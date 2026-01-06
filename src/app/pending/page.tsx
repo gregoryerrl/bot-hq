@@ -1,4 +1,5 @@
 import { Header } from "@/components/layout/header";
+import { ApprovalList } from "@/components/pending-board/approval-list";
 
 export default function PendingPage() {
   return (
@@ -8,9 +9,7 @@ export default function PendingPage() {
         description="Actions waiting for your approval"
       />
       <div className="flex-1 p-6">
-        <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
-          No pending approvals
-        </div>
+        <ApprovalList />
       </div>
     </div>
   );
