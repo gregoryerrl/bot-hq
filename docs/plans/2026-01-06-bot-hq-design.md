@@ -369,6 +369,51 @@ authorized_devices
 
 ---
 
+## Self-Update Capability
+
+Bot-HQ can be configured as one of its own workspaces, allowing agents to work on Bot-HQ itself (dogfooding).
+
+### How It Works
+
+```
+Bot-HQ (running on main branch)
+  └── Repo Agent: bot-hq
+       └── Working on feature branch
+       └── Modifying: ~/Projects/bot-hq/src/...
+       └── Cannot affect running instance
+```
+
+### Safeguards
+
+| Risk | Safeguard |
+|------|-----------|
+| Agent breaks Bot-HQ mid-run | Work on feature branches only. Running instance uses main. |
+| Recursive self-modification | Agent sessions are isolated processes - changes don't affect running instance |
+| Bad deploy bricks Bot-HQ | Approval required for restart/deploy commands |
+| Agent corrupts database | DB directory explicitly blocked from agent access |
+
+### Workspace Configuration
+
+```yaml
+workspaces:
+  - name: "bot-hq"
+    repo: "~/Projects/bot-hq"
+    linked:
+      - path: "~/Projects/bot-hq/data"
+        access: "none"  # Block DB access
+```
+
+### Update Workflow
+
+1. Agent works on bot-hq issue (feature branch)
+2. Agent creates draft PR
+3. You review and merge to main
+4. You manually restart Bot-HQ to pick up changes
+
+**Key principle:** Changes only apply after manual restart. The running instance remains stable.
+
+---
+
 ## Future Considerations (v2+)
 
 - **Gemini Flash for manager** - Reduce API costs further
