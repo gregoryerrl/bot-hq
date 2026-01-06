@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { TaskCard } from "./task-card";
 import { Task } from "@/lib/db/schema";
 
@@ -13,7 +13,7 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
   const [tasks, setTasks] = useState<(Task & { workspaceName?: string })[]>([]);
   const [loading, setLoading] = useState(true);
 
-  async function fetchTasks() {
+  const fetchTasks = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (workspaceFilter) params.set("workspaceId", workspaceFilter.toString());
@@ -27,13 +27,13 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
     } finally {
       setLoading(false);
     }
-  }
+  }, [workspaceFilter, stateFilter]);
 
   useEffect(() => {
     fetchTasks();
     const interval = setInterval(fetchTasks, 5000);
     return () => clearInterval(interval);
-  }, [workspaceFilter, stateFilter]);
+  }, [fetchTasks]);
 
   async function handleAssign(taskId: number) {
     try {
