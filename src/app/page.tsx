@@ -1,4 +1,6 @@
 import { Header } from "@/components/layout/header";
+import { TaskList } from "@/components/taskboard/task-list";
+import { SyncButton } from "@/components/taskboard/sync-button";
 
 export default function TaskboardPage() {
   return (
@@ -8,9 +10,13 @@ export default function TaskboardPage() {
         description="Manage issues across all repositories"
       />
       <div className="flex-1 p-6">
-        <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
-          No workspaces configured. Add a workspace in Settings.
+        <div className="flex items-center justify-between mb-6">
+          <div className="text-sm text-muted-foreground">
+            Issues synced from GitHub
+          </div>
+          <SyncButton />
         </div>
+        <TaskList />
       </div>
     </div>
   );
