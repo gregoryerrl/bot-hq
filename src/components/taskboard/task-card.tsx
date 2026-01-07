@@ -34,10 +34,10 @@ const stateLabels: Record<string, string> = {
 
 export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
   return (
-    <Card className="p-4">
-      <div className="flex items-start justify-between gap-4">
+    <Card className="p-3 md:p-4">
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex flex-wrap items-center gap-2 mb-1">
             {task.githubIssueNumber && (
               <span className="text-sm text-muted-foreground">
                 #{task.githubIssueNumber}
@@ -45,22 +45,26 @@ export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
             )}
             <Badge
               variant="secondary"
-              className={`${stateColors[task.state]} text-white`}
+              className={`${stateColors[task.state]} text-white text-xs`}
             >
               {stateLabels[task.state]}
             </Badge>
             {task.workspaceName && (
-              <Badge variant="outline">{task.workspaceName}</Badge>
+              <Badge variant="outline" className="text-xs">
+                {task.workspaceName}
+              </Badge>
             )}
           </div>
-          <h3 className="font-medium truncate">{task.title}</h3>
+          <h3 className="font-medium text-sm md:text-base line-clamp-2">
+            {task.title}
+          </h3>
           {task.description && (
-            <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
+            <p className="text-xs md:text-sm text-muted-foreground mt-1 line-clamp-2">
               {task.description}
             </p>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 self-end sm:self-start">
           {task.state === "new" && (
             <Button size="sm" onClick={() => onAssign(task.id)}>
               Assign
