@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
+import { MobileNav } from "@/components/layout/mobile-nav";
 import { Toaster } from "@/components/ui/sonner";
 import { ChatPanel } from "@/components/chat-panel/chat-panel";
 import { NotificationProvider } from "@/components/notifications/notification-provider";
@@ -24,6 +25,7 @@ export default function RootLayout({
         <NotificationProvider>
           <div className="flex h-screen">
             <Sidebar />
+            <MobileNav />
             <main className="flex-1 overflow-auto">{children}</main>
           </div>
           <ChatPanel />
