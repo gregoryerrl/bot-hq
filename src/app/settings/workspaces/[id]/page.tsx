@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, use } from "react";
+import { useState, useEffect, useCallback, use } from "react";
 import { useRouter } from "next/navigation";
 import { Header } from "@/components/layout/header";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
@@ -25,11 +25,7 @@ export default function WorkspaceConfigPage({
   const [repoPath, setRepoPath] = useState("");
   const [config, setConfig] = useState<AgentConfig>(DEFAULT_AGENT_CONFIG);
 
-  useEffect(() => {
-    fetchData();
-  }, [id]);
-
-  async function fetchData() {
+  const fetchData = useCallback(async () => {
     try {
       const [wsRes, cfgRes] = await Promise.all([
         fetch(`/api/workspaces/${id}`),
@@ -51,7 +47,11 @@ export default function WorkspaceConfigPage({
     } finally {
       setLoading(false);
     }
-  }
+  }, [id]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
 
   async function handleSave() {
     setSaving(true);

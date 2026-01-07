@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, workspaces } from "@/lib/db";
 import { eq } from "drizzle-orm";
-import { parseAgentConfig } from "@/lib/agents/config-types";
 import fs from "fs/promises";
 import path from "path";
 
@@ -24,8 +23,6 @@ export async function POST(
     const repoPath = workspace[0].repoPath.replace("~", process.env.HOME || "");
     const claudeDir = path.join(repoPath, ".claude");
     const settingsPath = path.join(claudeDir, "settings.json");
-
-    const config = parseAgentConfig(workspace[0].agentConfig);
 
     // Get Bot-HQ project root for hook path
     const botHqRoot = process.cwd();
