@@ -2,6 +2,29 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, approvals, tasks, logs } from "@/lib/db";
 import { eq } from "drizzle-orm";
 
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const result = await db
+      .select()
+      .from(approvals)
+      .where(eq(approvals.id, parseInt(id)))
+      .limit(1);
+
+    if (result.length === 0) {
+      return NextResponse.json({ error: "Approval not found" }, { status: 404 });
+    }
+
+    return NextResponse.json(result[0]);
+  } catch (error) {
+    console.error("Failed to fetch approval:", error);
+    return NextResponse.json({ error: "Failed to fetch approval" }, { status: 500 });
+  }
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -45,28 +68,36 @@ export async function POST(
       })
       .where(eq(approvals.id, parseInt(id)));
 
-    // Update task state
-    if (action === "approve") {
-      await db
-        .update(tasks)
-        .set({ state: "in_progress", updatedAt: new Date() })
-        .where(eq(tasks.id, approval.taskId));
+    // Update task state if taskId exists
+    if (approval.taskId) {
+      if (action === "approve") {
+        await db
+          .update(tasks)
+          .set({ state: "in_progress", updatedAt: new Date() })
+          .where(eq(tasks.id, approval.taskId));
+      } else {
+        await db
+          .update(tasks)
+          .set({ state: "queued", updatedAt: new Date() })
+          .where(eq(tasks.id, approval.taskId));
+      }
+
+      // Log the action
+      const task = await db.query.tasks.findFirst({
+        where: eq(tasks.id, approval.taskId),
+      });
+
+      if (task) {
+        await db.insert(logs).values({
+          workspaceId: task.workspaceId,
+          taskId: task.id,
+          type: "approval",
+          message: `${action === "approve" ? "Approved" : "Rejected"}: ${approval.command}`,
+        });
+      }
     } else {
-      await db
-        .update(tasks)
-        .set({ state: "queued", updatedAt: new Date() })
-        .where(eq(tasks.id, approval.taskId));
-    }
-
-    // Log the action
-    const task = await db.query.tasks.findFirst({
-      where: eq(tasks.id, approval.taskId),
-    });
-
-    if (task) {
+      // Log approval action without task context
       await db.insert(logs).values({
-        workspaceId: task.workspaceId,
-        taskId: task.id,
         type: "approval",
         message: `${action === "approve" ? "Approved" : "Rejected"}: ${approval.command}`,
       });
