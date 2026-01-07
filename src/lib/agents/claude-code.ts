@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from "child_process";
 import { AgentOutput, AgentEventHandler } from "./types";
-import { db, agentSessions, logs, approvals, tasks } from "@/lib/db";
+import { db, agentSessions, logs, approvals, tasks, workspaces } from "@/lib/db";
 import { eq } from "drizzle-orm";
 
 interface ClaudeCodeOptions {
@@ -209,7 +209,7 @@ export async function startAgentForTask(taskId: number): Promise<ClaudeCodeAgent
   if (!task) return null;
 
   const workspace = await db.query.workspaces.findFirst({
-    where: eq(tasks.workspaceId, task.workspaceId),
+    where: eq(workspaces.id, task.workspaceId),
   });
 
   if (!workspace) return null;
