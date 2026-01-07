@@ -1,4 +1,4 @@
-import { Badge } from "@/components/ui/badge";
+import { NotificationBell } from "@/components/notifications/notification-bell";
 
 interface HeaderProps {
   title: string;
@@ -10,14 +10,12 @@ export function Header({ title, description }: HeaderProps) {
     <header className="border-b px-6 py-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
+          <h1 className="text-2xl font-semibold">{title}</h1>
           {description && (
-            <p className="text-muted-foreground">{description}</p>
+            <p className="text-sm text-muted-foreground">{description}</p>
           )}
         </div>
-        <Badge variant="outline" className="text-xs">
-          Connected
-        </Badge>
+        <NotificationBell />
       </div>
     </header>
   );
