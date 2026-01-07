@@ -53,6 +53,9 @@ export class ClaudeCodeAgent {
       env: { ...process.env },
     });
 
+    // Close stdin so claude starts processing (it waits for stdin to close in -p mode)
+    this.process.stdin?.end();
+
     // Handle spawn errors
     this.process.on("error", async (err) => {
       await this.logMessage("error", `Failed to spawn claude: ${err.message}`);
