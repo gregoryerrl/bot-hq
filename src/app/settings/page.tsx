@@ -7,6 +7,7 @@ import { WorkspaceList } from "@/components/settings/workspace-list";
 import { AddWorkspaceDialog } from "@/components/settings/add-workspace-dialog";
 import { DeviceList } from "@/components/settings/device-list";
 import { PairingDisplay } from "@/components/settings/pairing-display";
+import { ScopeDirectory } from "@/components/settings/scope-directory";
 
 export default function SettingsPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -24,6 +25,9 @@ export default function SettingsPage() {
             <TabsTrigger value="workspaces" className="flex-1 sm:flex-initial">
               Workspaces
             </TabsTrigger>
+            <TabsTrigger value="general" className="flex-1 sm:flex-initial">
+              General
+            </TabsTrigger>
             <TabsTrigger value="devices" className="flex-1 sm:flex-initial">
               Devices
             </TabsTrigger>
@@ -34,6 +38,10 @@ export default function SettingsPage() {
               key={refreshKey}
               onAddClick={() => setDialogOpen(true)}
             />
+          </TabsContent>
+
+          <TabsContent value="general" className="space-y-6">
+            <ScopeDirectory />
           </TabsContent>
 
           <TabsContent value="devices" className="space-y-6">
