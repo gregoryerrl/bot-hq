@@ -1,10 +1,14 @@
 import { NextRequest } from "next/server";
-import { db, logs } from "@/lib/db";
-import { desc, gt } from "drizzle-orm";
+import { db, logs, agentSessions } from "@/lib/db";
+import { desc, gt, ne, eq, and } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const source = searchParams.get("source") || "all";
+  const sessionId = searchParams.get("sessionId");
+
   const encoder = new TextEncoder();
   let lastId = 0;
 
@@ -18,12 +22,57 @@ export async function GET(request: NextRequest) {
       // Poll for new logs every second
       const interval = setInterval(async () => {
         try {
-          const newLogs = await db
-            .select()
-            .from(logs)
-            .where(gt(logs.id, lastId))
-            .orderBy(desc(logs.createdAt))
-            .limit(20);
+          let query;
+
+          if (source === "server") {
+            // Server logs: everything except agent type
+            query = db
+              .select()
+              .from(logs)
+              .where(
+                and(
+                  gt(logs.id, lastId),
+                  ne(logs.type, "agent")
+                )
+              )
+              .orderBy(desc(logs.createdAt))
+              .limit(20);
+          } else if (source === "agent" && sessionId) {
+            // Agent logs: get taskId from session, filter by that
+            const session = await db
+              .select()
+              .from(agentSessions)
+              .where(eq(agentSessions.id, parseInt(sessionId)))
+              .limit(1);
+
+            if (session[0] && session[0].taskId !== null) {
+              const taskId = session[0].taskId;
+              query = db
+                .select()
+                .from(logs)
+                .where(
+                  and(
+                    gt(logs.id, lastId),
+                    eq(logs.type, "agent"),
+                    eq(logs.taskId, taskId)
+                  )
+                )
+                .orderBy(desc(logs.createdAt))
+                .limit(20);
+            } else {
+              return; // Session not found or no taskId
+            }
+          } else {
+            // All logs (default, for backwards compatibility)
+            query = db
+              .select()
+              .from(logs)
+              .where(gt(logs.id, lastId))
+              .orderBy(desc(logs.createdAt))
+              .limit(20);
+          }
+
+          const newLogs = await query;
 
           if (newLogs.length > 0) {
             lastId = Math.max(...newLogs.map((l) => l.id));
