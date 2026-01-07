@@ -18,11 +18,15 @@ export default function SettingsPage() {
         title="Settings"
         description="Configure workspaces and devices"
       />
-      <div className="flex-1 p-6">
+      <div className="flex-1 p-4 md:p-6">
         <Tabs defaultValue="workspaces" className="space-y-6">
-          <TabsList>
-            <TabsTrigger value="workspaces">Workspaces</TabsTrigger>
-            <TabsTrigger value="devices">Devices</TabsTrigger>
+          <TabsList className="w-full sm:w-auto">
+            <TabsTrigger value="workspaces" className="flex-1 sm:flex-initial">
+              Workspaces
+            </TabsTrigger>
+            <TabsTrigger value="devices" className="flex-1 sm:flex-initial">
+              Devices
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="workspaces" className="space-y-6">

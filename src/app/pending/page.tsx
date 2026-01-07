@@ -8,7 +8,7 @@ export default function PendingPage() {
         title="Pending Approvals"
         description="Actions waiting for your approval"
       />
-      <div className="flex-1 p-6">
+      <div className="flex-1 p-4 md:p-6">
         <ApprovalList />
       </div>
     </div>

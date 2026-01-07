@@ -5,7 +5,7 @@ export default function LogsPage() {
   return (
     <div className="flex flex-col h-full">
       <Header title="Logs" description="Real-time activity stream" />
-      <div className="flex-1 p-6">
+      <div className="flex-1 p-4 md:p-6">
         <LogList />
       </div>
     </div>
