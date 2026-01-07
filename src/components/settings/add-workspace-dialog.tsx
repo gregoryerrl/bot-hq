@@ -9,6 +9,8 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { FolderOpen } from "lucide-react";
+import { toast } from "sonner";
 
 interface AddWorkspaceDialogProps {
   open: boolean;
@@ -26,12 +28,61 @@ export function AddWorkspaceDialog({
   const [githubRemote, setGithubRemote] = useState("");
   const [buildCommand, setBuildCommand] = useState("");
   const [loading, setLoading] = useState(false);
+  const [cloning, setCloning] = useState(false);
+
+  async function handleFolderPicker() {
+    try {
+      // Get scope path from API
+      const scopeRes = await fetch("/api/settings?key=scope_path");
+      const scopeData = await scopeRes.json();
+      const scopePath = scopeData.value;
+
+      // Call the folder picker API
+      const res = await fetch("/api/pick-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startPath: scopePath }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.path) {
+          setRepoPath(data.path);
+        }
+      }
+    } catch (error) {
+      console.error("Failed to pick folder:", error);
+      toast.error("Failed to open folder picker");
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
 
     try {
+      // If githubRemote is set, try auto-clone
+      if (githubRemote) {
+        setCloning(true);
+        const cloneRes = await fetch("/api/workspaces/clone", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            path: repoPath,
+            remote: githubRemote,
+          }),
+        });
+
+        if (!cloneRes.ok) {
+          const error = await cloneRes.json();
+          toast.error(error.error || "Failed to clone repository");
+          setLoading(false);
+          setCloning(false);
+          return;
+        }
+        setCloning(false);
+      }
+
       const res = await fetch("/api/workspaces", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -50,9 +101,14 @@ export function AddWorkspaceDialog({
         setBuildCommand("");
         onSuccess();
         onOpenChange(false);
+        toast.success("Workspace created successfully");
+      } else {
+        const error = await res.json();
+        toast.error(error.error || "Failed to create workspace");
       }
     } catch (error) {
       console.error("Failed to create workspace:", error);
+      toast.error("Failed to create workspace");
     } finally {
       setLoading(false);
     }
@@ -76,12 +132,24 @@ export function AddWorkspaceDialog({
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">Repository Path</label>
-            <Input
-              value={repoPath}
-              onChange={(e) => setRepoPath(e.target.value)}
-              placeholder="~/Projects/my-project"
-              required
-            />
+            <div className="flex gap-2">
+              <Input
+                value={repoPath}
+                onChange={(e) => setRepoPath(e.target.value)}
+                placeholder="~/Projects/my-project"
+                required
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                onClick={handleFolderPicker}
+                title="Browse folders"
+              >
+                <FolderOpen className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">
@@ -112,7 +180,7 @@ export function AddWorkspaceDialog({
               Cancel
             </Button>
             <Button type="submit" disabled={loading}>
-              {loading ? "Adding..." : "Add Workspace"}
+              {cloning ? "Cloning..." : loading ? "Adding..." : "Add Workspace"}
             </Button>
           </div>
         </form>
