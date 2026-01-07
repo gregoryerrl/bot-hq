@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { ApprovalCard } from "./approval-card";
+import { DraftPRCard } from "./draft-pr-card";
 import { Approval } from "@/lib/db/schema";
 
 export function ApprovalList() {
@@ -32,16 +32,42 @@ export function ApprovalList() {
     return () => clearInterval(interval);
   }, []);
 
-  async function handleAction(id: number, action: "approve" | "reject") {
+  async function handleApprove(id: number) {
     try {
       await fetch(`/api/approvals/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action: "approve" }),
       });
       fetchApprovals();
     } catch (error) {
-      console.error("Failed to process approval:", error);
+      console.error("Failed to approve:", error);
+    }
+  }
+
+  async function handleReject(id: number) {
+    try {
+      await fetch(`/api/approvals/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "reject" }),
+      });
+      fetchApprovals();
+    } catch (error) {
+      console.error("Failed to reject:", error);
+    }
+  }
+
+  async function handleRequestChanges(id: number, instructions: string) {
+    try {
+      await fetch(`/api/approvals/${id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "request_changes", instructions }),
+      });
+      fetchApprovals();
+    } catch (error) {
+      console.error("Failed to request changes:", error);
     }
   }
 
@@ -52,19 +78,20 @@ export function ApprovalList() {
   if (approvals.length === 0) {
     return (
       <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
-        No pending approvals
+        No pending approvals. Agent work will appear here when complete.
       </div>
     );
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       {approvals.map((approval) => (
-        <ApprovalCard
+        <DraftPRCard
           key={approval.id}
           approval={approval}
-          onApprove={(id) => handleAction(id, "approve")}
-          onReject={(id) => handleAction(id, "reject")}
+          onApprove={handleApprove}
+          onReject={handleReject}
+          onRequestChanges={handleRequestChanges}
         />
       ))}
     </div>

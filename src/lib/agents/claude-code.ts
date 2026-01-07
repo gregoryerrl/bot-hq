@@ -1,7 +1,10 @@
-import { spawn, ChildProcess } from "child_process";
+import { spawn, ChildProcess, exec } from "child_process";
+import { promisify } from "util";
 import { AgentOutput, AgentEventHandler } from "./types";
 import { db, agentSessions, logs, approvals, tasks, workspaces } from "@/lib/db";
 import { eq } from "drizzle-orm";
+
+const execAsync = promisify(exec);
 
 interface ClaudeCodeOptions {
   workspacePath: string;
@@ -38,7 +41,7 @@ export class ClaudeCodeAgent {
     // Update task state
     await db
       .update(tasks)
-      .set({ state: "analyzing", updatedAt: new Date() })
+      .set({ state: "in_progress", updatedAt: new Date() })
       .where(eq(tasks.id, this.options.taskId));
 
     // Log startup
@@ -46,9 +49,6 @@ export class ClaudeCodeAgent {
     await this.logMessage("agent", `Working directory: ${this.options.workspacePath}`);
 
     // Spawn Claude Code process in headless mode
-    // --allowedTools grants permission without prompting (our hook still runs for Bash)
-    // See: https://code.claude.com/docs/en/headless
-    // Pass prompt via stdin to avoid issues with special characters in args
     this.process = spawn("claude", [
       "-p",
       "--verbose",
@@ -59,7 +59,7 @@ export class ClaudeCodeAgent {
       env: { ...process.env },
     });
 
-    // Write prompt to stdin then close it (claude -p reads from stdin)
+    // Write prompt to stdin then close it
     this.process.stdin?.write(prompt);
     this.process.stdin?.end();
 
@@ -98,7 +98,6 @@ export class ClaudeCodeAgent {
   private async handleOutput(data: string): Promise<void> {
     this.buffer += data;
 
-    // Try to parse complete JSON objects (stream-json outputs one JSON per line)
     const lines = this.buffer.split("\n");
     this.buffer = lines.pop() || "";
 
@@ -108,7 +107,6 @@ export class ClaudeCodeAgent {
       try {
         const output = JSON.parse(line);
 
-        // Handle stream-json format - log the content for visibility
         if (output.type === "assistant" && output.message?.content) {
           const content = output.message.content;
           for (const block of content) {
@@ -124,14 +122,12 @@ export class ClaudeCodeAgent {
           await this.processOutput(output as AgentOutput);
         }
       } catch {
-        // Not JSON, treat as plain text
         if (line.trim()) {
           await this.logMessage("agent", line);
         }
       }
     }
 
-    // Update last activity
     if (this.sessionId) {
       await db
         .update(agentSessions)
@@ -141,52 +137,10 @@ export class ClaudeCodeAgent {
   }
 
   private async processOutput(output: AgentOutput): Promise<void> {
-    if (output.type === "tool_use") {
-      // Check if this is a git push or other approval-required action
-      if (this.requiresApproval(output)) {
-        await this.requestApproval(output);
-        return;
-      }
-    }
-
     await this.logMessage("agent", output.content || JSON.stringify(output));
-
     this.options.onOutput?.({
       type: "output",
       data: output,
-    });
-  }
-
-  private requiresApproval(output: AgentOutput): boolean {
-    const approvalCommands = ["git push", "gh pr create", "deploy", "npm publish"];
-    const content = output.toolInput?.command as string || output.content;
-    return approvalCommands.some((cmd) => content?.includes(cmd));
-  }
-
-  private async requestApproval(output: AgentOutput): Promise<void> {
-    const command = (output.toolInput?.command as string) || output.content;
-
-    // Create approval request
-    await db.insert(approvals).values({
-      taskId: this.options.taskId,
-      type: command.includes("push") ? "git_push" : "external_command",
-      command,
-      reason: `Agent wants to run: ${command}`,
-      status: "pending",
-    });
-
-    // Update task state
-    await db
-      .update(tasks)
-      .set({ state: "plan_ready", updatedAt: new Date() })
-      .where(eq(tasks.id, this.options.taskId));
-
-    // Pause the agent (in real implementation, we'd need IPC)
-    await this.logMessage("approval", `Approval needed for: ${command}`);
-
-    this.options.onOutput?.({
-      type: "approval_needed",
-      data: { command },
     });
   }
 
@@ -205,18 +159,98 @@ export class ClaudeCodeAgent {
         .where(eq(agentSessions.id, this.sessionId));
     }
 
-    // Update task state based on exit code
     if (code === 0) {
-      await this.logMessage("agent", "Task completed successfully");
-      await db
-        .update(tasks)
-        .set({ state: "pr_draft", updatedAt: new Date() })
-        .where(eq(tasks.id, this.options.taskId));
+      await this.createDraftPR();
     } else {
       await this.logMessage("error", `Task failed with exit code: ${code}`);
     }
 
     this.options.onOutput?.({ type: "exit", data: { code } });
+  }
+
+  private async createDraftPR(): Promise<void> {
+    try {
+      // Get the current branch name
+      const { stdout: branchOutput } = await execAsync(
+        "git branch --show-current",
+        { cwd: this.options.workspacePath }
+      );
+      const branchName = branchOutput.trim();
+
+      // Check if we're on a feature branch (not main/master)
+      if (branchName === "main" || branchName === "master" || !branchName) {
+        await this.logMessage("agent", "No feature branch detected, skipping draft PR creation");
+        return;
+      }
+
+      // Get the base branch
+      const baseBranch = branchName === "main" ? "master" : "main";
+
+      // Get commit messages
+      const { stdout: logOutput } = await execAsync(
+        `git log ${baseBranch}..${branchName} --format="%s" --reverse`,
+        { cwd: this.options.workspacePath }
+      );
+      const commitMessages = logOutput.trim().split("\n").filter(Boolean);
+
+      if (commitMessages.length === 0) {
+        await this.logMessage("agent", "No commits on branch, skipping draft PR creation");
+        return;
+      }
+
+      // Get diff summary
+      const { stdout: numstat } = await execAsync(
+        `git diff ${baseBranch}...${branchName} --numstat`,
+        { cwd: this.options.workspacePath }
+      );
+
+      const statsLines = numstat.trim().split("\n").filter(Boolean);
+      let totalAdditions = 0;
+      let totalDeletions = 0;
+      const files: { path: string; additions: number; deletions: number }[] = [];
+
+      for (const line of statsLines) {
+        const [addStr, delStr, path] = line.split("\t");
+        const additions = addStr === "-" ? 0 : parseInt(addStr);
+        const deletions = delStr === "-" ? 0 : parseInt(delStr);
+        totalAdditions += additions;
+        totalDeletions += deletions;
+        files.push({ path, additions, deletions });
+      }
+
+      const diffSummary = JSON.stringify({
+        files,
+        totalAdditions,
+        totalDeletions,
+      });
+
+      // Update task with branch name
+      await db
+        .update(tasks)
+        .set({
+          branchName,
+          state: "pending_review",
+          updatedAt: new Date()
+        })
+        .where(eq(tasks.id, this.options.taskId));
+
+      // Create draft PR approval record
+      await db.insert(approvals).values({
+        taskId: this.options.taskId,
+        workspaceId: this.options.workspaceId,
+        branchName,
+        baseBranch,
+        commitMessages: JSON.stringify(commitMessages),
+        diffSummary,
+        status: "pending",
+      });
+
+      await this.logMessage("agent", `Draft PR created for branch: ${branchName}`);
+      await this.logMessage("agent", `Files changed: ${files.length}, +${totalAdditions} -${totalDeletions}`);
+
+    } catch (error) {
+      await this.logMessage("error", `Failed to create draft PR: ${error}`);
+    }
   }
 
   private async logMessage(
@@ -252,7 +286,10 @@ export class ClaudeCodeAgent {
   }
 }
 
-export async function startAgentForTask(taskId: number): Promise<ClaudeCodeAgent | null> {
+export async function startAgentForTask(
+  taskId: number,
+  userInstructions?: string
+): Promise<ClaudeCodeAgent | null> {
   const task = await db.query.tasks.findFirst({
     where: eq(tasks.id, taskId),
   });
@@ -265,22 +302,47 @@ export async function startAgentForTask(taskId: number): Promise<ClaudeCodeAgent
 
   if (!workspace) return null;
 
-  const prompt = `You are working on GitHub issue #${task.githubIssueNumber}: "${task.title}"
+  // Check if there's an existing branch to continue working on
+  const existingBranch = task.branchName;
+
+  let prompt: string;
+
+  if (existingBranch && userInstructions) {
+    // Continuing work with user feedback
+    prompt = `You are continuing work on GitHub issue #${task.githubIssueNumber}: "${task.title}"
 
 ${task.description || "No description provided."}
 
-Your task: Implement this feature completely. Do NOT wait for approval - implement the changes now.
+You previously worked on this task and created branch: ${existingBranch}
+
+The user has reviewed your work and requested changes:
+${userInstructions}
+
+Instructions:
+1. Switch to the existing branch: git checkout ${existingBranch}
+2. Address the user's feedback
+3. Make commits as you work
+4. Run the build (npm run build) before finishing
+5. Do NOT push to remote - Bot-HQ will handle that after review`;
+  } else {
+    // Starting fresh
+    prompt = `You are working on GitHub issue #${task.githubIssueNumber}: "${task.title}"
+
+${task.description || "No description provided."}
+
+Your task: Implement this feature completely.
 
 Steps:
-1. Create a feature branch (e.g., feature/${task.githubIssueNumber || "task"}-${task.id})
+1. Create a feature branch: git checkout -b feature/${task.githubIssueNumber || "task"}-${task.id}
 2. Implement the required changes with small, focused commits
 3. Run tests and fix any issues
-4. When complete, create a pull request (the approval hook will prompt the user before push)
+4. Run the build (npm run build) before finishing
 
 Important:
-- Make commits as you work (git commit is allowed, hook will prompt for git push)
-- Run the build (npm run build) before finishing
-- Do NOT wait for user input - complete the full implementation`;
+- Make commits as you work
+- Do NOT push to remote or create PRs - Bot-HQ will handle that after you finish
+- Work autonomously - complete the full implementation`;
+  }
 
   const agent = new ClaudeCodeAgent({
     workspacePath: workspace.repoPath.replace("~", process.env.HOME || ""),

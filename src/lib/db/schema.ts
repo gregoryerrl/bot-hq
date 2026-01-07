@@ -27,10 +27,9 @@ export const tasks = sqliteTable("tasks", {
     enum: [
       "new",
       "queued",
-      "analyzing",
-      "plan_ready",
       "in_progress",
-      "pr_draft",
+      "pending_review",
+      "pr_created",
       "done",
     ],
   })
@@ -46,21 +45,25 @@ export const tasks = sqliteTable("tasks", {
     .$defaultFn(() => new Date()),
 });
 
-// Pending approvals
+// Draft PRs (pending review)
 export const approvals = sqliteTable("approvals", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  taskId: integer("task_id").references(() => tasks.id),
-  type: text("type", {
-    enum: ["git_push", "external_command", "deploy"],
-  }).notNull(),
-  command: text("command"),
-  reason: text("reason"),
-  diffSummary: text("diff_summary"),
+  taskId: integer("task_id")
+    .notNull()
+    .references(() => tasks.id),
+  workspaceId: integer("workspace_id")
+    .notNull()
+    .references(() => workspaces.id),
+  branchName: text("branch_name").notNull(),
+  baseBranch: text("base_branch").notNull().default("main"),
+  commitMessages: text("commit_messages"), // JSON array of commit messages
+  diffSummary: text("diff_summary"), // JSON: { files: [...], additions, deletions }
   status: text("status", {
     enum: ["pending", "approved", "rejected"],
   })
     .notNull()
     .default("pending"),
+  userInstructions: text("user_instructions"), // Feedback for "Request Changes"
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
