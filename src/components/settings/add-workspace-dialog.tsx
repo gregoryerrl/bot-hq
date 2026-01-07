@@ -10,7 +10,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FolderOpen } from "lucide-react";
-import { useToast } from "@/hooks/use-toast";
+import { toast } from "sonner";
 
 interface AddWorkspaceDialogProps {
   open: boolean;
@@ -29,7 +29,6 @@ export function AddWorkspaceDialog({
   const [buildCommand, setBuildCommand] = useState("");
   const [loading, setLoading] = useState(false);
   const [cloning, setCloning] = useState(false);
-  const { toast } = useToast();
 
   async function handleFolderPicker() {
     try {
@@ -53,11 +52,7 @@ export function AddWorkspaceDialog({
       }
     } catch (error) {
       console.error("Failed to pick folder:", error);
-      toast({
-        title: "Error",
-        description: "Failed to open folder picker",
-        variant: "destructive",
-      });
+      toast.error("Failed to open folder picker");
     }
   }
 
@@ -80,11 +75,7 @@ export function AddWorkspaceDialog({
 
         if (!cloneRes.ok) {
           const error = await cloneRes.json();
-          toast({
-            title: "Clone Failed",
-            description: error.error || "Failed to clone repository",
-            variant: "destructive",
-          });
+          toast.error(error.error || "Failed to clone repository");
           setLoading(false);
           setCloning(false);
           return;
@@ -110,25 +101,14 @@ export function AddWorkspaceDialog({
         setBuildCommand("");
         onSuccess();
         onOpenChange(false);
-        toast({
-          title: "Success",
-          description: "Workspace created successfully",
-        });
+        toast.success("Workspace created successfully");
       } else {
         const error = await res.json();
-        toast({
-          title: "Error",
-          description: error.error || "Failed to create workspace",
-          variant: "destructive",
-        });
+        toast.error(error.error || "Failed to create workspace");
       }
     } catch (error) {
       console.error("Failed to create workspace:", error);
-      toast({
-        title: "Error",
-        description: "Failed to create workspace",
-        variant: "destructive",
-      });
+      toast.error("Failed to create workspace");
     } finally {
       setLoading(false);
     }
