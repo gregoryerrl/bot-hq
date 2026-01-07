@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from "child_process";
 import { AgentOutput, AgentEventHandler } from "./types";
-import { db, agentSessions, logs, approvals, tasks } from "@/lib/db";
+import { db, agentSessions, logs, approvals, tasks, workspaces } from "@/lib/db";
 import { eq } from "drizzle-orm";
 
 interface ClaudeCodeOptions {
@@ -41,10 +41,30 @@ export class ClaudeCodeAgent {
       .set({ state: "analyzing", updatedAt: new Date() })
       .where(eq(tasks.id, this.options.taskId));
 
+    // Log startup
+    await this.logMessage("agent", `Starting Claude Code agent for task #${this.options.taskId}`);
+    await this.logMessage("agent", `Working directory: ${this.options.workspacePath}`);
+
     // Spawn Claude Code process
-    this.process = spawn("claude", ["-p", prompt, "--output-format", "json"], {
+    // Note: prompt must come LAST after all flags
+    // stream-json requires --verbose when using -p
+    this.process = spawn("claude", ["-p", "--verbose", "--output-format", "stream-json", prompt], {
       cwd: this.options.workspacePath,
       env: { ...process.env },
+    });
+
+    // Close stdin so claude starts processing (it waits for stdin to close in -p mode)
+    this.process.stdin?.end();
+
+    // Handle spawn errors
+    this.process.on("error", async (err) => {
+      await this.logMessage("error", `Failed to spawn claude: ${err.message}`);
+      if (this.sessionId) {
+        await db
+          .update(agentSessions)
+          .set({ status: "error" })
+          .where(eq(agentSessions.id, this.sessionId));
+      }
     });
 
     // Update session with PID
@@ -52,6 +72,8 @@ export class ClaudeCodeAgent {
       .update(agentSessions)
       .set({ pid: this.process.pid })
       .where(eq(agentSessions.id, this.sessionId));
+
+    await this.logMessage("agent", `Agent process started (PID: ${this.process.pid})`);
 
     this.process.stdout?.on("data", (data: Buffer) => {
       this.handleOutput(data.toString());
@@ -69,7 +91,7 @@ export class ClaudeCodeAgent {
   private async handleOutput(data: string): Promise<void> {
     this.buffer += data;
 
-    // Try to parse complete JSON objects
+    // Try to parse complete JSON objects (stream-json outputs one JSON per line)
     const lines = this.buffer.split("\n");
     this.buffer = lines.pop() || "";
 
@@ -77,11 +99,28 @@ export class ClaudeCodeAgent {
       if (!line.trim()) continue;
 
       try {
-        const output: AgentOutput = JSON.parse(line);
-        await this.processOutput(output);
+        const output = JSON.parse(line);
+
+        // Handle stream-json format - log the content for visibility
+        if (output.type === "assistant" && output.message?.content) {
+          const content = output.message.content;
+          for (const block of content) {
+            if (block.type === "text") {
+              await this.logMessage("agent", block.text);
+            } else if (block.type === "tool_use") {
+              await this.logMessage("agent", `Tool: ${block.name} - ${JSON.stringify(block.input).slice(0, 200)}`);
+            }
+          }
+        } else if (output.type === "result") {
+          await this.logMessage("agent", `Result: ${output.result || "completed"}`);
+        } else {
+          await this.processOutput(output as AgentOutput);
+        }
       } catch {
         // Not JSON, treat as plain text
-        await this.logMessage("agent", line);
+        if (line.trim()) {
+          await this.logMessage("agent", line);
+        }
       }
     }
 
@@ -150,6 +189,8 @@ export class ClaudeCodeAgent {
   }
 
   private async handleExit(code: number | null): Promise<void> {
+    await this.logMessage("agent", `Agent process exited with code: ${code}`);
+
     if (this.sessionId) {
       await db
         .update(agentSessions)
@@ -159,10 +200,13 @@ export class ClaudeCodeAgent {
 
     // Update task state based on exit code
     if (code === 0) {
+      await this.logMessage("agent", "Task completed successfully");
       await db
         .update(tasks)
         .set({ state: "pr_draft", updatedAt: new Date() })
         .where(eq(tasks.id, this.options.taskId));
+    } else {
+      await this.logMessage("error", `Task failed with exit code: ${code}`);
     }
 
     this.options.onOutput?.({ type: "exit", data: { code } });
@@ -209,7 +253,7 @@ export async function startAgentForTask(taskId: number): Promise<ClaudeCodeAgent
   if (!task) return null;
 
   const workspace = await db.query.workspaces.findFirst({
-    where: eq(tasks.workspaceId, task.workspaceId),
+    where: eq(workspaces.id, task.workspaceId),
   });
 
   if (!workspace) return null;
