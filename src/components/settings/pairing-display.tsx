@@ -1,129 +1,167 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { RefreshCw, Check, X } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Check, X, Clock, Smartphone, RefreshCw } from "lucide-react";
 
-interface PendingPairing {
-  code: string;
-  deviceName: string;
-  fingerprint: string;
-  expiresAt: string;
+interface PendingDevice {
+  id: number;
+  pairingCode: string;
+  deviceId: string;
+  userAgent: string;
+  ip: string;
+  requestedAt: string;
+  expiresAt: Date;
 }
 
 export function PairingDisplay() {
-  const [code, setCode] = useState<string | null>(null);
-  const [pending, setPending] = useState<PendingPairing[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [pending, setPending] = useState<PendingDevice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [deviceNames, setDeviceNames] = useState<Record<string, string>>({});
 
-  async function fetchCode() {
-    setLoading(true);
+  const fetchPending = useCallback(async () => {
     try {
-      const res = await fetch("/api/auth/pair");
-      const data = await res.json();
-      setCode(data.code);
+      const res = await fetch("/api/auth/pending");
+      if (res.ok) {
+        const data = await res.json();
+        setPending(data);
+      }
     } catch (error) {
-      console.error("Failed to fetch pairing code:", error);
+      console.error("Failed to fetch pending:", error);
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
-  async function fetchPending() {
+  async function handleApprove(pairingCode: string) {
+    const deviceName = deviceNames[pairingCode] || "";
     try {
-      const res = await fetch("/api/auth/pair?action=pending");
-      const data = await res.json();
-      setPending(data.pending || []);
-    } catch (error) {
-      console.error("Failed to fetch pending:", error);
-    }
-  }
-
-  async function handleApprove(fingerprint: string) {
-    try {
-      await fetch("/api/auth/pair", {
+      const res = await fetch("/api/auth/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "approve", fingerprint }),
+        body: JSON.stringify({ pairingCode, deviceName }),
       });
-      fetchPending();
+      if (res.ok) {
+        fetchPending();
+      }
     } catch (error) {
       console.error("Failed to approve:", error);
     }
   }
 
-  async function handleReject(fingerprint: string) {
+  async function handleReject(pairingCode: string) {
     try {
-      await fetch("/api/auth/pair", {
+      const res = await fetch("/api/auth/reject", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "reject", fingerprint }),
+        body: JSON.stringify({ pairingCode }),
       });
-      fetchPending();
+      if (res.ok) {
+        fetchPending();
+      }
     } catch (error) {
       console.error("Failed to reject:", error);
     }
   }
 
+  function parseUserAgent(ua: string): string {
+    if (ua.includes("iPhone")) return "iPhone";
+    if (ua.includes("iPad")) return "iPad";
+    if (ua.includes("Android")) return "Android";
+    if (ua.includes("Mac")) return "Mac";
+    if (ua.includes("Windows")) return "Windows";
+    return "Unknown Device";
+  }
+
   useEffect(() => {
-    fetchCode();
     fetchPending();
-    const interval = setInterval(fetchPending, 5000);
+    // Poll every 3 seconds for new devices
+    const interval = setInterval(fetchPending, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchPending]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <RefreshCw className="h-4 w-4 animate-spin" />
+        Loading...
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
-      <h3 className="text-lg font-semibold">Device Pairing</h3>
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-semibold">Pending Device Requests</h3>
+        <Button variant="ghost" size="sm" onClick={fetchPending}>
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+      </div>
 
-      <Card className="p-6">
-        <div className="text-center space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Enter this code on your new device
+      {pending.length === 0 ? (
+        <Card className="p-6 text-center text-muted-foreground">
+          <Clock className="h-8 w-8 mx-auto mb-2 opacity-50" />
+          <p>No pending device requests</p>
+          <p className="text-xs mt-1">
+            Devices trying to access Bot-HQ will appear here
           </p>
-          <div className="text-4xl font-mono font-bold tracking-widest">
-            {code || "------"}
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={fetchCode}
-            disabled={loading}
-          >
-            <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
-            New Code
-          </Button>
-        </div>
-      </Card>
-
-      {pending.length > 0 && (
-        <div className="space-y-2">
-          <h4 className="text-sm font-medium">Pending Requests</h4>
-          {pending.map((p) => (
-            <Card key={p.fingerprint} className="p-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="font-medium">{p.deviceName}</div>
-                  <Badge variant="outline" className="text-xs">
-                    Waiting for approval
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {pending.map((device) => (
+            <Card key={device.id} className="p-4">
+              <div className="space-y-3">
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
+                      <Smartphone className="h-5 w-5 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <div className="font-medium">
+                        {parseUserAgent(device.userAgent)}
+                      </div>
+                      <div className="text-sm text-muted-foreground">
+                        IP: {device.ip}
+                      </div>
+                    </div>
+                  </div>
+                  <Badge variant="outline" className="font-mono text-lg">
+                    {device.pairingCode}
                   </Badge>
                 </div>
-                <div className="flex gap-2">
+
+                <div className="flex items-center gap-2">
+                  <Input
+                    placeholder="Device name (optional)"
+                    className="flex-1"
+                    value={deviceNames[device.pairingCode] || ""}
+                    onChange={(e) =>
+                      setDeviceNames({
+                        ...deviceNames,
+                        [device.pairingCode]: e.target.value,
+                      })
+                    }
+                  />
                   <Button
-                    size="icon"
+                    size="sm"
                     variant="outline"
-                    onClick={() => handleApprove(p.fingerprint)}
+                    className="text-green-600 border-green-600 hover:bg-green-50"
+                    onClick={() => handleApprove(device.pairingCode)}
                   >
-                    <Check className="h-4 w-4 text-green-600" />
+                    <Check className="h-4 w-4 mr-1" />
+                    Approve
                   </Button>
                   <Button
-                    size="icon"
+                    size="sm"
                     variant="outline"
-                    onClick={() => handleReject(p.fingerprint)}
+                    className="text-red-600 border-red-600 hover:bg-red-50"
+                    onClick={() => handleReject(device.pairingCode)}
                   >
-                    <X className="h-4 w-4 text-red-600" />
+                    <X className="h-4 w-4 mr-1" />
+                    Reject
                   </Button>
                 </div>
               </div>

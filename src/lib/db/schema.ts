@@ -113,6 +113,17 @@ export const authorizedDevices = sqliteTable("authorized_devices", {
   isRevoked: integer("is_revoked", { mode: "boolean" }).notNull().default(false),
 });
 
+// Pending device requests (waiting for approval)
+export const pendingDevices = sqliteTable("pending_devices", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  pairingCode: text("pairing_code").notNull().unique(),
+  deviceInfo: text("device_info").notNull(), // JSON: userAgent, ip, etc.
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+});
+
 // Type exports
 export type Workspace = typeof workspaces.$inferSelect;
 export type NewWorkspace = typeof workspaces.$inferInsert;
@@ -126,3 +137,5 @@ export type AgentSession = typeof agentSessions.$inferSelect;
 export type NewAgentSession = typeof agentSessions.$inferInsert;
 export type AuthorizedDevice = typeof authorizedDevices.$inferSelect;
 export type NewAuthorizedDevice = typeof authorizedDevices.$inferInsert;
+export type PendingDevice = typeof pendingDevices.$inferSelect;
+export type NewPendingDevice = typeof pendingDevices.$inferInsert;

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-const BOT_HQ_URL = process.env.BOT_HQ_URL || "http://localhost:3000";
+const PORT = process.env.PORT || "7890";
+const BOT_HQ_URL = process.env.BOT_HQ_URL || `http://localhost:${PORT}`;
 const POLL_INTERVAL = 2000;
 const TIMEOUT = 300000; // 5 minutes
 

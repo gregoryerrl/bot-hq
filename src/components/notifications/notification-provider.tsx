@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, ReactNode } from "react";
 import { useNotifications } from "@/hooks/use-notifications";
 
 type NotificationContextType = ReturnType<typeof useNotifications>;
@@ -23,6 +23,12 @@ interface NotificationProviderProps {
 
 export function NotificationProvider({ children }: NotificationProviderProps) {
   const notifications = useNotifications();
+  const addNotificationRef = useRef(notifications.addNotification);
+
+  // Keep ref updated
+  useEffect(() => {
+    addNotificationRef.current = notifications.addNotification;
+  }, [notifications.addNotification]);
 
   // Listen for log stream events that warrant notifications
   useEffect(() => {
@@ -35,13 +41,13 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
 
         // Notify on important events
         if (data.type === "approval") {
-          notifications.addNotification(
+          addNotificationRef.current(
             "Approval Required",
             data.message,
             "warning"
           );
         } else if (data.type === "error") {
-          notifications.addNotification("Error", data.message, "error");
+          addNotificationRef.current("Error", data.message, "error");
         }
       } catch {
         // Ignore parse errors
@@ -49,7 +55,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     };
 
     return () => eventSource.close();
-  }, [notifications]);
+  }, []); // Empty deps - EventSource only created once
 
   return (
     <NotificationContext.Provider value={notifications}>

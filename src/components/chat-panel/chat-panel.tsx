@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { MessageSquare, X, Trash2 } from "lucide-react";
@@ -12,6 +12,11 @@ import { ChatInput } from "./chat-input";
 export function ChatPanel() {
   const [isOpen, setIsOpen] = useState(false);
   const { messages, isLoading, sendMessage, clearMessages } = useManagerChat();
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   return (
     <>
@@ -77,6 +82,7 @@ export function ChatPanel() {
               {messages.map((message) => (
                 <ChatMessage key={message.id} message={message} />
               ))}
+              <div ref={messagesEndRef} />
             </div>
           )}
         </ScrollArea>

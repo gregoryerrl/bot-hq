@@ -45,15 +45,22 @@ export class ClaudeCodeAgent {
     await this.logMessage("agent", `Starting Claude Code agent for task #${this.options.taskId}`);
     await this.logMessage("agent", `Working directory: ${this.options.workspacePath}`);
 
-    // Spawn Claude Code process
-    // Note: prompt must come LAST after all flags
-    // stream-json requires --verbose when using -p
-    this.process = spawn("claude", ["-p", "--verbose", "--output-format", "stream-json", prompt], {
+    // Spawn Claude Code process in headless mode
+    // --allowedTools grants permission without prompting (our hook still runs for Bash)
+    // See: https://code.claude.com/docs/en/headless
+    // Pass prompt via stdin to avoid issues with special characters in args
+    this.process = spawn("claude", [
+      "-p",
+      "--verbose",
+      "--output-format", "stream-json",
+      "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep,LS,TodoWrite,Task,WebFetch,WebSearch,NotebookEdit",
+    ], {
       cwd: this.options.workspacePath,
       env: { ...process.env },
     });
 
-    // Close stdin so claude starts processing (it waits for stdin to close in -p mode)
+    // Write prompt to stdin then close it (claude -p reads from stdin)
+    this.process.stdin?.write(prompt);
     this.process.stdin?.end();
 
     // Handle spawn errors
@@ -262,13 +269,18 @@ export async function startAgentForTask(taskId: number): Promise<ClaudeCodeAgent
 
 ${task.description || "No description provided."}
 
-Please analyze this issue and create an implementation plan. After I approve the plan, implement the changes, run tests, and prepare for a pull request.
+Your task: Implement this feature completely. Do NOT wait for approval - implement the changes now.
+
+Steps:
+1. Create a feature branch (e.g., feature/${task.githubIssueNumber || "task"}-${task.id})
+2. Implement the required changes with small, focused commits
+3. Run tests and fix any issues
+4. When complete, create a pull request (the approval hook will prompt the user before push)
 
 Important:
-- Create a feature branch for this work
-- Make small, focused commits
-- Run tests before completing
-- Do not push to remote until I approve`;
+- Make commits as you work (git commit is allowed, hook will prompt for git push)
+- Run the build (npm run build) before finishing
+- Do NOT wait for user input - complete the full implementation`;
 
   const agent = new ClaudeCodeAgent({
     workspacePath: workspace.repoPath.replace("~", process.env.HOME || ""),
