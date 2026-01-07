@@ -46,7 +46,8 @@ export class ClaudeCodeAgent {
     await this.logMessage("agent", `Working directory: ${this.options.workspacePath}`);
 
     // Spawn Claude Code process
-    this.process = spawn("claude", ["-p", prompt, "--output-format", "stream-json"], {
+    // Note: prompt must come LAST after all flags
+    this.process = spawn("claude", ["-p", "--output-format", "stream-json", prompt], {
       cwd: this.options.workspacePath,
       env: { ...process.env },
     });
