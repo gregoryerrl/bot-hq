@@ -47,7 +47,8 @@ export class ClaudeCodeAgent {
 
     // Spawn Claude Code process
     // Note: prompt must come LAST after all flags
-    this.process = spawn("claude", ["-p", "--output-format", "stream-json", prompt], {
+    // stream-json requires --verbose when using -p
+    this.process = spawn("claude", ["-p", "--verbose", "--output-format", "stream-json", prompt], {
       cwd: this.options.workspacePath,
       env: { ...process.env },
     });
