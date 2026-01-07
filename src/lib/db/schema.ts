@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
 
 // Workspaces (repos + linked directories)
 export const workspaces = sqliteTable("workspaces", {
@@ -43,7 +43,11 @@ export const tasks = sqliteTable("tasks", {
   updatedAt: integer("updated_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
-});
+}, (table) => [
+  index("tasks_workspace_idx").on(table.workspaceId),
+  index("tasks_state_idx").on(table.state),
+  index("tasks_issue_idx").on(table.workspaceId, table.githubIssueNumber),
+]);
 
 // Draft PRs (pending review)
 export const approvals = sqliteTable("approvals", {
@@ -68,7 +72,10 @@ export const approvals = sqliteTable("approvals", {
     .notNull()
     .$defaultFn(() => new Date()),
   resolvedAt: integer("resolved_at", { mode: "timestamp" }),
-});
+}, (table) => [
+  index("approvals_status_idx").on(table.status),
+  index("approvals_task_idx").on(table.taskId),
+]);
 
 // Logs
 export const logs = sqliteTable("logs", {
@@ -83,7 +90,12 @@ export const logs = sqliteTable("logs", {
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
-});
+}, (table) => [
+  index("logs_type_idx").on(table.type),
+  index("logs_task_idx").on(table.taskId),
+  index("logs_created_idx").on(table.createdAt),
+  index("logs_stream_idx").on(table.id, table.type), // For streaming queries
+]);
 
 // Agent sessions
 export const agentSessions = sqliteTable("agent_sessions", {
@@ -101,6 +113,18 @@ export const agentSessions = sqliteTable("agent_sessions", {
   contextSize: integer("context_size"),
   startedAt: integer("started_at", { mode: "timestamp" }),
   lastActivityAt: integer("last_activity_at", { mode: "timestamp" }),
+}, (table) => [
+  index("sessions_status_idx").on(table.status),
+  index("sessions_task_idx").on(table.taskId),
+]);
+
+// App settings (key-value store)
+export const settings = sqliteTable("settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
 });
 
 // Authorized devices
@@ -142,3 +166,5 @@ export type AuthorizedDevice = typeof authorizedDevices.$inferSelect;
 export type NewAuthorizedDevice = typeof authorizedDevices.$inferInsert;
 export type PendingDevice = typeof pendingDevices.$inferSelect;
 export type NewPendingDevice = typeof pendingDevices.$inferInsert;
+export type Setting = typeof settings.$inferSelect;
+export type NewSetting = typeof settings.$inferInsert;
