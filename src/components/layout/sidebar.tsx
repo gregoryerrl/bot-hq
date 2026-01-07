@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, Clock, ScrollText, Settings } from "lucide-react";
+import { LayoutDashboard, Clock, ScrollText, Settings, Globe } from "lucide-react";
 
 const navItems = [
   { href: "/", label: "Taskboard", icon: LayoutDashboard },
   { href: "/pending", label: "Pending", icon: Clock },
   { href: "/logs", label: "Logs", icon: ScrollText },
   { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/claude-settings", label: "Claude Settings", icon: Globe },
 ];
 
 export function Sidebar() {
