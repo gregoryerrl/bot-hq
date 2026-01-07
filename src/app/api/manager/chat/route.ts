@@ -24,7 +24,7 @@ export async function POST(request: NextRequest) {
           });
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
           controller.close();
-        } catch (error) {
+        } catch {
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify({ error: "Chat failed" })}\n\n`)
           );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { toast } from "sonner";
 import {
   type Notification as AppNotification,
@@ -8,15 +8,16 @@ import {
   sendBrowserNotification,
 } from "@/lib/notifications";
 
+function getInitialPermission(): NotificationPermission {
+  if (typeof window !== "undefined" && "Notification" in window) {
+    return Notification.permission;
+  }
+  return "default";
+}
+
 export function useNotifications() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [permission, setPermission] = useState<NotificationPermission>("default");
-
-  useEffect(() => {
-    if ("Notification" in window) {
-      setPermission(Notification.permission);
-    }
-  }, []);
+  const [permission, setPermission] = useState<NotificationPermission>(getInitialPermission);
 
   const requestPermission = useCallback(async () => {
     const result = await requestNotificationPermission();
