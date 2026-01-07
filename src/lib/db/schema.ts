@@ -8,6 +8,7 @@ export const workspaces = sqliteTable("workspaces", {
   githubRemote: text("github_remote"),
   linkedDirs: text("linked_dirs"), // JSON string
   buildCommand: text("build_command"),
+  agentConfig: text("agent_config"), // JSON string storing AgentConfig
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -48,9 +49,7 @@ export const tasks = sqliteTable("tasks", {
 // Pending approvals
 export const approvals = sqliteTable("approvals", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  taskId: integer("task_id")
-    .notNull()
-    .references(() => tasks.id),
+  taskId: integer("task_id").references(() => tasks.id),
   type: text("type", {
     enum: ["git_push", "external_command", "deploy"],
   }).notNull(),
