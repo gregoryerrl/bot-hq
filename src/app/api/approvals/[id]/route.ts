@@ -36,7 +36,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const { action, instructions } = await request.json();
+    const { action, instructions, docRequest } = await request.json();
 
     if (!["approve", "reject", "request_changes"].includes(action)) {
       return NextResponse.json(
@@ -73,7 +73,7 @@ export async function POST(
 
     if (action === "approve") {
       // Push branch and create PR
-      await handleApprove(approval, task, workspace, repoPath);
+      await handleApprove(approval, task, workspace, repoPath, docRequest);
     } else if (action === "reject") {
       // Delete branch and reset task
       await handleReject(approval, task, repoPath);
@@ -96,7 +96,8 @@ async function handleApprove(
   approval: typeof approvals.$inferSelect,
   task: typeof tasks.$inferSelect,
   workspace: typeof workspaces.$inferSelect,
-  repoPath: string
+  repoPath: string,
+  docRequest?: string
 ) {
   // Push branch to remote
   await execAsync(
@@ -143,6 +144,28 @@ async function handleApprove(
     type: "approval",
     message: `Draft PR approved. Created PR: ${prUrl}`,
   });
+
+  // If documentation was requested, spawn a follow-up task
+  if (docRequest) {
+    const docPrompt = `${docRequest}
+
+Context from PR:
+- Title: ${task.title}
+- Branch: ${approval.branchName}
+- Issue: #${task.githubIssueNumber || "N/A"}
+- PR URL: ${prUrl}
+
+Please write documentation to the agent-docs folder based on the request above and the work completed in this PR.`;
+
+    await startAgentForTask(task.id, docPrompt);
+
+    await db.insert(logs).values({
+      workspaceId: workspace.id,
+      taskId: task.id,
+      type: "info",
+      message: `Documentation task spawned: ${docRequest}`,
+    });
+  }
 }
 
 async function handleReject(

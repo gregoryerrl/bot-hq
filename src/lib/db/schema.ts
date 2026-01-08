@@ -127,6 +127,15 @@ export const pendingDevices = sqliteTable("pending_devices", {
   expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
 });
 
+// Settings (key-value config store)
+export const settings = sqliteTable("settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 // Type exports
 export type Workspace = typeof workspaces.$inferSelect;
 export type NewWorkspace = typeof workspaces.$inferInsert;
@@ -142,3 +151,5 @@ export type AuthorizedDevice = typeof authorizedDevices.$inferSelect;
 export type NewAuthorizedDevice = typeof authorizedDevices.$inferInsert;
 export type PendingDevice = typeof pendingDevices.$inferSelect;
 export type NewPendingDevice = typeof pendingDevices.$inferInsert;
+export type Setting = typeof settings.$inferSelect;
+export type NewSetting = typeof settings.$inferInsert;
