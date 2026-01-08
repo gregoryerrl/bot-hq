@@ -43,7 +43,7 @@ interface DraftPRCardProps {
     workspaceName?: string;
     githubIssueNumber?: number;
   };
-  onApprove: (id: number) => void;
+  onApprove: (id: number, docRequest?: string) => void;
   onReject: (id: number) => void;
   onRequestChanges: (id: number, instructions: string) => void;
 }
@@ -56,7 +56,9 @@ export function DraftPRCard({
 }: DraftPRCardProps) {
   const [showFiles, setShowFiles] = useState(false);
   const [showRequestChanges, setShowRequestChanges] = useState(false);
+  const [showApproveDialog, setShowApproveDialog] = useState(false);
   const [instructions, setInstructions] = useState("");
+  const [docRequest, setDocRequest] = useState("");
   const [loading, setLoading] = useState(false);
 
   const commitMessages: string[] = approval.commitMessages
@@ -73,6 +75,14 @@ export function DraftPRCard({
     await onRequestChanges(approval.id, instructions);
     setShowRequestChanges(false);
     setInstructions("");
+    setLoading(false);
+  };
+
+  const handleApprove = async () => {
+    setLoading(true);
+    await onApprove(approval.id, docRequest.trim() || undefined);
+    setShowApproveDialog(false);
+    setDocRequest("");
     setLoading(false);
   };
 
@@ -205,7 +215,7 @@ export function DraftPRCard({
             <Button
               size="sm"
               className="bg-green-600 hover:bg-green-700 text-white"
-              onClick={() => onApprove(approval.id)}
+              onClick={() => setShowApproveDialog(true)}
             >
               <Check className="h-4 w-4 mr-1" />
               <span className="hidden sm:inline">Approve & Create PR</span>
@@ -214,6 +224,49 @@ export function DraftPRCard({
           </div>
         </div>
       </Card>
+
+      {/* Approve Dialog */}
+      <Dialog open={showApproveDialog} onOpenChange={setShowApproveDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Approve Draft PR</DialogTitle>
+          </DialogHeader>
+          <div className="py-4 space-y-4">
+            <p className="text-sm text-muted-foreground">
+              This will create a PR from <code className="bg-muted px-1 py-0.5 rounded">{approval.branchName}</code> to <code className="bg-muted px-1 py-0.5 rounded">{approval.baseBranch}</code>.
+            </p>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">
+                Documentation (optional)
+              </label>
+              <Textarea
+                placeholder="e.g. &quot;Document the auth middleware&quot;"
+                value={docRequest}
+                onChange={(e) => setDocRequest(e.target.value)}
+                rows={3}
+              />
+              <p className="text-xs text-muted-foreground">
+                If provided, an agent will create documentation after the PR is approved.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setShowApproveDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleApprove}
+              disabled={loading}
+              className="bg-green-600 hover:bg-green-700 text-white"
+            >
+              {loading ? "Approving..." : "Approve & Create PR"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Request Changes Dialog */}
       <Dialog open={showRequestChanges} onOpenChange={setShowRequestChanges}>
