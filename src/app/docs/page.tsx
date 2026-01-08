@@ -20,7 +20,7 @@ interface DocumentContent {
 export default function DocsPage() {
   const [files, setFiles] = useState<FileNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [document, setDocument] = useState<DocumentContent | null>(null);
+  const [currentDoc, setCurrentDoc] = useState<DocumentContent | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingDoc, setLoadingDoc] = useState(false);
 
@@ -54,10 +54,10 @@ export default function DocsPage() {
       if (!res.ok) throw new Error("Failed to load document");
 
       const data = await res.json();
-      setDocument(data);
+      setCurrentDoc(data);
     } catch (error) {
       console.error("Failed to load document:", error);
-      setDocument(null);
+      setCurrentDoc(null);
     } finally {
       setLoadingDoc(false);
     }
@@ -72,13 +72,13 @@ export default function DocsPage() {
 
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
+      const a = globalThis.document.createElement("a");
       a.href = url;
-      a.download = document?.filename || "document.md";
-      document.body.appendChild(a);
+      a.download = currentDoc?.filename || "document.md";
+      globalThis.document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+      globalThis.document.body.removeChild(a);
     } catch (error) {
       console.error("Failed to download document:", error);
     }
@@ -120,11 +120,11 @@ export default function DocsPage() {
             <div className="flex items-center justify-center h-full">
               <div className="text-muted-foreground">Loading document...</div>
             </div>
-          ) : document ? (
+          ) : currentDoc ? (
             <DocViewer
-              content={document.content}
-              filename={document.filename}
-              path={document.path}
+              content={currentDoc.content}
+              filename={currentDoc.filename}
+              path={currentDoc.path}
               onDownload={handleDownload}
             />
           ) : (

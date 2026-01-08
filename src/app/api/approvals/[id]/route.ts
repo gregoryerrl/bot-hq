@@ -162,7 +162,7 @@ Please write documentation to the agent-docs folder based on the request above a
     await db.insert(logs).values({
       workspaceId: workspace.id,
       taskId: task.id,
-      type: "info",
+      type: "agent",
       message: `Documentation task spawned: ${docRequest}`,
     });
   }
