@@ -20,7 +20,9 @@ export const tasks = sqliteTable("tasks", {
   workspaceId: integer("workspace_id")
     .notNull()
     .references(() => workspaces.id),
-  githubIssueNumber: integer("github_issue_number"),
+  githubIssueNumber: integer("github_issue_number"), // Legacy - will be removed
+  sourcePluginId: integer("source_plugin_id"), // Plugin that created this task
+  sourceRef: text("source_ref"), // Plugin-specific reference (issue #, message ID)
   title: text("title").notNull(),
   description: text("description"),
   state: text("state", {
@@ -151,6 +153,74 @@ export const pendingDevices = sqliteTable("pending_devices", {
   expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
 });
 
+// Installed plugins
+export const plugins = sqliteTable("plugins", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(),
+  version: text("version").notNull(),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  manifest: text("manifest").notNull(), // Full plugin.json cached
+  settings: text("settings").notNull().default("{}"), // User-configured settings
+  credentials: text("credentials"), // Encrypted secrets
+  installedAt: integer("installed_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Plugin data scoped to workspace
+export const pluginWorkspaceData = sqliteTable("plugin_workspace_data", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  pluginId: integer("plugin_id").notNull().references(() => plugins.id, { onDelete: "cascade" }),
+  workspaceId: integer("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  data: text("data").notNull().default("{}"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+}, (table) => [
+  index("plugin_workspace_plugin_idx").on(table.pluginId),
+  index("plugin_workspace_workspace_idx").on(table.workspaceId),
+]);
+
+// Plugin data scoped to task
+export const pluginTaskData = sqliteTable("plugin_task_data", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  pluginId: integer("plugin_id").notNull().references(() => plugins.id, { onDelete: "cascade" }),
+  taskId: integer("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+  data: text("data").notNull().default("{}"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+}, (table) => [
+  index("plugin_task_plugin_idx").on(table.pluginId),
+  index("plugin_task_task_idx").on(table.taskId),
+]);
+
+// Plugin global key-value store
+export const pluginStore = sqliteTable("plugin_store", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  pluginId: integer("plugin_id").notNull().references(() => plugins.id, { onDelete: "cascade" }),
+  key: text("key").notNull(),
+  value: text("value"),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+}, (table) => [
+  index("plugin_store_plugin_idx").on(table.pluginId),
+  index("plugin_store_key_idx").on(table.pluginId, table.key),
+]);
+
 // Type exports
 export type Workspace = typeof workspaces.$inferSelect;
 export type NewWorkspace = typeof workspaces.$inferInsert;
@@ -168,3 +238,8 @@ export type PendingDevice = typeof pendingDevices.$inferSelect;
 export type NewPendingDevice = typeof pendingDevices.$inferInsert;
 export type Setting = typeof settings.$inferSelect;
 export type NewSetting = typeof settings.$inferInsert;
+export type Plugin = typeof plugins.$inferSelect;
+export type NewPlugin = typeof plugins.$inferInsert;
+export type PluginWorkspaceData = typeof pluginWorkspaceData.$inferSelect;
+export type PluginTaskData = typeof pluginTaskData.$inferSelect;
+export type PluginStoreEntry = typeof pluginStore.$inferSelect;
