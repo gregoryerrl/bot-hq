@@ -31,7 +31,6 @@ export const tasks = sqliteTable("tasks", {
       "queued",
       "in_progress",
       "pending_review",
-      "pr_created",
       "done",
     ],
   })
