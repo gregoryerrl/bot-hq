@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Play } from "lucide-react";
 import { Task } from "@/lib/db/schema";
+import { PluginTaskBadges } from "@/components/plugins/plugin-task-badges";
 
 interface TaskCardProps {
   task: Task & { workspaceName?: string };
@@ -52,6 +53,7 @@ export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
                 {task.workspaceName}
               </Badge>
             )}
+            <PluginTaskBadges taskId={task.id} workspaceId={task.workspaceId} />
           </div>
           <h3 className="font-medium text-sm md:text-base line-clamp-2">
             {task.title}
