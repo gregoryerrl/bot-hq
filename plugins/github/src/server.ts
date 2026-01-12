@@ -163,7 +163,7 @@ async function syncIssues(
     .map(issue => ({
       number: issue.number,
       title: issue.title,
-      body: issue.body,
+      body: issue.body ?? null,
       state: issue.state,
       labels: issue.labels.map(l => (typeof l === "string" ? l : l.name || "")),
       assignees: issue.assignees?.map(a => a.login) || [],
@@ -229,7 +229,7 @@ async function getIssue(
   return {
     number: issue.number,
     title: issue.title,
-    body: issue.body,
+    body: issue.body ?? null,
     state: issue.state,
     labels: issue.labels.map(l => (typeof l === "string" ? l : l.name || "")),
     assignees: issue.assignees?.map(a => a.login) || [],
