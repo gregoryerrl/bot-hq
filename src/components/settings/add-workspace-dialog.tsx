@@ -25,10 +25,8 @@ export function AddWorkspaceDialog({
 }: AddWorkspaceDialogProps) {
   const [name, setName] = useState("");
   const [repoPath, setRepoPath] = useState("");
-  const [githubRemote, setGithubRemote] = useState("");
   const [buildCommand, setBuildCommand] = useState("");
   const [loading, setLoading] = useState(false);
-  const [cloning, setCloning] = useState(false);
 
   async function handleFolderPicker() {
     try {
@@ -61,35 +59,12 @@ export function AddWorkspaceDialog({
     setLoading(true);
 
     try {
-      // If githubRemote is set, try auto-clone
-      if (githubRemote) {
-        setCloning(true);
-        const cloneRes = await fetch("/api/workspaces/clone", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            path: repoPath,
-            remote: githubRemote,
-          }),
-        });
-
-        if (!cloneRes.ok) {
-          const error = await cloneRes.json();
-          toast.error(error.error || "Failed to clone repository");
-          setLoading(false);
-          setCloning(false);
-          return;
-        }
-        setCloning(false);
-      }
-
       const res = await fetch("/api/workspaces", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
           repoPath,
-          githubRemote: githubRemote || null,
           buildCommand: buildCommand || null,
         }),
       });
@@ -97,7 +72,6 @@ export function AddWorkspaceDialog({
       if (res.ok) {
         setName("");
         setRepoPath("");
-        setGithubRemote("");
         setBuildCommand("");
         onSuccess();
         onOpenChange(false);
@@ -153,16 +127,6 @@ export function AddWorkspaceDialog({
           </div>
           <div className="space-y-2">
             <label className="text-sm font-medium">
-              GitHub Remote (optional)
-            </label>
-            <Input
-              value={githubRemote}
-              onChange={(e) => setGithubRemote(e.target.value)}
-              placeholder="owner/repo"
-            />
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm font-medium">
               Build Command (optional)
             </label>
             <Input
@@ -180,7 +144,7 @@ export function AddWorkspaceDialog({
               Cancel
             </Button>
             <Button type="submit" disabled={loading}>
-              {cloning ? "Cloning..." : loading ? "Adding..." : "Add Workspace"}
+              {loading ? "Adding..." : "Add Workspace"}
             </Button>
           </div>
         </form>
