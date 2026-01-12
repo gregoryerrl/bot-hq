@@ -32,12 +32,12 @@ export function ApprovalList() {
     return () => clearInterval(interval);
   }, []);
 
-  async function handleApprove(id: number, docRequest?: string) {
+  async function handleApprove(id: number, docRequest?: string, pluginActions?: string[]) {
     try {
       await fetch(`/api/approvals/${id}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "approve", docRequest }),
+        body: JSON.stringify({ action: "approve", docRequest, pluginActions }),
       });
       fetchApprovals();
     } catch (error) {
