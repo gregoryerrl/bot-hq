@@ -41,7 +41,6 @@ export async function PATCH(
     if (body.state !== undefined) updates.state = body.state;
     if (body.agentPlan !== undefined) updates.agentPlan = body.agentPlan;
     if (body.branchName !== undefined) updates.branchName = body.branchName;
-    if (body.prUrl !== undefined) updates.prUrl = body.prUrl;
     if (body.priority !== undefined) updates.priority = body.priority;
 
     const result = await db

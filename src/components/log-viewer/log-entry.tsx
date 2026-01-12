@@ -8,7 +8,6 @@ interface LogEntryProps {
 const typeColors: Record<string, string> = {
   agent: "bg-blue-500",
   test: "bg-purple-500",
-  sync: "bg-green-500",
   approval: "bg-yellow-500",
   error: "bg-red-500",
   health: "bg-gray-500",

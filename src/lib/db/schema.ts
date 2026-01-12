@@ -5,7 +5,6 @@ export const workspaces = sqliteTable("workspaces", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(),
   repoPath: text("repo_path").notNull(),
-  githubRemote: text("github_remote"),
   linkedDirs: text("linked_dirs"), // JSON string
   buildCommand: text("build_command"),
   agentConfig: text("agent_config"), // JSON string storing AgentConfig
@@ -14,13 +13,12 @@ export const workspaces = sqliteTable("workspaces", {
     .$defaultFn(() => new Date()),
 });
 
-// Tasks (issues + manual tasks)
+// Tasks
 export const tasks = sqliteTable("tasks", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   workspaceId: integer("workspace_id")
     .notNull()
     .references(() => workspaces.id),
-  githubIssueNumber: integer("github_issue_number"), // Legacy - will be removed
   sourcePluginId: integer("source_plugin_id"), // Plugin that created this task
   sourceRef: text("source_ref"), // Plugin-specific reference (issue #, message ID)
   title: text("title").notNull(),
@@ -39,7 +37,6 @@ export const tasks = sqliteTable("tasks", {
   priority: integer("priority").default(0),
   agentPlan: text("agent_plan"),
   branchName: text("branch_name"),
-  prUrl: text("pr_url"),
   assignedAt: integer("assigned_at", { mode: "timestamp" }),
   updatedAt: integer("updated_at", { mode: "timestamp" })
     .notNull()
@@ -47,10 +44,9 @@ export const tasks = sqliteTable("tasks", {
 }, (table) => [
   index("tasks_workspace_idx").on(table.workspaceId),
   index("tasks_state_idx").on(table.state),
-  index("tasks_issue_idx").on(table.workspaceId, table.githubIssueNumber),
 ]);
 
-// Draft PRs (pending review)
+// Pending approvals (agent work awaiting review)
 export const approvals = sqliteTable("approvals", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   taskId: integer("task_id")
@@ -84,7 +80,7 @@ export const logs = sqliteTable("logs", {
   workspaceId: integer("workspace_id").references(() => workspaces.id),
   taskId: integer("task_id").references(() => tasks.id),
   type: text("type", {
-    enum: ["agent", "test", "sync", "approval", "error", "health"],
+    enum: ["agent", "test", "approval", "error", "health"],
   }).notNull(),
   message: text("message").notNull(),
   details: text("details"), // JSON string
