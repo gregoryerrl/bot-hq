@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, Clock, ScrollText, Settings, Globe, MessageSquare, Terminal, FileText } from "lucide-react";
+import { LayoutDashboard, Clock, ScrollText, Settings, Globe, MessageSquare, Terminal, FileText, Puzzle } from "lucide-react";
 
 const navItems = [
   { href: "/", label: "Taskboard", icon: LayoutDashboard },
@@ -12,6 +12,7 @@ const navItems = [
   { href: "/terminal", label: "Terminal", icon: Terminal },
   { href: "/docs", label: "Docs", icon: FileText },
   { href: "/logs", label: "Logs", icon: ScrollText },
+  { href: "/plugins", label: "Plugins", icon: Puzzle },
   { href: "/settings", label: "Settings", icon: Settings },
   { href: "/claude-settings", label: "Claude Settings", icon: Globe },
 ];
