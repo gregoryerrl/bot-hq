@@ -3,7 +3,6 @@
 import { useState } from "react";
 import { Header } from "@/components/layout/header";
 import { TaskList } from "@/components/taskboard/task-list";
-import { SyncButton } from "@/components/taskboard/sync-button";
 import { CreateTaskDialog } from "@/components/taskboard/create-task-dialog";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
@@ -35,7 +34,6 @@ export default function TaskboardPage() {
               <Plus className="h-4 w-4 mr-1" />
               Create Task
             </Button>
-            <SyncButton />
           </div>
         </div>
         <TaskList key={refreshKey} />
