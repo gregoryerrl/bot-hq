@@ -38,7 +38,7 @@ function getIconComponent(iconName: string): LucideIcon {
     .map(word => word.charAt(0).toUpperCase() + word.slice(1))
     .join("");
 
-  const icons = LucideIcons as Record<string, LucideIcon>;
+  const icons = LucideIcons as unknown as Record<string, LucideIcon>;
   return icons[pascalCase] || Box;
 }
 
