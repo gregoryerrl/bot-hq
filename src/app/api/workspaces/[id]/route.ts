@@ -42,7 +42,6 @@ export async function PATCH(
     const updates: Partial<typeof workspaces.$inferInsert> = {};
     if (body.name !== undefined) updates.name = body.name;
     if (body.repoPath !== undefined) updates.repoPath = body.repoPath;
-    if (body.githubRemote !== undefined) updates.githubRemote = body.githubRemote;
     if (body.linkedDirs !== undefined)
       updates.linkedDirs = JSON.stringify(body.linkedDirs);
     if (body.buildCommand !== undefined) updates.buildCommand = body.buildCommand;

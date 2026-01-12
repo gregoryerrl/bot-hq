@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Trash2, FolderGit2, Settings } from "lucide-react";
 import { Workspace } from "@/lib/db/schema";
 import Link from "next/link";
@@ -75,9 +74,6 @@ export function WorkspaceList({ onAddClick }: WorkspaceListProps) {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  {workspace.githubRemote && (
-                    <Badge variant="secondary">GitHub</Badge>
-                  )}
                   <Button variant="ghost" size="icon" asChild>
                     <Link href={`/settings/workspaces/${workspace.id}`}>
                       <Settings className="h-4 w-4" />

@@ -15,7 +15,7 @@ export interface ChatMessage {
 export async function getManagerContext() {
   const allWorkspaces = await db.select({
     name: workspaces.name,
-    githubRemote: workspaces.githubRemote,
+    repoPath: workspaces.repoPath,
   }).from(workspaces);
 
   const taskCountsRaw = await db
