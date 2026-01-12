@@ -18,9 +18,15 @@ export function ApprovalList() {
     try {
       const res = await fetch("/api/approvals?status=pending");
       const data = await res.json();
-      setApprovals(data);
+      if (Array.isArray(data)) {
+        setApprovals(data);
+      } else {
+        console.error("API returned non-array for approvals:", data);
+        setApprovals([]);
+      }
     } catch (error) {
       console.error("Failed to fetch approvals:", error);
+      setApprovals([]);
     } finally {
       setLoading(false);
     }

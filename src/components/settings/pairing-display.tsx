@@ -27,10 +27,16 @@ export function PairingDisplay() {
       const res = await fetch("/api/auth/pending");
       if (res.ok) {
         const data = await res.json();
-        setPending(data);
+        if (Array.isArray(data)) {
+          setPending(data);
+        } else {
+          console.error("API returned non-array for pending devices:", data);
+          setPending([]);
+        }
       }
     } catch (error) {
       console.error("Failed to fetch pending:", error);
+      setPending([]);
     } finally {
       setLoading(false);
     }

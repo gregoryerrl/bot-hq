@@ -20,10 +20,16 @@ export function DeviceList() {
       const res = await fetch("/api/auth/devices");
       if (res.ok) {
         const data = await res.json();
-        setDevices(data);
+        if (Array.isArray(data)) {
+          setDevices(data);
+        } else {
+          console.error("API returned non-array for devices:", data);
+          setDevices([]);
+        }
       }
     } catch (error) {
       console.error("Failed to fetch devices:", error);
+      setDevices([]);
     } finally {
       setLoading(false);
     }

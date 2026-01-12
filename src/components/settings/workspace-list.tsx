@@ -23,9 +23,15 @@ export function WorkspaceList({ onAddClick }: WorkspaceListProps) {
     try {
       const res = await fetch("/api/workspaces");
       const data = await res.json();
-      setWorkspaces(data);
+      if (Array.isArray(data)) {
+        setWorkspaces(data);
+      } else {
+        console.error("API returned non-array for workspaces:", data);
+        setWorkspaces([]);
+      }
     } catch (error) {
       console.error("Failed to fetch workspaces:", error);
+      setWorkspaces([]);
     } finally {
       setLoading(false);
     }

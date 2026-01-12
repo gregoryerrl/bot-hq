@@ -25,10 +25,16 @@ export function LogSourceList() {
         const response = await fetch("/api/logs/sources");
         if (response.ok) {
           const data = await response.json();
-          setSources(data);
+          if (Array.isArray(data)) {
+            setSources(data);
+          } else {
+            console.error("API returned non-array for log sources:", data);
+            setSources([]);
+          }
         }
       } catch (error) {
         console.error("Failed to fetch log sources:", error);
+        setSources([]);
       } finally {
         setLoading(false);
       }
