@@ -64,7 +64,7 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
   if (tasks.length === 0) {
     return (
       <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
-        No tasks found. Sync issues or add a workspace with GitHub configured.
+        No tasks found. Click "Create Task" to add a new task.
       </div>
     );
   }
