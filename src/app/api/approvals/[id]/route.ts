@@ -4,6 +4,7 @@ import { promisify } from "util";
 import { db, approvals, tasks, logs, workspaces } from "@/lib/db";
 import { eq } from "drizzle-orm";
 import { startAgentForTask } from "@/lib/agents/claude-code";
+import { fireApprovalAccepted } from "@/lib/plugins";
 
 const execAsync = promisify(exec);
 
@@ -36,7 +37,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const { action, instructions, docRequest } = await request.json();
+    const { action, instructions, docRequest, pluginActions } = await request.json();
 
     if (!["approve", "reject", "request_changes"].includes(action)) {
       return NextResponse.json(
@@ -72,8 +73,8 @@ export async function POST(
     const repoPath = workspace.repoPath.replace("~", process.env.HOME || "");
 
     if (action === "approve") {
-      // Push branch and create PR
-      await handleApprove(approval, task, workspace, repoPath, docRequest);
+      // Accept changes and run plugin actions
+      await handleApprove(approval, task, workspace, repoPath, docRequest, pluginActions);
     } else if (action === "reject") {
       // Delete branch and reset task
       await handleReject(approval, task, repoPath);
@@ -97,42 +98,20 @@ async function handleApprove(
   task: typeof tasks.$inferSelect,
   workspace: typeof workspaces.$inferSelect,
   repoPath: string,
-  docRequest?: string
+  docRequest?: string,
+  pluginActions?: string[]
 ) {
-  // Push branch to remote
-  await execAsync(
-    `git push -u origin ${approval.branchName}`,
-    { cwd: repoPath }
-  );
-
-  // Create PR using GitHub CLI
-  const prTitle = task.title;
-  const prBody = `Closes #${task.githubIssueNumber || "N/A"}\n\n## Changes\n${
-    approval.commitMessages
-      ? JSON.parse(approval.commitMessages).map((m: string) => `- ${m}`).join("\n")
-      : "No commit messages"
-  }`;
-
-  const { stdout: prOutput } = await execAsync(
-    `gh pr create --title "${prTitle.replace(/"/g, '\\"')}" --body "${prBody.replace(/"/g, '\\"')}" --base ${approval.baseBranch} --head ${approval.branchName}`,
-    { cwd: repoPath }
-  );
-
-  // Extract PR URL from output
-  const prUrl = prOutput.trim();
-
   // Update approval status
   await db
     .update(approvals)
     .set({ status: "approved", resolvedAt: new Date() })
     .where(eq(approvals.id, approval.id));
 
-  // Update task state and PR URL
+  // Update task state - just mark as done (no PR creation in core)
   await db
     .update(tasks)
     .set({
-      state: "pr_created",
-      prUrl,
+      state: "done",
       updatedAt: new Date(),
     })
     .where(eq(tasks.id, task.id));
@@ -142,20 +121,79 @@ async function handleApprove(
     workspaceId: workspace.id,
     taskId: task.id,
     type: "approval",
-    message: `Draft PR approved. Created PR: ${prUrl}`,
+    message: `Changes accepted. Branch ${approval.branchName} kept locally.`,
   });
+
+  // Fire hook for plugins
+  await fireApprovalAccepted(
+    {
+      id: approval.id,
+      taskId: approval.taskId,
+      workspaceId: approval.workspaceId,
+      branchName: approval.branchName,
+      baseBranch: approval.baseBranch,
+      commitMessages: approval.commitMessages ? JSON.parse(approval.commitMessages) : [],
+      status: "approved",
+    },
+    {
+      id: task.id,
+      workspaceId: task.workspaceId,
+      title: task.title,
+      description: task.description || "",
+      state: task.state,
+      priority: task.priority ?? 0,
+      branchName: task.branchName || undefined,
+    }
+  );
+
+  // Execute selected plugin actions
+  if (pluginActions && pluginActions.length > 0) {
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
+    for (const actionKey of pluginActions) {
+      const [pluginName, actionId] = actionKey.split(":");
+      try {
+        const res = await fetch(`${baseUrl}/api/plugins/actions/execute`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pluginName,
+            actionId,
+            approvalId: approval.id,
+          }),
+        });
+
+        if (!res.ok) {
+          const error = await res.json();
+          console.error(`Plugin action ${actionKey} failed:`, error);
+          await db.insert(logs).values({
+            workspaceId: workspace.id,
+            taskId: task.id,
+            type: "error",
+            message: `Plugin action ${pluginName}:${actionId} failed: ${error.error}`,
+          });
+        } else {
+          await db.insert(logs).values({
+            workspaceId: workspace.id,
+            taskId: task.id,
+            type: "approval",
+            message: `Plugin action ${pluginName}:${actionId} executed successfully`,
+          });
+        }
+      } catch (error) {
+        console.error(`Plugin action ${actionKey} error:`, error);
+      }
+    }
+  }
 
   // If documentation was requested, spawn a follow-up task
   if (docRequest) {
     const docPrompt = `${docRequest}
 
-Context from PR:
+Context:
 - Title: ${task.title}
 - Branch: ${approval.branchName}
-- Issue: #${task.githubIssueNumber || "N/A"}
-- PR URL: ${prUrl}
 
-Please write documentation to the agent-docs folder based on the request above and the work completed in this PR.`;
+Please write documentation to the agent-docs folder based on the request above.`;
 
     await startAgentForTask(task.id, docPrompt);
 
