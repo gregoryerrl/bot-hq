@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, tasks, workspaces } from "@/lib/db";
 import { eq, desc } from "drizzle-orm";
+import { fireTaskCreated } from "@/lib/plugins";
 
 export async function GET(request: NextRequest) {
   try {
@@ -39,6 +40,51 @@ export async function GET(request: NextRequest) {
     console.error("Failed to fetch tasks:", error);
     return NextResponse.json(
       { error: "Failed to fetch tasks" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { workspaceId, title, description, state = "new" } = body;
+
+    if (!workspaceId || !title) {
+      return NextResponse.json(
+        { error: "Missing required fields: workspaceId, title" },
+        { status: 400 }
+      );
+    }
+
+    const result = await db.insert(tasks).values({
+      workspaceId,
+      title,
+      description: description || "",
+      state,
+      priority: 0,
+      updatedAt: new Date(),
+    }).returning();
+
+    // Fire task created hook
+    try {
+      await fireTaskCreated({
+        id: result[0].id,
+        workspaceId: result[0].workspaceId,
+        title: result[0].title,
+        description: result[0].description || "",
+        state: result[0].state,
+        priority: result[0].priority ?? 0,
+      });
+    } catch (e) {
+      console.error("Failed to fire task created hook:", e);
+    }
+
+    return NextResponse.json(result[0]);
+  } catch (error) {
+    console.error("Failed to create task:", error);
+    return NextResponse.json(
+      { error: "Failed to create task" },
       { status: 500 }
     );
   }
