@@ -18,7 +18,7 @@ const stateColors: Record<string, string> = {
   analyzing: "bg-blue-500",
   plan_ready: "bg-purple-500",
   in_progress: "bg-orange-500",
-  pr_draft: "bg-green-500",
+  pending_review: "bg-green-500",
   done: "bg-green-700",
 };
 
@@ -28,7 +28,7 @@ const stateLabels: Record<string, string> = {
   analyzing: "Analyzing",
   plan_ready: "Plan Ready",
   in_progress: "In Progress",
-  pr_draft: "PR Draft",
+  pending_review: "Pending Review",
   done: "Done",
 };
 
