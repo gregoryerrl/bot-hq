@@ -3,7 +3,7 @@
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Play, ExternalLink } from "lucide-react";
+import { Play } from "lucide-react";
 import { Task } from "@/lib/db/schema";
 
 interface TaskCardProps {
@@ -38,11 +38,9 @@ export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-1">
-            {task.githubIssueNumber && (
-              <span className="text-sm text-muted-foreground">
-                #{task.githubIssueNumber}
-              </span>
-            )}
+            <span className="text-sm text-muted-foreground">
+              #{task.id}
+            </span>
             <Badge
               variant="secondary"
               className={`${stateColors[task.state]} text-white text-xs`}
@@ -74,13 +72,6 @@ export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
             <Button size="sm" onClick={() => onStartAgent(task.id)}>
               <Play className="h-4 w-4 mr-1" />
               Start
-            </Button>
-          )}
-          {task.prUrl && (
-            <Button size="sm" variant="outline" asChild>
-              <a href={task.prUrl} target="_blank" rel="noopener noreferrer">
-                <ExternalLink className="h-4 w-4" />
-              </a>
             </Button>
           )}
         </div>
