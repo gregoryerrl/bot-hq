@@ -40,7 +40,7 @@ export async function POST(
       workspaceId: task.workspaceId,
       taskId: task.id,
       type: "agent",
-      message: `Task #${task.githubIssueNumber || task.id} queued for agent`,
+      message: `Task #${task.id} queued for agent`,
     });
 
     return NextResponse.json(result[0]);
