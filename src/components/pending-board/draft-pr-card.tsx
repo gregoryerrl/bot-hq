@@ -24,6 +24,7 @@ import {
   Minus,
 } from "lucide-react";
 import { Approval } from "@/lib/db/schema";
+import { PluginActionCheckboxes } from "@/components/plugins/plugin-action-checkboxes";
 
 interface DiffFile {
   path: string;
@@ -43,7 +44,7 @@ interface DraftPRCardProps {
     workspaceName?: string;
     githubIssueNumber?: number;
   };
-  onApprove: (id: number, docRequest?: string) => void;
+  onApprove: (id: number, docRequest?: string, pluginActions?: string[]) => void;
   onReject: (id: number) => void;
   onRequestChanges: (id: number, instructions: string) => void;
 }
@@ -60,6 +61,7 @@ export function DraftPRCard({
   const [instructions, setInstructions] = useState("");
   const [docRequest, setDocRequest] = useState("");
   const [loading, setLoading] = useState(false);
+  const [selectedPluginActions, setSelectedPluginActions] = useState<string[]>([]);
 
   const commitMessages: string[] = approval.commitMessages
     ? JSON.parse(approval.commitMessages)
@@ -80,9 +82,10 @@ export function DraftPRCard({
 
   const handleApprove = async () => {
     setLoading(true);
-    await onApprove(approval.id, docRequest.trim() || undefined);
+    await onApprove(approval.id, docRequest.trim() || undefined, selectedPluginActions);
     setShowApproveDialog(false);
     setDocRequest("");
+    setSelectedPluginActions([]);
     setLoading(false);
   };
 
@@ -210,7 +213,7 @@ export function DraftPRCard({
               onClick={() => onReject(approval.id)}
             >
               <X className="h-4 w-4 mr-1" />
-              <span className="hidden sm:inline">Reject</span>
+              <span className="hidden sm:inline">Decline</span>
             </Button>
             <Button
               size="sm"
@@ -218,8 +221,7 @@ export function DraftPRCard({
               onClick={() => setShowApproveDialog(true)}
             >
               <Check className="h-4 w-4 mr-1" />
-              <span className="hidden sm:inline">Approve & Create PR</span>
-              <span className="sm:hidden">Approve</span>
+              Accept
             </Button>
           </div>
         </div>
@@ -227,14 +229,25 @@ export function DraftPRCard({
 
       {/* Approve Dialog */}
       <Dialog open={showApproveDialog} onOpenChange={setShowApproveDialog}>
-        <DialogContent>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Approve Draft PR</DialogTitle>
+            <DialogTitle>Accept Changes</DialogTitle>
           </DialogHeader>
           <div className="py-4 space-y-4">
             <p className="text-sm text-muted-foreground">
-              This will create a PR from <code className="bg-muted px-1 py-0.5 rounded">{approval.branchName}</code> to <code className="bg-muted px-1 py-0.5 rounded">{approval.baseBranch}</code>.
+              This will keep the commits on branch{" "}
+              <code className="bg-muted px-1 py-0.5 rounded">
+                {approval.branchName}
+              </code>
+              .
             </p>
+
+            <PluginActionCheckboxes
+              type="approval"
+              selectedActions={selectedPluginActions}
+              onSelectionChange={setSelectedPluginActions}
+            />
+
             <div className="space-y-2">
               <label className="text-sm font-medium">
                 Documentation (optional)
@@ -246,7 +259,7 @@ export function DraftPRCard({
                 rows={3}
               />
               <p className="text-xs text-muted-foreground">
-                If provided, an agent will create documentation after the PR is approved.
+                If provided, an agent will create documentation after acceptance.
               </p>
             </div>
           </div>
@@ -262,7 +275,7 @@ export function DraftPRCard({
               disabled={loading}
               className="bg-green-600 hover:bg-green-700 text-white"
             >
-              {loading ? "Approving..." : "Approve & Create PR"}
+              {loading ? "Accepting..." : "Accept"}
             </Button>
           </DialogFooter>
         </DialogContent>

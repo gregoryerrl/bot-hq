@@ -83,7 +83,7 @@ export async function POST(request: NextRequest) {
       task: {
         id: task.id,
         title: task.title,
-        description: task.description,
+        description: task.description || "",
         state: task.state,
       },
       workspace: {
