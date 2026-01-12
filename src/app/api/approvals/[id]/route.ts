@@ -244,7 +244,7 @@ async function handleReject(
     workspaceId: approval.workspaceId,
     taskId: task.id,
     type: "approval",
-    message: `Draft PR rejected. Branch ${approval.branchName} deleted.`,
+    message: `Approval declined. Branch ${approval.branchName} deleted.`,
   });
 }
 

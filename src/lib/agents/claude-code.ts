@@ -160,7 +160,7 @@ export class ClaudeCodeAgent {
     }
 
     if (code === 0) {
-      await this.createDraftPR();
+      await this.createPendingApproval();
     } else {
       await this.logMessage("error", `Task failed with exit code: ${code}`);
     }
@@ -168,7 +168,7 @@ export class ClaudeCodeAgent {
     this.options.onOutput?.({ type: "exit", data: { code } });
   }
 
-  private async createDraftPR(): Promise<void> {
+  private async createPendingApproval(): Promise<void> {
     try {
       // Get the current branch name
       const { stdout: branchOutput } = await execAsync(
@@ -179,7 +179,7 @@ export class ClaudeCodeAgent {
 
       // Check if we're on a feature branch (not main/master)
       if (branchName === "main" || branchName === "master" || !branchName) {
-        await this.logMessage("agent", "No feature branch detected, skipping draft PR creation");
+        await this.logMessage("agent", "No feature branch detected, skipping approval creation");
         return;
       }
 
@@ -194,7 +194,7 @@ export class ClaudeCodeAgent {
       const commitMessages = logOutput.trim().split("\n").filter(Boolean);
 
       if (commitMessages.length === 0) {
-        await this.logMessage("agent", "No commits on branch, skipping draft PR creation");
+        await this.logMessage("agent", "No commits on branch, skipping approval creation");
         return;
       }
 
@@ -234,7 +234,7 @@ export class ClaudeCodeAgent {
         })
         .where(eq(tasks.id, this.options.taskId));
 
-      // Create draft PR approval record
+      // Create pending approval record
       await db.insert(approvals).values({
         taskId: this.options.taskId,
         workspaceId: this.options.workspaceId,
@@ -245,11 +245,11 @@ export class ClaudeCodeAgent {
         status: "pending",
       });
 
-      await this.logMessage("agent", `Draft PR created for branch: ${branchName}`);
+      await this.logMessage("agent", `Pending approval created for branch: ${branchName}`);
       await this.logMessage("agent", `Files changed: ${files.length}, +${totalAdditions} -${totalDeletions}`);
 
     } catch (error) {
-      await this.logMessage("error", `Failed to create draft PR: ${error}`);
+      await this.logMessage("error", `Failed to create pending approval: ${error}`);
     }
   }
 
