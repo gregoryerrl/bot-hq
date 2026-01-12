@@ -41,8 +41,8 @@ interface DiffSummary {
 interface DraftPRCardProps {
   approval: Approval & {
     taskTitle?: string;
+    taskId?: number;
     workspaceName?: string;
-    githubIssueNumber?: number;
   };
   onApprove: (id: number, docRequest?: string, pluginActions?: string[]) => void;
   onReject: (id: number) => void;
@@ -96,16 +96,16 @@ export function DraftPRCard({
           {/* Header */}
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="default" className="text-xs">
-              Draft PR
+              Pending Review
             </Badge>
             {approval.workspaceName && (
               <Badge variant="outline" className="text-xs">
                 {approval.workspaceName}
               </Badge>
             )}
-            {approval.githubIssueNumber && (
+            {approval.taskId && (
               <span className="text-xs text-muted-foreground">
-                Issue #{approval.githubIssueNumber}
+                Task #{approval.taskId}
               </span>
             )}
           </div>

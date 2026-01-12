@@ -25,8 +25,8 @@ export async function GET(request: NextRequest) {
       filtered.map((a) => ({
         ...a.approval,
         taskTitle: a.task?.title,
+        taskId: a.task?.id,
         workspaceName: a.workspace?.name,
-        githubIssueNumber: a.task?.githubIssueNumber,
       }))
     );
   } catch (error) {

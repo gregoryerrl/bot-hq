@@ -8,8 +8,8 @@ export function ApprovalList() {
   const [approvals, setApprovals] = useState<
     (Approval & {
       taskTitle?: string;
+      taskId?: number;
       workspaceName?: string;
-      githubIssueNumber?: number;
     })[]
   >([]);
   const [loading, setLoading] = useState(true);
