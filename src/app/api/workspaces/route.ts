@@ -21,7 +21,6 @@ export async function POST(request: NextRequest) {
     const newWorkspace: NewWorkspace = {
       name: body.name,
       repoPath: body.repoPath,
-      githubRemote: body.githubRemote || null,
       linkedDirs: body.linkedDirs ? JSON.stringify(body.linkedDirs) : null,
       buildCommand: body.buildCommand || null,
     };
