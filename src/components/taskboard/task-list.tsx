@@ -21,9 +21,17 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
 
       const res = await fetch(`/api/tasks?${params}`);
       const data = await res.json();
-      setTasks(data);
+
+      // Ensure data is an array
+      if (Array.isArray(data)) {
+        setTasks(data);
+      } else {
+        console.error("API returned non-array:", data);
+        setTasks([]);
+      }
     } catch (error) {
       console.error("Failed to fetch tasks:", error);
+      setTasks([]);
     } finally {
       setLoading(false);
     }
