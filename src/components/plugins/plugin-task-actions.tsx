@@ -13,7 +13,7 @@ import { toast } from "sonner";
 
 interface PluginTaskAction {
   pluginName: string;
-  actionId: string;
+  id: string;
   label: string;
   description?: string;
   icon?: string;
@@ -35,7 +35,7 @@ export function PluginTaskActions({ taskId, workspaceId }: PluginTaskActionsProp
         const res = await fetch("/api/plugins/actions?type=task");
         if (!res.ok) throw new Error("Failed to fetch");
         const data = await res.json();
-        setActions(data);
+        setActions(data.actions || []);
       } catch (error) {
         console.error("Failed to load plugin task actions:", error);
       } finally {
@@ -47,14 +47,14 @@ export function PluginTaskActions({ taskId, workspaceId }: PluginTaskActionsProp
   }, []);
 
   async function executeAction(action: PluginTaskAction) {
-    setExecuting(action.actionId);
+    setExecuting(action.id);
     try {
       const res = await fetch("/api/plugins/actions/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           pluginName: action.pluginName,
-          actionId: action.actionId,
+          actionId: action.id,
           taskId,
           workspaceId,
         }),
@@ -89,11 +89,11 @@ export function PluginTaskActions({ taskId, workspaceId }: PluginTaskActionsProp
       <DropdownMenuContent align="end">
         {actions.map((action) => (
           <DropdownMenuItem
-            key={`${action.pluginName}-${action.actionId}`}
+            key={`${action.pluginName}-${action.id}`}
             onClick={() => executeAction(action)}
             disabled={executing !== null}
           >
-            {executing === action.actionId ? (
+            {executing === action.id ? (
               <Loader2 className="h-4 w-4 mr-2 animate-spin" />
             ) : null}
             <span className="text-xs text-muted-foreground mr-2">
