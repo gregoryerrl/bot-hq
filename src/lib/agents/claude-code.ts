@@ -309,7 +309,7 @@ export async function startAgentForTask(
 
   if (existingBranch && userInstructions) {
     // Continuing work with user feedback
-    prompt = `You are continuing work on GitHub issue #${task.githubIssueNumber}: "${task.title}"
+    prompt = `You are continuing work on task: "${task.title}"
 
 ${task.description || "No description provided."}
 
@@ -326,14 +326,14 @@ Instructions:
 5. Do NOT push to remote - Bot-HQ will handle that after review`;
   } else {
     // Starting fresh
-    prompt = `You are working on GitHub issue #${task.githubIssueNumber}: "${task.title}"
+    prompt = `You are working on task: "${task.title}"
 
 ${task.description || "No description provided."}
 
 Your task: Implement this feature completely.
 
 Steps:
-1. Create a feature branch: git checkout -b feature/${task.githubIssueNumber || "task"}-${task.id}
+1. Create a feature branch: git checkout -b feature/task-${task.id}
 2. Implement the required changes with small, focused commits
 3. Run tests and fix any issues
 4. Run the build (npm run build) before finishing
