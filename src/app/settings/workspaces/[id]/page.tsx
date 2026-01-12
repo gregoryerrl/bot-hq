@@ -10,6 +10,7 @@ import { RuleListEditor } from "@/components/settings/rule-list-editor";
 import { ArrowLeft, Save, RefreshCw } from "lucide-react";
 import { AgentConfig, DEFAULT_AGENT_CONFIG } from "@/lib/agents/config-types";
 import { toast } from "sonner";
+import { WorkspacePluginSettings } from "@/components/plugins/workspace-plugin-settings";
 
 export default function WorkspaceConfigPage({
   params,
@@ -167,7 +168,7 @@ export default function WorkspaceConfigPage({
           </CardContent>
         </Card>
 
-        <div className="flex gap-3 pb-6">
+        <div className="flex gap-3">
           <Button onClick={handleSave} disabled={saving}>
             <Save className="h-4 w-4 mr-2" />
             {saving ? "Saving..." : "Save Configuration"}
@@ -176,6 +177,12 @@ export default function WorkspaceConfigPage({
             <RefreshCw className={`h-4 w-4 mr-2 ${syncing ? "animate-spin" : ""}`} />
             {syncing ? "Syncing..." : "Sync to Workspace"}
           </Button>
+        </div>
+
+        {/* Plugin Settings */}
+        <div className="pb-6">
+          <h2 className="text-lg font-semibold mb-4">Plugin Settings</h2>
+          <WorkspacePluginSettings workspaceId={parseInt(id)} />
         </div>
       </div>
     </div>
