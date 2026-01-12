@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Play } from "lucide-react";
 import { Task } from "@/lib/db/schema";
 import { PluginTaskBadges } from "@/components/plugins/plugin-task-badges";
+import { PluginTaskActions } from "@/components/plugins/plugin-task-actions";
 
 interface TaskCardProps {
   task: Task & { workspaceName?: string };
@@ -76,6 +77,7 @@ export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
               Start
             </Button>
           )}
+          <PluginTaskActions taskId={task.id} workspaceId={task.workspaceId} />
         </div>
       </div>
     </Card>
