@@ -38,7 +38,6 @@ export const ChatMessage = memo(function ChatMessage({ block }: ChatMessageProps
   }
 
   if (block.type === "tool") {
-    const toolBlock = block as { type: "tool"; name: string; output: string };
     return (
       <div className="flex gap-3">
         <div className="w-8 h-8 rounded-full bg-yellow-500/10 flex items-center justify-center flex-shrink-0">
@@ -46,27 +45,37 @@ export const ChatMessage = memo(function ChatMessage({ block }: ChatMessageProps
         </div>
         <div className="max-w-[80%] rounded-lg p-2 bg-yellow-500/10 border border-yellow-500/20">
           <p className="text-xs font-medium text-yellow-700 dark:text-yellow-400 mb-1">
-            {toolBlock.name || "Tool"}
+            {block.name || "Tool"}
           </p>
           <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground">
-            {toolBlock.output || block.content}
+            {block.output}
           </pre>
         </div>
       </div>
     );
   }
 
-  // Default: assistant message
-  return (
-    <div className="flex gap-3">
-      <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-        <Bot className="h-4 w-4" />
-      </div>
-      <div className={cn("max-w-[80%] rounded-lg p-3 bg-muted")}>
-        <div className="prose prose-sm dark:prose-invert max-w-none">
-          <ReactMarkdown>{block.content}</ReactMarkdown>
+  // Skip permission blocks (handled separately by PermissionPrompt component)
+  if (block.type === "permission") {
+    return null;
+  }
+
+  // Assistant or thinking message
+  if (block.type === "assistant" || block.type === "thinking") {
+    return (
+      <div className="flex gap-3">
+        <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+          <Bot className="h-4 w-4" />
+        </div>
+        <div className={cn("max-w-[80%] rounded-lg p-3 bg-muted")}>
+          <div className="prose prose-sm dark:prose-invert max-w-none">
+            <ReactMarkdown>{block.content}</ReactMarkdown>
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  }
+
+  // Fallback for any other types
+  return null;
 });

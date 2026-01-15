@@ -55,6 +55,27 @@ export function detectPermissionPrompt(buffer: string): PermissionPrompt | null 
   return { question, options, selectedIndex };
 }
 
+// Helper to create a block with proper typing
+function createBlock(type: string, content: string, toolName?: string): ParsedBlock | null {
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+
+  switch (type) {
+    case "assistant":
+      return { type: "assistant", content: trimmed };
+    case "code":
+      return { type: "code", content: trimmed };
+    case "tool":
+      return { type: "tool", name: toolName || "Tool", output: trimmed };
+    case "user":
+      return { type: "user", content: trimmed };
+    case "thinking":
+      return { type: "thinking", content: trimmed };
+    default:
+      return { type: "assistant", content: trimmed };
+  }
+}
+
 // Parse full buffer into blocks for chat view
 export function parseTerminalOutput(buffer: string): ParsedBlock[] {
   const clean = stripAnsi(buffer);
@@ -63,49 +84,47 @@ export function parseTerminalOutput(buffer: string): ParsedBlock[] {
   // Split by common delimiters
   const lines = clean.split("\n");
   let currentBlock: string[] = [];
-  let currentType: ParsedBlock["type"] = "assistant";
+  let currentType = "assistant";
+  let currentToolName = "";
+
+  const flushBlock = () => {
+    if (currentBlock.length > 0) {
+      const block = createBlock(currentType, currentBlock.join("\n"), currentToolName);
+      if (block) blocks.push(block);
+      currentBlock = [];
+    }
+  };
 
   for (const line of lines) {
     // Detect user input (lines starting with > or after prompt)
     if (line.match(/^>\s/) || line.match(/^❯\s*\d+\./)) {
-      // Flush current block
-      if (currentBlock.length > 0) {
-        blocks.push({ type: currentType, content: currentBlock.join("\n").trim() });
-        currentBlock = [];
-      }
+      flushBlock();
       continue;
     }
 
     // Detect code blocks (lines with consistent indentation or ````)
     if (line.startsWith("```") || line.match(/^\s{4,}/)) {
-      if (currentType !== "code" && currentBlock.length > 0) {
-        blocks.push({ type: currentType, content: currentBlock.join("\n").trim() });
-        currentBlock = [];
+      if (currentType !== "code") {
+        flushBlock();
+        currentType = "code";
       }
-      currentType = "code";
     }
 
     // Detect tool output (common patterns)
-    if (line.match(/^(Read|Write|Edit|Bash|Glob|Grep):/i)) {
-      if (currentBlock.length > 0) {
-        blocks.push({ type: currentType, content: currentBlock.join("\n").trim() });
-        currentBlock = [];
-      }
+    const toolMatch = line.match(/^(Read|Write|Edit|Bash|Glob|Grep):/i);
+    if (toolMatch) {
+      flushBlock();
       currentType = "tool";
+      currentToolName = toolMatch[1];
     }
 
     currentBlock.push(line);
   }
 
   // Flush remaining
-  if (currentBlock.length > 0) {
-    const content = currentBlock.join("\n").trim();
-    if (content) {
-      blocks.push({ type: currentType, content });
-    }
-  }
+  flushBlock();
 
-  return blocks.filter((b) => b.type === "assistant" || b.type === "code" || b.type === "tool" ? b.content.length > 0 : true);
+  return blocks;
 }
 
 // Check if the "tell claude" option is selected

@@ -99,7 +99,6 @@ export function ChatView({
         <PermissionPrompt
           prompt={permissionPrompt}
           onSelect={handleOptionSelect}
-          disabled={status === "streaming"}
         />
       )}
 
