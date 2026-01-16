@@ -2,21 +2,24 @@ import * as pty from "node-pty";
 import os from "os";
 import { EventEmitter } from "events";
 
+// Max buffer size (100KB) to prevent memory issues
+const MAX_BUFFER_SIZE = 100 * 1024;
+
 interface PtySession {
   id: string;
   pty: pty.IPty;
   emitter: EventEmitter;
   createdAt: Date;
   lastActivityAt: Date;
+  buffer: string; // Stores output history for reconnecting clients
 }
 
 class PtyManager {
   private sessions: Map<string, PtySession> = new Map();
-  private cleanupInterval: NodeJS.Timeout | null = null;
 
   constructor() {
-    // Clean up stale sessions every 5 minutes
-    this.cleanupInterval = setInterval(() => this.cleanupStaleSessions(), 5 * 60 * 1000);
+    // Sessions persist until explicitly killed or server stops
+    // No automatic cleanup - sessions are meant to be long-lived
   }
 
   createSession(cwd: string): string {
@@ -51,6 +54,12 @@ class PtyManager {
       const session = this.sessions.get(id);
       if (session) {
         session.lastActivityAt = new Date();
+        // Accumulate output in buffer for reconnecting clients
+        session.buffer += data;
+        // Cap buffer size to prevent memory issues
+        if (session.buffer.length > MAX_BUFFER_SIZE) {
+          session.buffer = session.buffer.slice(-MAX_BUFFER_SIZE);
+        }
       }
     });
 
@@ -65,6 +74,7 @@ class PtyManager {
       emitter,
       createdAt: new Date(),
       lastActivityAt: new Date(),
+      buffer: "", // Initialize empty buffer
     });
 
     return id;
@@ -104,30 +114,21 @@ class PtyManager {
     return false;
   }
 
-  listSessions(): Array<{ id: string; createdAt: Date; lastActivityAt: Date }> {
+  listSessions(): Array<{ id: string; createdAt: Date; lastActivityAt: Date; bufferSize: number }> {
     return Array.from(this.sessions.values()).map((s) => ({
       id: s.id,
       createdAt: s.createdAt,
       lastActivityAt: s.lastActivityAt,
+      bufferSize: s.buffer.length,
     }));
   }
 
-  private cleanupStaleSessions() {
-    const now = new Date();
-    const maxAge = 30 * 60 * 1000; // 30 minutes
-
-    for (const [id, session] of this.sessions) {
-      if (now.getTime() - session.lastActivityAt.getTime() > maxAge) {
-        console.log(`[PtyManager] Cleaning up stale session: ${id}`);
-        this.killSession(id);
-      }
-    }
+  getBuffer(id: string): string | null {
+    const session = this.sessions.get(id);
+    return session ? session.buffer : null;
   }
 
   destroy() {
-    if (this.cleanupInterval) {
-      clearInterval(this.cleanupInterval);
-    }
     for (const id of this.sessions.keys()) {
       this.killSession(id);
     }

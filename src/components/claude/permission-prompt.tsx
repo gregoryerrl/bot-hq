@@ -15,7 +15,7 @@ export function PermissionPrompt({
   disabled = false,
 }: PermissionPromptProps) {
   return (
-    <div className="p-4 border-t bg-muted/30">
+    <div className="p-4 border-t bg-muted/30 pb-[max(1rem,env(safe-area-inset-bottom))] max-h-[40vh] overflow-y-auto">
       <p className="text-sm font-medium mb-3">{prompt.question}</p>
       <div className="flex flex-wrap gap-2">
         {prompt.options.map((option, index) => (
@@ -25,7 +25,7 @@ export function PermissionPrompt({
             size="sm"
             onClick={() => onSelect(index)}
             disabled={disabled}
-            className="min-h-[44px]"
+            className="min-h-[44px] text-wrap"
           >
             {option}
           </Button>

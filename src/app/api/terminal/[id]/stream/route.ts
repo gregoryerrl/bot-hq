@@ -45,6 +45,13 @@ export async function GET(
       const connectMsg = `data: ${JSON.stringify({ type: "connected", sessionId: id })}\n\n`;
       controller.enqueue(encoder.encode(connectMsg));
 
+      // Send buffered output for reconnecting clients
+      const buffer = ptyManager.getBuffer(id);
+      if (buffer && buffer.length > 0) {
+        const bufferMsg = `data: ${JSON.stringify({ type: "buffer", data: buffer })}\n\n`;
+        controller.enqueue(encoder.encode(bufferMsg));
+      }
+
       // Cleanup on abort
       request.signal.addEventListener("abort", () => {
         session.emitter.off("data", onData);

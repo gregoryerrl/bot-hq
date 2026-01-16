@@ -1,9 +1,7 @@
 "use client";
 
 import { memo } from "react";
-import { Bot, User } from "lucide-react";
 import { cn } from "@/lib/utils";
-import ReactMarkdown from "react-markdown";
 import type { ParsedBlock } from "@/lib/terminal-parser";
 
 interface ChatMessageProps {
@@ -11,71 +9,58 @@ interface ChatMessageProps {
 }
 
 export const ChatMessage = memo(function ChatMessage({ block }: ChatMessageProps) {
-  if (block.type === "user") {
-    return (
-      <div className="flex gap-3 justify-end">
-        <div className="max-w-[80%] rounded-lg p-3 bg-primary text-primary-foreground">
-          <p className="text-sm whitespace-pre-wrap">{block.content}</p>
-        </div>
-        <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center flex-shrink-0">
-          <User className="h-4 w-4 text-primary-foreground" />
-        </div>
-      </div>
-    );
-  }
-
-  if (block.type === "code") {
-    return (
-      <div className="flex gap-3">
-        <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-          <Bot className="h-4 w-4" />
-        </div>
-        <div className="max-w-[80%] rounded-lg p-3 bg-muted overflow-x-auto">
-          <pre className="text-sm font-mono whitespace-pre-wrap">{block.content}</pre>
-        </div>
-      </div>
-    );
-  }
-
-  if (block.type === "tool") {
-    return (
-      <div className="flex gap-3">
-        <div className="w-8 h-8 rounded-full bg-yellow-500/10 flex items-center justify-center flex-shrink-0">
-          <Bot className="h-4 w-4 text-yellow-600" />
-        </div>
-        <div className="max-w-[80%] rounded-lg p-2 bg-yellow-500/10 border border-yellow-500/20">
-          <p className="text-xs font-medium text-yellow-700 dark:text-yellow-400 mb-1">
-            {block.name || "Tool"}
-          </p>
-          <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground">
-            {block.output}
-          </pre>
-        </div>
-      </div>
-    );
-  }
-
   // Skip permission blocks (handled separately by PermissionPrompt component)
   if (block.type === "permission") {
     return null;
   }
 
-  // Assistant or thinking message
-  if (block.type === "assistant" || block.type === "thinking") {
+  // User input - show with > prefix like terminal
+  if (block.type === "user") {
     return (
-      <div className="flex gap-3">
-        <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-          <Bot className="h-4 w-4" />
-        </div>
-        <div className={cn("max-w-[80%] rounded-lg p-3 bg-muted")}>
-          <div className="prose prose-sm dark:prose-invert max-w-none">
-            <ReactMarkdown>{block.content}</ReactMarkdown>
-          </div>
-        </div>
+      <div className="font-mono text-sm py-0.5">
+        <span className="text-blue-500">❯ </span>
+        <span className="text-foreground">{block.content}</span>
       </div>
     );
   }
 
-  // Fallback for any other types
+  // Code block
+  if (block.type === "code") {
+    return (
+      <pre className="font-mono text-sm py-1 pl-4 text-muted-foreground whitespace-pre-wrap overflow-x-auto">
+        {block.content}
+      </pre>
+    );
+  }
+
+  // Tool output
+  if (block.type === "tool") {
+    return (
+      <div className="font-mono text-sm py-0.5">
+        <span className="text-yellow-500">● </span>
+        <span className="text-yellow-600 dark:text-yellow-400">{block.name}</span>
+        {block.output && (
+          <pre className="pl-4 text-muted-foreground whitespace-pre-wrap mt-0.5">
+            {block.output}
+          </pre>
+        )}
+      </div>
+    );
+  }
+
+  // Assistant message - clean terminal output
+  if (block.type === "assistant" || block.type === "thinking") {
+    return (
+      <div className={cn(
+        "font-mono text-sm py-0.5 whitespace-pre-wrap",
+        block.type === "thinking" ? "text-muted-foreground italic" : "text-foreground"
+      )}>
+        <span className="text-green-500">● </span>
+        {block.content}
+      </div>
+    );
+  }
+
+  // Fallback
   return null;
 });
