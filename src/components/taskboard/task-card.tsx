@@ -3,7 +3,7 @@
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Play } from "lucide-react";
+import { Play, RotateCcw } from "lucide-react";
 import { Task } from "@/lib/db/schema";
 import { PluginTaskBadges } from "@/components/plugins/plugin-task-badges";
 import { PluginTaskActions } from "@/components/plugins/plugin-task-actions";
@@ -11,30 +11,27 @@ import { PluginTaskActions } from "@/components/plugins/plugin-task-actions";
 interface TaskCardProps {
   task: Task & { workspaceName?: string };
   onAssign: (taskId: number) => void;
-  onStartAgent: (taskId: number) => void;
+  onStartTask: (taskId: number) => void;
+  onRetry?: (taskId: number) => void;
 }
 
 const stateColors: Record<string, string> = {
   new: "bg-gray-500",
   queued: "bg-yellow-500",
-  analyzing: "bg-blue-500",
-  plan_ready: "bg-purple-500",
   in_progress: "bg-orange-500",
-  pending_review: "bg-green-500",
+  needs_help: "bg-red-500",
   done: "bg-green-700",
 };
 
 const stateLabels: Record<string, string> = {
   new: "New",
   queued: "Queued",
-  analyzing: "Analyzing",
-  plan_ready: "Plan Ready",
   in_progress: "In Progress",
-  pending_review: "Pending Review",
+  needs_help: "Needs Help",
   done: "Done",
 };
 
-export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
+export function TaskCard({ task, onAssign, onStartTask, onRetry }: TaskCardProps) {
   return (
     <Card className="p-3 md:p-4">
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
@@ -45,9 +42,9 @@ export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
             </span>
             <Badge
               variant="secondary"
-              className={`${stateColors[task.state]} text-white text-xs`}
+              className={`${stateColors[task.state] || "bg-gray-500"} text-white text-xs`}
             >
-              {stateLabels[task.state]}
+              {stateLabels[task.state] || task.state}
             </Badge>
             {task.workspaceName && (
               <Badge variant="outline" className="text-xs">
@@ -72,9 +69,15 @@ export function TaskCard({ task, onAssign, onStartAgent }: TaskCardProps) {
             </Button>
           )}
           {task.state === "queued" && (
-            <Button size="sm" onClick={() => onStartAgent(task.id)}>
+            <Button size="sm" onClick={() => onStartTask(task.id)}>
               <Play className="h-4 w-4 mr-1" />
               Start
+            </Button>
+          )}
+          {task.state === "needs_help" && onRetry && (
+            <Button size="sm" variant="outline" onClick={() => onRetry(task.id)}>
+              <RotateCcw className="h-4 w-4 mr-1" />
+              Retry
             </Button>
           )}
           <PluginTaskActions taskId={task.id} workspaceId={task.workspaceId} />
