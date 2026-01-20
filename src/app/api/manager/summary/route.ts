@@ -8,10 +8,10 @@ export async function GET() {
     const allWorkspaces = await db.select().from(workspaces);
 
     const inProgress = allTasks.filter((t) => t.state === "in_progress").length;
-    const pendingReview = allTasks.filter((t) => t.state === "pending_review").length;
+    const needsHelp = allTasks.filter((t) => t.state === "needs_help").length;
     const done = allTasks.filter((t) => t.state === "done").length;
 
-    const summary = `${allTasks.length} tasks | ${inProgress} in progress | ${pendingReview} pending review | ${done} done | ${allWorkspaces.length} workspaces`;
+    const summary = `${allTasks.length} tasks | ${inProgress} in progress | ${needsHelp} needs help | ${done} done | ${allWorkspaces.length} workspaces`;
 
     return NextResponse.json({ summary });
   } catch (error) {

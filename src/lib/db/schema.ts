@@ -28,7 +28,7 @@ export const tasks = sqliteTable("tasks", {
       "new",
       "queued",
       "in_progress",
-      "pending_review",
+      "needs_help",  // Replaces stuck/pending_review state
       "done",
     ],
   })
@@ -37,6 +37,11 @@ export const tasks = sqliteTable("tasks", {
   priority: integer("priority").default(0),
   agentPlan: text("agent_plan"),
   branchName: text("branch_name"),
+  // New fields for manager + subagent architecture
+  completionCriteria: text("completion_criteria"),  // Task-specific success criteria
+  iterationCount: integer("iteration_count").default(0),  // Current iteration
+  maxIterations: integer("max_iterations"),  // Override global default
+  feedback: text("feedback"),  // Human feedback on retry
   assignedAt: integer("assigned_at", { mode: "timestamp" }),
   updatedAt: integer("updated_at", { mode: "timestamp" })
     .notNull()
@@ -46,33 +51,8 @@ export const tasks = sqliteTable("tasks", {
   index("tasks_state_idx").on(table.state),
 ]);
 
-// Pending approvals (agent work awaiting review)
-export const approvals = sqliteTable("approvals", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  taskId: integer("task_id")
-    .notNull()
-    .references(() => tasks.id),
-  workspaceId: integer("workspace_id")
-    .notNull()
-    .references(() => workspaces.id),
-  branchName: text("branch_name").notNull(),
-  baseBranch: text("base_branch").notNull().default("main"),
-  commitMessages: text("commit_messages"), // JSON array of commit messages
-  diffSummary: text("diff_summary"), // JSON: { files: [...], additions, deletions }
-  status: text("status", {
-    enum: ["pending", "approved", "rejected"],
-  })
-    .notNull()
-    .default("pending"),
-  userInstructions: text("user_instructions"), // Feedback for "Request Changes"
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  resolvedAt: integer("resolved_at", { mode: "timestamp" }),
-}, (table) => [
-  index("approvals_status_idx").on(table.status),
-  index("approvals_task_idx").on(table.taskId),
-]);
+// REMOVED: Pending approvals table - replaced by git-native review
+// The review workflow now uses task branches directly without a separate approvals table.
 
 // Logs
 export const logs = sqliteTable("logs", {
@@ -94,26 +74,8 @@ export const logs = sqliteTable("logs", {
   index("logs_stream_idx").on(table.id, table.type), // For streaming queries
 ]);
 
-// Agent sessions
-export const agentSessions = sqliteTable("agent_sessions", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  workspaceId: integer("workspace_id")
-    .notNull()
-    .references(() => workspaces.id),
-  taskId: integer("task_id").references(() => tasks.id),
-  pid: integer("pid"),
-  status: text("status", {
-    enum: ["running", "idle", "stopped", "error"],
-  })
-    .notNull()
-    .default("idle"),
-  contextSize: integer("context_size"),
-  startedAt: integer("started_at", { mode: "timestamp" }),
-  lastActivityAt: integer("last_activity_at", { mode: "timestamp" }),
-}, (table) => [
-  index("sessions_status_idx").on(table.status),
-  index("sessions_task_idx").on(table.taskId),
-]);
+// REMOVED: Agent sessions table - replaced by single persistent manager
+// The manager runs as a persistent session and spawns subagents via Task tool.
 
 // App settings (key-value store)
 export const settings = sqliteTable("settings", {
@@ -221,12 +183,8 @@ export type Workspace = typeof workspaces.$inferSelect;
 export type NewWorkspace = typeof workspaces.$inferInsert;
 export type Task = typeof tasks.$inferSelect;
 export type NewTask = typeof tasks.$inferInsert;
-export type Approval = typeof approvals.$inferSelect;
-export type NewApproval = typeof approvals.$inferInsert;
 export type Log = typeof logs.$inferSelect;
 export type NewLog = typeof logs.$inferInsert;
-export type AgentSession = typeof agentSessions.$inferSelect;
-export type NewAgentSession = typeof agentSessions.$inferInsert;
 export type AuthorizedDevice = typeof authorizedDevices.$inferSelect;
 export type NewAuthorizedDevice = typeof authorizedDevices.$inferInsert;
 export type PendingDevice = typeof pendingDevices.$inferSelect;

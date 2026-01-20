@@ -11,7 +11,7 @@ export function registerTaskTools(server: McpServer) {
     {
       workspaceId: z.number().optional().describe("Filter by workspace ID"),
       state: z
-        .enum(["new", "queued", "in_progress", "pending_review", "done"])
+        .enum(["new", "queued", "in_progress", "needs_help", "done"])
         .optional()
         .describe("Filter by task state"),
     },
@@ -194,7 +194,7 @@ export function registerTaskTools(server: McpServer) {
       taskId: z.number().describe("The task ID to update"),
       priority: z.number().optional().describe("New priority"),
       state: z
-        .enum(["new", "queued", "in_progress", "pending_review", "done"])
+        .enum(["new", "queued", "in_progress", "needs_help", "done"])
         .optional()
         .describe("New state"),
       notes: z.string().optional().describe("Additional notes to append to description"),

@@ -84,7 +84,7 @@ export function registerMonitoringTools(server: McpServer) {
         new: allTasks.filter((t) => t.state === "new").length,
         queued: allTasks.filter((t) => t.state === "queued").length,
         in_progress: allTasks.filter((t) => t.state === "in_progress").length,
-        pending_review: allTasks.filter((t) => t.state === "pending_review").length,
+        needs_help: allTasks.filter((t) => t.state === "needs_help").length,
         done: allTasks.filter((t) => t.state === "done").length,
       };
 
