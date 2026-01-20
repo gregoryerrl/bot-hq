@@ -1,22 +1,23 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { getManagerStatus, sendManagerCommand } from "../../lib/manager/persistent-manager.js";
 
-// Stub implementation - will be replaced when persistent manager is implemented
 export function registerAgentTools(server: McpServer) {
-  // agent_list - List all agent sessions
+  // agent_list - List manager status
   server.tool(
     "agent_list",
     "List all agent sessions with their status, workspace, and task info",
     {},
     async () => {
-      // TODO: Will be replaced with persistent manager status
+      const status = getManagerStatus();
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({
-              message: "Agent system is being migrated to persistent manager architecture",
-              sessions: [],
+              managerStatus: status.running ? "running" : "stopped",
+              managerPid: status.pid,
+              note: "Bot-hq now uses a single persistent manager that orchestrates subagents via the Task tool",
             }, null, 2),
           },
         ],
@@ -24,7 +25,7 @@ export function registerAgentTools(server: McpServer) {
     }
   );
 
-  // agent_start - Start an agent on a task
+  // agent_start - Send start command to manager
   server.tool(
     "agent_start",
     "Start a Claude Code agent to work on a specific task",
@@ -32,14 +33,32 @@ export function registerAgentTools(server: McpServer) {
       taskId: z.number().describe("The task ID to start working on"),
     },
     async ({ taskId }) => {
-      // TODO: Will send command to persistent manager
+      const status = getManagerStatus();
+      if (!status.running) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: false,
+                error: "Manager is not running",
+              }),
+            },
+          ],
+        };
+      }
+
+      sendManagerCommand(
+        `Start working on task ${taskId}. Use the task_get tool to fetch the task details, then spawn a subagent to work on it.`
+      );
+
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({
-              success: false,
-              message: `Agent system is being migrated. Task ${taskId} cannot be started via this tool yet.`,
+              success: true,
+              message: `Command sent to manager to start task ${taskId}`,
             }),
           },
         ],
@@ -47,7 +66,7 @@ export function registerAgentTools(server: McpServer) {
     }
   );
 
-  // agent_stop - Stop a running agent
+  // agent_stop - Send stop command to manager
   server.tool(
     "agent_stop",
     "Stop an agent that is currently working on a task",
@@ -55,14 +74,30 @@ export function registerAgentTools(server: McpServer) {
       taskId: z.number().describe("The task ID to stop"),
     },
     async ({ taskId }) => {
-      // TODO: Will send stop command to persistent manager
+      const status = getManagerStatus();
+      if (!status.running) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: false,
+                error: "Manager is not running",
+              }),
+            },
+          ],
+        };
+      }
+
+      sendManagerCommand(`Stop working on task ${taskId} if currently in progress.`);
+
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({
-              success: false,
-              message: `Agent system is being migrated. Task ${taskId} cannot be stopped via this tool yet.`,
+              success: true,
+              message: `Command sent to manager to stop task ${taskId}`,
             }),
           },
         ],
