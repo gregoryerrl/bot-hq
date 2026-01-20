@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { TaskCard } from "./task-card";
 import { Task } from "@/lib/db/schema";
+import { toast } from "sonner";
 
 interface TaskListProps {
   workspaceFilter?: number;
@@ -58,16 +59,50 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
     }
   }
 
-  async function handleStartAgent(taskId: number) {
+  async function handleStartTask(taskId: number) {
     try {
-      await fetch("/api/agents/start", {
+      // First update task state to in_progress
+      await fetch(`/api/tasks/${taskId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId }),
+        body: JSON.stringify({ state: "in_progress" }),
       });
+
+      // Send command to manager
+      const response = await fetch("/api/manager/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          command: `Start working on task ${taskId}. Use the task_get tool to fetch the task details, then spawn a subagent to work on it.`,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to send command to manager");
+      }
+
+      toast.success(`Task ${taskId} sent to manager`);
       fetchTasks();
     } catch (error) {
-      console.error("Failed to start agent:", error);
+      console.error("Failed to start task:", error);
+      toast.error("Failed to start task");
+    }
+  }
+
+  async function handleRetry(taskId: number) {
+    try {
+      // Update task state back to queued
+      await fetch(`/api/tasks/${taskId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state: "queued" }),
+      });
+
+      toast.success(`Task ${taskId} moved back to queue`);
+      fetchTasks();
+    } catch (error) {
+      console.error("Failed to retry task:", error);
+      toast.error("Failed to retry task");
     }
   }
 
@@ -90,7 +125,8 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
           key={task.id}
           task={task}
           onAssign={handleAssign}
-          onStartAgent={handleStartAgent}
+          onStartTask={handleStartTask}
+          onRetry={handleRetry}
         />
       ))}
     </div>
