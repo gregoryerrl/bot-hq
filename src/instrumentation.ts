@@ -16,5 +16,14 @@ export async function register() {
     } catch (error) {
       console.error("Failed to initialize plugins:", error);
     }
+
+    // Start persistent manager
+    try {
+      const { startManager } = await import("@/lib/manager/persistent-manager");
+      await startManager();
+      console.log("Manager session started");
+    } catch (error) {
+      console.error("Failed to start manager:", error);
+    }
   }
 }
