@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { db, logs, agentSessions } from "@/lib/db";
+import { db, logs, tasks } from "@/lib/db";
 import { desc, gt, ne, eq, and } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const source = searchParams.get("source") || "all";
-  const sessionId = searchParams.get("sessionId");
+  const taskId = searchParams.get("taskId");
 
   const encoder = new TextEncoder();
   let lastId = 0;
@@ -37,30 +37,41 @@ export async function GET(request: NextRequest) {
               )
               .orderBy(desc(logs.createdAt))
               .limit(20);
-          } else if (source === "agent" && sessionId) {
-            // Agent logs: get taskId from session, filter by that
-            const session = await db
+          } else if (source === "task" && taskId) {
+            // Task-specific agent logs
+            query = db
               .select()
-              .from(agentSessions)
-              .where(eq(agentSessions.id, parseInt(sessionId)))
-              .limit(1);
+              .from(logs)
+              .where(
+                and(
+                  gt(logs.id, lastId),
+                  eq(logs.type, "agent"),
+                  eq(logs.taskId, parseInt(taskId))
+                )
+              )
+              .orderBy(desc(logs.createdAt))
+              .limit(20);
+          } else if (source === "manager") {
+            // Manager logs: agent type logs (from in_progress tasks)
+            const inProgressTaskIds = await db
+              .select({ id: tasks.id })
+              .from(tasks)
+              .where(eq(tasks.state, "in_progress"));
 
-            if (session[0] && session[0].taskId !== null) {
-              const taskId = session[0].taskId;
+            if (inProgressTaskIds.length > 0) {
               query = db
                 .select()
                 .from(logs)
                 .where(
                   and(
                     gt(logs.id, lastId),
-                    eq(logs.type, "agent"),
-                    eq(logs.taskId, taskId)
+                    eq(logs.type, "agent")
                   )
                 )
                 .orderBy(desc(logs.createdAt))
                 .limit(20);
             } else {
-              return; // Session not found or no taskId
+              return; // No in-progress tasks
             }
           } else {
             // All logs (default, for backwards compatibility)

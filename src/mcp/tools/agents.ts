@@ -1,12 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { db, agentSessions, tasks, workspaces } from "../../lib/db/index.js";
-import { eq, desc } from "drizzle-orm";
-import { startAgentForTask, ClaudeCodeAgent } from "../../lib/agents/claude-code.js";
 
-// Track running agents
-const runningAgents = new Map<number, ClaudeCodeAgent>();
-
+// Stub implementation - will be replaced when persistent manager is implemented
 export function registerAgentTools(server: McpServer) {
   // agent_list - List all agent sessions
   server.tool(
@@ -14,50 +9,15 @@ export function registerAgentTools(server: McpServer) {
     "List all agent sessions with their status, workspace, and task info",
     {},
     async () => {
-      const sessions = await db
-        .select({
-          id: agentSessions.id,
-          status: agentSessions.status,
-          pid: agentSessions.pid,
-          workspaceId: agentSessions.workspaceId,
-          taskId: agentSessions.taskId,
-          startedAt: agentSessions.startedAt,
-          lastActivityAt: agentSessions.lastActivityAt,
-        })
-        .from(agentSessions)
-        .orderBy(desc(agentSessions.startedAt))
-        .limit(50);
-
-      // Enrich with workspace and task names
-      const enrichedSessions = await Promise.all(
-        sessions.map(async (session) => {
-          const workspace = await db.query.workspaces.findFirst({
-            where: eq(workspaces.id, session.workspaceId),
-          });
-          const task = session.taskId
-            ? await db.query.tasks.findFirst({
-                where: eq(tasks.id, session.taskId),
-              })
-            : null;
-
-          return {
-            id: session.id,
-            status: session.status,
-            pid: session.pid,
-            workspaceName: workspace?.name || "Unknown",
-            taskId: session.taskId,
-            taskTitle: task?.title || "No task",
-            startedAt: session.startedAt?.toISOString(),
-            lastActivityAt: session.lastActivityAt?.toISOString(),
-          };
-        })
-      );
-
+      // TODO: Will be replaced with persistent manager status
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(enrichedSessions, null, 2),
+            text: JSON.stringify({
+              message: "Agent system is being migrated to persistent manager architecture",
+              sessions: [],
+            }, null, 2),
           },
         ],
       };
@@ -72,51 +32,14 @@ export function registerAgentTools(server: McpServer) {
       taskId: z.number().describe("The task ID to start working on"),
     },
     async ({ taskId }) => {
-      // Check if agent already running for this task
-      const existingSession = await db.query.agentSessions.findFirst({
-        where: eq(agentSessions.taskId, taskId),
-      });
-
-      if (existingSession?.status === "running") {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: `Agent already running for task ${taskId}`,
-              }),
-            },
-          ],
-        };
-      }
-
-      // Start the agent
-      const agent = await startAgentForTask(taskId);
-
-      if (!agent) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: `Failed to start agent - task ${taskId} not found or no workspace`,
-              }),
-            },
-          ],
-        };
-      }
-
-      runningAgents.set(taskId, agent);
-
+      // TODO: Will send command to persistent manager
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({
-              success: true,
-              message: `Agent started for task ${taskId}`,
+              success: false,
+              message: `Agent system is being migrated. Task ${taskId} cannot be started via this tool yet.`,
             }),
           },
         ],
@@ -132,70 +55,14 @@ export function registerAgentTools(server: McpServer) {
       taskId: z.number().describe("The task ID to stop"),
     },
     async ({ taskId }) => {
-      // Try in-memory agent first
-      const agent = runningAgents.get(taskId);
-      if (agent) {
-        await agent.stop();
-        runningAgents.delete(taskId);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: true,
-                message: `Agent stopped for task ${taskId}`,
-              }),
-            },
-          ],
-        };
-      }
-
-      // Try to find by PID in database
-      const session = await db.query.agentSessions.findFirst({
-        where: eq(agentSessions.taskId, taskId),
-      });
-
-      if (session?.pid && session.status === "running") {
-        try {
-          process.kill(session.pid, "SIGTERM");
-          await db
-            .update(agentSessions)
-            .set({ status: "stopped" })
-            .where(eq(agentSessions.id, session.id));
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  success: true,
-                  message: `Agent stopped (PID: ${session.pid})`,
-                }),
-              },
-            ],
-          };
-        } catch (error) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({
-                  success: false,
-                  message: `Failed to stop agent: ${error}`,
-                }),
-              },
-            ],
-          };
-        }
-      }
-
+      // TODO: Will send stop command to persistent manager
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({
               success: false,
-              message: `No running agent found for task ${taskId}`,
+              message: `Agent system is being migrated. Task ${taskId} cannot be stopped via this tool yet.`,
             }),
           },
         ],

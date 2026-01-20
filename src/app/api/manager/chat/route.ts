@@ -1,7 +1,11 @@
 import { NextRequest } from "next/server";
-import { chatWithManager, ChatMessage } from "@/lib/agents/manager";
 
 export const dynamic = "force-dynamic";
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -16,20 +20,13 @@ export async function POST(request: NextRequest) {
 
     const encoder = new TextEncoder();
 
+    // Stub response - manager chat is being migrated to persistent manager
     const stream = new ReadableStream({
-      async start(controller) {
-        try {
-          await chatWithManager(messages, (chunk) => {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: chunk })}\n\n`));
-          });
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
-          controller.close();
-        } catch {
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ error: "Chat failed" })}\n\n`)
-          );
-          controller.close();
-        }
+      start(controller) {
+        const message = "The manager chat is being migrated to the new persistent manager architecture. This feature will be available soon.";
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: message })}\n\n`));
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
+        controller.close();
       },
     });
 

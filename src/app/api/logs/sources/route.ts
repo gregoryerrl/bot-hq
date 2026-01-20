@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
-import { db, logs, agentSessions, tasks, workspaces } from "@/lib/db";
+import { db, logs, tasks, workspaces } from "@/lib/db";
 import { eq, desc, ne, and } from "drizzle-orm";
 
 export const dynamic = "force-dynamic";
 
 interface LogSource {
   id: string;
-  type: "server" | "agent";
+  type: "server" | "manager";
   name: string;
   status: "live" | "running";
   latestMessage: string | null;
   latestAt: string | null;
-  sessionId?: number;
+  taskId?: number;
   taskTitle?: string;
   workspaceName?: string;
 }
@@ -37,46 +37,48 @@ export async function GET() {
       latestAt: latestServerLog[0]?.createdAt?.toISOString() || null,
     });
 
-    // 2. Active agent sessions
-    const activeSessions = await db
+    // 2. Manager source - persistent manager session
+    sources.push({
+      id: "manager",
+      type: "manager",
+      name: "Manager",
+      status: "live",
+      latestMessage: "Persistent manager architecture - logs will be available soon",
+      latestAt: new Date().toISOString(),
+    });
+
+    // 3. Get active in_progress tasks as log sources
+    const inProgressTasks = await db
       .select({
-        session: agentSessions,
         task: tasks,
         workspace: workspaces,
       })
-      .from(agentSessions)
-      .leftJoin(tasks, eq(agentSessions.taskId, tasks.id))
-      .leftJoin(workspaces, eq(agentSessions.workspaceId, workspaces.id))
-      .where(eq(agentSessions.status, "running"))
-      .orderBy(desc(agentSessions.startedAt));
+      .from(tasks)
+      .leftJoin(workspaces, eq(tasks.workspaceId, workspaces.id))
+      .where(eq(tasks.state, "in_progress"));
 
-    // Get latest log for each active agent
-    for (const { session, task, workspace } of activeSessions) {
-      let latestAgentLog: typeof logs.$inferSelect[] = [];
-
-      if (session.taskId !== null) {
-        latestAgentLog = await db
-          .select()
-          .from(logs)
-          .where(
-            and(
-              eq(logs.type, "agent"),
-              eq(logs.taskId, session.taskId)
-            )
+    for (const { task, workspace } of inProgressTasks) {
+      const latestTaskLog = await db
+        .select()
+        .from(logs)
+        .where(
+          and(
+            eq(logs.type, "agent"),
+            eq(logs.taskId, task.id)
           )
-          .orderBy(desc(logs.createdAt))
-          .limit(1);
-      }
+        )
+        .orderBy(desc(logs.createdAt))
+        .limit(1);
 
       sources.push({
-        id: `agent-${session.id}`,
-        type: "agent",
-        name: `${workspace?.name || "Unknown"} agent`,
+        id: `task-${task.id}`,
+        type: "manager",
+        name: `Task #${task.id}: ${task.title}`,
         status: "running",
-        latestMessage: latestAgentLog[0]?.message || "Starting...",
-        latestAt: latestAgentLog[0]?.createdAt?.toISOString() || session.startedAt?.toISOString() || null,
-        sessionId: session.id,
-        taskTitle: task?.title || undefined,
+        latestMessage: latestTaskLog[0]?.message || "In progress...",
+        latestAt: latestTaskLog[0]?.createdAt?.toISOString() || task.updatedAt?.toISOString() || null,
+        taskId: task.id,
+        taskTitle: task.title,
         workspaceName: workspace?.name || undefined,
       });
     }
