@@ -78,7 +78,14 @@ async function main() {
     warn('Could not rebuild native modules (may already be correct)');
   }
 
-  // Step 3: Initialize database
+  // Step 3: Create data directory
+  const dataDir = join(ROOT_DIR, 'data');
+  if (!existsSync(dataDir)) {
+    mkdirSync(dataDir, { recursive: true });
+    success('Created data/ directory');
+  }
+
+  // Step 4: Initialize database
   log('Initializing database...');
   try {
     execSync('npm run db:push', { cwd: ROOT_DIR, stdio: 'inherit' });
@@ -87,7 +94,7 @@ async function main() {
     error('Failed to initialize database. Try: npm rebuild better-sqlite3 && npm run db:push');
   }
 
-  // Step 4: Generate mcp-server.sh
+  // Step 5: Generate mcp-server.sh
   log('Generating MCP server script...');
   const mcpServerPath = join(ROOT_DIR, 'mcp-server.sh');
 
@@ -111,7 +118,7 @@ exec "${npxPath}" tsx src/mcp/server.ts
   chmodSync(mcpServerPath, '755');
   success('Generated mcp-server.sh');
 
-  // Step 5: Offer to install MCP to Claude Code
+  // Step 6: Offer to install MCP to Claude Code
   console.log('');
   const installMcp = await ask('Install bot-hq MCP server to Claude Code? (y/N) ');
 
