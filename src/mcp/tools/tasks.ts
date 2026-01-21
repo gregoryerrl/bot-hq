@@ -112,6 +112,8 @@ export function registerTaskTools(server: McpServer) {
                 branchName: task.branchName,
                 assignedAt: task.assignedAt?.toISOString(),
                 updatedAt: task.updatedAt?.toISOString(),
+                iterationCount: task.iterationCount || 1,
+                feedback: task.feedback || null,
               },
               null,
               2

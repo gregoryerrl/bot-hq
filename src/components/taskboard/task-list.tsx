@@ -63,7 +63,7 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
     try {
       // First update task state to in_progress
       await fetch(`/api/tasks/${taskId}`, {
-        method: "POST",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state: "in_progress" }),
       });
@@ -93,7 +93,7 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
     try {
       // Update task state back to queued
       await fetch(`/api/tasks/${taskId}`, {
-        method: "POST",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ state: "queued" }),
       });
@@ -102,6 +102,32 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
       fetchTasks();
     } catch (error) {
       console.error("Failed to retry task:", error);
+      toast.error("Failed to retry task");
+    }
+  }
+
+  async function handleRetryWithFeedback(taskId: number, feedback: string) {
+    try {
+      // First get the current task to read its iterationCount
+      const taskResponse = await fetch(`/api/tasks/${taskId}`);
+      const task = await taskResponse.json();
+      const currentIteration = task.iterationCount || 1;
+
+      // Update task with feedback and increment iteration count
+      await fetch(`/api/tasks/${taskId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          state: "queued",
+          feedback: feedback,
+          iterationCount: currentIteration + 1,
+        }),
+      });
+
+      toast.success(`Task ${taskId} requeued with feedback (iteration ${currentIteration + 1})`);
+      fetchTasks();
+    } catch (error) {
+      console.error("Failed to retry task with feedback:", error);
       toast.error("Failed to retry task");
     }
   }
@@ -127,6 +153,7 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
           onAssign={handleAssign}
           onStartTask={handleStartTask}
           onRetry={handleRetry}
+          onRetryWithFeedback={handleRetryWithFeedback}
         />
       ))}
     </div>
