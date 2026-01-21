@@ -1,9 +1,11 @@
 "use client";
 
+import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Play, RotateCcw } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
+import { Play, RotateCcw, MessageSquare, X } from "lucide-react";
 import { Task } from "@/lib/db/schema";
 import { PluginTaskBadges } from "@/components/plugins/plugin-task-badges";
 import { PluginTaskActions } from "@/components/plugins/plugin-task-actions";
@@ -13,12 +15,14 @@ interface TaskCardProps {
   onAssign: (taskId: number) => void;
   onStartTask: (taskId: number) => void;
   onRetry?: (taskId: number) => void;
+  onRetryWithFeedback?: (taskId: number, feedback: string) => void;
 }
 
 const stateColors: Record<string, string> = {
   new: "bg-gray-500",
   queued: "bg-yellow-500",
   in_progress: "bg-orange-500",
+  awaiting_input: "bg-amber-500",
   needs_help: "bg-red-500",
   done: "bg-green-700",
 };
@@ -27,11 +31,23 @@ const stateLabels: Record<string, string> = {
   new: "New",
   queued: "Queued",
   in_progress: "In Progress",
+  awaiting_input: "Awaiting Input",
   needs_help: "Needs Help",
   done: "Done",
 };
 
-export function TaskCard({ task, onAssign, onStartTask, onRetry }: TaskCardProps) {
+export function TaskCard({ task, onAssign, onStartTask, onRetry, onRetryWithFeedback }: TaskCardProps) {
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedback, setFeedback] = useState("");
+
+  const handleRetryWithFeedback = () => {
+    if (onRetryWithFeedback && feedback.trim()) {
+      onRetryWithFeedback(task.id, feedback);
+      setFeedback("");
+      setShowFeedback(false);
+    }
+  };
+
   return (
     <Card className="p-3 md:p-4">
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
@@ -42,7 +58,9 @@ export function TaskCard({ task, onAssign, onStartTask, onRetry }: TaskCardProps
             </span>
             <Badge
               variant="secondary"
-              className={`${stateColors[task.state] || "bg-gray-500"} text-white text-xs`}
+              className={`${stateColors[task.state] || "bg-gray-500"} text-white text-xs ${
+                task.state === "awaiting_input" ? "animate-pulse" : ""
+              }`}
             >
               {stateLabels[task.state] || task.state}
             </Badge>
@@ -80,9 +98,37 @@ export function TaskCard({ task, onAssign, onStartTask, onRetry }: TaskCardProps
               Retry
             </Button>
           )}
+          {task.state === "done" && onRetryWithFeedback && (
+            <Button size="sm" variant="outline" onClick={() => setShowFeedback(!showFeedback)}>
+              <MessageSquare className="h-4 w-4 mr-1" />
+              Request Changes
+            </Button>
+          )}
           <PluginTaskActions taskId={task.id} workspaceId={task.workspaceId} />
         </div>
       </div>
+
+      {/* Feedback input for done tasks */}
+      {showFeedback && task.state === "done" && (
+        <div className="mt-3 pt-3 border-t space-y-2">
+          <Textarea
+            placeholder="Describe what changes you need..."
+            value={feedback}
+            onChange={(e) => setFeedback(e.target.value)}
+            className="min-h-[80px] text-sm"
+          />
+          <div className="flex gap-2">
+            <Button size="sm" onClick={handleRetryWithFeedback} disabled={!feedback.trim()}>
+              <RotateCcw className="h-4 w-4 mr-1" />
+              Submit & Retry
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setShowFeedback(false)}>
+              <X className="h-4 w-4 mr-1" />
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

@@ -5,12 +5,13 @@ import { LogSourceCard } from "./log-source-card";
 
 interface LogSource {
   id: string;
-  type: "server" | "agent";
+  type: "server" | "agent" | "manager";
   name: string;
   status: "live" | "running";
   latestMessage: string | null;
   latestAt: string | null;
   sessionId?: number;
+  taskId?: number;
   taskTitle?: string;
   workspaceName?: string;
 }

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { usePluginUI } from "@/hooks/use-plugin-ui";
+import { GitHubWorkspaceSettings } from "./github-workspace-settings";
 
 interface WorkspacePluginSettingsProps {
   workspaceId: number;
@@ -84,33 +85,41 @@ export function WorkspacePluginSettings({ workspaceId }: WorkspacePluginSettings
 
   return (
     <div className="space-y-6">
-      {workspaceSettings.map((setting) => (
-        <Card key={setting.pluginName}>
-          <CardHeader>
-            <CardTitle className="capitalize">{setting.pluginName} Settings</CardTitle>
-            <CardDescription>
-              Configure {setting.pluginName} for this workspace
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              Plugin-specific settings will appear here when the plugin provides a settings component.
-            </p>
-            <div className="flex justify-end">
-              <Button
-                size="sm"
-                onClick={() => savePluginData(setting.pluginName)}
-                disabled={saving !== null}
-              >
-                {saving === setting.pluginName ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : null}
-                Save
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+      {workspaceSettings.map((setting) => {
+        // Use specialized components for known plugins
+        if (setting.pluginName === "github") {
+          return <GitHubWorkspaceSettings key={setting.pluginName} workspaceId={workspaceId} />;
+        }
+
+        // Generic fallback for other plugins
+        return (
+          <Card key={setting.pluginName}>
+            <CardHeader>
+              <CardTitle className="capitalize">{setting.pluginName} Settings</CardTitle>
+              <CardDescription>
+                Configure {setting.pluginName} for this workspace
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <p className="text-sm text-muted-foreground">
+                Plugin-specific settings will appear here when the plugin provides a settings component.
+              </p>
+              <div className="flex justify-end">
+                <Button
+                  size="sm"
+                  onClick={() => savePluginData(setting.pluginName)}
+                  disabled={saving !== null}
+                >
+                  {saving === setting.pluginName ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : null}
+                  Save
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })}
     </div>
   );
 }

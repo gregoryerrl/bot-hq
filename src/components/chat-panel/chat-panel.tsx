@@ -67,24 +67,26 @@ export function ChatPanel() {
         </div>
 
         {/* Messages */}
-        <ScrollArea className="flex-1 p-3">
-          {messages.length === 0 ? (
-            <div className="text-center text-muted-foreground text-sm py-8">
-              <p>Ask the manager about:</p>
-              <ul className="mt-2 space-y-1">
-                <li>&quot;Summarize today&apos;s work&quot;</li>
-                <li>&quot;What tasks need attention?&quot;</li>
-                <li>&quot;Status of repo X&quot;</li>
-              </ul>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {messages.map((message) => (
-                <ChatMessage key={message.id} message={message} />
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
+        <ScrollArea className="flex-1 overflow-hidden">
+          <div className="p-3">
+            {messages.length === 0 ? (
+              <div className="text-center text-muted-foreground text-sm py-8">
+                <p>Ask the manager about:</p>
+                <ul className="mt-2 space-y-1">
+                  <li>&quot;Summarize today&apos;s work&quot;</li>
+                  <li>&quot;What tasks need attention?&quot;</li>
+                  <li>&quot;Status of repo X&quot;</li>
+                </ul>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {messages.map((message) => (
+                  <ChatMessage key={message.id} message={message} />
+                ))}
+                <div ref={messagesEndRef} />
+              </div>
+            )}
+          </div>
         </ScrollArea>
 
         {/* Input */}

@@ -1,112 +1,129 @@
 import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 import { getManagerPrompt, initializeBotHqStructure, BOT_HQ_ROOT } from "@/lib/bot-hq";
+import { existsSync, writeFileSync, unlinkSync } from "fs";
+import path from "path";
+
+// Use a file-based flag to persist state across Next.js workers
+const STATUS_FILE = path.join(BOT_HQ_ROOT, ".manager-status");
+
+function isManagerRunning(): boolean {
+  return existsSync(STATUS_FILE);
+}
+
+function setManagerRunning(running: boolean): void {
+  if (running) {
+    writeFileSync(STATUS_FILE, Date.now().toString());
+  } else if (existsSync(STATUS_FILE)) {
+    unlinkSync(STATUS_FILE);
+  }
+}
 
 class PersistentManager extends EventEmitter {
-  private process: ChildProcess | null = null;
-  private isRunning = false;
-  private outputBuffer = "";
+  private commandQueue: string[] = [];
+  private processing = false;
 
   async start(): Promise<void> {
-    if (this.isRunning) {
-      console.log("[Manager] Already running");
+    if (isManagerRunning()) {
+      console.log("[Manager] Already initialized");
       return;
     }
 
     // Initialize .bot-hq structure
     await initializeBotHqStructure();
 
-    // Get manager prompt
-    const managerPrompt = await getManagerPrompt();
-
     console.log("[Manager] Starting persistent session...");
+    setManagerRunning(true);
+  }
 
-    this.process = spawn("claude", [
-      "--dangerously-skip-permissions",
-      "-p",
-      "--output-format", "stream-json",
-      "--mcp-config", "/Users/gregoryerrl/Projects/bot-hq/.mcp.json",
-    ], {
-      cwd: BOT_HQ_ROOT,
-      env: { ...process.env },
-    });
+  async processCommand(command: string): Promise<void> {
+    const managerPrompt = await getManagerPrompt();
+    const fullPrompt = `${managerPrompt}\n\n---\n\nUser Command:\n${command}`;
 
-    this.isRunning = true;
+    return new Promise((resolve, reject) => {
+      console.log("[Manager] Processing command:", command.substring(0, 100) + "...");
 
-    // Send startup prompt
-    this.process.stdin?.write(managerPrompt);
-    this.process.stdin?.write("\n\nPerform your startup tasks now.\n");
-    // Don't end stdin - keep it open for commands
+      const proc = spawn("claude", [
+        "--dangerously-skip-permissions",
+        "-p",
+        "--output-format", "json",
+        "--mcp-config", "/Users/gregoryerrl/Projects/bot-hq/.mcp.json",
+      ], {
+        cwd: BOT_HQ_ROOT,
+        env: { ...process.env },
+      });
 
-    this.process.stdout?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      this.outputBuffer += text;
-      this.emit("output", text);
+      let stdout = "";
+      let stderr = "";
 
-      // Parse JSON lines
-      const lines = this.outputBuffer.split("\n");
-      this.outputBuffer = lines.pop() || "";
+      proc.stdout?.on("data", (data: Buffer) => {
+        stdout += data.toString();
+        this.emit("output", data.toString());
+      });
 
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const output = JSON.parse(line);
-          this.emit("json", output);
+      proc.stderr?.on("data", (data: Buffer) => {
+        stderr += data.toString();
+        console.error("[Manager stderr]", data.toString());
+      });
 
-          // Extract text for display
-          if (output.type === "assistant" && output.message?.content) {
-            for (const block of output.message.content) {
-              if (block.type === "text") {
-                this.emit("text", block.text);
-              }
-            }
+      proc.on("error", (err) => {
+        console.error("[Manager] Process error:", err);
+        reject(err);
+      });
+
+      proc.on("exit", (code) => {
+        console.log("[Manager] Command completed with exit code:", code);
+        if (code === 0) {
+          try {
+            const result = JSON.parse(stdout);
+            this.emit("result", result);
+            resolve();
+          } catch {
+            this.emit("text", stdout);
+            resolve();
           }
-        } catch {
-          // Non-JSON output
-          this.emit("text", line);
+        } else {
+          console.error("[Manager] Process failed:", stderr);
+          reject(new Error(`Manager exited with code ${code}`));
         }
-      }
-    });
+      });
 
-    this.process.stderr?.on("data", (data: Buffer) => {
-      const text = data.toString();
-      console.error("[Manager stderr]", text);
-      this.emit("stderr", text);
-    });
-
-    this.process.on("error", (err) => {
-      console.error("[Manager] Process error:", err);
-      this.isRunning = false;
-      this.emit("error", err);
-    });
-
-    this.process.on("exit", (code) => {
-      console.log("[Manager] Process exited with code:", code);
-      this.isRunning = false;
-      this.emit("exit", code);
+      // Send the prompt
+      proc.stdin?.write(fullPrompt);
+      proc.stdin?.end();
     });
   }
 
-  sendCommand(command: string): void {
-    if (!this.process || !this.isRunning) {
-      console.error("[Manager] Cannot send command - not running");
+  async sendCommand(command: string): Promise<void> {
+    if (!isManagerRunning()) {
+      console.error("[Manager] Not initialized");
       return;
     }
 
-    this.process.stdin?.write(command + "\n");
+    this.commandQueue.push(command);
+
+    if (!this.processing) {
+      this.processing = true;
+      while (this.commandQueue.length > 0) {
+        const cmd = this.commandQueue.shift()!;
+        try {
+          await this.processCommand(cmd);
+        } catch (error) {
+          console.error("[Manager] Command failed:", error);
+        }
+      }
+      this.processing = false;
+    }
   }
 
   stop(): void {
-    if (this.process) {
-      this.process.kill("SIGTERM");
-      this.isRunning = false;
-    }
+    setManagerRunning(false);
   }
 
   getStatus(): { running: boolean; pid: number | null } {
     return {
-      running: this.isRunning,
-      pid: this.process?.pid || null,
+      running: isManagerRunning(),
+      pid: null, // No persistent process - spawns on demand
     };
   }
 }
@@ -138,8 +155,8 @@ export function sendManagerCommand(command: string): void {
 }
 
 export function getManagerStatus(): { running: boolean; pid: number | null } {
-  if (!managerInstance) {
-    return { running: false, pid: null };
-  }
-  return managerInstance.getStatus();
+  return {
+    running: isManagerRunning(),
+    pid: null,
+  };
 }

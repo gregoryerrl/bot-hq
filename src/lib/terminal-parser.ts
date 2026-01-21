@@ -29,6 +29,13 @@ export interface SelectionMenu {
   instructions?: string;
 }
 
+export interface AwaitingInputPrompt {
+  taskId?: number;
+  question: string;
+  options: string[];
+  context?: string;
+}
+
 // Lines that should never appear as permission options
 const INVALID_OPTION_PATTERNS = [
   /^(Esc|Tab|Enter|Space)\s+to\s+/i,
@@ -504,5 +511,70 @@ export function detectSelectionMenu(buffer: string): SelectionMenu | null {
     selectedIndex,
     hasSearch: true,
     instructions: instructions || undefined,
+  };
+}
+
+// Detect if output contains an [AWAITING_INPUT] marker for brainstorming
+// Format: [AWAITING_INPUT:taskId] or [AWAITING_INPUT]
+export function detectAwaitingInput(buffer: string): AwaitingInputPrompt | null {
+  const clean = stripAnsi(buffer);
+
+  // Look for [AWAITING_INPUT] or [AWAITING_INPUT:123] pattern
+  const markerRegex = /\[AWAITING_INPUT(?::(\d+))?\]/;
+  const endMarker = "[/AWAITING_INPUT]";
+
+  const match = clean.match(markerRegex);
+  if (!match) return null;
+
+  const startIndex = clean.lastIndexOf(match[0]);
+  if (startIndex === -1) return null;
+
+  const taskId = match[1] ? parseInt(match[1], 10) : undefined;
+
+  // Check if there's content after the start marker
+  const afterStart = clean.slice(startIndex + match[0].length);
+
+  // If we find an end marker, the prompt is complete (user should answer)
+  // If no end marker, prompt is still being output or waiting
+  const endIndex = afterStart.indexOf(endMarker);
+
+  // Extract the content between markers (or all content after start if no end marker yet)
+  const content = endIndex !== -1
+    ? afterStart.slice(0, endIndex).trim()
+    : afterStart.trim();
+
+  if (!content) return null;
+
+  // Parse the content
+  const lines = content.split("\n").map(l => l.trim()).filter(l => l);
+
+  let question = "";
+  const options: string[] = [];
+
+  let inOptions = false;
+
+  for (const line of lines) {
+    if (line.startsWith("Question:")) {
+      question = line.replace("Question:", "").trim();
+    } else if (line === "Options:") {
+      inOptions = true;
+    } else if (inOptions && /^\d+\./.test(line)) {
+      // Parse numbered option
+      const optionText = line.replace(/^\d+\.\s*/, "").trim();
+      if (optionText) {
+        options.push(optionText);
+      }
+    } else if (!inOptions && !question) {
+      // If no "Question:" prefix, treat first non-empty line as question
+      question = line;
+    }
+  }
+
+  if (!question) return null;
+
+  return {
+    taskId,
+    question,
+    options,
   };
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getPluginRegistry } from "@/lib/plugins";
+import { getPluginRegistry, initializePlugins } from "@/lib/plugins";
 
 interface PluginUIContribution {
   pluginName: string;
@@ -11,6 +11,9 @@ interface PluginUIContribution {
 
 export async function GET() {
   try {
+    // Ensure plugins are initialized before getting UI contributions
+    await initializePlugins();
+
     const registry = getPluginRegistry();
     const plugins = registry.getEnabledPlugins();
 

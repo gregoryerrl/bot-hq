@@ -1,7 +1,7 @@
 // src/app/api/plugins/[name]/settings/route.ts
 
 import { NextResponse } from "next/server";
-import { getPluginRegistry } from "@/lib/plugins";
+import { getPluginRegistry, initializePlugins } from "@/lib/plugins";
 
 export async function GET(
   request: Request,
@@ -9,6 +9,9 @@ export async function GET(
 ) {
   try {
     const { name } = await params;
+
+    // Ensure plugins are initialized
+    await initializePlugins();
     const registry = getPluginRegistry();
     const settings = await registry.getSettings(name);
 
@@ -29,6 +32,9 @@ export async function PUT(
   try {
     const { name } = await params;
     const body = await request.json();
+
+    // Ensure plugins are initialized
+    await initializePlugins();
     const registry = getPluginRegistry();
 
     await registry.updateSettings(name, body.settings || {});

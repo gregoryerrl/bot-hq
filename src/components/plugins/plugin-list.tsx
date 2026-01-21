@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { PluginCard } from "./plugin-card";
-import { PluginSettingsDialog } from "./plugin-settings-dialog";
 import { Puzzle } from "lucide-react";
 
 interface Plugin {
@@ -17,7 +16,6 @@ interface Plugin {
 export function PluginList() {
   const [plugins, setPlugins] = useState<Plugin[]>([]);
   const [loading, setLoading] = useState(true);
-  const [settingsPlugin, setSettingsPlugin] = useState<string | null>(null);
 
   const fetchPlugins = useCallback(async () => {
     try {
@@ -72,23 +70,14 @@ export function PluginList() {
   }
 
   return (
-    <>
-      <div className="space-y-3">
-        {plugins.map((plugin) => (
-          <PluginCard
-            key={plugin.name}
-            plugin={plugin}
-            onToggleEnabled={handleToggleEnabled}
-            onOpenSettings={setSettingsPlugin}
-          />
-        ))}
-      </div>
-
-      <PluginSettingsDialog
-        pluginName={settingsPlugin}
-        open={!!settingsPlugin}
-        onClose={() => setSettingsPlugin(null)}
-      />
-    </>
+    <div className="space-y-3">
+      {plugins.map((plugin) => (
+        <PluginCard
+          key={plugin.name}
+          plugin={plugin}
+          onToggleEnabled={handleToggleEnabled}
+        />
+      ))}
+    </div>
   );
 }

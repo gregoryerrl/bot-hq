@@ -22,15 +22,18 @@ export default function WorkspaceConfigPage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [savingContext, setSavingContext] = useState(false);
   const [workspaceName, setWorkspaceName] = useState("");
   const [repoPath, setRepoPath] = useState("");
   const [config, setConfig] = useState<AgentConfig>(DEFAULT_AGENT_CONFIG);
+  const [workspaceContext, setWorkspaceContext] = useState("");
 
   const fetchData = useCallback(async () => {
     try {
-      const [wsRes, cfgRes] = await Promise.all([
+      const [wsRes, cfgRes, ctxRes] = await Promise.all([
         fetch(`/api/workspaces/${id}`),
         fetch(`/api/workspaces/${id}/config`),
+        fetch(`/api/workspaces/${id}/context`),
       ]);
 
       if (wsRes.ok) {
@@ -41,6 +44,11 @@ export default function WorkspaceConfigPage({
 
       if (cfgRes.ok) {
         setConfig(await cfgRes.json());
+      }
+
+      if (ctxRes.ok) {
+        const ctx = await ctxRes.json();
+        setWorkspaceContext(ctx.context || "");
       }
     } catch (error) {
       console.error("Failed to fetch:", error);
@@ -83,6 +91,23 @@ export default function WorkspaceConfigPage({
       toast.error("Failed to sync");
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function handleSaveContext() {
+    setSavingContext(true);
+    try {
+      const res = await fetch(`/api/workspaces/${id}/context`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: workspaceContext }),
+      });
+      if (res.ok) toast.success("Workspace context saved");
+      else throw new Error("Failed");
+    } catch {
+      toast.error("Failed to save context");
+    } finally {
+      setSavingContext(false);
     }
   }
 
@@ -165,6 +190,36 @@ export default function WorkspaceConfigPage({
               onChange={(paths) => setConfig({ ...config, allowedPaths: paths })}
               placeholder="e.g., src/"
             />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Workspace Context (WORKSPACE.md)</CardTitle>
+            <CardDescription>
+              Project knowledge passed to agents. Describe architecture, conventions, and important patterns.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Textarea
+              className="min-h-[300px] font-mono text-sm"
+              value={workspaceContext}
+              onChange={(e) => setWorkspaceContext(e.target.value)}
+              placeholder="# Workspace Name
+
+## Overview
+Describe your project...
+
+## Architecture
+Key directories and patterns...
+
+## Build & Test
+npm run build, npm test, etc..."
+            />
+            <Button onClick={handleSaveContext} disabled={savingContext} size="sm">
+              <Save className="h-4 w-4 mr-2" />
+              {savingContext ? "Saving..." : "Save Context"}
+            </Button>
           </CardContent>
         </Card>
 

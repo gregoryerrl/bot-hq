@@ -10,7 +10,7 @@ import { ModeToggle } from "./mode-toggle";
 import { TerminalView } from "./terminal-view";
 import { ChatView } from "./chat-view";
 import { useIsMobile } from "@/hooks/use-media-query";
-import { detectPermissionPrompt, detectSelectionMenu } from "@/lib/terminal-parser";
+import { detectPermissionPrompt, detectSelectionMenu, detectAwaitingInput, AwaitingInputPrompt } from "@/lib/terminal-parser";
 import "@xterm/xterm/css/xterm.css";
 
 interface Session {
@@ -22,7 +22,7 @@ interface Session {
 }
 
 type ViewMode = "terminal" | "chat";
-type SessionStatus = "idle" | "streaming" | "permission" | "input" | "selection";
+type SessionStatus = "idle" | "streaming" | "permission" | "input" | "selection" | "awaiting_input";
 
 interface ServerSession {
   id: string;
@@ -40,6 +40,45 @@ export function ClaudeSession() {
   const [status, setStatus] = useState<SessionStatus>("idle");
   const isMobile = useIsMobile();
   const idleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastAwaitingPromptRef = useRef<string | null>(null);
+
+  // Update task state when awaiting input is detected
+  const updateTaskAwaitingState = useCallback(async (prompt: AwaitingInputPrompt | null, taskId?: number) => {
+    if (prompt) {
+      const promptKey = `${prompt.taskId || taskId || 'unknown'}-${prompt.question}`;
+      // Avoid duplicate API calls for the same prompt
+      if (lastAwaitingPromptRef.current === promptKey) return;
+      lastAwaitingPromptRef.current = promptKey;
+
+      const targetTaskId = prompt.taskId || taskId;
+      if (!targetTaskId) {
+        console.log("[Session] Awaiting input detected but no taskId");
+        return;
+      }
+
+      try {
+        await fetch(`/api/tasks/${targetTaskId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            state: "awaiting_input",
+            waitingQuestion: prompt.question,
+            waitingContext: prompt.options.length > 0
+              ? `Options:\n${prompt.options.map((o, i) => `${i + 1}. ${o}`).join('\n')}`
+              : null,
+            waitingSince: new Date().toISOString(),
+          }),
+        });
+        console.log("[Session] Task", targetTaskId, "set to awaiting_input");
+      } catch (error) {
+        console.error("[Session] Failed to update task state:", error);
+      }
+    } else if (lastAwaitingPromptRef.current) {
+      // Prompt was cleared - but we don't auto-resume here
+      // The manager will resume the task when it continues
+      lastAwaitingPromptRef.current = null;
+    }
+  }, []);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
@@ -133,12 +172,17 @@ export function ClaudeSession() {
             // Check status after buffer replay
             const menu = detectSelectionMenu(buffer);
             const prompt = detectPermissionPrompt(buffer);
-            if (menu) {
+            const awaitingInput = detectAwaitingInput(buffer);
+            if (awaitingInput) {
+              setStatus("awaiting_input");
+              updateTaskAwaitingState(awaitingInput);
+            } else if (menu) {
               setStatus("selection");
             } else if (prompt) {
               setStatus("permission");
             } else {
               setStatus("idle");
+              updateTaskAwaitingState(null);
             }
           } else if (message.type === "data") {
             terminal.write(message.data);
@@ -149,10 +193,19 @@ export function ClaudeSession() {
                 s.id === sessionId ? { ...s, buffer } : s
               )
             );
-            // Check for selection menu FIRST (more specific), then permission prompt
+            // Check for awaiting input FIRST, then selection menu, then permission prompt
+            const awaitingInput = detectAwaitingInput(buffer);
             const menu = detectSelectionMenu(buffer);
             const prompt = detectPermissionPrompt(buffer);
-            if (menu) {
+            if (awaitingInput) {
+              setStatus("awaiting_input");
+              updateTaskAwaitingState(awaitingInput);
+              // Clear idle timeout when awaiting input detected
+              if (idleTimeoutRef.current) {
+                clearTimeout(idleTimeoutRef.current);
+                idleTimeoutRef.current = null;
+              }
+            } else if (menu) {
               setStatus("selection");
               // Clear idle timeout when selection menu detected
               if (idleTimeoutRef.current) {
@@ -168,6 +221,7 @@ export function ClaudeSession() {
               }
             } else {
               setStatus("streaming");
+              updateTaskAwaitingState(null);
               // Reset idle timeout - if no data for 1.5s, assume idle
               if (idleTimeoutRef.current) {
                 clearTimeout(idleTimeoutRef.current);
@@ -302,14 +356,19 @@ export function ClaudeSession() {
                 s.id === sessionId ? { ...s, buffer } : s
               )
             );
+            const awaitingInput = detectAwaitingInput(buffer);
             const menu = detectSelectionMenu(buffer);
             const prompt = detectPermissionPrompt(buffer);
-            if (menu) {
+            if (awaitingInput) {
+              setStatus("awaiting_input");
+              updateTaskAwaitingState(awaitingInput);
+            } else if (menu) {
               setStatus("selection");
             } else if (prompt) {
               setStatus("permission");
             } else {
               setStatus("idle");
+              updateTaskAwaitingState(null);
             }
           } else if (message.type === "data") {
             terminal.write(message.data);
@@ -319,9 +378,17 @@ export function ClaudeSession() {
                 s.id === sessionId ? { ...s, buffer } : s
               )
             );
+            const awaitingInput = detectAwaitingInput(buffer);
             const menu = detectSelectionMenu(buffer);
             const prompt = detectPermissionPrompt(buffer);
-            if (menu) {
+            if (awaitingInput) {
+              setStatus("awaiting_input");
+              updateTaskAwaitingState(awaitingInput);
+              if (idleTimeoutRef.current) {
+                clearTimeout(idleTimeoutRef.current);
+                idleTimeoutRef.current = null;
+              }
+            } else if (menu) {
               setStatus("selection");
               if (idleTimeoutRef.current) {
                 clearTimeout(idleTimeoutRef.current);
@@ -335,6 +402,7 @@ export function ClaudeSession() {
               }
             } else {
               setStatus("streaming");
+              updateTaskAwaitingState(null);
               if (idleTimeoutRef.current) {
                 clearTimeout(idleTimeoutRef.current);
               }

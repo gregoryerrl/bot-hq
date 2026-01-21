@@ -6,12 +6,13 @@ export const dynamic = "force-dynamic";
 
 interface LogSource {
   id: string;
-  type: "server" | "manager";
+  type: "server" | "manager" | "agent";
   name: string;
   status: "live" | "running";
   latestMessage: string | null;
   latestAt: string | null;
   taskId?: number;
+  sessionId?: number;  // For frontend compatibility (same as taskId for task-based agents)
   taskTitle?: string;
   workspaceName?: string;
 }
@@ -72,12 +73,13 @@ export async function GET() {
 
       sources.push({
         id: `task-${task.id}`,
-        type: "manager",
+        type: "agent",
         name: `Task #${task.id}: ${task.title}`,
         status: "running",
         latestMessage: latestTaskLog[0]?.message || "In progress...",
         latestAt: latestTaskLog[0]?.createdAt?.toISOString() || task.updatedAt?.toISOString() || null,
         taskId: task.id,
+        sessionId: task.id,  // Use taskId as sessionId for frontend compatibility
         taskTitle: task.title,
         workspaceName: workspace?.name || undefined,
       });

@@ -14,10 +14,14 @@ interface SessionInfo {
 
 export default function AgentLogsPage() {
   const params = useParams();
-  const sessionId = parseInt(params.sessionId as string);
+  const rawSessionId = params.sessionId as string;
+  const sessionId = parseInt(rawSessionId);
+  const isValidId = !isNaN(sessionId) && sessionId > 0;
   const [session, setSession] = useState<SessionInfo | null>(null);
 
   useEffect(() => {
+    if (!isValidId) return;
+
     async function fetchSession() {
       try {
         const response = await fetch("/api/agents/sessions");
@@ -33,15 +37,33 @@ export default function AgentLogsPage() {
       }
     }
     fetchSession();
-  }, [sessionId]);
+  }, [sessionId, isValidId]);
 
   const title = session
     ? `${session.workspaceName} Agent`
-    : `Agent #${sessionId}`;
+    : isValidId
+    ? `Task #${sessionId}`
+    : "Invalid Task";
 
   const subtitle = session?.taskTitle
     ? `Task: ${session.taskTitle}`
     : undefined;
+
+  if (!isValidId) {
+    return (
+      <div className="flex flex-col h-full">
+        <Header
+          title="Agent Logs"
+          description="Invalid Task ID"
+        />
+        <div className="flex-1 p-4 md:p-6">
+          <div className="rounded-lg border border-dashed p-8 text-center text-muted-foreground">
+            Invalid task ID. Please select a valid task from the logs page.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full">

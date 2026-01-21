@@ -6,6 +6,7 @@ import { MobileNav } from "@/components/layout/mobile-nav";
 import { Toaster } from "@/components/ui/sonner";
 import { ChatPanel } from "@/components/chat-panel/chat-panel";
 import { NotificationProvider } from "@/components/notifications/notification-provider";
+import { AwaitingInputBanner } from "@/components/notifications/awaiting-input-banner";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -26,7 +27,10 @@ export default function RootLayout({
           <div className="flex h-screen">
             <Sidebar />
             <MobileNav />
-            <main className="flex-1 overflow-auto">{children}</main>
+            <main className="flex-1 overflow-auto flex flex-col">
+              <AwaitingInputBanner />
+              <div className="flex-1 overflow-auto">{children}</div>
+            </main>
           </div>
           <ChatPanel />
           <Toaster />

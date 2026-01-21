@@ -8,11 +8,11 @@ import {
   Clock,
   ScrollText,
   Settings,
-  Globe,
   Bot,
   FileText,
   Puzzle,
   Box,
+  FolderGit2,
   LucideIcon,
 } from "lucide-react";
 import * as LucideIcons from "lucide-react";
@@ -21,12 +21,12 @@ import { usePluginUI } from "@/hooks/use-plugin-ui";
 const navItems = [
   { href: "/", label: "Taskboard", icon: LayoutDashboard },
   { href: "/pending", label: "Pending", icon: Clock },
+  { href: "/workspaces", label: "Workspaces", icon: FolderGit2 },
   { href: "/claude", label: "Claude", icon: Bot },
   { href: "/docs", label: "Docs", icon: FileText },
   { href: "/logs", label: "Logs", icon: ScrollText },
   { href: "/plugins", label: "Plugins", icon: Puzzle },
   { href: "/settings", label: "Settings", icon: Settings },
-  { href: "/claude-settings", label: "Claude Settings", icon: Globe },
 ];
 
 function getIconComponent(iconName: string): LucideIcon {

@@ -5,12 +5,10 @@ import { getPluginRegistry, initializePlugins } from "@/lib/plugins";
 
 export async function GET() {
   try {
+    // Ensure plugins are initialized
+    await initializePlugins();
+
     const registry = getPluginRegistry();
-
-    if (!registry.isInitialized()) {
-      await initializePlugins();
-    }
-
     const plugins = registry.getAllPlugins().map(p => ({
       name: p.name,
       version: p.version,

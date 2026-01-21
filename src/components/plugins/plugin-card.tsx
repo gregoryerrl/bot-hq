@@ -3,9 +3,8 @@
 import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { Settings, Puzzle } from "lucide-react";
+import { Puzzle } from "lucide-react";
 
 interface Plugin {
   name: string;
@@ -19,13 +18,11 @@ interface Plugin {
 interface PluginCardProps {
   plugin: Plugin;
   onToggleEnabled: (name: string, enabled: boolean) => void;
-  onOpenSettings: (name: string) => void;
 }
 
 export function PluginCard({
   plugin,
   onToggleEnabled,
-  onOpenSettings,
 }: PluginCardProps) {
   const [loading, setLoading] = useState(false);
 
@@ -65,21 +62,11 @@ export function PluginCard({
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={() => onOpenSettings(plugin.name)}
-            disabled={!plugin.enabled}
-          >
-            <Settings className="h-4 w-4" />
-          </Button>
-          <Switch
-            checked={plugin.enabled}
-            onCheckedChange={handleToggle}
-            disabled={loading}
-          />
-        </div>
+        <Switch
+          checked={plugin.enabled}
+          onCheckedChange={handleToggle}
+          disabled={loading}
+        />
       </div>
     </Card>
   );

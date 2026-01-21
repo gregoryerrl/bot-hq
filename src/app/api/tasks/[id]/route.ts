@@ -42,6 +42,12 @@ export async function PATCH(
     if (body.agentPlan !== undefined) updates.agentPlan = body.agentPlan;
     if (body.branchName !== undefined) updates.branchName = body.branchName;
     if (body.priority !== undefined) updates.priority = body.priority;
+    if (body.feedback !== undefined) updates.feedback = body.feedback;
+    if (body.iterationCount !== undefined) updates.iterationCount = body.iterationCount;
+    // Brainstorming fields
+    if (body.waitingQuestion !== undefined) updates.waitingQuestion = body.waitingQuestion;
+    if (body.waitingContext !== undefined) updates.waitingContext = body.waitingContext;
+    if (body.waitingSince !== undefined) updates.waitingSince = body.waitingSince ? new Date(body.waitingSince) : null;
 
     const result = await db
       .update(tasks)

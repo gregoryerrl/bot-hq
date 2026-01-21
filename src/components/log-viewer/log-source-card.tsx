@@ -7,12 +7,13 @@ import { Monitor, Bot, ChevronRight } from "lucide-react";
 
 interface LogSource {
   id: string;
-  type: "server" | "agent";
+  type: "server" | "agent" | "manager";
   name: string;
   status: "live" | "running";
   latestMessage: string | null;
   latestAt: string | null;
   sessionId?: number;
+  taskId?: number;
   taskTitle?: string;
 }
 
@@ -40,7 +41,9 @@ function formatRelativeTime(dateString: string | null): string {
 export function LogSourceCard({ source }: LogSourceCardProps) {
   const href = source.type === "server"
     ? "/logs/server"
-    : `/logs/agent/${source.sessionId}`;
+    : source.type === "manager"
+    ? "/logs/manager"
+    : `/logs/agent/${source.sessionId || source.taskId}`;
 
   const Icon = source.type === "server" ? Monitor : Bot;
 

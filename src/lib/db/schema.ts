@@ -28,6 +28,7 @@ export const tasks = sqliteTable("tasks", {
       "new",
       "queued",
       "in_progress",
+      "awaiting_input",  // Manager is waiting for user input (brainstorming)
       "needs_help",  // Replaces stuck/pending_review state
       "done",
     ],
@@ -42,6 +43,10 @@ export const tasks = sqliteTable("tasks", {
   iterationCount: integer("iteration_count").default(0),  // Current iteration
   maxIterations: integer("max_iterations"),  // Override global default
   feedback: text("feedback"),  // Human feedback on retry
+  // Brainstorming fields - for manager awaiting user input
+  waitingQuestion: text("waiting_question"),  // Question manager is asking
+  waitingContext: text("waiting_context"),    // Conversation context so far
+  waitingSince: integer("waiting_since", { mode: "timestamp" }),  // When started waiting
   assignedAt: integer("assigned_at", { mode: "timestamp" }),
   updatedAt: integer("updated_at", { mode: "timestamp" })
     .notNull()

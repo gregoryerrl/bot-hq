@@ -55,5 +55,17 @@
     "task:write",
     "task:create",
     "approval:read"
-  ]
+  ],
+
+  "ui": {
+    "tabs": [
+      {
+        "id": "main",
+        "label": "GitHub",
+        "icon": "github",
+        "component": "github-plugin"
+      }
+    ],
+    "workspaceSettings": "github-workspace-settings"
+  }
 }
