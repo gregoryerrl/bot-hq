@@ -78,6 +78,22 @@ async function main() {
     warn('Could not rebuild native modules (may already be correct)');
   }
 
+  // Step 2b: Fix node-pty spawn-helper permissions (npm sometimes strips execute bit)
+  const spawnHelperPaths = [
+    join(ROOT_DIR, 'node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper'),
+    join(ROOT_DIR, 'node_modules/node-pty/prebuilds/darwin-x64/spawn-helper'),
+  ];
+  for (const helperPath of spawnHelperPaths) {
+    if (existsSync(helperPath)) {
+      try {
+        chmodSync(helperPath, '755');
+      } catch {
+        // Ignore errors
+      }
+    }
+  }
+  success('Fixed node-pty spawn-helper permissions');
+
   // Step 3: Create data directory
   const dataDir = join(ROOT_DIR, 'data');
   if (!existsSync(dataDir)) {
