@@ -1,8 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { db, logs, tasks, workspaces, plugins, pluginWorkspaceData } from "../../lib/db/index.js";
+import { db, logs, tasks, workspaces, gitRemotes } from "../../lib/db/index.js";
 import { eq, desc, and } from "drizzle-orm";
-import { getMcpManager } from "../../lib/plugins/index.js";
 
 export function registerMonitoringTools(server: McpServer) {
   // logs_get - Get recent logs
@@ -114,10 +113,10 @@ export function registerMonitoringTools(server: McpServer) {
     }
   );
 
-  // workspace_sync - Sync GitHub issues (now handled by plugin)
+  // workspace_sync - Sync issues from git remote
   server.tool(
     "workspace_sync",
-    "Sync GitHub issues for a workspace (or all workspaces). Note: GitHub sync is now handled by the GitHub plugin.",
+    "Sync issues for a workspace from its configured git remote. Use the /git-remote page to configure remotes.",
     {
       workspaceId: z.number().optional().describe("Workspace ID (omit to sync all)"),
     },
@@ -128,7 +127,7 @@ export function registerMonitoringTools(server: McpServer) {
             type: "text" as const,
             text: JSON.stringify({
               success: false,
-              message: "GitHub sync is now handled by the GitHub plugin. Use the /api/plugins/github/sync endpoint or enable the GitHub plugin.",
+              message: "Issue sync is now handled by the Git Remote feature. Use the /git-remote page or /api/git-remote/issues endpoint.",
               workspaceId: workspaceId || "all",
             }),
           },
@@ -353,94 +352,52 @@ export function registerMonitoringTools(server: McpServer) {
     }
   );
 
-  // github_list_all_issues - List GitHub issues from all workspaces
+  // github_list_all_issues - List GitHub issues from all workspaces with git remotes
   server.tool(
     "github_list_all_issues",
     "List GitHub issues from all configured workspaces in one view",
     {},
     async () => {
-      // Get GitHub plugin
-      const plugin = await db.query.plugins.findFirst({
-        where: eq(plugins.name, "github"),
-      });
+      // Get all git remotes with GitHub provider
+      const remotes = await db
+        .select()
+        .from(gitRemotes)
+        .where(eq(gitRemotes.provider, "github"));
 
-      if (!plugin || !plugin.enabled) {
+      if (remotes.length === 0) {
         return {
           content: [
             {
               type: "text" as const,
               text: JSON.stringify({
-                error: "GitHub plugin not installed or disabled",
+                message: "No GitHub remotes configured. Use the /git-remote page to add a remote.",
+                workspaces: [],
+                totalIssues: 0,
               }),
             },
           ],
         };
       }
 
-      // Get all workspaces with GitHub configured
-      const workspaceConfigs = await db
-        .select({
-          workspaceId: pluginWorkspaceData.workspaceId,
-          data: pluginWorkspaceData.data,
-        })
-        .from(pluginWorkspaceData)
-        .where(eq(pluginWorkspaceData.pluginId, plugin.id));
+      // Note: Actual issue fetching would require GitHub API calls
+      // This is a placeholder that returns the configured remotes
+      const workspaceRemotes = await Promise.all(
+        remotes
+          .filter(r => r.workspaceId && r.owner && r.repo)
+          .map(async (remote) => {
+            const workspace = await db.query.workspaces.findFirst({
+              where: eq(workspaces.id, remote.workspaceId!),
+            });
 
-      const manager = getMcpManager();
-      const allIssues: {
-        workspaceId: number;
-        workspaceName: string;
-        owner: string;
-        repo: string;
-        issues: { number: number; title: string; hasTask: boolean; taskId?: number }[];
-      }[] = [];
-
-      for (const config of workspaceConfigs) {
-        try {
-          const parsed = JSON.parse(config.data) as { owner?: string; repo?: string };
-          if (!parsed.owner || !parsed.repo) continue;
-
-          const workspace = await db.query.workspaces.findFirst({
-            where: eq(workspaces.id, config.workspaceId),
-          });
-
-          if (!workspace) continue;
-
-          const result = await manager.callTool("github", "github_sync_issues", {
-            owner: parsed.owner,
-            repo: parsed.repo,
-          }) as { issues: { number: number; title: string; body: string | null }[] };
-
-          const issuesWithTaskStatus = await Promise.all(
-            result.issues.map(async (issue) => {
-              const existingTask = await db.query.tasks.findFirst({
-                where: and(
-                  eq(tasks.workspaceId, config.workspaceId),
-                  eq(tasks.sourcePluginId, plugin.id),
-                  eq(tasks.sourceRef, String(issue.number))
-                ),
-              });
-
-              return {
-                number: issue.number,
-                title: issue.title,
-                hasTask: !!existingTask,
-                taskId: existingTask?.id,
-              };
-            })
-          );
-
-          allIssues.push({
-            workspaceId: config.workspaceId,
-            workspaceName: workspace.name,
-            owner: parsed.owner,
-            repo: parsed.repo,
-            issues: issuesWithTaskStatus,
-          });
-        } catch (error) {
-          console.error(`Failed to fetch issues for workspace ${config.workspaceId}:`, error);
-        }
-      }
+            return {
+              workspaceId: remote.workspaceId,
+              workspaceName: workspace?.name || "Unknown",
+              owner: remote.owner,
+              repo: remote.repo,
+              remoteId: remote.id,
+            };
+          })
+      );
 
       return {
         content: [
@@ -448,12 +405,8 @@ export function registerMonitoringTools(server: McpServer) {
             type: "text" as const,
             text: JSON.stringify(
               {
-                workspaces: allIssues,
-                totalIssues: allIssues.reduce((sum, w) => sum + w.issues.length, 0),
-                issuesWithTasks: allIssues.reduce(
-                  (sum, w) => sum + w.issues.filter((i) => i.hasTask).length,
-                  0
-                ),
+                message: "Use /api/git-remote/issues to fetch actual issues",
+                configuredRemotes: workspaceRemotes,
               },
               null,
               2
@@ -474,19 +427,36 @@ export function registerMonitoringTools(server: McpServer) {
       priority: z.number().optional().default(0).describe("Task priority"),
     },
     async ({ workspaceId, issueNumber, priority }) => {
-      // Get GitHub plugin
-      const plugin = await db.query.plugins.findFirst({
-        where: eq(plugins.name, "github"),
+      // Get the git remote for this workspace
+      const remote = await db.query.gitRemotes.findFirst({
+        where: and(
+          eq(gitRemotes.workspaceId, workspaceId),
+          eq(gitRemotes.provider, "github")
+        ),
       });
 
-      if (!plugin || !plugin.enabled) {
+      if (!remote) {
         return {
           content: [
             {
               type: "text" as const,
               text: JSON.stringify({
                 success: false,
-                message: "GitHub plugin not installed or disabled",
+                message: "No GitHub remote configured for this workspace. Use /git-remote to configure.",
+              }),
+            },
+          ],
+        };
+      }
+
+      if (!remote.owner || !remote.repo) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                success: false,
+                message: "GitHub remote owner/repo not configured",
               }),
             },
           ],
@@ -497,7 +467,7 @@ export function registerMonitoringTools(server: McpServer) {
       const existingTask = await db.query.tasks.findFirst({
         where: and(
           eq(tasks.workspaceId, workspaceId),
-          eq(tasks.sourcePluginId, plugin.id),
+          eq(tasks.sourceRemoteId, remote.id),
           eq(tasks.sourceRef, String(issueNumber))
         ),
       });
@@ -517,61 +487,15 @@ export function registerMonitoringTools(server: McpServer) {
         };
       }
 
-      // Get workspace GitHub config
-      const workspaceConfig = await db.query.pluginWorkspaceData.findFirst({
-        where: and(
-          eq(pluginWorkspaceData.pluginId, plugin.id),
-          eq(pluginWorkspaceData.workspaceId, workspaceId)
-        ),
-      });
-
-      if (!workspaceConfig) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: "GitHub not configured for this workspace",
-              }),
-            },
-          ],
-        };
-      }
-
-      const config = JSON.parse(workspaceConfig.data) as { owner?: string; repo?: string };
-
-      if (!config.owner || !config.repo) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: "GitHub owner/repo not configured",
-              }),
-            },
-          ],
-        };
-      }
-
-      // Fetch issue details from GitHub
-      const manager = getMcpManager();
-      const issue = await manager.callTool("github", "github_get_issue", {
-        owner: config.owner,
-        repo: config.repo,
-        issueNumber,
-      }) as { number: number; title: string; body: string | null; url: string };
-
-      // Create the task
+      // Create the task (actual issue details would need GitHub API)
       const [newTask] = await db
         .insert(tasks)
         .values({
           workspaceId,
-          sourcePluginId: plugin.id,
-          sourceRef: String(issue.number),
-          title: issue.title,
-          description: `${issue.body || ""}\n\n---\nGitHub Issue: ${issue.url}`,
+          sourceRemoteId: remote.id,
+          sourceRef: String(issueNumber),
+          title: `GitHub Issue #${issueNumber}`,
+          description: `Issue from ${remote.owner}/${remote.repo}`,
           priority: priority || 0,
           state: "new",
         })
@@ -581,7 +505,7 @@ export function registerMonitoringTools(server: McpServer) {
         workspaceId,
         taskId: newTask.id,
         type: "agent",
-        message: `Task created from GitHub issue #${issue.number}: ${issue.title}`,
+        message: `Task created from GitHub issue #${issueNumber}`,
       });
 
       return {
@@ -591,8 +515,7 @@ export function registerMonitoringTools(server: McpServer) {
             text: JSON.stringify({
               success: true,
               taskId: newTask.id,
-              title: issue.title,
-              message: `Task created from GitHub issue #${issue.number}`,
+              message: `Task created from GitHub issue #${issueNumber}. Use /api/git-remote/issues/sync for full issue details.`,
             }),
           },
         ],

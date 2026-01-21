@@ -5,10 +5,8 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Play, RotateCcw, MessageSquare, X } from "lucide-react";
+import { Play, RotateCcw, MessageSquare, X, ExternalLink } from "lucide-react";
 import { Task } from "@/lib/db/schema";
-import { PluginTaskBadges } from "@/components/plugins/plugin-task-badges";
-import { PluginTaskActions } from "@/components/plugins/plugin-task-actions";
 
 interface TaskCardProps {
   task: Task & { workspaceName?: string };
@@ -48,6 +46,9 @@ export function TaskCard({ task, onAssign, onStartTask, onRetry, onRetryWithFeed
     }
   };
 
+  // Check if task is from a git remote (has sourceRef)
+  const hasSourceRef = task.sourceRef && task.sourceRemoteId;
+
   return (
     <Card className="p-3 md:p-4">
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
@@ -69,7 +70,11 @@ export function TaskCard({ task, onAssign, onStartTask, onRetry, onRetryWithFeed
                 {task.workspaceName}
               </Badge>
             )}
-            <PluginTaskBadges taskId={task.id} workspaceId={task.workspaceId} />
+            {hasSourceRef && (
+              <Badge variant="outline" className="text-xs text-blue-600 border-blue-600">
+                Issue #{task.sourceRef}
+              </Badge>
+            )}
           </div>
           <h3 className="font-medium text-sm md:text-base line-clamp-2">
             {task.title}
@@ -104,7 +109,6 @@ export function TaskCard({ task, onAssign, onStartTask, onRetry, onRetryWithFeed
               Request Changes
             </Button>
           )}
-          <PluginTaskActions taskId={task.id} workspaceId={task.workspaceId} />
         </div>
       </div>
 

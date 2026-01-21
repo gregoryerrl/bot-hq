@@ -13,14 +13,38 @@ export const workspaces = sqliteTable("workspaces", {
     .$defaultFn(() => new Date()),
 });
 
+// Git Remotes - replaces plugin system for git provider integration
+export const gitRemotes = sqliteTable("git_remotes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  workspaceId: integer("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }), // Null = global
+  provider: text("provider", {
+    enum: ["github", "gitlab", "bitbucket", "gitea", "custom"],
+  }).notNull(),
+  name: text("name").notNull(), // Display name for this remote
+  url: text("url").notNull(), // Base URL (e.g., https://github.com or https://gitlab.company.com)
+  owner: text("owner"), // Repository owner/org (for workspace-scoped remotes)
+  repo: text("repo"), // Repository name (for workspace-scoped remotes)
+  credentials: text("credentials"), // Encrypted JSON: { token: string, ... }
+  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false), // Default remote for this provider
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+}, (table) => [
+  index("git_remotes_workspace_idx").on(table.workspaceId),
+  index("git_remotes_provider_idx").on(table.provider),
+]);
+
 // Tasks
 export const tasks = sqliteTable("tasks", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   workspaceId: integer("workspace_id")
     .notNull()
     .references(() => workspaces.id),
-  sourcePluginId: integer("source_plugin_id"), // Plugin that created this task
-  sourceRef: text("source_ref"), // Plugin-specific reference (issue #, message ID)
+  sourceRemoteId: integer("source_remote_id").references(() => gitRemotes.id), // Git remote that created this task
+  sourceRef: text("source_ref"), // Reference in remote (issue #, MR number, etc.)
   title: text("title").notNull(),
   description: text("description"),
   state: text("state", {
@@ -54,6 +78,7 @@ export const tasks = sqliteTable("tasks", {
 }, (table) => [
   index("tasks_workspace_idx").on(table.workspaceId),
   index("tasks_state_idx").on(table.state),
+  index("tasks_remote_idx").on(table.sourceRemoteId),
 ]);
 
 // REMOVED: Pending approvals table - replaced by git-native review
@@ -115,77 +140,11 @@ export const pendingDevices = sqliteTable("pending_devices", {
   expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
 });
 
-// Installed plugins
-export const plugins = sqliteTable("plugins", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  name: text("name").notNull().unique(),
-  version: text("version").notNull(),
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
-  manifest: text("manifest").notNull(), // Full plugin.json cached
-  settings: text("settings").notNull().default("{}"), // User-configured settings
-  credentials: text("credentials"), // Encrypted secrets
-  installedAt: integer("installed_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
-
-// Plugin data scoped to workspace
-export const pluginWorkspaceData = sqliteTable("plugin_workspace_data", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  pluginId: integer("plugin_id").notNull().references(() => plugins.id, { onDelete: "cascade" }),
-  workspaceId: integer("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  data: text("data").notNull().default("{}"),
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-}, (table) => [
-  index("plugin_workspace_plugin_idx").on(table.pluginId),
-  index("plugin_workspace_workspace_idx").on(table.workspaceId),
-]);
-
-// Plugin data scoped to task
-export const pluginTaskData = sqliteTable("plugin_task_data", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  pluginId: integer("plugin_id").notNull().references(() => plugins.id, { onDelete: "cascade" }),
-  taskId: integer("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
-  data: text("data").notNull().default("{}"),
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-}, (table) => [
-  index("plugin_task_plugin_idx").on(table.pluginId),
-  index("plugin_task_task_idx").on(table.taskId),
-]);
-
-// Plugin global key-value store
-export const pluginStore = sqliteTable("plugin_store", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  pluginId: integer("plugin_id").notNull().references(() => plugins.id, { onDelete: "cascade" }),
-  key: text("key").notNull(),
-  value: text("value"),
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-}, (table) => [
-  index("plugin_store_plugin_idx").on(table.pluginId),
-  index("plugin_store_key_idx").on(table.pluginId, table.key),
-]);
-
 // Type exports
 export type Workspace = typeof workspaces.$inferSelect;
 export type NewWorkspace = typeof workspaces.$inferInsert;
+export type GitRemote = typeof gitRemotes.$inferSelect;
+export type NewGitRemote = typeof gitRemotes.$inferInsert;
 export type Task = typeof tasks.$inferSelect;
 export type NewTask = typeof tasks.$inferInsert;
 export type Log = typeof logs.$inferSelect;
@@ -196,8 +155,3 @@ export type PendingDevice = typeof pendingDevices.$inferSelect;
 export type NewPendingDevice = typeof pendingDevices.$inferInsert;
 export type Setting = typeof settings.$inferSelect;
 export type NewSetting = typeof settings.$inferInsert;
-export type Plugin = typeof plugins.$inferSelect;
-export type NewPlugin = typeof plugins.$inferInsert;
-export type PluginWorkspaceData = typeof pluginWorkspaceData.$inferSelect;
-export type PluginTaskData = typeof pluginTaskData.$inferSelect;
-export type PluginStoreEntry = typeof pluginStore.$inferSelect;

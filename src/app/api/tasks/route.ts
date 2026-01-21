@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, tasks, workspaces } from "@/lib/db";
 import { eq, desc } from "drizzle-orm";
-import { fireTaskCreated } from "@/lib/plugins";
 
 export async function GET(request: NextRequest) {
   try {
@@ -65,20 +64,6 @@ export async function POST(request: NextRequest) {
       priority: 0,
       updatedAt: new Date(),
     }).returning();
-
-    // Fire task created hook
-    try {
-      await fireTaskCreated({
-        id: result[0].id,
-        workspaceId: result[0].workspaceId,
-        title: result[0].title,
-        description: result[0].description || "",
-        state: result[0].state,
-        priority: result[0].priority ?? 0,
-      });
-    } catch (e) {
-      console.error("Failed to fire task created hook:", e);
-    }
 
     return NextResponse.json(result[0]);
   } catch (error) {

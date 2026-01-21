@@ -10,7 +10,7 @@ import { RuleListEditor } from "@/components/settings/rule-list-editor";
 import { ArrowLeft, Save, RefreshCw } from "lucide-react";
 import { AgentConfig, DEFAULT_AGENT_CONFIG } from "@/lib/agents/config-types";
 import { toast } from "sonner";
-import { WorkspacePluginSettings } from "@/components/plugins/workspace-plugin-settings";
+import { GitRemoteSettings } from "@/components/git-remote/git-remote-settings";
 
 export default function WorkspaceConfigPage({
   params,
@@ -234,10 +234,10 @@ npm run build, npm test, etc..."
           </Button>
         </div>
 
-        {/* Plugin Settings */}
+        {/* Git Remote Settings */}
         <div className="pb-6">
-          <h2 className="text-lg font-semibold mb-4">Plugin Settings</h2>
-          <WorkspacePluginSettings workspaceId={parseInt(id)} />
+          <h2 className="text-lg font-semibold mb-4">Git Remote</h2>
+          <GitRemoteSettings workspaceId={parseInt(id)} />
         </div>
       </div>
     </div>

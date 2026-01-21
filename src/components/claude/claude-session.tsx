@@ -175,7 +175,9 @@ export function ClaudeSession() {
         try {
           const message = JSON.parse(event.data);
           if (message.type === "buffer") {
-            // Reconnection - replay buffered output
+            // Reconnection - reset terminal then replay buffered output
+            // This prevents garbled display from stale cursor positioning
+            terminal.reset();
             terminal.write(message.data);
             buffer = message.data;
             setSessions((prev) =>
@@ -362,7 +364,9 @@ export function ClaudeSession() {
         try {
           const message = JSON.parse(event.data);
           if (message.type === "buffer") {
-            // Reconnection - replay buffered output
+            // Reconnection - reset terminal then replay buffered output
+            // This prevents garbled display from stale cursor positioning
+            terminal.reset();
             terminal.write(message.data);
             buffer = message.data;
             setSessions((prev) =>

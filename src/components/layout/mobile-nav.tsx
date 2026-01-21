@@ -5,15 +5,28 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Menu, X, LayoutDashboard, Clock, ScrollText, Settings, Globe, Bot } from "lucide-react";
+import {
+  Menu,
+  X,
+  LayoutDashboard,
+  Clock,
+  ScrollText,
+  Settings,
+  Bot,
+  FileText,
+  FolderGit2,
+  GitBranch,
+} from "lucide-react";
 
 const navItems = [
   { href: "/", label: "Taskboard", icon: LayoutDashboard },
   { href: "/pending", label: "Pending", icon: Clock },
+  { href: "/workspaces", label: "Workspaces", icon: FolderGit2 },
+  { href: "/git-remote", label: "Git Remote", icon: GitBranch },
   { href: "/claude", label: "Claude", icon: Bot },
+  { href: "/docs", label: "Docs", icon: FileText },
   { href: "/logs", label: "Logs", icon: ScrollText },
   { href: "/settings", label: "Settings", icon: Settings },
-  { href: "/claude-settings", label: "Claude Settings", icon: Globe },
 ];
 
 export function MobileNav() {
