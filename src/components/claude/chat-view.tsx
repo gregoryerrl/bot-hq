@@ -20,7 +20,7 @@ interface ChatViewProps {
   onSendInput: (input: string) => void;
   onSelectOption: (index: number) => void;
   onSendKey: (key: string) => void;
-  status: "idle" | "streaming" | "permission" | "input" | "selection";
+  status: "idle" | "streaming" | "permission" | "input" | "selection" | "awaiting_input";
 }
 
 export function ChatView({

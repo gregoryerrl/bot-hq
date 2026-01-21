@@ -82,21 +82,35 @@ export function ClaudeSession() {
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
-  // Fetch existing server sessions on mount
+  // Fetch existing server sessions and auto-connect to manager on mount
   useEffect(() => {
-    const fetchServerSessions = async () => {
+    const initializeManagerSession = async () => {
       try {
-        const res = await fetch("/api/terminal");
-        if (res.ok) {
-          const data = await res.json();
-          setServerSessions(data.sessions || []);
+        // First, ensure manager session exists
+        const managerRes = await fetch("/api/terminal/manager");
+        if (managerRes.ok) {
+          const managerData = await managerRes.json();
+          console.log("[ClaudeSession] Manager session ready:", managerData.sessionId);
+
+          // Fetch all sessions
+          const res = await fetch("/api/terminal");
+          if (res.ok) {
+            const data = await res.json();
+            setServerSessions(data.sessions || []);
+
+            // Auto-connect to manager session if not already connected
+            if (managerData.sessionId && !sessions.find(s => s.id === managerData.sessionId)) {
+              console.log("[ClaudeSession] Auto-connecting to manager session...");
+              connectToSession(managerData.sessionId);
+            }
+          }
         }
       } catch (error) {
-        console.error("Failed to fetch server sessions:", error);
+        console.error("Failed to initialize manager session:", error);
       }
     };
-    fetchServerSessions();
-  }, []);
+    initializeManagerSession();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Force chat mode on mobile
   useEffect(() => {
@@ -601,17 +615,38 @@ export function ClaudeSession() {
             <Bot className="h-16 w-16 mb-4 opacity-50" />
             <h3 className="text-lg font-medium mb-2">Claude Code</h3>
             <p className="text-sm mb-4 text-center max-w-md">
-              Launch an interactive Claude Code session.
-              {!isMobile && " Toggle between terminal and chat views anytime."}
+              {isCreating
+                ? "Connecting to manager session..."
+                : "Manager terminal session."}
+              {!isMobile && !isCreating && " Toggle between terminal and chat views anytime."}
             </p>
-            <Button onClick={createSession} disabled={isCreating}>
-              {isCreating ? (
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-              ) : (
+            {isCreating ? (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>Connecting...</span>
+              </div>
+            ) : (
+              <Button onClick={async () => {
+                // Try to reconnect to manager session
+                setIsCreating(true);
+                try {
+                  const res = await fetch("/api/terminal/manager");
+                  if (res.ok) {
+                    const data = await res.json();
+                    if (data.sessionId) {
+                      connectToSession(data.sessionId);
+                    }
+                  }
+                } catch (error) {
+                  console.error("Failed to connect to manager:", error);
+                } finally {
+                  setIsCreating(false);
+                }
+              }}>
                 <Plus className="h-4 w-4 mr-2" />
-              )}
-              Start Session
-            </Button>
+                Reconnect to Manager
+              </Button>
+            )}
           </div>
         ) : (
           <>

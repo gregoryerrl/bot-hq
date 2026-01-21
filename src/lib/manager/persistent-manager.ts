@@ -1,14 +1,16 @@
-import { spawn, ChildProcess } from "child_process";
 import { EventEmitter } from "events";
-import { getManagerPrompt, initializeBotHqStructure, BOT_HQ_ROOT } from "@/lib/bot-hq";
+import { initializeBotHqStructure, BOT_HQ_ROOT } from "@/lib/bot-hq";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import path from "path";
+import { ptyManager, MANAGER_SESSION_ID } from "@/lib/pty-manager";
+import { getScopePath } from "@/lib/settings";
 
 // Use a file-based flag to persist state across Next.js workers
 const STATUS_FILE = path.join(BOT_HQ_ROOT, ".manager-status");
 
 function isManagerRunning(): boolean {
-  return existsSync(STATUS_FILE);
+  // Check both file flag and actual PTY session
+  return existsSync(STATUS_FILE) || ptyManager.hasManagerSession();
 }
 
 function setManagerRunning(running: boolean): void {
@@ -20,9 +22,6 @@ function setManagerRunning(running: boolean): void {
 }
 
 class PersistentManager extends EventEmitter {
-  private commandQueue: string[] = [];
-  private processing = false;
-
   async start(): Promise<void> {
     if (isManagerRunning()) {
       console.log("[Manager] Already initialized");
@@ -32,99 +31,61 @@ class PersistentManager extends EventEmitter {
     // Initialize .bot-hq structure
     await initializeBotHqStructure();
 
-    console.log("[Manager] Starting persistent session...");
-    setManagerRunning(true);
-  }
+    console.log("[Manager] Starting persistent PTY session...");
 
-  async processCommand(command: string): Promise<void> {
-    const managerPrompt = await getManagerPrompt();
-    const fullPrompt = `${managerPrompt}\n\n---\n\nUser Command:\n${command}`;
-
-    return new Promise((resolve, reject) => {
-      console.log("[Manager] Processing command:", command.substring(0, 100) + "...");
-
-      const proc = spawn("claude", [
-        "--dangerously-skip-permissions",
-        "-p",
-        "--output-format", "json",
-        "--mcp-config", "/Users/gregoryerrl/Projects/bot-hq/.mcp.json",
-      ], {
-        cwd: BOT_HQ_ROOT,
-        env: { ...process.env },
-      });
-
-      let stdout = "";
-      let stderr = "";
-
-      proc.stdout?.on("data", (data: Buffer) => {
-        stdout += data.toString();
-        this.emit("output", data.toString());
-      });
-
-      proc.stderr?.on("data", (data: Buffer) => {
-        stderr += data.toString();
-        console.error("[Manager stderr]", data.toString());
-      });
-
-      proc.on("error", (err) => {
-        console.error("[Manager] Process error:", err);
-        reject(err);
-      });
-
-      proc.on("exit", (code) => {
-        console.log("[Manager] Command completed with exit code:", code);
-        if (code === 0) {
-          try {
-            const result = JSON.parse(stdout);
-            this.emit("result", result);
-            resolve();
-          } catch {
-            this.emit("text", stdout);
-            resolve();
-          }
-        } else {
-          console.error("[Manager] Process failed:", stderr);
-          reject(new Error(`Manager exited with code ${code}`));
-        }
-      });
-
-      // Send the prompt
-      proc.stdin?.write(fullPrompt);
-      proc.stdin?.end();
-    });
-  }
-
-  async sendCommand(command: string): Promise<void> {
-    if (!isManagerRunning()) {
-      console.error("[Manager] Not initialized");
-      return;
+    // Get scope path for the manager session working directory
+    let scopePath: string;
+    try {
+      scopePath = await getScopePath();
+    } catch {
+      scopePath = process.env.HOME || "/tmp";
     }
 
-    this.commandQueue.push(command);
+    // Ensure the PTY-based manager session exists
+    ptyManager.ensureManagerSession(scopePath);
 
-    if (!this.processing) {
-      this.processing = true;
-      while (this.commandQueue.length > 0) {
-        const cmd = this.commandQueue.shift()!;
-        try {
-          await this.processCommand(cmd);
-        } catch (error) {
-          console.error("[Manager] Command failed:", error);
-        }
-      }
-      this.processing = false;
+    setManagerRunning(true);
+    console.log("[Manager] PTY session started");
+  }
+
+  // Send a command to the PTY-based manager session
+  async sendCommand(command: string): Promise<void> {
+    if (!ptyManager.hasManagerSession()) {
+      console.error("[Manager] PTY session not initialized");
+      // Try to start it
+      await this.start();
+    }
+
+    console.log("[Manager] Sending command to PTY:", command.substring(0, 100) + "...");
+
+    // Write the command to the PTY session
+    // The user will see this in the terminal and interact with it
+    const success = ptyManager.write(MANAGER_SESSION_ID, command + "\n");
+
+    if (!success) {
+      console.error("[Manager] Failed to write to PTY session");
     }
   }
 
   stop(): void {
+    // Kill the PTY session if running
+    if (ptyManager.hasManagerSession()) {
+      ptyManager.killSession(MANAGER_SESSION_ID);
+    }
     setManagerRunning(false);
   }
 
-  getStatus(): { running: boolean; pid: number | null } {
+  getStatus(): { running: boolean; sessionId: string | null } {
+    const hasSession = ptyManager.hasManagerSession();
     return {
-      running: isManagerRunning(),
-      pid: null, // No persistent process - spawns on demand
+      running: hasSession || isManagerRunning(),
+      sessionId: hasSession ? MANAGER_SESSION_ID : null,
     };
+  }
+
+  // Get the manager session ID for connecting from the UI
+  getSessionId(): string | null {
+    return ptyManager.hasManagerSession() ? MANAGER_SESSION_ID : null;
   }
 }
 
@@ -154,9 +115,12 @@ export function sendManagerCommand(command: string): void {
   manager.sendCommand(command);
 }
 
-export function getManagerStatus(): { running: boolean; pid: number | null } {
-  return {
-    running: isManagerRunning(),
-    pid: null,
-  };
+export function getManagerStatus(): { running: boolean; sessionId: string | null } {
+  const manager = getManager();
+  return manager.getStatus();
+}
+
+export function getManagerSessionId(): string | null {
+  const manager = getManager();
+  return manager.getSessionId();
 }

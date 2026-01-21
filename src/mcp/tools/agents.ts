@@ -16,8 +16,8 @@ export function registerAgentTools(server: McpServer) {
             type: "text" as const,
             text: JSON.stringify({
               managerStatus: status.running ? "running" : "stopped",
-              managerPid: status.pid,
-              note: "Bot-hq now uses a single persistent manager that orchestrates subagents via the Task tool",
+              sessionId: status.sessionId,
+              note: "Bot-hq uses a persistent manager terminal session that orchestrates subagents. Connect to the manager session via /api/terminal/manager",
             }, null, 2),
           },
         ],

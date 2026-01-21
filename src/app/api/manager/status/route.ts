@@ -8,7 +8,7 @@ export async function GET() {
   } catch (error) {
     console.error("Failed to get manager status:", error);
     return NextResponse.json(
-      { error: "Failed to get status", running: false, pid: null },
+      { error: "Failed to get status", running: false, sessionId: null },
       { status: 500 }
     );
   }
