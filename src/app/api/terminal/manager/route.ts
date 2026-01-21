@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { ptyManager, MANAGER_SESSION_ID } from "@/lib/pty-manager";
 import { getScopePath } from "@/lib/settings";
 
@@ -31,6 +31,44 @@ export async function GET() {
     console.error("Failed to get/create manager session:", error);
     return NextResponse.json(
       { error: `Failed to get manager session: ${error}` },
+      { status: 500 }
+    );
+  }
+}
+
+// POST - Send input to manager session
+export async function POST(request: NextRequest) {
+  try {
+    const { input, resize } = await request.json();
+
+    const session = ptyManager.getSession(MANAGER_SESSION_ID);
+    if (!session) {
+      return NextResponse.json(
+        { error: "Manager session not found" },
+        { status: 404 }
+      );
+    }
+
+    // Handle resize
+    if (resize) {
+      ptyManager.resize(MANAGER_SESSION_ID, resize.cols, resize.rows);
+      return NextResponse.json({ message: "Resized" });
+    }
+
+    // Handle input
+    if (input !== undefined) {
+      ptyManager.write(MANAGER_SESSION_ID, input);
+      return NextResponse.json({ message: "Input sent" });
+    }
+
+    return NextResponse.json(
+      { error: "No input or resize provided" },
+      { status: 400 }
+    );
+  } catch (error) {
+    console.error("Failed to send input to manager session:", error);
+    return NextResponse.json(
+      { error: "Failed to send input" },
       { status: 500 }
     );
   }
