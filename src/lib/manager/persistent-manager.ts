@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { initializeBotHqStructure, BOT_HQ_ROOT } from "@/lib/bot-hq";
+import { initializeBotHqStructure, BOT_HQ_ROOT, getManagerPrompt } from "@/lib/bot-hq";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import path from "path";
 import { ptyManager, MANAGER_SESSION_ID } from "@/lib/pty-manager";
@@ -8,15 +8,25 @@ import { getScopePath } from "@/lib/settings";
 // Use a file-based flag to persist state across Next.js workers
 const STATUS_FILE = path.join(BOT_HQ_ROOT, ".manager-status");
 
-// Startup command for Claude Code to run initialization tasks
-const STARTUP_COMMAND = `You are the bot-hq manager. Perform startup initialization:
+// Build startup command with manager prompt
+async function buildStartupCommand(): Promise<string> {
+  const managerPrompt = await getManagerPrompt();
+
+  return `${managerPrompt}
+
+---
+
+# STARTUP INITIALIZATION
+
+You just started. Perform these initialization tasks:
 
 1. Use status_overview to check system health
 2. Use task_list to find any tasks stuck in "in_progress" state
 3. For each stuck task, use task_update to reset its state to "queued" (these are orphaned from previous session)
 4. Report what you found and any actions taken
 
-Then wait for further instructions.`;
+Then wait for task commands. When you receive a task command, follow your instructions above.`;
+}
 
 function isManagerRunning(): boolean {
   const hasStatusFile = existsSync(STATUS_FILE);
@@ -139,9 +149,12 @@ class PersistentManager extends EventEmitter {
     }, 15000); // 15 second max fallback
   }
 
-  private sendStartupCommand(): void {
+  private async sendStartupCommand(): Promise<void> {
+    console.log("[Manager] Building startup command with manager prompt...");
+    const startupCommand = await buildStartupCommand();
+
     console.log("[Manager] Sending startup initialization command to Claude Code...");
-    const success = ptyManager.write(MANAGER_SESSION_ID, STARTUP_COMMAND + "\n");
+    const success = ptyManager.write(MANAGER_SESSION_ID, startupCommand + "\n");
     if (!success) {
       console.error("[Manager] Failed to send startup command");
     } else {
