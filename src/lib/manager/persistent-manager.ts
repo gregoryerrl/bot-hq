@@ -154,9 +154,21 @@ class PersistentManager extends EventEmitter {
     const startupCommand = await buildStartupCommand();
 
     console.log("[Manager] Sending startup initialization command to Claude Code...");
-    const success = ptyManager.write(MANAGER_SESSION_ID, startupCommand + "\n");
-    if (!success) {
-      console.error("[Manager] Failed to send startup command");
+
+    // Send the command text first
+    const textSuccess = ptyManager.write(MANAGER_SESSION_ID, startupCommand);
+    if (!textSuccess) {
+      console.error("[Manager] Failed to send startup command text");
+      return;
+    }
+
+    // Small delay then send Enter key
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Send Enter (try multiple formats to ensure it works)
+    const enterSuccess = ptyManager.write(MANAGER_SESSION_ID, "\r");
+    if (!enterSuccess) {
+      console.error("[Manager] Failed to send Enter key");
     } else {
       console.log("[Manager] Startup command sent successfully");
     }
@@ -172,12 +184,20 @@ class PersistentManager extends EventEmitter {
 
     console.log("[Manager] Sending command to PTY:", command.substring(0, 100) + "...");
 
-    // Write the command to the PTY session
-    // Use \n (newline) to submit - matches how frontend sends input
-    const success = ptyManager.write(MANAGER_SESSION_ID, command + "\n");
+    // Write the command text first
+    const textSuccess = ptyManager.write(MANAGER_SESSION_ID, command);
+    if (!textSuccess) {
+      console.error("[Manager] Failed to write command text to PTY session");
+      return;
+    }
 
-    if (!success) {
-      console.error("[Manager] Failed to write to PTY session");
+    // Small delay then send Enter key
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    // Send Enter key
+    const enterSuccess = ptyManager.write(MANAGER_SESSION_ID, "\r");
+    if (!enterSuccess) {
+      console.error("[Manager] Failed to send Enter key");
     }
   }
 
