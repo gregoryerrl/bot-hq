@@ -85,19 +85,19 @@ class PersistentManager extends EventEmitter {
       return;
     }
 
-    console.log("[Manager] Waiting for Claude Code to be ready...");
+    console.log("[Manager] Waiting for Claude Code to be ready (idle state)...");
 
-    let buffer = "";
+    let idleTimeout: NodeJS.Timeout | null = null;
+    const IDLE_DELAY = 2000; // Wait 2 seconds of no output = idle/ready
 
-    this.outputListener = (data: string) => {
-      buffer += data;
-
-      // Claude Code shows ">" prompt or asks for input when ready
-      // Look for patterns that indicate it's ready for input
-      if (buffer.includes(">") || buffer.includes("What would you like to do?") || buffer.includes("How can I help")) {
+    const resetIdleTimer = () => {
+      if (idleTimeout) {
+        clearTimeout(idleTimeout);
+      }
+      idleTimeout = setTimeout(() => {
         if (!this.startupCommandSent) {
           this.startupCommandSent = true;
-          console.log("[Manager] Claude Code is ready, sending startup command...");
+          console.log("[Manager] Claude Code is idle (ready), sending startup command...");
 
           // Remove listener
           if (this.outputListener) {
@@ -105,22 +105,30 @@ class PersistentManager extends EventEmitter {
             this.outputListener = null;
           }
 
-          // Small delay to ensure prompt is fully rendered
-          setTimeout(() => {
-            this.sendStartupCommand();
-          }, 500);
+          this.sendStartupCommand();
         }
-      }
+      }, IDLE_DELAY);
+    };
+
+    this.outputListener = () => {
+      // Each time we get output, reset the idle timer
+      resetIdleTimer();
     };
 
     session.emitter.on("data", this.outputListener);
 
-    // Fallback timeout in case we miss the ready signal
+    // Start the idle timer immediately
+    resetIdleTimer();
+
+    // Fallback timeout in case something goes wrong
     setTimeout(() => {
       if (!this.startupCommandSent) {
         this.startupCommandSent = true;
-        console.log("[Manager] Fallback: Sending startup command after timeout...");
+        console.log("[Manager] Fallback: Sending startup command after max timeout...");
 
+        if (idleTimeout) {
+          clearTimeout(idleTimeout);
+        }
         if (this.outputListener) {
           session.emitter.off("data", this.outputListener);
           this.outputListener = null;
@@ -128,12 +136,12 @@ class PersistentManager extends EventEmitter {
 
         this.sendStartupCommand();
       }
-    }, 10000); // 10 second fallback
+    }, 15000); // 15 second max fallback
   }
 
   private sendStartupCommand(): void {
     console.log("[Manager] Sending startup initialization command to Claude Code...");
-    const success = ptyManager.write(MANAGER_SESSION_ID, STARTUP_COMMAND + "\r");
+    const success = ptyManager.write(MANAGER_SESSION_ID, STARTUP_COMMAND + "\n");
     if (!success) {
       console.error("[Manager] Failed to send startup command");
     } else {
@@ -152,8 +160,8 @@ class PersistentManager extends EventEmitter {
     console.log("[Manager] Sending command to PTY:", command.substring(0, 100) + "...");
 
     // Write the command to the PTY session
-    // Use \r (carriage return) to submit - this is what terminals expect
-    const success = ptyManager.write(MANAGER_SESSION_ID, command + "\r");
+    // Use \n (newline) to submit - matches how frontend sends input
+    const success = ptyManager.write(MANAGER_SESSION_ID, command + "\n");
 
     if (!success) {
       console.error("[Manager] Failed to write to PTY session");
