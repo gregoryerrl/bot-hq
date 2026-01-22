@@ -156,18 +156,25 @@ class PersistentManager extends EventEmitter {
     console.log("[Manager] Sending startup initialization command to Claude Code...");
 
     // Use bracketed paste mode (like xterm.js does)
-    // ESC[200~ starts paste, ESC[201~ ends paste
     const PASTE_START = "\x1b[200~";
     const PASTE_END = "\x1b[201~";
+    const FOCUS_IN = "\x1b[I";
 
-    // Send: paste_start + content + paste_end + Enter
-    const input = PASTE_START + startupCommand + PASTE_END + "\r";
-    const success = ptyManager.write(MANAGER_SESSION_ID, input);
+    // Send paste content
+    ptyManager.write(MANAGER_SESSION_ID, PASTE_START + startupCommand + PASTE_END);
+
+    // Wait for Claude Code to process the paste
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    // Send focus sequence then Enter (like browser does)
+    ptyManager.write(MANAGER_SESSION_ID, FOCUS_IN);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const success = ptyManager.write(MANAGER_SESSION_ID, "\r");
 
     if (!success) {
-      console.error("[Manager] Failed to send startup command");
+      console.error("[Manager] Failed to send Enter key");
     } else {
-      console.log("[Manager] Startup command sent successfully with bracketed paste");
+      console.log("[Manager] Startup command sent successfully");
     }
   }
 
@@ -182,17 +189,20 @@ class PersistentManager extends EventEmitter {
     console.log("[Manager] Sending command to PTY:", command.substring(0, 100) + "...");
 
     // Use bracketed paste mode (like xterm.js does)
-    // ESC[200~ starts paste, ESC[201~ ends paste
     const PASTE_START = "\x1b[200~";
     const PASTE_END = "\x1b[201~";
+    const FOCUS_IN = "\x1b[I";
 
-    // Send: paste_start + content + paste_end + Enter
-    const input = PASTE_START + command + PASTE_END + "\r";
-    const success = ptyManager.write(MANAGER_SESSION_ID, input);
+    // Send paste content
+    ptyManager.write(MANAGER_SESSION_ID, PASTE_START + command + PASTE_END);
 
-    if (!success) {
-      console.error("[Manager] Failed to write to PTY session");
-    }
+    // Wait for processing
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    // Send focus sequence then Enter
+    ptyManager.write(MANAGER_SESSION_ID, FOCUS_IN);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    ptyManager.write(MANAGER_SESSION_ID, "\r");
   }
 
   stop(): void {
