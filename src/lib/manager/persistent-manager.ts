@@ -155,22 +155,19 @@ class PersistentManager extends EventEmitter {
 
     console.log("[Manager] Sending startup initialization command to Claude Code...");
 
-    // Send the command text first
-    const textSuccess = ptyManager.write(MANAGER_SESSION_ID, startupCommand);
-    if (!textSuccess) {
-      console.error("[Manager] Failed to send startup command text");
-      return;
-    }
+    // Use bracketed paste mode (like xterm.js does)
+    // ESC[200~ starts paste, ESC[201~ ends paste
+    const PASTE_START = "\x1b[200~";
+    const PASTE_END = "\x1b[201~";
 
-    // Small delay then send Enter key
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Send: paste_start + content + paste_end + Enter
+    const input = PASTE_START + startupCommand + PASTE_END + "\r";
+    const success = ptyManager.write(MANAGER_SESSION_ID, input);
 
-    // Send Enter (try multiple formats to ensure it works)
-    const enterSuccess = ptyManager.write(MANAGER_SESSION_ID, "\r");
-    if (!enterSuccess) {
-      console.error("[Manager] Failed to send Enter key");
+    if (!success) {
+      console.error("[Manager] Failed to send startup command");
     } else {
-      console.log("[Manager] Startup command sent successfully");
+      console.log("[Manager] Startup command sent successfully with bracketed paste");
     }
   }
 
@@ -184,20 +181,17 @@ class PersistentManager extends EventEmitter {
 
     console.log("[Manager] Sending command to PTY:", command.substring(0, 100) + "...");
 
-    // Write the command text first
-    const textSuccess = ptyManager.write(MANAGER_SESSION_ID, command);
-    if (!textSuccess) {
-      console.error("[Manager] Failed to write command text to PTY session");
-      return;
-    }
+    // Use bracketed paste mode (like xterm.js does)
+    // ESC[200~ starts paste, ESC[201~ ends paste
+    const PASTE_START = "\x1b[200~";
+    const PASTE_END = "\x1b[201~";
 
-    // Small delay then send Enter key
-    await new Promise(resolve => setTimeout(resolve, 50));
+    // Send: paste_start + content + paste_end + Enter
+    const input = PASTE_START + command + PASTE_END + "\r";
+    const success = ptyManager.write(MANAGER_SESSION_ID, input);
 
-    // Send Enter key
-    const enterSuccess = ptyManager.write(MANAGER_SESSION_ID, "\r");
-    if (!enterSuccess) {
-      console.error("[Manager] Failed to send Enter key");
+    if (!success) {
+      console.error("[Manager] Failed to write to PTY session");
     }
   }
 
