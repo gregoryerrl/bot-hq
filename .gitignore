@@ -46,3 +46,4 @@ data/
 
 # Worktrees
 .worktrees/
+bot-hq.db

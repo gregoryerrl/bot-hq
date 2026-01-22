@@ -4,11 +4,19 @@ import { existsSync, writeFileSync, unlinkSync } from "fs";
 import path from "path";
 import { ptyManager, MANAGER_SESSION_ID } from "@/lib/pty-manager";
 import { getScopePath } from "@/lib/settings";
-import { db, tasks } from "@/lib/db";
-import { eq } from "drizzle-orm";
 
 // Use a file-based flag to persist state across Next.js workers
 const STATUS_FILE = path.join(BOT_HQ_ROOT, ".manager-status");
+
+// Startup command for Claude Code to run initialization tasks
+const STARTUP_COMMAND = `You are the bot-hq manager. Perform startup initialization:
+
+1. Use status_overview to check system health
+2. Use task_list to find any tasks stuck in "in_progress" state
+3. For each stuck task, use task_update to reset its state to "queued" (these are orphaned from previous session)
+4. Report what you found and any actions taken
+
+Then wait for further instructions.`;
 
 function isManagerRunning(): boolean {
   const hasStatusFile = existsSync(STATUS_FILE);
@@ -37,46 +45,18 @@ function setManagerRunning(running: boolean): void {
 }
 
 class PersistentManager extends EventEmitter {
-  // Reset any tasks left in in_progress state from previous session
-  private async resetOrphanedTasks(): Promise<void> {
-    try {
-      const orphanedTasks = db
-        .select({ id: tasks.id, title: tasks.title })
-        .from(tasks)
-        .where(eq(tasks.state, "in_progress"))
-        .all();
-
-      if (orphanedTasks.length > 0) {
-        console.log(`[Manager] Found ${orphanedTasks.length} orphaned task(s), resetting to queued...`);
-
-        db.update(tasks)
-          .set({ state: "queued", updatedAt: new Date() })
-          .where(eq(tasks.state, "in_progress"))
-          .run();
-
-        for (const task of orphanedTasks) {
-          console.log(`[Manager]   - Task #${task.id}: ${task.title.substring(0, 50)}...`);
-        }
-      }
-    } catch (error) {
-      console.error("[Manager] Failed to reset orphaned tasks:", error);
-    }
-  }
+  private startupCommandSent = false;
 
   async start(): Promise<void> {
-    // Always reset orphaned tasks on startup, even if manager appears to be running
-    // (the status file may persist across server restarts)
-    await this.resetOrphanedTasks();
-
     if (isManagerRunning()) {
       console.log("[Manager] Already initialized");
       return;
     }
 
-    // Initialize .bot-hq structure
+    // Initialize .bot-hq structure first
     await initializeBotHqStructure();
 
-    console.log("[Manager] Starting persistent PTY session...");
+    console.log("[Manager] Starting Claude Code PTY session...");
 
     // Get scope path for the manager session working directory
     let scopePath: string;
@@ -86,11 +66,27 @@ class PersistentManager extends EventEmitter {
       scopePath = process.env.HOME || "/tmp";
     }
 
-    // Ensure the PTY-based manager session exists
+    // Start the PTY-based manager session (Claude Code)
     ptyManager.ensureManagerSession(scopePath);
-
     setManagerRunning(true);
-    console.log("[Manager] PTY session started");
+    console.log("[Manager] Claude Code PTY session started");
+
+    // Send startup command after a delay to let Claude Code initialize
+    if (!this.startupCommandSent) {
+      this.startupCommandSent = true;
+      console.log("[Manager] Scheduling startup command...");
+      setTimeout(() => {
+        this.sendStartupCommand();
+      }, 3000); // Wait 3 seconds for Claude Code to be ready
+    }
+  }
+
+  private sendStartupCommand(): void {
+    console.log("[Manager] Sending startup initialization command to Claude Code...");
+    const success = ptyManager.write(MANAGER_SESSION_ID, STARTUP_COMMAND + "\r");
+    if (!success) {
+      console.error("[Manager] Failed to send startup command");
+    }
   }
 
   // Send a command to the PTY-based manager session
