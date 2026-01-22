@@ -98,7 +98,7 @@ class PersistentManager extends EventEmitter {
     console.log("[Manager] Waiting for Claude Code to be ready (idle state)...");
 
     let idleTimeout: NodeJS.Timeout | null = null;
-    const IDLE_DELAY = 2000; // Wait 2 seconds of no output = idle/ready
+    const IDLE_DELAY = 4000; // Wait 4 seconds of no output = idle/ready
 
     const resetIdleTimer = () => {
       if (idleTimeout) {
@@ -154,28 +154,19 @@ class PersistentManager extends EventEmitter {
     const startupCommand = await buildStartupCommand();
 
     console.log("[Manager] Sending startup initialization command to Claude Code...");
+    console.log("[Manager] Command length:", startupCommand.length);
 
-    // Use bracketed paste mode (like xterm.js does)
-    const PASTE_START = "\x1b[200~";
-    const PASTE_END = "\x1b[201~";
-    const FOCUS_IN = "\x1b[I";
+    // Send text first, wait for Claude Code to process it, then send Enter separately
+    // This prevents the Enter from being absorbed as part of the paste content
+    ptyManager.write(MANAGER_SESSION_ID, startupCommand);
 
-    // Send paste content
-    ptyManager.write(MANAGER_SESSION_ID, PASTE_START + startupCommand + PASTE_END);
-
-    // Wait for Claude Code to process the paste
+    // Wait for Claude Code to process the pasted text
     await new Promise(resolve => setTimeout(resolve, 500));
 
-    // Send focus sequence then Enter (like browser does)
-    ptyManager.write(MANAGER_SESSION_ID, FOCUS_IN);
-    await new Promise(resolve => setTimeout(resolve, 50));
-    const success = ptyManager.write(MANAGER_SESSION_ID, "\r");
+    // Now send Enter to submit
+    ptyManager.write(MANAGER_SESSION_ID, "\u000d");
 
-    if (!success) {
-      console.error("[Manager] Failed to send Enter key");
-    } else {
-      console.log("[Manager] Startup command sent successfully");
-    }
+    console.log("[Manager] Startup command sent successfully");
   }
 
   // Send a command to the PTY-based manager session
@@ -188,21 +179,14 @@ class PersistentManager extends EventEmitter {
 
     console.log("[Manager] Sending command to PTY:", command.substring(0, 100) + "...");
 
-    // Use bracketed paste mode (like xterm.js does)
-    const PASTE_START = "\x1b[200~";
-    const PASTE_END = "\x1b[201~";
-    const FOCUS_IN = "\x1b[I";
+    // Send text first, wait for Claude Code to process it, then send Enter separately
+    ptyManager.write(MANAGER_SESSION_ID, command);
 
-    // Send paste content
-    ptyManager.write(MANAGER_SESSION_ID, PASTE_START + command + PASTE_END);
+    // Wait for Claude Code to process the text
+    await new Promise(resolve => setTimeout(resolve, 300));
 
-    // Wait for processing
-    await new Promise(resolve => setTimeout(resolve, 200));
-
-    // Send focus sequence then Enter
-    ptyManager.write(MANAGER_SESSION_ID, FOCUS_IN);
-    await new Promise(resolve => setTimeout(resolve, 50));
-    ptyManager.write(MANAGER_SESSION_ID, "\r");
+    // Now send Enter to submit
+    ptyManager.write(MANAGER_SESSION_ID, "\u000d");
   }
 
   stop(): void {
@@ -249,6 +233,7 @@ export function stopManager(): void {
 }
 
 export function sendManagerCommand(command: string): void {
+  console.log("[Manager] sendManagerCommand called with:", command.substring(0, 50) + "...");
   const manager = getManager();
   manager.sendCommand(command);
 }

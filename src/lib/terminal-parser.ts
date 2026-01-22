@@ -519,62 +519,193 @@ export function detectSelectionMenu(buffer: string): SelectionMenu | null {
 export function detectAwaitingInput(buffer: string): AwaitingInputPrompt | null {
   const clean = stripAnsi(buffer);
 
-  // Look for [AWAITING_INPUT] or [AWAITING_INPUT:123] pattern
+  // First check for explicit [AWAITING_INPUT] marker
   const markerRegex = /\[AWAITING_INPUT(?::(\d+))?\]/;
   const endMarker = "[/AWAITING_INPUT]";
 
   const match = clean.match(markerRegex);
-  if (!match) return null;
+  if (match) {
+    const startIndex = clean.lastIndexOf(match[0]);
+    if (startIndex !== -1) {
+      const taskId = match[1] ? parseInt(match[1], 10) : undefined;
+      const afterStart = clean.slice(startIndex + match[0].length);
+      const endIndex = afterStart.indexOf(endMarker);
+      const content = endIndex !== -1
+        ? afterStart.slice(0, endIndex).trim()
+        : afterStart.trim();
 
-  const startIndex = clean.lastIndexOf(match[0]);
-  if (startIndex === -1) return null;
+      if (content) {
+        const lines = content.split("\n").map(l => l.trim()).filter(l => l);
+        let question = "";
+        const options: string[] = [];
+        let inOptions = false;
 
-  const taskId = match[1] ? parseInt(match[1], 10) : undefined;
+        for (const line of lines) {
+          if (line.startsWith("Question:")) {
+            question = line.replace("Question:", "").trim();
+          } else if (line === "Options:") {
+            inOptions = true;
+          } else if (inOptions && /^\d+\./.test(line)) {
+            const optionText = line.replace(/^\d+\.\s*/, "").trim();
+            if (optionText) options.push(optionText);
+          } else if (!inOptions && !question) {
+            question = line;
+          }
+        }
 
-  // Check if there's content after the start marker
-  const afterStart = clean.slice(startIndex + match[0].length);
-
-  // If we find an end marker, the prompt is complete (user should answer)
-  // If no end marker, prompt is still being output or waiting
-  const endIndex = afterStart.indexOf(endMarker);
-
-  // Extract the content between markers (or all content after start if no end marker yet)
-  const content = endIndex !== -1
-    ? afterStart.slice(0, endIndex).trim()
-    : afterStart.trim();
-
-  if (!content) return null;
-
-  // Parse the content
-  const lines = content.split("\n").map(l => l.trim()).filter(l => l);
-
-  let question = "";
-  const options: string[] = [];
-
-  let inOptions = false;
-
-  for (const line of lines) {
-    if (line.startsWith("Question:")) {
-      question = line.replace("Question:", "").trim();
-    } else if (line === "Options:") {
-      inOptions = true;
-    } else if (inOptions && /^\d+\./.test(line)) {
-      // Parse numbered option
-      const optionText = line.replace(/^\d+\.\s*/, "").trim();
-      if (optionText) {
-        options.push(optionText);
+        if (question) {
+          return { taskId, question, options };
+        }
       }
-    } else if (!inOptions && !question) {
-      // If no "Question:" prefix, treat first non-empty line as question
-      question = line;
     }
   }
 
-  if (!question) return null;
+  // Also detect natural question patterns from Claude Code
+  // Look at the last 40 lines for common "awaiting input" patterns
+  const lines = clean.split("\n").filter(l => l.trim());
+  const lastLines = lines.slice(-40);
 
-  return {
-    taskId,
-    question,
-    options,
-  };
+  // Patterns that indicate Claude is waiting for user input (very flexible)
+  const questionPatterns = [
+    // Direct questions
+    /what would you like/i,
+    /would you like (?:me )?to/i,
+    /want me to (?:create|start|do|help|make)/i,
+    /please (?:select|choose|pick|tell|let)/i,
+    /which (?:option|one|workspace|task|would)/i,
+    /how would you like/i,
+    /should i (?:proceed|continue|start|create)/i,
+    /do you want (?:me )?to/i,
+    /what should i do/i,
+    /how can i help/i,
+    /can i help/i,
+    // Instruction prompts that expect input (very flexible)
+    /just tell me/i,
+    /tell me[:\s]/i,
+    /let me know/i,
+    /specify (?:which|what|the|a)/i,
+    /provide (?:the|a|your|me)/i,
+    // Task-related prompts
+    /waiting for (?:task|your|input|a|the)/i,
+    /ready for (?:task|your|the|a|next)/i,
+    /send.*to begin/i,
+    /awaiting (?:input|task|your|instructions)/i,
+    // Question marks at end of line (clear questions)
+    /\?$/,
+    // Colon prompts at end of line (expecting input)
+    /:\s*$/,
+  ];
+
+  // Look for question pattern in the last lines
+  let questionLineIndex = -1;
+  let questionText = "";
+
+  for (let i = lastLines.length - 1; i >= 0; i--) {
+    const line = lastLines[i].trim();
+
+    // Check if this line matches a question pattern
+    for (const pattern of questionPatterns) {
+      if (pattern.test(line)) {
+        questionLineIndex = i;
+        questionText = line;
+        break;
+      }
+    }
+    if (questionLineIndex !== -1) break;
+  }
+
+  // If we found a question, look for options nearby
+  if (questionLineIndex !== -1) {
+    const options: string[] = [];
+
+    // Look backwards from the question for numbered options
+    for (let i = questionLineIndex - 1; i >= Math.max(0, questionLineIndex - 15); i--) {
+      const line = lastLines[i].trim();
+      const optionMatch = line.match(/^(\d+)\.\s+(.+)/);
+      if (optionMatch) {
+        const optionText = optionMatch[2].trim();
+        // Skip instruction-like lines
+        if (optionText && !optionText.match(/^(Esc|Tab|Enter|ctrl)/i)) {
+          options.unshift(optionText); // Add to beginning to maintain order
+        }
+      }
+    }
+
+    // Also look forward for options (in case question comes before options)
+    for (let i = questionLineIndex + 1; i < Math.min(lastLines.length, questionLineIndex + 10); i++) {
+      const line = lastLines[i].trim();
+      const optionMatch = line.match(/^(\d+)\.\s+(.+)/);
+      if (optionMatch) {
+        const optionText = optionMatch[2].trim();
+        if (optionText && !optionText.match(/^(Esc|Tab|Enter|ctrl)/i)) {
+          if (!options.includes(optionText)) {
+            options.push(optionText);
+          }
+        }
+      }
+    }
+
+    // Return even without options if we found a clear question
+    return {
+      question: questionText,
+      options,
+    };
+  }
+
+  // Also check for "Options:" style lists at the end
+  const optionsIndex = lastLines.findIndex(l => l.trim() === "Options:");
+  if (optionsIndex !== -1) {
+    const options: string[] = [];
+    let question = "";
+
+    // Look for question before "Options:"
+    for (let i = optionsIndex - 1; i >= Math.max(0, optionsIndex - 5); i--) {
+      const line = lastLines[i].trim();
+      if (line && !line.match(/^[-─═]+$/) && line.length > 10) {
+        question = line;
+        break;
+      }
+    }
+
+    // Parse options after "Options:"
+    for (let i = optionsIndex + 1; i < Math.min(lastLines.length, optionsIndex + 10); i++) {
+      const line = lastLines[i].trim();
+      const optionMatch = line.match(/^(\d+)\.\s+(.+)/);
+      if (optionMatch) {
+        const optionText = optionMatch[2].trim();
+        if (optionText) options.push(optionText);
+      }
+    }
+
+    if (options.length > 0) {
+      return { question: question || "Please select an option", options };
+    }
+  }
+
+  // Check for numbered options at the very end (common pattern)
+  const lastFewLines = lastLines.slice(-15);
+  const numberedOptions: string[] = [];
+  let lastQuestionLine = "";
+
+  for (const line of lastFewLines) {
+    const trimmed = line.trim();
+    const optionMatch = trimmed.match(/^(\d+)\.\s+(.+)/);
+    if (optionMatch) {
+      const optionText = optionMatch[2].trim();
+      if (optionText && !optionText.match(/^(Esc|Tab|Enter|ctrl)/i) && optionText.length > 3) {
+        numberedOptions.push(optionText);
+      }
+    } else if (trimmed.endsWith("?") || trimmed.endsWith(":")) {
+      lastQuestionLine = trimmed;
+    }
+  }
+
+  if (numberedOptions.length >= 2) {
+    return {
+      question: lastQuestionLine || "Please select an option",
+      options: numberedOptions,
+    };
+  }
+
+  return null;
 }
