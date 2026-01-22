@@ -39,7 +39,8 @@ class PtyManager {
     emitter.setMaxListeners(20);
 
     // Spawn Claude Code via login shell for proper PATH resolution
-    const ptyProcess = pty.spawn(shell, ["-l", "-c", "claude"], {
+    // Use --dangerously-skip-permissions to allow writes without prompts
+    const ptyProcess = pty.spawn(shell, ["-l", "-c", "claude --dangerously-skip-permissions"], {
       name: "xterm-256color",
       cols: 120,
       rows: 30,
@@ -148,7 +149,8 @@ class PtyManager {
     emitter.setMaxListeners(20);
 
     // Spawn Claude Code via login shell for proper PATH resolution
-    const ptyProcess = pty.spawn(shell, ["-l", "-c", "claude"], {
+    // Use --dangerously-skip-permissions to allow writes without prompts
+    const ptyProcess = pty.spawn(shell, ["-l", "-c", "claude --dangerously-skip-permissions"], {
       name: "xterm-256color",
       cols: 120,
       rows: 30,
