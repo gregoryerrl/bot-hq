@@ -11,8 +11,21 @@ import { eq } from "drizzle-orm";
 const STATUS_FILE = path.join(BOT_HQ_ROOT, ".manager-status");
 
 function isManagerRunning(): boolean {
-  // Check both file flag and actual PTY session
-  return existsSync(STATUS_FILE) || ptyManager.hasManagerSession();
+  const hasStatusFile = existsSync(STATUS_FILE);
+  const hasPtySession = ptyManager.hasManagerSession();
+
+  // Clean up stale status file if PTY session doesn't exist
+  if (hasStatusFile && !hasPtySession) {
+    console.log("[Manager] Cleaning up stale status file (no PTY session)");
+    try {
+      unlinkSync(STATUS_FILE);
+    } catch {
+      // Ignore errors
+    }
+    return false;
+  }
+
+  return hasStatusFile || hasPtySession;
 }
 
 function setManagerRunning(running: boolean): void {
@@ -51,6 +64,10 @@ class PersistentManager extends EventEmitter {
   }
 
   async start(): Promise<void> {
+    // Always reset orphaned tasks on startup, even if manager appears to be running
+    // (the status file may persist across server restarts)
+    await this.resetOrphanedTasks();
+
     if (isManagerRunning()) {
       console.log("[Manager] Already initialized");
       return;
@@ -58,9 +75,6 @@ class PersistentManager extends EventEmitter {
 
     // Initialize .bot-hq structure
     await initializeBotHqStructure();
-
-    // Reset orphaned in_progress tasks back to queued
-    await this.resetOrphanedTasks();
 
     console.log("[Manager] Starting persistent PTY session...");
 
