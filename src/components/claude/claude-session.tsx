@@ -41,6 +41,7 @@ export function ClaudeSession() {
   const isMobile = useIsMobile();
   const idleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastAwaitingPromptRef = useRef<string | null>(null);
+  const connectingSessionsRef = useRef<Set<string>>(new Set());
 
   // Update task state when awaiting input is detected
   const updateTaskAwaitingState = useCallback(async (prompt: AwaitingInputPrompt | null, taskId?: number) => {
@@ -320,6 +321,13 @@ export function ClaudeSession() {
       return;
     }
 
+    // Prevent duplicate concurrent connections to the same session
+    if (connectingSessionsRef.current.has(sessionId)) {
+      console.log("[ClaudeSession] Already connecting to session:", sessionId);
+      return;
+    }
+    connectingSessionsRef.current.add(sessionId);
+
     setIsCreating(true);
     try {
       // Create xterm instance for the existing session
@@ -474,7 +482,16 @@ export function ClaudeSession() {
         buffer: "",
       };
 
-      setSessions((prev) => [...prev, newSession]);
+      setSessions((prev) => {
+        // Double-check to prevent duplicates
+        if (prev.find(s => s.id === sessionId)) {
+          console.log("[ClaudeSession] Session already exists, skipping add:", sessionId);
+          terminal.dispose();
+          eventSource.close();
+          return prev;
+        }
+        return [...prev, newSession];
+      });
       setActiveSessionId(sessionId);
       setStatus("idle");
 
@@ -484,6 +501,7 @@ export function ClaudeSession() {
     } catch (error) {
       console.error("Failed to connect to session:", error);
     } finally {
+      connectingSessionsRef.current.delete(sessionId);
       setIsCreating(false);
     }
   }, [sessions, isMobile]);
