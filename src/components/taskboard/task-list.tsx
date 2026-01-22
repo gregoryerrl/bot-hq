@@ -68,12 +68,12 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
         body: JSON.stringify({ state: "in_progress" }),
       });
 
-      // Send command to manager
+      // Send command to manager - simple and direct prompt
       const response = await fetch("/api/manager/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          command: `Start working on task ${taskId}. Use the task_get tool to fetch the task details, then spawn a subagent to work on it.`,
+          command: `Work on bot-hq task #${taskId}. Fetch task details with task_get, then implement the requirements directly.`,
         }),
       });
 

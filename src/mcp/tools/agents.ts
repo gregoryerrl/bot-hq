@@ -49,7 +49,7 @@ export function registerAgentTools(server: McpServer) {
       }
 
       sendManagerCommand(
-        `Start working on task ${taskId}. Use the task_get tool to fetch the task details, then spawn a subagent to work on it.`
+        `Work on bot-hq task #${taskId}. Fetch task details with task_get, then implement the requirements directly.`
       );
 
       return {

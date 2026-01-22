@@ -4,6 +4,8 @@ import { existsSync, writeFileSync, unlinkSync } from "fs";
 import path from "path";
 import { ptyManager, MANAGER_SESSION_ID } from "@/lib/pty-manager";
 import { getScopePath } from "@/lib/settings";
+import { db, tasks } from "@/lib/db";
+import { eq } from "drizzle-orm";
 
 // Use a file-based flag to persist state across Next.js workers
 const STATUS_FILE = path.join(BOT_HQ_ROOT, ".manager-status");
@@ -22,6 +24,32 @@ function setManagerRunning(running: boolean): void {
 }
 
 class PersistentManager extends EventEmitter {
+  // Reset any tasks left in in_progress state from previous session
+  private async resetOrphanedTasks(): Promise<void> {
+    try {
+      const orphanedTasks = db
+        .select({ id: tasks.id, title: tasks.title })
+        .from(tasks)
+        .where(eq(tasks.state, "in_progress"))
+        .all();
+
+      if (orphanedTasks.length > 0) {
+        console.log(`[Manager] Found ${orphanedTasks.length} orphaned task(s), resetting to queued...`);
+
+        db.update(tasks)
+          .set({ state: "queued", updatedAt: new Date() })
+          .where(eq(tasks.state, "in_progress"))
+          .run();
+
+        for (const task of orphanedTasks) {
+          console.log(`[Manager]   - Task #${task.id}: ${task.title.substring(0, 50)}...`);
+        }
+      }
+    } catch (error) {
+      console.error("[Manager] Failed to reset orphaned tasks:", error);
+    }
+  }
+
   async start(): Promise<void> {
     if (isManagerRunning()) {
       console.log("[Manager] Already initialized");
@@ -30,6 +58,9 @@ class PersistentManager extends EventEmitter {
 
     // Initialize .bot-hq structure
     await initializeBotHqStructure();
+
+    // Reset orphaned in_progress tasks back to queued
+    await this.resetOrphanedTasks();
 
     console.log("[Manager] Starting persistent PTY session...");
 
@@ -59,8 +90,8 @@ class PersistentManager extends EventEmitter {
     console.log("[Manager] Sending command to PTY:", command.substring(0, 100) + "...");
 
     // Write the command to the PTY session
-    // The user will see this in the terminal and interact with it
-    const success = ptyManager.write(MANAGER_SESSION_ID, command + "\n");
+    // Use \r (carriage return) to submit - this is what terminals expect
+    const success = ptyManager.write(MANAGER_SESSION_ID, command + "\r");
 
     if (!success) {
       console.error("[Manager] Failed to write to PTY session");

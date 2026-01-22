@@ -11,6 +11,7 @@ import { TerminalView } from "./terminal-view";
 import { ChatView } from "./chat-view";
 import { useIsMobile } from "@/hooks/use-media-query";
 import { detectPermissionPrompt, detectSelectionMenu, detectAwaitingInput, AwaitingInputPrompt } from "@/lib/terminal-parser";
+import { useNotificationContext } from "@/components/notifications/notification-provider";
 import "@xterm/xterm/css/xterm.css";
 
 interface Session {
@@ -42,6 +43,25 @@ export function ClaudeSession() {
   const idleTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastAwaitingPromptRef = useRef<string | null>(null);
   const connectingSessionsRef = useRef<Set<string>>(new Set());
+  const lastNotifiedStatusRef = useRef<SessionStatus | null>(null);
+  const { addNotification } = useNotificationContext();
+
+  // Notify when terminal needs input
+  const updateStatusWithNotification = useCallback((newStatus: SessionStatus) => {
+    setStatus(newStatus);
+
+    // Only notify on status change and for input-requiring states
+    if (newStatus !== lastNotifiedStatusRef.current) {
+      if (newStatus === "permission") {
+        addNotification("Terminal Needs Input", "Permission prompt is waiting for your response", "warning");
+      } else if (newStatus === "awaiting_input") {
+        addNotification("Terminal Needs Input", "Claude is asking a question", "warning");
+      } else if (newStatus === "selection") {
+        addNotification("Terminal Needs Input", "Selection menu is waiting", "warning");
+      }
+      lastNotifiedStatusRef.current = newStatus;
+    }
+  }, [addNotification]);
 
   // Update task state when awaiting input is detected
   const updateTaskAwaitingState = useCallback(async (prompt: AwaitingInputPrompt | null, taskId?: number) => {
@@ -191,12 +211,12 @@ export function ClaudeSession() {
             const prompt = detectPermissionPrompt(buffer);
             const awaitingInput = detectAwaitingInput(buffer);
             if (awaitingInput) {
-              setStatus("awaiting_input");
+              updateStatusWithNotification("awaiting_input");
               updateTaskAwaitingState(awaitingInput);
             } else if (menu) {
-              setStatus("selection");
+              updateStatusWithNotification("selection");
             } else if (prompt) {
-              setStatus("permission");
+              updateStatusWithNotification("permission");
             } else {
               setStatus("idle");
               updateTaskAwaitingState(null);
@@ -215,7 +235,7 @@ export function ClaudeSession() {
             const menu = detectSelectionMenu(buffer);
             const prompt = detectPermissionPrompt(buffer);
             if (awaitingInput) {
-              setStatus("awaiting_input");
+              updateStatusWithNotification("awaiting_input");
               updateTaskAwaitingState(awaitingInput);
               // Clear idle timeout when awaiting input detected
               if (idleTimeoutRef.current) {
@@ -223,14 +243,14 @@ export function ClaudeSession() {
                 idleTimeoutRef.current = null;
               }
             } else if (menu) {
-              setStatus("selection");
+              updateStatusWithNotification("selection");
               // Clear idle timeout when selection menu detected
               if (idleTimeoutRef.current) {
                 clearTimeout(idleTimeoutRef.current);
                 idleTimeoutRef.current = null;
               }
             } else if (prompt) {
-              setStatus("permission");
+              updateStatusWithNotification("permission");
               // Clear idle timeout when permission prompt detected
               if (idleTimeoutRef.current) {
                 clearTimeout(idleTimeoutRef.current);
@@ -386,12 +406,12 @@ export function ClaudeSession() {
             const menu = detectSelectionMenu(buffer);
             const prompt = detectPermissionPrompt(buffer);
             if (awaitingInput) {
-              setStatus("awaiting_input");
+              updateStatusWithNotification("awaiting_input");
               updateTaskAwaitingState(awaitingInput);
             } else if (menu) {
-              setStatus("selection");
+              updateStatusWithNotification("selection");
             } else if (prompt) {
-              setStatus("permission");
+              updateStatusWithNotification("permission");
             } else {
               setStatus("idle");
               updateTaskAwaitingState(null);
@@ -408,20 +428,20 @@ export function ClaudeSession() {
             const menu = detectSelectionMenu(buffer);
             const prompt = detectPermissionPrompt(buffer);
             if (awaitingInput) {
-              setStatus("awaiting_input");
+              updateStatusWithNotification("awaiting_input");
               updateTaskAwaitingState(awaitingInput);
               if (idleTimeoutRef.current) {
                 clearTimeout(idleTimeoutRef.current);
                 idleTimeoutRef.current = null;
               }
             } else if (menu) {
-              setStatus("selection");
+              updateStatusWithNotification("selection");
               if (idleTimeoutRef.current) {
                 clearTimeout(idleTimeoutRef.current);
                 idleTimeoutRef.current = null;
               }
             } else if (prompt) {
-              setStatus("permission");
+              updateStatusWithNotification("permission");
               if (idleTimeoutRef.current) {
                 clearTimeout(idleTimeoutRef.current);
                 idleTimeoutRef.current = null;
