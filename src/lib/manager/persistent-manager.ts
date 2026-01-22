@@ -46,6 +46,7 @@ function setManagerRunning(running: boolean): void {
 
 class PersistentManager extends EventEmitter {
   private startupCommandSent = false;
+  private outputListener: ((data: string) => void) | null = null;
 
   async start(): Promise<void> {
     if (isManagerRunning()) {
@@ -71,14 +72,63 @@ class PersistentManager extends EventEmitter {
     setManagerRunning(true);
     console.log("[Manager] Claude Code PTY session started");
 
-    // Send startup command after a delay to let Claude Code initialize
+    // Wait for Claude Code to be ready before sending startup command
     if (!this.startupCommandSent) {
-      this.startupCommandSent = true;
-      console.log("[Manager] Scheduling startup command...");
-      setTimeout(() => {
-        this.sendStartupCommand();
-      }, 3000); // Wait 3 seconds for Claude Code to be ready
+      this.waitForReadyAndSendCommand();
     }
+  }
+
+  private waitForReadyAndSendCommand(): void {
+    const session = ptyManager.getSession(MANAGER_SESSION_ID);
+    if (!session) {
+      console.error("[Manager] No session found for startup command");
+      return;
+    }
+
+    console.log("[Manager] Waiting for Claude Code to be ready...");
+
+    let buffer = "";
+
+    this.outputListener = (data: string) => {
+      buffer += data;
+
+      // Claude Code shows ">" prompt or asks for input when ready
+      // Look for patterns that indicate it's ready for input
+      if (buffer.includes(">") || buffer.includes("What would you like to do?") || buffer.includes("How can I help")) {
+        if (!this.startupCommandSent) {
+          this.startupCommandSent = true;
+          console.log("[Manager] Claude Code is ready, sending startup command...");
+
+          // Remove listener
+          if (this.outputListener) {
+            session.emitter.off("data", this.outputListener);
+            this.outputListener = null;
+          }
+
+          // Small delay to ensure prompt is fully rendered
+          setTimeout(() => {
+            this.sendStartupCommand();
+          }, 500);
+        }
+      }
+    };
+
+    session.emitter.on("data", this.outputListener);
+
+    // Fallback timeout in case we miss the ready signal
+    setTimeout(() => {
+      if (!this.startupCommandSent) {
+        this.startupCommandSent = true;
+        console.log("[Manager] Fallback: Sending startup command after timeout...");
+
+        if (this.outputListener) {
+          session.emitter.off("data", this.outputListener);
+          this.outputListener = null;
+        }
+
+        this.sendStartupCommand();
+      }
+    }, 10000); // 10 second fallback
   }
 
   private sendStartupCommand(): void {
@@ -86,6 +136,8 @@ class PersistentManager extends EventEmitter {
     const success = ptyManager.write(MANAGER_SESSION_ID, STARTUP_COMMAND + "\r");
     if (!success) {
       console.error("[Manager] Failed to send startup command");
+    } else {
+      console.log("[Manager] Startup command sent successfully");
     }
   }
 
