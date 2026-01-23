@@ -36,7 +36,7 @@ export function ChatView({
   const blocks = parseTerminalOutput(buffer);
   const permissionPrompt = detectPermissionPrompt(buffer);
   const selectionMenu = detectSelectionMenu(buffer);
-  const showInput = status === "idle" || status === "input" ||
+  const showInput = status === "idle" || status === "input" || status === "awaiting_input" ||
     (permissionPrompt && isTellClaudeSelected(permissionPrompt));
   const showPermissionButtons = status === "permission" && permissionPrompt && !isTellClaudeSelected(permissionPrompt);
   const showSelectionMenu = status === "selection" && selectionMenu;
