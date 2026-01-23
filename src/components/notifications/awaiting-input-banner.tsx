@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from "react";
 import { AlertCircle, ChevronDown, ChevronUp, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import Link from "next/link";
 
 interface AwaitingTask {
   id: number;
@@ -76,12 +75,12 @@ export function AwaitingInputBanner() {
               <div className="text-sm">
                 <span className="font-medium text-amber-100">
                   Manager needs input on{" "}
-                  <Link
-                    href={`/`}
+                  <a
+                    href="/"
                     className="underline hover:text-white"
                   >
                     Task #{firstTask.id}
-                  </Link>
+                  </a>
                 </span>
                 {firstTask.waitingQuestion && (
                   <span className="text-amber-200/80 ml-2 truncate">
@@ -93,7 +92,7 @@ export function AwaitingInputBanner() {
             )}
           </div>
 
-          <Link href="/claude">
+          <a href="/claude">
             <Button
               size="sm"
               variant="outline"
@@ -101,7 +100,7 @@ export function AwaitingInputBanner() {
             >
               Go to Terminal
             </Button>
-          </Link>
+          </a>
 
           <Button
             size="icon"

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,14 @@ const navItems = [
 export function MobileNav() {
   const [isOpen, setIsOpen] = useState(false);
   const pathname = usePathname();
+
+  // Force hard navigation to work around SSE connection blocking client-side navigation
+  const handleNavigation = useCallback((e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
+    e.preventDefault();
+    setIsOpen(false);
+    // Use window.location for reliable navigation when SSE connections are active
+    window.location.href = href;
+  }, []);
 
   return (
     <>
@@ -73,7 +81,7 @@ export function MobileNav() {
               <Link
                 key={item.href}
                 href={item.href}
-                onClick={() => setIsOpen(false)}
+                onClick={(e) => handleNavigation(e, item.href)}
                 className={cn(
                   "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors",
                   isActive
