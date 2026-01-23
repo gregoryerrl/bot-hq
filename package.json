@@ -4,16 +4,22 @@
   "private": true,
   "scripts": {
     "setup": "npx tsx scripts/setup.js",
+    "setup:quick": "npx tsx scripts/setup.js -- -y",
+    "setup:verify": "npx tsx scripts/setup.js -- --verify",
+    "setup:reset": "npx tsx scripts/setup.js -- --reset",
+    "doctor": "npx tsx scripts/doctor.js",
+    "doctor:fix": "npx tsx scripts/doctor.js -- --fix",
     "local": "npm run dev",
-    "dev": "next dev -p 7890",
+    "dev": "next dev -p ${BOT_HQ_PORT:-7890}",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${BOT_HQ_PORT:-7890}",
     "lint": "eslint",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "mcp": "npx tsx src/mcp/server.ts"
+    "mcp": "npx tsx src/mcp/server.ts",
+    "preinstall": "node -e \"if(process.version.match(/^v(\\d+)/)[1]<18){console.error('Node.js 18+ required');process.exit(1)}\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.71.2",

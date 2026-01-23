@@ -794,7 +794,7 @@ interface AgentConfig {
 
 ## 11. Current System State
 
-**Last Updated**: 2026-01-23 16:00 PHT
+**Last Updated**: 2026-01-24 (Setup improvements)
 
 ```
 Manager Status: Running (Input needed)
@@ -864,13 +864,42 @@ The terminal history shows Task 6 completed successfully:
 
 ## Appendix B: Common Commands
 
-### Development
+### Setup Commands
 ```bash
-npm run dev          # Start dev server on port 7890
+npm run setup              # Interactive setup wizard
+npm run setup:quick        # Non-interactive setup with defaults
+npm run setup:verify       # Verify installation health
+npm run setup:reset        # Reset database and state
+
+# Setup with options
+npm run setup -- --help          # Show all options
+npm run setup -- --port 8080     # Custom port
+npm run setup -- --scope ~/code  # Custom projects directory
+npm run setup -- -y --skip-mcp   # Quick setup, skip MCP
+```
+
+### Troubleshooting Commands
+```bash
+npm run doctor             # Diagnose common issues
+npm run doctor:fix         # Diagnose and auto-fix issues
+```
+
+### Development Commands
+```bash
+npm run local        # Start dev server (uses BOT_HQ_PORT or 7890)
+npm run dev          # Alias for local
 npm run build        # Build for production
-npm run mcp          # Run MCP server
-npm run db:push      # Push schema changes
-npm run db:studio    # Open Drizzle Studio
+npm run start        # Start production server
+npm run mcp          # Run MCP server standalone
+npm run lint         # Run ESLint
+```
+
+### Database Commands
+```bash
+npm run db:push      # Push schema changes to database
+npm run db:studio    # Open Drizzle Studio (database browser)
+npm run db:generate  # Generate migration files
+npm run db:migrate   # Run migrations
 ```
 
 ### MCP Tools (via Claude)
@@ -890,3 +919,13 @@ agent_start taskId=7
 # Check status
 status_overview
 ```
+
+### Environment Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | (required) | API key for Claude agents |
+| `BOT_HQ_PORT` | 7890 | Server port |
+| `BOT_HQ_URL` | http://localhost:7890 | Server URL (for MCP) |
+| `BOT_HQ_SCOPE` | ~/Projects | Working directory for agents |
+| `BOT_HQ_SHELL` | $SHELL | Shell for terminal sessions |
+| `BOT_HQ_MAX_ITERATIONS` | 3 | Max task retry iterations |
