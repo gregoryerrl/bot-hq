@@ -311,6 +311,12 @@ npm rebuild node-pty
 
 **Status**: Fixed - rewritten to single eternal session.
 
+### Issue: Chat View Shows Garbled Output
+
+**Cause**: Terminal parser not fully stripping escape sequence fragments (`*Mi`, `*sg`, `+sg`, `*un`) and code block markers.
+
+**Status**: Fixed - enhanced `src/lib/terminal-parser.ts` with `cleanTerminalArtifacts()` function and additional noise filters.
+
 ---
 
 ## Automated Test Script

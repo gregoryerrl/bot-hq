@@ -1,5 +1,34 @@
 import stripAnsi from "strip-ansi";
 
+// Additional cleanup for escape sequence fragments that strip-ansi misses
+function cleanTerminalArtifacts(text: string): string {
+  return text
+    // Remove OSC sequences (like terminal title changes)
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)?/g, '')
+    // Remove DCS sequences
+    .replace(/\x1bP[^\x1b]*\x1b\\/g, '')
+    // Remove mouse tracking and other application sequences
+    .replace(/\x1b\[[\?<>=]?[0-9;]*[a-zA-Z]/g, '')
+    // Remove partial escape fragments like *Mi, *sg, +sg, *un
+    .replace(/[*+][A-Za-z][a-z]/g, '')
+    // Remove cursor position reports and other CSI fragments
+    .replace(/\x1b\[[0-9;]*[HfJKmsuABCDEFGnST]/g, '')
+    // Remove single escape characters followed by brackets or letters
+    .replace(/\x1b[\[\]()#][^\x1b]*/g, '')
+    // Remove bare escape characters
+    .replace(/\x1b/g, '')
+    // Remove control characters except newline and tab
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    // Clean up multiple spaces
+    .replace(/[ ]{3,}/g, '  ')
+    // Clean up multiple dots that aren't ellipsis
+    .replace(/\.{4,}/g, '...')
+    // Remove lines that are just dots/periods
+    .replace(/^[\.\s]+$/gm, '')
+    // Clean up multiple newlines
+    .replace(/\n{3,}/g, '\n\n');
+}
+
 export type ParsedBlock =
   | { type: "assistant"; content: string }
   | { type: "user"; content: string }
@@ -229,6 +258,25 @@ function isNoiseeLine(line: string): boolean {
   if (/\[\[O/.test(trimmed)) return true;
   if (/^[a-z]\^/.test(trimmed)) return true;
 
+  // Skip partial escape sequence fragments (e.g., *Mi, *sg, +sg, *un)
+  if (/^[*+][A-Za-z][a-z]$/.test(trimmed)) return true;
+  if (/^[*+][A-Za-z][a-z]\s/.test(trimmed)) return true;
+
+  // Skip lines that are just ellipsis or dots
+  if (/^\.{2,}$/.test(trimmed)) return true;
+  if (/^…+$/.test(trimmed)) return true;
+
+  // Skip lines that are just code block markers
+  if (/^`{3,}$/.test(trimmed)) return true;
+  if (/^`{3,}\w*$/.test(trimmed)) return true;
+
+  // Skip fragmented table lines (single column separators)
+  if (/^[│|┃]+$/.test(trimmed)) return true;
+
+  // Skip lines that look like cursor/screen control remnants
+  if (/^\[\d+[A-Z]$/.test(trimmed)) return true;
+  if (/^\d+;\d+[Hf]$/.test(trimmed)) return true;
+
   // Skip lines that are just prompt characters
   if (/^[❯>●]\s*$/.test(trimmed)) return true;
 
@@ -262,7 +310,8 @@ function isNoiseeLine(line: string): boolean {
 
 // Parse full buffer into blocks for chat view
 export function parseTerminalOutput(buffer: string): ParsedBlock[] {
-  const clean = stripAnsi(buffer);
+  // First strip ANSI codes, then clean up remaining artifacts
+  const clean = cleanTerminalArtifacts(stripAnsi(buffer));
   const blocks: ParsedBlock[] = [];
 
   // Split by common delimiters
@@ -349,6 +398,11 @@ export function parseTerminalOutput(buffer: string): ParsedBlock[] {
     /Code\s+Writer/i,
     /Code\s+Reviewer/i,
     /Use\s+\/\w+\s+to/i,               // Use /command to suggestions
+    /^[*+][A-Za-z][a-z]/,              // Partial escape sequences
+    /^\.{2,}$/,                         // Just dots/ellipsis
+    /^…+$/,                             // Unicode ellipsis
+    /^\[\d+[A-Z]/,                      // Cursor control remnants
+    /^`{3,}$/,                          // Code block markers only
   ];
 
   let lastContent = "";

@@ -1,11 +1,69 @@
 # ISSUES.md - Known Issues & Bugs
 
-> **Last Updated**: 2026-01-23 (All critical issues fixed)
+> **Last Updated**: 2026-01-23 16:00 PHT
 > **Tested By**: Claude (via Claude in Chrome browser automation)
 
 ---
 
-## All Critical Issues - FIXED
+## All Issues Resolved
+
+No critical issues currently open.
+
+---
+
+## Previously Fixed Issues
+
+### 7. Taskboard Shows "No tasks found" Despite Tasks Existing - FIXED
+
+**Severity**: Critical
+**Status**: FIXED
+**Page**: `/` (Taskboard)
+
+**Root Cause**: The `better-sqlite3` native module was compiled for a different Node.js version (NODE_MODULE_VERSION 137 vs required 127), causing database queries to fail silently.
+
+**Solution**: Rebuilt the native module:
+```bash
+npm rebuild better-sqlite3
+```
+
+**Verified**: 2026-01-23 - Taskboard now displays all 7 tasks correctly.
+
+---
+
+### 8. Workspaces Page Shows "No workspaces configured" Despite Workspaces Existing - FIXED
+
+**Severity**: Critical
+**Status**: FIXED
+**Page**: `/workspaces`
+
+**Root Cause**: Same as Issue #7 - `better-sqlite3` native module version mismatch.
+
+**Solution**: Same fix as Issue #7 - `npm rebuild better-sqlite3`
+
+**Verified**: 2026-01-23 - Workspaces page now displays all 9 workspaces correctly.
+
+---
+
+### 9. Chat View Renders Garbled Terminal Output - FIXED
+
+**Severity**: Medium
+**Status**: FIXED
+**Page**: `/claude` (Chat view)
+
+**Root Cause**: The terminal parser (`src/lib/terminal-parser.ts`) wasn't fully cleaning escape sequence fragments and terminal UI artifacts from the buffer.
+
+**Solution**: Enhanced the terminal parser with:
+1. Added `cleanTerminalArtifacts()` function to strip remaining escape sequences after `stripAnsi()`
+2. Added filters for partial escape fragments like `*Mi`, `*sg`, `+sg`, `*un`
+3. Added filters for code block markers (`\`\`\``) and ellipsis lines
+4. Enhanced `isNoiseeLine()` to catch more terminal UI noise patterns
+
+**Files Modified**:
+- `src/lib/terminal-parser.ts`
+
+**Verified**: 2026-01-23 - Chat view now renders clean, readable output.
+
+---
 
 ### 1. Browser UI Stuck in "Rendering" Loop - FIXED
 
@@ -144,17 +202,19 @@ All database operations working:
 
 ### Browser UI
 
-All UI functionality working:
-- Sidebar navigation (full page reload)
-- Claude page with single eternal session
-- Terminal view with command input
-- Chat view with message input
-- Mode toggle (Terminal/Chat)
-- Status indicators
+All working (verified 2026-01-23 16:00 PHT):
+- ✅ Sidebar navigation (full page reload)
+- ✅ Claude page with single eternal session
+- ✅ Terminal view with command input
+- ✅ Chat view with message input and clean rendering
+- ✅ Mode toggle (Terminal/Chat)
+- ✅ Status indicators
+- ✅ Taskboard - shows all 7 tasks correctly
+- ✅ Workspaces - shows all 9 workspaces correctly
 
 ---
 
-## Test Results (2026-01-23)
+## Test Results (2026-01-23 16:00 PHT)
 
 ### Test Environment
 
@@ -165,50 +225,72 @@ All UI functionality working:
 
 ### Tests Performed
 
-1. **Sidebar Navigation**
-   - `/claude` → `/` (Taskboard)
-   - `/` → `/claude`
-   - All navigation links working
+1. **Sidebar Navigation** ✅ PASS
+   - All navigation links working via hard reload
 
-2. **Manager Session**
+2. **Manager Session** ✅ PASS
    - Auto-connects on page load
    - PTY spawns successfully
    - Claude Code initializes and runs
-   - Status indicator updates correctly
+   - Status indicator shows "Input needed" (yellow)
 
-3. **Terminal Input**
-   - Commands typed in Terminal view
-   - Commands typed in Chat view
-   - Send button works
-   - Enter key works
+3. **Terminal View Input** ✅ PASS
+   - Commands typed and displayed
    - Commands execute in Claude Code
+   - Output displays correctly with tables
 
-4. **Session UI**
+4. **Chat View Input** ✅ PASS
+   - Input field visible and works
+   - Commands can be typed and sent
+   - Send button works
+   - Output renders clean and readable
+
+5. **Session UI** ✅ PASS
    - No "+ New" button
    - No session tabs
    - Clean single-session interface
-   - Proper error handling with retry
+   - Terminal/Chat toggle works
+
+6. **Taskboard** ✅ PASS
+   - Shows all 7 tasks correctly
+   - Task cards display with proper styling
+
+7. **Workspaces Page** ✅ PASS
+   - Shows all 9 workspaces correctly
+   - Workspace cards display with paths
+
+8. **Git Remote Page** ✅ PASS
+   - Page loads correctly
+   - Tabs visible (Remotes, Issues, Clone)
+   - Add Remote button present
+
+9. **Logs Page** ✅ PASS
+   - Page loads correctly
+
+10. **Pending/Review Page** ✅ PASS
+    - Shows git-native review migration message
 
 ---
 
 ## How to Verify Fixes
 
 ```bash
-# 1. Ensure node-pty is properly installed
+# 1. Ensure native modules are properly installed
 cd /Users/gregoryerrl/Projects/bot-hq
 npm rebuild node-pty
+npm rebuild better-sqlite3
 
 # 2. Start the dev server
 npm run dev
 
 # 3. Open Chrome and navigate to
-http://localhost:7890/claude
+http://localhost:7890/
 
 # 4. Verify:
-#    - Page loads without "Rendering..." indicator
-#    - Manager session auto-connects
-#    - Terminal shows Claude Code output
-#    - No "+ New" button or session tabs
-#    - Sidebar navigation works
-#    - Terminal/Chat input works
+#    - Taskboard shows all tasks
+#    - Workspaces page shows all workspaces
+#    - Claude page loads with manager session
+#    - Chat view renders clean output
+#    - Terminal view shows formatted tables
+#    - All navigation works
 ```
