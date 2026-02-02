@@ -33,8 +33,8 @@ Bot-HQ's architecture draws from two key inspirations:
 
 | Feature | Inspired By | Description |
 |---------|-------------|-------------|
-| **Criteria-Driven Iteration** | [Ralph Wiggum](https://github.com/human-software-language/ralph-wiggum) | The iteration loop where tasks are retried with feedback until completion criteria are met. Manager evaluates work against defined criteria, provides feedback on failures, and triggers autonomous retries. |
-| **Smart Context Management** | [GSD (Get Shit Done)](https://github.com/get-shit-done/gsd) | The `.bot-hq/` directory structure with markdown files for context persistence. WORKSPACE.md, STATE.md, and PROGRESS.md files maintain context across sessions and enable effective handoff between manager and subagents. |
+| **Criteria-Driven Iteration** | Ralph Wiggum technique ([fstandhartinger](https://github.com/fstandhartinger/ralph-wiggum), [ghuntley](https://github.com/ghuntley/how-to-ralph-wiggum)) | The iteration loop where tasks are retried with feedback until completion criteria are met. Manager evaluates work against defined criteria, provides feedback on failures, and triggers autonomous retries. |
+| **Smart Context Management** | GSD (Get Shit Done) pattern ([b-r-a-n/gsd-claude](https://github.com/b-r-a-n/gsd-claude)) | The `.bot-hq/` directory structure with markdown files for context persistence. WORKSPACE.md, STATE.md, and PROGRESS.md files maintain context across sessions and enable effective handoff between manager and subagents. |
 
 #### Criteria-Driven Iteration (Ralph Wiggum)
 
