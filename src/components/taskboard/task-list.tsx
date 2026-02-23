@@ -68,12 +68,12 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
         body: JSON.stringify({ state: "in_progress" }),
       });
 
-      // Send command to manager - simple and direct prompt
+      // Send command to manager
       const response = await fetch("/api/manager/command", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          command: `Work on bot-hq task #${taskId}. Fetch task details with task_get, then implement the requirements directly.`,
+          command: `TASK ${taskId}`,
         }),
       });
 
@@ -106,32 +106,6 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
     }
   }
 
-  async function handleRetryWithFeedback(taskId: number, feedback: string) {
-    try {
-      // First get the current task to read its iterationCount
-      const taskResponse = await fetch(`/api/tasks/${taskId}`);
-      const task = await taskResponse.json();
-      const currentIteration = task.iterationCount || 1;
-
-      // Update task with feedback and increment iteration count
-      await fetch(`/api/tasks/${taskId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          state: "queued",
-          feedback: feedback,
-          iterationCount: currentIteration + 1,
-        }),
-      });
-
-      toast.success(`Task ${taskId} requeued with feedback (iteration ${currentIteration + 1})`);
-      fetchTasks();
-    } catch (error) {
-      console.error("Failed to retry task with feedback:", error);
-      toast.error("Failed to retry task");
-    }
-  }
-
   if (loading) {
     return <div className="text-muted-foreground">Loading tasks...</div>;
   }
@@ -153,7 +127,6 @@ export function TaskList({ workspaceFilter, stateFilter }: TaskListProps) {
           onAssign={handleAssign}
           onStartTask={handleStartTask}
           onRetry={handleRetry}
-          onRetryWithFeedback={handleRetryWithFeedback}
         />
       ))}
     </div>

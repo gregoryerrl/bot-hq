@@ -1,5 +1,23 @@
 import stripAnsi from "strip-ansi";
 
+// Pre-process terminal buffer to preserve whitespace implied by cursor positioning.
+// ANSI cursor movement sequences encode spatial layout - stripping them without
+// preserving spacing causes words to concatenate ("BuildinteractiveCLI").
+function preserveCursorSpacing(text: string): string {
+  return text
+    // Cursor to absolute column (e.g., \x1b[20G) → space
+    .replace(/\x1b\[\d*G/g, ' ')
+    // Cursor forward N positions (e.g., \x1b[5C) → space
+    .replace(/\x1b\[\d*C/g, ' ')
+    // Cursor position / home (e.g., \x1b[10;20H, \x1b[H) → newline
+    .replace(/\x1b\[\d*;\d*[Hf]/g, '\n')
+    .replace(/\x1b\[H/g, '\n')
+    // Carriage return + line feed → newline
+    .replace(/\r\n/g, '\n')
+    // Standalone carriage return (cursor to start of line) → newline
+    .replace(/\r/g, '\n');
+}
+
 // Additional cleanup for escape sequence fragments that strip-ansi misses
 function cleanTerminalArtifacts(text: string): string {
   return text
@@ -237,6 +255,11 @@ const NOISE_PATTERNS = [
   /^\d+\s+(hour|day|week|month|year)s?\s+ago/i,
   /\d+\s+messages?\s*$/i,
 
+  // Claude Code session rating prompt
+  /How is Claude doing this session/i,
+  /^\s*\d:\s*(Bad|Fine|Good|Dismiss)\s*/i,
+  /^1:\s*Bad\s+2:\s*Fine\s+3:\s*Good/i,
+
   // Claude Code suggestions and prompts
   /^Try\s+"/i,                        // Try "..." suggestions
   /^Try\s+".*"\s*$/i,                 // Full try suggestions
@@ -250,8 +273,8 @@ function isNoiseeLine(line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed) return true; // Skip empty lines
 
-  // Skip very short lines (likely UI artifacts)
-  if (trimmed.length < 3) return true;
+  // Skip very short lines (likely UI artifacts or streaming fragments)
+  if (trimmed.length < 4) return true;
 
   // Skip garbled escape sequences
   if (/\^\[\[/.test(trimmed)) return true;
@@ -280,11 +303,40 @@ function isNoiseeLine(line: string): boolean {
   // Skip lines that are just prompt characters
   if (/^[❯>●]\s*$/.test(trimmed)) return true;
 
+  // Skip prefix markers (* + · ●) followed by very short content (streaming fragments)
+  // e.g., "* S", "+ e", "· K ↑", "* 4", "+ in ..."
+  if (/^[*+·●]\s*.{0,8}$/.test(trimmed)) return true;
+
+  // Skip Claude Code thinking/streaming progress indicators
+  // These are in-place updated status lines that fragment when parsed
+  if (/\(thinking\)\s*$/i.test(trimmed)) return true;
+  if (/^[*+·]\s*\w{0,3}\s*\(thinking\)/i.test(trimmed)) return true;
+  if (/^[*+·]\s*(Stewing|Propagating|Photosynthesizing|Gitifying|Lollygagging|Ruminating|Pondering|Cogitating|Musing|Deliberating|Percolating|Simmering|Marinating|Distilling|Crystallizing|Composting|Fermenting|Brainstorming|Noodling|Daydreaming|Meditating|Contemplating|Reflecting|Processing|Synthesizing|Assembling|Constructing|Formulating|Drafting|Sculpting|Weaving|Brewing|Baking|Cooking|Sauteing|Grilling|Roasting|Mixing|Blending|Stirring|Whipping|Folding|Kneading|Crunching|Churning|Grinding|Polishing|Buffing|Sanding|Hammering|Forging|Welding|Soldering|Wiring|Plumbing|Tinkering|Fiddling|Juggling|Puzzling|Untangling|Decoding|Parsing|Compiling|Linking|Deploying|Shipping|Launching|Loading|Rendering|Painting|Sketching|Doodling|Scribbling|Typing|Writing|Reading|Scanning|Analyzing|Computing|Calculating|Tabulating|Enumerating|Iterating|Recursing|Searching|Indexing|Caching|Buffering|Streaming|Piping|Routing|Mapping|Reducing|Filtering|Sorting|Hashing|Encrypting|Decrypting|Compressing|Decompressing)/i.test(trimmed)) return true;
+  if (/^\d+m?\s*\d*s?\s*·\s*[↓↑]\s*[\d.]+k?\s*tokens/i.test(trimmed)) return true;
+  if (/·\s*[↓↑]\s*[\d.]+k?\s*tokens\s*·?\s*(thinking)?/i.test(trimmed)) return true;
+  // Streaming timing results: "Crunched for 1m 26s", "Kneading... 6"
+  if (/^(Crunched|Kneaded|Stewed|Brewed|Baked|Cooked)\s+(for\s+)?\d/i.test(trimmed)) return true;
+  if (/^[A-Z][a-z]+ing\.{3}\s*[↓↑]?\s*\d*$/i.test(trimmed)) return true;
+  // Single or few characters followed by (thinking) - fragmented progress updates
+  if (/^[*+·]?\s*[A-Za-z\s]{0,5}\s*\d*\s*(thinking)?\s*$/i.test(trimmed) && trimmed.length < 20) return true;
+  // "Claude is working..." spinner text
+  if (/^Claude is working/i.test(trimmed)) return true;
+  // ctrl+o/ctrl+b hints
+  if (/ctrl\+[ob]\s+to\s+(expand|run)/i.test(trimmed)) return true;
+  // "+N more tool uses" lines
+  if (/^\+\d+\s+more\s+tool\s+uses/i.test(trimmed)) return true;
+  // "[Pasted text #N +N lines]" indicators
+  if (/^\[Pasted text/i.test(trimmed)) return true;
+  // "bypass permissions on/off" status bar
+  if (/bypass permissions/i.test(trimmed)) return true;
+  // "shift+tab to cycle" and similar status bar text
+  if (/shift\+tab\s+to\s+cycle/i.test(trimmed)) return true;
+
   // Skip lines that are mostly box-drawing or decorative
   if (/^[─┌┐└┘│├┤┬┴┼╭╮╯╰\s|└├│┃┆┊]+$/.test(trimmed)) return true;
 
-  // Skip lines that start with box-drawing chars
-  if (/^[└├│┃┆┊]/.test(trimmed)) return true;
+  // Skip lines that start with box-drawing chars (tool output borders, tree connectors)
+  if (/^[└├│┃┆┊╭╮╯╰─┌┐┘]/.test(trimmed)) return true;
 
   // Skip ANY line containing "Tip:" anywhere
   if (/Tip:/i.test(trimmed)) return true;
@@ -310,8 +362,8 @@ function isNoiseeLine(line: string): boolean {
 
 // Parse full buffer into blocks for chat view
 export function parseTerminalOutput(buffer: string): ParsedBlock[] {
-  // First strip ANSI codes, then clean up remaining artifacts
-  const clean = cleanTerminalArtifacts(stripAnsi(buffer));
+  // Preserve cursor-implied spacing, strip ANSI codes, then clean artifacts
+  const clean = cleanTerminalArtifacts(stripAnsi(preserveCursorSpacing(buffer)));
   const blocks: ParsedBlock[] = [];
 
   // Split by common delimiters
@@ -403,6 +455,20 @@ export function parseTerminalOutput(buffer: string): ParsedBlock[] {
     /^…+$/,                             // Unicode ellipsis
     /^\[\d+[A-Z]/,                      // Cursor control remnants
     /^`{3,}$/,                          // Code block markers only
+    /\(thinking\)/i,                    // Thinking indicators
+    /^[*+·]\s*(Stewing|Propagating|Photosynthesizing|Gitifying|Lollygagging|Ruminating|Pondering|Kneading|Crunching|Churning)/i,
+    /·\s*[↓↑]\s*[\d.]+k?\s*tokens/i,   // Token count lines
+    /^Claude is working/i,              // Working spinner
+    /ctrl\+[ob]\s+to\s+(expand|run)/i,  // ctrl+o/b hints
+    /^\+\d+\s+more\s+tool\s+uses/i,    // Tool use count
+    /How is Claude doing this session/i, // Session rating
+    /^\d:\s*(Bad|Fine|Good|Dismiss)/i,  // Rating options
+    /^\[Pasted text/i,                  // Pasted text indicators
+    /bypass permissions/i,              // Status bar
+    /shift\+tab\s+to\s+cycle/i,        // Status bar
+    /^(Crunched|Kneaded|Stewed|Brewed)\s+(for\s+)?\d/i, // Timing results
+    /^[*+·●]\s*.{0,8}$/,               // Short streaming fragments
+    /^[└├│┃┆┊╭╮╯╰─┌┐┘]/,              // Box-drawing prefixes
   ];
 
   let lastContent = "";
@@ -615,13 +681,15 @@ export function detectAwaitingInput(buffer: string): AwaitingInputPrompt | null 
   }
 
   // Also detect natural question patterns from Claude Code
-  // Look at the last 40 lines for common "awaiting input" patterns
+  // Only look at the LAST 15 lines to avoid matching prompt template text
+  // that's deeper in the buffer (e.g., example "[AWAITING_INPUT]" blocks)
   const lines = clean.split("\n").filter(l => l.trim());
-  const lastLines = lines.slice(-40);
+  const lastLines = lines.slice(-15);
 
-  // Patterns that indicate Claude is waiting for user input (very flexible)
+  // Patterns that indicate Claude is waiting for user input
+  // These must be actual questions, not status messages
   const questionPatterns = [
-    // Direct questions
+    // Direct questions (these inherently indicate awaiting input)
     /what would you like/i,
     /would you like (?:me )?to/i,
     /want me to (?:create|start|do|help|make)/i,
@@ -633,21 +701,32 @@ export function detectAwaitingInput(buffer: string): AwaitingInputPrompt | null 
     /what should i do/i,
     /how can i help/i,
     /can i help/i,
-    // Instruction prompts that expect input (very flexible)
+    // Instruction prompts that expect input
     /just tell me/i,
     /tell me[:\s]/i,
     /let me know/i,
     /specify (?:which|what|the|a)/i,
     /provide (?:the|a|your|me)/i,
-    // Task-related prompts
-    /waiting for (?:task|your|input|a|the)/i,
-    /ready for (?:task|your|the|a|next)/i,
-    /send.*to begin/i,
-    /awaiting (?:input|task|your|instructions)/i,
     // Question marks at end of line (clear questions)
     /\?$/,
-    // Colon prompts at end of line (expecting input)
-    /:\s*$/,
+  ];
+
+  // Patterns that look like status/waiting messages and should NOT trigger input detection
+  const statusPatterns = [
+    /waiting for task command/i,
+    /ready\.\s*waiting/i,
+    /waiting for task\s*$/i,
+    /ready for next/i,
+    /awaiting task/i,
+    /how is claude doing this session/i,  // Session rating prompt
+    /^\d+:\s*(Bad|Fine|Good|Dismiss)/i,   // Session rating options
+    /1:\s*Bad\s+2:\s*Fine\s+3:\s*Good/i,  // Session rating line
+    /\(optional\)\s*$/i,                   // "(optional)" suffix
+    /Question:\s*Your question here/i,     // Template example text
+    /accept.*commit.*merge.*retry.*discard/i, // Manager review question (should not trigger)
+    /Stopped\.\s*What\s*would\s*you/i,    // Claude Code stop prompt (handled by manager)
+    /First option/i,                       // Template example option
+    /Third option/i,                       // Template example option
   ];
 
   // Look for question pattern in the last lines
@@ -656,6 +735,12 @@ export function detectAwaitingInput(buffer: string): AwaitingInputPrompt | null 
 
   for (let i = lastLines.length - 1; i >= 0; i--) {
     const line = lastLines[i].trim();
+
+    // Skip lines that end with "." (declarative statements, not questions)
+    if (line.endsWith('.') && !line.endsWith('?')) continue;
+
+    // Skip known status/waiting messages
+    if (statusPatterns.some(p => p.test(line))) continue;
 
     // Check if this line matches a question pattern
     for (const pattern of questionPatterns) {
@@ -737,26 +822,33 @@ export function detectAwaitingInput(buffer: string): AwaitingInputPrompt | null 
   }
 
   // Check for numbered options at the very end (common pattern)
+  // Only trigger if there's a clear question (ending with ?) - NOT colon
+  // Colon-ending lines are often instructions/headers, not questions
   const lastFewLines = lastLines.slice(-15);
   const numberedOptions: string[] = [];
   let lastQuestionLine = "";
 
   for (const line of lastFewLines) {
     const trimmed = line.trim();
+
+    // Skip known status patterns
+    if (statusPatterns.some(p => p.test(trimmed))) continue;
+
     const optionMatch = trimmed.match(/^(\d+)\.\s+(.+)/);
     if (optionMatch) {
       const optionText = optionMatch[2].trim();
       if (optionText && !optionText.match(/^(Esc|Tab|Enter|ctrl)/i) && optionText.length > 3) {
         numberedOptions.push(optionText);
       }
-    } else if (trimmed.endsWith("?") || trimmed.endsWith(":")) {
+    } else if (trimmed.endsWith("?")) {
+      // Only treat lines ending with ? as questions (not :)
       lastQuestionLine = trimmed;
     }
   }
 
-  if (numberedOptions.length >= 2) {
+  if (numberedOptions.length >= 2 && lastQuestionLine) {
     return {
-      question: lastQuestionLine || "Please select an option",
+      question: lastQuestionLine,
       options: numberedOptions,
     };
   }

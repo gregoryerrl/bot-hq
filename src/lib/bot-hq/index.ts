@@ -94,4 +94,24 @@ export async function cleanupTaskFiles(workspaceName: string, taskId: number): P
   }
 }
 
+export async function clearAllTaskContext(workspaceName: string): Promise<void> {
+  const tasksDir = path.join(BOT_HQ_DIR, "workspaces", workspaceName, "tasks");
+  try {
+    await fs.rm(tasksDir, { recursive: true });
+    await fs.mkdir(tasksDir, { recursive: true });
+  } catch {
+    // Directory may not exist
+  }
+
+  // Reset STATE.md
+  await updateStateFile(workspaceName, "# Current State\n\nNo active state.\n");
+}
+
+export async function updateStateFile(workspaceName: string, content: string): Promise<void> {
+  const stateMdPath = path.join(BOT_HQ_DIR, "workspaces", workspaceName, "STATE.md");
+  const workspaceDir = path.join(BOT_HQ_DIR, "workspaces", workspaceName);
+  await fs.mkdir(workspaceDir, { recursive: true });
+  await fs.writeFile(stateMdPath, content);
+}
+
 export { BOT_HQ_DIR, BOT_HQ_ROOT };

@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, gitRemotes, tasks, logs } from "@/lib/db";
 import { eq, and, isNull } from "drizzle-orm";
+import { execFile } from "child_process";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 function decryptCredentials(encrypted: string): { token: string } | null {
   try {
@@ -8,6 +12,64 @@ function decryptCredentials(encrypted: string): { token: string } | null {
   } catch {
     return null;
   }
+}
+
+interface IssueDetails {
+  number: number;
+  title: string;
+  body: string | null;
+  url: string;
+}
+
+async function fetchIssueViaApi(
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  token: string
+): Promise<IssueDetails> {
+  const response = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`,
+    {
+      headers: {
+        Authorization: `token ${token}`,
+        Accept: "application/vnd.github.v3+json",
+        "User-Agent": "bot-hq",
+      },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`GitHub API ${response.status}`);
+  }
+
+  const issue = await response.json();
+  return {
+    number: issue.number,
+    title: issue.title,
+    body: issue.body,
+    url: issue.html_url,
+  };
+}
+
+async function fetchIssueViaGh(
+  owner: string,
+  repo: string,
+  issueNumber: number
+): Promise<IssueDetails> {
+  const { stdout } = await execFileAsync("gh", [
+    "issue", "view",
+    String(issueNumber),
+    "--repo", `${owner}/${repo}`,
+    "--json", "number,title,body,url",
+  ], { timeout: 15000 });
+
+  const issue = JSON.parse(stdout);
+  return {
+    number: issue.number,
+    title: issue.title,
+    body: issue.body || null,
+    url: issue.url,
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -68,7 +130,6 @@ export async function POST(request: NextRequest) {
     }
 
     if (!token) {
-      // Try to get token from global remote
       const globalRemote = await db.query.gitRemotes.findFirst({
         where: and(
           eq(gitRemotes.provider, "github"),
@@ -82,33 +143,21 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    if (!token) {
-      return NextResponse.json(
-        { error: "No GitHub token available" },
-        { status: 400 }
-      );
-    }
+    // Fetch issue details — API with token, or gh CLI fallback
+    let issue: IssueDetails;
 
-    // Fetch issue details from GitHub
-    const response = await fetch(
-      `https://api.github.com/repos/${remote.owner}/${remote.repo}/issues/${issueNumber}`,
-      {
-        headers: {
-          Authorization: `token ${token}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "bot-hq",
-        },
+    if (token) {
+      issue = await fetchIssueViaApi(remote.owner, remote.repo, issueNumber, token);
+    } else {
+      try {
+        issue = await fetchIssueViaGh(remote.owner, remote.repo, issueNumber);
+      } catch {
+        return NextResponse.json(
+          { error: "No GitHub token and gh CLI unavailable" },
+          { status: 400 }
+        );
       }
-    );
-
-    if (!response.ok) {
-      return NextResponse.json(
-        { error: `Failed to fetch issue #${issueNumber} from GitHub` },
-        { status: 400 }
-      );
     }
-
-    const issue = await response.json();
 
     // Create the task
     const [newTask] = await db
@@ -118,7 +167,7 @@ export async function POST(request: NextRequest) {
         sourceRemoteId: remote.id,
         sourceRef: String(issue.number),
         title: issue.title,
-        description: `${issue.body || ""}\n\n---\nGitHub Issue: ${issue.html_url}`,
+        description: `${issue.body || ""}\n\n---\nGitHub Issue: ${issue.url}`,
         priority: 0,
         state: "new",
         updatedAt: new Date(),

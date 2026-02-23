@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Check, X, RotateCcw, GitBranch, FileCode } from "lucide-react";
+import { Check, Trash2, RotateCcw, GitBranch, FileCode } from "lucide-react";
 import { Task } from "@/lib/db/schema";
 
 interface DiffFile {
@@ -24,7 +24,7 @@ interface DiffReviewCardProps {
     totalDeletions: number;
   };
   onAccept: (taskId: number) => void;
-  onReject: (taskId: number) => void;
+  onDelete: (taskId: number) => void;
   onRetry: (taskId: number, feedback: string) => void;
 }
 
@@ -32,7 +32,7 @@ export function DiffReviewCard({
   task,
   diff,
   onAccept,
-  onReject,
+  onDelete,
   onRetry,
 }: DiffReviewCardProps) {
   const [feedback, setFeedback] = useState("");
@@ -136,10 +136,10 @@ export function DiffReviewCard({
             </Button>
             <Button
               variant="destructive"
-              onClick={() => onReject(task.id)}
+              onClick={() => onDelete(task.id)}
             >
-              <X className="h-4 w-4 mr-2" />
-              Reject & Remove
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
             </Button>
           </div>
         )}

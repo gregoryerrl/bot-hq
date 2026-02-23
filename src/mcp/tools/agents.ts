@@ -6,26 +6,12 @@ const BOT_HQ_URL = process.env.BOT_HQ_URL || "http://localhost:7890";
 
 async function sendCommandToManager(command: string): Promise<boolean> {
   try {
-    // Send text first
-    const textResponse = await fetch(`${BOT_HQ_URL}/api/terminal/manager`, {
+    const response = await fetch(`${BOT_HQ_URL}/api/manager/command`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: command }),
+      body: JSON.stringify({ command }),
     });
-
-    if (!textResponse.ok) return false;
-
-    // Wait for Claude Code to process the text
-    await new Promise(resolve => setTimeout(resolve, 300));
-
-    // Send Enter separately to submit (use unicode escape for carriage return)
-    const enterResponse = await fetch(`${BOT_HQ_URL}/api/terminal/manager`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input: "\u000d" }),
-    });
-
-    return enterResponse.ok;
+    return response.ok;
   } catch (error) {
     console.error("Failed to send command to manager:", error);
     return false;
@@ -94,7 +80,7 @@ export function registerAgentTools(server: McpServer) {
       }
 
       const success = await sendCommandToManager(
-        `Work on bot-hq task #${taskId}. Fetch task details with task_get, then implement the requirements directly.`
+        `TASK ${taskId}`
       );
 
       if (!success) {

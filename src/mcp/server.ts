@@ -3,6 +3,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { registerAgentTools } from "./tools/agents.js";
 import { registerTaskTools } from "./tools/tasks.js";
 import { registerMonitoringTools } from "./tools/monitoring.js";
+import { registerDiagramTools } from "./tools/diagrams.js";
+import { registerGitHealthTools } from "./tools/git-health.js";
 
 const server = new McpServer({
   name: "bot-hq",
@@ -13,6 +15,8 @@ const server = new McpServer({
 registerAgentTools(server);
 registerTaskTools(server);
 registerMonitoringTools(server);
+registerDiagramTools(server);
+registerGitHealthTools(server);
 
 // Start with stdio transport
 async function main() {

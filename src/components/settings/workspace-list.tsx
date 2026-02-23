@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Trash2, FolderGit2, Settings } from "lucide-react";
+import { Trash2, FolderGit2, Settings, GitGraph } from "lucide-react";
 import { Workspace } from "@/lib/db/schema";
 import Link from "next/link";
 
@@ -80,6 +80,14 @@ export function WorkspaceList({ onAddClick }: WorkspaceListProps) {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => window.location.assign(`/workspaces/${workspace.id}/diagram`)}
+                    title="Diagrams"
+                  >
+                    <GitGraph className="h-4 w-4" />
+                  </Button>
                   <Button variant="ghost" size="icon" asChild>
                     <Link href={`/settings/workspaces/${workspace.id}`}>
                       <Settings className="h-4 w-4" />

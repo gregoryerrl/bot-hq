@@ -1,11 +1,9 @@
 "use client";
 
-import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { Play, RotateCcw, MessageSquare, X, ExternalLink } from "lucide-react";
+import { Play, RotateCcw, ExternalLink, CheckCircle } from "lucide-react";
 import { Task } from "@/lib/db/schema";
 
 interface TaskCardProps {
@@ -13,7 +11,6 @@ interface TaskCardProps {
   onAssign: (taskId: number) => void;
   onStartTask: (taskId: number) => void;
   onRetry?: (taskId: number) => void;
-  onRetryWithFeedback?: (taskId: number, feedback: string) => void;
 }
 
 const stateColors: Record<string, string> = {
@@ -34,18 +31,7 @@ const stateLabels: Record<string, string> = {
   done: "Done",
 };
 
-export function TaskCard({ task, onAssign, onStartTask, onRetry, onRetryWithFeedback }: TaskCardProps) {
-  const [showFeedback, setShowFeedback] = useState(false);
-  const [feedback, setFeedback] = useState("");
-
-  const handleRetryWithFeedback = () => {
-    if (onRetryWithFeedback && feedback.trim()) {
-      onRetryWithFeedback(task.id, feedback);
-      setFeedback("");
-      setShowFeedback(false);
-    }
-  };
-
+export function TaskCard({ task, onAssign, onStartTask, onRetry }: TaskCardProps) {
   // Check if task is from a git remote (has sourceRef)
   const hasSourceRef = task.sourceRef && task.sourceRemoteId;
 
@@ -103,36 +89,28 @@ export function TaskCard({ task, onAssign, onStartTask, onRetry, onRetryWithFeed
               Retry
             </Button>
           )}
-          {task.state === "done" && onRetryWithFeedback && (
-            <Button size="sm" variant="outline" onClick={() => setShowFeedback(!showFeedback)}>
-              <MessageSquare className="h-4 w-4 mr-1" />
-              Request Changes
+          {task.state === "done" && task.branchName && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                if (typeof window !== "undefined") {
+                  window.location.assign("/pending");
+                }
+              }}
+            >
+              <ExternalLink className="h-4 w-4 mr-1" />
+              Review
             </Button>
+          )}
+          {task.state === "done" && !task.branchName && (
+            <Badge variant="secondary" className="bg-green-100 text-green-800 text-xs">
+              <CheckCircle className="h-3 w-3 mr-1" />
+              Committed
+            </Badge>
           )}
         </div>
       </div>
-
-      {/* Feedback input for done tasks */}
-      {showFeedback && task.state === "done" && (
-        <div className="mt-3 pt-3 border-t space-y-2">
-          <Textarea
-            placeholder="Describe what changes you need..."
-            value={feedback}
-            onChange={(e) => setFeedback(e.target.value)}
-            className="min-h-[80px] text-sm"
-          />
-          <div className="flex gap-2">
-            <Button size="sm" onClick={handleRetryWithFeedback} disabled={!feedback.trim()}>
-              <RotateCcw className="h-4 w-4 mr-1" />
-              Submit & Retry
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setShowFeedback(false)}>
-              <X className="h-4 w-4 mr-1" />
-              Cancel
-            </Button>
-          </div>
-        </div>
-      )}
     </Card>
   );
 }

@@ -3,6 +3,21 @@ import { z } from "zod";
 import { db, tasks, workspaces, logs } from "../../lib/db/index.js";
 import { eq, desc } from "drizzle-orm";
 
+const BOT_HQ_URL = process.env.BOT_HQ_URL || "http://localhost:7890";
+
+/** After a task is marked done with a branchName, auto-clear the manager session */
+function triggerAutoClear(): void {
+  // Delay to let the manager finish any remaining output before /clear
+  setTimeout(async () => {
+    try {
+      await fetch(`${BOT_HQ_URL}/api/manager/clear`, { method: "POST" });
+      console.log("[MCP] Auto-clear triggered after task completion");
+    } catch (error) {
+      console.error("[MCP] Failed to trigger auto-clear:", error);
+    }
+  }, 5000);
+}
+
 export function registerTaskTools(server: McpServer) {
   // task_list - List tasks with filters
   server.tool(
@@ -200,8 +215,9 @@ export function registerTaskTools(server: McpServer) {
         .optional()
         .describe("New state"),
       notes: z.string().optional().describe("Additional notes to append to description"),
+      branchName: z.string().optional().describe("Git branch name for this task"),
     },
-    async ({ taskId, priority, state, notes }) => {
+    async ({ taskId, priority, state, notes, branchName }) => {
       const task = await db.query.tasks.findFirst({
         where: eq(tasks.id, taskId),
       });
@@ -223,6 +239,7 @@ export function registerTaskTools(server: McpServer) {
       const updates: Record<string, unknown> = { updatedAt: new Date() };
       if (priority !== undefined) updates.priority = priority;
       if (state !== undefined) updates.state = state;
+      if (branchName !== undefined) updates.branchName = branchName;
       if (notes !== undefined) {
         updates.description = task.description
           ? `${task.description}\n\n---\nManager notes: ${notes}`
@@ -230,6 +247,11 @@ export function registerTaskTools(server: McpServer) {
       }
 
       await db.update(tasks).set(updates).where(eq(tasks.id, taskId));
+
+      // Auto-clear manager when a task is marked done with a branch (ready for review)
+      if (state === "done" && branchName) {
+        triggerAutoClear();
+      }
 
       return {
         content: [

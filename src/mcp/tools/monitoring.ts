@@ -1,7 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { db, logs, tasks, workspaces, gitRemotes } from "../../lib/db/index.js";
+import { db, logs, tasks, workspaces, gitRemotes, settings } from "../../lib/db/index.js";
 import { eq, desc, and } from "drizzle-orm";
+import { detectGitRemotes, createWorkspaceRemote } from "../../lib/git-remote-utils.js";
+import fs from "fs";
+import path from "path";
+import os from "os";
 
 export function registerMonitoringTools(server: McpServer) {
   // logs_get - Get recent logs
@@ -207,10 +211,22 @@ export function registerMonitoringTools(server: McpServer) {
         })
         .returning();
 
+      // Auto-detect and register git remotes
+      let autoDetectedRemotes = 0;
+      try {
+        const remotes = await detectGitRemotes(repoPath);
+        for (const remote of remotes) {
+          const created = await createWorkspaceRemote(newWorkspace.id, remote);
+          if (created) autoDetectedRemotes++;
+        }
+      } catch {
+        // Remote detection failure shouldn't block workspace creation
+      }
+
       await db.insert(logs).values({
         workspaceId: newWorkspace.id,
         type: "agent",
-        message: `Workspace created: ${name} -> ${repoPath}`,
+        message: `Workspace created: ${name} -> ${repoPath}${autoDetectedRemotes > 0 ? ` (${autoDetectedRemotes} remote${autoDetectedRemotes > 1 ? "s" : ""} auto-detected)` : ""}`,
       });
 
       return {
@@ -220,7 +236,8 @@ export function registerMonitoringTools(server: McpServer) {
             text: JSON.stringify({
               success: true,
               workspaceId: newWorkspace.id,
-              message: `Workspace '${name}' created`,
+              autoDetectedRemotes,
+              message: `Workspace '${name}' created${autoDetectedRemotes > 0 ? ` with ${autoDetectedRemotes} remote${autoDetectedRemotes > 1 ? "s" : ""} auto-detected` : ""}`,
             }),
           },
         ],
@@ -522,4 +539,117 @@ export function registerMonitoringTools(server: McpServer) {
       };
     }
   );
+
+  // workspace_discover - Scan scope directory for untracked repos and cleanup candidates
+  server.tool(
+    "workspace_discover",
+    "Scan the scope directory for git repos not tracked as workspaces and folders that may need cleanup",
+    {},
+    async () => {
+      // Inline discovery logic (can't use @/ imports in MCP process)
+      const scopePath = await getScopePathForMcp();
+
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(scopePath, { withFileTypes: true });
+      } catch {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ workspaces: [], cleanup: [], error: `Cannot read scope path: ${scopePath}` }),
+          }],
+        };
+      }
+
+      const allWorkspaces = await db.select({ repoPath: workspaces.repoPath }).from(workspaces);
+      const knownPaths = new Set(allWorkspaces.map((w) => w.repoPath));
+
+      const workspaceSuggestions: { name: string; repoPath: string; remotes?: { gitName: string; provider: string; owner: string | null; repo: string | null }[] }[] = [];
+      const cleanupSuggestions: { name: string; path: string; reason: string; lastModified: string; isEmpty: boolean; hasGit: boolean }[] = [];
+
+      const now = new Date();
+      const staleThreshold = new Date(now);
+      staleThreshold.setMonth(staleThreshold.getMonth() - 6);
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (/^\./.test(entry.name)) continue;
+
+        const dirPath = path.join(scopePath, entry.name);
+        const hasGit = fs.existsSync(path.join(dirPath, ".git"));
+
+        // Workspace suggestions: git repos not tracked
+        if (hasGit && !knownPaths.has(dirPath)) {
+          let remotes: { gitName: string; provider: string; owner: string | null; repo: string | null }[] | undefined;
+          try {
+            const detected = await detectGitRemotes(dirPath);
+            remotes = detected.map((r) => ({
+              gitName: r.gitName,
+              provider: r.provider,
+              owner: r.owner,
+              repo: r.repo,
+            }));
+          } catch {
+            // Remote detection failure shouldn't prevent the suggestion
+          }
+          workspaceSuggestions.push({ name: entry.name, repoPath: dirPath, remotes });
+        }
+
+        // Cleanup suggestions: skip tracked workspaces
+        if (knownPaths.has(dirPath)) continue;
+
+        let isEmpty = false;
+        try { isEmpty = fs.readdirSync(dirPath).length === 0; } catch { continue; }
+
+        let mtime: Date;
+        try { mtime = fs.statSync(dirPath).mtime; } catch { continue; }
+
+        const isStale = mtime < staleThreshold;
+
+        let reason: string | null = null;
+        if (isEmpty) {
+          reason = "Empty directory";
+        } else if (!hasGit) {
+          reason = "No git repository";
+        } else if (isStale) {
+          const monthsAgo = Math.floor((now.getTime() - mtime.getTime()) / (1000 * 60 * 60 * 24 * 30));
+          reason = `Not modified in ${monthsAgo} months`;
+        }
+
+        if (reason) {
+          cleanupSuggestions.push({
+            name: entry.name,
+            path: dirPath,
+            reason,
+            lastModified: mtime.toISOString(),
+            isEmpty,
+            hasGit,
+          });
+        }
+      }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ workspaces: workspaceSuggestions, cleanup: cleanupSuggestions }, null, 2),
+        }],
+      };
+    }
+  );
+}
+
+// Helper: get scope path for MCP process (reads from DB settings or falls back)
+async function getScopePathForMcp(): Promise<string> {
+  try {
+    const result = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, "scope_path"))
+      .limit(1);
+    if (result.length > 0) return result[0].value;
+  } catch {
+    // Fall through to defaults
+  }
+  if (process.env.SCOPE_PATH) return process.env.SCOPE_PATH;
+  return path.join(os.homedir(), "Projects");
 }

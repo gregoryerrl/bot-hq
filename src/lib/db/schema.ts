@@ -116,6 +116,24 @@ export const settings = sqliteTable("settings", {
     .$defaultFn(() => new Date()),
 });
 
+// Diagrams - React Flow user flow diagrams per workspace
+export const diagrams = sqliteTable("diagrams", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  workspaceId: integer("workspace_id")
+    .notNull()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  title: text("title").notNull(),
+  flowData: text("flow_data").notNull(), // JSON: { nodes: ReactFlowNode[], edges: ReactFlowEdge[] }
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+}, (table) => [
+  index("diagrams_workspace_idx").on(table.workspaceId),
+]);
+
 // Authorized devices
 export const authorizedDevices = sqliteTable("authorized_devices", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -155,3 +173,5 @@ export type PendingDevice = typeof pendingDevices.$inferSelect;
 export type NewPendingDevice = typeof pendingDevices.$inferInsert;
 export type Setting = typeof settings.$inferSelect;
 export type NewSetting = typeof settings.$inferInsert;
+export type Diagram = typeof diagrams.$inferSelect;
+export type NewDiagram = typeof diagrams.$inferInsert;

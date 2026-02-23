@@ -10,7 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { GitBranch, MoreVertical, Trash2, Settings, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { GitBranch, MoreVertical, Trash2, CheckCircle2, AlertCircle, Loader2, Scan, Plus } from "lucide-react";
 import { toast } from "sonner";
 
 interface GitRemote {
@@ -28,12 +28,15 @@ interface GitRemote {
 }
 
 interface RemoteListProps {
+  workspaceId?: string;
   onUpdate: () => void;
+  onAddRemote?: () => void;
 }
 
-export function RemoteList({ onUpdate }: RemoteListProps) {
+export function RemoteList({ workspaceId, onUpdate, onAddRemote }: RemoteListProps) {
   const [remotes, setRemotes] = useState<GitRemote[]>([]);
   const [loading, setLoading] = useState(true);
+  const [detecting, setDetecting] = useState(false);
 
   useEffect(() => {
     fetchRemotes();
@@ -66,7 +69,7 @@ export function RemoteList({ onUpdate }: RemoteListProps) {
       } else {
         throw new Error("Failed to delete");
       }
-    } catch (error) {
+    } catch {
       toast.error("Failed to delete remote");
     }
   }
@@ -83,18 +86,50 @@ export function RemoteList({ onUpdate }: RemoteListProps) {
         fetchRemotes();
         onUpdate();
       }
-    } catch (error) {
+    } catch {
       toast.error("Failed to update remote");
     }
   }
 
-  const providerIcons: Record<string, string> = {
-    github: "GitHub",
-    gitlab: "GitLab",
-    bitbucket: "Bitbucket",
-    gitea: "Gitea",
-    custom: "Custom",
-  };
+  async function detectRemotes() {
+    setDetecting(true);
+    try {
+      const body = wsId ? { workspaceId: wsId } : {};
+      const res = await fetch("/api/git-remote/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.totalDetected > 0) {
+          toast.success(
+            `Detected ${data.totalDetected} remote${data.totalDetected > 1 ? "s" : ""}${data.results.length > 1 ? ` across ${data.results.length} workspaces` : ""}`
+          );
+          fetchRemotes();
+          onUpdate();
+        } else {
+          toast.info("No new remotes detected — remotes already configured");
+        }
+      } else {
+        throw new Error("Detection failed");
+      }
+    } catch {
+      toast.error("Failed to detect remotes");
+    } finally {
+      setDetecting(false);
+    }
+  }
+
+  const wsId = workspaceId ? Number(workspaceId) : null;
+
+  // Filter remotes based on selected workspace
+  const filteredRemotes = wsId
+    ? remotes.filter((r) => !r.workspaceId || r.workspaceId === wsId)
+    : remotes;
+
+  const globalRemotes = filteredRemotes.filter((r) => !r.workspaceId);
+  const workspaceRemotes = filteredRemotes.filter((r) => r.workspaceId);
 
   if (loading) {
     return (
@@ -105,28 +140,71 @@ export function RemoteList({ onUpdate }: RemoteListProps) {
     );
   }
 
-  if (remotes.length === 0) {
+  if (filteredRemotes.length === 0) {
     return (
       <Card>
         <CardContent className="py-12">
           <div className="text-center text-muted-foreground">
             <GitBranch className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p className="font-medium">No Git Remotes Configured</p>
-            <p className="text-sm mt-2">
-              Add a remote to connect to GitHub, GitLab, Bitbucket, or other git providers.
+            <p className="font-medium">
+              {wsId ? "No Remotes for This Workspace" : "No Git Remotes Configured"}
             </p>
+            <p className="text-sm mt-2 mb-4">
+              {wsId
+                ? "Detect remotes from the repository or add one manually."
+                : "Add a remote to connect to GitHub, GitLab, Bitbucket, or other git providers."}
+            </p>
+            <div className="flex gap-2 justify-center">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={detectRemotes}
+                disabled={detecting}
+              >
+                {detecting ? (
+                  <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                ) : (
+                  <Scan className="h-4 w-4 mr-1.5" />
+                )}
+                {wsId ? "Detect Remotes" : "Detect from All Workspaces"}
+              </Button>
+              {onAddRemote && (
+                <Button size="sm" onClick={onAddRemote}>
+                  <Plus className="h-4 w-4 mr-1.5" />
+                  Add Remote
+                </Button>
+              )}
+            </div>
           </div>
         </CardContent>
       </Card>
     );
   }
 
-  // Group by workspace
-  const globalRemotes = remotes.filter(r => !r.workspaceId);
-  const workspaceRemotes = remotes.filter(r => r.workspaceId);
-
   return (
     <div className="space-y-6">
+      <div className="flex justify-end gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={detectRemotes}
+          disabled={detecting}
+        >
+          {detecting ? (
+            <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+          ) : (
+            <Scan className="h-4 w-4 mr-1.5" />
+          )}
+          {wsId ? "Detect Remotes" : "Detect from All Workspaces"}
+        </Button>
+        {onAddRemote && (
+          <Button size="sm" onClick={onAddRemote}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add Remote
+          </Button>
+        )}
+      </div>
+
       {globalRemotes.length > 0 && (
         <Card>
           <CardHeader>
@@ -151,9 +229,11 @@ export function RemoteList({ onUpdate }: RemoteListProps) {
       {workspaceRemotes.length > 0 && (
         <Card>
           <CardHeader>
-            <CardTitle>Workspace Remotes</CardTitle>
+            <CardTitle>{wsId ? "Workspace Remote" : "Workspace Remotes"}</CardTitle>
             <CardDescription>
-              Remotes linked to specific workspaces
+              {wsId
+                ? "Remote linked to this workspace"
+                : "Remotes linked to specific workspaces"}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -163,7 +243,7 @@ export function RemoteList({ onUpdate }: RemoteListProps) {
                 remote={remote}
                 onDelete={() => deleteRemote(remote.id)}
                 onSetDefault={() => setDefaultRemote(remote.id)}
-                showWorkspace
+                showWorkspace={!wsId}
               />
             ))}
           </CardContent>

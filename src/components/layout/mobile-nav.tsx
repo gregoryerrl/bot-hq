@@ -9,6 +9,7 @@ import {
   Menu,
   X,
   LayoutDashboard,
+  ListTodo,
   Clock,
   ScrollText,
   Settings,
@@ -19,10 +20,11 @@ import {
 } from "lucide-react";
 
 const navItems = [
-  { href: "/", label: "Taskboard", icon: LayoutDashboard },
+  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/taskboard", label: "Taskboard", icon: ListTodo },
   { href: "/pending", label: "Pending", icon: Clock },
   { href: "/workspaces", label: "Workspaces", icon: FolderGit2 },
-  { href: "/git-remote", label: "Git Remote", icon: GitBranch },
+  { href: "/git", label: "Git", icon: GitBranch },
   { href: "/claude", label: "Claude", icon: Bot },
   { href: "/docs", label: "Docs", icon: FileText },
   { href: "/logs", label: "Logs", icon: ScrollText },

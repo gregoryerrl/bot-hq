@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
 import { initializeBotHqStructure, BOT_HQ_ROOT, getManagerPrompt } from "@/lib/bot-hq";
+import { getReInitPrompt } from "@/lib/bot-hq/templates";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import path from "path";
 import { ptyManager, MANAGER_SESSION_ID } from "@/lib/pty-manager";
@@ -18,14 +19,15 @@ async function buildStartupCommand(): Promise<string> {
 
 # STARTUP INITIALIZATION
 
-You just started. Perform these initialization tasks:
+You just started. Follow the "On Startup" section from your instructions above — ALL steps are MANDATORY:
 
-1. Use status_overview to check system health
-2. Use task_list to find any tasks stuck in "in_progress" state
-3. For each stuck task, use task_update to reset its state to "queued" (these are orphaned from previous session)
-4. Report what you found and any actions taken
+1. Spawn an **Assistant Manager Bot** subagent (startup mode) — it handles ALL health checks, stuck task resets, diagram auditing, and git health auditing
+2. Read the Assistant Manager Bot's report
+3. For each workspace the report says has 0 diagrams: spawn a **Visualizer Bot** subagent
+4. Wait for all Visualizer Bot subagents to complete
+5. Wait for task commands
 
-Then wait for task commands. When you receive a task command, follow your instructions above.`;
+You are a pure orchestrator. Do NOT call health/context/diagram/git tools directly — the Assistant Manager Bot does that for you.`;
 }
 
 function isManagerRunning(): boolean {
@@ -54,9 +56,60 @@ function setManagerRunning(running: boolean): void {
   }
 }
 
+/**
+ * Wait for the PTY session to become idle (no output for IDLE_DELAY ms),
+ * then invoke the callback. Cleans up its listener afterward.
+ */
+function waitForIdle(callback: () => void, idleDelay = 4000, maxTimeout = 15000): void {
+  const session = ptyManager.getSession(MANAGER_SESSION_ID);
+  if (!session) {
+    console.error("[Manager] No session found for idle wait");
+    return;
+  }
+
+  let idleTimeout: NodeJS.Timeout | null = null;
+  let fallbackTimeout: NodeJS.Timeout | null = null;
+  let fired = false;
+  let listener: ((data: string) => void) | null = null;
+
+  const fire = () => {
+    if (fired) return;
+    fired = true;
+    if (idleTimeout) clearTimeout(idleTimeout);
+    if (fallbackTimeout) clearTimeout(fallbackTimeout);
+    if (listener) {
+      session.emitter.off("data", listener);
+      listener = null;
+    }
+    callback();
+  };
+
+  const resetIdleTimer = () => {
+    if (idleTimeout) clearTimeout(idleTimeout);
+    idleTimeout = setTimeout(fire, idleDelay);
+  };
+
+  listener = () => {
+    resetIdleTimer();
+  };
+
+  session.emitter.on("data", listener);
+  resetIdleTimer();
+
+  // Fallback timeout in case something goes wrong
+  fallbackTimeout = setTimeout(() => {
+    if (!fired) {
+      console.log("[Manager] Fallback: firing after max timeout");
+      fire();
+    }
+  }, maxTimeout);
+}
+
 class PersistentManager extends EventEmitter {
   private startupCommandSent = false;
   private outputListener: ((data: string) => void) | null = null;
+  private isClearing = false;
+  private pendingCommand: string | null = null;
 
   async start(): Promise<void> {
     if (isManagerRunning()) {
@@ -89,64 +142,15 @@ class PersistentManager extends EventEmitter {
   }
 
   private waitForReadyAndSendCommand(): void {
-    const session = ptyManager.getSession(MANAGER_SESSION_ID);
-    if (!session) {
-      console.error("[Manager] No session found for startup command");
-      return;
-    }
-
     console.log("[Manager] Waiting for Claude Code to be ready (idle state)...");
 
-    let idleTimeout: NodeJS.Timeout | null = null;
-    const IDLE_DELAY = 4000; // Wait 4 seconds of no output = idle/ready
-
-    const resetIdleTimer = () => {
-      if (idleTimeout) {
-        clearTimeout(idleTimeout);
-      }
-      idleTimeout = setTimeout(() => {
-        if (!this.startupCommandSent) {
-          this.startupCommandSent = true;
-          console.log("[Manager] Claude Code is idle (ready), sending startup command...");
-
-          // Remove listener
-          if (this.outputListener) {
-            session.emitter.off("data", this.outputListener);
-            this.outputListener = null;
-          }
-
-          this.sendStartupCommand();
-        }
-      }, IDLE_DELAY);
-    };
-
-    this.outputListener = () => {
-      // Each time we get output, reset the idle timer
-      resetIdleTimer();
-    };
-
-    session.emitter.on("data", this.outputListener);
-
-    // Start the idle timer immediately
-    resetIdleTimer();
-
-    // Fallback timeout in case something goes wrong
-    setTimeout(() => {
+    waitForIdle(() => {
       if (!this.startupCommandSent) {
         this.startupCommandSent = true;
-        console.log("[Manager] Fallback: Sending startup command after max timeout...");
-
-        if (idleTimeout) {
-          clearTimeout(idleTimeout);
-        }
-        if (this.outputListener) {
-          session.emitter.off("data", this.outputListener);
-          this.outputListener = null;
-        }
-
+        console.log("[Manager] Claude Code is idle (ready), sending startup command...");
         this.sendStartupCommand();
       }
-    }, 15000); // 15 second max fallback
+    });
   }
 
   private async sendStartupCommand(): Promise<void> {
@@ -156,14 +160,17 @@ class PersistentManager extends EventEmitter {
     console.log("[Manager] Sending startup initialization command to Claude Code...");
     console.log("[Manager] Command length:", startupCommand.length);
 
-    // Send text first, wait for Claude Code to process it, then send Enter separately
-    // This prevents the Enter from being absorbed as part of the paste content
+    // Clear any existing input/autocomplete before writing
+    ptyManager.write(MANAGER_SESSION_ID, "\u001b");  // Escape - dismiss suggestions
+    await new Promise(resolve => setTimeout(resolve, 100));
+    ptyManager.write(MANAGER_SESSION_ID, "\u0015");  // Ctrl+U - kill line
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Send text first (Claude Code treats this as a paste)
     ptyManager.write(MANAGER_SESSION_ID, startupCommand);
 
-    // Wait for Claude Code to process the pasted text
+    // Wait for paste to be processed, then send Enter as separate write
     await new Promise(resolve => setTimeout(resolve, 500));
-
-    // Now send Enter to submit
     ptyManager.write(MANAGER_SESSION_ID, "\u000d");
 
     console.log("[Manager] Startup command sent successfully");
@@ -177,16 +184,172 @@ class PersistentManager extends EventEmitter {
       await this.start();
     }
 
+    // If currently clearing, queue the command for replay after re-init
+    if (this.isClearing) {
+      console.log("[Manager] Currently clearing, queuing command:", command.substring(0, 50));
+      this.pendingCommand = command;
+      return;
+    }
+
     console.log("[Manager] Sending command to PTY:", command.substring(0, 100) + "...");
 
-    // Send text first, wait for Claude Code to process it, then send Enter separately
-    ptyManager.write(MANAGER_SESSION_ID, command);
+    // Wait for Claude Code to be idle (ready for input) before sending
+    await new Promise<void>((resolve) => {
+      waitForIdle(async () => {
+        // Re-check isClearing inside the callback - a clear may have started
+        // while we were waiting for idle
+        if (this.isClearing) {
+          console.log("[Manager] Clear started during idle wait, queuing command:", command.substring(0, 50));
+          this.pendingCommand = command;
+          resolve();
+          return;
+        }
 
-    // Wait for Claude Code to process the text
-    await new Promise(resolve => setTimeout(resolve, 300));
+        console.log("[Manager] Session idle, clearing input and writing command...");
 
-    // Now send Enter to submit
+        // Strategy: Prepend a random nonce to the command so it can NEVER
+        // match Claude Code's autocomplete history. The manager prompt
+        // is instructed to ignore the nonce prefix and extract the task ID.
+        const nonce = Math.random().toString(36).slice(2, 8);
+        const prefixedCommand = `${nonce} ${command}`;
+
+        // Strategy: Type command character-by-character to avoid autocomplete
+        // matching on pasted text. Claude Code autocomplete triggers on paste
+        // but not on individual keystrokes that don't match history.
+
+        // First dismiss any existing autocomplete and clear line
+        ptyManager.write(MANAGER_SESSION_ID, "\u001b");  // Escape
+        await new Promise(r => setTimeout(r, 100));
+        ptyManager.write(MANAGER_SESSION_ID, "\u0015");  // Ctrl+U - kill line
+        await new Promise(r => setTimeout(r, 100));
+
+        // Type the command character by character with small delays
+        // The nonce prefix + simplified format (TASK {id}) prevents autocomplete
+        for (const char of prefixedCommand) {
+          ptyManager.write(MANAGER_SESSION_ID, char);
+          await new Promise(r => setTimeout(r, 20));
+        }
+
+        // Wait for typing to settle, then send Enter
+        // Use 500ms gap to ensure Escape (if any) isn't combined with Enter as Alt+Enter
+        await new Promise(r => setTimeout(r, 500));
+        ptyManager.write(MANAGER_SESSION_ID, "\u000d");
+        console.log("[Manager] Command submitted char-by-char with nonce:", nonce);
+        resolve();
+      }, 2000, 30000); // 2s idle threshold, 30s max timeout
+    });
+  }
+
+  /**
+   * Full restart: kill the PTY, spawn a fresh one, send the full startup prompt.
+   * Used by the "Run Startup" button.
+   * Ralph Wiggum style: no /clear, no autocomplete, no slash command picker.
+   */
+  async restartWithFullPrompt(): Promise<void> {
+    this.isClearing = true;
+    console.log("[Manager] Full restart: killing PTY and spawning fresh...");
+
+    // Get scope path before killing
+    let scopePath: string;
+    try {
+      scopePath = await getScopePath();
+    } catch {
+      scopePath = process.env.HOME || "/tmp";
+    }
+
+    // Kill the old session
+    if (ptyManager.hasManagerSession()) {
+      ptyManager.killSession(MANAGER_SESSION_ID);
+    }
+
+    // Spawn a fresh Claude Code session
+    ptyManager.ensureManagerSession(scopePath);
+    this.startupCommandSent = false;
+
+    // Wait for Claude Code to fully boot (fixed delay — simple and reliable)
+    console.log("[Manager] Waiting 8s for Claude Code to boot...");
+    await new Promise(r => setTimeout(r, 8000));
+
+    console.log("[Manager] Sending full startup prompt...");
+    this.startupCommandSent = true;
+    const startupCommand = await buildStartupCommand();
+
+    // Clear input before pasting
+    ptyManager.write(MANAGER_SESSION_ID, "\u001b");  // Escape
+    await new Promise(r => setTimeout(r, 100));
+    ptyManager.write(MANAGER_SESSION_ID, "\u0015");  // Ctrl+U
+    await new Promise(r => setTimeout(r, 100));
+
+    // Paste the prompt
+    ptyManager.write(MANAGER_SESSION_ID, startupCommand);
+
+    // Wait then Enter
+    await new Promise(r => setTimeout(r, 500));
     ptyManager.write(MANAGER_SESSION_ID, "\u000d");
+    console.log("[Manager] Full startup prompt sent successfully");
+
+    this.isClearing = false;
+    this.pendingCommand = null;
+  }
+
+  /**
+   * Self-clear: kill the PTY, spawn a fresh one, send the re-init prompt.
+   * No /clear slash command needed — just nuke it and start over.
+   */
+  async selfClear(): Promise<void> {
+    this.isClearing = true;
+    console.log("[Manager] Self-clear: killing PTY and spawning fresh...");
+
+    // Get scope path before killing
+    let scopePath: string;
+    try {
+      scopePath = await getScopePath();
+    } catch {
+      scopePath = process.env.HOME || "/tmp";
+    }
+
+    // Kill the old session
+    if (ptyManager.hasManagerSession()) {
+      ptyManager.killSession(MANAGER_SESSION_ID);
+    }
+
+    // Spawn a fresh Claude Code session
+    ptyManager.ensureManagerSession(scopePath);
+    this.startupCommandSent = false;
+
+    // Wait for Claude Code to fully boot (fixed delay — simple and reliable)
+    console.log("[Manager] Waiting 8s for Claude Code to boot...");
+    await new Promise(r => setTimeout(r, 8000));
+
+    console.log("[Manager] Sending re-init prompt...");
+    this.startupCommandSent = true;
+    const reInitPrompt = getReInitPrompt();
+
+    // Clear input before pasting
+    ptyManager.write(MANAGER_SESSION_ID, "\u001b");  // Escape
+    await new Promise(r => setTimeout(r, 100));
+    ptyManager.write(MANAGER_SESSION_ID, "\u0015");  // Ctrl+U
+    await new Promise(r => setTimeout(r, 100));
+
+    // Paste the prompt
+    ptyManager.write(MANAGER_SESSION_ID, reInitPrompt);
+
+    // Wait then Enter
+    await new Promise(r => setTimeout(r, 500));
+    ptyManager.write(MANAGER_SESSION_ID, "\u000d");
+    console.log("[Manager] Re-init prompt sent successfully");
+
+    this.isClearing = false;
+
+    // Replay any command that was queued during the clear
+    if (this.pendingCommand) {
+      const cmd = this.pendingCommand;
+      this.pendingCommand = null;
+      console.log("[Manager] Replaying queued command after clear:", cmd.substring(0, 50));
+      // Wait for the re-init prompt to be fully processed before sending
+      await new Promise(r => setTimeout(r, 3000));
+      await this.sendCommand(cmd);
+    }
   }
 
   stop(): void {
@@ -236,6 +399,16 @@ export function sendManagerCommand(command: string): void {
   console.log("[Manager] sendManagerCommand called with:", command.substring(0, 50) + "...");
   const manager = getManager();
   manager.sendCommand(command);
+}
+
+export async function clearManager(): Promise<void> {
+  const manager = getManager();
+  await manager.selfClear();
+}
+
+export async function restartManager(): Promise<void> {
+  const manager = getManager();
+  await manager.restartWithFullPrompt();
 }
 
 export function getManagerStatus(): { running: boolean; sessionId: string | null } {

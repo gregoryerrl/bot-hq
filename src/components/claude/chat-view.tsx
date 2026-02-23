@@ -83,12 +83,22 @@ export function ChatView({
     const text = input.trim();
     setInput("");
 
-    // Send text first, then Enter after a small delay
-    // This ensures Claude Code receives the text before the submit
-    onSendInput(text);
+    // Clear any autocomplete suggestion and existing input first
+    onSendKey("\x1b");  // Escape - dismiss autocomplete popup
     setTimeout(() => {
-      onSendKey("\r"); // Carriage return (Enter)
-    }, 50);
+      onSendKey("\x15");  // Ctrl+U - kill line
+      setTimeout(() => {
+        // Send text (paste)
+        onSendInput(text);
+        setTimeout(() => {
+          // Dismiss any autocomplete that appeared over pasted text
+          onSendKey("\x1b");  // Escape
+          setTimeout(() => {
+            onSendKey("\r");  // Enter
+          }, 150);
+        }, 200);
+      }, 150);
+    }, 100);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {

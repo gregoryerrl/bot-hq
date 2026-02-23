@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import {
   LayoutDashboard,
+  ListTodo,
   Clock,
   ScrollText,
   Settings,
@@ -16,10 +17,11 @@ import {
 import { useCallback } from "react";
 
 const navItems = [
-  { href: "/", label: "Taskboard", icon: LayoutDashboard },
-  { href: "/pending", label: "Pending", icon: Clock },
+  { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/taskboard", label: "Taskboard", icon: ListTodo },
+  { href: "/pending", label: "Review", icon: Clock },
   { href: "/workspaces", label: "Workspaces", icon: FolderGit2 },
-  { href: "/git-remote", label: "Git Remote", icon: GitBranch },
+  { href: "/git", label: "Git", icon: GitBranch },
   { href: "/claude", label: "Claude", icon: Bot },
   { href: "/docs", label: "Docs", icon: FileText },
   { href: "/logs", label: "Logs", icon: ScrollText },

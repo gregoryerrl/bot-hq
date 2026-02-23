@@ -40,17 +40,16 @@ class PtyManager {
 
     // Spawn Claude Code via login shell for proper PATH resolution
     // Use --dangerously-skip-permissions to allow writes without prompts
+    // Unset CLAUDECODE env var to prevent "nested session" detection
+    const spawnEnv = { ...process.env, HOME: home, TERM: "xterm-256color", COLORTERM: "truecolor" };
+    delete (spawnEnv as Record<string, string | undefined>).CLAUDECODE;
+
     const ptyProcess = pty.spawn(shell, ["-l", "-c", "claude --dangerously-skip-permissions"], {
       name: "xterm-256color",
       cols: 120,
       rows: 30,
       cwd,
-      env: {
-        ...process.env,
-        HOME: home,
-        TERM: "xterm-256color",
-        COLORTERM: "truecolor",
-      } as { [key: string]: string },
+      env: spawnEnv as { [key: string]: string },
     });
 
     ptyProcess.onData((data) => {
@@ -150,17 +149,16 @@ class PtyManager {
 
     // Spawn Claude Code via login shell for proper PATH resolution
     // Use --dangerously-skip-permissions to allow writes without prompts
+    // Unset CLAUDECODE env var to prevent "nested session" detection
+    const spawnEnv = { ...process.env, HOME: home, TERM: "xterm-256color", COLORTERM: "truecolor" };
+    delete (spawnEnv as Record<string, string | undefined>).CLAUDECODE;
+
     const ptyProcess = pty.spawn(shell, ["-l", "-c", "claude --dangerously-skip-permissions"], {
       name: "xterm-256color",
       cols: 120,
       rows: 30,
       cwd,
-      env: {
-        ...process.env,
-        HOME: home,
-        TERM: "xterm-256color",
-        COLORTERM: "truecolor",
-      } as { [key: string]: string },
+      env: spawnEnv as { [key: string]: string },
     });
 
     ptyProcess.onData((data) => {
