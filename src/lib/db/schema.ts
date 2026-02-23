@@ -158,7 +158,26 @@ export const pendingDevices = sqliteTable("pending_devices", {
   expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
 });
 
+// Prompts - agent prompt templates stored in DB
+export const prompts = sqliteTable("prompts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  slug: text("slug").notNull().unique(),
+  name: text("name").notNull(),
+  description: text("description"),
+  content: text("content").notNull(),
+  variables: text("variables"), // JSON array: '["taskId","title"]' or null
+  isParametric: integer("is_parametric", { mode: "boolean" }).notNull().default(false),
+  createdAt: integer("created_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 // Type exports
+export type Prompt = typeof prompts.$inferSelect;
+export type NewPrompt = typeof prompts.$inferInsert;
 export type Workspace = typeof workspaces.$inferSelect;
 export type NewWorkspace = typeof workspaces.$inferInsert;
 export type GitRemote = typeof gitRemotes.$inferSelect;

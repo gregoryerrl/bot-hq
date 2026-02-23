@@ -5,9 +5,6 @@
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
-    const { initializeAgentDocs } = await import("@/lib/agent-docs");
-    await initializeAgentDocs();
-
     // Start persistent manager
     try {
       const { startManager } = await import("@/lib/manager/persistent-manager");

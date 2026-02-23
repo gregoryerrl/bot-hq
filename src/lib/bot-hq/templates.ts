@@ -529,6 +529,46 @@ After completing your work, you're done. The manager will handle the rest.
   return prompt;
 }
 
+export function buildSWEngineerTemplate(): string {
+  return `# SW Engineer - Task {{taskId}}: {{title}}
+
+## Workspace
+- Path: {{repoPath}}
+- Name: {{workspaceName}}
+
+## Your Mission
+{{description}}
+
+{{feedbackBlock}}
+## REQUIRED STEPS (Follow in Order)
+
+### 1. {{branchBlock}}
+
+### 2. Do the Work
+- Implement the requested changes
+- Follow existing code patterns
+- Add tests if applicable
+
+### 3. Update PROGRESS.md
+Update the file at /Users/gregoryerrl/Projects/.bot-hq/workspaces/{{workspaceName}}/tasks/{{taskId}}/PROGRESS.md:
+\`\`\`markdown
+## Status: completed
+## Completed
+- [List what you did]
+## Blockers
+(None - task complete)
+\`\`\`
+
+### 4. CRITICAL: DO NOT COMMIT
+Leave all changes uncommitted on the feature branch.
+Do NOT run \`git add\` or \`git commit\`.
+The human will review the uncommitted changes and decide whether to accept, retry, or delete.
+
+### 5. Report Completion
+After completing your work, you're done. The manager will handle the rest.
+`;
+}
+
 export function getDefaultWorkspaceTemplate(workspaceName: string): string {
   return `# ${workspaceName}
 

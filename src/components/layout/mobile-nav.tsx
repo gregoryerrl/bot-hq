@@ -14,7 +14,7 @@ import {
   ScrollText,
   Settings,
   Bot,
-  FileText,
+  MessageSquareCode,
   FolderGit2,
   GitBranch,
 } from "lucide-react";
@@ -26,7 +26,7 @@ const navItems = [
   { href: "/workspaces", label: "Workspaces", icon: FolderGit2 },
   { href: "/git", label: "Git", icon: GitBranch },
   { href: "/claude", label: "Claude", icon: Bot },
-  { href: "/docs", label: "Docs", icon: FileText },
+  { href: "/prompts", label: "Prompts", icon: MessageSquareCode },
   { href: "/logs", label: "Logs", icon: ScrollText },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

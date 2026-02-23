@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { getDefaultManagerPrompt, getDefaultWorkspaceTemplate } from "./templates";
+import { seedDefaultPrompts, getPromptBySlug, updatePromptContent, PROMPT_SLUGS } from "@/lib/prompts";
 
 const BOT_HQ_ROOT = process.env.BOT_HQ_SCOPE || "/Users/gregoryerrl/Projects";
 const BOT_HQ_DIR = path.join(BOT_HQ_ROOT, ".bot-hq");
@@ -10,7 +11,10 @@ export async function initializeBotHqStructure(): Promise<void> {
   await fs.mkdir(BOT_HQ_DIR, { recursive: true });
   await fs.mkdir(path.join(BOT_HQ_DIR, "workspaces"), { recursive: true });
 
-  // Create MANAGER_PROMPT.md if it doesn't exist
+  // Seed default prompts into DB (no-op if already seeded)
+  await seedDefaultPrompts();
+
+  // Create MANAGER_PROMPT.md if it doesn't exist (kept for backwards compat)
   const managerPromptPath = path.join(BOT_HQ_DIR, "MANAGER_PROMPT.md");
   try {
     await fs.access(managerPromptPath);
@@ -48,17 +52,11 @@ export async function initializeWorkspaceContext(workspaceName: string): Promise
 }
 
 export async function getManagerPrompt(): Promise<string> {
-  const promptPath = path.join(BOT_HQ_DIR, "MANAGER_PROMPT.md");
-  try {
-    return await fs.readFile(promptPath, "utf-8");
-  } catch {
-    return getDefaultManagerPrompt();
-  }
+  return getPromptBySlug(PROMPT_SLUGS.MANAGER);
 }
 
 export async function saveManagerPrompt(content: string): Promise<void> {
-  const promptPath = path.join(BOT_HQ_DIR, "MANAGER_PROMPT.md");
-  await fs.writeFile(promptPath, content);
+  await updatePromptContent(PROMPT_SLUGS.MANAGER, content);
 }
 
 export async function getWorkspaceContext(workspaceName: string): Promise<string> {

@@ -1,6 +1,6 @@
 import { EventEmitter } from "events";
 import { initializeBotHqStructure, BOT_HQ_ROOT, getManagerPrompt } from "@/lib/bot-hq";
-import { getReInitPrompt } from "@/lib/bot-hq/templates";
+import { getPromptBySlug, PROMPT_SLUGS } from "@/lib/prompts";
 import { existsSync, writeFileSync, unlinkSync } from "fs";
 import path from "path";
 import { ptyManager, MANAGER_SESSION_ID } from "@/lib/pty-manager";
@@ -323,7 +323,7 @@ class PersistentManager extends EventEmitter {
 
     console.log("[Manager] Sending re-init prompt...");
     this.startupCommandSent = true;
-    const reInitPrompt = getReInitPrompt();
+    const reInitPrompt = await getPromptBySlug(PROMPT_SLUGS.REINIT);
 
     // Clear input before pasting
     ptyManager.write(MANAGER_SESSION_ID, "\u001b");  // Escape
