@@ -46,7 +46,15 @@ export async function POST(
       return NextResponse.json({ error: "Prompt not found" }, { status: 404 });
     }
 
-    const promptText = `You are a prompt engineering expert. Below is an agent prompt used in an AI orchestration system (bot-hq). The user wants you to improve it.
+    const promptText = `You are a prompt engineering expert. Your ONLY job is to rewrite the prompt below based on the user's request.
+
+CRITICAL RULES:
+- Output ONLY the full rewritten prompt text. Nothing else.
+- Do NOT explain what you changed. Do NOT add commentary, code snippets, file paths, or instructions.
+- Do NOT suggest code changes. You are rewriting the PROMPT TEXT, not the application code.
+- Preserve all {{variable}} mustache placeholders exactly as they appear.
+- Preserve the overall markdown structure and format.
+- Make targeted improvements based on the user's request.
 
 ## Current Prompt
 \`\`\`
@@ -56,12 +64,7 @@ ${prompt.content}
 ## User's Improvement Request
 ${body.instruction}
 
-## Instructions
-- Return ONLY the improved prompt text, no explanations or commentary
-- Preserve the overall structure and format
-- Keep all {{variable}} placeholders intact if present
-- Make targeted improvements based on the user's request
-- Do not add unnecessary verbosity`;
+Remember: Output the complete improved prompt and NOTHING else. No preamble, no explanation.`;
 
     // Strip Claude Code env vars so the child process doesn't detect nesting
     const cleanEnv = { ...process.env };
