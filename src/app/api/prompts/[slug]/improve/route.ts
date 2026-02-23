@@ -42,12 +42,18 @@ ${body.instruction}
 - Make targeted improvements based on the user's request
 - Do not add unnecessary verbosity`;
 
+    // Strip Claude Code env vars so the child process doesn't detect nesting
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.CLAUDE_CODE_ENTRYPOINT;
+    delete cleanEnv.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+    delete cleanEnv.CLAUDECODE;
+
     const { stdout } = await execFileAsync("claude", [
       "-p",
       "--print",
       "--model", "sonnet",
       promptText,
-    ], { timeout: 60000 });
+    ], { timeout: 60000, env: cleanEnv });
 
     return NextResponse.json({ suggestion: stdout.trim() });
   } catch (error) {
