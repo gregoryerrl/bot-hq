@@ -1,9 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
-import { execFile } from "child_process";
-import { promisify } from "util";
+import { spawn } from "child_process";
 import { getPromptRecordBySlug } from "@/lib/prompts";
 
-const execFileAsync = promisify(execFile);
+function runClaude(prompt: string, env: NodeJS.ProcessEnv): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("claude", ["-p", "--print", "--model", "sonnet"], {
+      env,
+      timeout: 60000,
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (d) => { stdout += d; });
+    proc.stderr.on("data", (d) => { stderr += d; });
+
+    proc.on("close", (code) => {
+      if (code === 0) resolve(stdout);
+      else reject(new Error(stderr || `Process exited with code ${code}`));
+    });
+    proc.on("error", reject);
+
+    proc.stdin.write(prompt);
+    proc.stdin.end();
+  });
+}
 
 export async function POST(
   request: NextRequest,
@@ -48,14 +69,9 @@ ${body.instruction}
     delete cleanEnv.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
     delete cleanEnv.CLAUDECODE;
 
-    const { stdout } = await execFileAsync("claude", [
-      "-p",
-      "--print",
-      "--model", "sonnet",
-      promptText,
-    ], { timeout: 60000, env: cleanEnv });
+    const result = await runClaude(promptText, cleanEnv);
 
-    return NextResponse.json({ suggestion: stdout.trim() });
+    return NextResponse.json({ suggestion: result.trim() });
   } catch (error) {
     console.error("Failed to improve prompt:", error);
     const message = error instanceof Error ? error.message : "Unknown error";
