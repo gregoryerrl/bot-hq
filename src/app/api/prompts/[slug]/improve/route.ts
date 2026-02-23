@@ -4,9 +4,9 @@ import { getPromptRecordBySlug } from "@/lib/prompts";
 
 function runClaude(prompt: string, env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("claude", ["-p", "--print", "--model", "sonnet"], {
+    const proc = spawn("claude", ["-p", "--print", "--model", "sonnet", "--max-turns", "1"], {
       env,
-      timeout: 60000,
+      timeout: 120000,
     });
 
     let stdout = "";
