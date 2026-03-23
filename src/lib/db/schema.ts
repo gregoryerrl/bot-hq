@@ -1,196 +1,125 @@
-import { sqliteTable, text, integer, index } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, index, real } from "drizzle-orm/sqlite-core";
 
-// Workspaces (repos + linked directories)
-export const workspaces = sqliteTable("workspaces", {
+// Projects (replaces workspaces)
+export const projects = sqliteTable("projects", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(),
-  repoPath: text("repo_path").notNull(),
-  linkedDirs: text("linked_dirs"), // JSON string
-  buildCommand: text("build_command"),
-  agentConfig: text("agent_config"), // JSON string storing AgentConfig
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  description: text("description"),
+  repoPath: text("repo_path"),
+  status: text("status", { enum: ["active", "archived"] }).notNull().default("active"),
+  notes: text("notes"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
-
-// Git Remotes - replaces plugin system for git provider integration
-export const gitRemotes = sqliteTable("git_remotes", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  workspaceId: integer("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }), // Null = global
-  provider: text("provider", {
-    enum: ["github", "gitlab", "bitbucket", "gitea", "custom"],
-  }).notNull(),
-  name: text("name").notNull(), // Display name for this remote
-  url: text("url").notNull(), // Base URL (e.g., https://github.com or https://gitlab.company.com)
-  owner: text("owner"), // Repository owner/org (for workspace-scoped remotes)
-  repo: text("repo"), // Repository name (for workspace-scoped remotes)
-  credentials: text("credentials"), // Encrypted JSON: { token: string, ... }
-  isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false), // Default remote for this provider
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-}, (table) => [
-  index("git_remotes_workspace_idx").on(table.workspaceId),
-  index("git_remotes_provider_idx").on(table.provider),
-]);
 
 // Tasks
 export const tasks = sqliteTable("tasks", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  workspaceId: integer("workspace_id")
-    .notNull()
-    .references(() => workspaces.id),
-  sourceRemoteId: integer("source_remote_id").references(() => gitRemotes.id), // Git remote that created this task
-  sourceRef: text("source_ref"), // Reference in remote (issue #, MR number, etc.)
+  projectId: integer("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  parentTaskId: integer("parent_task_id"),  // self-reference for subtasks (no .references() to avoid circular ref)
   title: text("title").notNull(),
   description: text("description"),
-  state: text("state", {
-    enum: [
-      "new",
-      "queued",
-      "in_progress",
-      "awaiting_input",  // Manager is waiting for user input (brainstorming)
-      "needs_help",  // Replaces stuck/pending_review state
-      "done",
-    ],
-  })
-    .notNull()
-    .default("new"),
+  state: text("state", { enum: ["todo", "in_progress", "done", "blocked"] }).notNull().default("todo"),
   priority: integer("priority").default(0),
-  agentPlan: text("agent_plan"),
-  branchName: text("branch_name"),
-  // New fields for manager + subagent architecture
-  completionCriteria: text("completion_criteria"),  // Task-specific success criteria
-  iterationCount: integer("iteration_count").default(0),  // Current iteration
-  maxIterations: integer("max_iterations"),  // Override global default
-  feedback: text("feedback"),  // Human feedback on retry
-  // Brainstorming fields - for manager awaiting user input
-  waitingQuestion: text("waiting_question"),  // Question manager is asking
-  waitingContext: text("waiting_context"),    // Conversation context so far
-  waitingSince: integer("waiting_since", { mode: "timestamp" }),  // When started waiting
-  assignedAt: integer("assigned_at", { mode: "timestamp" }),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  tags: text("tags"),  // JSON array
+  dueDate: integer("due_date", { mode: "timestamp" }),
+  order: integer("order").default(0),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
-  index("tasks_workspace_idx").on(table.workspaceId),
+  index("tasks_project_idx").on(table.projectId),
   index("tasks_state_idx").on(table.state),
-  index("tasks_remote_idx").on(table.sourceRemoteId),
+  index("tasks_parent_idx").on(table.parentTaskId),
+  index("tasks_due_idx").on(table.dueDate),
 ]);
 
-// REMOVED: Pending approvals table - replaced by git-native review
-// The review workflow now uses task branches directly without a separate approvals table.
-
-// Logs
-export const logs = sqliteTable("logs", {
+// Task Notes
+export const taskNotes = sqliteTable("task_notes", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  workspaceId: integer("workspace_id").references(() => workspaces.id),
-  taskId: integer("task_id").references(() => tasks.id),
-  type: text("type", {
-    enum: ["agent", "test", "approval", "error", "health"],
-  }).notNull(),
-  message: text("message").notNull(),
-  details: text("details"), // JSON string
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  taskId: integer("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+  content: text("content").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
-  index("logs_type_idx").on(table.type),
-  index("logs_task_idx").on(table.taskId),
-  index("logs_created_idx").on(table.createdAt),
-  index("logs_stream_idx").on(table.id, table.type), // For streaming queries
+  index("task_notes_task_idx").on(table.taskId),
 ]);
 
-// REMOVED: Agent sessions table - replaced by single persistent manager
-// The manager runs as a persistent session and spawns subagents via Task tool.
+// Task Dependencies
+export const taskDependencies = sqliteTable("task_dependencies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  taskId: integer("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+  dependsOnTaskId: integer("depends_on_task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  index("task_deps_task_idx").on(table.taskId),
+  index("task_deps_depends_idx").on(table.dependsOnTaskId),
+]);
 
-// App settings (key-value store)
-export const settings = sqliteTable("settings", {
-  key: text("key").primaryKey(),
-  value: text("value").notNull(),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
-
-// Diagrams - React Flow user flow diagrams per workspace
+// Diagrams (simplified — no more flowData blob)
 export const diagrams = sqliteTable("diagrams", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  workspaceId: integer("workspace_id")
-    .notNull()
-    .references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: integer("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
-  flowData: text("flow_data").notNull(), // JSON: { nodes: ReactFlowNode[], edges: ReactFlowEdge[] }
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
+  template: text("template"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
-  index("diagrams_workspace_idx").on(table.workspaceId),
+  index("diagrams_project_idx").on(table.projectId),
 ]);
 
-// Authorized devices
-export const authorizedDevices = sqliteTable("authorized_devices", {
+// Diagram Groups
+export const diagramGroups = sqliteTable("diagram_groups", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  deviceName: text("device_name").notNull(),
-  deviceFingerprint: text("device_fingerprint").notNull().unique(),
-  tokenHash: text("token_hash").notNull(),
-  authorizedAt: integer("authorized_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  lastSeenAt: integer("last_seen_at", { mode: "timestamp" }),
-  isRevoked: integer("is_revoked", { mode: "boolean" }).notNull().default(false),
-});
+  diagramId: integer("diagram_id").notNull().references(() => diagrams.id, { onDelete: "cascade" }),
+  label: text("label").notNull(),
+  color: text("color").notNull().default("#6b7280"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  index("diagram_groups_diagram_idx").on(table.diagramId),
+]);
 
-// Pending device requests (waiting for approval)
-export const pendingDevices = sqliteTable("pending_devices", {
+// Diagram Nodes
+export const diagramNodes = sqliteTable("diagram_nodes", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  pairingCode: text("pairing_code").notNull().unique(),
-  deviceInfo: text("device_info").notNull(), // JSON: userAgent, ip, etc.
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
-});
-
-// Prompts - agent prompt templates stored in DB
-export const prompts = sqliteTable("prompts", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  slug: text("slug").notNull().unique(),
-  name: text("name").notNull(),
+  diagramId: integer("diagram_id").notNull().references(() => diagrams.id, { onDelete: "cascade" }),
+  groupId: integer("group_id").references(() => diagramGroups.id, { onDelete: "set null" }),
+  nodeType: text("node_type").notNull().default("default"),
+  label: text("label").notNull(),
   description: text("description"),
-  content: text("content").notNull(),
-  variables: text("variables"), // JSON array: '["taskId","title"]' or null
-  isParametric: integer("is_parametric", { mode: "boolean" }).notNull().default(false),
-  createdAt: integer("created_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-  updatedAt: integer("updated_at", { mode: "timestamp" })
-    .notNull()
-    .$defaultFn(() => new Date()),
-});
+  metadata: text("metadata"),  // JSON
+  positionX: real("position_x").notNull().default(0),
+  positionY: real("position_y").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  index("diagram_nodes_diagram_idx").on(table.diagramId),
+  index("diagram_nodes_group_idx").on(table.groupId),
+]);
+
+// Diagram Edges
+export const diagramEdges = sqliteTable("diagram_edges", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  diagramId: integer("diagram_id").notNull().references(() => diagrams.id, { onDelete: "cascade" }),
+  sourceNodeId: integer("source_node_id").notNull().references(() => diagramNodes.id, { onDelete: "cascade" }),
+  targetNodeId: integer("target_node_id").notNull().references(() => diagramNodes.id, { onDelete: "cascade" }),
+  label: text("label"),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  index("diagram_edges_diagram_idx").on(table.diagramId),
+]);
 
 // Type exports
-export type Prompt = typeof prompts.$inferSelect;
-export type NewPrompt = typeof prompts.$inferInsert;
-export type Workspace = typeof workspaces.$inferSelect;
-export type NewWorkspace = typeof workspaces.$inferInsert;
-export type GitRemote = typeof gitRemotes.$inferSelect;
-export type NewGitRemote = typeof gitRemotes.$inferInsert;
+export type Project = typeof projects.$inferSelect;
+export type NewProject = typeof projects.$inferInsert;
 export type Task = typeof tasks.$inferSelect;
 export type NewTask = typeof tasks.$inferInsert;
-export type Log = typeof logs.$inferSelect;
-export type NewLog = typeof logs.$inferInsert;
-export type AuthorizedDevice = typeof authorizedDevices.$inferSelect;
-export type NewAuthorizedDevice = typeof authorizedDevices.$inferInsert;
-export type PendingDevice = typeof pendingDevices.$inferSelect;
-export type NewPendingDevice = typeof pendingDevices.$inferInsert;
-export type Setting = typeof settings.$inferSelect;
-export type NewSetting = typeof settings.$inferInsert;
+export type TaskNote = typeof taskNotes.$inferSelect;
+export type NewTaskNote = typeof taskNotes.$inferInsert;
+export type TaskDependency = typeof taskDependencies.$inferSelect;
+export type NewTaskDependency = typeof taskDependencies.$inferInsert;
 export type Diagram = typeof diagrams.$inferSelect;
 export type NewDiagram = typeof diagrams.$inferInsert;
+export type DiagramGroup = typeof diagramGroups.$inferSelect;
+export type NewDiagramGroup = typeof diagramGroups.$inferInsert;
+export type DiagramNode = typeof diagramNodes.$inferSelect;
+export type NewDiagramNode = typeof diagramNodes.$inferInsert;
+export type DiagramEdge = typeof diagramEdges.$inferSelect;
+export type NewDiagramEdge = typeof diagramEdges.$inferInsert;
