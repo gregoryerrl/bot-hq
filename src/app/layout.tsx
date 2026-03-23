@@ -4,9 +4,8 @@ import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
 import { MobileNav } from "@/components/layout/mobile-nav";
 import { Toaster } from "@/components/ui/sonner";
-import { ChatPanel } from "@/components/chat-panel/chat-panel";
-import { NotificationProvider } from "@/components/notifications/notification-provider";
-import { AwaitingInputBanner } from "@/components/notifications/awaiting-input-banner";
+import { CommandContextProvider } from "@/components/command-bar/command-context";
+import { CommandBar } from "@/components/command-bar/command-bar";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -23,18 +22,17 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <NotificationProvider>
+        <CommandContextProvider>
           <div className="flex h-screen">
             <Sidebar />
             <MobileNav />
             <main className="flex-1 overflow-auto flex flex-col">
-              <AwaitingInputBanner />
+              <CommandBar />
               <div className="flex-1 overflow-auto">{children}</div>
             </main>
           </div>
-          <ChatPanel />
           <Toaster />
-        </NotificationProvider>
+        </CommandContextProvider>
       </body>
     </html>
   );
