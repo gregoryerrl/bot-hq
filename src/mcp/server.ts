@@ -1,22 +1,20 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerAgentTools } from "./tools/agents.js";
+import { registerProjectTools } from "./tools/projects.js";
 import { registerTaskTools } from "./tools/tasks.js";
-import { registerMonitoringTools } from "./tools/monitoring.js";
 import { registerDiagramTools } from "./tools/diagrams.js";
-import { registerGitHealthTools } from "./tools/git-health.js";
+import { registerSummaryTools } from "./tools/summary.js";
 
 const server = new McpServer({
   name: "bot-hq",
-  version: "1.0.0",
+  version: "2.0.0",
 });
 
 // Register all tools
-registerAgentTools(server);
+registerProjectTools(server);
 registerTaskTools(server);
-registerMonitoringTools(server);
 registerDiagramTools(server);
-registerGitHealthTools(server);
+registerSummaryTools(server);
 
 // Start with stdio transport
 async function main() {
