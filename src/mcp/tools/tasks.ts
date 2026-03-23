@@ -1,135 +1,97 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { db, tasks, workspaces, logs } from "../../lib/db/index.js";
-import { eq, desc } from "drizzle-orm";
-
-const BOT_HQ_URL = process.env.BOT_HQ_URL || "http://localhost:7890";
-
-/** After a task is marked done with a branchName, auto-clear the manager session */
-function triggerAutoClear(): void {
-  // Delay to let the manager finish any remaining output before /clear
-  setTimeout(async () => {
-    try {
-      await fetch(`${BOT_HQ_URL}/api/manager/clear`, { method: "POST" });
-      console.log("[MCP] Auto-clear triggered after task completion");
-    } catch (error) {
-      console.error("[MCP] Failed to trigger auto-clear:", error);
-    }
-  }, 5000);
-}
+import { eq, like, or, and, desc, asc, isNull, sql } from "drizzle-orm";
+import {
+  db,
+  tasks,
+  taskNotes,
+  taskDependencies,
+} from "../../lib/db/index.js";
 
 export function registerTaskTools(server: McpServer) {
-  // task_list - List tasks with filters
+  // task_list
   server.tool(
     "task_list",
-    "List tasks with optional filters by workspace or state",
+    "List tasks for a project with optional filters",
     {
-      workspaceId: z.number().optional().describe("Filter by workspace ID"),
+      projectId: z.number(),
       state: z
-        .enum(["new", "queued", "in_progress", "needs_help", "done"])
-        .optional()
-        .describe("Filter by task state"),
+        .enum(["todo", "in_progress", "done", "blocked"])
+        .optional(),
+      parentTaskId: z.number().nullable().optional(),
+      priority: z.number().optional(),
     },
-    async ({ workspaceId, state }) => {
-      let query = db.select().from(tasks);
+    async ({ projectId, state, parentTaskId, priority }) => {
+      const conditions = [eq(tasks.projectId, projectId)];
 
-      const conditions = [];
-      if (workspaceId) {
-        conditions.push(eq(tasks.workspaceId, workspaceId));
-      }
       if (state) {
         conditions.push(eq(tasks.state, state));
       }
+      if (parentTaskId === null) {
+        conditions.push(isNull(tasks.parentTaskId));
+      } else if (parentTaskId !== undefined) {
+        conditions.push(eq(tasks.parentTaskId, parentTaskId));
+      }
+      if (priority !== undefined) {
+        conditions.push(eq(tasks.priority, priority));
+      }
 
-      const taskList = await db
-        .select({
-          id: tasks.id,
-          title: tasks.title,
-          state: tasks.state,
-          workspaceId: tasks.workspaceId,
-          priority: tasks.priority,
-          branchName: tasks.branchName,
-          assignedAt: tasks.assignedAt,
-          updatedAt: tasks.updatedAt,
-        })
+      const result = await db
+        .select()
         .from(tasks)
-        .where(conditions.length > 0 ? conditions[0] : undefined)
-        .orderBy(desc(tasks.priority), desc(tasks.updatedAt))
-        .limit(100);
-
-      // Enrich with workspace names
-      const enrichedTasks = await Promise.all(
-        taskList.map(async (task) => {
-          const workspace = await db.query.workspaces.findFirst({
-            where: eq(workspaces.id, task.workspaceId),
-          });
-          return {
-            ...task,
-            workspaceName: workspace?.name || "Unknown",
-            assignedAt: task.assignedAt?.toISOString(),
-            updatedAt: task.updatedAt?.toISOString(),
-          };
-        })
-      );
+        .where(and(...conditions))
+        .orderBy(asc(tasks.order), desc(tasks.createdAt));
 
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(enrichedTasks, null, 2),
-          },
-        ],
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
     }
   );
 
-  // task_get - Get full task details
+  // task_get
   server.tool(
     "task_get",
-    "Get full details of a specific task",
+    "Get a task by ID with subtasks, notes, and dependencies",
     {
-      taskId: z.number().describe("The task ID to retrieve"),
+      taskId: z.number(),
     },
     async ({ taskId }) => {
-      const task = await db.query.tasks.findFirst({
-        where: eq(tasks.id, taskId),
-      });
+      const task = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .get();
 
       if (!task) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ error: `Task ${taskId} not found` }),
-            },
-          ],
+          content: [{ type: "text", text: `Task ${taskId} not found` }],
+          isError: true,
         };
       }
 
-      const workspace = await db.query.workspaces.findFirst({
-        where: eq(workspaces.id, task.workspaceId),
-      });
+      const subtasks = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.parentTaskId, taskId))
+        .orderBy(asc(tasks.order), desc(tasks.createdAt));
+
+      const notes = await db
+        .select()
+        .from(taskNotes)
+        .where(eq(taskNotes.taskId, taskId))
+        .orderBy(desc(taskNotes.createdAt));
+
+      const dependencies = await db
+        .select()
+        .from(taskDependencies)
+        .where(eq(taskDependencies.taskId, taskId));
 
       return {
         content: [
           {
-            type: "text" as const,
+            type: "text",
             text: JSON.stringify(
-              {
-                id: task.id,
-                title: task.title,
-                description: task.description,
-                state: task.state,
-                workspaceId: task.workspaceId,
-                workspaceName: workspace?.name || "Unknown",
-                repoPath: workspace?.repoPath || "Unknown",
-                priority: task.priority,
-                branchName: task.branchName,
-                assignedAt: task.assignedAt?.toISOString(),
-                updatedAt: task.updatedAt?.toISOString(),
-                iterationCount: task.iterationCount || 1,
-                feedback: task.feedback || null,
-              },
+              { ...task, subtasks, notes, dependencies },
               null,
               2
             ),
@@ -139,200 +101,272 @@ export function registerTaskTools(server: McpServer) {
     }
   );
 
-  // task_create - Create a new task
+  // task_create
   server.tool(
     "task_create",
-    "Create a new task (with or without GitHub issue)",
+    "Create a new task",
     {
-      workspaceId: z.number().describe("The workspace ID for this task"),
-      title: z.string().describe("Task title"),
-      description: z.string().describe("Task description"),
-      priority: z.number().optional().default(0).describe("Task priority (higher = more important)"),
+      projectId: z.number(),
+      title: z.string(),
+      description: z.string().optional(),
+      parentTaskId: z.number().optional(),
+      priority: z.number().min(0).max(3).optional(),
+      tags: z.array(z.string()).optional(),
+      dueDate: z.string().optional(),
     },
-    async ({ workspaceId, title, description, priority }) => {
-      // Verify workspace exists
-      const workspace = await db.query.workspaces.findFirst({
-        where: eq(workspaces.id, workspaceId),
-      });
-
-      if (!workspace) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: `Workspace ${workspaceId} not found`,
-              }),
-            },
-          ],
-        };
-      }
-
-      const [newTask] = await db
+    async ({ projectId, title, description, parentTaskId, priority, tags, dueDate }) => {
+      const result = await db
         .insert(tasks)
         .values({
-          workspaceId,
+          projectId,
           title,
           description,
-          priority: priority || 0,
-          state: "new",
+          parentTaskId,
+          priority,
+          tags: tags ? JSON.stringify(tags) : undefined,
+          dueDate: dueDate ? new Date(dueDate) : undefined,
         })
         .returning();
 
-      // Log the creation
-      await db.insert(logs).values({
-        workspaceId,
-        taskId: newTask.id,
-        type: "agent",
-        message: `Task created: ${title}`,
-      });
-
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              taskId: newTask.id,
-              message: `Task created: ${title}`,
-            }),
-          },
-        ],
+        content: [{ type: "text", text: JSON.stringify(result[0], null, 2) }],
       };
     }
   );
 
-  // task_update - Update task properties
+  // task_update
   server.tool(
     "task_update",
-    "Update task properties like priority, state, or notes",
+    "Update an existing task",
     {
-      taskId: z.number().describe("The task ID to update"),
-      priority: z.number().optional().describe("New priority"),
+      taskId: z.number(),
+      title: z.string().optional(),
+      description: z.string().optional(),
       state: z
-        .enum(["new", "queued", "in_progress", "needs_help", "done"])
-        .optional()
-        .describe("New state"),
-      notes: z.string().optional().describe("Additional notes to append to description"),
-      branchName: z.string().optional().describe("Git branch name for this task"),
+        .enum(["todo", "in_progress", "done", "blocked"])
+        .optional(),
+      priority: z.number().min(0).max(3).optional(),
+      tags: z.array(z.string()).optional(),
+      dueDate: z.string().nullable().optional(),
     },
-    async ({ taskId, priority, state, notes, branchName }) => {
-      const task = await db.query.tasks.findFirst({
-        where: eq(tasks.id, taskId),
-      });
+    async ({ taskId, ...fields }) => {
+      const existing = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .get();
 
-      if (!task) {
+      if (!existing) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: `Task ${taskId} not found`,
-              }),
-            },
-          ],
+          content: [{ type: "text", text: `Task ${taskId} not found` }],
+          isError: true,
         };
       }
 
       const updates: Record<string, unknown> = { updatedAt: new Date() };
-      if (priority !== undefined) updates.priority = priority;
-      if (state !== undefined) updates.state = state;
-      if (branchName !== undefined) updates.branchName = branchName;
-      if (notes !== undefined) {
-        updates.description = task.description
-          ? `${task.description}\n\n---\nManager notes: ${notes}`
-          : `Manager notes: ${notes}`;
+      if (fields.title !== undefined) updates.title = fields.title;
+      if (fields.description !== undefined)
+        updates.description = fields.description;
+      if (fields.state !== undefined) updates.state = fields.state;
+      if (fields.priority !== undefined) updates.priority = fields.priority;
+      if (fields.tags !== undefined)
+        updates.tags = JSON.stringify(fields.tags);
+      if (fields.dueDate !== undefined)
+        updates.dueDate =
+          fields.dueDate === null ? null : new Date(fields.dueDate);
+
+      const result = await db
+        .update(tasks)
+        .set(updates)
+        .where(eq(tasks.id, taskId))
+        .returning();
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result[0], null, 2) }],
+      };
+    }
+  );
+
+  // task_delete
+  server.tool(
+    "task_delete",
+    "Delete a task",
+    {
+      taskId: z.number(),
+    },
+    async ({ taskId }) => {
+      const existing = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .get();
+
+      if (!existing) {
+        return {
+          content: [{ type: "text", text: `Task ${taskId} not found` }],
+          isError: true,
+        };
       }
 
-      await db.update(tasks).set(updates).where(eq(tasks.id, taskId));
-
-      // Auto-clear manager when a task is marked done with a branch (ready for review)
-      if (state === "done" && branchName) {
-        triggerAutoClear();
-      }
+      await db.delete(tasks).where(eq(tasks.id, taskId));
 
       return {
         content: [
           {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              message: `Task ${taskId} updated`,
-            }),
+            type: "text",
+            text: `Task "${existing.title}" (ID: ${taskId}) deleted successfully`,
           },
         ],
       };
     }
   );
 
-  // task_assign - Assign a task (move to queued)
+  // task_move
   server.tool(
-    "task_assign",
-    "Assign a task - moves it from 'new' to 'queued' state",
+    "task_move",
+    "Move a task to a different parent or reorder it",
     {
-      taskId: z.number().describe("The task ID to assign"),
+      taskId: z.number(),
+      parentTaskId: z.number().nullable().optional(),
+      order: z.number().optional(),
     },
-    async ({ taskId }) => {
-      const task = await db.query.tasks.findFirst({
-        where: eq(tasks.id, taskId),
-      });
+    async ({ taskId, parentTaskId, order }) => {
+      const existing = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .get();
 
-      if (!task) {
+      if (!existing) {
         return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: `Task ${taskId} not found`,
-              }),
-            },
-          ],
+          content: [{ type: "text", text: `Task ${taskId} not found` }],
+          isError: true,
         };
       }
 
-      if (task.state !== "new") {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                success: false,
-                message: `Task ${taskId} is not in 'new' state (current: ${task.state})`,
-              }),
-            },
-          ],
-        };
-      }
+      const updates: Record<string, unknown> = { updatedAt: new Date() };
+      if (parentTaskId !== undefined) updates.parentTaskId = parentTaskId;
+      if (order !== undefined) updates.order = order;
 
-      await db
+      const result = await db
         .update(tasks)
-        .set({
-          state: "queued",
-          assignedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(tasks.id, taskId));
+        .set(updates)
+        .where(eq(tasks.id, taskId))
+        .returning();
 
-      await db.insert(logs).values({
-        workspaceId: task.workspaceId,
-        taskId,
-        type: "agent",
-        message: `Task assigned and queued`,
-      });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result[0], null, 2) }],
+      };
+    }
+  );
+
+  // task_add_note
+  server.tool(
+    "task_add_note",
+    "Add a note to a task",
+    {
+      taskId: z.number(),
+      content: z.string(),
+    },
+    async ({ taskId, content }) => {
+      const existing = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .get();
+
+      if (!existing) {
+        return {
+          content: [{ type: "text", text: `Task ${taskId} not found` }],
+          isError: true,
+        };
+      }
+
+      const result = await db
+        .insert(taskNotes)
+        .values({ taskId, content })
+        .returning();
 
       return {
         content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({
-              success: true,
-              message: `Task ${taskId} assigned and moved to 'queued' state`,
-            }),
-          },
+          { type: "text", text: JSON.stringify(result[0], null, 2) },
         ],
+      };
+    }
+  );
+
+  // task_add_dependency
+  server.tool(
+    "task_add_dependency",
+    "Add a dependency between tasks",
+    {
+      taskId: z.number(),
+      dependsOnTaskId: z.number(),
+    },
+    async ({ taskId, dependsOnTaskId }) => {
+      const task = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, taskId))
+        .get();
+
+      if (!task) {
+        return {
+          content: [{ type: "text", text: `Task ${taskId} not found` }],
+          isError: true,
+        };
+      }
+
+      const dependsOn = await db
+        .select()
+        .from(tasks)
+        .where(eq(tasks.id, dependsOnTaskId))
+        .get();
+
+      if (!dependsOn) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Dependency task ${dependsOnTaskId} not found`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const result = await db
+        .insert(taskDependencies)
+        .values({ taskId, dependsOnTaskId })
+        .returning();
+
+      return {
+        content: [
+          { type: "text", text: JSON.stringify(result[0], null, 2) },
+        ],
+      };
+    }
+  );
+
+  // task_search
+  server.tool(
+    "task_search",
+    "Search tasks by title or description across all projects",
+    {
+      query: z.string(),
+    },
+    async ({ query }) => {
+      const pattern = `%${query}%`;
+      const result = await db
+        .select()
+        .from(tasks)
+        .where(
+          or(like(tasks.title, pattern), like(tasks.description, pattern))
+        )
+        .orderBy(desc(tasks.updatedAt));
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
     }
   );
