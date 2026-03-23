@@ -1,51 +1,23 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import {
-  Menu,
-  X,
-  LayoutDashboard,
-  ListTodo,
-  Clock,
-  ScrollText,
-  Settings,
-  Bot,
-  MessageSquareCode,
-  FolderGit2,
-  GitBranch,
-} from "lucide-react";
+import { Menu, X, LayoutDashboard, FolderOpen } from "lucide-react";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/taskboard", label: "Taskboard", icon: ListTodo },
-  { href: "/pending", label: "Pending", icon: Clock },
-  { href: "/workspaces", label: "Workspaces", icon: FolderGit2 },
-  { href: "/git", label: "Git", icon: GitBranch },
-  { href: "/claude", label: "Claude", icon: Bot },
-  { href: "/prompts", label: "Prompts", icon: MessageSquareCode },
-  { href: "/logs", label: "Logs", icon: ScrollText },
-  { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/projects", label: "Projects", icon: FolderOpen },
 ];
 
 export function MobileNav() {
   const [isOpen, setIsOpen] = useState(false);
   const pathname = usePathname();
 
-  // Force hard navigation to work around SSE connection blocking client-side navigation
-  const handleNavigation = useCallback((e: React.MouseEvent<HTMLAnchorElement>, href: string) => {
-    e.preventDefault();
-    setIsOpen(false);
-    // Use window.location for reliable navigation when SSE connections are active
-    window.location.href = href;
-  }, []);
-
   return (
     <>
-      {/* Mobile Menu Button - Only visible on small screens */}
       <div className="fixed top-4 left-4 z-50 md:hidden">
         <Button
           variant="outline"
@@ -56,7 +28,6 @@ export function MobileNav() {
         </Button>
       </div>
 
-      {/* Mobile Navigation Overlay */}
       {isOpen && (
         <div
           className="fixed inset-0 bg-black/50 z-40 md:hidden"
@@ -64,7 +35,6 @@ export function MobileNav() {
         />
       )}
 
-      {/* Mobile Navigation Panel */}
       <div
         className={cn(
           "fixed left-0 top-0 h-full w-64 bg-background border-r z-50 transform transition-transform duration-200 md:hidden",
@@ -83,7 +53,7 @@ export function MobileNav() {
               <Link
                 key={item.href}
                 href={item.href}
-                onClick={(e) => handleNavigation(e, item.href)}
+                onClick={() => setIsOpen(false)}
                 className={cn(
                   "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors",
                   isActive
