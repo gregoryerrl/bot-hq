@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import { FlowCanvas } from "@/components/diagrams/flow-canvas";
+import { useCommandContext } from "@/components/command-bar/command-context";
 import type { Node, Edge } from "@xyflow/react";
 
 interface DiagramResponse {
@@ -26,12 +27,25 @@ export default function VisualizerPage({
 }) {
   const { id: projectId, diagramId } = use(params);
   const router = useRouter();
+  const { setContext, clearContext } = useCommandContext();
   const [diagram, setDiagram] = useState<DiagramResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const previousPositions = useRef<Map<string, { x: number; y: number }>>(
     new Map()
   );
+
+  useEffect(() => {
+    if (diagram) {
+      setContext({
+        projectId: parseInt(projectId),
+        diagramId: parseInt(diagramId),
+        label: diagram.title,
+      });
+    }
+    return () => clearContext();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diagram?.id]);
 
   const fetchDiagram = useCallback(async () => {
     try {

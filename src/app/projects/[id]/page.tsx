@@ -12,6 +12,7 @@ import { Plus } from "lucide-react";
 import { toast } from "sonner";
 import { TaskList } from "@/components/projects/task-list";
 import { FlowCard } from "@/components/diagrams/flow-card";
+import { useCommandContext } from "@/components/command-bar/command-context";
 
 interface ProjectData {
   id: number;
@@ -42,6 +43,7 @@ export default function ProjectDetailPage({
   const { id } = use(params);
   const projectId = Number(id);
   const router = useRouter();
+  const { setContext, clearContext } = useCommandContext();
 
   const [project, setProject] = useState<ProjectData | null>(null);
   const [diagrams, setDiagrams] = useState<DiagramData[]>([]);
@@ -49,6 +51,14 @@ export default function ProjectDetailPage({
   const [newDiagramTitle, setNewDiagramTitle] = useState("");
   const [creatingDiagram, setCreatingDiagram] = useState(false);
   const [showNewDiagramInput, setShowNewDiagramInput] = useState(false);
+
+  useEffect(() => {
+    if (project) {
+      setContext({ projectId: project.id, label: project.name });
+    }
+    return () => clearContext();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id]);
 
   const fetchProject = useCallback(async () => {
     try {
