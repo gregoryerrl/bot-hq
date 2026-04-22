@@ -9,6 +9,7 @@ import { toolToFunctionDeclaration } from './gemini/types'
 import { registerAllTools, toolRegistry } from './tools/index'
 import { ToolDispatcher } from './tools/dispatcher'
 import { buildSystemInstruction } from './memory/context'
+import { getConfig, updateConfig } from './config'
 import type { AgentState } from './gemini/types'
 
 function loadEnv(): Record<string, string> {
@@ -36,10 +37,11 @@ let geminiSession: GeminiSession | null = null
 let dispatcher: ToolDispatcher | null = null
 
 function createWindow() {
+  const cfg = getConfig()
   mainWindow = new BrowserWindow({
     width: 380,
     height: 520,
-    alwaysOnTop: true,
+    alwaysOnTop: cfg.alwaysOnTop,
     frame: false,
     transparent: true,
     resizable: true,
@@ -144,6 +146,20 @@ app.whenReady().then(() => {
   // Placeholder for push-to-talk release from renderer
   ipcMain.on('hotkey:push-to-talk-release', () => {
     // Will be implemented when voice pipeline is ready
+  })
+
+  // Config IPC handlers
+  ipcMain.handle('config:get', () => {
+    return getConfig()
+  })
+
+  ipcMain.handle('config:update', (_event, updates: Record<string, unknown>) => {
+    const updated = updateConfig(updates)
+    // Apply alwaysOnTop immediately if it changed
+    if ('alwaysOnTop' in updates && mainWindow) {
+      mainWindow.setAlwaysOnTop(updated.alwaysOnTop)
+    }
+    return updated
   })
 })
 

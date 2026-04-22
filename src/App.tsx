@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { FloatingWindow } from './components/floating-window'
+import { Settings } from './components/settings'
 import { useAudioCapture } from './hooks/use-audio-capture'
 import { useAudioPlayback } from './hooks/use-audio-playback'
 import type { ActionEntry } from './components/action-log'
@@ -21,6 +22,7 @@ export default function App() {
   const [focusedProject, setFocusedProject] = useState<string | null>(null)
   const [actions, setActions] = useState<ActionEntry[]>([])
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null)
+  const [settingsVisible, setSettingsVisible] = useState(false)
 
   const capturingRef = useRef(false)
   const { start: startCapture, stop: stopCapture } = useAudioCapture()
@@ -148,16 +150,23 @@ export default function App() {
   }, [addMessage, enqueue, startCapture, stopCapture, stopPlayback])
 
   return (
-    <FloatingWindow
-      state={agentState}
-      messages={messages}
-      focusedProject={focusedProject}
-      actions={actions}
-      confirmVisible={confirmRequest !== null}
-      confirmToolName={confirmRequest?.name ?? ''}
-      confirmArgs={confirmRequest?.args ?? {}}
-      onConfirmApprove={handleApprove}
-      onConfirmDeny={handleDeny}
-    />
+    <>
+      <FloatingWindow
+        state={agentState}
+        messages={messages}
+        focusedProject={focusedProject}
+        actions={actions}
+        confirmVisible={confirmRequest !== null}
+        confirmToolName={confirmRequest?.name ?? ''}
+        confirmArgs={confirmRequest?.args ?? {}}
+        onConfirmApprove={handleApprove}
+        onConfirmDeny={handleDeny}
+        onSettingsOpen={() => setSettingsVisible(true)}
+      />
+      <Settings
+        visible={settingsVisible}
+        onClose={() => setSettingsVisible(false)}
+      />
+    </>
   )
 }
