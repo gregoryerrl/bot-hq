@@ -1,5 +1,7 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
+import { registerHotkeys, unregisterHotkeys } from './hotkey'
+import { createTray } from './tray'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -26,8 +28,24 @@ function createWindow() {
   }
 }
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  createWindow()
+
+  if (mainWindow) {
+    registerHotkeys(mainWindow)
+    createTray(mainWindow)
+  }
+
+  // Placeholder for push-to-talk release from renderer
+  ipcMain.on('hotkey:push-to-talk-release', () => {
+    // Will be implemented when voice pipeline is ready
+  })
+})
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
+})
+
+app.on('will-quit', () => {
+  unregisterHotkeys()
 })
