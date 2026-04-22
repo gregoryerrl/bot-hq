@@ -1,9 +1,10 @@
-import { ipcMain, BrowserWindow } from 'electron'
+import { BrowserWindow } from 'electron'
 
-export function setupAudioIPC(window: BrowserWindow) {
-  // Renderer sends captured PCM audio chunks (16kHz 16-bit mono)
-  ipcMain.on('audio:chunk', (_event, base64PCM: string) => {
-    // Will be forwarded to Gemini in Task 4
-    window.webContents.send('audio:to-gemini', base64PCM)
-  })
+export function setupAudioIPC(_window: BrowserWindow) {
+  // Audio routing is now handled in main.ts via GeminiSession.
+  // The renderer sends 'audio:chunk' which main.ts forwards to Gemini.
+  // Gemini responses are sent back via 'gemini:audio' IPC events from GeminiSession.
+  //
+  // This module is kept as a no-op placeholder for any future
+  // audio processing that may need to happen between capture and Gemini.
 }
