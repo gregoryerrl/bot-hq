@@ -1,5 +1,6 @@
 import { toolRegistry } from './registry'
 import { BrowserWindow, ipcMain } from 'electron'
+import { isDestructiveCommand } from '../safety/patterns'
 
 interface DispatchResult {
   id: string
@@ -32,7 +33,10 @@ export class ToolDispatcher {
 
       this.window.webContents.send('tool:executing', { name: call.name, args: call.args })
 
-      if (tool.destructive) {
+      const isDestructive = tool.destructive ||
+        (call.name === 'run_command' && isDestructiveCommand(call.args.command as string))
+
+      if (isDestructive) {
         const approved = await this.requestConfirmation(call.id, call.name, call.args)
         if (!approved) {
           results.push({ id: call.id, name: call.name, response: { error: 'User denied this action' } })
