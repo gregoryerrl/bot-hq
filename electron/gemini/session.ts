@@ -1,10 +1,18 @@
 import { BrowserWindow } from 'electron'
 import { GeminiClient, type GeminiClientConfig } from './client'
-import type { FunctionCall } from './types'
+import type { FunctionCall, AgentState } from './types'
+
+export type ToolCallHandler = (
+  calls: FunctionCall[]
+) => Promise<Array<{ id: string; name: string; response: unknown }>>
+
+export type StateChangeHandler = (state: AgentState) => void
 
 export class GeminiSession {
   private client: GeminiClient
   private window: BrowserWindow
+  private toolCallHandler: ToolCallHandler | null = null
+  private stateChangeHandler: StateChangeHandler | null = null
 
   constructor(config: GeminiClientConfig, window: BrowserWindow) {
     this.client = new GeminiClient(config)
@@ -12,14 +20,39 @@ export class GeminiSession {
     this.setupListeners()
   }
 
+  /**
+   * Set a handler for tool calls. When Gemini requests tool execution,
+   * this handler is called in the main process. The handler should dispatch
+   * tool calls and return results. The session will then send the results
+   * back to Gemini automatically.
+   */
+  setToolCallHandler(handler: ToolCallHandler): void {
+    this.toolCallHandler = handler
+  }
+
+  /**
+   * Set a handler that is called whenever the agent state changes.
+   * Useful for updating the tray icon or other status indicators.
+   */
+  setStateChangeHandler(handler: StateChangeHandler): void {
+    this.stateChangeHandler = handler
+  }
+
+  private emitState(state: AgentState): void {
+    this.window.webContents.send('gemini:state', state)
+    if (this.stateChangeHandler) {
+      this.stateChangeHandler(state)
+    }
+  }
+
   private setupListeners(): void {
     this.client.on('connected', () => {
-      this.window.webContents.send('gemini:state', 'idle')
+      this.emitState('idle')
     })
 
     this.client.on('audio', (base64: string) => {
       this.window.webContents.send('gemini:audio', base64)
-      this.window.webContents.send('gemini:state', 'speaking')
+      this.emitState('speaking')
     })
 
     this.client.on('text', (text: string) => {
@@ -34,13 +67,29 @@ export class GeminiSession {
       this.window.webContents.send('gemini:assistant-transcript', text)
     })
 
-    this.client.on('tool-call', (calls: FunctionCall[]) => {
-      this.window.webContents.send('gemini:state', 'executing')
+    this.client.on('tool-call', async (calls: FunctionCall[]) => {
+      this.emitState('executing')
       this.window.webContents.send('gemini:tool-calls', calls)
+
+      if (this.toolCallHandler) {
+        try {
+          const results = await this.toolCallHandler(calls)
+          this.sendToolResponse(results)
+        } catch (err) {
+          console.error('Tool call handler error:', err)
+          // Send error responses for all calls so Gemini can continue
+          const errorResults = calls.map((call) => ({
+            id: call.id,
+            name: call.name,
+            response: { error: `Tool execution failed: ${(err as Error).message}` },
+          }))
+          this.sendToolResponse(errorResults)
+        }
+      }
     })
 
     this.client.on('turn-complete', () => {
-      this.window.webContents.send('gemini:state', 'idle')
+      this.emitState('idle')
       this.window.webContents.send('gemini:turn-complete')
     })
 
@@ -53,7 +102,7 @@ export class GeminiSession {
     })
 
     this.client.on('disconnected', () => {
-      this.window.webContents.send('gemini:state', 'idle')
+      this.emitState('idle')
     })
   }
 

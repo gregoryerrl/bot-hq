@@ -2,6 +2,7 @@ import type {
   FunctionDeclaration as SDKFunctionDeclaration,
   Type,
 } from '@google/genai'
+import type { ToolDefinition } from '../tools/types'
 
 export { Type } from '@google/genai'
 
@@ -34,6 +35,35 @@ export function toSDKFunctionDeclaration(
         ])
       ),
       required: decl.parameters.required,
+    },
+  }
+}
+
+/**
+ * Convert a ToolDefinition from the tool registry into a FunctionDeclaration for Gemini.
+ *
+ * The SDK's Type enum uses string values identical to the plain strings in ToolDefinition
+ * (e.g. Type.STRING = "STRING", Type.OBJECT = "OBJECT"), so we can cast directly.
+ */
+export function toolToFunctionDeclaration(
+  tool: ToolDefinition
+): FunctionDeclaration {
+  return {
+    name: tool.name,
+    description: tool.description,
+    parameters: {
+      type: (tool.parameters.type || 'OBJECT') as unknown as Type,
+      properties: Object.fromEntries(
+        Object.entries(tool.parameters.properties).map(([key, val]) => [
+          key,
+          {
+            type: (val.type || 'STRING') as unknown as Type,
+            description: val.description,
+            enum: val.enum,
+          },
+        ])
+      ),
+      required: tool.parameters.required,
     },
   }
 }

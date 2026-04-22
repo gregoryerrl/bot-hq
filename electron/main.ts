@@ -2,9 +2,14 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { readFileSync } from 'fs'
 import { registerHotkeys, unregisterHotkeys } from './hotkey'
-import { createTray } from './tray'
+import { createTray, updateTrayStatus } from './tray'
 import { setupAudioIPC } from './audio'
 import { GeminiSession } from './gemini/session'
+import { toolToFunctionDeclaration } from './gemini/types'
+import { registerAllTools, toolRegistry } from './tools/index'
+import { ToolDispatcher } from './tools/dispatcher'
+import { buildSystemInstruction } from './memory/context'
+import type { AgentState } from './gemini/types'
 
 function loadEnv(): Record<string, string> {
   try {
@@ -28,6 +33,7 @@ function loadEnv(): Record<string, string> {
 
 let mainWindow: BrowserWindow | null = null
 let geminiSession: GeminiSession | null = null
+let dispatcher: ToolDispatcher | null = null
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -52,6 +58,70 @@ function createWindow() {
   }
 }
 
+async function initGemini(window: BrowserWindow) {
+  const env = loadEnv()
+  if (!env.GEMINI_API_KEY) {
+    console.warn('GEMINI_API_KEY not found in .env — Gemini session will not start')
+    return
+  }
+
+  // 1. Register all tools
+  registerAllTools()
+  const allTools = toolRegistry.getAll()
+  console.log(`Registered ${allTools.length} tools`)
+
+  // 2. Build system instruction from memory + project context
+  let systemInstruction: string
+  try {
+    systemInstruction = await buildSystemInstruction()
+  } catch (err) {
+    console.warn('Failed to build system instruction from DB, using fallback:', err)
+    systemInstruction =
+      'You are Bot-HQ, a voice-controlled computer agent. Be concise in voice responses.'
+  }
+
+  // 3. Convert tool definitions to Gemini FunctionDeclarations
+  const functionDeclarations = allTools.map(toolToFunctionDeclaration)
+
+  // 4. Create the Gemini session
+  geminiSession = new GeminiSession(
+    {
+      apiKey: env.GEMINI_API_KEY,
+      systemInstruction,
+      tools: functionDeclarations
+    },
+    window
+  )
+
+  // 5. Create the tool dispatcher
+  dispatcher = new ToolDispatcher(window)
+
+  // 6. Set the tool-call handler: Gemini -> Dispatcher -> Gemini
+  geminiSession.setToolCallHandler(async (calls) => {
+    if (!dispatcher) {
+      return calls.map((c) => ({
+        id: c.id,
+        name: c.name,
+        response: { error: 'Dispatcher not initialized' }
+      }))
+    }
+    return dispatcher.dispatch(calls)
+  })
+
+  // 7. Update tray status on agent state changes
+  geminiSession.setStateChangeHandler((state: AgentState) => {
+    updateTrayStatus(state)
+  })
+
+  // 8. Connect to Gemini Live API
+  try {
+    await geminiSession.connect()
+    console.log('Gemini Live session connected')
+  } catch (err) {
+    console.error('Gemini connection failed:', err)
+  }
+}
+
 app.whenReady().then(() => {
   createWindow()
 
@@ -60,24 +130,10 @@ app.whenReady().then(() => {
     createTray(mainWindow)
     setupAudioIPC(mainWindow)
 
-    // Connect to Gemini Live API
-    const env = loadEnv()
-    if (env.GEMINI_API_KEY) {
-      geminiSession = new GeminiSession(
-        {
-          apiKey: env.GEMINI_API_KEY,
-          systemInstruction:
-            'You are Bot-HQ, a voice-controlled computer agent. Be concise in voice responses.',
-          tools: [] // Tools will be added in Task 18
-        },
-        mainWindow
-      )
-      geminiSession
-        .connect()
-        .catch((err) =>
-          console.error('Gemini connection failed:', err)
-        )
-    }
+    // Initialize Gemini with tools, dispatcher, and context
+    initGemini(mainWindow).catch((err) =>
+      console.error('Gemini init failed:', err)
+    )
   }
 
   // Forward audio chunks from renderer to Gemini
