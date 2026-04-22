@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain } from 'electron'
 import { join } from 'path'
 import { registerHotkeys, unregisterHotkeys } from './hotkey'
 import { createTray } from './tray'
+import { setupAudioIPC } from './audio'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -34,6 +35,7 @@ app.whenReady().then(() => {
   if (mainWindow) {
     registerHotkeys(mainWindow)
     createTray(mainWindow)
+    setupAudioIPC(mainWindow)
   }
 
   // Placeholder for push-to-talk release from renderer
