@@ -1,266 +1,211 @@
 # Bot-HQ
 
-A control center for managing Claude Code agents. Create tasks, monitor progress, and orchestrate AI coding assistants from a single dashboard.
+A native multi-agent communication hub. A single Go binary that lets AI agents (Claude Code sessions, voice interface, Discord bot) communicate peer-to-peer through a shared SQLite database.
 
 ## Quick Start
 
 ```bash
-# Clone and install
-git clone https://github.com/gregoryerrl/bot-hq.git
-cd bot-hq
-npm install
+# Build
+go build -o bot-hq ./cmd/bot-hq
 
-# Run interactive setup
-npm run setup
+# Run the hub (terminal UI + Live server)
+./bot-hq
+
+# Or install globally
+cp bot-hq /usr/local/bin/
 ```
 
-The setup wizard will guide you through:
-1. Configuring your Anthropic API key
-2. Setting the server port (default: 7890)
-3. Configuring the projects directory
-4. Initializing the database
-5. Setting up the MCP server
+Bot-HQ Live (voice interface) is available at `http://localhost:3847` when the hub is running.
 
-Then start the server:
-```bash
-npm run local
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                       BOT-HQ HUB                         │
+│                (Go binary, ~18MB, ~2MB RAM)               │
+│                                                          │
+│  ┌──────────┐  ┌───────────┐  ┌────────────────────┐    │
+│  │Bubbletea │  │ SQLite    │  │ WebSocket Server   │    │
+│  │ TUI      │  │ hub.db    │  │ (serves Live,      │    │
+│  │ (tabs,   │  │ WAL mode  │  │  proxies Gemini)   │    │
+│  │  feed,   │  │ pure Go   │  │                    │    │
+│  │  input)  │  │           │  │                    │    │
+│  └──────────┘  └─────┬─────┘  └────────────────────┘    │
+│                      │                                   │
+│              OnMessage callbacks                         │
+│           (instant detection)                            │
+│                      │                                   │
+│  ┌───────────────────┴────────────────────────────────┐  │
+│  │         MCP Server (stdio, per-client, Go)          │  │
+│  └────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────┘
+          │                    │                    │
+   ┌──────┴──────┐     ┌──────┴──────┐     ┌──────┴──────┐
+   │ Claude Code │     │ Claude Code │     │   Browser   │
+   │ Session A   │     │ Session B   │     │  (Live UI)  │
+   │ stdio MCP   │     │ stdio MCP   │     │  on-demand  │
+   └─────────────┘     └─────────────┘     └─────────────┘
 ```
 
-Open http://localhost:7890
-
-## Setup Options
-
-### Interactive Setup (Recommended)
-```bash
-npm run setup
-```
-Walks you through configuration with prompts.
-
-### Quick Setup (Non-Interactive)
-```bash
-npm run setup:quick
-```
-Uses defaults, skips prompts. Good for CI/CD or when you'll configure `.env.local` manually.
-
-### Custom Configuration
-```bash
-# Use a different port
-npm run setup -- --port 8080
-
-# Specify projects directory
-npm run setup -- --scope /path/to/your/projects
-
-# Skip MCP server configuration
-npm run setup -- --skip-mcp
-
-# Combine options
-npm run setup -- -y --port 8080 --scope ~/code
-```
-
-### Setup Commands Reference
+## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `npm run setup` | Interactive setup wizard |
-| `npm run setup:quick` | Quick setup with defaults |
-| `npm run setup:verify` | Verify installation health |
-| `npm run setup:reset` | Reset database and state |
-| `npm run setup -- --help` | Show all setup options |
+| `bot-hq` | Start the hub (TUI + Live server + Discord bot) |
+| `bot-hq mcp` | Start as stdio MCP server (used by Claude Code) |
+| `bot-hq status` | Print agent status and exit |
+| `bot-hq version` | Print version |
 
-### Environment Variables
+## Components
 
-Copy `.env.example` to `.env.local` and configure:
+### Terminal UI (Bubbletea)
 
-```bash
-# Required
-ANTHROPIC_API_KEY=sk-ant-api03-...
+Four tabs navigable with `Tab`/`Shift+Tab` or number keys `1-4`:
 
-# Server (optional)
-BOT_HQ_PORT=7890
-BOT_HQ_URL=http://localhost:7890
+- **Hub** — Color-coded message feed + command input
+- **Agents** — Live agent list with status indicators
+- **Sessions** — Active collaboration sessions
+- **Settings** — Current configuration display
 
-# Agent scope (optional)
-BOT_HQ_SCOPE=/Users/you/Projects
-```
+### Bot-HQ Live (Voice Interface)
 
-See `.env.example` for all available options.
+Web-based voice UI served at `http://localhost:3847`:
+- Connects to Gemini Live API for real-time voice
+- Mic capture (16kHz PCM) via AudioWorklet
+- Audio playback (24kHz PCM) from Gemini
+- On-demand — Gemini connects only when a browser tab is open
 
-## Prerequisites
+### MCP Server
 
-- **Node.js 18+** (20+ recommended)
-- **Claude Code CLI** (`claude` command) - for agent functionality
-- **Anthropic API key** - [Get one here](https://console.anthropic.com/)
-
-## Troubleshooting
-
-### Doctor Command
-
-Run diagnostics and auto-fix common issues:
-
-```bash
-# Check for issues
-npm run doctor
-
-# Attempt automatic fixes
-npm run doctor:fix
-```
-
-### Common Issues
-
-**Database errors**
-```bash
-npm rebuild better-sqlite3
-npm run db:push
-```
-
-**node-pty errors (terminal not working)**
-```bash
-npm rebuild node-pty
-# Or run setup which fixes permissions automatically
-npm run setup:quick
-```
-
-**MCP server not connecting**
-```bash
-# Test MCP server directly
-npm run mcp
-
-# Regenerate MCP server script
-npm run setup -- --skip-db
-```
-
-**Port already in use**
-```bash
-# Use a different port
-npm run setup -- --port 8080
-# Or edit .env.local and change BOT_HQ_PORT
-```
-
-**Agent not starting**
-- Verify `claude` CLI is installed: `claude --version`
-- Check workspace path exists
-- Ensure ANTHROPIC_API_KEY is set in `.env.local`
-
-## Features
-
-- **Task Management** - Create tasks manually or sync from GitHub issues
-- **Agent Orchestration** - Start Claude Code agents to work on tasks
-- **Progress Tracking** - Monitor agent work with iteration-based feedback loops
-- **MCP Integration** - Control bot-hq from any Claude Code session via MCP tools
-
-## MCP Server
-
-Bot-HQ includes an MCP server that lets you manage tasks from any Claude Code session.
-
-The setup script configures this automatically. To use it globally, add to your Claude settings (`~/.claude/settings.json`):
+Every Claude Code session can connect to the hub via MCP:
 
 ```json
 {
   "mcpServers": {
     "bot-hq": {
-      "command": "/path/to/bot-hq/mcp-server.sh"
+      "command": "bot-hq",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-### Available MCP Tools
+**Available tools:**
 
 | Tool | Description |
 |------|-------------|
-| `task_list` | List tasks by workspace or state |
-| `task_get` | Get task details including feedback |
-| `task_create` | Create new tasks |
-| `task_update` | Update task state, priority, notes |
-| `task_assign` | Move task to queue |
-| `workspace_list` | List configured workspaces |
-| `workspace_create` | Create a new workspace |
-| `agent_start` | Start agent on a task |
-| `agent_stop` | Stop running agent |
-| `status_overview` | Dashboard summary |
+| `hub_register` | Join the hub as an agent |
+| `hub_unregister` | Leave the hub |
+| `hub_send` | Send a message to an agent or session |
+| `hub_read` | Read new messages addressed to you |
+| `hub_agents` | List registered agents |
+| `hub_sessions` | List sessions |
+| `hub_session_create` | Start a new collaboration session |
+| `hub_session_join` | Join an existing session |
+| `hub_status` | Update your agent status |
+| `hub_spawn` | Spawn a new Claude Code session in tmux |
 
-## Setting Up Workspaces
+### Discord Bot
 
-1. Open http://localhost:7890
-2. Go to **Workspaces** (sidebar)
-3. Click **Add Workspace** with:
-   - **Name**: Project identifier (e.g., "my-app")
-   - **Path**: Absolute path to the repository
+Bridges messages between a Discord channel and the hub. Configure token and channel ID in `~/.bot-hq/config.toml`.
 
-## How Tasks Work
+## Configuration
 
-Tasks follow this lifecycle:
+Config file at `~/.bot-hq/config.toml` (created automatically on first run):
 
+```toml
+[hub]
+db_path = "~/.bot-hq/hub.db"
+live_port = 3847
+
+[live]
+voice = "Iapetus"
+gemini_api_key = ""    # or set BOT_HQ_GEMINI_KEY env var
+
+[discord]
+token = ""             # or set BOT_HQ_DISCORD_TOKEN env var
+channel_id = ""
+
+[brain]
+auto_start = false
 ```
-new → queued → in_progress → done
-                    ↓
-               needs_help
-                    ↓
-              (with feedback)
-                    ↓
-                 queued (iteration 2, 3, ...)
-```
 
-When an agent completes a task, you can:
-- Mark it **done** if the work is correct
-- Send **feedback** to requeue with incremented iteration count
+Environment variables `BOT_HQ_GEMINI_KEY` and `BOT_HQ_DISCORD_TOKEN` override config file values.
 
-The agent receives the feedback and iteration count to improve its work.
+## Tech Stack
 
-## All Scripts
-
-| Script | Description |
-|--------|-------------|
-| `npm run setup` | Interactive first-time setup |
-| `npm run setup:quick` | Non-interactive setup with defaults |
-| `npm run setup:verify` | Verify installation health |
-| `npm run setup:reset` | Reset database and state |
-| `npm run doctor` | Diagnose common issues |
-| `npm run doctor:fix` | Diagnose and auto-fix issues |
-| `npm run local` | Start development server |
-| `npm run dev` | Start development server (alias) |
-| `npm run build` | Production build |
-| `npm run start` | Start production server |
-| `npm run mcp` | Run MCP server standalone |
-| `npm run db:push` | Sync database schema |
-| `npm run db:studio` | Open database browser |
-| `npm run lint` | Run ESLint |
+| Component | Technology |
+|-----------|-----------|
+| Hub binary | Go |
+| Terminal UI | Bubbletea + Lipgloss |
+| Database | modernc.org/sqlite (pure Go, WAL mode) |
+| MCP Server | mark3labs/mcp-go (stdio transport) |
+| WebSocket | gorilla/websocket |
+| Voice API | Gemini Live API |
+| Live web UI | Vanilla HTML/JS (embedded via `go:embed`) |
+| Discord | discordgo |
+| Config | BurntSushi/toml |
 
 ## Project Structure
 
 ```
 bot-hq/
-├── src/
-│   ├── app/           # Next.js pages and API routes
-│   ├── components/    # React components
-│   ├── lib/           # Database, utilities, manager
-│   └── mcp/           # MCP server and tools
-├── scripts/           # Setup and doctor scripts
-├── data/              # SQLite database
-├── drizzle/           # Database migrations
-└── docs/              # Documentation
+  cmd/bot-hq/
+    main.go                 — Entry point
+
+  internal/
+    hub/
+      hub.go                — Core hub: dispatch, WS client management
+      db.go                 — SQLite database layer
+      config.go             — TOML config
+
+    mcp/
+      server.go             — stdio MCP server
+      tools.go              — 10 hub tool definitions
+
+    live/
+      server.go             — WebSocket server + static file serving
+      gemini.go             — Gemini Live API proxy
+      web/                  — Embedded web UI (HTML/JS/CSS)
+
+    tmux/
+      tmux.go               — tmux exec helpers
+
+    discord/
+      bot.go                — Discord bot bridge
+
+    ui/
+      app.go                — Bubbletea root model with tabs
+      hub_tab.go            — Message feed + command input
+      agents_tab.go         — Agent list with status dots
+      sessions_tab.go       — Session list
+      settings_tab.go       — Config display
+      styles.go             — Lipgloss styles
+
+    protocol/
+      types.go              — Message types, agent types, session modes
+      constants.go          — Protocol constants
 ```
-
-## Tech Stack
-
-- **Next.js 16** (App Router, React 19)
-- **SQLite** + Drizzle ORM
-- **Tailwind CSS** + shadcn/ui
-- **MCP SDK** for Claude integration
-- **node-pty** for terminal sessions
 
 ## Development
 
 ```bash
-# Start dev server with hot reload
-npm run local
+# Run tests
+go test ./internal/... -v
 
-# Open database browser
-npm run db:studio
+# Build
+go build -o bot-hq ./cmd/bot-hq
 
-# Run linter
-npm run lint
+# Run with race detector
+go build -race -o bot-hq ./cmd/bot-hq
 ```
+
+## Prerequisites
+
+- **Go 1.21+**
+- **tmux** — for spawning Claude Code sessions
+- **Gemini API key** — for voice interface (optional)
+- **Discord bot token** — for Discord integration (optional)
 
 ## License
 
