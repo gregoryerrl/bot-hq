@@ -12,7 +12,7 @@ import (
 
 const (
 	geminiWSEndpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
-	geminiModel      = "models/gemini-2.0-flash-live-001"
+	geminiModel      = "models/gemini-3.1-flash-live-preview"
 	defaultSystemInstruction = "You are Bot-HQ, a voice-controlled AI assistant hub. You coordinate with AI agents (Claude Code sessions, Discord bots) and help users manage their development workflow through voice commands. Be concise — your responses will be spoken aloud. Keep responses under 2 sentences unless the user asks for detail."
 )
 
