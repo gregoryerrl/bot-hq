@@ -3,6 +3,7 @@ package rain
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,10 @@ type Rain struct {
 // New creates a Rain instance. workDir is where the Claude Code session runs.
 func New(db *hub.DB, workDir string) *Rain {
 	if workDir == "" {
-		home, _ := os.UserHomeDir()
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = os.TempDir()
+		}
 		workDir = filepath.Join(home, "Projects")
 	}
 	return &Rain{
@@ -280,7 +284,9 @@ func (r *Rain) processNewMessages() {
 		// Forward messages addressed to rain (from anyone except rain itself)
 		if msg.FromAgent != agentID {
 			nudge := formatRainNudge(msg.FromAgent, msg.Content)
-			r.SendCommand(nudge)
+			if err := r.SendCommand(nudge); err != nil {
+				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
+			}
 		}
 	}
 }
