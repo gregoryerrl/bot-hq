@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "bot-hq": {
-      "command": "/Users/gregoryerrl/Projects/bot-hq/mcp-server.sh",
-      "args": []
-    }
-  }
-}

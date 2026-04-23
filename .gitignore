@@ -1,33 +1,25 @@
-# dependencies
-/node_modules
+# Binary
+/bot-hq
 
-# testing
-/coverage
-
-# build output
-/out/
-/dist/
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
+# Database
+data/
+bot-hq.db
+*.db
 
 # env files
 .env*
 !.env.example
 
-# typescript
-*.tsbuildinfo
-
-# Database
-data/
-bot-hq.db
+# Build output
+/out/
+/dist/
 
 # Worktrees
 .worktrees/
+
+# Misc
+.DS_Store
+*.pem
+
+# Stale coder configs
+.bot-hq-coder-*-mcp.json
