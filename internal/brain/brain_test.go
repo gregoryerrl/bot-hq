@@ -29,3 +29,13 @@ func TestFormatNudgeIsNotEmpty(t *testing.T) {
 		t.Error("formatNudge should instruct Claude to use hub_send")
 	}
 }
+
+func TestFormatNudgeIncludesInstructions(t *testing.T) {
+	nudge := formatNudge("user", "hello")
+	if !strings.Contains(nudge, "hub_send") {
+		t.Error("formatNudge should instruct Claude to use hub_send")
+	}
+	if !strings.Contains(nudge, "brain") {
+		t.Error("formatNudge should mention brain as the sender")
+	}
+}

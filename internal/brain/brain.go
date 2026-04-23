@@ -141,6 +141,14 @@ func (b *Brain) SendCommand(text string) error {
 	session := b.tmuxSession
 	b.mu.Unlock()
 
+	// Record in hub messages so TUI can display brain→claude exchanges
+	b.db.InsertMessage(protocol.Message{
+		FromAgent: agentID,
+		ToAgent:   "claude-session",
+		Type:      protocol.MsgCommand,
+		Content:   text,
+	})
+
 	// Send the text to the tmux pane
 	cmd := exec.Command("tmux", "send-keys", "-t", session, "-l", text)
 	if err := cmd.Run(); err != nil {
