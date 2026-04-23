@@ -13,6 +13,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// QueuedMessage represents a message waiting to be delivered to a busy agent.
+type QueuedMessage struct {
+	ID            int64
+	MessageID     int64
+	TargetAgent   string
+	TmuxTarget    string
+	FormattedText string
+	Attempts      int
+	MaxAttempts   int
+	Status        string
+	Created       time.Time
+	LastAttempt   time.Time
+}
+
 type DB struct {
 	conn       *sql.DB
 	mu         sync.RWMutex
@@ -20,13 +34,40 @@ type DB struct {
 }
 
 func OpenDB(path string) (*DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
 
-	conn, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL")
+	// Pre-create the DB file with restrictive permissions if it doesn't exist
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, fmt.Errorf("create db file: %w", err)
+		}
+		f.Close()
+	}
+
+	conn, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
+	}
+
+	// Force single connection so PRAGMAs apply to all operations.
+	// SQLite only allows one writer at a time anyway; extra pool connections
+	// would not inherit PRAGMA settings and cause SQLITE_BUSY under contention.
+	conn.SetMaxOpenConns(1)
+
+	// Apply PRAGMAs explicitly — modernc.org/sqlite ignores DSN parameters
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA synchronous=NORMAL",
+	}
+	for _, p := range pragmas {
+		if _, err := conn.Exec(p); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("pragma %q: %w", p, err)
+		}
 	}
 
 	db := &DB{conn: conn}
@@ -83,9 +124,42 @@ func (db *DB) migrate() error {
 		created     INTEGER NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS claude_sessions (
+		id          TEXT PRIMARY KEY,
+		project     TEXT NOT NULL,
+		tmux_target TEXT NOT NULL,
+		pid         INTEGER DEFAULT 0,
+		mode        TEXT NOT NULL,
+		status      TEXT NOT NULL,
+		last_output TEXT DEFAULT '',
+		started     INTEGER NOT NULL,
+		ended       INTEGER DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS settings (
+		key         TEXT PRIMARY KEY,
+		value       TEXT NOT NULL,
+		updated     INTEGER NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS message_queue (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		message_id      INTEGER NOT NULL,
+		target_agent    TEXT NOT NULL,
+		tmux_target     TEXT NOT NULL,
+		formatted_text  TEXT NOT NULL,
+		attempts        INTEGER DEFAULT 0,
+		max_attempts    INTEGER DEFAULT 30,
+		status          TEXT DEFAULT 'pending',
+		created         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_attempt    TIMESTAMP
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_agent, id);
 	CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 	CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created);
+	CREATE INDEX IF NOT EXISTS idx_mq_status ON message_queue(status);
+	CREATE INDEX IF NOT EXISTS idx_mq_target ON message_queue(target_agent);
 	`
 	_, err := db.conn.Exec(schema)
 	return err
@@ -142,6 +216,12 @@ func (db *DB) UpdateAgentStatus(id string, status protocol.AgentStatus, project 
 
 func (db *DB) UnregisterAgent(id string) error {
 	return db.UpdateAgentStatus(id, protocol.StatusOffline)
+}
+
+// DeleteAgent permanently removes an agent record from the database.
+func (db *DB) DeleteAgent(id string) error {
+	_, err := db.conn.Exec(`DELETE FROM agents WHERE id = ?`, id)
+	return err
 }
 
 func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
@@ -219,14 +299,28 @@ func (db *DB) ReadMessages(agentID string, sinceID int64, limit int) ([]protocol
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := db.conn.Query(
-		`SELECT id, session_id, from_agent, to_agent, type, content, created
-		 FROM messages
-		 WHERE (to_agent = ? OR to_agent = '') AND id > ?
-		 ORDER BY id ASC
-		 LIMIT ?`,
-		agentID, sinceID, limit,
-	)
+	var rows *sql.Rows
+	var err error
+	if agentID == "" {
+		// Return all messages (for TUI/admin view)
+		rows, err = db.conn.Query(
+			`SELECT id, session_id, from_agent, to_agent, type, content, created
+			 FROM messages
+			 WHERE id > ?
+			 ORDER BY id ASC
+			 LIMIT ?`,
+			sinceID, limit,
+		)
+	} else {
+		rows, err = db.conn.Query(
+			`SELECT id, session_id, from_agent, to_agent, type, content, created
+			 FROM messages
+			 WHERE (to_agent = ? OR to_agent = '') AND id > ?
+			 ORDER BY id ASC
+			 LIMIT ?`,
+			agentID, sinceID, limit,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -383,6 +477,108 @@ func (db *DB) JoinSession(sessionID, agentID string) error {
 	_, err = db.conn.Exec(
 		`UPDATE sessions SET agents = ?, updated = ? WHERE id = ?`,
 		string(agentsJSON), time.Now().UnixMilli(), sessionID,
+	)
+	return err
+}
+
+// --- Settings ---
+
+// GetSetting returns the value for a setting key, or defaultVal if not found.
+func (db *DB) GetSetting(key, defaultVal string) string {
+	var val string
+	err := db.conn.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&val)
+	if err != nil {
+		return defaultVal
+	}
+	return val
+}
+
+// SetSetting upserts a setting key-value pair.
+func (db *DB) SetSetting(key, value string) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO settings (key, value, updated) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated = excluded.updated`,
+		key, value, time.Now().UnixMilli(),
+	)
+	return err
+}
+
+// GetAllSettings returns all settings as a map.
+func (db *DB) GetAllSettings() (map[string]string, error) {
+	rows, err := db.conn.Query(`SELECT key, value FROM settings ORDER BY key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	settings := make(map[string]string)
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		settings[k] = v
+	}
+	return settings, rows.Err()
+}
+
+// --- Message Queue ---
+
+// EnqueueMessage adds a message to the retry queue for later delivery.
+func (db *DB) EnqueueMessage(messageID int64, targetAgent, tmuxTarget, formattedText string) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO message_queue (message_id, target_agent, tmux_target, formatted_text)
+		 VALUES (?, ?, ?, ?)`,
+		messageID, targetAgent, tmuxTarget, formattedText,
+	)
+	return err
+}
+
+// GetPendingMessages returns all pending queued messages ordered by creation time.
+func (db *DB) GetPendingMessages() ([]QueuedMessage, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, message_id, target_agent, tmux_target, formatted_text, attempts, max_attempts, status, created, last_attempt
+		 FROM message_queue WHERE status = 'pending' ORDER BY created ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []QueuedMessage
+	for rows.Next() {
+		var qm QueuedMessage
+		var created string
+		var lastAttempt sql.NullString
+		if err := rows.Scan(&qm.ID, &qm.MessageID, &qm.TargetAgent, &qm.TmuxTarget,
+			&qm.FormattedText, &qm.Attempts, &qm.MaxAttempts, &qm.Status,
+			&created, &lastAttempt); err != nil {
+			return nil, err
+		}
+		qm.Created, _ = time.Parse(time.DateTime, created)
+		if lastAttempt.Valid {
+			qm.LastAttempt, _ = time.Parse(time.DateTime, lastAttempt.String)
+		}
+		msgs = append(msgs, qm)
+	}
+	return msgs, rows.Err()
+}
+
+// UpdateQueueStatus updates the status and attempt count of a queued message.
+func (db *DB) UpdateQueueStatus(id int64, status string, attempts int) error {
+	_, err := db.conn.Exec(
+		`UPDATE message_queue SET status = ?, attempts = ?, last_attempt = CURRENT_TIMESTAMP WHERE id = ?`,
+		status, attempts, id,
+	)
+	return err
+}
+
+// CleanDeliveredMessages removes delivered queue entries older than the given duration.
+func (db *DB) CleanDeliveredMessages(olderThan time.Duration) error {
+	cutoff := time.Now().Add(-olderThan).Format(time.DateTime)
+	_, err := db.conn.Exec(
+		`DELETE FROM message_queue WHERE status = 'delivered' AND created < ?`,
+		cutoff,
 	)
 	return err
 }

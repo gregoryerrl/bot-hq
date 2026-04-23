@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,7 @@ func (h *Hub) Start() error {
 		h.lastPollID = msgs[len(msgs)-1].ID
 	}
 	go h.pollExternalMessages()
+	go h.processMessageQueue()
 	return nil
 }
 
@@ -213,9 +215,21 @@ func (h *Hub) dispatchToClients(msg protocol.Message) {
 	}
 }
 
+// isAtPrompt checks if the tmux pane output indicates the agent is at a prompt.
+func (h *Hub) isAtPrompt(paneOutput string) bool {
+	lines := strings.Split(strings.TrimSpace(paneOutput), "\n")
+	if len(lines) == 0 {
+		return false
+	}
+	lastLine := strings.TrimSpace(lines[len(lines)-1])
+	return lastLine == "" || strings.HasSuffix(lastLine, "❯") ||
+		strings.HasSuffix(lastLine, ">") || strings.HasSuffix(lastLine, "$")
+}
+
 // dispatchToTmux sends a message to a coder agent's tmux session.
 // It looks up the agent's tmux target, checks if Claude is at a prompt,
-// and sends the message text as keystrokes.
+// and sends the message text as keystrokes. If the agent is busy, the
+// message is queued for retry delivery.
 func (h *Hub) dispatchToTmux(msg protocol.Message) {
 	agent, err := h.DB.GetAgent(msg.ToAgent)
 	if err != nil {
@@ -253,17 +267,118 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 
 	text := h.FormatTmuxMessage(tmuxTarget, msg)
 
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	atPrompt := false
-	if len(lines) > 0 {
-		lastLine := strings.TrimSpace(lines[len(lines)-1])
-		if lastLine == "" || strings.HasSuffix(lastLine, "❯") ||
-			strings.HasSuffix(lastLine, ">") || strings.HasSuffix(lastLine, "$") {
-			atPrompt = true
-		}
-	}
-
-	if atPrompt {
+	if h.isAtPrompt(output) {
 		tmuxpkg.SendKeys(tmuxTarget, text, true)
+		// Drain any previously queued messages for this agent
+		h.drainQueue(tmuxTarget, msg.ToAgent)
+	} else {
+		// Agent is busy — queue for retry
+		if err := h.DB.EnqueueMessage(msg.ID, msg.ToAgent, tmuxTarget, text); err != nil {
+			log.Printf("[dispatch] Failed to enqueue message %d for %s: %v", msg.ID, msg.ToAgent, err)
+			return
+		}
+		log.Printf("[dispatch] Agent %s busy, queued message %d", msg.ToAgent, msg.ID)
+	}
+}
+
+// drainQueue delivers any previously queued messages to an agent that is now at a prompt.
+func (h *Hub) drainQueue(tmuxTarget, agentID string) {
+	pending, err := h.DB.GetPendingMessages()
+	if err != nil {
+		return
+	}
+	for _, qm := range pending {
+		if qm.TargetAgent != agentID {
+			continue
+		}
+		// Re-check prompt before each send
+		output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
+		if err != nil {
+			break
+		}
+		if !h.isAtPrompt(output) {
+			break
+		}
+		if err := tmuxpkg.SendKeys(tmuxTarget, qm.FormattedText, true); err != nil {
+			log.Printf("[queue] Failed to send queued message %d: %v", qm.ID, err)
+			break
+		}
+		time.Sleep(1 * time.Second)
+		h.DB.UpdateQueueStatus(qm.ID, "delivered", qm.Attempts+1)
+		log.Printf("[queue] Delivered queued message %d to %s", qm.MessageID, agentID)
+	}
+}
+
+// processMessageQueue periodically checks for pending queued messages
+// and attempts to deliver them when the target agent becomes idle.
+func (h *Hub) processMessageQueue() {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-h.stopPollCh:
+			return
+		case <-ticker.C:
+			pending, err := h.DB.GetPendingMessages()
+			if err != nil {
+				continue
+			}
+			if len(pending) == 0 {
+				continue
+			}
+
+			// Group by target agent
+			byAgent := make(map[string][]QueuedMessage)
+			for _, qm := range pending {
+				byAgent[qm.TargetAgent] = append(byAgent[qm.TargetAgent], qm)
+			}
+
+			for agentID, messages := range byAgent {
+				tmuxTarget := messages[0].TmuxTarget
+				output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
+				if err != nil {
+					for _, qm := range messages {
+						if qm.Attempts >= qm.MaxAttempts {
+							h.DB.UpdateQueueStatus(qm.ID, "failed", qm.Attempts+1)
+							log.Printf("[queue] Message %d to %s failed after %d attempts", qm.MessageID, agentID, qm.Attempts)
+						} else {
+							h.DB.UpdateQueueStatus(qm.ID, "pending", qm.Attempts+1)
+						}
+					}
+					continue
+				}
+
+				if !h.isAtPrompt(output) {
+					for _, qm := range messages {
+						if qm.Attempts >= qm.MaxAttempts {
+							h.DB.UpdateQueueStatus(qm.ID, "failed", qm.Attempts+1)
+							log.Printf("[queue] Message %d to %s failed after %d attempts", qm.MessageID, agentID, qm.Attempts)
+						} else {
+							h.DB.UpdateQueueStatus(qm.ID, "pending", qm.Attempts+1)
+						}
+					}
+					continue
+				}
+
+				// Agent is at prompt — deliver queued messages in order
+				for _, qm := range messages {
+					output, err = tmuxpkg.CapturePane(tmuxTarget, 5)
+					if err != nil || !h.isAtPrompt(output) {
+						break
+					}
+					if err := tmuxpkg.SendKeys(tmuxTarget, qm.FormattedText, true); err != nil {
+						log.Printf("[queue] Failed to send queued message %d: %v", qm.ID, err)
+						break
+					}
+					time.Sleep(1 * time.Second)
+					h.DB.UpdateQueueStatus(qm.ID, "delivered", qm.Attempts+1)
+					log.Printf("[queue] Delivered queued message %d to %s", qm.MessageID, agentID)
+				}
+			}
+
+			// Cleanup old delivered messages (older than 1 hour)
+			h.DB.CleanDeliveredMessages(1 * time.Hour)
+		}
 	}
 }

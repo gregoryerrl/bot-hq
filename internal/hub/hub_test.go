@@ -125,6 +125,145 @@ func TestHubDispatchToCoderAgent(t *testing.T) {
 	// No panic = success
 }
 
+func TestMessageQueueEnqueue(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Enqueue a message
+	err := db.EnqueueMessage(42, "claude-abc", "cc-abc123", "[user] hello claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify it's pending
+	pending, err := db.GetPendingMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending message, got %d", len(pending))
+	}
+	if pending[0].MessageID != 42 {
+		t.Errorf("expected message_id 42, got %d", pending[0].MessageID)
+	}
+	if pending[0].TargetAgent != "claude-abc" {
+		t.Errorf("expected target_agent 'claude-abc', got %q", pending[0].TargetAgent)
+	}
+	if pending[0].TmuxTarget != "cc-abc123" {
+		t.Errorf("expected tmux_target 'cc-abc123', got %q", pending[0].TmuxTarget)
+	}
+	if pending[0].FormattedText != "[user] hello claude" {
+		t.Errorf("expected formatted_text '[user] hello claude', got %q", pending[0].FormattedText)
+	}
+	if pending[0].Status != "pending" {
+		t.Errorf("expected status 'pending', got %q", pending[0].Status)
+	}
+}
+
+func TestMessageQueueDelivery(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Enqueue a message
+	err := db.EnqueueMessage(1, "claude-abc", "cc-abc123", "[user] test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mark as delivered
+	pending, _ := db.GetPendingMessages()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending, got %d", len(pending))
+	}
+
+	err = db.UpdateQueueStatus(pending[0].ID, "delivered", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify no more pending messages
+	pending, err = db.GetPendingMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending messages after delivery, got %d", len(pending))
+	}
+}
+
+func TestMessageQueueMaxAttempts(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Enqueue a message
+	err := db.EnqueueMessage(99, "claude-xyz", "cc-xyz789", "[user] retry test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pending, _ := db.GetPendingMessages()
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending, got %d", len(pending))
+	}
+
+	// Simulate max attempts reached — mark as failed
+	err = db.UpdateQueueStatus(pending[0].ID, "failed", pending[0].MaxAttempts+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify no pending messages (failed is not pending)
+	pending, err = db.GetPendingMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending after max attempts, got %d", len(pending))
+	}
+}
+
+func TestMessageQueueCleanup(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Enqueue and immediately deliver
+	err := db.EnqueueMessage(1, "claude-abc", "cc-abc", "[user] old msg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := db.GetPendingMessages()
+	db.UpdateQueueStatus(pending[0].ID, "delivered", 1)
+
+	// Cleanup with 0 duration should remove it
+	err = db.CleanDeliveredMessages(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIsAtPrompt(t *testing.T) {
+	h := &Hub{}
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"shell prompt $", "some output\n$ ", true},
+		{"zsh prompt ❯", "some output\n❯", true},
+		{"generic prompt >", "some output\n>", true},
+		{"trailing newline only", "some output\n", false},
+		{"busy agent", "Processing your request...\n  working on it", false},
+		{"empty pane", "", true},
+		{"prompt after output", "some output\n$ ", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := h.isAtPrompt(tt.output)
+			if got != tt.want {
+				t.Errorf("isAtPrompt(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHubNewAndStop(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Hub.DBPath = filepath.Join(t.TempDir(), "test.db")
