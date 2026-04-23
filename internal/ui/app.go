@@ -3,6 +3,7 @@ package ui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/gregoryerrl/bot-hq/internal/hub"
 )
 
 var tabNames = []string{"Hub", "Agents", "Sessions", "Settings"}
@@ -19,17 +20,23 @@ const (
 
 // App is the root Bubbletea model that manages tab navigation.
 type App struct {
-	activeTab Tab
-	width     int
-	height    int
-	hubTab    HubTab
+	activeTab   Tab
+	width       int
+	height      int
+	hubTab      HubTab
+	agentsTab   AgentsTab
+	sessionsTab SessionsTab
+	settingsTab SettingsTab
 }
 
 // NewApp creates a new App model with the Hub tab active.
-func NewApp() App {
+func NewApp(cfg hub.Config) App {
 	return App{
-		activeTab: TabHub,
-		hubTab:    NewHubTab(),
+		activeTab:   TabHub,
+		hubTab:      NewHubTab(),
+		agentsTab:   NewAgentsTab(),
+		sessionsTab: NewSessionsTab(),
+		settingsTab: NewSettingsTab(cfg),
 	}
 }
 
@@ -53,7 +60,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
-		a.hubTab.SetSize(a.width, a.contentHeight())
+		ch := a.contentHeight()
+		a.hubTab.SetSize(a.width, ch)
+		a.agentsTab.SetSize(a.width, ch)
+		a.sessionsTab.SetSize(a.width, ch)
+		a.settingsTab.SetSize(a.width, ch)
 		// Forward to hub tab so it can resize viewport
 		var cmd tea.Cmd
 		a.hubTab, cmd = a.hubTab.Update(msg)
@@ -63,6 +74,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Always route MessageReceived to the hub tab regardless of active tab
 		var cmd tea.Cmd
 		a.hubTab, cmd = a.hubTab.Update(msg)
+		return a, cmd
+
+	case AgentsUpdated:
+		var cmd tea.Cmd
+		a.agentsTab, cmd = a.agentsTab.Update(msg)
+		return a, cmd
+
+	case SessionsUpdated:
+		var cmd tea.Cmd
+		a.sessionsTab, cmd = a.sessionsTab.Update(msg)
 		return a, cmd
 
 	case tea.KeyMsg:
@@ -131,11 +152,11 @@ func (a App) View() string {
 	case TabHub:
 		content = a.hubTab.View()
 	case TabAgents:
-		content = "Agents — agent list (coming soon)"
+		content = a.agentsTab.View()
 	case TabSessions:
-		content = "Sessions — session list (coming soon)"
+		content = a.sessionsTab.View()
 	case TabSettings:
-		content = "Settings — configuration (coming soon)"
+		content = a.settingsTab.View()
 	}
 
 	// For non-hub tabs, wrap in a styled container
