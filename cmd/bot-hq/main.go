@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
+	"github.com/gregoryerrl/bot-hq/internal/live"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
@@ -53,7 +54,13 @@ func runHub() {
 	}
 	defer h.Stop()
 
-	// 3. Start Discord bot if configured
+	// 3. Start Live web server
+	liveServer := live.NewServer(h, cfg.Hub.LivePort)
+	if err := liveServer.Start(); err != nil {
+		log.Printf("Live server error: %v", err)
+	}
+
+	// 4. Start Discord bot if configured
 	if cfg.Discord.Token != "" && cfg.Discord.ChannelID != "" {
 		discordBot, err := discord.NewBot(cfg.Discord.Token, cfg.Discord.ChannelID, h)
 		if err != nil {
