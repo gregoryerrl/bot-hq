@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
@@ -51,7 +53,21 @@ func runHub() {
 	}
 	defer h.Stop()
 
-	// 3. Run Bubbletea TUI
+	// 3. Start Discord bot if configured
+	if cfg.Discord.Token != "" && cfg.Discord.ChannelID != "" {
+		discordBot, err := discord.NewBot(cfg.Discord.Token, cfg.Discord.ChannelID, h)
+		if err != nil {
+			log.Printf("Discord bot error: %v", err)
+		} else {
+			if err := discordBot.Start(); err != nil {
+				log.Printf("Discord bot start failed: %v", err)
+			} else {
+				defer discordBot.Stop()
+			}
+		}
+	}
+
+	// 4. Run Bubbletea TUI
 	app := ui.NewApp(cfg)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 
