@@ -13,6 +13,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Checkpoint represents a persisted agent state snapshot.
+type Checkpoint struct {
+	AgentID string    `json:"agent_id"`
+	Data    string    `json:"data"`
+	Version int       `json:"version"`
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
+}
+
 // QueuedMessage represents a message waiting to be delivered to a busy agent.
 type QueuedMessage struct {
 	ID            int64
@@ -158,6 +167,14 @@ func (db *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_messages_to ON messages(to_agent, id);
 	CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 	CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created);
+	CREATE TABLE IF NOT EXISTS checkpoints (
+		agent_id    TEXT PRIMARY KEY,
+		data        TEXT NOT NULL,
+		version     INTEGER NOT NULL DEFAULT 1,
+		created     INTEGER NOT NULL,
+		updated     INTEGER NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_mq_status ON message_queue(status);
 	CREATE INDEX IF NOT EXISTS idx_mq_target ON message_queue(target_agent);
 	`
@@ -610,5 +627,93 @@ func (db *DB) CleanDeliveredMessages(olderThan time.Duration) error {
 		`DELETE FROM message_queue WHERE status = 'delivered' AND created < ?`,
 		cutoff,
 	)
+	return err
+}
+
+// --- Claude Sessions ---
+
+// ClaudeSession represents a tracked Claude Code session.
+type ClaudeSession struct {
+	ID         string
+	Project    string
+	TmuxTarget string
+	PID        int
+	Mode       string
+	Status     string
+	LastOutput string
+	Started    time.Time
+	Ended      time.Time
+}
+
+// ListClaudeSessions returns claude sessions, optionally filtered by status.
+func (db *DB) ListClaudeSessions(statusFilter string) ([]ClaudeSession, error) {
+	var rows *sql.Rows
+	var err error
+	if statusFilter != "" {
+		rows, err = db.conn.Query(
+			`SELECT id, project, tmux_target, pid, mode, status, last_output, started, ended
+			 FROM claude_sessions WHERE status = ? ORDER BY started DESC`, statusFilter,
+		)
+	} else {
+		rows, err = db.conn.Query(
+			`SELECT id, project, tmux_target, pid, mode, status, last_output, started, ended
+			 FROM claude_sessions ORDER BY started DESC`,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []ClaudeSession
+	for rows.Next() {
+		var s ClaudeSession
+		var started, ended int64
+		if err := rows.Scan(&s.ID, &s.Project, &s.TmuxTarget, &s.PID, &s.Mode, &s.Status, &s.LastOutput, &started, &ended); err != nil {
+			return nil, err
+		}
+		s.Started = time.UnixMilli(started)
+		if ended > 0 {
+			s.Ended = time.UnixMilli(ended)
+		}
+		sessions = append(sessions, s)
+	}
+	return sessions, rows.Err()
+}
+
+// --- Checkpoints ---
+
+// SaveCheckpoint upserts a checkpoint for an agent. data must be a valid JSON string.
+func (db *DB) SaveCheckpoint(agentID, data string) error {
+	if !json.Valid([]byte(data)) {
+		return fmt.Errorf("invalid JSON data")
+	}
+	now := time.Now().UnixMilli()
+	_, err := db.conn.Exec(
+		`INSERT INTO checkpoints (agent_id, data, version, created, updated) VALUES (?, ?, 1, ?, ?)
+		 ON CONFLICT(agent_id) DO UPDATE SET data=excluded.data, version=version+1, updated=excluded.updated`,
+		agentID, data, now, now,
+	)
+	return err
+}
+
+// GetCheckpoint retrieves the checkpoint for an agent.
+func (db *DB) GetCheckpoint(agentID string) (Checkpoint, error) {
+	var cp Checkpoint
+	var created, updated int64
+	err := db.conn.QueryRow(
+		`SELECT agent_id, data, version, created, updated FROM checkpoints WHERE agent_id = ?`, agentID,
+	).Scan(&cp.AgentID, &cp.Data, &cp.Version, &created, &updated)
+	if err != nil {
+		return cp, err
+	}
+	cp.Created = time.UnixMilli(created)
+	cp.Updated = time.UnixMilli(updated)
+	return cp, nil
+}
+
+// DeleteCheckpoint removes a checkpoint for an agent.
+func (db *DB) DeleteCheckpoint(agentID string) error {
+	_, err := db.conn.Exec(`DELETE FROM checkpoints WHERE agent_id = ?`, agentID)
 	return err
 }

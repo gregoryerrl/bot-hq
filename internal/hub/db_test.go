@@ -154,3 +154,85 @@ func TestUpdateHook(t *testing.T) {
 		t.Error("timed out waiting for update hook")
 	}
 }
+
+func TestSaveAndGetCheckpoint(t *testing.T) {
+	db := setupTestDB(t)
+
+	data := `{"active_tasks":["task-1"],"context":"some state"}`
+	if err := db.SaveCheckpoint("brain", data); err != nil {
+		t.Fatal(err)
+	}
+
+	cp, err := db.GetCheckpoint("brain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cp.AgentID != "brain" {
+		t.Errorf("expected agent_id 'brain', got %q", cp.AgentID)
+	}
+	if cp.Data != data {
+		t.Errorf("expected data %q, got %q", data, cp.Data)
+	}
+	if cp.Version != 1 {
+		t.Errorf("expected version 1, got %d", cp.Version)
+	}
+	if cp.Created.IsZero() {
+		t.Error("expected non-zero created time")
+	}
+}
+
+func TestSaveCheckpointVersionIncrement(t *testing.T) {
+	db := setupTestDB(t)
+
+	db.SaveCheckpoint("brain", `{"v":1}`)
+	cp1, _ := db.GetCheckpoint("brain")
+
+	time.Sleep(10 * time.Millisecond)
+	db.SaveCheckpoint("brain", `{"v":2}`)
+	cp2, _ := db.GetCheckpoint("brain")
+
+	if cp2.Version != 2 {
+		t.Errorf("expected version 2, got %d", cp2.Version)
+	}
+	if cp2.Data != `{"v":2}` {
+		t.Errorf("expected updated data, got %q", cp2.Data)
+	}
+	if !cp2.Created.Equal(cp1.Created) {
+		t.Errorf("expected created to stay the same: got %v vs %v", cp1.Created, cp2.Created)
+	}
+	if !cp2.Updated.After(cp1.Updated) {
+		t.Errorf("expected updated to advance")
+	}
+}
+
+func TestGetCheckpointNotFound(t *testing.T) {
+	db := setupTestDB(t)
+
+	_, err := db.GetCheckpoint("nonexistent")
+	if err == nil {
+		t.Error("expected error for non-existent checkpoint")
+	}
+}
+
+func TestDeleteCheckpoint(t *testing.T) {
+	db := setupTestDB(t)
+
+	db.SaveCheckpoint("brain", `{"x":1}`)
+	if err := db.DeleteCheckpoint("brain"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := db.GetCheckpoint("brain")
+	if err == nil {
+		t.Error("expected error after deleting checkpoint")
+	}
+}
+
+func TestSaveCheckpointInvalidJSON(t *testing.T) {
+	db := setupTestDB(t)
+
+	err := db.SaveCheckpoint("brain", "not json")
+	if err == nil {
+		t.Error("expected error for invalid JSON data")
+	}
+}

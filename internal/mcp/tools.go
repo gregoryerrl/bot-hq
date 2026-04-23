@@ -22,7 +22,7 @@ type ToolDef struct {
 	Handler server.ToolHandlerFunc
 }
 
-// BuildTools returns all 10 hub tools wired to the given database.
+// BuildTools returns all hub tools wired to the given database.
 func BuildTools(db *hub.DB) []ToolDef {
 	return []ToolDef{
 		hubRegister(db),
@@ -35,6 +35,8 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSessionJoin(db),
 		hubStatus(db),
 		hubSpawn(db),
+		hubCheckpoint(db),
+		hubRestore(db),
 	}
 }
 
@@ -422,6 +424,88 @@ func hubSpawn(db *hub.DB) ToolDef {
 			"tmux_session": sessionName,
 			"project":      project,
 		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func hubCheckpoint(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_checkpoint",
+		mcp.WithDescription("Save agent state checkpoint for persistence across sessions"),
+		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent ID to save checkpoint for")),
+		mcp.WithString("data", mcp.Required(), mcp.Description("JSON object containing agent state to persist")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		agentID, err := req.RequireString("agent_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		data, err := req.RequireString("data")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if !json.Valid([]byte(data)) {
+			return mcp.NewToolResultError("data must be valid JSON"), nil
+		}
+
+		if err := db.SaveCheckpoint(agentID, data); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("checkpoint save failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(toJSON(map[string]string{
+			"status":   "saved",
+			"agent_id": agentID,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func hubRestore(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_restore",
+		mcp.WithDescription("Restore agent state checkpoint from a previous session"),
+		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent ID to restore checkpoint for")),
+		mcp.WithBoolean("validate", mcp.Description("Cross-check checkpoint against live hub state")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		agentID, err := req.RequireString("agent_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		cp, err := db.GetCheckpoint(agentID)
+		if err != nil {
+			return mcp.NewToolResultText(toJSON(map[string]string{
+				"status":   "no_checkpoint",
+				"agent_id": agentID,
+			})), nil
+		}
+
+		result := map[string]any{
+			"status":   "restored",
+			"agent_id": agentID,
+			"data":     cp.Data,
+			"version":  cp.Version,
+			"updated":  cp.Updated.UTC().Format(time.RFC3339),
+		}
+
+		var validate bool
+		if args, ok := req.Params.Arguments.(map[string]any); ok {
+			validate, _ = args["validate"].(bool)
+		}
+		if validate {
+			agent, agentErr := db.GetAgent(agentID)
+			if agentErr != nil {
+				result["warning"] = "agent not found in hub"
+			} else if agent.Status == protocol.StatusOffline {
+				result["warning"] = "agent is currently offline"
+			}
+		}
+
+		return mcp.NewToolResultText(toJSON(result)), nil
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}
