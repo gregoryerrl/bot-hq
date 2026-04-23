@@ -82,21 +82,27 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		} else {
-			switch msg.String() {
+			key := msg.String()
+			switch key {
 			case "/", "i":
 				h.focused = true
 				cmds = append(cmds, h.input.Focus())
 			default:
-				var cmd tea.Cmd
-				h.viewport, cmd = h.viewport.Update(msg)
-				cmds = append(cmds, cmd)
+				// Auto-focus input on any printable character
+				if len(key) == 1 && key >= " " && key <= "~" {
+					h.focused = true
+					cmds = append(cmds, h.input.Focus())
+					// Forward the typed character to the input
+					var cmd tea.Cmd
+					h.input, cmd = h.input.Update(msg)
+					cmds = append(cmds, cmd)
+				} else {
+					var cmd tea.Cmd
+					h.viewport, cmd = h.viewport.Update(msg)
+					cmds = append(cmds, cmd)
+				}
 			}
 		}
-
-	case tea.WindowSizeMsg:
-		h.width = msg.Width
-		h.height = msg.Height
-		h.resize()
 
 	case tea.MouseMsg:
 		if !h.focused {
@@ -183,6 +189,22 @@ func (h HubTab) formatMessage(msg protocol.Message) string {
 		style.Render(arrow+":"),
 		style.Render(msg.Content),
 	)
+}
+
+// parseCommand extracts an @agent target from user input.
+// Returns (target, content). If no @mention, target is empty.
+func parseCommand(input string) (string, string) {
+	input = strings.TrimSpace(input)
+	if !strings.HasPrefix(input, "@") {
+		return "", input
+	}
+	parts := strings.SplitN(input, " ", 2)
+	target := strings.TrimPrefix(parts[0], "@")
+	content := ""
+	if len(parts) > 1 {
+		content = parts[1]
+	}
+	return target, content
 }
 
 // messageColor determines the display color for a message based on its type

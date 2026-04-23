@@ -1,9 +1,14 @@
 package ui
 
 import (
+	"strings"
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/gregoryerrl/bot-hq/internal/brain"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
+	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
 var tabNames = []string{"Hub", "Agents", "Sessions", "Settings"}
@@ -18,6 +23,9 @@ const (
 	TabSettings
 )
 
+// tickMsg is sent periodically to poll the database.
+type tickMsg time.Time
+
 // App is the root Bubbletea model that manages tab navigation.
 type App struct {
 	activeTab   Tab
@@ -27,27 +35,37 @@ type App struct {
 	agentsTab   AgentsTab
 	sessionsTab SessionsTab
 	settingsTab SettingsTab
+	db          *hub.DB
+	brain       *brain.Brain
+	lastMsgID   int64
 }
 
 // NewApp creates a new App model with the Hub tab active.
-func NewApp(cfg hub.Config) App {
+func NewApp(cfg hub.Config, db *hub.DB, b *brain.Brain) App {
 	return App{
 		activeTab:   TabHub,
 		hubTab:      NewHubTab(),
 		agentsTab:   NewAgentsTab(),
 		sessionsTab: NewSessionsTab(),
-		settingsTab: NewSettingsTab(cfg),
+		settingsTab: NewSettingsTab(cfg, db),
+		db:          db,
+		brain:       b,
 	}
 }
 
 // Init implements tea.Model.
 func (a App) Init() tea.Cmd {
-	return nil
+	return tea.Batch(
+		tea.EnableBracketedPaste,
+		tea.Tick(time.Second, func(t time.Time) tea.Msg {
+			return tickMsg(t)
+		}),
+	)
 }
 
 // contentHeight returns the available height for tab content (total minus tab bar).
 func (a App) contentHeight() int {
-	h := a.height - 3 // Reserve space for tab bar
+	h := a.height - 2 // Reserve 2 lines for tab bar (names + border)
 	if h < 1 {
 		h = 1
 	}
@@ -57,6 +75,33 @@ func (a App) contentHeight() int {
 // Update implements tea.Model.
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tickMsg:
+		var cmds []tea.Cmd
+		// Poll agents
+		if a.db != nil {
+			if agents, err := a.db.ListAgents(""); err == nil {
+				a.agentsTab, _ = a.agentsTab.Update(AgentsUpdated{Agents: agents})
+			}
+			// Poll sessions
+			if sessions, err := a.db.ListSessions(""); err == nil {
+				a.sessionsTab, _ = a.sessionsTab.Update(SessionsUpdated{Sessions: sessions})
+			}
+			// Poll new messages
+			if msgs, err := a.db.ReadMessages("", a.lastMsgID, 50); err == nil {
+				for _, m := range msgs {
+					a.hubTab, _ = a.hubTab.Update(MessageReceived{Message: m})
+					if m.ID > a.lastMsgID {
+						a.lastMsgID = m.ID
+					}
+				}
+			}
+		}
+		// Schedule next tick
+		cmds = append(cmds, tea.Tick(time.Second, func(t time.Time) tea.Msg {
+			return tickMsg(t)
+		}))
+		return a, tea.Batch(cmds...)
+
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
@@ -65,15 +110,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.agentsTab.SetSize(a.width, ch)
 		a.sessionsTab.SetSize(a.width, ch)
 		a.settingsTab.SetSize(a.width, ch)
-		// Forward to hub tab so it can resize viewport
-		var cmd tea.Cmd
-		a.hubTab, cmd = a.hubTab.Update(msg)
-		return a, cmd
+		return a, nil
 
 	case MessageReceived:
-		// Always route MessageReceived to the hub tab regardless of active tab
 		var cmd tea.Cmd
 		a.hubTab, cmd = a.hubTab.Update(msg)
+		if msg.Message.ID > a.lastMsgID {
+			a.lastMsgID = msg.Message.ID
+		}
 		return a, cmd
 
 	case AgentsUpdated:
@@ -86,15 +130,48 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sessionsTab, cmd = a.sessionsTab.Update(msg)
 		return a, cmd
 
+	case CommandSubmitted:
+		// Handle commands from the Hub tab command bar
+		if a.db != nil {
+			target, content := parseCommand(msg.Text)
+			if content == "" && target != "" {
+				return a, nil
+			}
+			m := protocol.Message{
+				FromAgent: "user",
+				Type:      protocol.MsgCommand,
+				Content:   content,
+			}
+			if target != "" {
+				m.ToAgent = target
+			}
+			if content == "" {
+				m.Content = msg.Text
+			}
+			a.db.InsertMessage(m)
+		}
+		return a, nil
+
+	case SettingSaved:
+		// Update the config in settings tab (already done internally)
+		return a, nil
+
 	case tea.KeyMsg:
-		// When the hub tab input is focused, route all keys there
-		// except ctrl+c which always quits
+		// When hub input or settings editor is focused, capture all keys
 		if a.activeTab == TabHub && a.hubTab.focused {
 			if msg.String() == "ctrl+c" {
 				return a, tea.Quit
 			}
 			var cmd tea.Cmd
 			a.hubTab, cmd = a.hubTab.Update(msg)
+			return a, cmd
+		}
+		if a.activeTab == TabSettings && a.settingsTab.editing {
+			if msg.String() == "ctrl+c" {
+				return a, tea.Quit
+			}
+			var cmd tea.Cmd
+			a.settingsTab, cmd = a.settingsTab.Update(msg)
 			return a, cmd
 		}
 
@@ -114,10 +191,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "4":
 			a.activeTab = TabSettings
 		default:
-			// Forward remaining keys to active tab
 			if a.activeTab == TabHub {
 				var cmd tea.Cmd
 				a.hubTab, cmd = a.hubTab.Update(msg)
+				return a, cmd
+			}
+			if a.activeTab == TabSettings {
+				var cmd tea.Cmd
+				a.settingsTab, cmd = a.settingsTab.Update(msg)
 				return a, cmd
 			}
 		}
@@ -134,17 +215,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View implements tea.Model.
 func (a App) View() string {
+	if a.width == 0 || a.height == 0 {
+		return "Loading Bot-HQ..."
+	}
 	// Render tab bar
-	var tabs []string
+	var tabParts []string
 	for i, name := range tabNames {
 		if Tab(i) == a.activeTab {
-			tabs = append(tabs, ActiveTabStyle.Render(" "+name+" "))
+			tabParts = append(tabParts, ActiveTabStyle.Render(" "+name+" "))
 		} else {
-			tabs = append(tabs, InactiveTabStyle.Render(" "+name+" "))
+			tabParts = append(tabParts, InactiveTabStyle.Render(" "+name+" "))
 		}
 	}
-	tabBar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
-	tabBar = TabBarStyle.Width(a.width).Render(tabBar)
+	tabLine := strings.Join(tabParts, "")
+	border := lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(strings.Repeat("─", a.width))
+	tabBar := tabLine + "\n" + border
 
 	// Render content for the active tab
 	var content string
