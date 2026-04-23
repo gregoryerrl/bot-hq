@@ -37,6 +37,9 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSpawn(db),
 		hubCheckpoint(db),
 		hubRestore(db),
+		hubIssueCreate(db),
+		hubIssueList(db),
+		hubIssueUpdate(db),
 	}
 }
 
@@ -473,6 +476,101 @@ func hubCheckpoint(db *hub.DB) ToolDef {
 			"status":   "saved",
 			"agent_id": agentID,
 		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func hubIssueCreate(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_issue_create",
+		mcp.WithDescription("Create a new issue in the hub issue tracker"),
+		mcp.WithString("reporter", mcp.Required(), mcp.Description("Agent ID reporting the issue")),
+		mcp.WithString("severity", mcp.Required(), mcp.Description("Issue severity: low, medium, high, critical")),
+		mcp.WithString("title", mcp.Required(), mcp.Description("Short issue title")),
+		mcp.WithString("description", mcp.Description("Detailed issue description")),
+		mcp.WithString("file_path", mcp.Description("File path related to the issue")),
+		mcp.WithNumber("line_number", mcp.Description("Line number in the file")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		reporter, err := req.RequireString("reporter")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		severity, err := req.RequireString("severity")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		title, err := req.RequireString("title")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		description := req.GetString("description", "")
+		filePath := req.GetString("file_path", "")
+		lineNumber := req.GetInt("line_number", 0)
+
+		id := uuid.New().String()
+		issue, err := db.CreateIssue(id, reporter, severity, title, description, filePath, lineNumber)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("create issue failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(toJSON(issue)), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func hubIssueList(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_issue_list",
+		mcp.WithDescription("List issues from the hub issue tracker"),
+		mcp.WithString("status", mcp.Description("Filter by status: open, in_progress, fixed, wontfix, duplicate")),
+		mcp.WithString("severity", mcp.Description("Filter by severity: low, medium, high, critical")),
+		mcp.WithString("reporter", mcp.Description("Filter by reporter agent ID")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		status := req.GetString("status", "")
+		severity := req.GetString("severity", "")
+		reporter := req.GetString("reporter", "")
+
+		issues, err := db.ListIssues(status, severity, reporter)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("list issues failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(toJSON(issues)), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func hubIssueUpdate(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_issue_update",
+		mcp.WithDescription("Update an existing issue in the hub issue tracker"),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Issue ID to update")),
+		mcp.WithString("status", mcp.Description("New status: open, in_progress, fixed, wontfix, duplicate")),
+		mcp.WithString("assigned_to", mcp.Description("Agent ID to assign the issue to")),
+		mcp.WithString("resolution", mcp.Description("Resolution description")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id, err := req.RequireString("id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		status := req.GetString("status", "")
+		assignedTo := req.GetString("assigned_to", "")
+		resolution := req.GetString("resolution", "")
+
+		issue, err := db.UpdateIssue(id, status, assignedTo, resolution)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("update issue failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(toJSON(issue)), nil
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -174,6 +175,24 @@ func (db *DB) migrate() error {
 		created     INTEGER NOT NULL,
 		updated     INTEGER NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS issues (
+		id          TEXT PRIMARY KEY,
+		reporter    TEXT NOT NULL,
+		severity    TEXT NOT NULL CHECK(severity IN ('low','medium','high','critical')),
+		title       TEXT NOT NULL,
+		description TEXT,
+		file_path   TEXT,
+		line_number INTEGER,
+		status      TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','in_progress','fixed','wontfix','duplicate')),
+		assigned_to TEXT,
+		resolution  TEXT,
+		created     INTEGER NOT NULL,
+		updated     INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
+	CREATE INDEX IF NOT EXISTS idx_issues_severity ON issues(severity);
+	CREATE INDEX IF NOT EXISTS idx_issues_reporter ON issues(reporter);
 
 	CREATE INDEX IF NOT EXISTS idx_mq_status ON message_queue(status);
 	CREATE INDEX IF NOT EXISTS idx_mq_target ON message_queue(target_agent);
@@ -716,4 +735,156 @@ func (db *DB) GetCheckpoint(agentID string) (Checkpoint, error) {
 func (db *DB) DeleteCheckpoint(agentID string) error {
 	_, err := db.conn.Exec(`DELETE FROM checkpoints WHERE agent_id = ?`, agentID)
 	return err
+}
+
+// --- Issues ---
+
+// CreateIssue inserts a new issue and returns it as a map.
+func (db *DB) CreateIssue(id, reporter, severity, title, description, filePath string, lineNumber int) (map[string]interface{}, error) {
+	now := time.Now().UnixMilli()
+	_, err := db.conn.Exec(
+		`INSERT INTO issues (id, reporter, severity, title, description, file_path, line_number, status, created, updated)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
+		id, reporter, severity, title, description, filePath, lineNumber, now, now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"id":          id,
+		"reporter":    reporter,
+		"severity":    severity,
+		"title":       title,
+		"description": description,
+		"file_path":   filePath,
+		"line_number": lineNumber,
+		"status":      "open",
+		"created":     now,
+		"updated":     now,
+	}, nil
+}
+
+// ListIssues queries issues with optional filters.
+func (db *DB) ListIssues(status, severity, reporter string) ([]map[string]interface{}, error) {
+	query := `SELECT id, reporter, severity, title, description, file_path, line_number, status, assigned_to, resolution, created, updated FROM issues`
+	var conditions []string
+	var args []interface{}
+
+	if status != "" {
+		conditions = append(conditions, "status = ?")
+		args = append(args, status)
+	}
+	if severity != "" {
+		conditions = append(conditions, "severity = ?")
+		args = append(args, severity)
+	}
+	if reporter != "" {
+		conditions = append(conditions, "reporter = ?")
+		args = append(args, reporter)
+	}
+
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY created DESC"
+
+	rows, err := db.conn.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var issues []map[string]interface{}
+	for rows.Next() {
+		var id, rep, sev, title, st string
+		var desc, fp, assignedTo, resolution sql.NullString
+		var lineNum sql.NullInt64
+		var created, updated int64
+		if err := rows.Scan(&id, &rep, &sev, &title, &desc, &fp, &lineNum, &st, &assignedTo, &resolution, &created, &updated); err != nil {
+			return nil, err
+		}
+		issue := map[string]interface{}{
+			"id":          id,
+			"reporter":    rep,
+			"severity":    sev,
+			"title":       title,
+			"description": desc.String,
+			"file_path":   fp.String,
+			"line_number": lineNum.Int64,
+			"status":      st,
+			"assigned_to": assignedTo.String,
+			"resolution":  resolution.String,
+			"created":     created,
+			"updated":     updated,
+		}
+		issues = append(issues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return issues, nil
+}
+
+// UpdateIssue updates specified fields on an issue and returns the updated issue.
+func (db *DB) UpdateIssue(id, status, assignedTo, resolution string) (map[string]interface{}, error) {
+	now := time.Now().UnixMilli()
+	var sets []string
+	var args []interface{}
+
+	if status != "" {
+		sets = append(sets, "status = ?")
+		args = append(args, status)
+	}
+	if assignedTo != "" {
+		sets = append(sets, "assigned_to = ?")
+		args = append(args, assignedTo)
+	}
+	if resolution != "" {
+		sets = append(sets, "resolution = ?")
+		args = append(args, resolution)
+	}
+
+	if len(sets) == 0 {
+		return nil, fmt.Errorf("no fields to update")
+	}
+
+	sets = append(sets, "updated = ?")
+	args = append(args, now)
+	args = append(args, id)
+
+	query := "UPDATE issues SET " + strings.Join(sets, ", ") + " WHERE id = ?"
+	result, err := db.conn.Exec(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return nil, fmt.Errorf("issue not found: %s", id)
+	}
+
+	// Read back the updated issue
+	var rep, sev, title, st string
+	var desc, fp, assignTo, res sql.NullString
+	var lineNum sql.NullInt64
+	var created, updated int64
+	err = db.conn.QueryRow(
+		`SELECT id, reporter, severity, title, description, file_path, line_number, status, assigned_to, resolution, created, updated FROM issues WHERE id = ?`, id,
+	).Scan(&id, &rep, &sev, &title, &desc, &fp, &lineNum, &st, &assignTo, &res, &created, &updated)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"id":          id,
+		"reporter":    rep,
+		"severity":    sev,
+		"title":       title,
+		"description": desc.String,
+		"file_path":   fp.String,
+		"line_number": lineNum.Int64,
+		"status":      st,
+		"assigned_to": assignTo.String,
+		"resolution":  res.String,
+		"created":     created,
+		"updated":     updated,
+	}, nil
 }
