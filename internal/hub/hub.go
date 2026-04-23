@@ -123,8 +123,8 @@ func (h *Hub) dispatch(msg protocol.Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	if msg.ToAgent == "" {
-		// Broadcast to all WS clients
+	if msg.ToAgent == "" || msg.Type == protocol.MsgFlag {
+		// Broadcast to all WS clients (flags always broadcast for Discord/UI visibility)
 		for _, ch := range h.wsClients {
 			select {
 			case ch <- msg:
