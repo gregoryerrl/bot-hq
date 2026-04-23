@@ -564,6 +564,36 @@ func (db *DB) GetPendingMessages() ([]QueuedMessage, error) {
 	return msgs, rows.Err()
 }
 
+// GetPendingMessagesForAgent returns pending queued messages for a specific agent.
+func (db *DB) GetPendingMessagesForAgent(agentID string) ([]QueuedMessage, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, message_id, target_agent, tmux_target, formatted_text, attempts, max_attempts, status, created, last_attempt
+		 FROM message_queue WHERE status = 'pending' AND target_agent = ? ORDER BY created ASC`, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []QueuedMessage
+	for rows.Next() {
+		var qm QueuedMessage
+		var created string
+		var lastAttempt sql.NullString
+		if err := rows.Scan(&qm.ID, &qm.MessageID, &qm.TargetAgent, &qm.TmuxTarget,
+			&qm.FormattedText, &qm.Attempts, &qm.MaxAttempts, &qm.Status,
+			&created, &lastAttempt); err != nil {
+			return nil, err
+		}
+		qm.Created, _ = time.Parse(time.DateTime, created)
+		if lastAttempt.Valid {
+			qm.LastAttempt, _ = time.Parse(time.DateTime, lastAttempt.String)
+		}
+		msgs = append(msgs, qm)
+	}
+	return msgs, rows.Err()
+}
+
 // UpdateQueueStatus updates the status and attempt count of a queued message.
 func (db *DB) UpdateQueueStatus(id int64, status string, attempts int) error {
 	_, err := db.conn.Exec(

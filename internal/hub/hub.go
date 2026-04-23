@@ -24,6 +24,7 @@ type Hub struct {
 	stopPollCh     chan struct{}
 	dispatchedIDs  map[int64]bool // tracks in-process dispatched message IDs
 	dispatchedMu   sync.Mutex
+	dispatchMu     sync.Map       // per-agent *sync.Mutex for tmux send serialization
 }
 
 // NewHub creates a new Hub, opens the database, and wires up the
@@ -215,7 +216,18 @@ func (h *Hub) dispatchToClients(msg protocol.Message) {
 	}
 }
 
+// getAgentMu returns a per-agent mutex for serializing tmux sends.
+// Both dispatchToTmux and processMessageQueue use this to prevent
+// interleaved input on the same tmux pane.
+func (h *Hub) getAgentMu(agentID string) *sync.Mutex {
+	mu, _ := h.dispatchMu.LoadOrStore(agentID, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
 // isAtPrompt checks if the tmux pane output indicates the agent is at a prompt.
+// Empty output is treated as "at prompt" — intentional.
+// CapturePane errors are handled by the caller before reaching here,
+// so empty output means the pane exists but has no visible content (idle).
 func (h *Hub) isAtPrompt(paneOutput string) bool {
 	lines := strings.Split(strings.TrimSpace(paneOutput), "\n")
 	if len(lines) == 0 {
@@ -260,6 +272,12 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 		return
 	}
 
+	// Lock per-agent mutex to prevent interleaved tmux input
+	// from concurrent dispatchToTmux and processMessageQueue calls.
+	mu := h.getAgentMu(msg.ToAgent)
+	mu.Lock()
+	defer mu.Unlock()
+
 	output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
 	if err != nil {
 		return
@@ -270,9 +288,12 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 	if h.isAtPrompt(output) {
 		tmuxpkg.SendKeys(tmuxTarget, text, true)
 		// Drain any previously queued messages for this agent
+		// Note: drainQueue is called under the same lock — do not re-lock inside it.
 		h.drainQueue(tmuxTarget, msg.ToAgent)
 	} else {
-		// Agent is busy — queue for retry
+		// Agent is busy — queue for retry.
+		// Delivery is at-least-once: if we crash between SendKeys and
+		// UpdateQueueStatus, the message stays "pending" and may be re-sent.
 		if err := h.DB.EnqueueMessage(msg.ID, msg.ToAgent, tmuxTarget, text); err != nil {
 			log.Printf("[dispatch] Failed to enqueue message %d for %s: %v", msg.ID, msg.ToAgent, err)
 			return
@@ -282,15 +303,13 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 }
 
 // drainQueue delivers any previously queued messages to an agent that is now at a prompt.
+// Called from dispatchToTmux which already holds the per-agent mutex — do NOT lock here.
 func (h *Hub) drainQueue(tmuxTarget, agentID string) {
-	pending, err := h.DB.GetPendingMessages()
+	pending, err := h.DB.GetPendingMessagesForAgent(agentID)
 	if err != nil {
 		return
 	}
 	for _, qm := range pending {
-		if qm.TargetAgent != agentID {
-			continue
-		}
 		// Re-check prompt before each send
 		output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
 		if err != nil {
@@ -303,7 +322,7 @@ func (h *Hub) drainQueue(tmuxTarget, agentID string) {
 			log.Printf("[queue] Failed to send queued message %d: %v", qm.ID, err)
 			break
 		}
-		time.Sleep(1 * time.Second)
+		// SendKeys already sleeps 500ms for bracketed paste — no extra delay needed.
 		h.DB.UpdateQueueStatus(qm.ID, "delivered", qm.Attempts+1)
 		log.Printf("[queue] Delivered queued message %d to %s", qm.MessageID, agentID)
 	}
@@ -311,9 +330,14 @@ func (h *Hub) drainQueue(tmuxTarget, agentID string) {
 
 // processMessageQueue periodically checks for pending queued messages
 // and attempts to deliver them when the target agent becomes idle.
+// Retry interval: 3s. Max attempts: 30 (configurable per message, default 30 = ~90s).
+// Delivery semantics: at-least-once. If a crash occurs between SendKeys and
+// UpdateQueueStatus("delivered"), the message stays "pending" and may be re-sent.
 func (h *Hub) processMessageQueue() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+
+	var cleanupCounter int
 
 	for {
 		select {
@@ -336,6 +360,12 @@ func (h *Hub) processMessageQueue() {
 
 			for agentID, messages := range byAgent {
 				tmuxTarget := messages[0].TmuxTarget
+
+				// Lock per-agent mutex to prevent interleaved sends
+				// with concurrent dispatchToTmux calls.
+				mu := h.getAgentMu(agentID)
+				mu.Lock()
+
 				output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
 				if err != nil {
 					for _, qm := range messages {
@@ -346,6 +376,7 @@ func (h *Hub) processMessageQueue() {
 							h.DB.UpdateQueueStatus(qm.ID, "pending", qm.Attempts+1)
 						}
 					}
+					mu.Unlock()
 					continue
 				}
 
@@ -358,6 +389,7 @@ func (h *Hub) processMessageQueue() {
 							h.DB.UpdateQueueStatus(qm.ID, "pending", qm.Attempts+1)
 						}
 					}
+					mu.Unlock()
 					continue
 				}
 
@@ -371,14 +403,20 @@ func (h *Hub) processMessageQueue() {
 						log.Printf("[queue] Failed to send queued message %d: %v", qm.ID, err)
 						break
 					}
-					time.Sleep(1 * time.Second)
+					// SendKeys already sleeps 500ms for bracketed paste — no extra delay needed.
 					h.DB.UpdateQueueStatus(qm.ID, "delivered", qm.Attempts+1)
 					log.Printf("[queue] Delivered queued message %d to %s", qm.MessageID, agentID)
 				}
+
+				mu.Unlock()
 			}
 
-			// Cleanup old delivered messages (older than 1 hour)
-			h.DB.CleanDeliveredMessages(1 * time.Hour)
+			// Cleanup old delivered messages every ~100 ticks (~5 min at 3s interval)
+			cleanupCounter++
+			if cleanupCounter >= 100 {
+				h.DB.CleanDeliveredMessages(1 * time.Hour)
+				cleanupCounter = 0
+			}
 		}
 	}
 }
