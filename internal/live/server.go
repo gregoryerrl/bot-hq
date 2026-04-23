@@ -73,6 +73,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	const agentID = "live"
 	log.Printf("Live WebSocket client connected")
 
+	// Register live agent in the hub DB
+	s.hub.DB.RegisterAgent(protocol.Agent{
+		ID:     agentID,
+		Name:   "Live",
+		Type:   protocol.AgentVoice,
+		Status: protocol.StatusOnline,
+	})
+
 	// Register with the hub
 	hubCh := s.hub.RegisterWSClient(agentID)
 
@@ -104,6 +112,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		gemini = NewGeminiProxy(apiKey, voice)
 		if err := gemini.Connect(""); err != nil {
 			log.Printf("Gemini connect error: %v", err)
+			writeBrowser(map[string]string{
+				"type":  "error",
+				"error": fmt.Sprintf("Gemini connection failed: %v", err),
+			})
 			gemini = nil
 		} else {
 			// Send connected confirmation to browser
@@ -114,6 +126,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		log.Printf("No Gemini API key configured — voice proxy disabled")
+		writeBrowser(map[string]string{
+			"type":  "error",
+			"error": "No Gemini API key configured — voice disabled",
+		})
 	}
 
 	// Write hub messages to the WebSocket client
@@ -135,6 +151,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		close(done)
 		s.hub.UnregisterWSClient(agentID)
+		s.hub.DB.UpdateAgentStatus(agentID, protocol.StatusOffline)
 		if gemini != nil {
 			gemini.Close()
 		}
