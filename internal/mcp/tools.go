@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -350,8 +351,12 @@ func hubStatus(db *hub.DB) ToolDef {
 		}
 
 		as := protocol.AgentStatus(status)
+		if !as.Valid() {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid status: %s", status)), nil
+		}
+		project := req.GetString("project", "")
 
-		if err := db.UpdateAgentStatus(id, as); err != nil {
+		if err := db.UpdateAgentStatus(id, as, project); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("status update failed: %v", err)), nil
 		}
 
@@ -379,23 +384,37 @@ func hubSpawn(db *hub.DB) ToolDef {
 		}
 		prompt := req.GetString("prompt", "")
 
-		sessionName := fmt.Sprintf("cc-%s", uuid.New().String()[:8])
-
-		// Build the claude command
-		claudeCmd := "claude"
-		if prompt != "" {
-			claudeCmd = fmt.Sprintf("claude -p %q", prompt)
+		// Validate project path exists and is a directory
+		info, err := os.Stat(project)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("project path invalid: %v", err)), nil
+		}
+		if !info.IsDir() {
+			return mcp.NewToolResultError(fmt.Sprintf("project path is not a directory: %s", project)), nil
 		}
 
-		// Create a new tmux session running claude in the project directory
+		sessionName := fmt.Sprintf("cc-%s", uuid.New().String()[:8])
+
+		// Create a new tmux session in the project directory
 		cmd := exec.CommandContext(ctx, "tmux", "new-session", "-d",
 			"-s", sessionName,
 			"-c", project,
-			claudeCmd,
 		)
-
 		if err := cmd.Run(); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("spawn failed: %v", err)), nil
+		}
+
+		// Send claude command via send-keys (avoids shell injection)
+		sendArgs := []string{"send-keys", "-t", sessionName, "claude", "Enter"}
+		if err := exec.CommandContext(ctx, "tmux", sendArgs...).Run(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to start claude: %v", err)), nil
+		}
+
+		// Send initial prompt if provided
+		if prompt != "" {
+			time.Sleep(3 * time.Second)
+			promptArgs := []string{"send-keys", "-t", sessionName, prompt, "Enter"}
+			exec.CommandContext(ctx, "tmux", promptArgs...).Run()
 		}
 
 		return mcp.NewToolResultText(toJSON(map[string]string{

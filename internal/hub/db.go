@@ -122,10 +122,18 @@ func (db *DB) GetAgent(id string) (protocol.Agent, error) {
 	return a, nil
 }
 
-func (db *DB) UpdateAgentStatus(id string, status protocol.AgentStatus) error {
+func (db *DB) UpdateAgentStatus(id string, status protocol.AgentStatus, project ...string) error {
+	now := time.Now().UnixMilli()
+	if len(project) > 0 && project[0] != "" {
+		_, err := db.conn.Exec(
+			`UPDATE agents SET status = ?, project = ?, last_seen = ? WHERE id = ?`,
+			string(status), project[0], now, id,
+		)
+		return err
+	}
 	_, err := db.conn.Exec(
 		`UPDATE agents SET status = ?, last_seen = ? WHERE id = ?`,
-		string(status), time.Now().UnixMilli(), id,
+		string(status), now, id,
 	)
 	return err
 }

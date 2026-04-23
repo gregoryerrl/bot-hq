@@ -28,6 +28,14 @@ const (
 	StatusOffline AgentStatus = "offline"
 )
 
+func (a AgentStatus) Valid() bool {
+	switch a {
+	case StatusOnline, StatusWorking, StatusIdle, StatusOffline:
+		return true
+	}
+	return false
+}
+
 type MessageType string
 
 const (
@@ -71,6 +79,14 @@ const (
 	SessionPaused SessionStatus = "paused"
 	SessionDone   SessionStatus = "done"
 )
+
+func (s SessionStatus) Valid() bool {
+	switch s {
+	case SessionActive, SessionPaused, SessionDone:
+		return true
+	}
+	return false
+}
 
 type Agent struct {
 	ID         string      `json:"id"`
