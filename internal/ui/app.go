@@ -22,13 +22,14 @@ type App struct {
 	activeTab Tab
 	width     int
 	height    int
-	// Tab content will be added in later tasks
+	hubTab    HubTab
 }
 
 // NewApp creates a new App model with the Hub tab active.
 func NewApp() App {
 	return App{
 		activeTab: TabHub,
+		hubTab:    NewHubTab(),
 	}
 }
 
@@ -37,10 +38,45 @@ func (a App) Init() tea.Cmd {
 	return nil
 }
 
+// contentHeight returns the available height for tab content (total minus tab bar).
+func (a App) contentHeight() int {
+	h := a.height - 3 // Reserve space for tab bar
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 // Update implements tea.Model.
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		a.width = msg.Width
+		a.height = msg.Height
+		a.hubTab.SetSize(a.width, a.contentHeight())
+		// Forward to hub tab so it can resize viewport
+		var cmd tea.Cmd
+		a.hubTab, cmd = a.hubTab.Update(msg)
+		return a, cmd
+
+	case MessageReceived:
+		// Always route MessageReceived to the hub tab regardless of active tab
+		var cmd tea.Cmd
+		a.hubTab, cmd = a.hubTab.Update(msg)
+		return a, cmd
+
 	case tea.KeyMsg:
+		// When the hub tab input is focused, route all keys there
+		// except ctrl+c which always quits
+		if a.activeTab == TabHub && a.hubTab.focused {
+			if msg.String() == "ctrl+c" {
+				return a, tea.Quit
+			}
+			var cmd tea.Cmd
+			a.hubTab, cmd = a.hubTab.Update(msg)
+			return a, cmd
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return a, tea.Quit
@@ -56,10 +92,21 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.activeTab = TabSessions
 		case "4":
 			a.activeTab = TabSettings
+		default:
+			// Forward remaining keys to active tab
+			if a.activeTab == TabHub {
+				var cmd tea.Cmd
+				a.hubTab, cmd = a.hubTab.Update(msg)
+				return a, cmd
+			}
 		}
-	case tea.WindowSizeMsg:
-		a.width = msg.Width
-		a.height = msg.Height
+
+	case tea.MouseMsg:
+		if a.activeTab == TabHub {
+			var cmd tea.Cmd
+			a.hubTab, cmd = a.hubTab.Update(msg)
+			return a, cmd
+		}
 	}
 	return a, nil
 }
@@ -78,11 +125,11 @@ func (a App) View() string {
 	tabBar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 	tabBar = TabBarStyle.Width(a.width).Render(tabBar)
 
-	// Content placeholder for each tab
+	// Render content for the active tab
 	var content string
 	switch a.activeTab {
 	case TabHub:
-		content = "Hub — message feed (coming soon)"
+		content = a.hubTab.View()
 	case TabAgents:
 		content = "Agents — agent list (coming soon)"
 	case TabSessions:
@@ -91,13 +138,17 @@ func (a App) View() string {
 		content = "Settings — configuration (coming soon)"
 	}
 
-	contentStyle := lipgloss.NewStyle().
-		Width(a.width).
-		Height(a.height - 3). // Reserve space for tab bar
-		Padding(1, 2)
+	// For non-hub tabs, wrap in a styled container
+	if a.activeTab != TabHub {
+		contentStyle := lipgloss.NewStyle().
+			Width(a.width).
+			Height(a.contentHeight()).
+			Padding(1, 2)
+		content = contentStyle.Render(content)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		tabBar,
-		contentStyle.Render(content),
+		content,
 	)
 }
