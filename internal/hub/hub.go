@@ -63,6 +63,9 @@ func (h *Hub) RegisterWSClient(agentID string) chan protocol.Message {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	if old, ok := h.wsClients[agentID]; ok {
+		close(old)
+	}
 	ch := make(chan protocol.Message, 64)
 	h.wsClients[agentID] = ch
 	return ch
