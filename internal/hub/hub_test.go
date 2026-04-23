@@ -95,6 +95,36 @@ func TestHubBroadcast(t *testing.T) {
 	h.UnregisterWSClient("client-2")
 }
 
+func TestHubDispatchToCoderAgent(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Hub.DBPath = filepath.Join(t.TempDir(), "test.db")
+
+	h, err := NewHub(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Stop()
+
+	// Register a coder agent with a tmux target in meta
+	h.DB.RegisterAgent(protocol.Agent{
+		ID:     "claude-abc",
+		Name:   "Claude ABC",
+		Type:   protocol.AgentCoder,
+		Status: protocol.StatusOnline,
+		Meta:   `{"tmux_target":"cc-abc123"}`,
+	})
+
+	// Dispatch a message to the coder — should not panic or error
+	msg := protocol.Message{
+		FromAgent: "user",
+		ToAgent:   "claude-abc",
+		Type:      protocol.MsgCommand,
+		Content:   "hello claude",
+	}
+	h.dispatch(msg)
+	// No panic = success
+}
+
 func TestHubNewAndStop(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Hub.DBPath = filepath.Join(t.TempDir(), "test.db")
