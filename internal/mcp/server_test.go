@@ -40,6 +40,9 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_spawn",
 		"hub_checkpoint",
 		"hub_restore",
+		"hub_issue_create",
+		"hub_issue_list",
+		"hub_issue_update",
 	}
 
 	if len(tools) != len(expected) {
@@ -362,5 +365,316 @@ func TestRestoreCrossAgent(t *testing.T) {
 	}
 	if restored["data"] != `{"tasks":["t1","t2"]}` {
 		t.Errorf("unexpected restored data: %v", restored["data"])
+	}
+}
+
+func TestIssueCreateAndList(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	handlers := make(map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error))
+	for _, td := range tools {
+		handlers[td.Tool.Name] = td.Handler
+	}
+	ctx := context.Background()
+
+	// Test creating an issue with all fields (including line_number)
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"reporter":    "coder-1",
+		"severity":    "high",
+		"title":       "Null pointer in handler",
+		"description": "Crashes on nil input",
+		"file_path":   "internal/hub/db.go",
+		"line_number": float64(42),
+	}
+	result, err := handlers["hub_issue_create"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("create issue with line_number failed: %v", result.Content)
+	}
+	var issue1 map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &issue1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if issue1["title"] != "Null pointer in handler" {
+		t.Errorf("expected title 'Null pointer in handler', got %v", issue1["title"])
+	}
+	if issue1["line_number"] != float64(42) {
+		t.Errorf("expected line_number 42, got %v", issue1["line_number"])
+	}
+	if issue1["status"] != "open" {
+		t.Errorf("expected status 'open', got %v", issue1["status"])
+	}
+	if issue1["assigned_to"] != "" {
+		t.Errorf("expected empty assigned_to, got %v", issue1["assigned_to"])
+	}
+	if issue1["resolution"] != "" {
+		t.Errorf("expected empty resolution, got %v", issue1["resolution"])
+	}
+
+	// Test creating an issue without optional fields (no line_number, no description, no file_path)
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"reporter": "brain",
+		"severity": "low",
+		"title":    "Minor typo in docs",
+	}
+	result, err = handlers["hub_issue_create"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("create issue without optionals failed: %v", result.Content)
+	}
+	var issue2 map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &issue2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Verify line_number is nil/null when not provided
+	if issue2["line_number"] != nil {
+		t.Errorf("expected line_number nil when not provided, got %v", issue2["line_number"])
+	}
+
+	// Test listing all issues
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{}
+	result, err = handlers["hub_issue_list"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("list issues failed: %v", result.Content)
+	}
+	var allIssues []map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &allIssues); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(allIssues) != 2 {
+		t.Fatalf("expected 2 issues, got %d", len(allIssues))
+	}
+
+	// Test listing with severity filter
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"severity": "high"}
+	result, err = handlers["hub_issue_list"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var highIssues []map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &highIssues); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(highIssues) != 1 {
+		t.Fatalf("expected 1 high issue, got %d", len(highIssues))
+	}
+
+	// Test listing with reporter filter
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"reporter": "brain"}
+	result, err = handlers["hub_issue_list"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var brainIssues []map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &brainIssues); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(brainIssues) != 1 {
+		t.Fatalf("expected 1 brain issue, got %d", len(brainIssues))
+	}
+
+	// Test listing with status filter
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"status": "open"}
+	result, err = handlers["hub_issue_list"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var openIssues []map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &openIssues); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(openIssues) != 2 {
+		t.Fatalf("expected 2 open issues, got %d", len(openIssues))
+	}
+
+	// Test empty result when no matches
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"severity": "critical"}
+	result, err = handlers["hub_issue_list"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var noIssues []map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &noIssues); err != nil {
+			// null JSON decodes to nil slice, which is fine
+			noIssues = nil
+		}
+	}
+	if len(noIssues) != 0 {
+		t.Fatalf("expected 0 issues for critical, got %d", len(noIssues))
+	}
+
+	// Verify line_number is nil in listed issue without line_number
+	for _, iss := range allIssues {
+		if iss["title"] == "Minor typo in docs" {
+			if iss["line_number"] != nil {
+				t.Errorf("expected nil line_number in listed issue, got %v", iss["line_number"])
+			}
+		}
+		if iss["title"] == "Null pointer in handler" {
+			if iss["line_number"] != float64(42) {
+				t.Errorf("expected line_number 42 in listed issue, got %v", iss["line_number"])
+			}
+		}
+	}
+}
+
+func TestIssueUpdate(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	handlers := make(map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error))
+	for _, td := range tools {
+		handlers[td.Tool.Name] = td.Handler
+	}
+	ctx := context.Background()
+
+	// Create an issue first
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"reporter": "coder-1",
+		"severity": "medium",
+		"title":    "Fix login bug",
+	}
+	result, err := handlers["hub_issue_create"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	issueID := created["id"].(string)
+
+	// Update status to "in_progress"
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"id":     issueID,
+		"status": "in_progress",
+	}
+	result, err = handlers["hub_issue_update"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("update status failed: %v", result.Content)
+	}
+	var updated map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &updated); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if updated["status"] != "in_progress" {
+		t.Errorf("expected status 'in_progress', got %v", updated["status"])
+	}
+
+	// Update assigned_to
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"id":          issueID,
+		"assigned_to": "coder-2",
+	}
+	result, err = handlers["hub_issue_update"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("update assigned_to failed: %v", result.Content)
+	}
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &updated); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if updated["assigned_to"] != "coder-2" {
+		t.Errorf("expected assigned_to 'coder-2', got %v", updated["assigned_to"])
+	}
+
+	// Update status to "fixed" with resolution
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"id":         issueID,
+		"status":     "fixed",
+		"resolution": "Added nil check in handler",
+	}
+	result, err = handlers["hub_issue_update"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("update to fixed failed: %v", result.Content)
+	}
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &updated); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if updated["status"] != "fixed" {
+		t.Errorf("expected status 'fixed', got %v", updated["status"])
+	}
+	if updated["resolution"] != "Added nil check in handler" {
+		t.Errorf("expected resolution 'Added nil check in handler', got %v", updated["resolution"])
+	}
+
+	// Verify updates persisted via list
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"status": "fixed"}
+	result, err = handlers["hub_issue_list"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixedIssues []map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &fixedIssues); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(fixedIssues) != 1 {
+		t.Fatalf("expected 1 fixed issue, got %d", len(fixedIssues))
+	}
+	if fixedIssues[0]["assigned_to"] != "coder-2" {
+		t.Errorf("expected assigned_to persisted as 'coder-2', got %v", fixedIssues[0]["assigned_to"])
+	}
+
+	// Test update on non-existent ID
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"id":     "non-existent-id",
+		"status": "fixed",
+	}
+	result, err = handlers["hub_issue_update"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error for non-existent issue ID")
 	}
 }

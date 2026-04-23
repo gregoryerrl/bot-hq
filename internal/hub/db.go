@@ -740,28 +740,39 @@ func (db *DB) DeleteCheckpoint(agentID string) error {
 // --- Issues ---
 
 // CreateIssue inserts a new issue and returns it as a map.
-func (db *DB) CreateIssue(id, reporter, severity, title, description, filePath string, lineNumber int) (map[string]interface{}, error) {
+func (db *DB) CreateIssue(id, reporter, severity, title, description, filePath string, lineNumber *int) (map[string]interface{}, error) {
 	now := time.Now().UnixMilli()
+	var lineNumArg interface{}
+	if lineNumber != nil {
+		lineNumArg = *lineNumber
+	}
 	_, err := db.conn.Exec(
 		`INSERT INTO issues (id, reporter, severity, title, description, file_path, line_number, status, created, updated)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`,
-		id, reporter, severity, title, description, filePath, lineNumber, now, now,
+		id, reporter, severity, title, description, filePath, lineNumArg, now, now,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{
+	issue := map[string]interface{}{
 		"id":          id,
 		"reporter":    reporter,
 		"severity":    severity,
 		"title":       title,
 		"description": description,
 		"file_path":   filePath,
-		"line_number": lineNumber,
 		"status":      "open",
+		"assigned_to": "",
+		"resolution":  "",
 		"created":     now,
 		"updated":     now,
-	}, nil
+	}
+	if lineNumber != nil {
+		issue["line_number"] = *lineNumber
+	} else {
+		issue["line_number"] = nil
+	}
+	return issue, nil
 }
 
 // ListIssues queries issues with optional filters.
@@ -810,12 +821,16 @@ func (db *DB) ListIssues(status, severity, reporter string) ([]map[string]interf
 			"title":       title,
 			"description": desc.String,
 			"file_path":   fp.String,
-			"line_number": lineNum.Int64,
 			"status":      st,
 			"assigned_to": assignedTo.String,
 			"resolution":  resolution.String,
 			"created":     created,
 			"updated":     updated,
+		}
+		if lineNum.Valid {
+			issue["line_number"] = lineNum.Int64
+		} else {
+			issue["line_number"] = nil
 		}
 		issues = append(issues, issue)
 	}
@@ -873,18 +888,23 @@ func (db *DB) UpdateIssue(id, status, assignedTo, resolution string) (map[string
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{
+	issue := map[string]interface{}{
 		"id":          id,
 		"reporter":    rep,
 		"severity":    sev,
 		"title":       title,
 		"description": desc.String,
 		"file_path":   fp.String,
-		"line_number": lineNum.Int64,
 		"status":      st,
 		"assigned_to": assignTo.String,
 		"resolution":  res.String,
 		"created":     created,
 		"updated":     updated,
-	}, nil
+	}
+	if lineNum.Valid {
+		issue["line_number"] = lineNum.Int64
+	} else {
+		issue["line_number"] = nil
+	}
+	return issue, nil
 }

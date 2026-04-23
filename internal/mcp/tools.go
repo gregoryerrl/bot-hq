@@ -508,7 +508,12 @@ func hubIssueCreate(db *hub.DB) ToolDef {
 
 		description := req.GetString("description", "")
 		filePath := req.GetString("file_path", "")
-		lineNumber := req.GetInt("line_number", 0)
+		lineNumberRaw := req.GetInt("line_number", 0)
+		var lineNumber *int
+		if lineNumberRaw != 0 {
+			v := lineNumberRaw
+			lineNumber = &v
+		}
 
 		id := uuid.New().String()
 		issue, err := db.CreateIssue(id, reporter, severity, title, description, filePath, lineNumber)
