@@ -132,7 +132,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Write hub messages to the WebSocket client
+	// Write hub messages to the WebSocket client + speak via Gemini
 	go func() {
 		for {
 			select {
@@ -141,6 +141,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				writeBrowser(msg)
+				// If this is a response message, have Gemini speak it
+				if gemini != nil && msg.Type == protocol.MsgResponse {
+					gemini.SendText(msg.Content)
+				}
 			case <-done:
 				return
 			}
@@ -206,6 +210,22 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+}
+
+// transcriptToMessage converts a voice transcript into a hub message.
+func transcriptToMessage(role, text string) protocol.Message {
+	if role == "user" {
+		return protocol.Message{
+			FromAgent: "live",
+			Type:      protocol.MsgCommand,
+			Content:   text,
+		}
+	}
+	return protocol.Message{
+		FromAgent: "live",
+		Type:      protocol.MsgResponse,
+		Content:   text,
 	}
 }
 
@@ -275,6 +295,9 @@ func (s *Server) geminiReadLoop(gemini *GeminiProxy, writeBrowser func(interface
 					"role": "user",
 					"text": text,
 				})
+				// Insert user speech as a hub command
+				hubMsg := transcriptToMessage("user", text)
+				s.hub.DB.InsertMessage(hubMsg)
 			}
 		}
 

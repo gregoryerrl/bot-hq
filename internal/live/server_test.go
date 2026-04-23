@@ -2,6 +2,8 @@ package live
 
 import (
 	"testing"
+
+	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
 func TestBrowserReceivesErrorOnGeminiFailure(t *testing.T) {
@@ -15,6 +17,20 @@ func TestBrowserReceivesErrorOnGeminiFailure(t *testing.T) {
 	}
 	if msg.Error == "" {
 		t.Error("error message should have non-empty error field")
+	}
+}
+
+func TestTranscriptToHubMessage(t *testing.T) {
+	transcript := "fix the login bug"
+	msg := transcriptToMessage("user", transcript)
+	if msg.FromAgent != "live" {
+		t.Errorf("from_agent = %q, want 'live'", msg.FromAgent)
+	}
+	if msg.Type != protocol.MsgCommand {
+		t.Errorf("type = %q, want %q", msg.Type, protocol.MsgCommand)
+	}
+	if msg.Content != transcript {
+		t.Errorf("content = %q, want %q", msg.Content, transcript)
 	}
 }
 
