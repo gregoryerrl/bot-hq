@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -54,29 +55,26 @@ func runHub() {
 	}
 	defer h.Stop()
 
-	// 3. Start Live web server
-	liveServer := live.NewServer(h, cfg.Hub.LivePort)
-	if err := liveServer.Start(); err != nil {
-		log.Printf("Live server error: %v", err)
-	}
+	// 3. Suppress log output — TUI owns the terminal
+	log.SetOutput(io.Discard)
 
-	// 4. Start Discord bot if configured
+	// 4. Start Live web server
+	liveServer := live.NewServer(h, cfg.Hub.LivePort)
+	liveServer.Start()
+
+	// 5. Start Discord bot if configured
 	if cfg.Discord.Token != "" && cfg.Discord.ChannelID != "" {
 		discordBot, err := discord.NewBot(cfg.Discord.Token, cfg.Discord.ChannelID, h)
-		if err != nil {
-			log.Printf("Discord bot error: %v", err)
-		} else {
-			if err := discordBot.Start(); err != nil {
-				log.Printf("Discord bot start failed: %v", err)
-			} else {
+		if err == nil {
+			if err := discordBot.Start(); err == nil {
 				defer discordBot.Stop()
 			}
 		}
 	}
 
-	// 4. Run Bubbletea TUI
+	// 6. Run Bubbletea TUI
 	app := ui.NewApp(cfg)
-	p := tea.NewProgram(app, tea.WithAltScreen())
+	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	// Wire Hub OnMessage to forward messages to TUI.
 	// DB supports multiple OnMessage callbacks, so this chains with
