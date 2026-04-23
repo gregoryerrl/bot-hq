@@ -14,9 +14,9 @@ import (
 )
 
 type DB struct {
-	conn      *sql.DB
-	mu        sync.RWMutex
-	onMessage func(protocol.Message)
+	conn       *sql.DB
+	mu         sync.RWMutex
+	onMessages []func(protocol.Message)
 }
 
 func OpenDB(path string) (*DB, error) {
@@ -42,10 +42,12 @@ func (db *DB) Close() error {
 	return db.conn.Close()
 }
 
+// OnMessage registers a callback that fires whenever a message is inserted.
+// Multiple callbacks can be registered; they are all called in order.
 func (db *DB) OnMessage(fn func(protocol.Message)) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	db.onMessage = fn
+	db.onMessages = append(db.onMessages, fn)
 }
 
 func (db *DB) migrate() error {
@@ -201,11 +203,12 @@ func (db *DB) InsertMessage(msg protocol.Message) (int64, error) {
 
 	msg.ID = id
 
-	// Fire update hook
+	// Fire update hooks
 	db.mu.RLock()
-	fn := db.onMessage
+	fns := make([]func(protocol.Message), len(db.onMessages))
+	copy(fns, db.onMessages)
 	db.mu.RUnlock()
-	if fn != nil {
+	for _, fn := range fns {
 		go fn(msg)
 	}
 
