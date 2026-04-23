@@ -13,6 +13,9 @@ func TestHasTmux(t *testing.T) {
 }
 
 func TestNewAndKillSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping tmux test in short mode")
+	}
 	if !HasTmux() {
 		t.Skip("tmux not available")
 	}
@@ -39,6 +42,9 @@ func TestNewAndKillSession(t *testing.T) {
 }
 
 func TestSendKeysAndCapture(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping tmux test in short mode")
+	}
 	if !HasTmux() {
 		t.Skip("tmux not available")
 	}

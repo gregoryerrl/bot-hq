@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -22,11 +25,13 @@ type ToolDef struct {
 	Handler server.ToolHandlerFunc
 }
 
-// BuildTools returns all hub tools wired to the given database.
+// BuildTools returns all hub + claude tools wired to the given database.
 func BuildTools(db *hub.DB) []ToolDef {
 	return []ToolDef{
 		hubRegister(db),
 		hubUnregister(db),
+		hubDeleteAgent(db),
+		hubFlag(db),
 		hubSend(db),
 		hubRead(db),
 		hubAgents(db),
@@ -40,6 +45,12 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubIssueCreate(db),
 		hubIssueList(db),
 		hubIssueUpdate(db),
+		claudeList(db),
+		claudeRead(db),
+		claudeMessage(db),
+		claudeSend(),
+		claudeResume(),
+		claudeStop(db),
 	}
 }
 
@@ -84,9 +95,15 @@ func hubRegister(db *hub.DB) ToolDef {
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
+		if strings.TrimSpace(id) == "" {
+			return mcp.NewToolResultError("id must not be empty"), nil
+		}
 		name, err := req.RequireString("name")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if strings.TrimSpace(name) == "" {
+			return mcp.NewToolResultError("name must not be empty"), nil
 		}
 		typ, err := req.RequireString("type")
 		if err != nil {
@@ -145,6 +162,81 @@ func hubUnregister(db *hub.DB) ToolDef {
 	return ToolDef{Tool: tool, Handler: handler}
 }
 
+func hubDeleteAgent(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_delete_agent",
+		mcp.WithDescription("Permanently delete an agent record from the hub database"),
+		mcp.WithString("id", mcp.Required(), mcp.Description("Agent ID to delete")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id, err := req.RequireString("id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		// Protect core agents
+		switch id {
+		case "brain", "live", "discord", "rain":
+			return mcp.NewToolResultError(fmt.Sprintf("cannot delete core agent: %s", id)), nil
+		}
+
+		if err := db.DeleteAgent(id); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("delete failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(toJSON(map[string]string{
+			"status":   "deleted",
+			"agent_id": id,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func hubFlag(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_flag",
+		mcp.WithDescription("Flag a message for user attention. Use when: agents disagree and need user input, errors occur, rate limits hit, something stops working, or any situation requiring human decision. This sends a Discord notification."),
+		mcp.WithString("from", mcp.Required(), mcp.Description("Agent ID raising the flag")),
+		mcp.WithString("reason", mcp.Required(), mcp.Description("Why the user's attention is needed — be specific and concise")),
+		mcp.WithString("severity", mcp.Description("Severity: info, warning, critical (default: warning)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		from, err := req.RequireString("from")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		reason, err := req.RequireString("reason")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		severity := "warning"
+		if s, sErr := req.RequireString("severity"); sErr == nil && s != "" {
+			severity = s
+		}
+
+		content := fmt.Sprintf("[%s] %s", strings.ToUpper(severity), reason)
+
+		msg := protocol.Message{
+			FromAgent: from,
+			ToAgent:   "user",
+			Type:      protocol.MsgFlag,
+			Content:   content,
+			Created:   time.Now(),
+		}
+		if _, err := db.InsertMessage(msg); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("flag failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(toJSON(map[string]string{
+			"status":   "flagged",
+			"severity": severity,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
 func hubSend(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_send",
 		mcp.WithDescription("Send a message through the hub"),
@@ -159,6 +251,9 @@ func hubSend(db *hub.DB) ToolDef {
 		from, err := req.RequireString("from")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if strings.TrimSpace(from) == "" {
+			return mcp.NewToolResultError("from must not be empty"), nil
 		}
 		msgType, err := req.RequireString("type")
 		if err != nil {
@@ -389,16 +484,74 @@ func hubSpawn(db *hub.DB) ToolDef {
 		}
 		prompt := req.GetString("prompt", "")
 
+		// Resolve to absolute path to prevent relative path tricks
+		absProject, err := filepath.Abs(project)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid path: %v", err)), nil
+		}
+
+		// Block system/dangerous directories
+		if isBlockedPath(absProject) {
+			return mcp.NewToolResultError(fmt.Sprintf("project path is in a restricted system directory: %s", absProject)), nil
+		}
+
 		// Validate project path exists and is a directory
-		info, err := os.Stat(project)
+		info, err := os.Stat(absProject)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("project path invalid: %v", err)), nil
 		}
 		if !info.IsDir() {
-			return mcp.NewToolResultError(fmt.Sprintf("project path is not a directory: %s", project)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("project path is not a directory: %s", absProject)), nil
+		}
+		project = absProject
+
+		sessionID := uuid.New().String()[:8]
+		sessionName := fmt.Sprintf("cc-%s", sessionID)
+
+		// If the project is the same repo the bot-hq binary lives in,
+		// create a git worktree so the coder doesn't modify files the
+		// running server depends on.
+		worktreePath := ""
+		worktreeBranch := ""
+		selfPath, _ := os.Executable()
+		if selfPath != "" {
+			selfDir := filepath.Dir(selfPath)
+			// Check if our binary lives inside the target project
+			if strings.HasPrefix(selfDir, project+"/") || selfDir == project {
+				branchName := fmt.Sprintf("coder-%s", sessionID)
+				wtPath := filepath.Join(project, ".worktrees", branchName)
+				// Create worktree with a new branch off HEAD
+				mkErr := os.MkdirAll(filepath.Dir(wtPath), 0700)
+				if mkErr == nil {
+					wtCmd := exec.CommandContext(ctx, "git", "-C", project, "worktree", "add", "-b", branchName, wtPath, "HEAD")
+					if wtErr := wtCmd.Run(); wtErr == nil {
+						worktreePath = wtPath
+						worktreeBranch = branchName
+						project = wtPath // coder works in the worktree
+					}
+				}
+			}
 		}
 
-		sessionName := fmt.Sprintf("cc-%s", uuid.New().String()[:8])
+		// Write MCP config so the coder agent can reach bot-hq hub tools
+		mcpConfigPath := filepath.Join(project, fmt.Sprintf(".bot-hq-coder-%s-mcp.json", sessionID))
+		botHQPath, mcpErr := os.Executable()
+		if mcpErr != nil {
+			botHQPath, mcpErr = exec.LookPath("bot-hq")
+		}
+		if mcpErr == nil {
+			mcpCfg := map[string]any{
+				"mcpServers": map[string]any{
+					"bot-hq": map[string]any{
+						"command": botHQPath,
+						"args":    []string{"mcp"},
+					},
+				},
+			}
+			if data, err := json.MarshalIndent(mcpCfg, "", "  "); err == nil {
+				os.WriteFile(mcpConfigPath, data, 0600)
+			}
+		}
 
 		// Create a new tmux session in the project directory
 		cmd := exec.CommandContext(ctx, "tmux", "new-session", "-d",
@@ -409,23 +562,365 @@ func hubSpawn(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("spawn failed: %v", err)), nil
 		}
 
-		// Send claude command via send-keys (avoids shell injection)
-		sendArgs := []string{"send-keys", "-t", sessionName, "claude", "Enter"}
+		// Build claude command — include MCP config if we wrote one
+		claudeCmd := "claude --dangerously-skip-permissions"
+		if mcpErr == nil {
+			claudeCmd = fmt.Sprintf("claude --mcp-config %s --dangerously-skip-permissions", mcpConfigPath)
+		}
+
+		// Send claude command via send-keys (-l for literal to prevent key name injection)
+		sendArgs := []string{"send-keys", "-t", sessionName, "-l", claudeCmd}
 		if err := exec.CommandContext(ctx, "tmux", sendArgs...).Run(); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to start claude: %v", err)), nil
 		}
-
-		// Send initial prompt if provided
-		if prompt != "" {
-			time.Sleep(3 * time.Second)
-			promptArgs := []string{"send-keys", "-t", sessionName, prompt, "Enter"}
-			exec.CommandContext(ctx, "tmux", promptArgs...).Run()
+		// Send Enter separately (cannot use -l for Enter)
+		if err := exec.CommandContext(ctx, "tmux", "send-keys", "-t", sessionName, "Enter").Run(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to send Enter: %v", err)), nil
 		}
 
+		// Track in DB
+		db.InsertClaudeSession(hub.ClaudeSession{
+			ID:         sessionID,
+			Project:    project,
+			TmuxTarget: sessionName,
+			Mode:       "managed",
+			Status:     "running",
+			Started:    time.Now(),
+		})
+
+		// Register as an agent so it shows up in the hub
+		metaJSON, _ := json.Marshal(map[string]string{"tmux_target": sessionName})
+		db.RegisterAgent(protocol.Agent{
+			ID:      sessionID,
+			Name:    fmt.Sprintf("Coder %s", sessionID),
+			Type:    protocol.AgentCoder,
+			Status:  protocol.StatusOnline,
+			Project: project,
+			Meta:    string(metaJSON),
+		})
+
+		// Send initial prompt with hub communication instructions
+		time.Sleep(3 * time.Second)
+		worktreeNote := ""
+		if worktreePath != "" {
+			worktreeNote = fmt.Sprintf(`
+NOTE: You are working in a git worktree at %s (branch: %s).
+This is an isolated copy — the main repo is running a live server. Commit your changes to this branch.
+When done, Brian or the user will merge your branch into main.
+`, worktreePath, worktreeBranch)
+		}
+		hubPreamble := fmt.Sprintf(`You are a coder agent (ID: %s) in the bot-hq system. You have bot-hq MCP tools available.
+
+IMPORTANT: Communicate your progress on the hub so other agents can see what you're doing.
+- When you START work: hub_send(from="%s", to="brain", type="update", content="Starting: <brief description>")
+- When you FINISH or hit a blocker: hub_send(from="%s", to="brain", type="result", content="<what you did or what's blocking>")
+- Keep hub messages short — one or two sentences max.
+%s
+Your task:
+`, sessionID, sessionID, sessionID, worktreeNote)
+		fullPrompt := hubPreamble + prompt
+		if prompt == "" {
+			fullPrompt = hubPreamble + "Awaiting instructions. Register yourself and stand by."
+		}
+		// Use -l (literal) to prevent tmux key name injection in user prompts
+		exec.CommandContext(ctx, "tmux", "send-keys", "-t", sessionName, "-l", fullPrompt).Run()
+		// Claude Code's bracketed paste needs time to process before Enter
+		time.Sleep(500 * time.Millisecond)
+		exec.CommandContext(ctx, "tmux", "send-keys", "-t", sessionName, "Enter").Run()
+
+		result := map[string]string{
+			"status":     "spawned",
+			"session_id": sessionID,
+			"tmux":       sessionName,
+			"project":    project,
+		}
+		if worktreePath != "" {
+			result["worktree"] = worktreePath
+			result["branch"] = worktreeBranch
+		}
+		return mcp.NewToolResultText(toJSON(result)), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// --- Claude Code tools ---
+
+func claudeList(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("claude_list",
+		mcp.WithDescription("Discover and list all running Claude Code sessions in tmux. Returns session IDs, project paths, tmux targets, and status."),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Discover live sessions in tmux
+		discovered, err := tmuxpkg.DiscoverClaudeSessions()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("discovery failed: %v", err)), nil
+		}
+
+		// Sync with DB: register new ones, update existing
+		var results []hub.ClaudeSession
+		for _, d := range discovered {
+			existing, err := db.FindClaudeSessionByTarget(d.TmuxTarget)
+			if err == nil {
+				// Update existing
+				db.UpdateClaudeSessionStatus(existing.ID, "running", "")
+				existing.Status = "running"
+				existing.PID = d.PID
+				results = append(results, existing)
+			} else {
+				// New session found — register as attached
+				id := uuid.New().String()[:8]
+				sess := hub.ClaudeSession{
+					ID:         id,
+					Project:    d.CWD,
+					TmuxTarget: d.TmuxTarget,
+					PID:        d.PID,
+					Mode:       "attached",
+					Status:     "running",
+					Started:    time.Now(),
+				}
+				db.InsertClaudeSession(sess)
+				results = append(results, sess)
+			}
+		}
+
+		// Also include DB sessions that weren't found (mark as stopped)
+		dbSessions, _ := db.ListClaudeSessions("running")
+		for _, s := range dbSessions {
+			found := false
+			for _, d := range discovered {
+				if d.TmuxTarget == s.TmuxTarget {
+					found = true
+					break
+				}
+			}
+			if !found {
+				db.StopClaudeSession(s.ID)
+				s.Status = "stopped"
+			}
+			// Check if already in results
+			inResults := false
+			for _, r := range results {
+				if r.ID == s.ID {
+					inResults = true
+					break
+				}
+			}
+			if !inResults {
+				results = append(results, s)
+			}
+		}
+
+		return mcp.NewToolResultText(toJSON(results)), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func claudeRead(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("claude_read",
+		mcp.WithDescription("Read the latest output from a running Claude Code session. Captures the current tmux pane content."),
+		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID to read output from")),
+		mcp.WithNumber("lines", mcp.Description("Number of lines to capture (default 50)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		sessionID, err := req.RequireString("session_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		lines := req.GetInt("lines", 50)
+
+		sess, err := db.GetClaudeSession(sessionID)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("session not found: %v", err)), nil
+		}
+
+		output, err := tmuxpkg.CapturePane(sess.TmuxTarget, lines)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("capture failed: %v", err)), nil
+		}
+
+		// Update last output in DB
+		db.UpdateClaudeSessionStatus(sessionID, sess.Status, output)
+
+		return mcp.NewToolResultText(output), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func claudeMessage(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("claude_message",
+		mcp.WithDescription("Send a message to a running Claude Code session. Detects if Claude is at prompt before sending. Returns captured output."),
+		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID to message")),
+		mcp.WithString("message", mcp.Required(), mcp.Description("Message to send to Claude Code")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		sessionID, err := req.RequireString("session_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		message, err := req.RequireString("message")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		sess, err := db.GetClaudeSession(sessionID)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("session not found: %v", err)), nil
+		}
+
+		// Check if Claude is at prompt
+		currentOutput, err := tmuxpkg.CapturePane(sess.TmuxTarget, 10)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("capture failed: %v", err)), nil
+		}
+
+		lines := strings.Split(strings.TrimSpace(currentOutput), "\n")
+		lastLine := ""
+		if len(lines) > 0 {
+			lastLine = lines[len(lines)-1]
+		}
+
+		// Check for prompt indicators (❯, >, or empty line)
+		atPrompt := strings.HasSuffix(strings.TrimSpace(lastLine), "❯") ||
+			strings.HasSuffix(strings.TrimSpace(lastLine), ">") ||
+			strings.TrimSpace(lastLine) == ""
+
+		if !atPrompt {
+			// Claude is busy
+			output, _ := tmuxpkg.CapturePane(sess.TmuxTarget, 50)
+			db.UpdateClaudeSessionStatus(sessionID, "busy", output)
+			return mcp.NewToolResultText(fmt.Sprintf("[Claude is busy — not at prompt]\n%s", output)), nil
+		}
+
+		// Send the message
+		if err := tmuxpkg.SendKeys(sess.TmuxTarget, message, true); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("send failed: %v", err)), nil
+		}
+
+		// Wait for Claude to start processing, then capture
+		time.Sleep(2 * time.Second)
+		output, _ := tmuxpkg.CapturePane(sess.TmuxTarget, 50)
+		db.UpdateClaudeSessionStatus(sessionID, "running", output)
+
+		return mcp.NewToolResultText(output), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func claudeSend() ToolDef {
+	tool := mcp.NewTool("claude_send",
+		mcp.WithDescription("Send a one-shot task to Claude Code using --print mode. Returns the full output. Good for quick questions that don't need a persistent session."),
+		mcp.WithString("prompt", mcp.Required(), mcp.Description("Prompt to send to Claude Code")),
+		mcp.WithString("cwd", mcp.Description("Working directory (defaults to home)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		prompt, err := req.RequireString("prompt")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		cwd := req.GetString("cwd", "")
+		if cwd == "" {
+			cwd, _ = os.UserHomeDir()
+		}
+
+		cmd := exec.CommandContext(ctx, "claude", "--print", "-p", prompt)
+		cmd.Dir = cwd
+		out, err := cmd.Output()
+		if err != nil {
+			// Try to get partial output
+			if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) > 0 {
+				return mcp.NewToolResultText(fmt.Sprintf("[partial output]\n%s\n[stderr: %s]",
+					strings.TrimSpace(string(out)), strings.TrimSpace(string(exitErr.Stderr)))), nil
+			}
+			if len(out) > 0 {
+				return mcp.NewToolResultText(fmt.Sprintf("[partial output]\n%s", strings.TrimSpace(string(out)))), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("claude --print failed: %v", err)), nil
+		}
+
+		output := strings.TrimSpace(string(out))
+		if len(output) > 30000 {
+			output = output[:30000] + "\n...[truncated]"
+		}
+
+		return mcp.NewToolResultText(output), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func claudeResume() ToolDef {
+	tool := mcp.NewTool("claude_resume",
+		mcp.WithDescription("Resume the last Claude Code conversation using -c flag. Continues where a previous session left off."),
+		mcp.WithString("prompt", mcp.Required(), mcp.Description("Prompt to continue the conversation with")),
+		mcp.WithString("cwd", mcp.Description("Working directory (defaults to home)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		prompt, err := req.RequireString("prompt")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		cwd := req.GetString("cwd", "")
+		if cwd == "" {
+			cwd, _ = os.UserHomeDir()
+		}
+
+		cmd := exec.CommandContext(ctx, "claude", "-c", "--print", "-p", prompt)
+		cmd.Dir = cwd
+		out, err := cmd.Output()
+		if err != nil {
+			if len(out) > 0 {
+				return mcp.NewToolResultText(fmt.Sprintf("[partial output]\n%s", strings.TrimSpace(string(out)))), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("claude -c --print failed: %v", err)), nil
+		}
+
+		output := strings.TrimSpace(string(out))
+		if len(output) > 30000 {
+			output = output[:30000] + "\n...[truncated]"
+		}
+
+		return mcp.NewToolResultText(output), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+func claudeStop(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("claude_stop",
+		mcp.WithDescription("Stop a running Claude Code session by killing its tmux session. This is destructive."),
+		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session ID to stop")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		sessionID, err := req.RequireString("session_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		sess, err := db.GetClaudeSession(sessionID)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("session not found: %v", err)), nil
+		}
+
+		// Kill the tmux session
+		if err := tmuxpkg.KillSession(sess.TmuxTarget); err != nil {
+			// Session might already be dead — mark as stopped anyway
+		}
+
+		db.StopClaudeSession(sessionID)
+
 		return mcp.NewToolResultText(toJSON(map[string]string{
-			"status":       "spawned",
-			"tmux_session": sessionName,
-			"project":      project,
+			"status":     "stopped",
+			"session_id": sessionID,
 		})), nil
 	}
 
@@ -627,4 +1122,31 @@ func hubRestore(db *hub.DB) ToolDef {
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// blockedPrefixes are system directories that hub_spawn should never use.
+var blockedPrefixes = func() []string {
+	common := []string{
+		"/etc", "/bin", "/sbin", "/usr", "/lib", "/lib64",
+		"/boot", "/dev", "/proc", "/sys", "/run",
+		"/var/run", "/var/log",
+	}
+	if runtime.GOOS == "darwin" {
+		common = append(common, "/System", "/Library", "/private/var", "/private/etc")
+	}
+	return common
+}()
+
+// isBlockedPath returns true if the path is inside a system/dangerous directory.
+func isBlockedPath(absPath string) bool {
+	// Block filesystem root
+	if absPath == "/" {
+		return true
+	}
+	for _, prefix := range blockedPrefixes {
+		if absPath == prefix || strings.HasPrefix(absPath, prefix+"/") {
+			return true
+		}
+	}
+	return false
 }

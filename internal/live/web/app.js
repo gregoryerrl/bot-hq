@@ -81,6 +81,7 @@
                 addTranscript(msg.role, msg.text);
                 break;
             case "turn_complete":
+                finalizeTurn();
                 isSpeaking = false;
                 if (isCapturing) {
                     updateStatus("listening", "Listening...");
@@ -90,6 +91,7 @@
                 break;
             case "interrupted":
                 stopPlayback();
+                finalizeTurn();
                 isSpeaking = false;
                 if (isCapturing) {
                     updateStatus("listening", "Listening...");
@@ -97,12 +99,29 @@
                     updateStatus("connected", "Connected");
                 }
                 break;
+            case "error":
+                updateStatus("error", msg.error || "Unknown error");
+                addTranscript("assistant", "Error: " + (msg.error || "Unknown error"));
+                break;
         }
     }
 
     // ── Transcript ─────────────────────────────────────────────────────
+    var currentTurnEl = null;
+    var currentTurnRole = null;
+
     function addTranscript(role, text) {
         if (!text) return;
+
+        // Append to existing turn if same role
+        if (currentTurnEl && currentTurnRole === role) {
+            var content = currentTurnEl.querySelector(".transcript-text");
+            content.textContent += text;
+            transcriptEl.scrollTop = transcriptEl.scrollHeight;
+            return;
+        }
+
+        // New turn
         var div = document.createElement("div");
         div.className = "transcript-entry " + role;
 
@@ -118,6 +137,14 @@
         div.appendChild(content);
         transcriptEl.appendChild(div);
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
+
+        currentTurnEl = div;
+        currentTurnRole = role;
+    }
+
+    function finalizeTurn() {
+        currentTurnEl = null;
+        currentTurnRole = null;
     }
 
     // ── Mic Button ─────────────────────────────────────────────────────

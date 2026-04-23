@@ -72,10 +72,20 @@ func KillSession(name string) error {
 }
 
 // SendKeys sends keystrokes to a tmux target (session:window.pane).
+// Uses -l (literal) flag so key names in content are not interpreted by tmux.
+// When enter is true, a small delay is inserted before sending Enter to allow
+// the target application's bracketed paste handler to finish processing.
 func SendKeys(target, keys string, enter bool) error {
-	args := []string{"send-keys", "-t", target, keys}
+	args := []string{"send-keys", "-t", target, "-l", keys}
 	if enter {
-		args = append(args, "Enter")
+		// Enter must be sent as a separate non-literal send-keys call
+		if _, err := Exec(args...); err != nil {
+			return err
+		}
+		// Delay for bracketed paste processing (Claude Code, etc.)
+		time.Sleep(500 * time.Millisecond)
+		_, err := Exec("send-keys", "-t", target, "Enter")
+		return err
 	}
 	_, err := Exec(args...)
 	return err

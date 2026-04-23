@@ -7,7 +7,9 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
@@ -46,11 +48,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/ws", s.handleWebSocket)
 
 	addr := fmt.Sprintf(":%d", s.port)
-	log.Printf("Bot-HQ Live serving at http://localhost%s", addr)
+	log.Printf("Clive serving at http://localhost%s", addr)
 
 	go func() {
 		if err := http.ListenAndServe(addr, mux); err != nil {
-			log.Printf("Live server error: %v", err)
+			log.Printf("Clive server error: %v", err)
 		}
 	}()
 
@@ -71,12 +73,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	const agentID = "live"
-	log.Printf("Live WebSocket client connected")
+	log.Printf("Clive WebSocket client connected")
 
 	// Register live agent in the hub DB
 	s.hub.DB.RegisterAgent(protocol.Agent{
 		ID:     agentID,
-		Name:   "Live",
+		Name:   "Clive",
 		Type:   protocol.AgentVoice,
 		Status: protocol.StatusOnline,
 	})
@@ -104,11 +106,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Connect to Gemini if API key is configured
+	// Query API key from DB at connection time (user may have set it via Settings tab)
 	var gemini *GeminiProxy
-	apiKey := s.hub.Config.Live.GeminiAPIKey
+	apiKey := s.hub.DB.GetSetting("live.gemini_api_key", "")
+	if apiKey == "" {
+		// Fall back to config file / env var
+		apiKey = s.hub.Config.Live.GeminiAPIKey
+	}
 	if apiKey != "" {
-		voice := s.hub.Config.Live.Voice
+		voice := s.hub.DB.GetSetting("live.voice", s.hub.Config.Live.Voice)
 		gemini = NewGeminiProxy(apiKey, voice)
 		if err := gemini.Connect(""); err != nil {
 			log.Printf("Gemini connect error: %v", err)
@@ -122,18 +128,41 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			writeBrowser(map[string]string{"type": "connected"})
 
 			// Start Gemini read loop — forwards Gemini responses to the browser
-			go s.geminiReadLoop(gemini, writeBrowser, done)
+			go s.geminiReadLoop(gemini, writeBrowser, done, &gemini)
 		}
 	} else {
 		log.Printf("No Gemini API key configured — voice proxy disabled")
 		writeBrowser(map[string]string{
 			"type":  "error",
-			"error": "No Gemini API key configured — voice disabled",
+			"error": "No Gemini API key configured — set it in Settings tab, then reconnect",
 		})
 	}
 
-	// Write hub messages to the WebSocket client + speak via Gemini
+	// Write hub messages to the WebSocket client and forward agent replies to Gemini.
+	// Messages addressed to "live" are batched over a short window so Brian's
+	// rapid-fire responses don't interrupt Clive mid-sentence.
 	go func() {
+		var pendingMessages []protocol.Message
+		var debounceTimer *time.Timer
+
+		flushToGemini := func() {
+			if len(pendingMessages) == 0 || gemini == nil {
+				pendingMessages = nil
+				return
+			}
+			// Combine all pending messages into one context injection
+			var parts []string
+			for _, m := range pendingMessages {
+				parts = append(parts, fmt.Sprintf("[%s]: %s", m.FromAgent, m.Content))
+			}
+			combined := strings.Join(parts, "\n\n")
+			contextText := fmt.Sprintf("%s\n\nRelay this to the user conversationally — summarize if it's long.", combined)
+			if err := gemini.SendText(contextText); err != nil {
+				log.Printf("gemini context inject error: %v", err)
+			}
+			pendingMessages = nil
+		}
+
 		for {
 			select {
 			case msg, ok := <-hubCh:
@@ -141,11 +170,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				writeBrowser(msg)
-				// If this is a response message, have Gemini speak it
-				if gemini != nil && msg.Type == protocol.MsgResponse {
-					gemini.SendText(msg.Content)
+				// Only inject messages explicitly addressed to "live" (Clive)
+				if msg.ToAgent == "live" && msg.FromAgent != "live" && msg.Content != "" {
+					pendingMessages = append(pendingMessages, msg)
+					// Reset debounce timer — wait 3s for more messages before flushing
+					if debounceTimer != nil {
+						debounceTimer.Stop()
+					}
+					debounceTimer = time.AfterFunc(3*time.Second, func() {
+						flushToGemini()
+					})
 				}
 			case <-done:
+				if debounceTimer != nil {
+					debounceTimer.Stop()
+				}
 				return
 			}
 		}
@@ -160,7 +199,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			gemini.Close()
 		}
 		conn.Close()
-		log.Printf("Live WebSocket client disconnected")
+		log.Printf("Clive WebSocket client disconnected")
 	}()
 
 	for {
@@ -184,7 +223,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			case "audio":
 				if gemini != nil {
 					if err := gemini.SendAudio(bMsg.Data); err != nil {
-						log.Printf("gemini send audio error: %v", err)
+						// Don't spam logs when connection is closing
+						if !strings.Contains(err.Error(), "close sent") {
+							log.Printf("gemini send audio error: %v", err)
+						}
 					}
 				}
 			case "text":
@@ -201,7 +243,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				msg.FromAgent = agentID
-				log.Printf("Live WS received: type=%s content=%s", msg.Type, msg.Content)
+				log.Printf("Clive WS received: type=%s content=%s", msg.Type, msg.Content)
 
 				if msg.SessionID != "" {
 					if _, err := s.hub.DB.InsertMessage(msg); err != nil {
@@ -229,8 +271,92 @@ func transcriptToMessage(role, text string) protocol.Message {
 	}
 }
 
+// executeHubTool runs a hub tool call from Gemini and returns the result.
+func (s *Server) executeHubTool(name string, args map[string]interface{}) map[string]interface{} {
+	switch name {
+	case "hub_list_agents":
+		agents, err := s.hub.DB.ListAgents("")
+		if err != nil {
+			return map[string]interface{}{"error": err.Error()}
+		}
+		var result []map[string]string
+		for _, a := range agents {
+			result = append(result, map[string]string{
+				"id":      a.ID,
+				"name":    a.Name,
+				"type":    string(a.Type),
+				"status":  string(a.Status),
+				"project": a.Project,
+			})
+		}
+		return map[string]interface{}{"agents": result}
+
+	case "hub_read_messages":
+		limit := 20
+		if l, ok := args["limit"].(float64); ok && l > 0 {
+			limit = int(l)
+		}
+		msgs, err := s.hub.DB.GetRecentMessages(limit)
+		if err != nil {
+			return map[string]interface{}{"error": err.Error()}
+		}
+		var result []map[string]string
+		for _, m := range msgs {
+			result = append(result, map[string]string{
+				"from":    m.FromAgent,
+				"to":      m.ToAgent,
+				"type":    string(m.Type),
+				"content": m.Content,
+			})
+		}
+		return map[string]interface{}{"messages": result}
+
+	case "hub_send_message":
+		content, _ := args["content"].(string)
+		to, _ := args["to"].(string)
+		msgType, _ := args["type"].(string)
+		if msgType == "" {
+			msgType = "command"
+		}
+		if content == "" {
+			return map[string]interface{}{"error": "content is required"}
+		}
+		msg := protocol.Message{
+			FromAgent: "live",
+			ToAgent:   to,
+			Type:      protocol.MessageType(msgType),
+			Content:   content,
+		}
+		id, err := s.hub.DB.InsertMessage(msg)
+		if err != nil {
+			return map[string]interface{}{"error": err.Error()}
+		}
+		return map[string]interface{}{"status": "sent", "message_id": id}
+
+	case "hub_list_sessions":
+		sessions, err := s.hub.DB.ListSessions("")
+		if err != nil {
+			return map[string]interface{}{"error": err.Error()}
+		}
+		var result []map[string]string
+		for _, sess := range sessions {
+			result = append(result, map[string]string{
+				"id":      sess.ID,
+				"mode":    string(sess.Mode),
+				"purpose": sess.Purpose,
+				"status":  string(sess.Status),
+			})
+		}
+		return map[string]interface{}{"sessions": result}
+
+	default:
+		return map[string]interface{}{"error": fmt.Sprintf("unknown tool: %s", name)}
+	}
+}
+
 // geminiReadLoop reads messages from Gemini and forwards them to the browser.
-func (s *Server) geminiReadLoop(gemini *GeminiProxy, writeBrowser func(interface{}), done <-chan struct{}) {
+// If the Gemini connection drops, it auto-reconnects and updates the gemini pointer.
+func (s *Server) geminiReadLoop(gemini *GeminiProxy, writeBrowser func(interface{}), done <-chan struct{}, geminiPtr **GeminiProxy) {
 	for {
 		select {
 		case <-done:
@@ -245,8 +371,50 @@ func (s *Server) geminiReadLoop(gemini *GeminiProxy, writeBrowser func(interface
 				return
 			default:
 				log.Printf("gemini read error: %v", err)
-				return
+				// Auto-reconnect
+				writeBrowser(map[string]string{"type": "error", "error": "Reconnecting to Gemini..."})
+				gemini.Close()
+
+				apiKey := s.hub.DB.GetSetting("live.gemini_api_key", "")
+				if apiKey == "" {
+					apiKey = s.hub.Config.Live.GeminiAPIKey
+				}
+				voice := s.hub.DB.GetSetting("live.voice", s.hub.Config.Live.Voice)
+				newGemini := NewGeminiProxy(apiKey, voice)
+				if err := newGemini.Connect(""); err != nil {
+					log.Printf("gemini reconnect failed: %v", err)
+					writeBrowser(map[string]string{"type": "error", "error": fmt.Sprintf("Reconnect failed: %v", err)})
+					*geminiPtr = nil
+					return
+				}
+				log.Printf("Gemini auto-reconnected")
+				writeBrowser(map[string]string{"type": "connected"})
+				*geminiPtr = newGemini
+				gemini = newGemini
+				continue
 			}
+		}
+
+		// Handle tool calls from Gemini
+		if tc, ok := msg["toolCall"].(map[string]interface{}); ok {
+			if calls, ok := tc["functionCalls"].([]interface{}); ok {
+				for _, c := range calls {
+					call, ok := c.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					callID, _ := call["id"].(string)
+					fnName, _ := call["name"].(string)
+					args, _ := call["args"].(map[string]interface{})
+					log.Printf("Gemini tool call: %s(%v)", fnName, args)
+
+					result := s.executeHubTool(fnName, args)
+					if err := gemini.SendToolResponse(callID, result); err != nil {
+						log.Printf("tool response error: %v", err)
+					}
+				}
+			}
+			continue
 		}
 
 		sc, ok := msg["serverContent"]
@@ -295,9 +463,10 @@ func (s *Server) geminiReadLoop(gemini *GeminiProxy, writeBrowser func(interface
 					"role": "user",
 					"text": text,
 				})
-				// Insert user speech as a hub command
-				hubMsg := transcriptToMessage("user", text)
-				s.hub.DB.InsertMessage(hubMsg)
+				// Don't insert voice transcriptions into the hub — Clive decides
+				// what to send via hub_send_message tool calls. Broadcasting raw
+				// voice here causes Brian to pick it up AND Clive to send a
+				// separate tool call, resulting in duplicate processing.
 			}
 		}
 

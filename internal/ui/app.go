@@ -113,6 +113,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case MessageReceived:
+		// Only accept MessageReceived if it's newer than what we've seen via polling.
+		// This prevents duplicates from OnMessage callbacks racing with tick polls.
+		if msg.Message.ID > 0 && msg.Message.ID <= a.lastMsgID {
+			return a, nil
+		}
 		var cmd tea.Cmd
 		a.hubTab, cmd = a.hubTab.Update(msg)
 		if msg.Message.ID > a.lastMsgID {
@@ -138,6 +143,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case CommandSubmitted:
+		// Handle slash commands
+		if strings.TrimSpace(msg.Text) == "/clear" {
+			a.hubTab.messages = nil
+			a.hubTab.viewport.SetContent(a.hubTab.renderMessages())
+			return a, nil
+		}
+
 		// Handle commands from the Hub tab command bar
 		if a.db != nil {
 			target, content := parseCommand(msg.Text)
@@ -151,9 +163,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if target != "" {
 				m.ToAgent = target
-			}
-			if content == "" {
-				m.Content = msg.Text
 			}
 			a.db.InsertMessage(m)
 		}

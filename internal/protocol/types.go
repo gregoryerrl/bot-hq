@@ -9,11 +9,12 @@ const (
 	AgentVoice   AgentType = "voice"
 	AgentBrain   AgentType = "brain"
 	AgentDiscord AgentType = "discord"
+	AgentQA      AgentType = "qa"
 )
 
 func (a AgentType) Valid() bool {
 	switch a {
-	case AgentCoder, AgentVoice, AgentBrain, AgentDiscord:
+	case AgentCoder, AgentVoice, AgentBrain, AgentDiscord, AgentQA:
 		return true
 	}
 	return false
@@ -46,11 +47,12 @@ const (
 	MsgUpdate    MessageType = "update"
 	MsgResult    MessageType = "result"
 	MsgError     MessageType = "error"
+	MsgFlag      MessageType = "flag"
 )
 
 func (m MessageType) Valid() bool {
 	switch m {
-	case MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError:
+	case MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError, MsgFlag:
 		return true
 	}
 	return false

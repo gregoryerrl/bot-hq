@@ -181,25 +181,58 @@ func (h HubTab) renderMessages() string {
 }
 
 // formatMessage renders a single message as "[HH:MM:SS] from → to: content"
-// with color based on agent type and message type.
+// with each agent name colored independently.
 func (h HubTab) formatMessage(msg protocol.Message) string {
 	timestamp := msg.Created.Format("15:04:05")
 
-	var arrow string
-	if msg.ToAgent != "" {
-		arrow = fmt.Sprintf("%s → %s", msg.FromAgent, msg.ToAgent)
-	} else {
-		arrow = fmt.Sprintf("%s → *", msg.FromAgent)
+	if msg.Type == protocol.MsgFlag {
+		flagStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+		fromStyle := lipgloss.NewStyle().Foreground(agentColor(msg.FromAgent))
+		tsStyle := lipgloss.NewStyle().Foreground(ColorStatus)
+		return fmt.Sprintf("%s %s %s %s",
+			tsStyle.Render("["+timestamp+"]"),
+			flagStyle.Render("⚑ FLAG"),
+			fromStyle.Render(msg.FromAgent+":"),
+			flagStyle.Render(msg.Content),
+		)
 	}
 
-	color := h.messageColor(msg)
-	style := lipgloss.NewStyle().Foreground(color)
 	tsStyle := lipgloss.NewStyle().Foreground(ColorStatus)
+	arrowStyle := lipgloss.NewStyle().Foreground(ColorStatus)
 
-	return fmt.Sprintf("%s %s %s",
+	fromColor := agentColor(msg.FromAgent)
+	fromStyle := lipgloss.NewStyle().Foreground(fromColor)
+	toName := "*"
+	if msg.ToAgent != "" {
+		toName = msg.ToAgent
+	}
+	toStyle := lipgloss.NewStyle().Foreground(agentColor(toName))
+
+	// Message content matches the author's color
+	msgColor := fromColor
+	if msg.Type == protocol.MsgError {
+		msgColor = ColorError
+	}
+
+	// Build the prefix to calculate its visible width for wrapping
+	prefix := fmt.Sprintf("[%s] %s → %s: ", timestamp, msg.FromAgent, toName)
+	prefixLen := len(prefix)
+
+	// Wrap content to fit viewport width
+	content := msg.Content
+	if h.width > 0 && prefixLen+len(content) > h.width {
+		content = wrapText(content, h.width-prefixLen)
+	}
+
+	msgStyle := lipgloss.NewStyle().Foreground(msgColor)
+
+	return fmt.Sprintf("%s %s %s %s%s %s",
 		tsStyle.Render("["+timestamp+"]"),
-		style.Render(arrow+":"),
-		style.Render(msg.Content),
+		fromStyle.Render(msg.FromAgent),
+		arrowStyle.Render("→"),
+		toStyle.Render(toName),
+		arrowStyle.Render(":"),
+		msgStyle.Render(content),
 	)
 }
 
@@ -219,46 +252,84 @@ func parseCommand(input string) (string, string) {
 	return target, content
 }
 
-// messageColor determines the display color for a message based on its type
-// and the sender's identity.
+// agentColorPalette is a set of distinct colors for dynamically assigned agent colors.
+var agentColorPalette = []lipgloss.Color{
+	lipgloss.Color("#A855F7"), // purple
+	lipgloss.Color("#EC4899"), // pink
+	lipgloss.Color("#14B8A6"), // teal
+	lipgloss.Color("#F59E0B"), // amber
+	lipgloss.Color("#8B5CF6"), // violet
+	lipgloss.Color("#10B981"), // emerald
+	lipgloss.Color("#F472B6"), // rose
+	lipgloss.Color("#06B6D4"), // cyan
+}
+
+// agentColor returns a consistent color for a given agent name.
+// Known agents get fixed colors; others get a hash-based color from the palette.
+func agentColor(name string) lipgloss.Color {
+	lower := strings.ToLower(name)
+	switch {
+	case lower == "system" || lower == "hub":
+		return ColorSystem
+	case lower == "brain":
+		return ColorBrian
+	case lower == "live":
+		return ColorClive
+	case lower == "rain":
+		return ColorRain
+	case lower == "user":
+		return lipgloss.Color("#FFFFFF") // white
+	case lower == "discord":
+		return ColorDiscord
+	case lower == "*":
+		return ColorStatus
+	}
+
+	// Hash-based color for coder agents etc.
+	var hash uint32
+	for _, c := range name {
+		hash = hash*31 + uint32(c)
+	}
+	return agentColorPalette[hash%uint32(len(agentColorPalette))]
+}
+
+// wrapText wraps text to fit within maxWidth, breaking at spaces.
+func wrapText(text string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return text
+	}
+	var lines []string
+	words := strings.Fields(text)
+	var current string
+	for _, word := range words {
+		if current == "" {
+			current = word
+		} else if len(current)+1+len(word) > maxWidth {
+			lines = append(lines, current)
+			current = word
+		} else {
+			current += " " + word
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	if len(lines) <= 1 {
+		return text
+	}
+	// Indent continuation lines to align with the first line's content
+	indent := strings.Repeat(" ", 2)
+	result := lines[0]
+	for _, line := range lines[1:] {
+		result += "\n" + indent + line
+	}
+	return result
+}
+
+// messageColor determines the display color for a message based on the sender.
 func (h HubTab) messageColor(msg protocol.Message) lipgloss.Color {
-	// Error messages are always red
 	if msg.Type == protocol.MsgError {
 		return ColorError
 	}
-
-	// Handshake and session-related
-	if msg.Type == protocol.MsgHandshake {
-		return ColorSession
-	}
-
-	// Status updates
-	if msg.Type == protocol.MsgUpdate {
-		return ColorStatus
-	}
-
-	// Color by agent name/type hints
-	from := strings.ToLower(msg.FromAgent)
-	switch {
-	case from == "system" || from == "hub":
-		return ColorSystem
-	case strings.Contains(from, "live") || strings.Contains(from, "voice"):
-		return ColorLive
-	case strings.Contains(from, "coder") || strings.Contains(from, "claude"):
-		return ColorCoder
-	case strings.Contains(from, "discord") || strings.Contains(from, "brain"):
-		return ColorDiscord
-	}
-
-	// Default based on message type
-	switch msg.Type {
-	case protocol.MsgCommand:
-		return ColorLive
-	case protocol.MsgResult, protocol.MsgResponse:
-		return ColorCoder
-	case protocol.MsgQuestion:
-		return ColorSession
-	default:
-		return ColorStatus
-	}
+	return agentColor(msg.FromAgent)
 }

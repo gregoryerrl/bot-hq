@@ -15,7 +15,7 @@ import (
 
 const (
 	agentID   = "brain"
-	agentName = "Brain"
+	agentName = "Brian"
 	agentType = protocol.AgentBrain
 
 	pollInterval   = 3 * time.Second
@@ -101,7 +101,7 @@ func (b *Brain) Start() error {
 	b.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
 		Type:      protocol.MsgUpdate,
-		Content:   "Brain orchestrator online. Ready for commands.",
+		Content:   "Brian orchestrator online. Ready for commands.",
 	})
 
 	return nil
@@ -141,20 +141,16 @@ func (b *Brain) SendCommand(text string) error {
 	session := b.tmuxSession
 	b.mu.Unlock()
 
-	// Record in hub messages so TUI can display brain→claude exchanges
-	b.db.InsertMessage(protocol.Message{
-		FromAgent: agentID,
-		ToAgent:   "claude-session",
-		Type:      protocol.MsgCommand,
-		Content:   text,
-	})
+	// No need to echo the nudge back into the hub — Brain's Claude Code
+	// session will respond via hub_send which creates its own message.
 
 	// Send the text to the tmux pane
 	cmd := exec.Command("tmux", "send-keys", "-t", session, "-l", text)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("tmux send: %w", err)
 	}
-	// Press Enter
+	// Claude Code's bracketed paste needs time to process before Enter
+	time.Sleep(500 * time.Millisecond)
 	return exec.Command("tmux", "send-keys", "-t", session, "Enter").Run()
 }
 
@@ -219,27 +215,35 @@ func (b *Brain) spawnTmux() error {
 	if err := sendPrompt.Run(); err != nil {
 		return fmt.Errorf("tmux send prompt: %w", err)
 	}
+	// Claude Code's bracketed paste needs time to process before Enter
+	time.Sleep(500 * time.Millisecond)
 	return exec.Command("tmux", "send-keys", "-t", b.tmuxSession, "Enter").Run()
 }
 
 // initialPrompt returns the system prompt that tells Claude how to be the brain.
 func (b *Brain) initialPrompt() string {
-	return `You are the Brain orchestrator for bot-hq. You have access to bot-hq MCP tools.
+	return `You are Brian, the orchestrator for bot-hq. You have access to bot-hq MCP tools.
+
+Your name is Brian (agent ID "brain"). The voice interface agent is named Clive (agent ID "live"). The QA watchdog is Rain (agent ID "rain") — Rain reviews your decisions and agent output.
+
+WORKING WITH RAIN: Rain will challenge your decisions. That's his job. But don't just roll over — think critically about his feedback before responding. If his point is valid, acknowledge it and adjust. If you believe your approach is sound, explain your reasoning and stand your ground. You are the orchestrator — you own the decisions. Rain's challenges should sharpen your thinking, not override it. Only escalate with hub_flag when you've gone back and forth and genuinely can't resolve it.
+
+CRITICAL RULE: When you need to dispatch work to a project, you MUST use hub_spawn to create a Claude Code session. Do NOT use the Agent tool or any in-process subagents. hub_spawn creates a visible agent on the hub that the user can see and track. Every spawned agent appears in the Agents tab with its tmux session ID.
+
+RESPONSE ROUTING RULE: Always route responses back through the same channel the message arrived from. If a message comes from "discord", reply with to="discord". If from "live" (Clive), reply with to="live". If from "user" directly, reply with to="user". This ensures replies reach the user wherever they are.
 
 Your responsibilities:
-1. Register yourself: call hub_register with id="brain", name="Brain", type="brain"
+1. Register yourself: call hub_register with id="brain", name="Brian", type="brain"
 2. Monitor messages: periodically call hub_read with agent_id="brain" to check for new messages
-3. When you see messages from "user" (type="command"), respond helpfully:
-   - If it's a question, answer it using hub_send (from="brain", to="user", type="response")
-   - If it's a task like "spawn project X", use hub_spawn to create a Claude Code session
-   - After spawning, establish a handshake: send a message with type="handshake" to the new agent
+3. When you see messages from "user", "live" (Clive), or "discord", respond helpfully:
+   - If it's a question, answer it using hub_send (from="brain", to=<the sender's agent ID>, type="response")
+   - If it's a task, use hub_spawn to create a Claude Code session in the target project directory, with a prompt describing the task
+   - After spawning, send a handshake message to the new agent
    - Create a session with hub_session_create (mode="implement" or "brainstorm", purpose=<task>)
    - If it's a message for another agent, route it with hub_send
 4. Keep your status updated with hub_status
-5. Handshake protocol: When starting work with another agent:
-   a. hub_send(from="brain", to=<agent>, type="handshake", content=<mode:purpose>)
-   b. hub_session_create(mode=<brainstorm|implement|chat>, purpose=<description>, agents="brain,<agent>")
-   c. Use the session_id in subsequent messages to keep the conversation scoped
+5. For multi-agent tasks, spawn multiple agents with hub_spawn (one per subtask/project) and coordinate via hub messages
+6. Use hub_flag (from="brain", reason=<description>, severity=<info|warning|critical>) when the user's attention is needed: errors, rate limits, blocked tasks, or unresolved disagreements with Rain
 
 Start now: register yourself, then enter a loop where you check for messages every 5-10 seconds using hub_read. Always respond to user commands.`
 }
@@ -262,14 +266,15 @@ func (b *Brain) pollLoop() {
 
 // formatNudge creates a nudge message that includes the actual content,
 // so Claude doesn't need to call hub_read for every user message.
+// The reply target matches the sender so responses route back through the same channel.
 func formatNudge(from, content string) string {
-	return fmt.Sprintf("[Hub message from %s]: %s\n\nRespond to this using hub_send (from=\"brain\", to=\"user\", type=\"response\").", from, content)
+	return fmt.Sprintf("[Hub message from %s]: %s\n\nRespond to this using hub_send (from=\"brain\", to=\"%s\", type=\"response\").\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content, from)
 }
 
 // processNewMessages checks for user commands that arrived since the last poll
 // and sends them to the brain's Claude session.
 func (b *Brain) processNewMessages() {
-	msgs, err := b.db.ReadMessages("", b.lastMsgID, 50)
+	msgs, err := b.db.ReadMessages(agentID, b.lastMsgID, 50)
 	if err != nil {
 		return
 	}
@@ -279,8 +284,8 @@ func (b *Brain) processNewMessages() {
 			b.lastMsgID = msg.ID
 		}
 
-		// Only forward user commands to the brain session
-		if msg.FromAgent == "user" && msg.Type == protocol.MsgCommand {
+		// Forward messages addressed to brain (from user, Clive, or other agents)
+		if msg.FromAgent != agentID {
 			nudge := formatNudge(msg.FromAgent, msg.Content)
 			b.SendCommand(nudge)
 		}
@@ -301,14 +306,14 @@ func (b *Brain) healthLoop() {
 				b.db.InsertMessage(protocol.Message{
 					FromAgent: agentID,
 					Type:      protocol.MsgError,
-					Content:   "Brain tmux session died. Attempting restart...",
+					Content:   "Brian tmux session died. Attempting restart...",
 				})
 				// Try to restart
 				if err := b.restart(); err != nil {
 					b.db.InsertMessage(protocol.Message{
 						FromAgent: agentID,
 						Type:      protocol.MsgError,
-						Content:   fmt.Sprintf("Brain restart failed: %v", err),
+						Content:   fmt.Sprintf("Brian restart failed: %v", err),
 					})
 				}
 			}
@@ -339,7 +344,7 @@ func (b *Brain) restart() error {
 	b.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
 		Type:      protocol.MsgUpdate,
-		Content:   "Brain orchestrator restarted successfully.",
+		Content:   "Brian orchestrator restarted successfully.",
 	})
 	return nil
 }

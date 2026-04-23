@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -9,6 +11,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
+
+// stripANSI removes ANSI escape sequences from a string to prevent terminal injection.
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)|\x1b[^[\]()]`)
+
+func stripANSI(s string) string {
+	return ansiRegex.ReplaceAllString(s, "")
+}
 
 // AgentsUpdated is a Bubbletea message sent when the agent list changes.
 type AgentsUpdated struct {
@@ -50,11 +59,12 @@ func (a AgentsTab) View() string {
 			Render("No agents registered yet.")
 	}
 
-	// Find max name length for padding
+	// Find max name length for padding (use sanitized names)
 	maxName := 0
 	for _, ag := range a.agents {
-		if len(ag.Name) > maxName {
-			maxName = len(ag.Name)
+		name := stripANSI(ag.Name)
+		if len(name) > maxName {
+			maxName = len(name)
 		}
 	}
 	if maxName < 8 {
@@ -86,17 +96,32 @@ func (a AgentsTab) View() string {
 			statusStyle = lipgloss.NewStyle().Foreground(ColorStatus)
 		}
 
-		name := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Render(
-			fmt.Sprintf("%-*s", maxName, ag.Name),
+		safeName := stripANSI(ag.Name)
+		name := lipgloss.NewStyle().Foreground(agentColor(ag.ID)).Render(
+			fmt.Sprintf("%-*s", maxName, safeName),
 		)
 		status := statusStyle.Render(fmt.Sprintf("%-10s", ag.Status))
+		safeProject := stripANSI(ag.Project)
 		project := lipgloss.NewStyle().Foreground(ColorSession).Render(
-			fmt.Sprintf("%-18s", ag.Project),
+			fmt.Sprintf("%-18s", safeProject),
 		)
 		elapsed := formatElapsed(ag.LastSeen)
 		timeStr := lipgloss.NewStyle().Foreground(ColorStatus).Render(elapsed)
 
-		lines = append(lines, fmt.Sprintf("%s %s  %s  %s  %s", dot, name, status, project, timeStr))
+		// Extract tmux target from agent meta
+		tmuxStr := ""
+		if ag.Meta != "" {
+			var meta struct {
+				TmuxTarget string `json:"tmux_target"`
+			}
+			if json.Unmarshal([]byte(ag.Meta), &meta) == nil && meta.TmuxTarget != "" {
+				tmuxStr = lipgloss.NewStyle().Foreground(ColorStatus).Render(
+					fmt.Sprintf("  tmux:%s", meta.TmuxTarget),
+				)
+			}
+		}
+
+		lines = append(lines, fmt.Sprintf("%s %s  %s  %s  %s%s", dot, name, status, project, timeStr, tmuxStr))
 	}
 
 	offlineCount := len(a.agents) - onlineCount

@@ -649,57 +649,6 @@ func (db *DB) CleanDeliveredMessages(olderThan time.Duration) error {
 	return err
 }
 
-// --- Claude Sessions ---
-
-// ClaudeSession represents a tracked Claude Code session.
-type ClaudeSession struct {
-	ID         string
-	Project    string
-	TmuxTarget string
-	PID        int
-	Mode       string
-	Status     string
-	LastOutput string
-	Started    time.Time
-	Ended      time.Time
-}
-
-// ListClaudeSessions returns claude sessions, optionally filtered by status.
-func (db *DB) ListClaudeSessions(statusFilter string) ([]ClaudeSession, error) {
-	var rows *sql.Rows
-	var err error
-	if statusFilter != "" {
-		rows, err = db.conn.Query(
-			`SELECT id, project, tmux_target, pid, mode, status, last_output, started, ended
-			 FROM claude_sessions WHERE status = ? ORDER BY started DESC`, statusFilter,
-		)
-	} else {
-		rows, err = db.conn.Query(
-			`SELECT id, project, tmux_target, pid, mode, status, last_output, started, ended
-			 FROM claude_sessions ORDER BY started DESC`,
-		)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var sessions []ClaudeSession
-	for rows.Next() {
-		var s ClaudeSession
-		var started, ended int64
-		if err := rows.Scan(&s.ID, &s.Project, &s.TmuxTarget, &s.PID, &s.Mode, &s.Status, &s.LastOutput, &started, &ended); err != nil {
-			return nil, err
-		}
-		s.Started = time.UnixMilli(started)
-		if ended > 0 {
-			s.Ended = time.UnixMilli(ended)
-		}
-		sessions = append(sessions, s)
-	}
-	return sessions, rows.Err()
-}
-
 // --- Checkpoints ---
 
 // SaveCheckpoint upserts a checkpoint for an agent. data must be a valid JSON string.

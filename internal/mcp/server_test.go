@@ -30,6 +30,8 @@ func TestToolsRegistered(t *testing.T) {
 	expected := []string{
 		"hub_register",
 		"hub_unregister",
+		"hub_delete_agent",
+		"hub_flag",
 		"hub_send",
 		"hub_read",
 		"hub_agents",
@@ -43,6 +45,12 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_issue_create",
 		"hub_issue_list",
 		"hub_issue_update",
+		"claude_list",
+		"claude_read",
+		"claude_message",
+		"claude_send",
+		"claude_resume",
+		"claude_stop",
 	}
 
 	if len(tools) != len(expected) {

@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/gregoryerrl/bot-hq/internal/brain"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
+	"github.com/gregoryerrl/bot-hq/internal/rain"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/live"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
@@ -26,16 +28,23 @@ func main() {
 			runStatus()
 			return
 		case "version":
+			// Ensure config directory and default config exist
+			home, _ := os.UserHomeDir()
+			hub.LoadConfig(filepath.Join(home, ".bot-hq", "config.toml"))
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|version]\n", os.Args[1])
+			os.Exit(1)
 		}
 	}
 	runHub()
 }
 
 func runHub() {
-	// 1. Load config
 	home, _ := os.UserHomeDir()
+
+	// 1. Load config
 	configPath := filepath.Join(home, ".bot-hq", "config.toml")
 	cfg, err := hub.LoadConfig(configPath)
 	if err != nil {
@@ -49,20 +58,31 @@ func runHub() {
 		fmt.Fprintf(os.Stderr, "hub error: %v\n", err)
 		os.Exit(1)
 	}
+
+	// 3. Apply DB settings (overrides config file)
+	cfg.ApplyDBSettings(h.DB)
+	h.Config = cfg
+
 	if err := h.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "hub start error: %v\n", err)
 		os.Exit(1)
 	}
 	defer h.Stop()
 
-	// 3. Suppress log output — TUI owns the terminal
-	log.SetOutput(io.Discard)
+	// 4. Redirect log output to file — TUI owns the terminal
+	logFile, logErr := os.OpenFile(filepath.Join(home, ".bot-hq", "live.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if logErr == nil {
+		log.SetOutput(logFile)
+		defer logFile.Close()
+	} else {
+		log.SetOutput(io.Discard)
+	}
 
-	// 4. Start Live web server
+	// 5. Start Live web server
 	liveServer := live.NewServer(h, cfg.Hub.LivePort)
 	liveServer.Start()
 
-	// 5. Start Discord bot if configured
+	// 6. Start Discord bot if configured
 	if cfg.Discord.Token != "" && cfg.Discord.ChannelID != "" {
 		discordBot, err := discord.NewBot(cfg.Discord.Token, cfg.Discord.ChannelID, h)
 		if err == nil {
@@ -72,13 +92,41 @@ func runHub() {
 		}
 	}
 
-	// 6. Run Bubbletea TUI
-	app := ui.NewApp(cfg)
-	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// 7. Start Brain orchestrator if configured
+	var brainOrch *brain.Brain
+	if cfg.Brain.AutoStart {
+		brainOrch = brain.New(h.DB, cfg.Brain.WorkDir)
+		if err := brainOrch.Start(); err != nil {
+			// Non-fatal — log and continue without brain
+			h.DB.InsertMessage(protocol.Message{
+				FromAgent: "system",
+				Type:      protocol.MsgError,
+				Content:   fmt.Sprintf("Brian auto-start failed: %v", err),
+			})
+		} else {
+			defer brainOrch.Stop()
+		}
+	}
 
-	// Wire Hub OnMessage to forward messages to TUI.
-	// DB supports multiple OnMessage callbacks, so this chains with
-	// the hub's dispatch callback registered in NewHub.
+	// 7b. Start Rain QA agent if configured
+	if cfg.Rain.AutoStart {
+		rainAgent := rain.New(h.DB, cfg.Rain.WorkDir)
+		if err := rainAgent.Start(); err != nil {
+			h.DB.InsertMessage(protocol.Message{
+				FromAgent: "system",
+				Type:      protocol.MsgError,
+				Content:   fmt.Sprintf("Rain auto-start failed: %v", err),
+			})
+		} else {
+			defer rainAgent.Stop()
+		}
+	}
+
+	// 8. Run Bubbletea TUI
+	app := ui.NewApp(cfg, h.DB, brainOrch)
+	p := tea.NewProgram(app, tea.WithAltScreen())
+
+	// Wire Hub OnMessage to forward messages to TUI
 	h.DB.OnMessage(func(msg protocol.Message) {
 		p.Send(ui.MessageReceived{Message: msg})
 	})
@@ -90,18 +138,21 @@ func runHub() {
 }
 
 func runMCP() {
-	// Open DB directly (no TUI needed)
 	home, _ := os.UserHomeDir()
 	configPath := filepath.Join(home, ".bot-hq", "config.toml")
 	cfg, err := hub.LoadConfig(configPath)
 	if err != nil {
+		// Config errors are fatal — no way to find the DB without config
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
 	}
 
 	db, err := hub.OpenDB(cfg.Hub.DBPath)
 	if err != nil {
+		// Start MCP server with an error-only tool set so clients get a
+		// proper JSON-RPC response instead of an unexpected EOF.
 		fmt.Fprintf(os.Stderr, "db error: %v\n", err)
+		mcp.RunStdioServerWithError(fmt.Sprintf("database unavailable: %v", err))
 		os.Exit(1)
 	}
 	defer db.Close()
@@ -113,7 +164,6 @@ func runMCP() {
 }
 
 func runStatus() {
-	// Quick status check — open DB, list agents, print, exit
 	home, _ := os.UserHomeDir()
 	dbPath := filepath.Join(home, ".bot-hq", "hub.db")
 	db, err := hub.OpenDB(dbPath)

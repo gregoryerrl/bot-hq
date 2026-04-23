@@ -13,7 +13,19 @@ import (
 const (
 	geminiWSEndpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
 	geminiModel      = "models/gemini-3.1-flash-live-preview"
-	defaultSystemInstruction = "You are Bot-HQ, a voice-controlled AI assistant hub. You coordinate with AI agents (Claude Code sessions, Discord bots) and help users manage their development workflow through voice commands. Be concise — your responses will be spoken aloud. Keep responses under 2 sentences unless the user asks for detail."
+	defaultSystemInstruction = `You are Clive, the voice operator for bot-hq. Be straightforward, direct, and precise. No filler, no pleasantries, no unnecessary words. Speak like a professional operator relaying information — short, factual, actionable. One sentence when one sentence will do. Never narrate what you're about to do — just do it, then report the result.
+
+The orchestrator is Brian (agent ID "brain"). The QA watchdog is Rain (agent ID "rain").
+
+Your tools:
+- hub_list_agents: Check who's online
+- hub_read_messages: Read recent hub activity
+- hub_send_message: Message agents (to: agent ID, content: message)
+- hub_list_sessions: Check active sessions
+
+You can ONLY read and communicate on the hub. For anything else — spawning sessions, running code, executing tasks — tell Brian to do it via hub_send_message. You are the voice. Brian is the hands.
+
+When relaying hub messages, give the key info only. Strip fluff. If it's long, summarize to the essential point.`
 )
 
 // GeminiProxy manages a WebSocket connection to the Gemini Live API,
@@ -34,6 +46,63 @@ func NewGeminiProxy(apiKey, voice string) *GeminiProxy {
 	return &GeminiProxy{
 		apiKey: apiKey,
 		voice:  voice,
+	}
+}
+
+// hubToolDeclarations returns Gemini function declarations for hub tools.
+func hubToolDeclarations() []map[string]interface{} {
+	return []map[string]interface{}{
+		{
+			"name":        "hub_list_agents",
+			"description": "List all agents registered in the bot-hq hub with their status",
+			"parameters": map[string]interface{}{
+				"type":       "OBJECT",
+				"properties": map[string]interface{}{},
+			},
+		},
+		{
+			"name":        "hub_read_messages",
+			"description": "Read recent messages from the bot-hq hub",
+			"parameters": map[string]interface{}{
+				"type": "OBJECT",
+				"properties": map[string]interface{}{
+					"limit": map[string]interface{}{
+						"type":        "NUMBER",
+						"description": "Max messages to return (default 20)",
+					},
+				},
+			},
+		},
+		{
+			"name":        "hub_send_message",
+			"description": "Send a message to an agent or broadcast to the hub. Use this to talk to Brian, other agents, or broadcast commands.",
+			"parameters": map[string]interface{}{
+				"type": "OBJECT",
+				"properties": map[string]interface{}{
+					"to": map[string]interface{}{
+						"type":        "STRING",
+						"description": "Recipient agent ID (e.g. 'brain', 'user'). Leave empty for broadcast.",
+					},
+					"content": map[string]interface{}{
+						"type":        "STRING",
+						"description": "Message content",
+					},
+					"type": map[string]interface{}{
+						"type":        "STRING",
+						"description": "Message type: command, question, update",
+					},
+				},
+				"required": []string{"content"},
+			},
+		},
+		{
+			"name":        "hub_list_sessions",
+			"description": "List active sessions (Claude Code tmux sessions, brainstorming sessions, etc.)",
+			"parameters": map[string]interface{}{
+				"type":       "OBJECT",
+				"properties": map[string]interface{}{},
+			},
+		},
 	}
 }
 
@@ -69,7 +138,7 @@ func (g *GeminiProxy) Connect(systemInstruction string) error {
 		"setup": map[string]interface{}{
 			"model": geminiModel,
 			"generationConfig": map[string]interface{}{
-				"responseModalities": []string{"AUDIO", "TEXT"},
+				"responseModalities": []string{"AUDIO"},
 				"speechConfig": map[string]interface{}{
 					"voiceConfig": map[string]interface{}{
 						"prebuiltVoiceConfig": map[string]interface{}{
@@ -83,7 +152,9 @@ func (g *GeminiProxy) Connect(systemInstruction string) error {
 					{"text": systemInstruction},
 				},
 			},
-			"tools":                    []interface{}{},
+			"tools": []map[string]interface{}{
+				{"functionDeclarations": hubToolDeclarations()},
+			},
 			"inputAudioTranscription":  map[string]interface{}{},
 			"outputAudioTranscription": map[string]interface{}{},
 			"realtimeInputConfig": map[string]interface{}{
@@ -125,11 +196,9 @@ func (g *GeminiProxy) SendAudio(base64PCM string) error {
 
 	msg := map[string]interface{}{
 		"realtimeInput": map[string]interface{}{
-			"mediaChunks": []map[string]interface{}{
-				{
-					"mimeType": "audio/pcm;rate=16000",
-					"data":     base64PCM,
-				},
+			"audio": map[string]interface{}{
+				"mimeType": "audio/pcm;rate=16000",
+				"data":     base64PCM,
 			},
 		},
 	}
@@ -157,6 +226,29 @@ func (g *GeminiProxy) SendText(text string) error {
 				},
 			},
 			"turnComplete": true,
+		},
+	}
+
+	return g.conn.WriteJSON(msg)
+}
+
+// SendToolResponse sends a function call response back to Gemini.
+func (g *GeminiProxy) SendToolResponse(callID string, result map[string]interface{}) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if !g.connected || g.conn == nil {
+		return fmt.Errorf("not connected")
+	}
+
+	msg := map[string]interface{}{
+		"toolResponse": map[string]interface{}{
+			"functionResponses": []map[string]interface{}{
+				{
+					"id":       callID,
+					"response": result,
+				},
+			},
 		},
 	}
 

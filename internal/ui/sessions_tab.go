@@ -44,6 +44,13 @@ func (s SessionsTab) Update(msg tea.Msg) (SessionsTab, tea.Cmd) {
 	switch msg := msg.(type) {
 	case SessionsUpdated:
 		s.sessions = msg.Sessions
+		// Clamp cursor to valid range when sessions list shrinks
+		if s.cursor >= len(s.sessions) {
+			s.cursor = len(s.sessions) - 1
+		}
+		if s.cursor < 0 {
+			s.cursor = 0
+		}
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "j", "down":
@@ -109,7 +116,7 @@ func (s SessionsTab) View() string {
 		idStr := lipgloss.NewStyle().Foreground(ColorStatus).Render("#" + shortID)
 
 		// Mode
-		modeStr := lipgloss.NewStyle().Foreground(ColorLive).Render(
+		modeStr := lipgloss.NewStyle().Foreground(ColorClive).Render(
 			fmt.Sprintf("%-12s", sess.Mode),
 		)
 

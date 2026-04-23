@@ -10,9 +10,11 @@ var (
 
 	// Message feed colors
 	ColorSystem  = lipgloss.Color("#22C55E") // green — system events
-	ColorLive    = lipgloss.Color("#3B82F6") // blue — Bot-HQ Live
+	ColorClive   = lipgloss.Color("#3B82F6") // blue — Clive (voice)
+	ColorBrian   = lipgloss.Color("#F97316") // orange — Brian (orchestrator)
+	ColorRain    = lipgloss.Color("#EF4444") // red — Rain (adversarial QA)
 	ColorCoder   = lipgloss.Color("#A855F7") // purple — Claude Code sessions
-	ColorDiscord = lipgloss.Color("#F97316") // orange — Discord / Brain
+	ColorDiscord = lipgloss.Color("#22D3EE") // cyan — Discord
 	ColorError   = lipgloss.Color("#EF4444") // red — errors
 	ColorStatus  = lipgloss.Color("#6B7280") // gray — status updates
 	ColorSession = lipgloss.Color("#EAB308") // yellow — handshakes, sessions

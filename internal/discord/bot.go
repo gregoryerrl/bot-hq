@@ -149,6 +149,9 @@ func (b *Bot) handleDiscordMessage(s *discordgo.Session, m *discordgo.MessageCre
 // forwardToDiscord reads messages from the hub's WS client channel and
 // sends any messages addressed to the "discord" agent to the Discord channel.
 func (b *Bot) forwardToDiscord(ch <-chan protocol.Message) {
+	var lastContent string
+	var lastSent time.Time
+
 	for {
 		select {
 		case <-b.stopCh:
@@ -163,8 +166,25 @@ func (b *Bot) forwardToDiscord(ch <-chan protocol.Message) {
 				continue
 			}
 
+			// Forward messages addressed to "discord" OR flag messages (attention notifications)
+			if msg.ToAgent != "discord" && msg.Type != protocol.MsgFlag {
+				continue
+			}
+
+			// Deduplicate: skip if same content was sent within 5 seconds
+			if msg.Content == lastContent && time.Since(lastSent) < 5*time.Second {
+				continue
+			}
+			lastContent = msg.Content
+			lastSent = time.Now()
+
 			// Format and send to Discord
-			text := fmt.Sprintf("**[%s]** %s", msg.FromAgent, msg.Content)
+			var text string
+			if msg.Type == protocol.MsgFlag {
+				text = fmt.Sprintf("🚨 **ATTENTION NEEDED** — from **%s**:\n%s", msg.FromAgent, msg.Content)
+			} else {
+				text = fmt.Sprintf("**[%s]** %s", msg.FromAgent, msg.Content)
+			}
 
 			// Discord has a 2000 character limit; split if needed
 			chunks := splitMessage(text, 2000)
