@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
@@ -37,6 +38,8 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_session_join",
 		"hub_status",
 		"hub_spawn",
+		"hub_checkpoint",
+		"hub_restore",
 	}
 
 	if len(tools) != len(expected) {
@@ -204,5 +207,160 @@ func TestHubSendAndReadTools(t *testing.T) {
 	}
 	if msgs[0].FromAgent != "alice" {
 		t.Errorf("expected from 'alice', got %q", msgs[0].FromAgent)
+	}
+}
+
+func findHandler(tools []ToolDef, name string) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	for _, td := range tools {
+		if td.Tool.Name == name {
+			return td.Handler
+		}
+	}
+	return nil
+}
+
+func TestCheckpointSelfOnly(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	handler := findHandler(tools, "hub_checkpoint")
+	if handler == nil {
+		t.Fatal("hub_checkpoint tool not found")
+	}
+	ctx := context.Background()
+
+	// Self-checkpoint should succeed
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"from":     "brain",
+		"agent_id": "brain",
+		"data":     `{"state":"ok"}`,
+	}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("self-checkpoint should succeed, got error: %v", result.Content)
+	}
+
+	// Cross-agent checkpoint should be rejected
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"from":     "coder-1",
+		"agent_id": "brain",
+		"data":     `{"hijack":true}`,
+	}
+	result, err = handler(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("cross-agent checkpoint should be rejected")
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok || !strings.Contains(tc.Text, "agents can only checkpoint their own state") {
+		t.Errorf("expected self-only error message, got %v", result.Content)
+	}
+}
+
+func TestCheckpointSizeLimit(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	handler := findHandler(tools, "hub_checkpoint")
+	if handler == nil {
+		t.Fatal("hub_checkpoint tool not found")
+	}
+	ctx := context.Background()
+
+	// Build data just over 1MB
+	bigValue := strings.Repeat("x", 1_000_001-len(`{"big":""}`))
+	bigData := `{"big":"` + bigValue + `"}`
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"from":     "brain",
+		"agent_id": "brain",
+		"data":     bigData,
+	}
+	result, err := handler(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatal("checkpoint over 1MB should be rejected")
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok || !strings.Contains(tc.Text, "checkpoint data exceeds 1MB limit") {
+		t.Errorf("expected size limit error, got %v", result.Content)
+	}
+
+	// Data exactly at 1MB should succeed
+	exactValue := strings.Repeat("x", 1_000_000-len(`{"ok":""}`))
+	exactData := `{"ok":"` + exactValue + `"}`
+
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"from":     "brain",
+		"agent_id": "brain",
+		"data":     exactData,
+	}
+	result, err = handler(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("checkpoint at exactly 1MB should succeed, got: %v", result.Content)
+	}
+}
+
+func TestRestoreCrossAgent(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	checkpointHandler := findHandler(tools, "hub_checkpoint")
+	restoreHandler := findHandler(tools, "hub_restore")
+	if checkpointHandler == nil || restoreHandler == nil {
+		t.Fatal("checkpoint/restore tools not found")
+	}
+	ctx := context.Background()
+
+	// Agent "brain" saves its own checkpoint
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"from":     "brain",
+		"agent_id": "brain",
+		"data":     `{"tasks":["t1","t2"]}`,
+	}
+	result, err := checkpointHandler(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("checkpoint failed: %v", result.Content)
+	}
+
+	// Different agent "coder-1" restores brain's checkpoint (should succeed)
+	req = mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"agent_id": "brain",
+	}
+	result, err = restoreHandler(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("cross-agent restore should succeed, got error: %v", result.Content)
+	}
+
+	var restored map[string]any
+	if tc, ok := result.Content[0].(mcp.TextContent); ok {
+		if err := json.Unmarshal([]byte(tc.Text), &restored); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if restored["status"] != "restored" {
+		t.Errorf("expected status 'restored', got %v", restored["status"])
+	}
+	if restored["data"] != `{"tasks":["t1","t2"]}` {
+		t.Errorf("unexpected restored data: %v", restored["data"])
 	}
 }

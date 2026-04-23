@@ -432,11 +432,16 @@ func hubSpawn(db *hub.DB) ToolDef {
 func hubCheckpoint(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_checkpoint",
 		mcp.WithDescription("Save agent state checkpoint for persistence across sessions"),
+		mcp.WithString("from", mcp.Required(), mcp.Description("Caller agent ID (must match agent_id)")),
 		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent ID to save checkpoint for")),
 		mcp.WithString("data", mcp.Required(), mcp.Description("JSON object containing agent state to persist")),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		from, err := req.RequireString("from")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
 		agentID, err := req.RequireString("agent_id")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
@@ -444,6 +449,16 @@ func hubCheckpoint(db *hub.DB) ToolDef {
 		data, err := req.RequireString("data")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		// Self-only write: agents can only checkpoint their own state
+		if from != agentID {
+			return mcp.NewToolResultError("agents can only checkpoint their own state"), nil
+		}
+
+		// Size limit: reject checkpoint data exceeding 1MB
+		if len(data) > 1_000_000 {
+			return mcp.NewToolResultError("checkpoint data exceeds 1MB limit"), nil
 		}
 
 		if !json.Valid([]byte(data)) {
