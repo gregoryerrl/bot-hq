@@ -165,6 +165,9 @@ func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
 		a.LastSeen = time.UnixMilli(lastSeen)
 		agents = append(agents, a)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return agents, nil
 }
 
@@ -230,6 +233,9 @@ func (db *DB) ReadMessages(agentID string, sinceID int64, limit int) ([]protocol
 		m.Created = time.UnixMilli(created)
 		msgs = append(msgs, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return msgs, nil
 }
 
@@ -257,6 +263,9 @@ func (db *DB) GetRecentMessages(limit int) ([]protocol.Message, error) {
 		m.Type = protocol.MessageType(typ)
 		m.Created = time.UnixMilli(created)
 		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	// Reverse to chronological order
 	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
@@ -334,8 +343,13 @@ func (db *DB) ListSessions(statusFilter string) ([]protocol.Session, error) {
 		s.Status = protocol.SessionStatus(status)
 		s.Created = time.UnixMilli(created)
 		s.Updated = time.UnixMilli(updated)
-		json.Unmarshal([]byte(agentsJSON), &s.Agents)
+		if err := json.Unmarshal([]byte(agentsJSON), &s.Agents); err != nil {
+			return nil, err
+		}
 		sessions = append(sessions, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return sessions, nil
 }
@@ -351,7 +365,10 @@ func (db *DB) JoinSession(sessionID, agentID string) error {
 		}
 	}
 	sess.Agents = append(sess.Agents, agentID)
-	agentsJSON, _ := json.Marshal(sess.Agents)
+	agentsJSON, err := json.Marshal(sess.Agents)
+	if err != nil {
+		return fmt.Errorf("marshal agents: %w", err)
+	}
 	_, err = db.conn.Exec(
 		`UPDATE sessions SET agents = ?, updated = ? WHERE id = ?`,
 		string(agentsJSON), time.Now().UnixMilli(), sessionID,
