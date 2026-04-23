@@ -23,12 +23,13 @@ type CommandSubmitted struct {
 
 // HubTab displays a scrollable, color-coded message feed with a command input.
 type HubTab struct {
-	messages []protocol.Message
-	viewport viewport.Model
-	input    textinput.Model
-	width    int
-	height   int
-	focused  bool // true when the command input is focused
+	messages      []protocol.Message
+	viewport      viewport.Model
+	input         textinput.Model
+	width         int
+	height        int
+	focused       bool // true when the command input is focused
+	sessionFilter string
 }
 
 // NewHubTab creates a new HubTab with default dimensions.
@@ -122,6 +123,14 @@ func (h *HubTab) SetSize(width, height int) {
 	h.resize()
 }
 
+// SetSessionFilter filters the hub to only show messages from a specific session.
+// Pass an empty string to clear the filter.
+func (h *HubTab) SetSessionFilter(sessionID string) {
+	h.sessionFilter = sessionID
+	h.viewport.SetContent(h.renderMessages())
+	h.viewport.GotoBottom()
+}
+
 // resize recalculates viewport and input dimensions.
 func (h *HubTab) resize() {
 	// Reserve 3 lines: 1 for separator, 1 for input, 1 for padding
@@ -163,6 +172,9 @@ func (h HubTab) renderMessages() string {
 
 	var lines []string
 	for _, msg := range h.messages {
+		if h.sessionFilter != "" && msg.SessionID != h.sessionFilter {
+			continue
+		}
 		lines = append(lines, h.formatMessage(msg))
 	}
 	return strings.Join(lines, "\n")

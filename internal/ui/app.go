@@ -130,6 +130,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.sessionsTab, cmd = a.sessionsTab.Update(msg)
 		return a, cmd
 
+	case SessionSelected:
+		a.hubTab.SetSessionFilter(msg.SessionID)
+		if msg.SessionID != "" {
+			a.activeTab = TabHub
+		}
+		return a, nil
+
 	case CommandSubmitted:
 		// Handle commands from the Hub tab command bar
 		if a.db != nil {
@@ -194,6 +201,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.activeTab == TabHub {
 				var cmd tea.Cmd
 				a.hubTab, cmd = a.hubTab.Update(msg)
+				return a, cmd
+			}
+			if a.activeTab == TabSessions {
+				var cmd tea.Cmd
+				a.sessionsTab, cmd = a.sessionsTab.Update(msg)
 				return a, cmd
 			}
 			if a.activeTab == TabSettings {
