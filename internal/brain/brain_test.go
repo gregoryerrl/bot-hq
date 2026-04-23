@@ -30,6 +30,17 @@ func TestFormatNudgeIsNotEmpty(t *testing.T) {
 	}
 }
 
+func TestInitialPromptMentionsHandshake(t *testing.T) {
+	b := &Brain{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, "handshake") {
+		t.Error("initial prompt should mention handshake protocol")
+	}
+	if !strings.Contains(prompt, "hub_session_create") {
+		t.Error("initial prompt should mention hub_session_create")
+	}
+}
+
 func TestFormatNudgeIncludesInstructions(t *testing.T) {
 	nudge := formatNudge("user", "hello")
 	if !strings.Contains(nudge, "hub_send") {
