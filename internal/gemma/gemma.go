@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	agentID   = "gemma-agent"
-	agentName = "Gemma"
+	agentID   = "emma"
+	agentName = "Emma"
 
 	pollInterval           = 3 * time.Second
 	healthInterval         = 30 * time.Second
@@ -51,6 +51,12 @@ var allowedCommands = []string{
 	"git status",
 	"git log",
 	"git diff",
+	"gh issue view",
+	"gh issue list",
+	"gh pr view",
+	"gh pr list",
+	"curl -s",
+	"curl -sL",
 }
 
 // SharedSem is the package-level semaphore that caps total concurrent Gemma
@@ -155,7 +161,7 @@ func (g *Gemma) Start() error {
 		Status: protocol.StatusOnline,
 	}
 	if err := g.db.RegisterAgent(agent); err != nil {
-		return fmt.Errorf("gemma register: %w", err)
+		return fmt.Errorf("emma register: %w", err)
 	}
 
 	// Get current last message ID so we only process new messages
@@ -173,7 +179,7 @@ func (g *Gemma) Start() error {
 	g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
 		Type:      protocol.MsgUpdate,
-		Content:   fmt.Sprintf("Gemma agent online. Model: %s", g.model),
+		Content:   fmt.Sprintf("Emma online. Model: %s", g.model),
 	})
 
 	return nil
@@ -287,7 +293,7 @@ func (g *Gemma) pollLoop() {
 	}
 }
 
-// processNewMessages reads hub messages directed at gemma-agent and handles them.
+// processNewMessages reads hub messages directed at emma and handles them.
 func (g *Gemma) processNewMessages() {
 	msgs, err := g.db.ReadMessages(agentID, g.lastMsgID, 50)
 	if err != nil {
@@ -433,6 +439,10 @@ func (g *Gemma) runHealthChecks() {
 			continue
 		}
 		mount := fields[len(fields)-1]
+		// Skip pseudo-filesystems that always report ~100% on macOS.
+		if mount == "/dev" || strings.HasPrefix(mount, "/System/Volumes/VM") || strings.HasPrefix(mount, "/private/var/vm") {
+			continue
+		}
 		anomalies = append(anomalies, fmt.Sprintf("Disk usage high: %s at %s%%", mount, fields[4]))
 	}
 
@@ -444,20 +454,38 @@ func (g *Gemma) runHealthChecks() {
 	if vmErr != nil {
 		anomalies = append(anomalies, "vm_stat failed")
 	} else {
-		// Check for low free pages (each page = 16384 bytes on Apple Silicon, 4096 on Intel)
+		// Sum "available" pages: free + inactive + speculative + purgeable.
+		// macOS reports very few "Pages free" under normal load because the kernel
+		// aggressively caches via the other buckets; only the combined total reflects
+		// actual memory pressure.
+		availablePages := 0
 		for _, line := range strings.Split(string(vmOut), "\n") {
-			if strings.Contains(line, "Pages free") {
-				parts := strings.Fields(line)
-				if len(parts) >= 3 {
-					pagesStr := strings.TrimSuffix(parts[len(parts)-1], ".")
-					var pages int
-					fmt.Sscanf(pagesStr, "%d", &pages)
-					// Less than ~256MB free (assuming 16KB pages)
-					if pages > 0 && pages < 16384 {
-						anomalies = append(anomalies, fmt.Sprintf("Low free memory: %d pages free", pages))
-					}
-				}
+			var match string
+			switch {
+			case strings.HasPrefix(line, "Pages free:"):
+				match = "Pages free:"
+			case strings.HasPrefix(line, "Pages inactive:"):
+				match = "Pages inactive:"
+			case strings.HasPrefix(line, "Pages speculative:"):
+				match = "Pages speculative:"
+			case strings.HasPrefix(line, "Pages purgeable:"):
+				match = "Pages purgeable:"
 			}
+			if match == "" {
+				continue
+			}
+			parts := strings.Fields(line)
+			if len(parts) < 3 {
+				continue
+			}
+			pagesStr := strings.TrimSuffix(parts[len(parts)-1], ".")
+			var pages int
+			fmt.Sscanf(pagesStr, "%d", &pages)
+			availablePages += pages
+		}
+		// Flag only if combined available memory drops below ~512MB (16384 pages on Apple Silicon 16KB pages).
+		if availablePages > 0 && availablePages < 32768 {
+			anomalies = append(anomalies, fmt.Sprintf("Low available memory: %d pages (free+inactive+speculative+purgeable)", availablePages))
 		}
 	}
 
