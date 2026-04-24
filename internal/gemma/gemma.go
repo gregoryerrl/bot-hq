@@ -3,6 +3,7 @@ package gemma
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -334,9 +335,16 @@ func (g *Gemma) handleMessage(msg protocol.Message) {
 		taskType = TaskAnalyze
 		command = strings.TrimSpace(strings.TrimPrefix(content, "analyze:"))
 	} else {
-		// Default to exec
-		taskType = TaskExec
-		command = content
+		// No recognized prefix — drop. Emma is a tool agent; unprefixed
+		// content (greetings, acks, malformed dispatches) must not be
+		// shell-executed. Log with sender + truncated content so triage
+		// has a grep target when an expected task never runs.
+		truncated := content
+		if len(truncated) > 80 {
+			truncated = truncated[:80]
+		}
+		log.Printf("emma: dropped non-prefixed message from %s: %s", msg.FromAgent, truncated)
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
