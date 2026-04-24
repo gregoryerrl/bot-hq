@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	agentID   = "brain"
+	agentID   = "brian"
 	agentName = "Brian"
 	agentType = protocol.AgentBrain
 
@@ -224,28 +224,29 @@ func (b *Brain) spawnTmux() error {
 func (b *Brain) initialPrompt() string {
 	return `You are Brian, the orchestrator for bot-hq. You have access to bot-hq MCP tools.
 
-Your name is Brian (agent ID "brain"). The voice interface agent is named Clive (agent ID "live"). The QA watchdog is Rain (agent ID "rain") — Rain reviews your decisions and agent output.
+Your name is Brian (agent ID "brian"). The voice interface agent is named Clive (agent ID "clive"). The QA watchdog is Rain (agent ID "rain") — Rain reviews your decisions and agent output.
 
 WORKING WITH RAIN: Rain will challenge your decisions. That's his job. But don't just roll over — think critically about his feedback before responding. If his point is valid, acknowledge it and adjust. If you believe your approach is sound, explain your reasoning and stand your ground. You are the orchestrator — you own the decisions. Rain's challenges should sharpen your thinking, not override it. Only escalate with hub_flag when you've gone back and forth and genuinely can't resolve it.
 
 CRITICAL RULE: When you need to dispatch work to a project, you MUST use hub_spawn to create a Claude Code session. Do NOT use the Agent tool or any in-process subagents. hub_spawn creates a visible agent on the hub that the user can see and track. Every spawned agent appears in the Agents tab with its tmux session ID.
 
-RESPONSE ROUTING RULE: Always route responses back through the same channel the message arrived from. If a message comes from "discord", reply with to="discord". If from "live" (Clive), reply with to="live". If from "user" directly, reply with to="user". This ensures replies reach the user wherever they are.
+RESPONSE ROUTING RULE: Always route responses back through the same channel the message arrived from. If a message comes from "discord", reply with to="discord". If from "clive" (Clive), reply with to="clive". If from "user" directly, reply with to="user". This ensures replies reach the user wherever they are.
 
 Your responsibilities:
-1. Register yourself: call hub_register with id="brain", name="Brian", type="brain"
-2. Monitor messages: periodically call hub_read with agent_id="brain" to check for new messages
-3. When you see messages from "user", "live" (Clive), or "discord", respond helpfully:
-   - If it's a question, answer it using hub_send (from="brain", to=<the sender's agent ID>, type="response")
+1. Register yourself: call hub_register with id="brian", name="Brian", type="brian"
+2. Messages are delivered to you automatically — you do NOT need to poll hub_read. When a message arrives, it will appear in your input. Just respond to it.
+3. When you see messages from "user", "clive" (Clive), or "discord", respond helpfully:
+   - If it's a question, answer it using hub_send (from="brian", to=<the sender's agent ID>, type="response")
    - If it's a task, use hub_spawn to create a Claude Code session in the target project directory, with a prompt describing the task
    - After spawning, send a handshake message to the new agent
    - Create a session with hub_session_create (mode="implement" or "brainstorm", purpose=<task>)
    - If it's a message for another agent, route it with hub_send
 4. Keep your status updated with hub_status
 5. For multi-agent tasks, spawn multiple agents with hub_spawn (one per subtask/project) and coordinate via hub messages
-6. Use hub_flag (from="brain", reason=<description>, severity=<info|warning|critical>) when the user's attention is needed: errors, rate limits, blocked tasks, or unresolved disagreements with Rain
+6. Use hub_flag (from="brian", reason=<description>, severity=<info|warning|critical>) when the user's attention is needed: errors, rate limits, blocked tasks, or unresolved disagreements with Rain
+7. You may use hub_read to catch up on history or check context, but do NOT poll it in a loop — messages come to you automatically.
 
-Start now: register yourself, then enter a loop where you check for messages every 5-10 seconds using hub_read. Always respond to user commands.`
+Start now: register yourself, then wait for messages. They will be delivered to you directly.`
 }
 
 // pollLoop checks for new messages directed at the brain and forwards them
@@ -268,13 +269,15 @@ func (b *Brain) pollLoop() {
 // so Claude doesn't need to call hub_read for every user message.
 // The reply target matches the sender so responses route back through the same channel.
 func formatNudge(from, content string) string {
-	return fmt.Sprintf("[Hub message from %s]: %s\n\nRespond to this using hub_send (from=\"brain\", to=\"%s\", type=\"response\").\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content, from)
+	return fmt.Sprintf("[Hub message from %s]: %s\n\nRespond to this using hub_send (from=\"brian\", to=\"%s\", type=\"response\").\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content, from)
 }
 
 // processNewMessages checks for user commands that arrived since the last poll
 // and sends them to the brain's Claude session.
+// Brain sees: to="brian", to="user" (any->user), to="" (broadcasts).
+// Brain skips: own messages, private whispers (user->specific agent other than brain).
 func (b *Brain) processNewMessages() {
-	msgs, err := b.db.ReadMessages(agentID, b.lastMsgID, 50)
+	msgs, err := b.db.ReadMessages("", b.lastMsgID, 50)
 	if err != nil {
 		return
 	}
@@ -284,11 +287,23 @@ func (b *Brain) processNewMessages() {
 			b.lastMsgID = msg.ID
 		}
 
-		// Forward messages addressed to brain (from user, Clive, or other agents)
-		if msg.FromAgent != agentID {
-			nudge := formatNudge(msg.FromAgent, msg.Content)
-			b.SendCommand(nudge)
+		// Skip own messages
+		if msg.FromAgent == agentID {
+			continue
 		}
+
+		// Skip private whispers from user to other agents
+		if msg.FromAgent == "user" && msg.ToAgent != "" && msg.ToAgent != agentID && msg.ToAgent != "user" {
+			continue
+		}
+
+		// Skip messages to other specific agents (not brain, not user, not broadcast)
+		if msg.ToAgent != "" && msg.ToAgent != agentID && msg.ToAgent != "user" {
+			continue
+		}
+
+		nudge := formatNudge(msg.FromAgent, msg.Content)
+		b.SendCommand(nudge)
 	}
 }
 
