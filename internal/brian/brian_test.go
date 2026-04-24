@@ -58,6 +58,31 @@ func TestInitialPromptContainsOutboundContract(t *testing.T) {
 	}
 }
 
+// Ratchet against regression: DISC v2 role split (HANDS/EYES/BRAIN) + OUTPUT
+// class rules must survive future prompt compression. Each literal is
+// load-bearing — missing any of these silently re-opens a drift mode we
+// already diagnosed (2026-04-24). Failure is mechanical: restore the literal.
+func TestInitialPromptContainsDISCv2(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"HANDS (brian):",
+		"EYES (rain):",
+		"BRAIN (both):",
+		"Neither rubber-stamps; silence = implicit approval.",
+		"Class-split suspended.",
+		"Cannot expand Emma's allowlist",
+		"EYES is read-only",
+		"Rain cannot edit code",
+		"OUTPUT: user replies split by class",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain DISC v2 literal %q", w)
+		}
+	}
+}
+
 func TestFormatNudgeCompactTagAndNoTrailer(t *testing.T) {
 	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"})
 	if nudge != "[HUB:user] hello" {
