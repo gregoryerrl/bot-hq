@@ -10,12 +10,12 @@ func TestParseCommand(t *testing.T) {
 		target  string
 		content string
 	}{
-		{"@brain hello", "brain", "hello"},
+		{"@brian hello", "brian", "hello"},
 		{"@claude-abc stop", "claude-abc", "stop"},
 		{"@live check status", "live", "check status"},
 		{"hello world", "", "hello world"},
 		{"spawn bcc-ad-manager", "", "spawn bcc-ad-manager"},
-		{"@brain", "brain", ""},
+		{"@brian", "brian", ""},
 	}
 
 	for _, tt := range tests {

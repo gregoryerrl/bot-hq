@@ -243,8 +243,8 @@ func TestCheckpointSelfOnly(t *testing.T) {
 	// Self-checkpoint should succeed
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
-		"from":     "brain",
-		"agent_id": "brain",
+		"from":     "brian",
+		"agent_id": "brian",
 		"data":     `{"state":"ok"}`,
 	}
 	result, err := handler(ctx, req)
@@ -259,7 +259,7 @@ func TestCheckpointSelfOnly(t *testing.T) {
 	req = mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
 		"from":     "coder-1",
-		"agent_id": "brain",
+		"agent_id": "brian",
 		"data":     `{"hijack":true}`,
 	}
 	result, err = handler(ctx, req)
@@ -290,8 +290,8 @@ func TestCheckpointSizeLimit(t *testing.T) {
 
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
-		"from":     "brain",
-		"agent_id": "brain",
+		"from":     "brian",
+		"agent_id": "brian",
 		"data":     bigData,
 	}
 	result, err := handler(ctx, req)
@@ -312,8 +312,8 @@ func TestCheckpointSizeLimit(t *testing.T) {
 
 	req = mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
-		"from":     "brain",
-		"agent_id": "brain",
+		"from":     "brian",
+		"agent_id": "brian",
 		"data":     exactData,
 	}
 	result, err = handler(ctx, req)
@@ -335,11 +335,11 @@ func TestRestoreCrossAgent(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Agent "brain" saves its own checkpoint
+	// Agent "brian" saves its own checkpoint
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
-		"from":     "brain",
-		"agent_id": "brain",
+		"from":     "brian",
+		"agent_id": "brian",
 		"data":     `{"tasks":["t1","t2"]}`,
 	}
 	result, err := checkpointHandler(ctx, req)
@@ -350,10 +350,10 @@ func TestRestoreCrossAgent(t *testing.T) {
 		t.Fatalf("checkpoint failed: %v", result.Content)
 	}
 
-	// Different agent "coder-1" restores brain's checkpoint (should succeed)
+	// Different agent "coder-1" restores brian's checkpoint (should succeed)
 	req = mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
-		"agent_id": "brain",
+		"agent_id": "brian",
 	}
 	result, err = restoreHandler(ctx, req)
 	if err != nil {
@@ -428,7 +428,7 @@ func TestIssueCreateAndList(t *testing.T) {
 	// Test creating an issue without optional fields (no line_number, no description, no file_path)
 	req = mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
-		"reporter": "brain",
+		"reporter": "brian",
 		"severity": "low",
 		"title":    "Minor typo in docs",
 	}
@@ -489,19 +489,19 @@ func TestIssueCreateAndList(t *testing.T) {
 
 	// Test listing with reporter filter
 	req = mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{"reporter": "brain"}
+	req.Params.Arguments = map[string]any{"reporter": "brian"}
 	result, err = handlers["hub_issue_list"](ctx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var brainIssues []map[string]any
+	var brianIssues []map[string]any
 	if tc, ok := result.Content[0].(mcp.TextContent); ok {
-		if err := json.Unmarshal([]byte(tc.Text), &brainIssues); err != nil {
+		if err := json.Unmarshal([]byte(tc.Text), &brianIssues); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if len(brainIssues) != 1 {
-		t.Fatalf("expected 1 brain issue, got %d", len(brainIssues))
+	if len(brianIssues) != 1 {
+		t.Fatalf("expected 1 brian issue, got %d", len(brianIssues))
 	}
 
 	// Test listing with status filter

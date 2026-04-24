@@ -271,7 +271,7 @@ func agentColor(name string) lipgloss.Color {
 	switch {
 	case lower == "system" || lower == "hub":
 		return ColorSystem
-	case lower == "brain":
+	case lower == "brian":
 		return ColorBrian
 	case lower == "live":
 		return ColorClive

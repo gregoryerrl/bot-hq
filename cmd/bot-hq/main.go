@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/gregoryerrl/bot-hq/internal/brain"
+	"github.com/gregoryerrl/bot-hq/internal/brian"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
@@ -93,19 +93,21 @@ func runHub() {
 		}
 	}
 
-	// 7. Start Brain orchestrator if configured
-	var brainOrch *brain.Brain
-	if cfg.Brain.AutoStart {
-		brainOrch = brain.New(h.DB, cfg.Brain.WorkDir)
-		if err := brainOrch.Start(); err != nil {
-			// Non-fatal — log and continue without brain
+	// 7. Start Brian orchestrator if configured
+	var brianOrch *brian.Brian
+	log.Printf("[autostart] brian=%v rain=%v gemma=%v", cfg.Brian.AutoStart, cfg.Rain.AutoStart, cfg.Gemma.AutoStart)
+	if cfg.Brian.AutoStart {
+		brianOrch = brian.New(h.DB, cfg.Brian.WorkDir)
+		if err := brianOrch.Start(); err != nil {
+			log.Printf("[autostart] brian FAILED: %v", err)
 			h.DB.InsertMessage(protocol.Message{
 				FromAgent: "system",
 				Type:      protocol.MsgError,
 				Content:   fmt.Sprintf("Brian auto-start failed: %v", err),
 			})
 		} else {
-			defer brainOrch.Stop()
+			log.Printf("[autostart] brian OK")
+			defer brianOrch.Stop()
 		}
 	}
 
@@ -113,12 +115,14 @@ func runHub() {
 	if cfg.Rain.AutoStart {
 		rainAgent := rain.New(h.DB, cfg.Rain.WorkDir)
 		if err := rainAgent.Start(); err != nil {
+			log.Printf("[autostart] rain FAILED: %v", err)
 			h.DB.InsertMessage(protocol.Message{
 				FromAgent: "system",
 				Type:      protocol.MsgError,
 				Content:   fmt.Sprintf("Rain auto-start failed: %v", err),
 			})
 		} else {
+			log.Printf("[autostart] rain OK")
 			defer rainAgent.Stop()
 		}
 	}
@@ -127,18 +131,20 @@ func runHub() {
 	if cfg.Gemma.AutoStart {
 		gemmaAgent := gemma.New(h.DB, cfg.Gemma)
 		if err := gemmaAgent.Start(); err != nil {
+			log.Printf("[autostart] gemma FAILED: %v", err)
 			h.DB.InsertMessage(protocol.Message{
 				FromAgent: "system",
 				Type:      protocol.MsgError,
 				Content:   fmt.Sprintf("Gemma auto-start failed: %v", err),
 			})
 		} else {
+			log.Printf("[autostart] gemma OK")
 			defer gemmaAgent.Stop()
 		}
 	}
 
 	// 8. Run Bubbletea TUI
-	app := ui.NewApp(cfg, h.DB, brainOrch)
+	app := ui.NewApp(cfg, h.DB, brianOrch)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 
 	// Wire Hub OnMessage to forward messages to TUI

@@ -422,13 +422,18 @@ func (g *Gemma) runHealthChecks() {
 	cancel2()
 	for _, line := range strings.Split(string(dfOut), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) >= 5 {
-			pct := strings.TrimSuffix(fields[4], "%")
-			var usage int
-			if _, err := fmt.Sscanf(pct, "%d", &usage); err == nil && usage >= 90 {
-				anomalies = append(anomalies, fmt.Sprintf("Disk usage high: %s at %s%%", fields[5], fields[4]))
-			}
+		// macOS df -h: Filesystem Size Used Avail Capacity iused ifree %iused Mounted-on (9 cols)
+		// Linux df -h: Filesystem Size Used Avail Use% Mounted-on (6 cols)
+		if len(fields) < 6 {
+			continue
 		}
+		pct := strings.TrimSuffix(fields[4], "%")
+		var usage int
+		if _, err := fmt.Sscanf(pct, "%d", &usage); err != nil || usage < 90 {
+			continue
+		}
+		mount := fields[len(fields)-1]
+		anomalies = append(anomalies, fmt.Sprintf("Disk usage high: %s at %s%%", mount, fields[4]))
 	}
 
 	// 3. System health: memory (macOS vm_stat)

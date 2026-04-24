@@ -159,16 +159,16 @@ func TestSaveAndGetCheckpoint(t *testing.T) {
 	db := setupTestDB(t)
 
 	data := `{"active_tasks":["task-1"],"context":"some state"}`
-	if err := db.SaveCheckpoint("brain", data); err != nil {
+	if err := db.SaveCheckpoint("brian", data); err != nil {
 		t.Fatal(err)
 	}
 
-	cp, err := db.GetCheckpoint("brain")
+	cp, err := db.GetCheckpoint("brian")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cp.AgentID != "brain" {
-		t.Errorf("expected agent_id 'brain', got %q", cp.AgentID)
+	if cp.AgentID != "brian" {
+		t.Errorf("expected agent_id 'brian', got %q", cp.AgentID)
 	}
 	if cp.Data != data {
 		t.Errorf("expected data %q, got %q", data, cp.Data)
@@ -184,12 +184,12 @@ func TestSaveAndGetCheckpoint(t *testing.T) {
 func TestSaveCheckpointVersionIncrement(t *testing.T) {
 	db := setupTestDB(t)
 
-	db.SaveCheckpoint("brain", `{"v":1}`)
-	cp1, _ := db.GetCheckpoint("brain")
+	db.SaveCheckpoint("brian", `{"v":1}`)
+	cp1, _ := db.GetCheckpoint("brian")
 
 	time.Sleep(10 * time.Millisecond)
-	db.SaveCheckpoint("brain", `{"v":2}`)
-	cp2, _ := db.GetCheckpoint("brain")
+	db.SaveCheckpoint("brian", `{"v":2}`)
+	cp2, _ := db.GetCheckpoint("brian")
 
 	if cp2.Version != 2 {
 		t.Errorf("expected version 2, got %d", cp2.Version)
@@ -217,12 +217,12 @@ func TestGetCheckpointNotFound(t *testing.T) {
 func TestDeleteCheckpoint(t *testing.T) {
 	db := setupTestDB(t)
 
-	db.SaveCheckpoint("brain", `{"x":1}`)
-	if err := db.DeleteCheckpoint("brain"); err != nil {
+	db.SaveCheckpoint("brian", `{"x":1}`)
+	if err := db.DeleteCheckpoint("brian"); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := db.GetCheckpoint("brain")
+	_, err := db.GetCheckpoint("brian")
 	if err == nil {
 		t.Error("expected error after deleting checkpoint")
 	}
@@ -231,7 +231,7 @@ func TestDeleteCheckpoint(t *testing.T) {
 func TestSaveCheckpointInvalidJSON(t *testing.T) {
 	db := setupTestDB(t)
 
-	err := db.SaveCheckpoint("brain", "not json")
+	err := db.SaveCheckpoint("brian", "not json")
 	if err == nil {
 		t.Error("expected error for invalid JSON data")
 	}

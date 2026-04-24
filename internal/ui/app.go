@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/gregoryerrl/bot-hq/internal/brain"
+	"github.com/gregoryerrl/bot-hq/internal/brian"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
@@ -36,12 +36,12 @@ type App struct {
 	sessionsTab SessionsTab
 	settingsTab SettingsTab
 	db          *hub.DB
-	brain       *brain.Brain
+	brian       *brian.Brian
 	lastMsgID   int64
 }
 
 // NewApp creates a new App model with the Hub tab active.
-func NewApp(cfg hub.Config, db *hub.DB, b *brain.Brain) App {
+func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 	return App{
 		activeTab:   TabHub,
 		hubTab:      NewHubTab(),
@@ -49,7 +49,7 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brain.Brain) App {
 		sessionsTab: NewSessionsTab(),
 		settingsTab: NewSettingsTab(cfg, db),
 		db:          db,
-		brain:       b,
+		brian:       b,
 	}
 }
 

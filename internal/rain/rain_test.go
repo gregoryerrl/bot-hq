@@ -91,9 +91,9 @@ func TestStop_NotRunning_NoOp(t *testing.T) {
 
 // 6. TestFormatRainNudge_BasicFormat — verify "[Hub message from X]: Y" structure
 func TestFormatRainNudge_BasicFormat(t *testing.T) {
-	result := formatRainNudge("brain", "Please review the code")
+	result := formatRainNudge("brian", "Please review the code")
 
-	if !strings.Contains(result, "[Hub message from brain]: Please review the code") {
+	if !strings.Contains(result, "[Hub message from brian]: Please review the code") {
 		t.Errorf("expected nudge to contain header and content, got %q", result)
 	}
 	if !strings.Contains(result, "IMPORTANT") {
@@ -103,9 +103,9 @@ func TestFormatRainNudge_BasicFormat(t *testing.T) {
 
 // 7. TestFormatRainNudge_EmptyContent — handles empty string
 func TestFormatRainNudge_EmptyContent(t *testing.T) {
-	result := formatRainNudge("brain", "")
+	result := formatRainNudge("brian", "")
 
-	if !strings.Contains(result, "[Hub message from brain]: ") {
+	if !strings.Contains(result, "[Hub message from brian]: ") {
 		t.Errorf("expected nudge to contain header, got %q", result)
 	}
 }

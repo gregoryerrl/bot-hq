@@ -7,7 +7,7 @@ type AgentType string
 const (
 	AgentCoder   AgentType = "coder"
 	AgentVoice   AgentType = "voice"
-	AgentBrain   AgentType = "brain"
+	AgentBrian   AgentType = "brian"
 	AgentDiscord AgentType = "discord"
 	AgentQA      AgentType = "qa"
 	AgentGemma   AgentType = "gemma"
@@ -15,7 +15,7 @@ const (
 
 func (a AgentType) Valid() bool {
 	switch a {
-	case AgentCoder, AgentVoice, AgentBrain, AgentDiscord, AgentQA, AgentGemma:
+	case AgentCoder, AgentVoice, AgentBrian, AgentDiscord, AgentQA, AgentGemma:
 		return true
 	}
 	return false

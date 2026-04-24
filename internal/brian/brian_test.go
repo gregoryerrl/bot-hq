@@ -1,4 +1,4 @@
-package brain
+package brian
 
 import (
 	"strings"
@@ -31,7 +31,7 @@ func TestFormatNudgeIsNotEmpty(t *testing.T) {
 }
 
 func TestInitialPromptMentionsHandshake(t *testing.T) {
-	b := &Brain{}
+	b := &Brian{}
 	prompt := b.initialPrompt()
 	if !strings.Contains(prompt, "handshake") {
 		t.Error("initial prompt should mention handshake protocol")

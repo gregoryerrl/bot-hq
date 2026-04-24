@@ -13,7 +13,7 @@ type Config struct {
 	Hub     HubConfig     `toml:"hub"`
 	Live    LiveConfig    `toml:"live"`
 	Discord DiscordConfig `toml:"discord"`
-	Brain   BrainConfig   `toml:"brain"`
+	Brian   BrianConfig   `toml:"brian"`
 	Rain    RainConfig    `toml:"rain"`
 	Gemma   GemmaConfig   `toml:"gemma"`
 }
@@ -33,7 +33,7 @@ type DiscordConfig struct {
 	ChannelID string `toml:"channel_id"`
 }
 
-type BrainConfig struct {
+type BrianConfig struct {
 	AutoStart bool   `toml:"auto_start"`
 	WorkDir   string `toml:"work_dir"`
 }
@@ -115,8 +115,8 @@ var EditableSettings = []SettingKey{
 	{Key: "live.gemini_api_key", Label: "Gemini Key", Section: "CLIVE", IsSecret: true},
 	{Key: "live.voice", Label: "Voice", Section: "CLIVE"},
 	{Key: "hub.live_port", Label: "Clive Port", Section: "HUB"},
-	{Key: "brain.auto_start", Label: "Auto-start", Section: "BRIAN"},
-	{Key: "brain.work_dir", Label: "Work Dir", Section: "BRIAN"},
+	{Key: "brian.auto_start", Label: "Auto-start", Section: "BRIAN"},
+	{Key: "brian.work_dir", Label: "Work Dir", Section: "BRIAN"},
 	{Key: "rain.auto_start", Label: "Auto-start", Section: "RAIN"},
 	{Key: "rain.work_dir", Label: "Work Dir", Section: "RAIN"},
 	{Key: "gemma.auto_start", Label: "Auto-start", Section: "GEMMA"},
@@ -148,10 +148,10 @@ func (cfg *Config) ApplyDBSettings(db *DB) {
 			if port, err := strconv.Atoi(v); err == nil && port > 0 {
 				cfg.Hub.LivePort = port
 			}
-		case "brain.auto_start":
-			cfg.Brain.AutoStart = v == "true"
-		case "brain.work_dir":
-			cfg.Brain.WorkDir = v
+		case "brian.auto_start":
+			cfg.Brian.AutoStart = v == "true"
+		case "brian.work_dir":
+			cfg.Brian.WorkDir = v
 		case "rain.auto_start":
 			cfg.Rain.AutoStart = v == "true"
 		case "rain.work_dir":
@@ -179,13 +179,13 @@ func (cfg *Config) GetSettingValue(key string) string {
 		return cfg.Live.Voice
 	case "hub.live_port":
 		return fmt.Sprintf("%d", cfg.Hub.LivePort)
-	case "brain.auto_start":
-		if cfg.Brain.AutoStart {
+	case "brian.auto_start":
+		if cfg.Brian.AutoStart {
 			return "true"
 		}
 		return "false"
-	case "brain.work_dir":
-		return cfg.Brain.WorkDir
+	case "brian.work_dir":
+		return cfg.Brian.WorkDir
 	case "rain.auto_start":
 		if cfg.Rain.AutoStart {
 			return "true"

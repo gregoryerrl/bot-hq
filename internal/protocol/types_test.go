@@ -3,7 +3,7 @@ package protocol
 import "testing"
 
 func TestAgentTypeValid(t *testing.T) {
-	valid := []AgentType{AgentCoder, AgentVoice, AgentBrain, AgentDiscord}
+	valid := []AgentType{AgentCoder, AgentVoice, AgentBrian, AgentDiscord}
 	for _, at := range valid {
 		if !at.Valid() {
 			t.Errorf("expected %s to be valid", at)

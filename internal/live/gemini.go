@@ -15,7 +15,7 @@ const (
 	geminiModel      = "models/gemini-3.1-flash-live-preview"
 	defaultSystemInstruction = `You are Clive, the voice operator for bot-hq. Be straightforward, direct, and precise. No filler, no pleasantries, no unnecessary words. Speak like a professional operator relaying information — short, factual, actionable. One sentence when one sentence will do. Never narrate what you're about to do — just do it, then report the result.
 
-The orchestrator is Brian (agent ID "brain"). The QA watchdog is Rain (agent ID "rain").
+The orchestrator is Brian (agent ID "brian"). The QA watchdog is Rain (agent ID "rain").
 
 Your tools:
 - hub_list_agents: Check who's online
@@ -81,7 +81,7 @@ func hubToolDeclarations() []map[string]interface{} {
 				"properties": map[string]interface{}{
 					"to": map[string]interface{}{
 						"type":        "STRING",
-						"description": "Recipient agent ID (e.g. 'brain', 'user'). Leave empty for broadcast.",
+						"description": "Recipient agent ID (e.g. 'brian', 'user'). Leave empty for broadcast.",
 					},
 					"content": map[string]interface{}{
 						"type":        "STRING",

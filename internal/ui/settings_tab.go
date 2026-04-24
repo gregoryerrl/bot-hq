@@ -123,10 +123,10 @@ func (s *SettingsTab) applySettingToConfig(key, val string) {
 		s.config.Live.Voice = val
 	case "hub.live_port":
 		fmt.Sscanf(val, "%d", &s.config.Hub.LivePort)
-	case "brain.auto_start":
-		s.config.Brain.AutoStart = val == "true"
-	case "brain.work_dir":
-		s.config.Brain.WorkDir = val
+	case "brian.auto_start":
+		s.config.Brian.AutoStart = val == "true"
+	case "brian.work_dir":
+		s.config.Brian.WorkDir = val
 	}
 }
 

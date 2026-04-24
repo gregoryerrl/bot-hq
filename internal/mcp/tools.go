@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
@@ -88,7 +88,7 @@ func hubRegister(db *hub.DB) ToolDef {
 		mcp.WithDescription("Register as an agent in the hub"),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Unique agent ID")),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Human-readable agent name")),
-		mcp.WithString("type", mcp.Required(), mcp.Description("Agent type: coder, voice, brain, discord")),
+		mcp.WithString("type", mcp.Required(), mcp.Description("Agent type: coder, voice, brian, discord")),
 		mcp.WithString("project", mcp.Description("Project path or name the agent is working on")),
 	)
 
@@ -178,7 +178,7 @@ func hubDeleteAgent(db *hub.DB) ToolDef {
 
 		// Protect core agents
 		switch id {
-		case "brain", "live", "discord", "rain", "gemma-agent":
+		case "brian", "live", "discord", "rain", "gemma-agent":
 			return mcp.NewToolResultError(fmt.Sprintf("cannot delete core agent: %s", id)), nil
 		}
 
@@ -624,8 +624,8 @@ When done, Brian or the user will merge your branch into main.
 		hubPreamble := fmt.Sprintf(`You are a coder agent (ID: %s) in the bot-hq system. You have bot-hq MCP tools available.
 
 IMPORTANT: Communicate your progress on the hub so other agents can see what you're doing.
-- When you START work: hub_send(from="%s", to="brain", type="update", content="Starting: <brief description>")
-- When you FINISH or hit a blocker: hub_send(from="%s", to="brain", type="result", content="<what you did or what's blocking>")
+- When you START work: hub_send(from="%s", to="brian", type="update", content="Starting: <brief description>")
+- When you FINISH or hit a blocker: hub_send(from="%s", to="brian", type="result", content="<what you did or what's blocking>")
 - Keep hub messages short — one or two sentences max.
 %s
 Your task:
@@ -661,7 +661,7 @@ Your task:
 func hubSpawnGemma(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_spawn_gemma",
 		mcp.WithDescription("Spawn a Gemma task: run a command and optionally analyze the output with the local Gemma model via Ollama"),
-		mcp.WithString("command", mcp.Required(), mcp.Description("Shell command to run (must be on the allowlist: go test/vet/build, df, ps, uptime, free, vm_stat, du, wc, cat, ls, git status/log/diff)")),
+		mcp.WithString("command", mcp.Required(), mcp.Description("Shell command to run (must be on the allowlist: go test/vet/build, df, ps, uptime, free, vm_stat, du, wc, ls, git status/log/diff)")),
 		mcp.WithString("task_type", mcp.Required(), mcp.Description("Task type: exec (raw output) or analyze (pass output through Gemma for interpretation)")),
 		mcp.WithString("project", mcp.Description("Working directory for the command (default: bot-hq project dir)")),
 	)
@@ -676,30 +676,33 @@ func hubSpawnGemma(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		// Validate task type
-		var taskType string
 		switch taskTypeStr {
 		case "exec", "analyze":
-			taskType = taskTypeStr
 		default:
 			return mcp.NewToolResultError(fmt.Sprintf("invalid task_type: %s (must be exec or analyze)", taskTypeStr)), nil
 		}
 
-		// Validate command against allowlist
-		if !isGemmaCommandAllowed(command) {
+		if !gemma.IsCommandAllowed(command) {
 			return mcp.NewToolResultError(fmt.Sprintf("command not allowed: %s", command)), nil
 		}
 
 		workDir := req.GetString("project", "")
 		if workDir == "" {
-			home, _ := os.UserHomeDir()
-			workDir = filepath.Join(home, "Projects", "bot-hq")
+			workDir = gemma.ProjectDir()
+		}
+
+		// Honor the shared concurrency cap across persistent agent + MCP spawns.
+		gemma.InitSharedSem(3)
+		select {
+		case gemma.SharedSem <- struct{}{}:
+			defer func() { <-gemma.SharedSem }()
+		case <-ctx.Done():
+			return mcp.NewToolResultError("cancelled waiting for gemma slot"), nil
 		}
 
 		taskID := uuid.New().String()[:8]
 		agentID := fmt.Sprintf("gemma-%s", taskID)
 
-		// Register temporary agent
 		db.RegisterAgent(protocol.Agent{
 			ID:     agentID,
 			Name:   fmt.Sprintf("Gemma %s", taskID),
@@ -707,7 +710,6 @@ func hubSpawnGemma(db *hub.DB) ToolDef {
 			Status: protocol.StatusWorking,
 		})
 
-		// Run command
 		parts := strings.Fields(command)
 		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
 		cmd.Dir = workDir
@@ -721,12 +723,9 @@ func hubSpawnGemma(db *hub.DB) ToolDef {
 		}
 
 		var result string
-		if taskType == "analyze" {
-			// Try to get Ollama analysis
+		if taskTypeStr == "analyze" {
 			ollamaURL := "http://localhost:11434"
 			model := "gemma4:e4b"
-
-			// Check DB settings for overrides
 			if settings, sErr := db.GetAllSettings(); sErr == nil {
 				if v, ok := settings["gemma.ollama_url"]; ok && v != "" {
 					ollamaURL = v
@@ -736,9 +735,9 @@ func hubSpawnGemma(db *hub.DB) ToolDef {
 				}
 			}
 
-			client := newOllamaClient(ollamaURL, model)
+			client := gemma.NewClient(ollamaURL, model)
 			prompt := fmt.Sprintf("Summarize this output concisely. Flag any errors or anomalies:\n\n```\n%s\n```", string(output))
-			analysis, aErr := client.generate(ctx, prompt)
+			analysis, aErr := client.Generate(ctx, prompt)
 			if aErr != nil {
 				result = fmt.Sprintf("exit_code: %d\n%s\n\n[ollama analysis failed: %v]", exitCode, string(output), aErr)
 			} else {
@@ -748,19 +747,16 @@ func hubSpawnGemma(db *hub.DB) ToolDef {
 			result = fmt.Sprintf("exit_code: %d\n%s", exitCode, string(output))
 		}
 
-		// Truncate if very long
 		if len(result) > 10000 {
 			result = result[:10000] + "\n...[truncated]"
 		}
 
-		// Send result to hub
 		db.InsertMessage(protocol.Message{
 			FromAgent: agentID,
 			Type:      protocol.MsgResult,
 			Content:   result,
 		})
 
-		// Unregister temporary agent
 		db.UnregisterAgent(agentID)
 
 		return mcp.NewToolResultText(toJSON(map[string]any{
@@ -771,69 +767,6 @@ func hubSpawnGemma(db *hub.DB) ToolDef {
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}
-}
-
-// isGemmaCommandAllowed checks a command against the Gemma allowlist.
-var gemmaAllowedCommands = []string{
-	"go test", "go vet", "go build",
-	"df -h", "ps aux", "uptime", "free -m", "vm_stat",
-	"du -sh", "wc -l", "cat", "ls",
-	"git status", "git log", "git diff",
-}
-
-func isGemmaCommandAllowed(command string) bool {
-	trimmed := strings.TrimSpace(command)
-	for _, prefix := range gemmaAllowedCommands {
-		if strings.HasPrefix(trimmed, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// newOllamaClient and generate are lightweight wrappers for the MCP tool context
-// (avoids importing the gemma package which would create a circular dependency risk).
-type ollamaClient struct {
-	baseURL string
-	model   string
-}
-
-func newOllamaClient(baseURL, model string) *ollamaClient {
-	return &ollamaClient{baseURL: baseURL, model: model}
-}
-
-func (c *ollamaClient) generate(ctx context.Context, prompt string) (string, error) {
-	type genReq struct {
-		Model  string `json:"model"`
-		Prompt string `json:"prompt"`
-		Stream bool   `json:"stream"`
-	}
-	type genResp struct {
-		Response string `json:"response"`
-	}
-
-	body, _ := json.Marshal(genReq{Model: c.model, Prompt: prompt, Stream: false})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/generate", strings.NewReader(string(body)))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("ollama: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama returned %d", resp.StatusCode)
-	}
-
-	var result genResp
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	return result.Response, nil
 }
 
 // --- Claude Code tools ---
