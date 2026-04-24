@@ -282,10 +282,28 @@ func formatNudge(msg protocol.Message) string {
 	return fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 }
 
-// processNewMessages checks for user commands that arrived since the last poll
-// and sends them to the brian's Claude session as a single batched nudge.
-// Brian sees: to="brian", to="" (broadcasts).
-// Brian skips: own messages, messages to other specific agents (including to="user").
+// shouldForwardToBrian decides whether a message polled from the hub should
+// be nudged into Brian's tmux pane. Extracted as a pure function for testing.
+//
+// Brian sees: to="brian", to="" (broadcasts), and any user/discord traffic
+// regardless of target — so Brian observes Rain's to="user" replies and the
+// mirror case for Rain (see rain.go:319-325).
+// Brian skips: own messages, inter-agent chatter not involving user/discord.
+func shouldForwardToBrian(msg protocol.Message) bool {
+	if msg.FromAgent == agentID {
+		return false
+	}
+	if msg.FromAgent == "user" || msg.ToAgent == "user" ||
+		msg.FromAgent == "discord" || msg.ToAgent == "discord" {
+		return true
+	}
+	if msg.ToAgent != "" && msg.ToAgent != agentID {
+		return false
+	}
+	return true
+}
+
+// processNewMessages checks for new messages and nudges Brian via tmux.
 func (b *Brian) processNewMessages() {
 	msgs, err := b.db.ReadMessages("", b.lastMsgID, 50)
 	if err != nil {
@@ -297,18 +315,9 @@ func (b *Brian) processNewMessages() {
 		if msg.ID > b.lastMsgID {
 			b.lastMsgID = msg.ID
 		}
-
-		// Skip own messages
-		if msg.FromAgent == agentID {
-			continue
+		if shouldForwardToBrian(msg) {
+			pending = append(pending, formatNudge(msg))
 		}
-
-		// Skip messages to other specific agents (not brian, not broadcast)
-		if msg.ToAgent != "" && msg.ToAgent != agentID {
-			continue
-		}
-
-		pending = append(pending, formatNudge(msg))
 	}
 
 	if len(pending) == 0 {
