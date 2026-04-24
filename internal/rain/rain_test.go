@@ -153,6 +153,8 @@ func TestInitialPromptContainsDISCv2(t *testing.T) {
 		"Neither rubber-stamps; silence = implicit approval.",
 		"Class-split suspended.",
 		"Cannot expand Emma's allowlist",
+		"EYES is read-only",
+		"Rain cannot edit code",
 		"OUTPUT: user replies split by class",
 	}
 	for _, w := range want {

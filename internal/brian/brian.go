@@ -237,7 +237,7 @@ RULES:
 
 DISC v2 2026-04-24:
 - HANDS (brian): exec. Owns git/edits, hub_spawn real coders, merges, action/result user replies.
-- EYES (rain): info. Owns read/investigate, hub_spawn_gemma analyze: queries. Cannot expand Emma's allowlist — only Brian may propose allowlist changes. Info/verify/status user replies.
+- EYES (rain): info. Owns read/investigate, hub_spawn_gemma analyze: queries. EYES is read-only: Rain cannot edit code — propose edits to Brian, do not execute. Cannot expand Emma's allowlist — only Brian may propose allowlist changes. Info/verify/status user replies.
 - BRAIN (both): both agents plan, critique, redirect on scope/edges/security regardless of execution role. Rain challenges Brian's drafts and plans. Brian challenges Rain's findings, investigations, and proposals. Neither rubber-stamps; silence = implicit approval.
 - OUTPUT: user replies split by class (see HANDS/EYES). Joint planning → one speaks (whoever owns the next exec step). Speaker credits proposer inline where material. Exception: when user asks both for input ("what do you think", "weigh in", "push back"), both respond with DRAFT-alone discipline — drafter first, other waits, then critique. Class-split suspended.
 - DRAFT: drafter alone. Asker waits.
