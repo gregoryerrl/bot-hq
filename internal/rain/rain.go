@@ -214,13 +214,13 @@ RULES:
 - When disagreeing with Brian: "Brian wants X. I think Y because Z. User decision needed." + hub_flag.
 - Approve cleanly: "Looks clean." Flag precisely: what's wrong, why it matters.
 
-DISCIPLINE (persistent, adopted 2026-04-24):
-- ROLE: you verify + challenge; Brian executes. Do not draft in parallel or pre-scope his work.
-- DRAFTER DRAFTS ALONE: when Brian asks you to draft X, you draft; he stops writing X. When you ask Brian to execute, you stop re-scoping.
-- FLAG ONCE: don't re-flag Brian's concerns unless you disagree or need to correct.
-- UNOWNED PIVOTS: when user pivots without naming an executor, hold 60s. Brian flags first; if he hasn't acked in 60s, step in.
-- VERIFY BEFORE TRUSTING: when Brian reports a coder dispatched/completed, spot-check via git state or claude_read. No claim-based sign-offs.
-- SNAPSHOTS ARE CLAIMS, NOT TRUTH: when Brian posts a state snapshot, cross-check against git state (git branch -a, git log) and claude_list before acknowledging. If the snapshot disagrees with reality, flag.
+DISC v1 2026-04-24:
+- ROLES: rain=verify/challenge; brian=exec(git/edits/dispatch). No parallel drafts/pre-scope.
+- DRAFT: drafter alone. Asker waits.
+- FLAG: 1 concern=1 flag. No re-flag unless disagree/correct.
+- PIVOT: user w/o executor → hold 60s. Brian flags first; step in if no ack.
+- TRUST: spot-check claims via git/claude_read. Snapshots=claims, not truth.
+- NUDGE: msgs prefixed [HUB:<sender>], [HUB:FLAG:<sender>], or [HUB-OBS:<from>→<to>]. After current task: process in order. FLAG=elevated priority. OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.
 
 Start now: register, then watch everything.`
 }
@@ -239,8 +239,20 @@ func (r *Rain) pollLoop() {
 	}
 }
 
-func formatRainNudge(from, content string) string {
-	return fmt.Sprintf("[Hub message from %s]: %s\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content)
+// formatRainNudge builds the compact tag that Rain's session reads.
+// Contract is declared in Rain's initial prompt DISCIPLINE block.
+//
+//	[HUB:<sender>]                    — directed to Rain, or broadcast worth forwarding.
+//	[HUB:FLAG:<sender>]               — MsgFlag-typed; elevated priority.
+//	[HUB-OBS:<from>→<to>]             — observation of inter-agent traffic Rain is not the target of.
+func formatRainNudge(msg protocol.Message) string {
+	if msg.Type == protocol.MsgFlag {
+		return fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
+	}
+	if msg.ToAgent != "" && msg.ToAgent != agentID {
+		return fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)
+	}
+	return fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 }
 
 func (r *Rain) processNewMessages() {
@@ -261,7 +273,7 @@ func (r *Rain) processNewMessages() {
 
 		// Messages addressed directly to rain — always forward
 		if msg.ToAgent == agentID {
-			nudge := formatRainNudge(msg.FromAgent, msg.Content)
+			nudge := formatRainNudge(msg)
 			if err := r.SendCommand(nudge); err != nil {
 				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 			}
@@ -273,7 +285,7 @@ func (r *Rain) processNewMessages() {
 			// Always forward messages from/to user (incl. messages relayed via discord)
 			if msg.FromAgent == "user" || msg.ToAgent == "user" ||
 				msg.FromAgent == "discord" || msg.ToAgent == "discord" {
-				nudge := formatRainNudge(msg.FromAgent, msg.Content)
+				nudge := formatRainNudge(msg)
 				if err := r.SendCommand(nudge); err != nil {
 					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 				}
@@ -282,7 +294,7 @@ func (r *Rain) processNewMessages() {
 			// Forward results, errors, commands, and flags
 			switch msg.Type {
 			case protocol.MsgResult, protocol.MsgError, protocol.MsgCommand, protocol.MsgFlag:
-				nudge := formatRainNudge(msg.FromAgent, msg.Content)
+				nudge := formatRainNudge(msg)
 				if err := r.SendCommand(nudge); err != nil {
 					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 				}
@@ -290,7 +302,7 @@ func (r *Rain) processNewMessages() {
 			}
 			// Forward messages mentioning hub_flag or hub_spawn
 			if strings.Contains(msg.Content, "hub_flag") || strings.Contains(msg.Content, "hub_spawn") {
-				nudge := formatRainNudge(msg.FromAgent, msg.Content)
+				nudge := formatRainNudge(msg)
 				if err := r.SendCommand(nudge); err != nil {
 					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 				}
@@ -304,7 +316,7 @@ func (r *Rain) processNewMessages() {
 		// Treat discord traffic as user traffic for visibility.
 		if msg.FromAgent == "user" || msg.ToAgent == "user" ||
 			msg.FromAgent == "discord" || msg.ToAgent == "discord" {
-			observe := fmt.Sprintf("[Hub traffic %s → %s]: %s", msg.FromAgent, msg.ToAgent, msg.Content)
+			observe := formatRainNudge(msg)
 			if err := r.SendCommand(observe); err != nil {
 				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 			}
@@ -312,7 +324,7 @@ func (r *Rain) processNewMessages() {
 		}
 		switch msg.Type {
 		case protocol.MsgResult, protocol.MsgError, protocol.MsgCommand, protocol.MsgFlag:
-			observe := fmt.Sprintf("[Hub traffic %s → %s]: %s", msg.FromAgent, msg.ToAgent, msg.Content)
+			observe := formatRainNudge(msg)
 			if err := r.SendCommand(observe); err != nil {
 				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 			}

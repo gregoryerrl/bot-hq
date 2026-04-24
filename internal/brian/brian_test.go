@@ -3,11 +3,13 @@ package brian
 import (
 	"strings"
 	"testing"
+
+	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
 func TestNudgeContainsMessageContent(t *testing.T) {
 	content := "fix the login bug"
-	nudge := formatNudge("user", content)
+	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: content})
 
 	if !strings.Contains(nudge, content) {
 		t.Errorf("nudge should contain message content %q, got: %s", content, nudge)
@@ -18,15 +20,15 @@ func TestNudgeContainsMessageContent(t *testing.T) {
 }
 
 func TestFormatNudgeIsNotEmpty(t *testing.T) {
-	nudge := formatNudge("user", "hello")
+	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"})
 	if nudge == "" {
 		t.Error("formatNudge should return non-empty string")
 	}
 	if !strings.Contains(nudge, "hello") {
 		t.Error("formatNudge should include content")
 	}
-	if !strings.Contains(nudge, "[Hub message from user]") {
-		t.Error("formatNudge should include sender in header")
+	if !strings.Contains(nudge, "[HUB:user]") {
+		t.Error("formatNudge should include sender in [HUB:<sender>] tag")
 	}
 }
 
@@ -41,16 +43,24 @@ func TestInitialPromptMentionsHandshake(t *testing.T) {
 	}
 }
 
-func TestFormatNudgeIncludesInstructions(t *testing.T) {
-	nudge := formatNudge("user", "hello")
-	if !strings.Contains(nudge, "[Hub message from user]: hello") {
-		t.Error("formatNudge should contain header and content")
+func TestFormatNudgeCompactTagAndNoTrailer(t *testing.T) {
+	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"})
+	if nudge != "[HUB:user] hello" {
+		t.Errorf("expected compact tag, got %q", nudge)
 	}
-	// Keeps the IMPORTANT behavioral anchor but strips routing instructions
-	if !strings.Contains(nudge, "IMPORTANT") {
-		t.Error("formatNudge should contain IMPORTANT attention line")
+	// The IMPORTANT trailer has been moved to the initial-prompt DISCIPLINE/NUDGE
+	// contract. It must not appear per-message any more — that's the compression win.
+	if strings.Contains(nudge, "IMPORTANT") {
+		t.Error("formatNudge should not contain the IMPORTANT trailer (moved to initial prompt)")
 	}
 	if strings.Contains(nudge, "hub_send") {
 		t.Error("formatNudge should not contain routing instructions (hub_send)")
+	}
+}
+
+func TestFormatNudgeFlagVariant(t *testing.T) {
+	nudge := formatNudge(protocol.Message{FromAgent: "rain", Type: protocol.MsgFlag, Content: "disagree on scope"})
+	if nudge != "[HUB:FLAG:rain] disagree on scope" {
+		t.Errorf("expected FLAG-prefixed tag, got %q", nudge)
 	}
 }
