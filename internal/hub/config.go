@@ -15,6 +15,7 @@ type Config struct {
 	Discord DiscordConfig `toml:"discord"`
 	Brain   BrainConfig   `toml:"brain"`
 	Rain    RainConfig    `toml:"rain"`
+	Gemma   GemmaConfig   `toml:"gemma"`
 }
 
 type HubConfig struct {
@@ -40,6 +41,13 @@ type BrainConfig struct {
 type RainConfig struct {
 	AutoStart bool   `toml:"auto_start"`
 	WorkDir   string `toml:"work_dir"`
+}
+
+type GemmaConfig struct {
+	AutoStart     bool   `toml:"auto_start"`
+	Model         string `toml:"model"`
+	OllamaURL     string `toml:"ollama_url"`
+	MaxConcurrent int    `toml:"max_concurrent"`
 }
 
 func DefaultConfig() Config {
@@ -111,6 +119,9 @@ var EditableSettings = []SettingKey{
 	{Key: "brain.work_dir", Label: "Work Dir", Section: "BRIAN"},
 	{Key: "rain.auto_start", Label: "Auto-start", Section: "RAIN"},
 	{Key: "rain.work_dir", Label: "Work Dir", Section: "RAIN"},
+	{Key: "gemma.auto_start", Label: "Auto-start", Section: "GEMMA"},
+	{Key: "gemma.model", Label: "Model", Section: "GEMMA"},
+	{Key: "gemma.ollama_url", Label: "Ollama URL", Section: "GEMMA"},
 }
 
 // ApplyDBSettings overlays DB settings onto the config.
@@ -145,6 +156,12 @@ func (cfg *Config) ApplyDBSettings(db *DB) {
 			cfg.Rain.AutoStart = v == "true"
 		case "rain.work_dir":
 			cfg.Rain.WorkDir = v
+		case "gemma.auto_start":
+			cfg.Gemma.AutoStart = v == "true"
+		case "gemma.model":
+			cfg.Gemma.Model = v
+		case "gemma.ollama_url":
+			cfg.Gemma.OllamaURL = v
 		}
 	}
 }
@@ -176,6 +193,15 @@ func (cfg *Config) GetSettingValue(key string) string {
 		return "false"
 	case "rain.work_dir":
 		return cfg.Rain.WorkDir
+	case "gemma.auto_start":
+		if cfg.Gemma.AutoStart {
+			return "true"
+		}
+		return "false"
+	case "gemma.model":
+		return cfg.Gemma.Model
+	case "gemma.ollama_url":
+		return cfg.Gemma.OllamaURL
 	default:
 		return ""
 	}

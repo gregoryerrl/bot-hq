@@ -10,11 +10,12 @@ const (
 	AgentBrain   AgentType = "brain"
 	AgentDiscord AgentType = "discord"
 	AgentQA      AgentType = "qa"
+	AgentGemma   AgentType = "gemma"
 )
 
 func (a AgentType) Valid() bool {
 	switch a {
-	case AgentCoder, AgentVoice, AgentBrain, AgentDiscord, AgentQA:
+	case AgentCoder, AgentVoice, AgentBrain, AgentDiscord, AgentQA, AgentGemma:
 		return true
 	}
 	return false

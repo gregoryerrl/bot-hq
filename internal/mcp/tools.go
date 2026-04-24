@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +46,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubIssueCreate(db),
 		hubIssueList(db),
 		hubIssueUpdate(db),
+		hubSpawnGemma(db),
 		claudeList(db),
 		claudeRead(db),
 		claudeMessage(db),
@@ -176,7 +178,7 @@ func hubDeleteAgent(db *hub.DB) ToolDef {
 
 		// Protect core agents
 		switch id {
-		case "brain", "live", "discord", "rain":
+		case "brain", "live", "discord", "rain", "gemma-agent":
 			return mcp.NewToolResultError(fmt.Sprintf("cannot delete core agent: %s", id)), nil
 		}
 
@@ -652,6 +654,186 @@ Your task:
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// --- Gemma tools ---
+
+func hubSpawnGemma(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_spawn_gemma",
+		mcp.WithDescription("Spawn a Gemma task: run a command and optionally analyze the output with the local Gemma model via Ollama"),
+		mcp.WithString("command", mcp.Required(), mcp.Description("Shell command to run (must be on the allowlist: go test/vet/build, df, ps, uptime, free, vm_stat, du, wc, cat, ls, git status/log/diff)")),
+		mcp.WithString("task_type", mcp.Required(), mcp.Description("Task type: exec (raw output) or analyze (pass output through Gemma for interpretation)")),
+		mcp.WithString("project", mcp.Description("Working directory for the command (default: bot-hq project dir)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		command, err := req.RequireString("command")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		taskTypeStr, err := req.RequireString("task_type")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		// Validate task type
+		var taskType string
+		switch taskTypeStr {
+		case "exec", "analyze":
+			taskType = taskTypeStr
+		default:
+			return mcp.NewToolResultError(fmt.Sprintf("invalid task_type: %s (must be exec or analyze)", taskTypeStr)), nil
+		}
+
+		// Validate command against allowlist
+		if !isGemmaCommandAllowed(command) {
+			return mcp.NewToolResultError(fmt.Sprintf("command not allowed: %s", command)), nil
+		}
+
+		workDir := req.GetString("project", "")
+		if workDir == "" {
+			home, _ := os.UserHomeDir()
+			workDir = filepath.Join(home, "Projects", "bot-hq")
+		}
+
+		taskID := uuid.New().String()[:8]
+		agentID := fmt.Sprintf("gemma-%s", taskID)
+
+		// Register temporary agent
+		db.RegisterAgent(protocol.Agent{
+			ID:     agentID,
+			Name:   fmt.Sprintf("Gemma %s", taskID),
+			Type:   protocol.AgentGemma,
+			Status: protocol.StatusWorking,
+		})
+
+		// Run command
+		parts := strings.Fields(command)
+		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+		cmd.Dir = workDir
+		output, cmdErr := cmd.CombinedOutput()
+
+		exitCode := 0
+		if cmdErr != nil {
+			if exitErr, ok := cmdErr.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			}
+		}
+
+		var result string
+		if taskType == "analyze" {
+			// Try to get Ollama analysis
+			ollamaURL := "http://localhost:11434"
+			model := "gemma4:e4b"
+
+			// Check DB settings for overrides
+			if settings, sErr := db.GetAllSettings(); sErr == nil {
+				if v, ok := settings["gemma.ollama_url"]; ok && v != "" {
+					ollamaURL = v
+				}
+				if v, ok := settings["gemma.model"]; ok && v != "" {
+					model = v
+				}
+			}
+
+			client := newOllamaClient(ollamaURL, model)
+			prompt := fmt.Sprintf("Summarize this output concisely. Flag any errors or anomalies:\n\n```\n%s\n```", string(output))
+			analysis, aErr := client.generate(ctx, prompt)
+			if aErr != nil {
+				result = fmt.Sprintf("exit_code: %d\n%s\n\n[ollama analysis failed: %v]", exitCode, string(output), aErr)
+			} else {
+				result = analysis
+			}
+		} else {
+			result = fmt.Sprintf("exit_code: %d\n%s", exitCode, string(output))
+		}
+
+		// Truncate if very long
+		if len(result) > 10000 {
+			result = result[:10000] + "\n...[truncated]"
+		}
+
+		// Send result to hub
+		db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			Type:      protocol.MsgResult,
+			Content:   result,
+		})
+
+		// Unregister temporary agent
+		db.UnregisterAgent(agentID)
+
+		return mcp.NewToolResultText(toJSON(map[string]any{
+			"status":  "completed",
+			"task_id": taskID,
+			"result":  result,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// isGemmaCommandAllowed checks a command against the Gemma allowlist.
+var gemmaAllowedCommands = []string{
+	"go test", "go vet", "go build",
+	"df -h", "ps aux", "uptime", "free -m", "vm_stat",
+	"du -sh", "wc -l", "cat", "ls",
+	"git status", "git log", "git diff",
+}
+
+func isGemmaCommandAllowed(command string) bool {
+	trimmed := strings.TrimSpace(command)
+	for _, prefix := range gemmaAllowedCommands {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// newOllamaClient and generate are lightweight wrappers for the MCP tool context
+// (avoids importing the gemma package which would create a circular dependency risk).
+type ollamaClient struct {
+	baseURL string
+	model   string
+}
+
+func newOllamaClient(baseURL, model string) *ollamaClient {
+	return &ollamaClient{baseURL: baseURL, model: model}
+}
+
+func (c *ollamaClient) generate(ctx context.Context, prompt string) (string, error) {
+	type genReq struct {
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
+		Stream bool   `json:"stream"`
+	}
+	type genResp struct {
+		Response string `json:"response"`
+	}
+
+	body, _ := json.Marshal(genReq{Model: c.model, Prompt: prompt, Stream: false})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/generate", strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("ollama: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama returned %d", resp.StatusCode)
+	}
+
+	var result genResp
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.Response, nil
 }
 
 // --- Claude Code tools ---

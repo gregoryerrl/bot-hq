@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gregoryerrl/bot-hq/internal/brain"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
+	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/live"
@@ -119,6 +120,20 @@ func runHub() {
 			})
 		} else {
 			defer rainAgent.Stop()
+		}
+	}
+
+	// 7c. Start Gemma agent if configured
+	if cfg.Gemma.AutoStart {
+		gemmaAgent := gemma.New(h.DB, cfg.Gemma)
+		if err := gemmaAgent.Start(); err != nil {
+			h.DB.InsertMessage(protocol.Message{
+				FromAgent: "system",
+				Type:      protocol.MsgError,
+				Content:   fmt.Sprintf("Gemma auto-start failed: %v", err),
+			})
+		} else {
+			defer gemmaAgent.Stop()
 		}
 	}
 
