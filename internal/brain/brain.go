@@ -275,7 +275,7 @@ func (b *Brain) pollLoop() {
 // so Claude doesn't need to call hub_read for every user message.
 // The reply target matches the sender so responses route back through the same channel.
 func formatNudge(from, content string) string {
-	return fmt.Sprintf("[Hub message from %s]: %s", from, content)
+	return fmt.Sprintf("[Hub message from %s]: %s\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content)
 }
 
 // processNewMessages checks for user commands that arrived since the last poll

@@ -46,8 +46,11 @@ func TestFormatNudgeIncludesInstructions(t *testing.T) {
 	if !strings.Contains(nudge, "[Hub message from user]: hello") {
 		t.Error("formatNudge should contain header and content")
 	}
-	// Simplified format — no boilerplate routing instructions
-	if strings.Contains(nudge, "IMPORTANT") {
-		t.Error("formatNudge should not contain boilerplate instructions")
+	// Keeps the IMPORTANT behavioral anchor but strips routing instructions
+	if !strings.Contains(nudge, "IMPORTANT") {
+		t.Error("formatNudge should contain IMPORTANT attention line")
+	}
+	if strings.Contains(nudge, "hub_send") {
+		t.Error("formatNudge should not contain routing instructions (hub_send)")
 	}
 }

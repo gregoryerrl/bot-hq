@@ -93,9 +93,11 @@ func TestStop_NotRunning_NoOp(t *testing.T) {
 func TestFormatRainNudge_BasicFormat(t *testing.T) {
 	result := formatRainNudge("brain", "Please review the code")
 
-	expected := "[Hub message from brain]: Please review the code"
-	if result != expected {
-		t.Errorf("expected %q, got %q", expected, result)
+	if !strings.Contains(result, "[Hub message from brain]: Please review the code") {
+		t.Errorf("expected nudge to contain header and content, got %q", result)
+	}
+	if !strings.Contains(result, "IMPORTANT") {
+		t.Error("expected nudge to contain IMPORTANT attention line")
 	}
 }
 
@@ -103,9 +105,8 @@ func TestFormatRainNudge_BasicFormat(t *testing.T) {
 func TestFormatRainNudge_EmptyContent(t *testing.T) {
 	result := formatRainNudge("brain", "")
 
-	expected := "[Hub message from brain]: "
-	if result != expected {
-		t.Errorf("expected %q, got %q", expected, result)
+	if !strings.Contains(result, "[Hub message from brain]: ") {
+		t.Errorf("expected nudge to contain header, got %q", result)
 	}
 }
 

@@ -270,7 +270,7 @@ func (r *Rain) pollLoop() {
 }
 
 func formatRainNudge(from, content string) string {
-	return fmt.Sprintf("[Hub message from %s]: %s", from, content)
+	return fmt.Sprintf("[Hub message from %s]: %s\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content)
 }
 
 func (r *Rain) processNewMessages() {
@@ -325,7 +325,26 @@ func (r *Rain) processNewMessages() {
 				}
 			}
 			// Skip everything else (acks, handshakes, "Standing by" responses)
+			continue
 		}
+
+		// Directed inter-agent messages (to != rain, to != "") — filter by type
+		// Rain needs to see coder results, errors, flags, and commands for QA
+		if msg.FromAgent == "user" || msg.ToAgent == "user" {
+			observe := fmt.Sprintf("[Hub traffic %s → %s]: %s", msg.FromAgent, msg.ToAgent, msg.Content)
+			if err := r.SendCommand(observe); err != nil {
+				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
+			}
+			continue
+		}
+		switch msg.Type {
+		case protocol.MsgResult, protocol.MsgError, protocol.MsgCommand, protocol.MsgFlag:
+			observe := fmt.Sprintf("[Hub traffic %s → %s]: %s", msg.FromAgent, msg.ToAgent, msg.Content)
+			if err := r.SendCommand(observe); err != nil {
+				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
+			}
+		}
+		// Skip acks, handshakes, and routine responses between agents
 	}
 }
 
