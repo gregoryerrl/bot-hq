@@ -182,6 +182,47 @@ func TestFormatRainNudge_ObserveVariant(t *testing.T) {
 	}
 }
 
+// Ratchet against regression: nudge tags must distinguish directed (PM) from
+// broadcast (HUB) routing so Rain can tell at a glance whether she's the sole
+// recipient or one of many. Mirror of brian_test.go TestFormatNudgePMAndHubVariants.
+func TestFormatRainNudgePMAndHubVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  protocol.Message
+		want string
+	}{
+		{"PM from brian", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgResponse, Content: "private"}, "[PM:brian] private"},
+		{"PM from user", protocol.Message{FromAgent: "user", ToAgent: "rain", Type: protocol.MsgCommand, Content: "do x"}, "[PM:user] do x"},
+		{"PM from discord", protocol.Message{FromAgent: "discord", ToAgent: "rain", Type: protocol.MsgResponse, Content: "hi"}, "[PM:discord] hi"},
+		{"PM from coder", protocol.Message{FromAgent: "7a776ee2", ToAgent: "rain", Type: protocol.MsgResult, Content: "done"}, "[PM:7a776ee2] done"},
+		{"PM FLAG from brian", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgFlag, Content: "stop"}, "[PM:FLAG:brian] stop"},
+		{"HUB broadcast from brian", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgResponse, Content: "broad"}, "[HUB:brian] broad"},
+		{"HUB broadcast from user", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgCommand, Content: "all"}, "[HUB:user] all"},
+		{"HUB FLAG broadcast", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgFlag, Content: "bug"}, "[HUB:FLAG:brian] bug"},
+		{"HUB-OBS cross-traffic", protocol.Message{FromAgent: "brian", ToAgent: "user", Type: protocol.MsgResponse, Content: "reply"}, "[HUB-OBS:brian→user] reply"},
+		{"HUB-OBS to discord", protocol.Message{FromAgent: "brian", ToAgent: "discord", Type: protocol.MsgResponse, Content: "post"}, "[HUB-OBS:brian→discord] post"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatRainNudge(tc.msg); got != tc.want {
+				t.Errorf("formatRainNudge = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Ratchet against regression: initial prompt must document the PM/HUB/HUB-OBS
+// tag split so Rain knows which tag means which routing.
+func TestInitialPromptDocumentsPMTag(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	for _, literal := range []string{"[PM:<sender>]", "[HUB:<sender>]", "[HUB-OBS:<from>→<to>]"} {
+		if !strings.Contains(prompt, literal) {
+			t.Errorf("initial prompt must document tag %q", literal)
+		}
+	}
+}
+
 // Ratchet against regression: Rain must see peer replies to user/discord in
 // real time. The bug was two-layered: SQL filter at db.go:354 excluded
 // cross-traffic from Rain's query, AND rain.go pollLoop used ReadMessages("rain")

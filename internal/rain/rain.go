@@ -222,7 +222,7 @@ DISC v2 2026-04-24:
 - FLAG: 1 concern=1 flag. No re-flag unless disagree/correct.
 - PIVOT: user w/o executor → hold 60s. Brian flags first; step in if no ack.
 - TRUST: spot-check claims via git/claude_read. Snapshots=claims, not truth.
-- NUDGE: msgs prefixed [HUB:<sender>], [HUB:FLAG:<sender>], or [HUB-OBS:<from>→<to>]. After current task: process in order. FLAG=elevated priority. OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.
+- NUDGE: msgs prefixed [PM:<sender>] (directed to you), [HUB:<sender>] (broadcast), [HUB-OBS:<from>→<to>] (cross-traffic you observe), or FLAG variants [PM:FLAG:<sender>]/[HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. PM and user msgs always handled. HUB-OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.
 
 Start now: register, then watch everything.`
 }
@@ -242,14 +242,23 @@ func (r *Rain) pollLoop() {
 }
 
 // formatRainNudge builds the compact tag that Rain's session reads.
-// Contract is declared in Rain's initial prompt DISCIPLINE block.
+// Contract is declared in Rain's initial prompt NUDGE block.
 //
-//	[HUB:<sender>]                    — directed to Rain, or broadcast worth forwarding.
-//	[HUB:FLAG:<sender>]               — MsgFlag-typed; elevated priority.
+//	[PM:<sender>]                     — directed to Rain (ToAgent == "rain").
+//	[HUB:<sender>]                    — broadcast worth forwarding.
 //	[HUB-OBS:<from>→<to>]             — observation of inter-agent traffic Rain is not the target of.
+//	[PM:FLAG:<sender>]                — directed MsgFlag.
+//	[HUB:FLAG:<sender>]               — broadcast MsgFlag.
 func formatRainNudge(msg protocol.Message) string {
+	directed := msg.ToAgent == agentID
 	if msg.Type == protocol.MsgFlag {
+		if directed {
+			return fmt.Sprintf("[PM:FLAG:%s] %s", msg.FromAgent, msg.Content)
+		}
 		return fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
+	}
+	if directed {
+		return fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)
 	}
 	if msg.ToAgent != "" && msg.ToAgent != agentID {
 		return fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)

@@ -249,7 +249,7 @@ DISC v2 2026-04-24:
     Agents:   brian(s), rain(s), emma(s), coder id(s),...
     Pending:  <blocker>
     Next:     <action>
-- NUDGE: msgs prefixed [HUB:<sender>] or [HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. Irrelevant broadcasts skipped silently. Never ignore.
+- NUDGE: msgs prefixed [PM:<sender>] (directed to you), [HUB:<sender>] (broadcast), [HUB-OBS:<from>→<to>] (cross-traffic you observe), or FLAG variants [PM:FLAG:<sender>]/[HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. PM and user msgs always handled. HUB-OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.
 
 Start now: follow STARTUP.`
 }
@@ -271,13 +271,26 @@ func (b *Brian) pollLoop() {
 }
 
 // formatNudge builds the compact tag that Brian's session reads.
-// Contract is declared in Brian's initial prompt DISCIPLINE block.
+// Contract is declared in Brian's initial prompt NUDGE block.
 //
-//	[HUB:<sender>]            — directed to Brian or broadcast.
-//	[HUB:FLAG:<sender>]       — MsgFlag-typed; elevated priority.
+//	[PM:<sender>]             — directed to Brian (ToAgent == "brian").
+//	[HUB:<sender>]             — broadcast (ToAgent == "").
+//	[HUB-OBS:<from>→<to>]      — observation of cross-traffic (ToAgent set but not Brian).
+//	[PM:FLAG:<sender>]         — directed MsgFlag.
+//	[HUB:FLAG:<sender>]        — broadcast MsgFlag.
 func formatNudge(msg protocol.Message) string {
+	directed := msg.ToAgent == agentID
 	if msg.Type == protocol.MsgFlag {
+		if directed {
+			return fmt.Sprintf("[PM:FLAG:%s] %s", msg.FromAgent, msg.Content)
+		}
 		return fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
+	}
+	if directed {
+		return fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)
+	}
+	if msg.ToAgent != "" && msg.ToAgent != agentID {
+		return fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)
 	}
 	return fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 }

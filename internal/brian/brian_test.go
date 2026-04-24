@@ -101,7 +101,49 @@ func TestFormatNudgeCompactTagAndNoTrailer(t *testing.T) {
 func TestFormatNudgeFlagVariant(t *testing.T) {
 	nudge := formatNudge(protocol.Message{FromAgent: "rain", Type: protocol.MsgFlag, Content: "disagree on scope"})
 	if nudge != "[HUB:FLAG:rain] disagree on scope" {
-		t.Errorf("expected FLAG-prefixed tag, got %q", nudge)
+		t.Errorf("expected broadcast FLAG tag, got %q", nudge)
+	}
+}
+
+// Ratchet against regression: nudge tags must distinguish directed (PM) from
+// broadcast (HUB) routing so Brian can tell at a glance whether he's the sole
+// recipient or one of many. Missing PM variant silently reverts to [HUB:X]
+// for direct sends — the exact confusion surfaced by the 2026-04-24 incident.
+func TestFormatNudgePMAndHubVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  protocol.Message
+		want string
+	}{
+		{"PM from rain", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgResponse, Content: "private"}, "[PM:rain] private"},
+		{"PM from user", protocol.Message{FromAgent: "user", ToAgent: "brian", Type: protocol.MsgCommand, Content: "do x"}, "[PM:user] do x"},
+		{"PM from discord", protocol.Message{FromAgent: "discord", ToAgent: "brian", Type: protocol.MsgResponse, Content: "hi"}, "[PM:discord] hi"},
+		{"PM from coder", protocol.Message{FromAgent: "7a776ee2", ToAgent: "brian", Type: protocol.MsgResult, Content: "done"}, "[PM:7a776ee2] done"},
+		{"PM FLAG from rain", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgFlag, Content: "stop"}, "[PM:FLAG:rain] stop"},
+		{"HUB broadcast from rain", protocol.Message{FromAgent: "rain", ToAgent: "", Type: protocol.MsgResponse, Content: "broad"}, "[HUB:rain] broad"},
+		{"HUB broadcast from user", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgCommand, Content: "all"}, "[HUB:user] all"},
+		{"HUB FLAG broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Type: protocol.MsgFlag, Content: "bug"}, "[HUB:FLAG:rain] bug"},
+		{"HUB-OBS cross-traffic", protocol.Message{FromAgent: "rain", ToAgent: "user", Type: protocol.MsgResponse, Content: "reply"}, "[HUB-OBS:rain→user] reply"},
+		{"HUB-OBS to discord", protocol.Message{FromAgent: "rain", ToAgent: "discord", Type: protocol.MsgResponse, Content: "post"}, "[HUB-OBS:rain→discord] post"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatNudge(tc.msg); got != tc.want {
+				t.Errorf("formatNudge = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Ratchet against regression: initial prompt must document the PM/HUB/HUB-OBS
+// tag split so the agent knows which tag means which routing.
+func TestInitialPromptDocumentsPMTag(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	for _, literal := range []string{"[PM:<sender>]", "[HUB:<sender>]", "[HUB-OBS:<from>→<to>]"} {
+		if !strings.Contains(prompt, literal) {
+			t.Errorf("initial prompt must document tag %q", literal)
+		}
 	}
 }
 
