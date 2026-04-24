@@ -257,8 +257,48 @@ func formatRainNudge(msg protocol.Message) string {
 	return fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 }
 
+// shouldForwardToRain decides whether a message polled from the hub should
+// be nudged into Rain's tmux pane. Extracted as a pure function for testing.
+//
+// Rain sees: to="rain", any user/discord traffic regardless of target,
+// results/errors/commands/flags from any peer (QA coverage), MsgResponse
+// broadcasts from Brian (peer visibility on user-facing work), and broadcasts
+// whose content mentions hub_flag/hub_spawn.
+// Rain skips: own messages, inter-agent chatter between coders or
+// non-Brian MsgResponse broadcasts (handshakes, acks, "standing by").
+func shouldForwardToRain(msg protocol.Message) bool {
+	if msg.FromAgent == agentID {
+		return false
+	}
+	if msg.ToAgent == agentID {
+		return true
+	}
+	if msg.FromAgent == "user" || msg.ToAgent == "user" ||
+		msg.FromAgent == "discord" || msg.ToAgent == "discord" {
+		return true
+	}
+	switch msg.Type {
+	case protocol.MsgResult, protocol.MsgError, protocol.MsgCommand, protocol.MsgFlag:
+		return true
+	}
+	if msg.ToAgent == "" {
+		// Peer-visibility: Brian's broadcast responses reach Rain in real time.
+		// Scoped to FromAgent=="brian" to avoid coder MsgResponse flood.
+		if msg.Type == protocol.MsgResponse && msg.FromAgent == "brian" {
+			return true
+		}
+		if strings.Contains(msg.Content, "hub_flag") || strings.Contains(msg.Content, "hub_spawn") {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Rain) processNewMessages() {
-	msgs, err := r.db.ReadMessages(agentID, r.lastMsgID, 50)
+	// Read all messages ("" agentID disables SQL targeting) so shouldForwardToRain
+	// is the single point of truth. Calling ReadMessages("rain", ...) would SQL-filter
+	// out brian→user and other cross-traffic before the Go filter ever sees them.
+	msgs, err := r.db.ReadMessages("", r.lastMsgID, 50)
 	if err != nil {
 		return
 	}
@@ -267,71 +307,13 @@ func (r *Rain) processNewMessages() {
 		if msg.ID > r.lastMsgID {
 			r.lastMsgID = msg.ID
 		}
-
-		// Skip own messages
-		if msg.FromAgent == agentID {
+		if !shouldForwardToRain(msg) {
 			continue
 		}
-
-		// Messages addressed directly to rain — always forward
-		if msg.ToAgent == agentID {
-			nudge := formatRainNudge(msg)
-			if err := r.SendCommand(nudge); err != nil {
-				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
-			}
-			continue
+		nudge := formatRainNudge(msg)
+		if err := r.SendCommand(nudge); err != nil {
+			log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 		}
-
-		// Broadcast observations — filter to only high-value messages
-		if msg.ToAgent == "" {
-			// Always forward messages from/to user (incl. messages relayed via discord)
-			if msg.FromAgent == "user" || msg.ToAgent == "user" ||
-				msg.FromAgent == "discord" || msg.ToAgent == "discord" {
-				nudge := formatRainNudge(msg)
-				if err := r.SendCommand(nudge); err != nil {
-					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
-				}
-				continue
-			}
-			// Forward results, errors, commands, and flags
-			switch msg.Type {
-			case protocol.MsgResult, protocol.MsgError, protocol.MsgCommand, protocol.MsgFlag:
-				nudge := formatRainNudge(msg)
-				if err := r.SendCommand(nudge); err != nil {
-					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
-				}
-				continue
-			}
-			// Forward messages mentioning hub_flag or hub_spawn
-			if strings.Contains(msg.Content, "hub_flag") || strings.Contains(msg.Content, "hub_spawn") {
-				nudge := formatRainNudge(msg)
-				if err := r.SendCommand(nudge); err != nil {
-					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
-				}
-			}
-			// Skip everything else (acks, handshakes, "Standing by" responses)
-			continue
-		}
-
-		// Directed inter-agent messages (to != rain, to != "") — filter by type
-		// Rain needs to see coder results, errors, flags, and commands for QA.
-		// Treat discord traffic as user traffic for visibility.
-		if msg.FromAgent == "user" || msg.ToAgent == "user" ||
-			msg.FromAgent == "discord" || msg.ToAgent == "discord" {
-			observe := formatRainNudge(msg)
-			if err := r.SendCommand(observe); err != nil {
-				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
-			}
-			continue
-		}
-		switch msg.Type {
-		case protocol.MsgResult, protocol.MsgError, protocol.MsgCommand, protocol.MsgFlag:
-			observe := formatRainNudge(msg)
-			if err := r.SendCommand(observe); err != nil {
-				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
-			}
-		}
-		// Skip acks, handshakes, and routine responses between agents
 	}
 }
 

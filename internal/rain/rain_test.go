@@ -182,6 +182,62 @@ func TestFormatRainNudge_ObserveVariant(t *testing.T) {
 	}
 }
 
+// Ratchet against regression: Rain must see peer replies to user/discord in
+// real time. The bug was two-layered: SQL filter at db.go:354 excluded
+// cross-traffic from Rain's query, AND rain.go pollLoop used ReadMessages("rain")
+// which activated that SQL filter. Fix moves filter authority fully into
+// shouldForwardToRain() by calling ReadMessages("") — this test locks the
+// Go-layer decisions. See 2026-04-24 incident.
+func TestShouldForwardToRain_PeerToUserVisibility(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  protocol.Message
+		want bool
+	}{
+		{"brian to user forwards", protocol.Message{FromAgent: "brian", ToAgent: "user", Type: protocol.MsgResponse, Content: "x"}, true},
+		{"brian to discord forwards", protocol.Message{FromAgent: "brian", ToAgent: "discord", Type: protocol.MsgResponse, Content: "x"}, true},
+		{"brian broadcast response forwards (peer visibility)", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgResponse, Content: "x"}, true},
+		{"user to brian forwards (visible coordination)", protocol.Message{FromAgent: "user", ToAgent: "brian", Type: protocol.MsgCommand, Content: "x"}, true},
+		{"directed to rain forwards", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgResponse, Content: "x"}, true},
+		{"user broadcast forwards", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgCommand, Content: "x"}, true},
+		{"coder result forwards (QA coverage)", protocol.Message{FromAgent: "7a776ee2", ToAgent: "brian", Type: protocol.MsgResult, Content: "x"}, true},
+		{"flag forwards", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgFlag, Content: "x"}, true},
+		{"hub_flag mention forwards", protocol.Message{FromAgent: "emma", ToAgent: "", Type: protocol.MsgUpdate, Content: "calling hub_flag"}, true},
+		{"coder broadcast response skips (no flood)", protocol.Message{FromAgent: "7a776ee2", ToAgent: "", Type: protocol.MsgResponse, Content: "ack"}, false},
+		{"coder to coder skips", protocol.Message{FromAgent: "6058b444", ToAgent: "b4e5593f", Type: protocol.MsgUpdate, Content: "x"}, false},
+		{"emma to brian update skips", protocol.Message{FromAgent: "emma", ToAgent: "brian", Type: protocol.MsgUpdate, Content: "x"}, false},
+		{"own message skipped", protocol.Message{FromAgent: "rain", ToAgent: "user", Type: protocol.MsgResponse, Content: "x"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldForwardToRain(tc.msg); got != tc.want {
+				t.Errorf("shouldForwardToRain(%+v) = %v, want %v", tc.msg, got, tc.want)
+			}
+		})
+	}
+}
+
+// Ratchet against the SQL-layer half of the bug: Rain's poll MUST use
+// ReadMessages("", ...) not ReadMessages("rain", ...). The agentID-scoped
+// SQL query filters cross-traffic before Go ever sees it, silently
+// invalidating shouldForwardToRain()'s user/discord escape clauses.
+// This test asserts the source contains the unscoped call.
+func TestProcessNewMessagesUsesUnscoppedRead(t *testing.T) {
+	data, err := os.ReadFile("rain.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	want := `r.db.ReadMessages("", r.lastMsgID, 50)`
+	if !strings.Contains(src, want) {
+		t.Errorf("rain.go must call %s — scoped ReadMessages(agentID, ...) reintroduces the SQL-layer blindspot", want)
+	}
+	unwanted := `r.db.ReadMessages(agentID, r.lastMsgID`
+	if strings.Contains(src, unwanted) {
+		t.Errorf("rain.go must not call %s — that reintroduces the bug", unwanted)
+	}
+}
+
 // 9. TestWriteMCPConfig_JSONStructure — create Rain with t.TempDir() workDir,
 // call writeMCPConfig(), read and parse the JSON file, verify structure.
 func TestWriteMCPConfig_JSONStructure(t *testing.T) {
