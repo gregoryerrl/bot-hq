@@ -198,7 +198,7 @@ func (h *Hub) dispatchToClients(msg protocol.Message) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	if msg.ToAgent == "" {
+	if msg.ToAgent == "" || msg.Type == protocol.MsgFlag {
 		for _, ch := range h.wsClients {
 			select {
 			case ch <- msg:
