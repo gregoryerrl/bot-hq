@@ -292,11 +292,6 @@ func (b *Brain) processNewMessages() {
 			continue
 		}
 
-		// Skip private whispers from user to other agents
-		if msg.FromAgent == "user" && msg.ToAgent != "" && msg.ToAgent != agentID && msg.ToAgent != "user" {
-			continue
-		}
-
 		// Skip messages to other specific agents (not brain, not user, not broadcast)
 		if msg.ToAgent != "" && msg.ToAgent != agentID && msg.ToAgent != "user" {
 			continue
