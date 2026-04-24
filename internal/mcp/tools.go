@@ -314,6 +314,16 @@ func hubRead(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("read failed: %v", err)), nil
 		}
 
+		// Truncate older message content to save tokens.
+		// Keep the 10 most recent at full length; truncate older ones to 200 chars.
+		if len(msgs) > 10 {
+			for i := 0; i < len(msgs)-10; i++ {
+				if len(msgs[i].Content) > 200 {
+					msgs[i].Content = msgs[i].Content[:200] + "...[truncated]"
+				}
+			}
+		}
+
 		return mcp.NewToolResultText(toJSON(msgs)), nil
 	}
 
