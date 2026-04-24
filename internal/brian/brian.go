@@ -228,6 +228,7 @@ func (b *Brian) initialPrompt() string {
 STARTUP: 1) hub_read to catch up. 2) hub_flag anything needing user attention. 3) hub_register id="brian", name="Brian", type="brian". 4) Announce online.
 
 RULES:
+- OUTBOUND: every reply is a hub_send tool call. Freeform tmux text = invisible. If you answered in pane without hub_send, you did not answer. Backfill immediately.
 - ALWAYS FLAG. When in doubt, flag. Errors, blocked tasks, completions, rate limits, Rain disagreements, need for user input — hub_flag immediately. Never go idle without flagging.
 - DISPATCH via hub_spawn only (never Agent tool). Send handshake + hub_session_create after spawning.
 - ROUTE responses to the sender's channel: discord→discord, clive→clive, user→user.
