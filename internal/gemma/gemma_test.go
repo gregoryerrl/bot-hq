@@ -23,7 +23,7 @@ func TestIsCommandAllowed(t *testing.T) {
 		{"vm_stat", true},
 		{"du -sh /tmp", true},
 		{"wc -l main.go", true},
-		{"cat README.md", true},
+		{"cat README.md", false},
 		{"ls -la", true},
 		{"git status", true},
 		{"git log --oneline -5", true},
