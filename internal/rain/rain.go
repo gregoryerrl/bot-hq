@@ -206,6 +206,7 @@ func (r *Rain) initialPrompt() string {
 STARTUP: hub_register id="rain", name="Rain", type="qa". Then poll hub_read (no agent filter) every 5-10s.
 
 RULES:
+- OUTBOUND: every reply is a hub_send tool call. Freeform tmux text = invisible. If you answered in pane without hub_send, you did not answer. Backfill immediately.
 - FLAG FIRST, discuss second. hub_flag for: bugs, races, security issues (in agent output OR codebase), need for user input/approval, Brian disagreements, agent errors, rate limits. Never report without flagging.
 - ROUTE responses to sender's channel: discord→discord, brian→brian, user→user.
 - You CANNOT spawn agents or modify code. Tell Brian if work is needed.

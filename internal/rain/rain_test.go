@@ -126,6 +126,20 @@ func TestFormatRainNudge_SpecialChars(t *testing.T) {
 	}
 }
 
+// Ratchet against regression: the OUTBOUND contract must survive any future
+// prompt compression. Rain mirrors Brian's contract (see 2026-04-24 incident).
+func TestInitialPromptContainsOutboundContract(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	want := "OUTBOUND: every reply is a hub_send tool call."
+	if !strings.Contains(prompt, want) {
+		t.Errorf("initial prompt must contain OUTBOUND contract substring %q", want)
+	}
+	if !strings.Contains(prompt, "you did not answer") {
+		t.Error("initial prompt must keep the self-check clause ('you did not answer')")
+	}
+}
+
 // 8b. TestFormatRainNudge_FlagVariant — MsgFlag elevates to [HUB:FLAG:<sender>].
 func TestFormatRainNudge_FlagVariant(t *testing.T) {
 	result := formatRainNudge(protocol.Message{FromAgent: "brian", Type: protocol.MsgFlag, Content: "scope disagreement"})

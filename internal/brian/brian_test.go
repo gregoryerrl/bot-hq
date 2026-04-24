@@ -43,6 +43,21 @@ func TestInitialPromptMentionsHandshake(t *testing.T) {
 	}
 }
 
+// Ratchet against regression: the OUTBOUND contract must survive any future
+// prompt compression. If this line goes missing, replies regress to tmux-only
+// and the user sees silence (see 2026-04-24 incident).
+func TestInitialPromptContainsOutboundContract(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := "OUTBOUND: every reply is a hub_send tool call."
+	if !strings.Contains(prompt, want) {
+		t.Errorf("initial prompt must contain OUTBOUND contract substring %q", want)
+	}
+	if !strings.Contains(prompt, "you did not answer") {
+		t.Error("initial prompt must keep the self-check clause ('you did not answer')")
+	}
+}
+
 func TestFormatNudgeCompactTagAndNoTrailer(t *testing.T) {
 	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"})
 	if nudge != "[HUB:user] hello" {
