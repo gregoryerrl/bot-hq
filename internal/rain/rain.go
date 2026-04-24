@@ -262,8 +262,9 @@ func (r *Rain) processNewMessages() {
 
 		// Broadcast observations — filter to only high-value messages
 		if msg.ToAgent == "" {
-			// Always forward messages from/to user
-			if msg.FromAgent == "user" || msg.ToAgent == "user" {
+			// Always forward messages from/to user (incl. messages relayed via discord)
+			if msg.FromAgent == "user" || msg.ToAgent == "user" ||
+				msg.FromAgent == "discord" || msg.ToAgent == "discord" {
 				nudge := formatRainNudge(msg.FromAgent, msg.Content)
 				if err := r.SendCommand(nudge); err != nil {
 					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
@@ -291,8 +292,10 @@ func (r *Rain) processNewMessages() {
 		}
 
 		// Directed inter-agent messages (to != rain, to != "") — filter by type
-		// Rain needs to see coder results, errors, flags, and commands for QA
-		if msg.FromAgent == "user" || msg.ToAgent == "user" {
+		// Rain needs to see coder results, errors, flags, and commands for QA.
+		// Treat discord traffic as user traffic for visibility.
+		if msg.FromAgent == "user" || msg.ToAgent == "user" ||
+			msg.FromAgent == "discord" || msg.ToAgent == "discord" {
 			observe := fmt.Sprintf("[Hub traffic %s → %s]: %s", msg.FromAgent, msg.ToAgent, msg.Content)
 			if err := r.SendCommand(observe); err != nil {
 				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
