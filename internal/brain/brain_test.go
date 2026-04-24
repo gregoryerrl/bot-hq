@@ -46,7 +46,7 @@ func TestFormatNudgeIncludesInstructions(t *testing.T) {
 	if !strings.Contains(nudge, "hub_send") {
 		t.Error("formatNudge should instruct Claude to use hub_send")
 	}
-	if !strings.Contains(nudge, "brain") {
-		t.Error("formatNudge should mention brain as the sender")
+	if !strings.Contains(nudge, "brian") {
+		t.Error("formatNudge should mention brian as the sender")
 	}
 }

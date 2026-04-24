@@ -143,9 +143,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// rapid-fire responses don't interrupt Clive mid-sentence.
 	go func() {
 		var pendingMessages []protocol.Message
-		var debounceTimer *time.Timer
+		debounceTimer := time.NewTimer(0)
+		if !debounceTimer.Stop() {
+			<-debounceTimer.C
+		}
+		debounceActive := false
 
 		flushToGemini := func() {
+			debounceActive = false
 			if len(pendingMessages) == 0 || gemini == nil {
 				pendingMessages = nil
 				return
@@ -167,6 +172,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			select {
 			case msg, ok := <-hubCh:
 				if !ok {
+					debounceTimer.Stop()
 					return
 				}
 				writeBrowser(msg)
@@ -174,17 +180,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				if msg.ToAgent == "live" && msg.FromAgent != "live" && msg.Content != "" {
 					pendingMessages = append(pendingMessages, msg)
 					// Reset debounce timer — wait 3s for more messages before flushing
-					if debounceTimer != nil {
-						debounceTimer.Stop()
+					if debounceActive {
+						if !debounceTimer.Stop() {
+							<-debounceTimer.C
+						}
 					}
-					debounceTimer = time.AfterFunc(3*time.Second, func() {
-						flushToGemini()
-					})
+					debounceTimer.Reset(3 * time.Second)
+					debounceActive = true
 				}
+			case <-debounceTimer.C:
+				flushToGemini()
 			case <-done:
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
+				debounceTimer.Stop()
 				return
 			}
 		}
