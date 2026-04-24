@@ -275,13 +275,13 @@ func (b *Brain) pollLoop() {
 // so Claude doesn't need to call hub_read for every user message.
 // The reply target matches the sender so responses route back through the same channel.
 func formatNudge(from, content string) string {
-	return fmt.Sprintf("[Hub message from %s]: %s\n\nRespond to this using hub_send (from=\"brian\", to=\"%s\", type=\"response\").\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content, from)
+	return fmt.Sprintf("[Hub message from %s]: %s", from, content)
 }
 
 // processNewMessages checks for user commands that arrived since the last poll
 // and sends them to the brain's Claude session.
-// Brain sees: to="brian", to="user" (any->user), to="" (broadcasts).
-// Brain skips: own messages, private whispers (user->specific agent other than brain).
+// Brain sees: to="brian", to="" (broadcasts).
+// Brain skips: own messages, messages to other specific agents (including to="user").
 func (b *Brain) processNewMessages() {
 	msgs, err := b.db.ReadMessages("", b.lastMsgID, 50)
 	if err != nil {
@@ -298,8 +298,8 @@ func (b *Brain) processNewMessages() {
 			continue
 		}
 
-		// Skip messages to other specific agents (not brain, not user, not broadcast)
-		if msg.ToAgent != "" && msg.ToAgent != agentID && msg.ToAgent != "user" {
+		// Skip messages to other specific agents (not brain, not broadcast)
+		if msg.ToAgent != "" && msg.ToAgent != agentID {
 			continue
 		}
 

@@ -93,17 +93,9 @@ func TestStop_NotRunning_NoOp(t *testing.T) {
 func TestFormatRainNudge_BasicFormat(t *testing.T) {
 	result := formatRainNudge("brain", "Please review the code")
 
-	if !strings.Contains(result, "[Hub message from brain]: Please review the code") {
-		t.Errorf("expected nudge to contain message header, got %q", result)
-	}
-	if !strings.Contains(result, `to="brain"`) {
-		t.Errorf("expected nudge to contain routing instruction with to=\"brain\", got %q", result)
-	}
-	if !strings.Contains(result, "hub_send") {
-		t.Errorf("expected nudge to mention hub_send, got %q", result)
-	}
-	if !strings.Contains(result, "hub_flag") {
-		t.Errorf("expected nudge to mention hub_flag, got %q", result)
+	expected := "[Hub message from brain]: Please review the code"
+	if result != expected {
+		t.Errorf("expected %q, got %q", expected, result)
 	}
 }
 
@@ -111,12 +103,9 @@ func TestFormatRainNudge_BasicFormat(t *testing.T) {
 func TestFormatRainNudge_EmptyContent(t *testing.T) {
 	result := formatRainNudge("brain", "")
 
-	if !strings.Contains(result, "[Hub message from brain]: ") {
-		t.Errorf("expected nudge to handle empty content, got %q", result)
-	}
-	// Should not panic and should still contain routing instructions
-	if !strings.Contains(result, `to="brain"`) {
-		t.Errorf("expected routing instructions even with empty content, got %q", result)
+	expected := "[Hub message from brain]: "
+	if result != expected {
+		t.Errorf("expected %q, got %q", expected, result)
 	}
 }
 
@@ -133,9 +122,6 @@ func TestFormatRainNudge_SpecialChars(t *testing.T) {
 	}
 	if !strings.Contains(result, "\t") {
 		t.Errorf("expected nudge to preserve tabs, got %q", result)
-	}
-	if !strings.Contains(result, `to="user"`) {
-		t.Errorf("expected routing to user, got %q", result)
 	}
 }
 

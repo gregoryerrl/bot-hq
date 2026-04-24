@@ -25,8 +25,8 @@ func TestFormatNudgeIsNotEmpty(t *testing.T) {
 	if !strings.Contains(nudge, "hello") {
 		t.Error("formatNudge should include content")
 	}
-	if !strings.Contains(nudge, "hub_send") {
-		t.Error("formatNudge should instruct Claude to use hub_send")
+	if !strings.Contains(nudge, "[Hub message from user]") {
+		t.Error("formatNudge should include sender in header")
 	}
 }
 
@@ -43,10 +43,11 @@ func TestInitialPromptMentionsHandshake(t *testing.T) {
 
 func TestFormatNudgeIncludesInstructions(t *testing.T) {
 	nudge := formatNudge("user", "hello")
-	if !strings.Contains(nudge, "hub_send") {
-		t.Error("formatNudge should instruct Claude to use hub_send")
+	if !strings.Contains(nudge, "[Hub message from user]: hello") {
+		t.Error("formatNudge should contain header and content")
 	}
-	if !strings.Contains(nudge, "brian") {
-		t.Error("formatNudge should mention brian as the sender")
+	// Simplified format — no boilerplate routing instructions
+	if strings.Contains(nudge, "IMPORTANT") {
+		t.Error("formatNudge should not contain boilerplate instructions")
 	}
 }

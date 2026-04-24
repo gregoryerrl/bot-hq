@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -269,7 +270,7 @@ func (r *Rain) pollLoop() {
 }
 
 func formatRainNudge(from, content string) string {
-	return fmt.Sprintf("[Hub message from %s]: %s\n\nIf this needs your input, respond via hub_send (from=\"rain\", to=\"%s\"). If it needs the user's attention, use hub_flag.\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content, from)
+	return fmt.Sprintf("[Hub message from %s]: %s", from, content)
 }
 
 func (r *Rain) processNewMessages() {
@@ -283,12 +284,47 @@ func (r *Rain) processNewMessages() {
 			r.lastMsgID = msg.ID
 		}
 
-		// Forward messages addressed to rain (from anyone except rain itself)
-		if msg.FromAgent != agentID {
+		// Skip own messages
+		if msg.FromAgent == agentID {
+			continue
+		}
+
+		// Messages addressed directly to rain — always forward
+		if msg.ToAgent == agentID {
 			nudge := formatRainNudge(msg.FromAgent, msg.Content)
 			if err := r.SendCommand(nudge); err != nil {
 				log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 			}
+			continue
+		}
+
+		// Broadcast observations — filter to only high-value messages
+		if msg.ToAgent == "" {
+			// Always forward messages from/to user
+			if msg.FromAgent == "user" || msg.ToAgent == "user" {
+				nudge := formatRainNudge(msg.FromAgent, msg.Content)
+				if err := r.SendCommand(nudge); err != nil {
+					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
+				}
+				continue
+			}
+			// Forward results, errors, commands, and flags
+			switch msg.Type {
+			case protocol.MsgResult, protocol.MsgError, protocol.MsgCommand, protocol.MsgFlag:
+				nudge := formatRainNudge(msg.FromAgent, msg.Content)
+				if err := r.SendCommand(nudge); err != nil {
+					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
+				}
+				continue
+			}
+			// Forward messages mentioning hub_flag or hub_spawn
+			if strings.Contains(msg.Content, "hub_flag") || strings.Contains(msg.Content, "hub_spawn") {
+				nudge := formatRainNudge(msg.FromAgent, msg.Content)
+				if err := r.SendCommand(nudge); err != nil {
+					log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
+				}
+			}
+			// Skip everything else (acks, handshakes, "Standing by" responses)
 		}
 	}
 }
