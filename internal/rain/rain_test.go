@@ -140,6 +140,28 @@ func TestInitialPromptContainsOutboundContract(t *testing.T) {
 	}
 }
 
+// Ratchet against regression: DISC v2 role split (HANDS/EYES/BRAIN) + OUTPUT
+// class rules must survive future prompt compression. Rain mirrors Brian's
+// ratchet — same literals, same diagnostic load (see 2026-04-24 discussion).
+func TestInitialPromptContainsDISCv2(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	want := []string{
+		"HANDS (brian):",
+		"EYES (rain):",
+		"BRAIN (both):",
+		"Neither rubber-stamps; silence = implicit approval.",
+		"Class-split suspended.",
+		"Cannot expand Emma's allowlist",
+		"OUTPUT: user replies split by class",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain DISC v2 literal %q", w)
+		}
+	}
+}
+
 // 8b. TestFormatRainNudge_FlagVariant — MsgFlag elevates to [HUB:FLAG:<sender>].
 func TestFormatRainNudge_FlagVariant(t *testing.T) {
 	result := formatRainNudge(protocol.Message{FromAgent: "brian", Type: protocol.MsgFlag, Content: "scope disagreement"})
