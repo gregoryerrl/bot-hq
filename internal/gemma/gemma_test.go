@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestIsCommandAllowed(t *testing.T) {
@@ -121,5 +122,100 @@ func TestClientIsHealthy(t *testing.T) {
 	client2 := NewClient(srv.URL, "test")
 	if client2.IsHealthy(context.Background()) {
 		t.Error("expected unhealthy after server close")
+	}
+}
+
+func TestIsPseudoMount(t *testing.T) {
+	tests := []struct {
+		mount  string
+		pseudo bool
+	}{
+		{"/dev", true},
+		{"/dev/disk1s1", true},
+		{"/proc", true},
+		{"/proc/sys", true},
+		{"/sys", true},
+		{"/run", true},
+		{"/System/Volumes/VM", true},
+		{"/System/Volumes/Preboot", true},
+		{"/System/Volumes/Update", true},
+		{"/private/var/vm", true},
+		// Real mounts must NOT be filtered.
+		{"/", false},
+		{"/Users", false},
+		{"/Volumes/External", false},
+		{"/System/Volumes/Data", false},
+		{"/home", false},
+		// Edge: prefix-but-not-component must not match.
+		{"/develop", false},
+		{"/sysadmin", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mount, func(t *testing.T) {
+			if got := isPseudoMount(tt.mount); got != tt.pseudo {
+				t.Errorf("isPseudoMount(%q) = %v, want %v", tt.mount, got, tt.pseudo)
+			}
+		})
+	}
+}
+
+func TestShouldFlag_HysteresisDedupes(t *testing.T) {
+	g := &Gemma{flagHistory: make(map[string]time.Time)}
+	now := time.Now()
+
+	if !g.shouldFlag("disk:/", now) {
+		t.Fatal("first fire of a fresh condition must succeed")
+	}
+	if g.shouldFlag("disk:/", now.Add(5*time.Minute)) {
+		t.Fatal("re-firing within hysteresis window must be suppressed")
+	}
+	if g.shouldFlag("disk:/", now.Add(29*time.Minute)) {
+		t.Fatal("re-firing at 29min must still be suppressed (window=30m)")
+	}
+	if !g.shouldFlag("disk:/", now.Add(31*time.Minute)) {
+		t.Fatal("re-firing past hysteresis window must succeed")
+	}
+}
+
+func TestShouldFlag_RateCapAcrossConditions(t *testing.T) {
+	g := &Gemma{flagHistory: make(map[string]time.Time)}
+	now := time.Now()
+
+	// Three distinct conditions inside 1h fill the cap.
+	if !g.shouldFlag("a", now) {
+		t.Fatal("flag 1 must succeed")
+	}
+	if !g.shouldFlag("b", now.Add(time.Minute)) {
+		t.Fatal("flag 2 must succeed")
+	}
+	if !g.shouldFlag("c", now.Add(2*time.Minute)) {
+		t.Fatal("flag 3 must succeed")
+	}
+	// Fourth distinct condition still inside the 1h window — blocked by cap.
+	if g.shouldFlag("d", now.Add(3*time.Minute)) {
+		t.Fatal("flag 4 within 1h window must be capped")
+	}
+
+	// After the window slides past the first three, capacity returns.
+	if !g.shouldFlag("d", now.Add(61*time.Minute)) {
+		t.Fatal("flag past 1h window must succeed once older fires age out")
+	}
+}
+
+func TestShouldFlag_WindowPrunes(t *testing.T) {
+	g := &Gemma{flagHistory: make(map[string]time.Time)}
+	now := time.Now()
+
+	// Pre-seed three old fires (>1h ago); they must be pruned.
+	for i, k := range []string{"a", "b", "c"} {
+		_ = i
+		g.flagHistory[k] = now.Add(-2 * time.Hour)
+		g.flagWindow = append(g.flagWindow, now.Add(-2*time.Hour))
+	}
+	if !g.shouldFlag("d", now) {
+		t.Fatal("aged-out window entries must not block fresh fires")
+	}
+	if got := len(g.flagWindow); got != 1 {
+		t.Errorf("expected window pruned to 1 entry, got %d", got)
 	}
 }
