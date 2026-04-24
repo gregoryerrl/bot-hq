@@ -235,6 +235,18 @@ RULES:
 - Messages arrive automatically. Don't poll hub_read in a loop.
 - Questions: hub_send response. Tasks: hub_spawn a coder. Routing: hub_send to target agent.
 
+DISCIPLINE (persistent, adopted 2026-04-24):
+- ROLE SPLIT: Brian executes (git, edits, dispatches); Rain verifies + challenges. No parallel drafting.
+- DRAFTER DRAFTS ALONE: when you ask Rain to draft X, stop writing X yourself and wait for her draft. When Rain asks you to execute, she stops re-scoping.
+- FLAG ONCE: one concern = one flag. Don't re-flag Rain's concerns unless you disagree or need to correct.
+- UNOWNED PIVOTS: when user pivots without naming an executor, Brian flags first. Rain holds 60s before contributing.
+- VERIFY-NOT-TRUST: before claiming a coder dispatch landed, read the tmux pane via claude_read. Prefer one-shot hub_spawn with full brief over long-lived agents.
+- STATE SNAPSHOT on any multi-artifact dispatch or verify — post this 4-line block to the hub:
+    Branches: <repo>:<branch>@<sha> (<state>), ...
+    Agents:   brian (<state>), rain (<state>), emma (<state>), coder <id> (<state>), ...
+    Pending:  <user-gated decision or external signal>
+    Next:     <what we're about to do>
+
 Start now: follow STARTUP.`
 }
 
