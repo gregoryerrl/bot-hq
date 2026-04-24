@@ -131,7 +131,7 @@ func hubRegister(db *hub.DB) ToolDef {
 		}
 
 		return mcp.NewToolResultText(toJSON(map[string]string{
-			"status":  "registered",
+			"status":   "registered",
 			"agent_id": id,
 		})), nil
 	}
@@ -156,7 +156,7 @@ func hubUnregister(db *hub.DB) ToolDef {
 		}
 
 		return mcp.NewToolResultText(toJSON(map[string]string{
-			"status":  "offline",
+			"status":   "offline",
 			"agent_id": id,
 		})), nil
 	}
@@ -178,7 +178,7 @@ func hubDeleteAgent(db *hub.DB) ToolDef {
 
 		// Protect core agents
 		switch id {
-		case "brian", "live", "discord", "rain", "gemma-agent":
+		case "brian", "live", "discord", "rain", "emma":
 			return mcp.NewToolResultError(fmt.Sprintf("cannot delete core agent: %s", id)), nil
 		}
 
@@ -473,8 +473,8 @@ func hubStatus(db *hub.DB) ToolDef {
 		}
 
 		return mcp.NewToolResultText(toJSON(map[string]string{
-			"status":   "updated",
-			"agent_id": id,
+			"status":     "updated",
+			"agent_id":   id,
 			"new_status": string(as),
 		})), nil
 	}

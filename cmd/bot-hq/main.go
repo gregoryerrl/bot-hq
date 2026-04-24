@@ -11,11 +11,11 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/brian"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
-	"github.com/gregoryerrl/bot-hq/internal/rain"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/live"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	"github.com/gregoryerrl/bot-hq/internal/rain"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
 )
 
@@ -95,7 +95,7 @@ func runHub() {
 
 	// 7. Start Brian orchestrator if configured
 	var brianOrch *brian.Brian
-	log.Printf("[autostart] brian=%v rain=%v gemma=%v", cfg.Brian.AutoStart, cfg.Rain.AutoStart, cfg.Gemma.AutoStart)
+	log.Printf("[autostart] brian=%v rain=%v emma=%v", cfg.Brian.AutoStart, cfg.Rain.AutoStart, cfg.Gemma.AutoStart)
 	if cfg.Brian.AutoStart {
 		brianOrch = brian.New(h.DB, cfg.Brian.WorkDir)
 		if err := brianOrch.Start(); err != nil {
@@ -127,19 +127,19 @@ func runHub() {
 		}
 	}
 
-	// 7c. Start Gemma agent if configured
+	// 7c. Start Emma (the persistent monitor agent, backed by the gemma package + model) if configured
 	if cfg.Gemma.AutoStart {
-		gemmaAgent := gemma.New(h.DB, cfg.Gemma)
-		if err := gemmaAgent.Start(); err != nil {
-			log.Printf("[autostart] gemma FAILED: %v", err)
+		emmaAgent := gemma.New(h.DB, cfg.Gemma)
+		if err := emmaAgent.Start(); err != nil {
+			log.Printf("[autostart] emma FAILED: %v", err)
 			h.DB.InsertMessage(protocol.Message{
 				FromAgent: "system",
 				Type:      protocol.MsgError,
-				Content:   fmt.Sprintf("Gemma auto-start failed: %v", err),
+				Content:   fmt.Sprintf("Emma auto-start failed: %v", err),
 			})
 		} else {
-			log.Printf("[autostart] gemma OK")
-			defer gemmaAgent.Stop()
+			log.Printf("[autostart] emma OK")
+			defer emmaAgent.Stop()
 		}
 	}
 
