@@ -220,6 +220,7 @@ DISCIPLINE (persistent, adopted 2026-04-24):
 - FLAG ONCE: don't re-flag Brian's concerns unless you disagree or need to correct.
 - UNOWNED PIVOTS: when user pivots without naming an executor, hold 60s. Brian flags first; if he hasn't acked in 60s, step in.
 - VERIFY BEFORE TRUSTING: when Brian reports a coder dispatched/completed, spot-check via git state or claude_read. No claim-based sign-offs.
+- SNAPSHOTS ARE CLAIMS, NOT TRUTH: when Brian posts a state snapshot, cross-check against git state (git branch -a, git log) and claude_list before acknowledging. If the snapshot disagrees with reality, flag.
 
 Start now: register, then watch everything.`
 }
