@@ -89,31 +89,31 @@ func TestStop_NotRunning_NoOp(t *testing.T) {
 	}
 }
 
-// 6. TestFormatRainNudge_BasicFormat — verify "[Hub message from X]: Y" structure
+// 6. TestFormatRainNudge_BasicFormat — compact [HUB:<sender>] tag, no IMPORTANT trailer.
 func TestFormatRainNudge_BasicFormat(t *testing.T) {
-	result := formatRainNudge("brian", "Please review the code")
+	result := formatRainNudge(protocol.Message{FromAgent: "brian", Content: "Please review the code"})
 
-	if !strings.Contains(result, "[Hub message from brian]: Please review the code") {
-		t.Errorf("expected nudge to contain header and content, got %q", result)
+	if result != "[HUB:brian] Please review the code" {
+		t.Errorf("expected compact tag, got %q", result)
 	}
-	if !strings.Contains(result, "IMPORTANT") {
-		t.Error("expected nudge to contain IMPORTANT attention line")
+	if strings.Contains(result, "IMPORTANT") {
+		t.Error("nudge should not contain the IMPORTANT trailer (moved to initial-prompt NUDGE contract)")
 	}
 }
 
-// 7. TestFormatRainNudge_EmptyContent — handles empty string
+// 7. TestFormatRainNudge_EmptyContent — handles empty content without dropping the tag.
 func TestFormatRainNudge_EmptyContent(t *testing.T) {
-	result := formatRainNudge("brian", "")
+	result := formatRainNudge(protocol.Message{FromAgent: "brian", Content: ""})
 
-	if !strings.Contains(result, "[Hub message from brian]: ") {
-		t.Errorf("expected nudge to contain header, got %q", result)
+	if !strings.HasPrefix(result, "[HUB:brian]") {
+		t.Errorf("expected nudge to start with [HUB:brian], got %q", result)
 	}
 }
 
-// 8. TestFormatRainNudge_SpecialChars — quotes, newlines in content
+// 8. TestFormatRainNudge_SpecialChars — quotes, newlines, tabs survive compression.
 func TestFormatRainNudge_SpecialChars(t *testing.T) {
 	content := "He said \"hello\"\nand then\ttabs"
-	result := formatRainNudge("user", content)
+	result := formatRainNudge(protocol.Message{FromAgent: "user", Content: content})
 
 	if !strings.Contains(result, `"hello"`) {
 		t.Errorf("expected nudge to preserve quotes, got %q", result)
@@ -123,6 +123,24 @@ func TestFormatRainNudge_SpecialChars(t *testing.T) {
 	}
 	if !strings.Contains(result, "\t") {
 		t.Errorf("expected nudge to preserve tabs, got %q", result)
+	}
+}
+
+// 8b. TestFormatRainNudge_FlagVariant — MsgFlag elevates to [HUB:FLAG:<sender>].
+func TestFormatRainNudge_FlagVariant(t *testing.T) {
+	result := formatRainNudge(protocol.Message{FromAgent: "brian", Type: protocol.MsgFlag, Content: "scope disagreement"})
+
+	if result != "[HUB:FLAG:brian] scope disagreement" {
+		t.Errorf("expected FLAG-prefixed tag, got %q", result)
+	}
+}
+
+// 8c. TestFormatRainNudge_ObserveVariant — directed-to-other-agent becomes [HUB-OBS:<from>→<to>].
+func TestFormatRainNudge_ObserveVariant(t *testing.T) {
+	result := formatRainNudge(protocol.Message{FromAgent: "brian", ToAgent: "discord", Content: "posting update"})
+
+	if result != "[HUB-OBS:brian→discord] posting update" {
+		t.Errorf("expected HUB-OBS variant for inter-agent traffic, got %q", result)
 	}
 }
 

@@ -235,17 +235,18 @@ RULES:
 - Messages arrive automatically. Don't poll hub_read in a loop.
 - Questions: hub_send response. Tasks: hub_spawn a coder. Routing: hub_send to target agent.
 
-DISCIPLINE (persistent, adopted 2026-04-24):
-- ROLE SPLIT: Brian executes (git, edits, dispatches); Rain verifies + challenges. No parallel drafting.
-- DRAFTER DRAFTS ALONE: when you ask Rain to draft X, stop writing X yourself and wait for her draft. When Rain asks you to execute, she stops re-scoping.
-- FLAG ONCE: one concern = one flag. Don't re-flag Rain's concerns unless you disagree or need to correct.
-- UNOWNED PIVOTS: when user pivots without naming an executor, Brian flags first. Rain holds 60s before contributing.
-- VERIFY-NOT-TRUST: before claiming a coder dispatch landed, read the tmux pane via claude_read. Prefer one-shot hub_spawn with full brief over long-lived agents.
-- STATE SNAPSHOT on any multi-artifact dispatch or verify — post this 4-line block to the hub:
-    Branches: <repo>:<branch>@<sha> (<state>), ...
-    Agents:   brian (<state>), rain (<state>), emma (<state>), coder <id> (<state>), ...
-    Pending:  <user-gated decision or external signal>
-    Next:     <what we're about to do>
+DISC v1 2026-04-24:
+- ROLES: brian=exec(git/edits/dispatch); rain=verify/challenge. No parallel drafts.
+- DRAFT: drafter alone. Asker waits.
+- FLAG: 1 concern=1 flag. No re-flag unless disagree/correct.
+- PIVOT: user w/o executor → brian flags, rain holds 60s.
+- TRUST: verify via claude_read before "dispatched" claim. Prefer one-shot spawn.
+- SNAP (multi-artifact dispatch/verify):
+    Branches: repo:branch@sha(state),...
+    Agents:   brian(s), rain(s), emma(s), coder id(s),...
+    Pending:  <blocker>
+    Next:     <action>
+- NUDGE: msgs prefixed [HUB:<sender>] or [HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. Irrelevant broadcasts skipped silently. Never ignore.
 
 Start now: follow STARTUP.`
 }
@@ -266,11 +267,16 @@ func (b *Brian) pollLoop() {
 	}
 }
 
-// formatNudge creates a nudge message that includes the actual content,
-// so Claude doesn't need to call hub_read for every user message.
-// The reply target matches the sender so responses route back through the same channel.
-func formatNudge(from, content string) string {
-	return fmt.Sprintf("[Hub message from %s]: %s\n\nIMPORTANT: After completing your current task, you MUST address the user's message above. Do not ignore it.", from, content)
+// formatNudge builds the compact tag that Brian's session reads.
+// Contract is declared in Brian's initial prompt DISCIPLINE block.
+//
+//	[HUB:<sender>]            — directed to Brian or broadcast.
+//	[HUB:FLAG:<sender>]       — MsgFlag-typed; elevated priority.
+func formatNudge(msg protocol.Message) string {
+	if msg.Type == protocol.MsgFlag {
+		return fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
+	}
+	return fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 }
 
 // processNewMessages checks for user commands that arrived since the last poll
@@ -299,16 +305,17 @@ func (b *Brian) processNewMessages() {
 			continue
 		}
 
-		pending = append(pending, fmt.Sprintf("[Hub message from %s]: %s", msg.FromAgent, msg.Content))
+		pending = append(pending, formatNudge(msg))
 	}
 
 	if len(pending) == 0 {
 		return
 	}
 
-	// Batch all messages into a single nudge
-	combined := strings.Join(pending, "\n\n")
-	nudge := fmt.Sprintf("%s\n\nIMPORTANT: After completing your current task, you MUST address ALL messages above. Do not ignore any.", combined)
+	// Batch all messages into a single nudge. Each line carries its own
+	// [HUB:<sender>] tag; the NUDGE contract in the initial prompt covers
+	// "process in order after current task", so no trailing IMPORTANT block.
+	nudge := strings.Join(pending, "\n")
 	b.SendCommand(nudge)
 }
 
