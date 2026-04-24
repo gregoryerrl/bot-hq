@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,8 +18,9 @@ const (
 	agentID   = "gemma-agent"
 	agentName = "Gemma"
 
-	pollInterval   = 3 * time.Second
-	healthInterval = 30 * time.Second
+	pollInterval           = 3 * time.Second
+	healthInterval         = 30 * time.Second
+	defaultMonitorInterval = 5 * time.Minute
 
 	defaultModel     = "gemma4:e4b"
 	defaultOllamaURL = "http://localhost:11434"
@@ -45,24 +47,42 @@ var allowedCommands = []string{
 	"vm_stat",
 	"du -sh",
 	"wc -l",
-	"cat",
 	"ls",
 	"git status",
 	"git log",
 	"git diff",
 }
 
+// SharedSem is the package-level semaphore that caps total concurrent Gemma
+// tasks across both the persistent agent and the hub_spawn_gemma MCP tool.
+// Initialized by New(); callers that bypass New() must call InitSharedSem().
+var SharedSem chan struct{}
+
+// InitSharedSem sets up the shared semaphore if not already created.
+func InitSharedSem(maxConc int) {
+	if SharedSem == nil {
+		SharedSem = make(chan struct{}, maxConc)
+	}
+}
+
+// ProjectDir returns the bot-hq project directory for health checks.
+func ProjectDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Projects", "bot-hq")
+}
+
 // Gemma manages the Ollama sidecar and processes tasks via the hub.
 type Gemma struct {
 	db     *hub.DB
 	client *Client
-	sem    chan struct{}
 
 	model     string
 	ollamaURL string
 
 	ollamaCmd *exec.Cmd
 	lastMsgID int64
+
+	monitorInterval time.Duration
 
 	mu      sync.Mutex
 	running bool
@@ -84,12 +104,14 @@ func New(db *hub.DB, cfg hub.GemmaConfig) *Gemma {
 		maxConc = defaultMaxConc
 	}
 
+	InitSharedSem(maxConc)
+
 	return &Gemma{
-		db:        db,
-		model:     model,
-		ollamaURL: ollamaURL,
-		sem:       make(chan struct{}, maxConc),
-		stopCh:    make(chan struct{}),
+		db:              db,
+		model:           model,
+		ollamaURL:       ollamaURL,
+		monitorInterval: defaultMonitorInterval,
+		stopCh:          make(chan struct{}),
 	}
 }
 
@@ -146,6 +168,7 @@ func (g *Gemma) Start() error {
 
 	go g.pollLoop()
 	go g.healthLoop()
+	go g.monitorLoop()
 
 	g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
@@ -207,10 +230,10 @@ func (g *Gemma) ExecuteTask(ctx context.Context, command string, taskType TaskTy
 		return "", fmt.Errorf("command not allowed: %s", command)
 	}
 
-	// Acquire semaphore
+	// Acquire shared semaphore
 	select {
-	case g.sem <- struct{}{}:
-		defer func() { <-g.sem }()
+	case SharedSem <- struct{}{}:
+		defer func() { <-SharedSem }()
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -360,6 +383,127 @@ func (g *Gemma) healthLoop() {
 			}
 		}
 	}
+}
+
+// monitorLoop proactively runs Tier 1 health checks on a configurable interval.
+func (g *Gemma) monitorLoop() {
+	ticker := time.NewTicker(g.monitorInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-g.stopCh:
+			return
+		case <-ticker.C:
+			g.runHealthChecks()
+		}
+	}
+}
+
+// runHealthChecks executes Tier 1 checks and reports anomalies to Brian.
+func (g *Gemma) runHealthChecks() {
+	var anomalies []string
+	projectDir := ProjectDir()
+
+	// 1. Run go test in bot-hq project directory
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	testCmd := exec.CommandContext(ctx, "go", "test", "./...")
+	testCmd.Dir = projectDir
+	testOut, testErr := testCmd.CombinedOutput()
+	cancel()
+	if testErr != nil {
+		anomalies = append(anomalies, fmt.Sprintf("go test FAIL: %s", summarizeOutput(string(testOut), 500)))
+	}
+
+	// 2. System health: disk space
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	dfCmd := exec.CommandContext(ctx2, "df", "-h")
+	dfOut, _ := dfCmd.CombinedOutput()
+	cancel2()
+	for _, line := range strings.Split(string(dfOut), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 5 {
+			pct := strings.TrimSuffix(fields[4], "%")
+			var usage int
+			if _, err := fmt.Sscanf(pct, "%d", &usage); err == nil && usage >= 90 {
+				anomalies = append(anomalies, fmt.Sprintf("Disk usage high: %s at %s%%", fields[5], fields[4]))
+			}
+		}
+	}
+
+	// 3. System health: memory (macOS vm_stat)
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 10*time.Second)
+	vmCmd := exec.CommandContext(ctx3, "vm_stat")
+	vmOut, vmErr := vmCmd.CombinedOutput()
+	cancel3()
+	if vmErr != nil {
+		anomalies = append(anomalies, "vm_stat failed")
+	} else {
+		// Check for low free pages (each page = 16384 bytes on Apple Silicon, 4096 on Intel)
+		for _, line := range strings.Split(string(vmOut), "\n") {
+			if strings.Contains(line, "Pages free") {
+				parts := strings.Fields(line)
+				if len(parts) >= 3 {
+					pagesStr := strings.TrimSuffix(parts[len(parts)-1], ".")
+					var pages int
+					fmt.Sscanf(pagesStr, "%d", &pages)
+					// Less than ~256MB free (assuming 16KB pages)
+					if pages > 0 && pages < 16384 {
+						anomalies = append(anomalies, fmt.Sprintf("Low free memory: %d pages free", pages))
+					}
+				}
+			}
+		}
+	}
+
+	// 4. Hub agent status
+	agents, err := g.db.ListAgents("")
+	if err == nil {
+		online, offline := 0, 0
+		for _, a := range agents {
+			if a.Status == protocol.StatusOnline || a.Status == protocol.StatusWorking {
+				online++
+			} else {
+				offline++
+			}
+		}
+		if offline > online && len(agents) > 1 {
+			anomalies = append(anomalies, fmt.Sprintf("Agent anomaly: %d online, %d offline", online, offline))
+		}
+	}
+
+	// 5. Hub message activity
+	msgs, err := g.db.GetRecentMessages(10)
+	if err == nil {
+		if len(msgs) == 0 {
+			anomalies = append(anomalies, "No recent hub messages")
+		} else {
+			lastActivity := msgs[0].Created
+			if time.Since(lastActivity) > 30*time.Minute {
+				anomalies = append(anomalies, fmt.Sprintf("Hub quiet: last message %s ago", time.Since(lastActivity).Round(time.Minute)))
+			}
+		}
+	}
+
+	// Report anomalies to Brian; stay quiet if all healthy
+	if len(anomalies) > 0 {
+		report := "Monitor check anomalies:\n- " + strings.Join(anomalies, "\n- ")
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			ToAgent:   "brian",
+			Type:      protocol.MsgResult,
+			Content:   report,
+		})
+	}
+}
+
+// summarizeOutput truncates output to maxLen, keeping the tail.
+func summarizeOutput(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxLen {
+		return s
+	}
+	return "..." + s[len(s)-maxLen:]
 }
 
 // restartOllama kills and restarts the Ollama process.
