@@ -58,6 +58,24 @@ func TestInitialPromptContainsOutboundContract(t *testing.T) {
 	}
 }
 
+// Ratchet against regression: OUTBOUND rule must default user-facing replies
+// to broadcast, not private to:"user". The private-default was the convention
+// half of the 2026-04-24 peer-visibility incident — even with the filter fix,
+// defaulting private still hides intent from the peer. Both clauses must
+// survive prompt compression.
+func TestInitialPromptContainsBroadcastDefault(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	for _, literal := range []string{
+		"Default broadcast for user-facing replies",
+		`Private to:"user" only when`,
+	} {
+		if !strings.Contains(prompt, literal) {
+			t.Errorf("initial prompt must contain OUTBOUND broadcast-default literal %q", literal)
+		}
+	}
+}
+
 // Ratchet against regression: DISC v2 role split (HANDS/EYES/BRAIN) + OUTPUT
 // class rules must survive future prompt compression. Each literal is
 // load-bearing — missing any of these silently re-opens a drift mode we

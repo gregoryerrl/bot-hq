@@ -140,6 +140,21 @@ func TestInitialPromptContainsOutboundContract(t *testing.T) {
 	}
 }
 
+// Ratchet against regression: OUTBOUND rule must default user-facing replies
+// to broadcast. Mirror of brian_test.go TestInitialPromptContainsBroadcastDefault.
+func TestInitialPromptContainsBroadcastDefault(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	for _, literal := range []string{
+		"Default broadcast for user-facing replies",
+		`Private to:"user" only when`,
+	} {
+		if !strings.Contains(prompt, literal) {
+			t.Errorf("initial prompt must contain OUTBOUND broadcast-default literal %q", literal)
+		}
+	}
+}
+
 // Ratchet against regression: DISC v2 role split (HANDS/EYES/BRAIN) + OUTPUT
 // class rules must survive future prompt compression. Rain mirrors Brian's
 // ratchet — same literals, same diagnostic load (see 2026-04-24 discussion).
