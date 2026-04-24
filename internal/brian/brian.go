@@ -228,10 +228,10 @@ func (b *Brian) initialPrompt() string {
 STARTUP: 1) hub_read to catch up. 2) hub_flag anything needing user attention. 3) hub_register id="brian", name="Brian", type="brian". 4) Announce online.
 
 RULES:
-- OUTBOUND: every reply is a hub_send tool call. Freeform tmux text = invisible. If you answered in pane without hub_send, you did not answer. Backfill immediately.
+- OUTBOUND: every reply is a hub_send tool call. Freeform tmux text = invisible. If you answered in pane without hub_send, you did not answer. Backfill immediately. Default broadcast for user-facing replies (hub_send with empty to). Private to:"user" only when (a) content is meant for user alone (critique of peer, user-only decisions, meta feedback) or (b) avoiding nudge-stack on rapid back-and-forth.
 - ALWAYS FLAG. When in doubt, flag. Errors, blocked tasks, completions, rate limits, Rain disagreements, need for user input — hub_flag immediately. Never go idle without flagging.
 - DISPATCH via hub_spawn only (never Agent tool). Send handshake + hub_session_create after spawning.
-- ROUTE responses to the sender's channel: discord→discord, clive→clive, user→user.
+- ROUTE responses to the sender's channel: discord→discord, clive→clive. User routing handled by OUTBOUND.
 - Messages arrive automatically. Don't poll hub_read in a loop.
 - Questions: hub_send response. Tasks: hub_spawn a coder. Routing: hub_send to target agent.
 
@@ -249,7 +249,7 @@ DISC v2 2026-04-24:
     Agents:   brian(s), rain(s), emma(s), coder id(s),...
     Pending:  <blocker>
     Next:     <action>
-- NUDGE: msgs prefixed [HUB:<sender>] or [HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. Irrelevant broadcasts skipped silently. Never ignore.
+- NUDGE: msgs prefixed [PM:<sender>] (directed to you), [HUB:<sender>] (broadcast), [HUB-OBS:<from>→<to>] (cross-traffic you observe), or FLAG variants [PM:FLAG:<sender>]/[HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. PM and user msgs always handled. HUB-OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.
 
 Start now: follow STARTUP.`
 }
@@ -271,21 +271,52 @@ func (b *Brian) pollLoop() {
 }
 
 // formatNudge builds the compact tag that Brian's session reads.
-// Contract is declared in Brian's initial prompt DISCIPLINE block.
+// Contract is declared in Brian's initial prompt NUDGE block.
 //
-//	[HUB:<sender>]            — directed to Brian or broadcast.
-//	[HUB:FLAG:<sender>]       — MsgFlag-typed; elevated priority.
+//	[PM:<sender>]             — directed to Brian (ToAgent == "brian").
+//	[HUB:<sender>]             — broadcast (ToAgent == "").
+//	[HUB-OBS:<from>→<to>]      — observation of cross-traffic (ToAgent set but not Brian).
+//	[PM:FLAG:<sender>]         — directed MsgFlag.
+//	[HUB:FLAG:<sender>]        — broadcast MsgFlag.
 func formatNudge(msg protocol.Message) string {
+	directed := msg.ToAgent == agentID
 	if msg.Type == protocol.MsgFlag {
+		if directed {
+			return fmt.Sprintf("[PM:FLAG:%s] %s", msg.FromAgent, msg.Content)
+		}
 		return fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
+	}
+	if directed {
+		return fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)
+	}
+	if msg.ToAgent != "" && msg.ToAgent != agentID {
+		return fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)
 	}
 	return fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 }
 
-// processNewMessages checks for user commands that arrived since the last poll
-// and sends them to the brian's Claude session as a single batched nudge.
-// Brian sees: to="brian", to="" (broadcasts).
-// Brian skips: own messages, messages to other specific agents (including to="user").
+// shouldForwardToBrian decides whether a message polled from the hub should
+// be nudged into Brian's tmux pane. Extracted as a pure function for testing.
+//
+// Brian sees: to="brian", to="" (broadcasts), and any user/discord traffic
+// regardless of target — so Brian observes Rain's to="user" replies and the
+// mirror case for Rain (see rain.go:319-325).
+// Brian skips: own messages, inter-agent chatter not involving user/discord.
+func shouldForwardToBrian(msg protocol.Message) bool {
+	if msg.FromAgent == agentID {
+		return false
+	}
+	if msg.FromAgent == "user" || msg.ToAgent == "user" ||
+		msg.FromAgent == "discord" || msg.ToAgent == "discord" {
+		return true
+	}
+	if msg.ToAgent != "" && msg.ToAgent != agentID {
+		return false
+	}
+	return true
+}
+
+// processNewMessages checks for new messages and nudges Brian via tmux.
 func (b *Brian) processNewMessages() {
 	msgs, err := b.db.ReadMessages("", b.lastMsgID, 50)
 	if err != nil {
@@ -297,18 +328,9 @@ func (b *Brian) processNewMessages() {
 		if msg.ID > b.lastMsgID {
 			b.lastMsgID = msg.ID
 		}
-
-		// Skip own messages
-		if msg.FromAgent == agentID {
-			continue
+		if shouldForwardToBrian(msg) {
+			pending = append(pending, formatNudge(msg))
 		}
-
-		// Skip messages to other specific agents (not brian, not broadcast)
-		if msg.ToAgent != "" && msg.ToAgent != agentID {
-			continue
-		}
-
-		pending = append(pending, formatNudge(msg))
 	}
 
 	if len(pending) == 0 {
