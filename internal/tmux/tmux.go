@@ -102,3 +102,75 @@ func HasTmux() bool {
 	_, err := exec.LookPath("tmux")
 	return err == nil
 }
+
+// promptByteAnchor is the literal byte sequence for "❯ " (U+276F + space).
+// Pinned at byte level rather than rune level because lipgloss/ANSI rendering
+// can produce variant codepoints that render visually identically; matching
+// raw bytes avoids the regex-on-visual-chars failure mode. Empirical hexdump
+// from a live Claude Code pane confirms single-codepoint U+276F (3 bytes
+// UTF-8), no combining marks, no variant selectors.
+const promptByteAnchor = "\xe2\x9d\xaf\x20"
+
+// PromptCheckGrace is the grace window for at-prompt checks that must
+// tolerate transient mid-render frames (e.g. claude_message busy detection).
+// 750ms balances snappy response with resilience against partial-frame
+// false-busy on a Claude pane that's redrawing its input box.
+const PromptCheckGrace = 750 * time.Millisecond
+
+// promptCaptureLines is the number of lines to capture when scanning for the
+// prompt anchor. Per spec (variable per call site): the prompt can render
+// several lines above the literal last pane line because of the input-box
+// rules and footer. 30 lines also covers spawn-time MCP loading messages
+// above the eventual prompt.
+const promptCaptureLines = 30
+
+// promptPollInterval is how often WaitForPrompt re-checks the pane during
+// timeout polling. 200ms balances latency against tmux capture-pane shell-out
+// cost.
+const promptPollInterval = 200 * time.Millisecond
+
+// WaitForPrompt scans the pane for the "❯ " input prompt anchor.
+// Returns immediately on detection. With timeout=0, performs a single-shot
+// check (use for instantaneous at-prompt queries). With timeout>0, polls
+// every promptPollInterval until detected or deadline.
+//
+// On timeout, returns (false, lastCapture, nil) — error is nil because
+// timeout is not exceptional, the absence of a prompt is the answer. The
+// returned output is the most recent capture so callers can diagnose what
+// was on the pane.
+//
+// Capture errors during polling propagate immediately as (false, "", err).
+//
+// Use case mapping:
+//   - hub_spawn boot wait: WaitForPrompt(target, 30*time.Second) — wait up
+//     to 30s for Claude to finish booting before sending the user prompt.
+//     Replaces the brittle time.Sleep(3s) gate (bug #2).
+//   - claude_message at-prompt check: WaitForPrompt(target, PromptCheckGrace)
+//     — 750ms grace tolerates mid-render frames without false-busy (bug #3).
+func WaitForPrompt(target string, timeout time.Duration) (atPrompt bool, output string, err error) {
+	if timeout == 0 {
+		return checkPromptOnce(target)
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		at, out, err := checkPromptOnce(target)
+		if err != nil {
+			return false, "", err
+		}
+		if at {
+			return true, out, nil
+		}
+		if time.Now().After(deadline) {
+			return false, out, nil
+		}
+		time.Sleep(promptPollInterval)
+	}
+}
+
+func checkPromptOnce(target string) (bool, string, error) {
+	out, err := CapturePane(target, promptCaptureLines)
+	if err != nil {
+		return false, "", err
+	}
+	return strings.Contains(out, promptByteAnchor), out, nil
+}
