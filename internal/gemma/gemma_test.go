@@ -3,6 +3,7 @@ package gemma
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -293,11 +294,14 @@ func TestSentinelMatchPositive(t *testing.T) {
 		content    string
 		alwaysFlag bool
 	}{
-		{"panic", "runtime panic: nil pointer dereference", true},
-		{"deadlock", "fatal error: all goroutines are asleep - deadlock!", true},
+		{"panic-colon", "panic: runtime error: index out of range", true},
+		{"panic-paren", "panic({0xc000..., 0xc000...})", true},
+		{"deadlock-bang", "fatal error: all goroutines are asleep - deadlock!", true},
 		{"rate-limit", "anthropic API rate limit exceeded", true},
 		{"process-exit", "coder agent process exited with code 1", true},
-		{"schema-constraint", "schema constraint violation on agents.id", true},
+		{"schema-constraint-violation", "schema constraint violation on agents.id", true},
+		{"schema-constraint-failed", "schema constraint failed during migration", true},
+		{"schema-constraint-error", "schema constraint error: agents.id not unique", true},
 		{"sigsegv", "SIGSEGV: segmentation violation", true},
 		{"fatal-no-flag", "FATAL: connection lost", false},   // pre-filter only, not always-flag
 		{"oom-no-flag", "out of memory: killed worker", false}, // pre-filter only
@@ -329,6 +333,21 @@ func TestSentinelMatchNegative(t *testing.T) {
 		"task complete: 5 files changed",
 		"hello world",
 		"",
+		// F2 false-positive class: panic/deadlock as nouns in planning prose.
+		// Post-tighten patterns require canonical Go runtime delimiters
+		// (`panic:` / `panic(` / `deadlock!`) — bare-word, period-followed,
+		// space-followed, and `=`-followed cases all drop out.
+		"flow on panic.",
+		"resolved a deadlock.",
+		"on panic = retry, on deadlock = abort.",
+		"on panic state",
+		"deadlock condition exists",
+		"discussion on panic in code review",
+		// F2 false-positive class: schema constraint discussed conceptually
+		// without the violation/failed/error follow-on word.
+		"discussing schema constraint design",
+		"the schema constraint is conservative",
+		"constraint violation in our locked spec",
 	}
 	for _, content := range cases {
 		t.Run(content, func(t *testing.T) {
@@ -439,5 +458,68 @@ func TestStartWiresHeartbeatLoop(t *testing.T) {
 	}
 	if !strings.Contains(src, "UpdateAgentLastSeen(agentID)") {
 		t.Errorf("heartbeatLoop must call db.UpdateAgentLastSeen(agentID)")
+	}
+}
+
+// TestAgentImbalanceExcludesCoders locks the F3 whitelist contract: coder
+// agents are spawn-and-die by design, so their offline rows must not count
+// toward the offline-ratio anomaly. The "20 offline coders + 6 online
+// non-coders" steady-state should produce no flag.
+func TestAgentImbalanceExcludesCoders(t *testing.T) {
+	agents := []protocol.Agent{
+		{ID: "brian", Type: protocol.AgentBrian, Status: protocol.StatusOnline},
+		{ID: "rain", Type: protocol.AgentQA, Status: protocol.StatusOnline},
+		{ID: "emma", Type: protocol.AgentGemma, Status: protocol.StatusOnline},
+		{ID: "discord", Type: protocol.AgentDiscord, Status: protocol.StatusOnline},
+		{ID: "clive", Type: protocol.AgentVoice, Status: protocol.StatusOnline},
+		{ID: "live", Type: protocol.AgentVoice, Status: protocol.StatusOnline},
+	}
+	for i := 0; i < 20; i++ {
+		agents = append(agents, protocol.Agent{
+			ID:     fmt.Sprintf("coder-%d", i),
+			Type:   protocol.AgentCoder,
+			Status: protocol.StatusOffline,
+		})
+	}
+	if a, ok := checkAgentImbalance(agents); ok {
+		t.Errorf("expected no anomaly (6 non-coder online + 20 offline coders excluded), got %+v", a)
+	}
+}
+
+// TestAgentImbalanceFiresOnNonCoders locks the inverse: when non-coder
+// agents skew offline, the anomaly still fires. This is the F3 ratchet —
+// the coder whitelist must not accidentally suppress real imbalance signal.
+func TestAgentImbalanceFiresOnNonCoders(t *testing.T) {
+	agents := []protocol.Agent{
+		{ID: "brian", Type: protocol.AgentBrian, Status: protocol.StatusOffline},
+		{ID: "rain", Type: protocol.AgentQA, Status: protocol.StatusOffline},
+		{ID: "emma", Type: protocol.AgentGemma, Status: protocol.StatusOnline},
+		{ID: "discord", Type: protocol.AgentDiscord, Status: protocol.StatusOffline},
+		// One coder included — must not change the outcome.
+		{ID: "coder-1", Type: protocol.AgentCoder, Status: protocol.StatusOnline},
+	}
+	a, ok := checkAgentImbalance(agents)
+	if !ok {
+		t.Fatalf("expected anomaly (3 non-coder offline vs 1 non-coder online), got none")
+	}
+	if a.key != "agent-imbalance" {
+		t.Errorf("expected key=agent-imbalance, got %q", a.key)
+	}
+	if !strings.Contains(a.msg, "1 online, 3 offline") {
+		t.Errorf("anomaly msg should report non-coder counts (1 online, 3 offline), got %q", a.msg)
+	}
+}
+
+// TestAgentImbalanceCoderOnlyNoFlag locks the edge case: when only coder
+// agents exist (no non-coder rows), nothing is anomalous regardless of
+// their status distribution. The whitelist should not crash or false-fire.
+func TestAgentImbalanceCoderOnlyNoFlag(t *testing.T) {
+	agents := []protocol.Agent{
+		{ID: "coder-1", Type: protocol.AgentCoder, Status: protocol.StatusOffline},
+		{ID: "coder-2", Type: protocol.AgentCoder, Status: protocol.StatusOffline},
+		{ID: "coder-3", Type: protocol.AgentCoder, Status: protocol.StatusOnline},
+	}
+	if a, ok := checkAgentImbalance(agents); ok {
+		t.Errorf("expected no anomaly (coder-only roster), got %+v", a)
 	}
 }

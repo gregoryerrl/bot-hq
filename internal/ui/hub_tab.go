@@ -126,11 +126,16 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 				h.focused = true
 				cmds = append(cmds, h.input.Focus())
 			default:
-				// Auto-focus input on any printable character
-				if len(key) == 1 && key >= " " && key <= "~" {
+				// Auto-focus input on any printable character OR on a
+				// bracketed-paste delivery. Without the Paste branch a
+				// multi-rune paste arriving while unfocused would route to
+				// the viewport (silently dropped) instead of being captured
+				// as input — observably "bracketed paste didn't work" even
+				// though the bubbletea bracketed-paste path itself was fine.
+				printable := len(key) == 1 && key >= " " && key <= "~"
+				if printable || msg.Paste {
 					h.focused = true
 					cmds = append(cmds, h.input.Focus())
-					// Forward the typed character to the input
 					var cmd tea.Cmd
 					h.input, cmd = h.input.Update(msg)
 					cmds = append(cmds, cmd)

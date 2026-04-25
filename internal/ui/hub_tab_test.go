@@ -282,3 +282,30 @@ func TestHubTabAccepts10kbInput(t *testing.T) {
 		t.Errorf("long input truncated: got len=%d, want %d", got, size)
 	}
 }
+
+// TestHubTabPasteWhileUnfocusedAutoFocuses locks F1's behavior contract:
+// when bracketed paste content arrives while the input is unfocused, the
+// HubTab must auto-focus the input and forward the paste to the textarea
+// rather than silently routing it to the viewport. Pre-fix, a multi-rune
+// paste delivered as one KeyMsg{Paste:true} matched neither the "/"+"i"
+// shortcut keys nor the single-printable-char branch (because the rune
+// slice has length > 1) and was dropped into viewport.Update — observable
+// to users as "bracketed paste didn't work" even though the bubbletea
+// bracketed-paste pipeline itself was fine.
+func TestHubTabPasteWhileUnfocusedAutoFocuses(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	if h.focused {
+		t.Fatalf("hub tab should start unfocused")
+	}
+
+	paste := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello\nworld"), Paste: true}
+	h, _ = h.Update(paste)
+
+	if !h.focused {
+		t.Errorf("paste arriving while unfocused must auto-focus the input")
+	}
+	if got := h.input.Value(); got != "hello\nworld" {
+		t.Errorf("paste content should land in input buffer, got %q", got)
+	}
+}
