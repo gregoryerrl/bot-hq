@@ -103,13 +103,18 @@ func HasTmux() bool {
 	return err == nil
 }
 
-// promptByteAnchor is the literal byte sequence for "❯ " (U+276F + space).
-// Pinned at byte level rather than rune level because lipgloss/ANSI rendering
-// can produce variant codepoints that render visually identically; matching
-// raw bytes avoids the regex-on-visual-chars failure mode. Empirical hexdump
-// from a live Claude Code pane confirms single-codepoint U+276F (3 bytes
-// UTF-8), no combining marks, no variant selectors.
-const promptByteAnchor = "\xe2\x9d\xaf\x20"
+// promptByteAnchor is the literal byte sequence for ❯ + NBSP (U+276F +
+// U+00A0). Pinned at byte level rather than rune level because:
+//   - Claude Code renders the cursor space as a NON-BREAKING SPACE (U+00A0,
+//     bytes 0xC2 0xA0), not a regular space (U+0020). NBSP is non-whitespace
+//     from tmux capture-pane's line-trim perspective, so the cursor position
+//     survives capture even at end-of-visual-line. Empirical hexdump from a
+//     live Claude pane confirms `e2 9d af c2 a0`.
+//   - Matching at byte level avoids the regex-on-visual-chars failure mode
+//     where lipgloss/ANSI rendering could produce visually-identical variant
+//     codepoints, AND prevents collision with the regular-space form that
+//     appears in chat text / docs / code where humans type `❯ ` literally.
+const promptByteAnchor = "\xe2\x9d\xaf\xc2\xa0"
 
 // PromptCheckGrace is the grace window for at-prompt checks that must
 // tolerate transient mid-render frames (e.g. claude_message busy detection).

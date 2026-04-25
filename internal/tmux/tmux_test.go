@@ -45,21 +45,23 @@ func TestNewAndKillSession(t *testing.T) {
 // nothing else. Pure unit, no tmux dependency. Locks the empirical hexdump
 // finding (Rain's investigation msg 2317) into the source.
 func TestPromptByteAnchor_MatchesLiteral(t *testing.T) {
-	if promptByteAnchor != "❯ " {
-		t.Errorf("promptByteAnchor mismatch: bytes %x, want %x", promptByteAnchor, "❯ ")
+	want := "\xe2\x9d\xaf\xc2\xa0" // ❯ + NBSP (U+00A0)
+	if promptByteAnchor != want {
+		t.Errorf("promptByteAnchor mismatch: bytes % x, want % x", promptByteAnchor, want)
 	}
 	cases := []struct {
 		name string
 		in   string
 		want bool
 	}{
-		{"exact match", "❯ ", true},
-		{"trailing context", "$ ❯ ready", true},
-		{"leading context", "[mode]\n❯ ", true},
+		{"exact match (❯+NBSP)", "\xe2\x9d\xaf\xc2\xa0", true},
+		{"trailing context (❯+NBSP+text)", "$ \xe2\x9d\xaf\xc2\xa0ready", true},
+		{"leading context", "[mode]\n\xe2\x9d\xaf\xc2\xa0", true},
 		{"no anchor", "$ no prompt here", false},
-		{"anchor without trailing space", "❯", false}, // strict: space required
-		{"different bullet (›)", "› ", false},          // U+203A, not U+276F
-		{"different bullet (>)", "> ", false},          // ASCII gt
+		{"❯ + REGULAR space (must NOT match)", "\xe2\x9d\xaf\x20", false}, // distinguishes Claude pane from chat text where humans type `❯ ` literally
+		{"❯ alone (no trailing byte)", "\xe2\x9d\xaf", false},             // strict: NBSP required
+		{"different bullet (›)", "›\xc2\xa0", false},                      // U+203A, not U+276F
+		{"different bullet (>)", "> ", false},                              // ASCII gt
 		{"empty", "", false},
 	}
 	for _, tc := range cases {
@@ -90,7 +92,7 @@ func newTestSession(t *testing.T) string {
 
 func TestCheckPromptOnce_FindsAnchorWhenPresent(t *testing.T) {
 	name := newTestSession(t)
-	if err := SendKeys(name, "printf '\\xe2\\x9d\\xaf X'", true); err != nil {
+	if err := SendKeys(name, "printf '\\xe2\\x9d\\xaf\\xc2\\xa0X'", true); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(300 * time.Millisecond) // let printf land in pane
@@ -120,7 +122,7 @@ func TestCheckPromptOnce_NoAnchorWhenAbsent(t *testing.T) {
 
 func TestWaitForPrompt_InstantDetection(t *testing.T) {
 	name := newTestSession(t)
-	if err := SendKeys(name, "printf '\\xe2\\x9d\\xaf X'", true); err != nil {
+	if err := SendKeys(name, "printf '\\xe2\\x9d\\xaf\\xc2\\xa0X'", true); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -143,7 +145,7 @@ func TestWaitForPrompt_DelayedDetection(t *testing.T) {
 	// Print the anchor after ~600ms — must be detected during polling, not
 	// returned immediately. WaitForPrompt should resolve in roughly the
 	// delay window (within one poll interval of 200ms slack).
-	if err := SendKeys(name, "(sleep 0.6; printf '\\xe2\\x9d\\xaf X')&", true); err != nil {
+	if err := SendKeys(name, "(sleep 0.6; printf '\\xe2\\x9d\\xaf\\xc2\\xa0X')&", true); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Now()
