@@ -178,6 +178,10 @@ func runMCP() {
 	}
 	defer db.Close()
 
+	if n, err := db.ReconcileCoderGhosts(); err == nil && n > 0 {
+		fmt.Fprintf(os.Stderr, "reconciled %d ghost coder agent(s) to offline\n", n)
+	}
+
 	if err := mcp.RunStdioServer(db); err != nil {
 		fmt.Fprintf(os.Stderr, "mcp error: %v\n", err)
 		os.Exit(1)

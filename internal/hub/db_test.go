@@ -289,3 +289,114 @@ func TestUpdateAgentLastSeenUnknownID(t *testing.T) {
 		t.Errorf("unexpected error for unknown id: %v", err)
 	}
 }
+
+// Bug #4 cleanup: ReconcileCoderGhosts must flip ONLY coder agents, ONLY
+// when status=online, ONLY when their paired session is stopped. Three
+// conjoined predicates — easy to break one in a refactor without noticing.
+// Test cases lock each predicate independently.
+func TestReconcileCoderGhosts_FlipsStoppedSessionAgents(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Two ghosts: coder + online + stopped session → should flip
+	for _, id := range []string{"ghost1", "ghost2"} {
+		if err := db.InsertClaudeSession(ClaudeSession{
+			ID: id, Project: "/tmp", TmuxTarget: "cc-" + id,
+			Mode: "managed", Status: "stopped",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.RegisterAgent(protocol.Agent{
+			ID: id, Name: id, Type: protocol.AgentCoder, Status: protocol.StatusOnline,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Healthy coder: coder + online + running session → must NOT flip
+	if err := db.InsertClaudeSession(ClaudeSession{
+		ID: "healthy", Project: "/tmp", TmuxTarget: "cc-healthy",
+		Mode: "managed", Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: "healthy", Name: "Healthy", Type: protocol.AgentCoder, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-coder agent with stopped session: type predicate guards this →
+	// must NOT flip. (Contrived: voice/brian/discord don't normally have
+	// claude_sessions rows, but the SQL must guard regardless.)
+	if err := db.InsertClaudeSession(ClaudeSession{
+		ID: "voice1", Project: "/tmp", TmuxTarget: "cc-voice1",
+		Mode: "attached", Status: "stopped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: "voice1", Name: "V1", Type: protocol.AgentVoice, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Already-offline coder with stopped session: status predicate guards
+	// this → no-op (already offline, not a ghost).
+	if err := db.InsertClaudeSession(ClaudeSession{
+		ID: "alreadyoff", Project: "/tmp", TmuxTarget: "cc-alreadyoff",
+		Mode: "managed", Status: "stopped",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: "alreadyoff", Name: "Off", Type: protocol.AgentCoder, Status: protocol.StatusOffline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := db.ReconcileCoderGhosts()
+	if err != nil {
+		t.Fatalf("ReconcileCoderGhosts error: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("flipped count: got %d, want 2 (ghost1 + ghost2)", n)
+	}
+
+	// Verify each predicate independently
+	for _, id := range []string{"ghost1", "ghost2"} {
+		a, _ := db.GetAgent(id)
+		if a.Status != protocol.StatusOffline {
+			t.Errorf("%s: status got %q, want offline", id, a.Status)
+		}
+	}
+	if a, _ := db.GetAgent("healthy"); a.Status != protocol.StatusOnline {
+		t.Errorf("healthy coder flipped erroneously: status=%q (running session must not be touched)", a.Status)
+	}
+	if a, _ := db.GetAgent("voice1"); a.Status != protocol.StatusOnline {
+		t.Errorf("voice agent flipped erroneously: status=%q (type predicate failed)", a.Status)
+	}
+	if a, _ := db.GetAgent("alreadyoff"); a.Status != protocol.StatusOffline {
+		t.Errorf("alreadyoff coder: status=%q (should still be offline)", a.Status)
+	}
+
+	// Idempotency: second call should flip zero rows.
+	n2, err := db.ReconcileCoderGhosts()
+	if err != nil {
+		t.Fatalf("second call error: %v", err)
+	}
+	if n2 != 0 {
+		t.Errorf("second call flipped %d rows, want 0 (not idempotent)", n2)
+	}
+}
+
+// Empty DB: no rows to reconcile, must not error and must return 0.
+func TestReconcileCoderGhosts_EmptyDB(t *testing.T) {
+	db := setupTestDB(t)
+	n, err := db.ReconcileCoderGhosts()
+	if err != nil {
+		t.Errorf("unexpected error on empty DB: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("flipped count on empty DB: got %d, want 0", n)
+	}
+}
