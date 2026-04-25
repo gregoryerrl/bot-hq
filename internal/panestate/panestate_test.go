@@ -367,3 +367,78 @@ func TestRefreshPaneActivity_CaptureErrorCarriesForward(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// TestRefreshPaneActivity_H6_LauncherShapedMeta locks the H6 fix path:
+// launcher-registered agents (internal/brian/brian.go, internal/rain/rain.go)
+// carry tmux_target in Meta JSON with the format "bot-hq-<role>-<unix>".
+// panestate must read this, drive the pane-tier observer, and produce
+// continuous-promotion ActivityWorking under continuously-changing pane content.
+//
+// Regression preventer (consumer side). The producer-side companion test —
+// hub_register handler preserving Meta on Claude STARTUP re-register — lives
+// in internal/mcp/server_test.go. Rain-pattern-8 + Brian-pattern-3.12: audit
+// both ends of the contract.
+func TestRefreshPaneActivity_H6_LauncherShapedMeta(t *testing.T) {
+	target := "bot-hq-brian-1777154445"
+	fake := &fakeSource{agents: []protocol.Agent{agentWithTmux("brian", target)}}
+	cap := &scriptedCapture{outputs: []string{"tick0", "tick1", "tick2", "tick3", "tick4"}}
+	m := NewManager(fake, cap.fn)
+
+	// Tick 1: seed. agentWithTmux uses fresh LastSeen, so heartbeat tier holds
+	// Working regardless of pane state.
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ticks 2-5: each hash differs → pane-tier stamps LastPaneActivity, and the
+	// fresh heartbeat keeps the row at Working (continuous-promotion locked).
+	for i := 2; i <= 5; i++ {
+		if err := m.Refresh(); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+		snap := m.Snapshot()
+		if snap[0].LastPaneActivity.IsZero() {
+			t.Fatalf("tick %d: LastPaneActivity = zero, want non-zero (continuous-promotion)", i)
+		}
+		if snap[0].Activity != ActivityWorking {
+			t.Errorf("tick %d: Activity = %v, want ActivityWorking", i, snap[0].Activity)
+		}
+	}
+
+	if cap.calls != 5 {
+		t.Errorf("capturePane calls = %d, want 5 (no skip-no-target on launcher-shaped Meta)", cap.calls)
+	}
+}
+
+// TestRefreshPaneActivity_H6_PaneRescuesStaleHeartbeat locks F-core-b case-ii
+// for launcher-registered agents: heartbeat past OnlineWindow + pane scrolls →
+// pane-tier rescues to ActivityWorking. This is the runtime failure shape that
+// the H6 investigation revealed (saltegge bash runs #1-#3) — once tmux_target
+// is populated through the launcher fix, the existing F-core-b OR-combination
+// must produce the rescue.
+func TestRefreshPaneActivity_H6_PaneRescuesStaleHeartbeat(t *testing.T) {
+	target := "bot-hq-brian-1777154445"
+	a := agentWithTmux("brian", target)
+	a.LastSeen = time.Now().Add(-2 * time.Minute) // past HeartbeatOnlineWindow
+	fake := &fakeSource{agents: []protocol.Agent{a}}
+	cap := &scriptedCapture{outputs: []string{"tick0", "tick1"}}
+	m := NewManager(fake, cap.fn)
+
+	// Tick 1: seed. Heartbeat stale, pane has no prior frame to compare → row
+	// must be ActivityStale (heartbeat-only path with stale recency).
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Snapshot()[0].Activity; got != ActivityStale {
+		t.Errorf("tick 1 Activity = %v, want ActivityStale (heartbeat past OnlineWindow, pane seed-only)", got)
+	}
+
+	// Tick 2: hash differs → pane-tier stamps now, OR-combines with stale
+	// heartbeat → row promotes to Working. This is the case-ii ratchet.
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Snapshot()[0].Activity; got != ActivityWorking {
+		t.Errorf("tick 2 Activity = %v, want ActivityWorking (pane-tier rescue from stale heartbeat)", got)
+	}
+}

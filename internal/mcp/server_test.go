@@ -122,6 +122,113 @@ func TestHubRegisterTool(t *testing.T) {
 	}
 }
 
+// TestHubRegister_PreservesLauncherMeta locks the H6 fix's load-bearing
+// invariant: Meta is owned by the launcher (e.g. internal/brian/brian.go,
+// internal/rain/rain.go), and the MCP hub_register handler — typically called
+// from the Claude STARTUP prompt AFTER the launcher has registered — must NOT
+// clobber the launcher's Meta JSON. db.RegisterAgent is INSERT OR REPLACE, so
+// the handler reads existing Meta and threads it through.
+//
+// Regression preventer (producer side). Without this test, a future refactor
+// could "simplify" the handler back to constructing Meta="" and silently
+// re-introduce H6 — fix would appear correct on first launcher boot, then
+// regress on first Claude STARTUP hub_register call. Worst class of bug.
+// Rain-pattern-8 + Brian-pattern-3.12 backstop: audit producer side here,
+// audit consumer side via panestate_test.go's H6 tests.
+func TestHubRegister_PreservesLauncherMeta(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+
+	var registerHandler func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
+	for _, td := range tools {
+		if td.Tool.Name == "hub_register" {
+			registerHandler = td.Handler
+			break
+		}
+	}
+	if registerHandler == nil {
+		t.Fatal("hub_register tool not found")
+	}
+
+	// Simulate the launcher's pre-registration with tmux_target Meta populated.
+	launcherMeta := `{"tmux_target":"bot-hq-brian-1777154445"}`
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     "brian",
+		Name:   "Brian",
+		Type:   protocol.AgentBrian,
+		Status: protocol.StatusOnline,
+		Meta:   launcherMeta,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Claude STARTUP prompt re-registers via MCP. No meta param is passed
+	// (matches the current STARTUP rule: hub_register id="brian" name="Brian"
+	// type="brian"). Handler must preserve the launcher's Meta.
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"id":   "brian",
+		"name": "Brian",
+		"type": "brian",
+	}
+	result, err := registerHandler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("re-register failed: %v", result.Content)
+	}
+
+	after, err := db.GetAgent("brian")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Meta != launcherMeta {
+		t.Errorf("Meta clobbered on re-register: got %q, want %q (H6 regression)", after.Meta, launcherMeta)
+	}
+}
+
+// TestHubRegister_NewAgentNoExistingMeta locks the green path for first-time
+// registration via MCP (no prior launcher row). Handler must not error on the
+// GetAgent miss and must register cleanly with Meta="".
+func TestHubRegister_NewAgentNoExistingMeta(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+
+	var registerHandler func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error)
+	for _, td := range tools {
+		if td.Tool.Name == "hub_register" {
+			registerHandler = td.Handler
+			break
+		}
+	}
+	if registerHandler == nil {
+		t.Fatal("hub_register tool not found")
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"id":   "fresh-agent",
+		"name": "Fresh",
+		"type": "coder",
+	}
+	result, err := registerHandler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("register failed: %v", result.Content)
+	}
+
+	after, err := db.GetAgent("fresh-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Meta != "" {
+		t.Errorf("fresh agent Meta = %q, want empty (no prior row to preserve from)", after.Meta)
+	}
+}
+
 func TestHubSendAndReadTools(t *testing.T) {
 	db := setupTestDB(t)
 	tools := BuildTools(db)
