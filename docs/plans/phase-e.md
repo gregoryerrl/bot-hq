@@ -258,3 +258,56 @@ Phase E is done when:
 - Strip visible on HubTab, dots transition correctly during real coordination
 - Agents tab Status column reflects Activity, not raw `ag.Status`
 - `panestate.Manager` is the only consumer of `db.ListAgents` for tab rendering
+
+## 11. Post-Merge Addendum
+
+Corrections + observations accumulated during smoke-ladder execution and the
+bug-fix bundles (#4, #2/#3, #1) that followed Phase E. Folded back here as a
+single addendum rather than amending §1–§10 in place — Phase E shipped as
+designed, these are notes for future readers about what we learned after.
+
+### 11.1 Threshold wording correction (§7 step 6)
+
+§7 step 6 reads "wait 10s" but the working-window threshold per §2.54 is 5s.
+The 10s figure was a margin past the edge, not a threshold. Read "wait past
+the 5s threshold (≥10s gives clean margin for observation)."
+
+### 11.2 Coord vs service silence under live testing
+
+Smoke ladder §7 step 7 requires an agent to cross the 60s stale boundary by
+holding silent. Service agents (Discord, Emma) cross naturally because they
+don't poll on idle. Coordinating agents (Brian, Rain) bump `last_seen` on
+every ack and routine `hub_read` poll, so they cross the boundary only under
+a deliberate-hold posture (no acks, no polls) sustained past 60s. Both paths
+are valid evidence; service-agent path is lower-friction during live testing.
+
+Empirically validated: Brian crossed 60.7s naturally during smoke ladder
+execution after deliberately suppressing acks and polls.
+
+### 11.3 Phase E status post-merge
+
+Phase E delivered the foundation (`panestate.Manager`, strip render, Activity
+vocab, MCP-middleware first-order signal, threshold model). The user-visible
+value — knowing if an agent is *currently working in its pane* without
+checking tmux — is delivered by Phase F (deferred tmux-pane introspection).
+Phase E in isolation is largely redundant for the "is the agent working"
+question (the strip lights only on hub-traffic, equivalent to reading the
+message log). Phase F closes the gap by adding pane-content introspection
+into the same Manager / strip / vocab.
+
+### 11.4 Observation discipline for live signal tests
+
+When one agent owns a step's signal during a smoke ladder or live test, peer
+agents must silence (no PM-ack, no broadcast) during the observation window.
+Otherwise peer acks pollute the scan with their own `last_seen` bumps and the
+observation captures a mixed state instead of the intended isolated event.
+
+Mitigation when silence isn't viable: report all bumps observed and treat
+scans as samples-of-time, not freeze-frames. The math reconstructs intent
+across multiple samples even when timing is noisy.
+
+For user-triggered tests specifically, one agent claims via brief "I'll fire"
+PM before sending; the other silences explicitly. Default claimer = the
+agent the user addressed, or HANDS if ambiguous. We violated this discipline
+inside 5 minutes of writing it down (msg 2305-2307 cycle); explicit claim
+protocol prevents the reflexive parallel-fire failure mode.
