@@ -154,6 +154,11 @@ func runHub() {
 			})
 		} else {
 			log.Printf("[autostart] emma OK")
+			// Wire Emma's hub-reactive sentinel subscriber. OnMessage fires
+			// for every in-process insert; cross-process MCP inserts surface
+			// to Emma via her own boot-time replay + the live tick path is
+			// not needed (sentinel is purely event-driven).
+			h.DB.OnMessage(emmaAgent.OnHubMessage)
 			defer emmaAgent.Stop()
 		}
 	}

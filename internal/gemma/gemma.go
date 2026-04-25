@@ -192,6 +192,12 @@ func (g *Gemma) Start() error {
 	go g.heartbeatLoop()
 	go g.monitorLoop()
 
+	// Boot-time replay: run the most recent N hub messages through the
+	// sentinel so any active failures from the pre-restart window are
+	// caught. Live messages from this point onward arrive via the
+	// OnMessage subscriber wired in cmd/bot-hq/main.go.
+	g.replayThroughSentinel()
+
 	g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
 		Type:      protocol.MsgUpdate,
@@ -411,6 +417,70 @@ func (g *Gemma) healthLoop() {
 				g.restartOllama()
 			}
 		}
+	}
+}
+
+// replayBacklog is the number of recent hub messages Emma re-classifies
+// at boot to catch active failures from the pre-restart window.
+const replayBacklog = 50
+
+// OnHubMessage is the OnMessage subscriber Emma registers with the hub.
+// Pure dispatcher: skips Emma's own messages, runs SentinelMatch, and
+// hands matched messages to dispatchSentinelHit. Default-ignore for
+// any non-match.
+//
+// Wired post-Start in cmd/bot-hq/main.go via h.DB.OnMessage(...).
+func (g *Gemma) OnHubMessage(msg protocol.Message) {
+	if msg.FromAgent == agentID {
+		return // skip self to avoid feedback loops
+	}
+	d := SentinelMatch(msg)
+	if !d.Match {
+		return // default-ignore
+	}
+	g.dispatchSentinelHit(msg, d)
+}
+
+// dispatchSentinelHit emits the appropriate hub message for a sentinel
+// match. Always-flag matches go out as Type=MsgFlag (Discord-bound);
+// pre-filter-only matches go out as Type=MsgUpdate observations to
+// Rain. Both paths reuse Gemma.shouldFlag so a noisy storm doesn't
+// blow past the existing rate cap and hysteresis window.
+func (g *Gemma) dispatchSentinelHit(msg protocol.Message, d SentinelDecision) {
+	now := time.Now()
+	if d.AlwaysFlag {
+		if !g.shouldFlag("sentinel:"+d.Pattern, now) {
+			return
+		}
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			Type:      protocol.MsgFlag,
+			Content:   fmt.Sprintf("Sentinel always-flag hit in msg #%d (from %s, pattern %s): %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)),
+		})
+		return
+	}
+	if !g.shouldFlag("sentinel-obs:"+d.Pattern, now) {
+		return
+	}
+	g.db.InsertMessage(protocol.Message{
+		FromAgent: agentID,
+		ToAgent:   "rain",
+		Type:      protocol.MsgUpdate,
+		Content:   fmt.Sprintf("Sentinel match in msg #%d (from %s, pattern %s): %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)),
+	})
+}
+
+// replayThroughSentinel feeds the last replayBacklog hub messages
+// through OnHubMessage at boot. Catches active failures from the
+// pre-restart window without requiring a separate silence-poll path
+// (deferred to post-Phase-F per locked msg 2442).
+func (g *Gemma) replayThroughSentinel() {
+	msgs, err := g.db.GetRecentMessages(replayBacklog)
+	if err != nil {
+		return
+	}
+	for _, m := range msgs {
+		g.OnHubMessage(m)
 	}
 }
 

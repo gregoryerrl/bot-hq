@@ -285,6 +285,142 @@ func TestHeartbeatRefreshesLastSeen(t *testing.T) {
 	}
 }
 
+// TestSentinelMatchPositive locks that representative pre-filter strings
+// produce Match=true and (where appropriate) AlwaysFlag=true.
+func TestSentinelMatchPositive(t *testing.T) {
+	cases := []struct {
+		name       string
+		content    string
+		alwaysFlag bool
+	}{
+		{"panic", "runtime panic: nil pointer dereference", true},
+		{"deadlock", "fatal error: all goroutines are asleep - deadlock!", true},
+		{"rate-limit", "anthropic API rate limit exceeded", true},
+		{"process-exit", "coder agent process exited with code 1", true},
+		{"schema-constraint", "schema constraint violation on agents.id", true},
+		{"sigsegv", "SIGSEGV: segmentation violation", true},
+		{"fatal-no-flag", "FATAL: connection lost", false},   // pre-filter only, not always-flag
+		{"oom-no-flag", "out of memory: killed worker", false}, // pre-filter only
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := SentinelMatch(protocol.Message{Content: tc.content})
+			if !d.Match {
+				t.Fatalf("expected Match=true for %q, got %+v", tc.content, d)
+			}
+			if d.AlwaysFlag != tc.alwaysFlag {
+				t.Errorf("AlwaysFlag mismatch for %q: got %v, want %v", tc.content, d.AlwaysFlag, tc.alwaysFlag)
+			}
+			if d.Pattern == "" {
+				t.Errorf("Pattern should be non-empty for matched message")
+			}
+		})
+	}
+}
+
+// TestSentinelMatchNegative locks default-ignore: routine messages must
+// produce Match=false so they're silently dropped instead of triggering
+// observations or flags.
+func TestSentinelMatchNegative(t *testing.T) {
+	cases := []string{
+		"Brian online. Ready for commands.",
+		"Concur shape, opening worktree.",
+		"Pull request merged successfully",
+		"task complete: 5 files changed",
+		"hello world",
+		"",
+	}
+	for _, content := range cases {
+		t.Run(content, func(t *testing.T) {
+			d := SentinelMatch(protocol.Message{Content: content})
+			if d.Match {
+				t.Errorf("expected default-ignore for %q, got Match=%v Pattern=%q", content, d.Match, d.Pattern)
+			}
+			if d.AlwaysFlag {
+				t.Errorf("AlwaysFlag must be false when Match=false")
+			}
+		})
+	}
+}
+
+// TestSentinelAlwaysFlagSubsetOfPreFilter is a structural ratchet: every
+// always-flag pattern source must also exist verbatim in the pre-filter
+// list (alwaysFlag is a strict subset). Without this invariant, a future
+// editor could add an always-flag pattern that fails the pre-filter
+// gate and never fires.
+func TestSentinelAlwaysFlagSubsetOfPreFilter(t *testing.T) {
+	pre := map[string]bool{}
+	for _, p := range preFilterPatterns {
+		pre[p.String()] = true
+	}
+	for _, p := range alwaysFlagPatterns {
+		if !pre[p.String()] {
+			t.Errorf("always-flag pattern %q is not in preFilterPatterns — strict subset invariant broken", p.String())
+		}
+	}
+}
+
+// TestOnHubMessageSkipsSelfAndDefaultIgnores locks two contracts:
+//  1. Emma's own messages do not feed back into the sentinel
+//  2. Non-matching messages produce no DB writes (default-ignore)
+func TestOnHubMessageSkipsSelfAndDefaultIgnores(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	g := New(db, hub.GemmaConfig{})
+
+	// Self-message with a panic-like body: must NOT generate any new row.
+	g.OnHubMessage(protocol.Message{FromAgent: agentID, Content: "panic: self test"})
+	// Routine non-matching message: must NOT generate any new row.
+	g.OnHubMessage(protocol.Message{FromAgent: "brian", Content: "concur shape, opening worktree"})
+
+	msgs, err := db.GetRecentMessages(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("expected zero rows after skip-self + default-ignore, got %d (%v)", len(msgs), msgs)
+	}
+}
+
+// TestOnHubMessageEmitsFlagOnAlwaysFlagPattern locks the always-flag
+// dispatch: a non-self message containing a panic produces a flag
+// message in the DB.
+func TestOnHubMessageEmitsFlagOnAlwaysFlagPattern(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	g := New(db, hub.GemmaConfig{})
+
+	g.OnHubMessage(protocol.Message{FromAgent: "brian", Content: "PANIC: nil pointer in handler"})
+
+	msgs, err := db.GetRecentMessages(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flag *protocol.Message
+	for i := range msgs {
+		if msgs[i].FromAgent == agentID && msgs[i].Type == protocol.MsgFlag {
+			flag = &msgs[i]
+			break
+		}
+	}
+	if flag == nil {
+		t.Fatalf("expected MsgFlag from emma, got messages: %v", msgs)
+	}
+	if !strings.Contains(flag.Content, "panic") && !strings.Contains(flag.Content, "PANIC") {
+		t.Errorf("flag content should reference matched panic, got %q", flag.Content)
+	}
+}
+
 // TestStartWiresHeartbeatLoop locks that gemma.Start() launches the
 // heartbeat goroutine. Source-level check (mirrors the existing
 // TestRunHealthChecksRoutesToRain pattern) — full goroutine integration
