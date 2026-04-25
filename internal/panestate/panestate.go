@@ -10,6 +10,8 @@
 package panestate
 
 import (
+	"encoding/json"
+	"hash/fnv"
 	"sync"
 	"time"
 
@@ -30,6 +32,24 @@ const (
 	PaneOnlineWindow       = 60 * time.Second
 	StaleAgentWindow       = 7 * 24 * time.Hour
 )
+
+// paneCaptureLines bounds the capture-pane window for activity hashing.
+// Captures the last N lines of scrollback (`tmux capture-pane -p -S -<N>`),
+// NOT the current visible viewport. Viewport-based hashing produces an
+// always-active false signal as content scrolls past — scrollback-tail
+// changes only when new output is emitted, which is the truthful signal.
+// 50 lines covers Claude Code multi-line tool-result blocks (typically
+// 15–30 lines) with margin; FNV-64 hashing of ~4KB is sub-millisecond.
+const paneCaptureLines = 50
+
+// paneState is the per-agent cache entry used by Manager.Refresh to detect
+// pane-content deltas across UI ticks. lastHash is the FNV-64 of the most
+// recent capture; lastActivity is the timestamp at which the hash last
+// changed (zero before the first observed change).
+type paneState struct {
+	lastHash     uint64
+	lastActivity time.Time
+}
 
 // AgentActivity is the derived activity tier for first-order user check.
 type AgentActivity int
@@ -93,17 +113,34 @@ type AgentSource interface {
 }
 
 // Manager owns the shared snapshot. Tabs read via Snapshot(), App refreshes via Refresh().
+//
+// paneCache is mutated only inside Refresh, which is called from a single UI
+// ticker (see internal/ui/app.go); no separate lock is needed for the cache.
+// snapshot/raw are guarded by mu for concurrent reads from tabs.
 type Manager struct {
-	src      AgentSource
-	mu       sync.RWMutex
-	snapshot []AgentSnapshot
-	raw      []protocol.Agent
+	src         AgentSource
+	capturePane func(target string, lines int) (string, error)
+	paneCache   map[string]paneState
+	mu          sync.RWMutex
+	snapshot    []AgentSnapshot
+	raw         []protocol.Agent
 }
 
-// NewManager constructs a Manager bound to the given source. Snapshot is empty
-// until Refresh runs.
-func NewManager(src AgentSource) *Manager {
-	return &Manager{src: src}
+// NewManager constructs a Manager bound to the given source and pane-capture
+// function. Snapshot is empty until Refresh runs.
+//
+// capturePane is required: production passes tmux.CapturePane; tests pass a
+// fake. Permitting nil would create a silent fallback to heartbeat-only mode
+// indistinguishable from a wiring bug — panic at construction is fail-fast.
+func NewManager(src AgentSource, capturePane func(string, int) (string, error)) *Manager {
+	if capturePane == nil {
+		panic("panestate.NewManager: capturePane is required (use tmux.CapturePane in production, fake in tests)")
+	}
+	return &Manager{
+		src:         src,
+		capturePane: capturePane,
+		paneCache:   make(map[string]paneState),
+	}
 }
 
 // Refresh queries the source and recomputes activity for each agent.
@@ -116,9 +153,7 @@ func (m *Manager) Refresh() error {
 	now := time.Now()
 	snap := make([]AgentSnapshot, len(agents))
 	for i, a := range agents {
-		// F-core-a: paneActive zero — no source wired yet. F-core-b will
-		// populate from the capture-pane source.
-		var paneActive time.Time
+		paneActive := m.observePaneActivity(a, now)
 		snap[i] = AgentSnapshot{
 			ID:               a.ID,
 			Name:             a.Name,
@@ -134,6 +169,59 @@ func (m *Manager) Refresh() error {
 	m.raw = agents
 	m.mu.Unlock()
 	return nil
+}
+
+// observePaneActivity returns the LastPaneActivity timestamp for an agent by
+// hashing its tmux pane scrollback-tail and comparing to the cached prior
+// hash. Per F-core-b spec §2:
+//
+//   - No tmux_target → time.Time{} (heartbeat-only path).
+//   - capturePane error → carry forward cached lastActivity (transient tmux
+//     glitch should not demote an active row; if tmux is permanently gone,
+//     the carry-forward will eventually exceed PaneOnlineWindow naturally).
+//   - First tick (no cache entry) → seed cache, return time.Time{} (no prior
+//     frame to compare; promoting on first sight inflates working-tier on
+//     startup).
+//   - Hash differs → paneActive = now, cache updated.
+//   - Hash matches → carry forward cached lastActivity.
+func (m *Manager) observePaneActivity(a protocol.Agent, now time.Time) time.Time {
+	tmuxTarget := extractTmuxTarget(a)
+	if tmuxTarget == "" {
+		return time.Time{}
+	}
+	cached, hadCache := m.paneCache[a.ID]
+	output, err := m.capturePane(tmuxTarget, paneCaptureLines)
+	if err != nil {
+		return cached.lastActivity
+	}
+	h := fnv.New64a()
+	h.Write([]byte(output))
+	hash := h.Sum64()
+	if !hadCache {
+		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: time.Time{}}
+		return time.Time{}
+	}
+	if hash != cached.lastHash {
+		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: now}
+		return now
+	}
+	return cached.lastActivity
+}
+
+// extractTmuxTarget reads the tmux_target field from an agent's Meta JSON.
+// Mirrors the parse pattern in internal/hub/hub.go:257-262 — kept inline to
+// avoid coupling panestate to hub package internals (anti-precedent §3).
+func extractTmuxTarget(a protocol.Agent) string {
+	if a.Meta == "" {
+		return ""
+	}
+	var meta struct {
+		TmuxTarget string `json:"tmux_target"`
+	}
+	if err := json.Unmarshal([]byte(a.Meta), &meta); err != nil {
+		return ""
+	}
+	return meta.TmuxTarget
 }
 
 // Snapshot returns a copy of the activity-derived state. Safe for concurrent reads.

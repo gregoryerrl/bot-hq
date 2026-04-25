@@ -20,9 +20,16 @@ func (f *fakeSource) ListAgents(string) ([]protocol.Agent, error) {
 	return f.agents, nil
 }
 
+// noPaneCapture is a no-op capturePane for ui-package tests that don't
+// exercise pane logic — agents in these tests have no tmux_target Meta, so
+// extractTmuxTarget short-circuits before this is invoked.
+func noPaneCapture(target string, lines int) (string, error) {
+	return "", nil
+}
+
 func newPaneWithAgents(t *testing.T, agents []protocol.Agent) *panestate.Manager {
 	t.Helper()
-	mgr := panestate.NewManager(&fakeSource{agents: agents})
+	mgr := panestate.NewManager(&fakeSource{agents: agents}, noPaneCapture)
 	if err := mgr.Refresh(); err != nil {
 		t.Fatal(err)
 	}
