@@ -50,7 +50,13 @@ func NewHub(cfg Config) (*Hub, error) {
 
 // Start begins background goroutines including cross-process message polling.
 func (h *Hub) Start() error {
-	// Seed lastPollID to current max so we only dispatch new messages
+	// Intentionally pre-seed lastPollID to the current max ID. The cross-process
+	// poller dispatches messages it sees for the first time — tail-replaying
+	// pre-restart messages here would re-fire Discord forwards and other
+	// dispatch side effects on every hub restart. This is NOT the same pattern
+	// as brian/rain agent inits (which were buggy and fixed in commit fb431f3);
+	// agents need backlog replay for context recovery, the hub poller does not.
+	// Do not apply ReadMessages tail-mode (commit a96ebcc) to this site.
 	if msgs, err := h.DB.GetRecentMessages(1); err == nil && len(msgs) > 0 {
 		h.lastPollID = msgs[len(msgs)-1].ID
 	}
