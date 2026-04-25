@@ -82,6 +82,7 @@ type Manager struct {
 	src      AgentSource
 	mu       sync.RWMutex
 	snapshot []AgentSnapshot
+	raw      []protocol.Agent
 }
 
 // NewManager constructs a Manager bound to the given source. Snapshot is empty
@@ -111,16 +112,29 @@ func (m *Manager) Refresh() error {
 	}
 	m.mu.Lock()
 	m.snapshot = snap
+	m.raw = agents
 	m.mu.Unlock()
 	return nil
 }
 
-// Snapshot returns a copy of the current state. Safe for concurrent reads.
+// Snapshot returns a copy of the activity-derived state. Safe for concurrent reads.
 func (m *Manager) Snapshot() []AgentSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]AgentSnapshot, len(m.snapshot))
 	copy(out, m.snapshot)
+	return out
+}
+
+// Agents returns a copy of the raw agent list as last seen by Refresh.
+// Used by tab renderers that consume protocol.Agent directly during the
+// Phase E migration. Phase F may collapse this once tabs read solely from
+// AgentSnapshot.
+func (m *Manager) Agents() []protocol.Agent {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]protocol.Agent, len(m.raw))
+	copy(out, m.raw)
 	return out
 }
 

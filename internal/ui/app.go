@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/gregoryerrl/bot-hq/internal/brian"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
+	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
@@ -38,6 +39,7 @@ type App struct {
 	db          *hub.DB
 	brian       *brian.Brian
 	lastMsgID   int64
+	pane        *panestate.Manager
 }
 
 // NewApp creates a new App model with the Hub tab active.
@@ -55,6 +57,10 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 			}
 		}
 	}
+	var pane *panestate.Manager
+	if db != nil {
+		pane = panestate.NewManager(db)
+	}
 	return App{
 		activeTab:   TabHub,
 		hubTab:      hubTab,
@@ -64,6 +70,7 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 		db:          db,
 		brian:       b,
 		lastMsgID:   lastID,
+		pane:        pane,
 	}
 }
 
@@ -91,11 +98,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tickMsg:
 		var cmds []tea.Cmd
-		// Poll agents
-		if a.db != nil {
-			if agents, err := a.db.ListAgents(""); err == nil {
-				a.agentsTab, _ = a.agentsTab.Update(AgentsUpdated{Agents: agents})
+		// Refresh agent state via panestate (single source of truth) and dispatch
+		// the raw agent slice to AgentsTab so existing render paths see no change.
+		// Phase E commit 4 will switch tabs to read AgentSnapshot directly.
+		if a.pane != nil {
+			if err := a.pane.Refresh(); err == nil {
+				a.agentsTab, _ = a.agentsTab.Update(AgentsUpdated{Agents: a.pane.Agents()})
 			}
+		}
+		if a.db != nil {
 			// Poll sessions
 			if sessions, err := a.db.ListSessions(""); err == nil {
 				a.sessionsTab, _ = a.sessionsTab.Update(SessionsUpdated{Sessions: sessions})
