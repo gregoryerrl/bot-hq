@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -217,5 +219,24 @@ func TestShouldFlag_WindowPrunes(t *testing.T) {
 	}
 	if got := len(g.flagWindow); got != 1 {
 		t.Errorf("expected window pruned to 1 entry, got %d", got)
+	}
+}
+
+// Ratchet against the Emma anomaly-routing regression: monitor reports
+// MUST go to Rain (EYES owns Emma), not Brian. A future refactor that
+// flips this back to "brian" puts anomaly noise on the wrong agent
+// and breaks the EYES role boundary.
+func TestRunHealthChecksRoutesToRain(t *testing.T) {
+	data, err := os.ReadFile("gemma.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	want := `ToAgent:   "rain",`
+	if !strings.Contains(src, want) {
+		t.Errorf("gemma.go must contain %q — anomaly reports route to Rain (EYES)", want)
+	}
+	if strings.Contains(src, `ToAgent:   "brian",`) {
+		t.Errorf("gemma.go must not route anomalies to Brian — that violates EYES/HANDS split")
 	}
 }
