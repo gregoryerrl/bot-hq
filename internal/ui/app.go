@@ -10,6 +10,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	"github.com/gregoryerrl/bot-hq/internal/tmux"
 )
 
 var tabNames = []string{"Hub", "Agents", "Sessions", "Settings"}
@@ -61,7 +62,7 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 	}
 	var pane *panestate.Manager
 	if db != nil {
-		pane = panestate.NewManager(db)
+		pane = panestate.NewManager(db, tmux.CapturePane)
 	}
 	agentsTab := NewAgentsTab()
 	if pane != nil {

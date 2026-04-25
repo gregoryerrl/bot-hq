@@ -92,7 +92,7 @@ func TestManagerRefresh(t *testing.T) {
 			{ID: "a2", Name: "Agent 2", Type: protocol.AgentCoder, Status: protocol.StatusOffline, LastSeen: time.Now().Add(-1 * time.Hour)},
 		},
 	}
-	m := NewManager(fake)
+	m := NewManager(fake, noPaneCapture)
 	if err := m.Refresh(); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestManagerSnapshotFreshness(t *testing.T) {
 			{ID: "a1", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now().Add(-1 * time.Hour)},
 		},
 	}
-	m := NewManager(fake)
+	m := NewManager(fake, noPaneCapture)
 	if err := m.Refresh(); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestManagerSnapshotIsCopy(t *testing.T) {
 			{ID: "a1", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now()},
 		},
 	}
-	m := NewManager(fake)
+	m := NewManager(fake, noPaneCapture)
 	m.Refresh()
 	s1 := m.Snapshot()
 	s1[0].ID = "mutated"
@@ -179,3 +179,191 @@ type fakeSource struct {
 func (f *fakeSource) ListAgents(string) ([]protocol.Agent, error) {
 	return f.agents, nil
 }
+
+// noPaneCapture is the test default for tests that don't exercise pane logic.
+// Returns empty content + nil error so first-tick seed always lands; agents
+// without tmux_target Meta short-circuit before this is called.
+func noPaneCapture(target string, lines int) (string, error) {
+	return "", nil
+}
+
+// scriptedCapture returns a capturePane fake that yields outputs in order.
+// Each invocation pops the next entry; a nil error means success, else error.
+// Tests that step through deterministic content sequences across Refresh ticks
+// use this to lock pane-cache transitions.
+type scriptedCapture struct {
+	outputs []string
+	errs    []error
+	calls   int
+}
+
+func (s *scriptedCapture) fn(target string, lines int) (string, error) {
+	if s.calls >= len(s.outputs) {
+		s.calls++
+		return "", nil
+	}
+	out := s.outputs[s.calls]
+	var err error
+	if s.calls < len(s.errs) {
+		err = s.errs[s.calls]
+	}
+	s.calls++
+	return out, err
+}
+
+// agentWithTmux constructs a protocol.Agent with the tmux_target Meta field
+// set — exercises the extractTmuxTarget JSON parse path.
+func agentWithTmux(id, target string) protocol.Agent {
+	return protocol.Agent{
+		ID:       id,
+		Name:     id,
+		Type:     protocol.AgentBrian,
+		Status:   protocol.StatusOnline,
+		LastSeen: time.Now(),
+		Meta:     `{"tmux_target":"` + target + `"}`,
+	}
+}
+
+// TestRefreshPaneActivity_FirstTickSeeds locks E4: first observed capture for
+// an agent populates the cache but leaves LastPaneActivity == zero (no prior
+// frame to compare against — promoting on first sight inflates working-tier
+// on startup).
+func TestRefreshPaneActivity_FirstTickSeeds(t *testing.T) {
+	fake := &fakeSource{agents: []protocol.Agent{agentWithTmux("a1", "session:0.0")}}
+	cap := &scriptedCapture{outputs: []string{"abc"}}
+	m := NewManager(fake, cap.fn)
+
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if cap.calls != 1 {
+		t.Fatalf("capturePane calls = %d, want 1", cap.calls)
+	}
+	snap := m.Snapshot()
+	if !snap[0].LastPaneActivity.IsZero() {
+		t.Errorf("first-tick LastPaneActivity = %v, want zero (seed-only)", snap[0].LastPaneActivity)
+	}
+	cached, ok := m.paneCache["a1"]
+	if !ok {
+		t.Fatal("paneCache missing entry for a1 after first-tick seed")
+	}
+	if cached.lastHash == 0 {
+		t.Error("paneCache[a1].lastHash = 0, want non-zero (FNV of \"abc\")")
+	}
+	if !cached.lastActivity.IsZero() {
+		t.Errorf("paneCache[a1].lastActivity = %v, want zero (seed-only)", cached.lastActivity)
+	}
+}
+
+// TestRefreshPaneActivity_HashChangePromotes locks E5: hash differs between
+// ticks → paneActive = now, cache updated. This is the primary "pane signal
+// detected activity" path that F-core-b activates.
+func TestRefreshPaneActivity_HashChangePromotes(t *testing.T) {
+	fake := &fakeSource{agents: []protocol.Agent{agentWithTmux("a1", "session:0.0")}}
+	cap := &scriptedCapture{outputs: []string{"abc", "xyz"}}
+	m := NewManager(fake, cap.fn)
+
+	// Tick 1: seed.
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	// Tick 2: hash changes → promote.
+	before := time.Now()
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now()
+
+	snap := m.Snapshot()
+	if snap[0].LastPaneActivity.IsZero() {
+		t.Fatal("LastPaneActivity = zero after hash-change tick, want non-zero")
+	}
+	if snap[0].LastPaneActivity.Before(before) || snap[0].LastPaneActivity.After(after) {
+		t.Errorf("LastPaneActivity = %v, want within [%v, %v]", snap[0].LastPaneActivity, before, after)
+	}
+}
+
+// TestRefreshPaneActivity_HashStableCarriesForward locks E3: hash matches
+// across ticks → carry forward cached lastActivity. After a hash-change tick
+// stamps a non-zero value, subsequent stable ticks must preserve it (until
+// PaneOnlineWindow eventually demotes via threshold).
+func TestRefreshPaneActivity_HashStableCarriesForward(t *testing.T) {
+	fake := &fakeSource{agents: []protocol.Agent{agentWithTmux("a1", "session:0.0")}}
+	cap := &scriptedCapture{outputs: []string{"abc", "xyz", "xyz"}}
+	m := NewManager(fake, cap.fn)
+
+	// Tick 1: seed.
+	m.Refresh()
+	// Tick 2: hash changes → promote, capture timestamp.
+	m.Refresh()
+	promotedAt := m.Snapshot()[0].LastPaneActivity
+	if promotedAt.IsZero() {
+		t.Fatal("setup: tick 2 should have produced non-zero LastPaneActivity")
+	}
+	// Tick 3: hash stable → carry forward.
+	m.Refresh()
+	carried := m.Snapshot()[0].LastPaneActivity
+	if !carried.Equal(promotedAt) {
+		t.Errorf("tick 3 LastPaneActivity = %v, want %v (carry-forward)", carried, promotedAt)
+	}
+}
+
+// TestRefreshPaneActivity_NoTmuxTargetSkips locks E1: agents with no
+// tmux_target Meta never hit capturePane and remain on the heartbeat-only
+// path (LastPaneActivity == zero).
+func TestRefreshPaneActivity_NoTmuxTargetSkips(t *testing.T) {
+	fake := &fakeSource{agents: []protocol.Agent{
+		{ID: "a1", Name: "a1", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now()},
+	}}
+	cap := &scriptedCapture{outputs: []string{"abc"}}
+	m := NewManager(fake, cap.fn)
+
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if cap.calls != 0 {
+		t.Errorf("capturePane called %d times for tmux-targetless agent, want 0", cap.calls)
+	}
+	if !m.Snapshot()[0].LastPaneActivity.IsZero() {
+		t.Errorf("LastPaneActivity = %v, want zero (no tmux_target → skip)", m.Snapshot()[0].LastPaneActivity)
+	}
+	if _, hadCache := m.paneCache["a1"]; hadCache {
+		t.Error("paneCache should not contain entries for tmux-targetless agents")
+	}
+}
+
+// TestRefreshPaneActivity_CaptureErrorCarriesForward locks E2: capturePane
+// error carries forward cached lastActivity, NOT zero. Three-step shape per
+// Brian-pattern-3.5 — without step 2 producing a non-zero cached value, a
+// step-3 zero would also pass and the carry-forward semantic would be
+// vacuously asserted.
+func TestRefreshPaneActivity_CaptureErrorCarriesForward(t *testing.T) {
+	fake := &fakeSource{agents: []protocol.Agent{agentWithTmux("a1", "session:0.0")}}
+	captureErr := errString("tmux capture-pane: target gone")
+	cap := &scriptedCapture{
+		outputs: []string{"abc", "xyz", ""},
+		errs:    []error{nil, nil, captureErr},
+	}
+	m := NewManager(fake, cap.fn)
+
+	// Step 1: seed.
+	m.Refresh()
+	// Step 2: hash change → non-zero promotion timestamp (precondition for
+	// observable carry-forward in step 3).
+	m.Refresh()
+	step2 := m.Snapshot()[0].LastPaneActivity
+	if step2.IsZero() {
+		t.Fatal("setup: step 2 LastPaneActivity must be non-zero for step 3 to be observable")
+	}
+	// Step 3: capturePane error → carry forward step 2's value, NOT zero.
+	m.Refresh()
+	step3 := m.Snapshot()[0].LastPaneActivity
+	if !step3.Equal(step2) {
+		t.Errorf("step 3 LastPaneActivity = %v, want %v (carry-forward from step 2)", step3, step2)
+	}
+}
+
+// errString is a minimal error implementation for capturePane fake errors.
+type errString string
+
+func (e errString) Error() string { return string(e) }
