@@ -21,6 +21,7 @@ const (
 
 	pollInterval           = 3 * time.Second
 	healthInterval         = 30 * time.Second
+	heartbeatInterval      = 30 * time.Second
 	defaultMonitorInterval = 5 * time.Minute
 
 	defaultModel     = "gemma4:e4b"
@@ -188,7 +189,14 @@ func (g *Gemma) Start() error {
 
 	go g.pollLoop()
 	go g.healthLoop()
+	go g.heartbeatLoop()
 	go g.monitorLoop()
+
+	// Boot-time replay: run the most recent N hub messages through the
+	// sentinel so any active failures from the pre-restart window are
+	// caught. Live messages from this point onward arrive via the
+	// OnMessage subscriber wired in cmd/bot-hq/main.go.
+	g.replayThroughSentinel()
 
 	g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
@@ -408,6 +416,93 @@ func (g *Gemma) healthLoop() {
 				})
 				g.restartOllama()
 			}
+		}
+	}
+}
+
+// replayBacklog is the number of recent hub messages Emma re-classifies
+// at boot to catch active failures from the pre-restart window.
+const replayBacklog = 50
+
+// OnHubMessage is the OnMessage subscriber Emma registers with the hub.
+// Pure dispatcher: skips Emma's own messages, runs SentinelMatch, and
+// hands matched messages to dispatchSentinelHit. Default-ignore for
+// any non-match.
+//
+// Wired post-Start in cmd/bot-hq/main.go via h.DB.OnMessage(...).
+func (g *Gemma) OnHubMessage(msg protocol.Message) {
+	if msg.FromAgent == agentID {
+		return // skip self to avoid feedback loops
+	}
+	d := SentinelMatch(msg)
+	if !d.Match {
+		return // default-ignore
+	}
+	g.dispatchSentinelHit(msg, d)
+}
+
+// dispatchSentinelHit emits the appropriate hub message for a sentinel
+// match. Always-flag matches go out as Type=MsgFlag (Discord-bound);
+// pre-filter-only matches go out as Type=MsgUpdate observations to
+// Rain. Both paths reuse Gemma.shouldFlag so a noisy storm doesn't
+// blow past the existing rate cap and hysteresis window.
+func (g *Gemma) dispatchSentinelHit(msg protocol.Message, d SentinelDecision) {
+	now := time.Now()
+	if d.AlwaysFlag {
+		if !g.shouldFlag("sentinel:"+d.Pattern, now) {
+			return
+		}
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			Type:      protocol.MsgFlag,
+			Content:   fmt.Sprintf("Sentinel always-flag hit in msg #%d (from %s, pattern %s): %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)),
+		})
+		return
+	}
+	if !g.shouldFlag("sentinel-obs:"+d.Pattern, now) {
+		return
+	}
+	g.db.InsertMessage(protocol.Message{
+		FromAgent: agentID,
+		ToAgent:   "rain",
+		Type:      protocol.MsgUpdate,
+		Content:   fmt.Sprintf("Sentinel match in msg #%d (from %s, pattern %s): %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)),
+	})
+}
+
+// replayThroughSentinel feeds the last replayBacklog hub messages
+// through OnHubMessage at boot. Catches active failures from the
+// pre-restart window without requiring a separate silence-poll path
+// (deferred to post-Phase-F per locked msg 2442).
+func (g *Gemma) replayThroughSentinel() {
+	msgs, err := g.db.GetRecentMessages(replayBacklog)
+	if err != nil {
+		return
+	}
+	for _, m := range msgs {
+		g.OnHubMessage(m)
+	}
+}
+
+// heartbeatLoop refreshes Emma's last_seen on a fast cadence so she stays
+// in panestate.ActivityOnline (and thus visible in the hub strip) during
+// quiet observation periods. Claude-pane agents get this refresh for free
+// via the MCP middleware on every tool call (internal/mcp/tools.go);
+// Emma is a Go-internal monitor with no MCP entry point, so the refresh
+// must be explicit.
+//
+// Interval is well within panestate.OnlineWindow (60s) — 30s gives 2x
+// margin against GC pauses and schedule jitter.
+func (g *Gemma) heartbeatLoop() {
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-g.stopCh:
+			return
+		case <-ticker.C:
+			_ = g.db.UpdateAgentLastSeen(agentID)
 		}
 	}
 }

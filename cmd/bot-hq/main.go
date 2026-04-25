@@ -93,11 +93,26 @@ func runHub() {
 		}
 	}
 
-	// 7. Start Brian orchestrator if configured
+	// 7. Build Brian orchestrator instance (Start deferred until after TUI
+	// is ready so its first inserts reach the TUI via OnMessage).
 	var brianOrch *brian.Brian
 	log.Printf("[autostart] brian=%v rain=%v emma=%v", cfg.Brian.AutoStart, cfg.Rain.AutoStart, cfg.Gemma.AutoStart)
 	if cfg.Brian.AutoStart {
 		brianOrch = brian.New(h.DB, cfg.Brian.WorkDir)
+	}
+
+	// 8. Build TUI app + program and wire OnMessage BEFORE starting agents.
+	// In-process inserts (autostart errors, internal monitors) emitted during
+	// step 9 below now reach the TUI immediately; cross-process MCP inserts
+	// continue to surface via the tick poll in App.Update.
+	app := ui.NewApp(cfg, h.DB, brianOrch)
+	p := tea.NewProgram(app, tea.WithAltScreen())
+	h.DB.OnMessage(func(msg protocol.Message) {
+		p.Send(ui.MessageReceived{Message: msg})
+	})
+
+	// 9. Start Brian orchestrator
+	if brianOrch != nil {
 		if err := brianOrch.Start(); err != nil {
 			log.Printf("[autostart] brian FAILED: %v", err)
 			h.DB.InsertMessage(protocol.Message{
@@ -111,7 +126,7 @@ func runHub() {
 		}
 	}
 
-	// 7b. Start Rain QA agent if configured
+	// 9b. Start Rain QA agent if configured
 	if cfg.Rain.AutoStart {
 		rainAgent := rain.New(h.DB, cfg.Rain.WorkDir)
 		if err := rainAgent.Start(); err != nil {
@@ -127,7 +142,7 @@ func runHub() {
 		}
 	}
 
-	// 7c. Start Emma (the persistent monitor agent, backed by the gemma package + model) if configured
+	// 9c. Start Emma (the persistent monitor agent, backed by the gemma package + model) if configured
 	if cfg.Gemma.AutoStart {
 		emmaAgent := gemma.New(h.DB, cfg.Gemma)
 		if err := emmaAgent.Start(); err != nil {
@@ -139,19 +154,16 @@ func runHub() {
 			})
 		} else {
 			log.Printf("[autostart] emma OK")
+			// Wire Emma's hub-reactive sentinel subscriber. OnMessage fires
+			// for every in-process insert; cross-process MCP inserts surface
+			// to Emma via her own boot-time replay + the live tick path is
+			// not needed (sentinel is purely event-driven).
+			h.DB.OnMessage(emmaAgent.OnHubMessage)
 			defer emmaAgent.Stop()
 		}
 	}
 
-	// 8. Run Bubbletea TUI
-	app := ui.NewApp(cfg, h.DB, brianOrch)
-	p := tea.NewProgram(app, tea.WithAltScreen())
-
-	// Wire Hub OnMessage to forward messages to TUI
-	h.DB.OnMessage(func(msg protocol.Message) {
-		p.Send(ui.MessageReceived{Message: msg})
-	})
-
+	// 10. Run Bubbletea TUI
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 		os.Exit(1)

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
@@ -107,5 +108,177 @@ func TestHubTabViewHidesStaleAgents(t *testing.T) {
 	}
 	if strings.Contains(out, "offline-agent") {
 		t.Errorf("strip should hide offline-agent, got:\n%s", out)
+	}
+}
+
+// TestWrapTextPreservesParagraphBreaks locks that explicit `\n` between
+// paragraphs round-trip through wrapping. The pre-fix behavior collapsed
+// all newlines into spaces via strings.Fields, producing one wall of text.
+func TestWrapTextPreservesParagraphBreaks(t *testing.T) {
+	in := "line one\nline two"
+	out := wrapText(in, 80)
+	if !strings.Contains(out, "\n") {
+		t.Fatalf("output lost paragraph break, got: %q", out)
+	}
+	if !strings.Contains(out, "line one") || !strings.Contains(out, "line two") {
+		t.Fatalf("output dropped a paragraph, got: %q", out)
+	}
+	if strings.Count(out, "\n") != 1 {
+		t.Errorf("expected exactly 1 newline, got %d in %q", strings.Count(out, "\n"), out)
+	}
+}
+
+// TestWrapTextPreservesEmptyLines locks that blank lines between paragraphs
+// (e.g. "a\n\nb") round-trip as empty segments, not collapsed.
+func TestWrapTextPreservesEmptyLines(t *testing.T) {
+	in := "para one\n\npara two"
+	out := wrapText(in, 80)
+	parts := strings.Split(out, "\n")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 segments (para1 / empty / para2), got %d: %q", len(parts), parts)
+	}
+	if parts[1] != "" {
+		t.Errorf("middle segment must be empty, got %q", parts[1])
+	}
+}
+
+// TestWrapTextBulletList locks that bullet lines stay on their own lines
+// regardless of width — the most user-visible failure mode of the prior
+// implementation.
+func TestWrapTextBulletList(t *testing.T) {
+	in := "- one\n- two\n- three"
+	out := wrapText(in, 80)
+	parts := strings.Split(out, "\n")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 bullet lines, got %d: %q", len(parts), parts)
+	}
+	for i, want := range []string{"one", "two", "three"} {
+		if !strings.Contains(parts[i], want) {
+			t.Errorf("part %d missing %q: %q", i, want, parts[i])
+		}
+	}
+}
+
+// TestWrapTextLongLineStillWraps locks that the within-paragraph wrap
+// still happens at maxWidth — paragraph-split must not disable wrap.
+func TestWrapTextLongLineStillWraps(t *testing.T) {
+	in := "x x x x x x x x x x"
+	out := wrapText(in, 5)
+	if !strings.Contains(out, "\n") {
+		t.Fatalf("expected wrap within paragraph, got: %q", out)
+	}
+}
+
+// TestWrapTextNoNewlineRatchet locks that input without any `\n` produces
+// the same shape as the pre-fix behavior for the common single-paragraph
+// case (single line under maxWidth returns unchanged).
+func TestWrapTextNoNewlineRatchet(t *testing.T) {
+	in := "short message"
+	out := wrapText(in, 80)
+	if out != "short message" {
+		t.Errorf("short single-line input changed unexpectedly: in=%q out=%q", in, out)
+	}
+}
+
+// runeKey constructs a KeyMsg for a single rune (matches textarea's own
+// test helpers in bubbles).
+func runeKey(r rune) tea.KeyMsg {
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+}
+
+// typeString feeds each rune of s through the HubTab as KeyRunes events.
+// Returns the updated HubTab.
+func typeString(h HubTab, s string) HubTab {
+	for _, r := range s {
+		h, _ = h.Update(runeKey(r))
+	}
+	return h
+}
+
+// TestHubTabMultiLineSubmitOnEnter locks that ctrl+j (the universal
+// terminal-supported newline binding) inserts a newline into the input
+// buffer, then plain enter submits the full multi-line value via
+// CommandSubmitted. shift+enter shares the same InsertNewline binding;
+// ctrl+j is used in the test because bubbletea's KeyMsg encoding for
+// shift+enter varies by terminal capability.
+func TestHubTabMultiLineSubmitOnEnter(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h.focused = true
+	h.input.Focus()
+
+	h = typeString(h, "abc")
+
+	// ctrl+j inserts a newline via the rebound InsertNewline binding.
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+
+	h = typeString(h, "def")
+
+	// Plain enter submits.
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected CommandSubmitted cmd from plain enter, got nil")
+	}
+	out := cmd()
+	cs, ok := out.(CommandSubmitted)
+	if !ok {
+		t.Fatalf("expected CommandSubmitted, got %T (%v)", out, out)
+	}
+	if !strings.Contains(cs.Text, "abc") || !strings.Contains(cs.Text, "def") {
+		t.Errorf("submitted text missing parts: %q", cs.Text)
+	}
+	if !strings.Contains(cs.Text, "\n") {
+		t.Errorf("submitted text missing newline (multi-line not preserved): %q", cs.Text)
+	}
+}
+
+// TestHubTabPastePreservesNewlines locks that bracketed-paste delivery of
+// '\n' (KeyEnter with Paste=true) inserts the newline into the buffer
+// instead of triggering a submit.
+func TestHubTabPastePreservesNewlines(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h.focused = true
+	h.input.Focus()
+
+	// Simulate pasting "x\ny" by sending each char as Paste=true.
+	pasteX := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}, Paste: true}
+	pasteNL := tea.KeyMsg{Type: tea.KeyEnter, Paste: true}
+	pasteY := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}, Paste: true}
+
+	h, _ = h.Update(pasteX)
+	var cmd tea.Cmd
+	h, cmd = h.Update(pasteNL)
+	if cmd != nil {
+		// If a submit fired here, the paste was wrongly interpreted as enter.
+		out := cmd()
+		if _, ok := out.(CommandSubmitted); ok {
+			t.Fatal("paste-flagged enter wrongly triggered CommandSubmitted")
+		}
+	}
+	h, _ = h.Update(pasteY)
+
+	val := h.input.Value()
+	if !strings.Contains(val, "x") || !strings.Contains(val, "y") {
+		t.Fatalf("paste lost characters: %q", val)
+	}
+	if !strings.Contains(val, "\n") {
+		t.Errorf("paste lost newline: %q", val)
+	}
+}
+
+// TestHubTabAccepts10kbInput locks that the textarea has no character
+// limit (CharLimit=0). Long pastes must round-trip without truncation.
+func TestHubTabAccepts10kbInput(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h.focused = true
+	h.input.Focus()
+
+	const size = 10_000
+	long := strings.Repeat("a", size)
+	h.input.SetValue(long)
+	if got := len(h.input.Value()); got != size {
+		t.Errorf("long input truncated: got len=%d, want %d", got, size)
 	}
 }

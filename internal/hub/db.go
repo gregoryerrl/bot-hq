@@ -254,22 +254,45 @@ func (db *DB) UnregisterAgent(id string) error {
 	return db.UpdateAgentStatus(id, protocol.StatusOffline)
 }
 
-// ReconcileCoderGhosts flips coder agents whose paired claude session is
-// already marked stopped back to offline. Idempotent. Wired post-OpenDB at
-// boot to clean ghost rows that accumulated before the bug-#4 fix landed
-// (claude_stop used to mark the session stopped but leave the agent row at
-// status=online), and to act as a safety net for any future drift in the
-// stop path. Returns the count of rows flipped so callers can log it.
+// staleCoderCutoff is the last_seen age beyond which an online coder row
+// is treated as a ghost regardless of claude_session state. Tuned wide
+// enough to never sweep a healthy coder (active sessions update last_seen
+// per MCP tool call via UpdateAgentLastSeen) but tight enough to keep
+// Emma's anomaly checks from flagging long-stale rows on every restart.
+const staleCoderCutoff = 7 * 24 * time.Hour
+
+// ReconcileCoderGhosts flips ghost coder agents back to offline. Two
+// cleanup paths share one query for atomicity and a single count return:
 //
-// Pure DB scope by design — does NOT use tmux discovery. The discovery-based
-// reconciliation lives in claudeList and conflates registration with cleanup;
-// this is the cleanup-only path with no IO contract.
+//  1. Coders whose paired claude_session row is already "stopped" — the
+//     bug-#4-era leak path that this function originally targeted.
+//  2. Coders whose last_seen is older than staleCoderCutoff — covers
+//     pre-existing stale rows from before the bug-#4 fix landed and any
+//     future drift where a coder dies without its session marker being
+//     written.
+//
+// Idempotent. Wired post-OpenDB at boot. Returns the count of rows
+// flipped so callers can log it.
+//
+// Pure DB scope by design — does NOT use tmux discovery. The discovery-
+// based reconciliation lives in claudeList and conflates registration
+// with cleanup; this is the cleanup-only path with no IO contract.
 func (db *DB) ReconcileCoderGhosts() (int, error) {
+	staleCutoffMillis := time.Now().Add(-staleCoderCutoff).UnixMilli()
 	res, err := db.conn.Exec(`
 		UPDATE agents SET status = ?
 		WHERE type = ? AND status = ?
-		  AND id IN (SELECT id FROM claude_sessions WHERE status = ?)
-	`, string(protocol.StatusOffline), string(protocol.AgentCoder), string(protocol.StatusOnline), "stopped")
+		  AND (
+		    id IN (SELECT id FROM claude_sessions WHERE status = ?)
+		    OR last_seen < ?
+		  )
+	`,
+		string(protocol.StatusOffline),
+		string(protocol.AgentCoder),
+		string(protocol.StatusOnline),
+		"stopped",
+		staleCutoffMillis,
+	)
 	if err != nil {
 		return 0, err
 	}
