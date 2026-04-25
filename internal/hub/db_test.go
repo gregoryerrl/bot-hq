@@ -102,6 +102,118 @@ func TestInsertAndReadMessages(t *testing.T) {
 	}
 }
 
+// TestReadMessagesTailContract locks the restart-context-recovery contract:
+// sinceID<=0 returns the latest N rows in chronological order, sinceID>0 returns
+// the next-after-sinceID rows in chronological order, sinceID==lastID returns
+// empty (polling stability). Without these guarantees, fresh-start callers
+// (agent boot, hub_read with no since_id) get oldest-first historical traffic
+// instead of recent context.
+func TestReadMessagesTailContract(t *testing.T) {
+	db := setupTestDB(t)
+	db.RegisterAgent(protocol.Agent{ID: "sender", Name: "S", Type: protocol.AgentCoder, Status: protocol.StatusOnline})
+
+	const total = 100
+	var maxID int64
+	for i := 1; i <= total; i++ {
+		id, err := db.InsertMessage(protocol.Message{
+			FromAgent: "sender",
+			Type:      protocol.MsgUpdate,
+			Content:   "msg",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id > maxID {
+			maxID = id
+		}
+	}
+
+	t.Run("sinceID=0 returns latest N chronological", func(t *testing.T) {
+		msgs, err := db.ReadMessages("", 0, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(msgs) != 50 {
+			t.Fatalf("len=%d, want 50", len(msgs))
+		}
+		if msgs[0].ID != maxID-49 {
+			t.Errorf("first ID=%d, want %d (latest 50 starting from maxID-49)", msgs[0].ID, maxID-49)
+		}
+		if msgs[len(msgs)-1].ID != maxID {
+			t.Errorf("last ID=%d, want %d (chronological order ends at maxID)", msgs[len(msgs)-1].ID, maxID)
+		}
+		for i := 1; i < len(msgs); i++ {
+			if msgs[i].ID <= msgs[i-1].ID {
+				t.Errorf("not chronological at i=%d: %d <= %d", i, msgs[i].ID, msgs[i-1].ID)
+			}
+		}
+	})
+
+	t.Run("sinceID=K returns next-after-K chronological", func(t *testing.T) {
+		msgs, err := db.ReadMessages("", 50, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(msgs) != 50 {
+			t.Fatalf("len=%d, want 50", len(msgs))
+		}
+		if msgs[0].ID != 51 {
+			t.Errorf("first ID=%d, want 51 (next after sinceID=50)", msgs[0].ID)
+		}
+		if msgs[len(msgs)-1].ID != 100 {
+			t.Errorf("last ID=%d, want 100", msgs[len(msgs)-1].ID)
+		}
+	})
+
+	t.Run("sinceID=lastID returns empty (polling stability)", func(t *testing.T) {
+		msgs, err := db.ReadMessages("", maxID, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(msgs) != 0 {
+			t.Errorf("len=%d, want 0 (no spurious replay at watermark)", len(msgs))
+		}
+	})
+
+	t.Run("sinceID<0 defensive: treated as tail", func(t *testing.T) {
+		msgs, err := db.ReadMessages("", -5, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(msgs) != 50 {
+			t.Fatalf("len=%d, want 50", len(msgs))
+		}
+		if msgs[len(msgs)-1].ID != maxID {
+			t.Errorf("last ID=%d, want %d (tail mode on negative sinceID)", msgs[len(msgs)-1].ID, maxID)
+		}
+	})
+}
+
+// TestReadMessagesTailBoundaryExactN locks behavior when DB row count equals
+// the requested limit. Boundary case for the restart-context-recovery contract.
+func TestReadMessagesTailBoundaryExactN(t *testing.T) {
+	db := setupTestDB(t)
+	db.RegisterAgent(protocol.Agent{ID: "sender", Name: "S", Type: protocol.AgentCoder, Status: protocol.StatusOnline})
+
+	const n = 50
+	for i := 1; i <= n; i++ {
+		if _, err := db.InsertMessage(protocol.Message{FromAgent: "sender", Type: protocol.MsgUpdate, Content: "msg"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	msgs, err := db.ReadMessages("", 0, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != n {
+		t.Fatalf("len=%d, want %d (return all when row count == limit)", len(msgs), n)
+	}
+	if msgs[0].ID != 1 || msgs[len(msgs)-1].ID != int64(n) {
+		t.Errorf("range=[%d,%d], want [1,%d]", msgs[0].ID, msgs[len(msgs)-1].ID, n)
+	}
+}
+
 func TestCreateAndGetSession(t *testing.T) {
 	db := setupTestDB(t)
 

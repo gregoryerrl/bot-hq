@@ -1,11 +1,25 @@
 package brian
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
+
+func setupTestDB(t *testing.T) *hub.DB {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "test.db")
+	db, err := hub.OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
 
 func TestNudgeContainsMessageContent(t *testing.T) {
 	content := "fix the login bug"
@@ -216,5 +230,71 @@ func TestShouldForwardToBrian_PeerToUserVisibility(t *testing.T) {
 				t.Errorf("shouldForwardToBrian(%+v) = %v, want %v", tc.msg, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestStartInitDoesNotPreSeedLastMsgID is a source ratchet locking the C2
+// deletion: brian.go must NOT pre-seed lastMsgID to the highest existing ID at
+// init. The pre-fix init block called GetRecentMessages(1) and assigned
+// msgs[0].ID to b.lastMsgID, which silently skipped any pre-restart backlog.
+// First poll-tick now relies on ReadMessages tail semantics (sinceID=0 →
+// latest N) to replay recent context.
+func TestStartInitDoesNotPreSeedLastMsgID(t *testing.T) {
+	data, err := os.ReadFile("brian.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	for _, banned := range []string{
+		"b.db.GetRecentMessages(1)",
+		"b.lastMsgID = msgs[0].ID",
+	} {
+		if strings.Contains(src, banned) {
+			t.Errorf("brian.go must not contain %q — reintroduces the pre-restart backlog skip bug", banned)
+		}
+	}
+}
+
+// TestProcessNewMessagesAdvancesWatermark seeds N+5 messages in a fresh DB,
+// constructs a Brian with zero-valued lastMsgID, calls processNewMessages
+// once, and verifies the watermark advances to the highest seen ID. A second
+// call returns nothing (no spurious replay — locks polling stability and the
+// C1+C2 interaction).
+func TestProcessNewMessagesAdvancesWatermark(t *testing.T) {
+	db := setupTestDB(t)
+
+	const seedCount = 55 // > the 50-row limit so we exercise the cap path
+	var maxID int64
+	for i := 0; i < seedCount; i++ {
+		id, err := db.InsertMessage(protocol.Message{
+			FromAgent: "user",
+			Type:      protocol.MsgCommand,
+			Content:   "msg",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id > maxID {
+			maxID = id
+		}
+	}
+
+	b := New(db, t.TempDir())
+	if b.lastMsgID != 0 {
+		t.Fatalf("New(): lastMsgID = %d, want 0 (Go zero-value)", b.lastMsgID)
+	}
+
+	// First call: sinceID=0 path → ReadMessages tail returns latest 50.
+	// SendCommand will fail (no tmux), but the watermark advances regardless.
+	b.processNewMessages()
+	if b.lastMsgID != maxID {
+		t.Errorf("after first poll: lastMsgID = %d, want %d (latest seeded ID)", b.lastMsgID, maxID)
+	}
+
+	// Second call: sinceID=maxID path → ReadMessages returns empty, no advance.
+	prev := b.lastMsgID
+	b.processNewMessages()
+	if b.lastMsgID != prev {
+		t.Errorf("after second poll: lastMsgID = %d, want %d (no spurious replay)", b.lastMsgID, prev)
 	}
 }

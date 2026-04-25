@@ -371,31 +371,56 @@ func (db *DB) InsertMessage(msg protocol.Message) (int64, error) {
 	return id, nil
 }
 
+// ReadMessages returns hub messages for an agent (or all if agentID="").
+// sinceID<=0 returns the latest N rows in chronological order (tail mode for
+// fresh-start callers). sinceID>0 returns rows with id>sinceID in chronological
+// order (incremental polling). Stable contract relied on by brian/rain pollers.
 func (db *DB) ReadMessages(agentID string, sinceID int64, limit int) ([]protocol.Message, error) {
 	if limit <= 0 {
 		limit = 50
 	}
+	tail := sinceID <= 0
 	var rows *sql.Rows
 	var err error
 	if agentID == "" {
-		// Return all messages (for TUI/admin view)
-		rows, err = db.conn.Query(
-			`SELECT id, session_id, from_agent, to_agent, type, content, created
-			 FROM messages
-			 WHERE id > ?
-			 ORDER BY id ASC
-			 LIMIT ?`,
-			sinceID, limit,
-		)
+		if tail {
+			rows, err = db.conn.Query(
+				`SELECT id, session_id, from_agent, to_agent, type, content, created
+				 FROM messages
+				 ORDER BY id DESC
+				 LIMIT ?`,
+				limit,
+			)
+		} else {
+			rows, err = db.conn.Query(
+				`SELECT id, session_id, from_agent, to_agent, type, content, created
+				 FROM messages
+				 WHERE id > ?
+				 ORDER BY id ASC
+				 LIMIT ?`,
+				sinceID, limit,
+			)
+		}
 	} else {
-		rows, err = db.conn.Query(
-			`SELECT id, session_id, from_agent, to_agent, type, content, created
-			 FROM messages
-			 WHERE (to_agent = ? OR to_agent = '') AND id > ?
-			 ORDER BY id ASC
-			 LIMIT ?`,
-			agentID, sinceID, limit,
-		)
+		if tail {
+			rows, err = db.conn.Query(
+				`SELECT id, session_id, from_agent, to_agent, type, content, created
+				 FROM messages
+				 WHERE (to_agent = ? OR to_agent = '')
+				 ORDER BY id DESC
+				 LIMIT ?`,
+				agentID, limit,
+			)
+		} else {
+			rows, err = db.conn.Query(
+				`SELECT id, session_id, from_agent, to_agent, type, content, created
+				 FROM messages
+				 WHERE (to_agent = ? OR to_agent = '') AND id > ?
+				 ORDER BY id ASC
+				 LIMIT ?`,
+				agentID, sinceID, limit,
+			)
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -416,6 +441,11 @@ func (db *DB) ReadMessages(agentID string, sinceID int64, limit int) ([]protocol
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if tail {
+		for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+			msgs[i], msgs[j] = msgs[j], msgs[i]
+		}
 	}
 	return msgs, nil
 }

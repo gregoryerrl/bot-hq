@@ -86,11 +86,9 @@ func (r *Rain) Start() error {
 		return fmt.Errorf("rain register: %w", err)
 	}
 
-	msgs, err := r.db.GetRecentMessages(1)
-	if err == nil && len(msgs) > 0 {
-		r.lastMsgID = msgs[0].ID
-	}
-
+	// lastMsgID stays at zero. The first poll-tick uses ReadMessages's tail
+	// semantics (sinceID<=0 → latest N) to replay recent backlog through the
+	// nudge filter chain.
 	r.running = true
 
 	go r.pollLoop()
