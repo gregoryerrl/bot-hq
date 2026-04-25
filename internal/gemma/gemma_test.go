@@ -3,6 +3,7 @@ package gemma
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -457,5 +458,68 @@ func TestStartWiresHeartbeatLoop(t *testing.T) {
 	}
 	if !strings.Contains(src, "UpdateAgentLastSeen(agentID)") {
 		t.Errorf("heartbeatLoop must call db.UpdateAgentLastSeen(agentID)")
+	}
+}
+
+// TestAgentImbalanceExcludesCoders locks the F3 whitelist contract: coder
+// agents are spawn-and-die by design, so their offline rows must not count
+// toward the offline-ratio anomaly. The "20 offline coders + 6 online
+// non-coders" steady-state should produce no flag.
+func TestAgentImbalanceExcludesCoders(t *testing.T) {
+	agents := []protocol.Agent{
+		{ID: "brian", Type: protocol.AgentBrian, Status: protocol.StatusOnline},
+		{ID: "rain", Type: protocol.AgentQA, Status: protocol.StatusOnline},
+		{ID: "emma", Type: protocol.AgentGemma, Status: protocol.StatusOnline},
+		{ID: "discord", Type: protocol.AgentDiscord, Status: protocol.StatusOnline},
+		{ID: "clive", Type: protocol.AgentVoice, Status: protocol.StatusOnline},
+		{ID: "live", Type: protocol.AgentVoice, Status: protocol.StatusOnline},
+	}
+	for i := 0; i < 20; i++ {
+		agents = append(agents, protocol.Agent{
+			ID:     fmt.Sprintf("coder-%d", i),
+			Type:   protocol.AgentCoder,
+			Status: protocol.StatusOffline,
+		})
+	}
+	if a, ok := checkAgentImbalance(agents); ok {
+		t.Errorf("expected no anomaly (6 non-coder online + 20 offline coders excluded), got %+v", a)
+	}
+}
+
+// TestAgentImbalanceFiresOnNonCoders locks the inverse: when non-coder
+// agents skew offline, the anomaly still fires. This is the F3 ratchet —
+// the coder whitelist must not accidentally suppress real imbalance signal.
+func TestAgentImbalanceFiresOnNonCoders(t *testing.T) {
+	agents := []protocol.Agent{
+		{ID: "brian", Type: protocol.AgentBrian, Status: protocol.StatusOffline},
+		{ID: "rain", Type: protocol.AgentQA, Status: protocol.StatusOffline},
+		{ID: "emma", Type: protocol.AgentGemma, Status: protocol.StatusOnline},
+		{ID: "discord", Type: protocol.AgentDiscord, Status: protocol.StatusOffline},
+		// One coder included — must not change the outcome.
+		{ID: "coder-1", Type: protocol.AgentCoder, Status: protocol.StatusOnline},
+	}
+	a, ok := checkAgentImbalance(agents)
+	if !ok {
+		t.Fatalf("expected anomaly (3 non-coder offline vs 1 non-coder online), got none")
+	}
+	if a.key != "agent-imbalance" {
+		t.Errorf("expected key=agent-imbalance, got %q", a.key)
+	}
+	if !strings.Contains(a.msg, "1 online, 3 offline") {
+		t.Errorf("anomaly msg should report non-coder counts (1 online, 3 offline), got %q", a.msg)
+	}
+}
+
+// TestAgentImbalanceCoderOnlyNoFlag locks the edge case: when only coder
+// agents exist (no non-coder rows), nothing is anomalous regardless of
+// their status distribution. The whitelist should not crash or false-fire.
+func TestAgentImbalanceCoderOnlyNoFlag(t *testing.T) {
+	agents := []protocol.Agent{
+		{ID: "coder-1", Type: protocol.AgentCoder, Status: protocol.StatusOffline},
+		{ID: "coder-2", Type: protocol.AgentCoder, Status: protocol.StatusOffline},
+		{ID: "coder-3", Type: protocol.AgentCoder, Status: protocol.StatusOnline},
+	}
+	if a, ok := checkAgentImbalance(agents); ok {
+		t.Errorf("expected no anomaly (coder-only roster), got %+v", a)
 	}
 }

@@ -528,6 +528,34 @@ type anomaly struct {
 	key, msg string
 }
 
+// checkAgentImbalance reports an offline-ratio anomaly if non-coder agents
+// skew offline. Coders (protocol.AgentCoder) are excluded from the count
+// because they are spawn-and-die by design — their offline state is the
+// expected steady state, not an anomaly. Returns (anomaly, true) when the
+// imbalance trips, otherwise (zero, false).
+func checkAgentImbalance(agents []protocol.Agent) (anomaly, bool) {
+	online, offline := 0, 0
+	considered := 0
+	for _, a := range agents {
+		if a.Type == protocol.AgentCoder {
+			continue
+		}
+		considered++
+		if a.Status == protocol.StatusOnline || a.Status == protocol.StatusWorking {
+			online++
+		} else {
+			offline++
+		}
+	}
+	if offline > online && considered > 1 {
+		return anomaly{
+			key: "agent-imbalance",
+			msg: fmt.Sprintf("Agent anomaly: %d online, %d offline (coders excluded)", online, offline),
+		}, true
+	}
+	return anomaly{}, false
+}
+
 // pseudoFilesystemMounts lists mount-point prefixes whose capacity reading
 // is a kernel artifact, not real disk pressure. Filter them before flagging.
 // macOS: devfs at /dev, VM scratch at /System/Volumes/VM, firmlinks under
@@ -711,19 +739,8 @@ func (g *Gemma) runHealthChecks() {
 	// 4. Hub agent status
 	agents, err := g.db.ListAgents("")
 	if err == nil {
-		online, offline := 0, 0
-		for _, a := range agents {
-			if a.Status == protocol.StatusOnline || a.Status == protocol.StatusWorking {
-				online++
-			} else {
-				offline++
-			}
-		}
-		if offline > online && len(agents) > 1 {
-			anomalies = append(anomalies, anomaly{
-				key: "agent-imbalance",
-				msg: fmt.Sprintf("Agent anomaly: %d online, %d offline", online, offline),
-			})
+		if a, ok := checkAgentImbalance(agents); ok {
+			anomalies = append(anomalies, a)
 		}
 	}
 
