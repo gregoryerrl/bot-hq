@@ -41,6 +41,240 @@ func TestNewAndKillSession(t *testing.T) {
 	}
 }
 
+// promptByteAnchor must match the literal U+276F + space sequence and
+// nothing else. Pure unit, no tmux dependency. Locks the empirical hexdump
+// finding (Rain's investigation msg 2317) into the source.
+func TestPromptByteAnchor_MatchesLiteral(t *testing.T) {
+	want := "\xe2\x9d\xaf\xc2\xa0" // ❯ + NBSP (U+00A0)
+	if promptByteAnchor != want {
+		t.Errorf("promptByteAnchor mismatch: bytes % x, want % x", promptByteAnchor, want)
+	}
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"exact match (❯+NBSP)", "\xe2\x9d\xaf\xc2\xa0", true},
+		{"trailing context (❯+NBSP+text)", "$ \xe2\x9d\xaf\xc2\xa0ready", true},
+		{"leading context", "[mode]\n\xe2\x9d\xaf\xc2\xa0", true},
+		{"no anchor", "$ no prompt here", false},
+		{"❯ + REGULAR space (must NOT match)", "\xe2\x9d\xaf\x20", false}, // distinguishes Claude pane from chat text where humans type `❯ ` literally
+		{"❯ alone (no trailing byte)", "\xe2\x9d\xaf", false},             // strict: NBSP required
+		{"different bullet (›)", "›\xc2\xa0", false},                      // U+203A, not U+276F
+		{"different bullet (>)", "> ", false},                              // ASCII gt
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Contains(tc.in, promptByteAnchor); got != tc.want {
+				t.Errorf("contains(%q, anchor) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// Helper: spin a fresh tmux session for a test, return name + cleanup.
+func newTestSession(t *testing.T) string {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("skipping tmux test in short mode")
+	}
+	if !HasTmux() {
+		t.Skip("tmux not available")
+	}
+	name := fmt.Sprintf("bot-hq-wfp-%d", time.Now().UnixNano())
+	if err := NewSession(name, "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { KillSession(name) })
+	return name
+}
+
+func TestCheckPromptOnce_FindsAnchorWhenPresent(t *testing.T) {
+	name := newTestSession(t)
+	if err := SendKeys(name, "printf '\\xe2\\x9d\\xaf\\xc2\\xa0X'", true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // let printf land in pane
+	at, out, err := checkPromptOnce(name)
+	if err != nil {
+		t.Fatalf("checkPromptOnce error: %v", err)
+	}
+	if !at {
+		t.Errorf("expected atPrompt=true, got false. capture:\n%s", out)
+	}
+}
+
+func TestCheckPromptOnce_NoAnchorWhenAbsent(t *testing.T) {
+	name := newTestSession(t)
+	if err := SendKeys(name, "echo no-anchor-here", true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	at, _, err := checkPromptOnce(name)
+	if err != nil {
+		t.Fatalf("checkPromptOnce error: %v", err)
+	}
+	if at {
+		t.Error("expected atPrompt=false, got true on pane without anchor")
+	}
+}
+
+func TestWaitForPrompt_InstantDetection(t *testing.T) {
+	name := newTestSession(t)
+	if err := SendKeys(name, "printf '\\xe2\\x9d\\xaf\\xc2\\xa0X'", true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	start := time.Now()
+	at, _, err := WaitForPrompt(name, 5*time.Second)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("WaitForPrompt error: %v", err)
+	}
+	if !at {
+		t.Error("expected atPrompt=true on already-prompting pane")
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("instant detection too slow: %v (expected <500ms)", elapsed)
+	}
+}
+
+func TestWaitForPrompt_DelayedDetection(t *testing.T) {
+	name := newTestSession(t)
+	// Print the anchor after ~600ms — must be detected during polling, not
+	// returned immediately. WaitForPrompt should resolve in roughly the
+	// delay window (within one poll interval of 200ms slack).
+	if err := SendKeys(name, "(sleep 0.6; printf '\\xe2\\x9d\\xaf\\xc2\\xa0X')&", true); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	at, _, err := WaitForPrompt(name, 5*time.Second)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("WaitForPrompt error: %v", err)
+	}
+	if !at {
+		t.Error("expected atPrompt=true after delayed prompt")
+	}
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("returned too early: %v (anchor only printed at ~600ms)", elapsed)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("returned too late: %v (expected ~600-900ms with 200ms poll slack)", elapsed)
+	}
+}
+
+func TestWaitForPrompt_TimeoutWhenNoPrompt(t *testing.T) {
+	name := newTestSession(t)
+	if err := SendKeys(name, "echo no-prompt-here-ever", true); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	at, out, err := WaitForPrompt(name, 800*time.Millisecond)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("WaitForPrompt should not error on timeout, got: %v", err)
+	}
+	if at {
+		t.Errorf("expected atPrompt=false on timeout, got true. capture:\n%s", out)
+	}
+	if elapsed < 700*time.Millisecond {
+		t.Errorf("returned before timeout deadline: %v (expected ≥800ms)", elapsed)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("returned too long after deadline: %v (expected ~800-1100ms)", elapsed)
+	}
+	if out == "" {
+		t.Error("expected non-empty lastCapture on timeout for diagnostics")
+	}
+}
+
+func TestWaitForPrompt_ZeroTimeoutSingleShot(t *testing.T) {
+	name := newTestSession(t)
+	if err := SendKeys(name, "echo bare", true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	start := time.Now()
+	at, _, err := WaitForPrompt(name, 0)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("WaitForPrompt error: %v", err)
+	}
+	if at {
+		t.Error("expected atPrompt=false on bare-shell pane")
+	}
+	if elapsed > 300*time.Millisecond {
+		t.Errorf("single-shot check too slow: %v (expected <300ms — must not poll)", elapsed)
+	}
+}
+
+func TestWaitForPrompt_CaptureErrorOnUnknownTarget(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping tmux test in short mode")
+	}
+	if !HasTmux() {
+		t.Skip("tmux not available")
+	}
+	bogus := fmt.Sprintf("bot-hq-no-such-session-%d", time.Now().UnixNano())
+	at, out, err := WaitForPrompt(bogus, 0)
+	if err == nil {
+		t.Error("expected error on unknown tmux target, got nil")
+	}
+	if at {
+		t.Error("expected atPrompt=false on capture error")
+	}
+	if out != "" {
+		t.Errorf("expected empty output on capture error, got %q", out)
+	}
+}
+
+// Integration regression: simulates the rendering pattern that broke the
+// old claude_message at-prompt heuristic. A real Claude pane shows the ❯
+// anchor several lines above the literal last pane line because the
+// input-box bottom rule and footer (`-- INSERT -- ⏵⏵ bypass permissions`)
+// render below it. The old heuristic checked only the literal last line
+// and false-busy'd. WaitForPrompt scans the buffer and finds the anchor
+// regardless of position. This test fixes the rendering shape so a
+// future "optimization" that drops back to a last-line-only check fails
+// CI — bug #3 specifically.
+func TestWaitForPrompt_DetectsAnchorAboveFooter(t *testing.T) {
+	name := newTestSession(t)
+	// Render: anchor line, then a rule line, then a footer line. The
+	// literal last line is the footer, NOT the anchor — same shape as a
+	// real Claude pane.
+	if err := SendKeys(name,
+		`printf '\xe2\x9d\xaf\xc2\xa0X\n'; printf -- '----------\n'; printf -- '-- INSERT -- bypass on\n'`,
+		true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	// New path: WaitForPrompt scans the buffer, finds the anchor.
+	at, out, err := WaitForPrompt(name, PromptCheckGrace)
+	if err != nil {
+		t.Fatalf("WaitForPrompt error: %v", err)
+	}
+	if !at {
+		t.Errorf("expected atPrompt=true (anchor present in buffer above footer). capture:\n%s", out)
+	}
+
+	// Regression evidence: the old last-line heuristic would NOT find the
+	// anchor here because the literal last non-empty line is the footer.
+	// This sub-assertion locks "the new path handles a case the old path
+	// can't" — if anyone reverts to last-line scanning, this fails.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	lastLine := ""
+	if len(lines) > 0 {
+		lastLine = strings.TrimSpace(lines[len(lines)-1])
+	}
+	oldAtPrompt := strings.HasSuffix(lastLine, "❯") || strings.HasSuffix(lastLine, ">") || lastLine == ""
+	if oldAtPrompt {
+		t.Errorf("test fixture didn't reproduce the bug-#3 shape: literal last line %q would have passed the old heuristic, so this test no longer guards against last-line regression", lastLine)
+	}
+}
+
 func TestSendKeysAndCapture(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping tmux test in short mode")

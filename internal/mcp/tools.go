@@ -682,8 +682,22 @@ func hubSpawn(db *hub.DB) ToolDef {
 			Meta:    string(metaJSON),
 		})
 
-		// Send initial prompt with hub communication instructions
-		time.Sleep(3 * time.Second)
+		// Send initial prompt with hub communication instructions.
+		// Bug #2 fix: replace brittle time.Sleep(3s) gate with a state-gated
+		// WaitForPrompt. The 3s sleep failed when Claude's boot was slower
+		// than expected (cold cache, --mcp-config loading) — the prompt got
+		// sent into a pre-prompt buffer and was eaten. Now we poll until
+		// the input prompt is visible. BOT_HQ_CC_BOOT_TIMEOUT env var
+		// overrides the default 30s for slow-CI / cold-cache contexts.
+		bootTimeout := 30 * time.Second
+		if v := os.Getenv("BOT_HQ_CC_BOOT_TIMEOUT"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				bootTimeout = d
+			}
+		}
+		if at, _, err := tmuxpkg.WaitForPrompt(sessionName, bootTimeout); err != nil || !at {
+			return mcp.NewToolResultError(fmt.Sprintf("claude session did not reach prompt within %v (bug #2 boot wait)", bootTimeout)), nil
+		}
 		worktreeNote := ""
 		if worktreePath != "" {
 			worktreeNote = fmt.Sprintf(`
@@ -969,28 +983,23 @@ func claudeMessage(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("session not found: %v", err)), nil
 		}
 
-		// Check if Claude is at prompt
-		currentOutput, err := tmuxpkg.CapturePane(sess.TmuxTarget, 10)
+		// Bug #3 fix: detect at-prompt via WaitForPrompt with a 750ms grace
+		// window instead of the brittle last-line-of-10-lines heuristic. The
+		// old heuristic checked if the literal last pane line ended in ❯/>
+		// or was empty — which fails for Claude Code's actual rendering
+		// because the visible ❯ is typically several lines above the literal
+		// last line (input-box bottom rule + footer render below the prompt).
+		// It also false-busy'd on transient mid-render frames during a
+		// pane redraw. WaitForPrompt scans 30 lines for the byte anchor and
+		// the 750ms grace tolerates partial-frame redraws.
+		atPrompt, currentOutput, err := tmuxpkg.WaitForPrompt(sess.TmuxTarget, tmuxpkg.PromptCheckGrace)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("capture failed: %v", err)), nil
 		}
 
-		lines := strings.Split(strings.TrimSpace(currentOutput), "\n")
-		lastLine := ""
-		if len(lines) > 0 {
-			lastLine = lines[len(lines)-1]
-		}
-
-		// Check for prompt indicators (❯, >, or empty line)
-		atPrompt := strings.HasSuffix(strings.TrimSpace(lastLine), "❯") ||
-			strings.HasSuffix(strings.TrimSpace(lastLine), ">") ||
-			strings.TrimSpace(lastLine) == ""
-
 		if !atPrompt {
-			// Claude is busy
-			output, _ := tmuxpkg.CapturePane(sess.TmuxTarget, 50)
-			db.UpdateClaudeSessionStatus(sessionID, "busy", output)
-			return mcp.NewToolResultText(fmt.Sprintf("[Claude is busy — not at prompt]\n%s", output)), nil
+			db.UpdateClaudeSessionStatus(sessionID, "busy", currentOutput)
+			return mcp.NewToolResultText(fmt.Sprintf("[Claude is busy — not at prompt]\n%s", currentOutput)), nil
 		}
 
 		// Send the message
