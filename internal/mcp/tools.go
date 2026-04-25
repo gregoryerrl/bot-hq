@@ -26,6 +26,15 @@ import (
 // tool adds a different parameter name.
 //
 // Spec: docs/plans/phase-e.md §2 (signal architecture).
+//
+// Design intent (locked by Rain's review on commit 2): anonymous read tools
+// (hub_agents, hub_sessions, hub_issue_list, claude_list) intentionally do
+// NOT include a caller-context key. An agent that only polls hub_agents and
+// never writes/sends will appear stale on the strip. This is correct under
+// the "first-order check = is something happening" framing — pure observation
+// is not substantive activity. Future contributors: do not add caller_id to
+// read-only tools just to "make them update last_seen." That breaks the
+// signal-vs-noise contract that makes the strip useful.
 var commonAgentIDKeys = []string{"from", "agent_id", "id"}
 
 // lastSeenThrottle is the per-agent minimum interval between UpdateAgentLastSeen

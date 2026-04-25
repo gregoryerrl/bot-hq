@@ -222,6 +222,15 @@ Saltegge's smoke check after merge requires:
 
 If any step fails, smoke regression. Don't ship without verifying steps 5–8 manually.
 
+### Vocabulary flip (read before smoke)
+
+Phase E commit 4 changes the Agents tab Status column from raw `protocol.AgentStatus` (`online` / `working` / `offline`) to derived `panestate.AgentActivity` (`working` / `online` / `stale` / `offline`). After rebuild, expect:
+
+- The Status column shows the **activity vocab**, not the legacy status enum.
+- Currently-online-but-quiet agents (last_seen older than 60s) display as `stale`.
+- The new `stale` label is **expected behavior**, not a regression — it indicates the strip's first-order check correctly identifies an inactive agent that should be escalated to second-order tmux inspection.
+- The Agents tab summary changed from `[N online, M offline]` to `[N alive, M offline]` where `alive = working + online`. Stale agents fall into the `M offline` bucket today (cosmetic; precision is a Phase F follow-up).
+
 ## 8. Bug List — Separate Post-Phase-E Fix Bundles
 
 These surfaced during the experiment phase but are **out of scope for Phase E**. Logged for later sequencing:
