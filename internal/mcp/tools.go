@@ -188,12 +188,23 @@ func hubRegister(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid agent type: %s", typ)), nil
 		}
 
+		// Meta is owned by the launcher (e.g. internal/brian/brian.go RegisterAgent
+		// call site, which writes tmux_target). hub_register may be called from any
+		// MCP client (today: Claude STARTUP prompt) after the launcher has populated
+		// Meta. Since db.RegisterAgent is INSERT OR REPLACE, we must read-and-preserve
+		// the launcher's Meta here or the round-trip silently clobbers tmux_target,
+		// which presents as panestate's pane-tier observer never finding the pane
+		// (H6 — registration plumbing gap). If a future caller needs to populate
+		// Meta via MCP, add an explicit tmux_target param to the tool schema rather
+		// than removing this preservation.
+		existing, _ := db.GetAgent(id)
 		agent := protocol.Agent{
 			ID:         id,
 			Name:       name,
 			Type:       agentType,
 			Status:     protocol.StatusOnline,
 			Project:    req.GetString("project", ""),
+			Meta:       existing.Meta,
 			Registered: time.Now(),
 		}
 

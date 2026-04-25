@@ -76,11 +76,16 @@ func (r *Rain) Start() error {
 		return fmt.Errorf("rain tmux spawn: %w", err)
 	}
 
+	// Register rain agent in the hub. Meta carries tmux_target so panestate's
+	// pane-tier observer (extractTmuxTarget) can capture this pane — the launcher
+	// is the source of truth for tmux_target since it owns the session-name lifetime.
+	metaJSON, _ := json.Marshal(map[string]string{"tmux_target": r.tmuxSession})
 	agent := protocol.Agent{
 		ID:     agentID,
 		Name:   agentName,
 		Type:   agentType,
 		Status: protocol.StatusOnline,
+		Meta:   string(metaJSON),
 	}
 	if err := r.db.RegisterAgent(agent); err != nil {
 		return fmt.Errorf("rain register: %w", err)

@@ -75,12 +75,16 @@ func (b *Brian) Start() error {
 		return fmt.Errorf("brian tmux spawn: %w", err)
 	}
 
-	// Register brian agent in the hub
+	// Register brian agent in the hub. Meta carries tmux_target so panestate's
+	// pane-tier observer (extractTmuxTarget) can capture this pane — the launcher
+	// is the source of truth for tmux_target since it owns the session-name lifetime.
+	metaJSON, _ := json.Marshal(map[string]string{"tmux_target": b.tmuxSession})
 	agent := protocol.Agent{
 		ID:     agentID,
 		Name:   agentName,
 		Type:   agentType,
 		Status: protocol.StatusOnline,
+		Meta:   string(metaJSON),
 	}
 	if err := b.db.RegisterAgent(agent); err != nil {
 		return fmt.Errorf("brian register: %w", err)
