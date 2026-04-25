@@ -682,8 +682,22 @@ func hubSpawn(db *hub.DB) ToolDef {
 			Meta:    string(metaJSON),
 		})
 
-		// Send initial prompt with hub communication instructions
-		time.Sleep(3 * time.Second)
+		// Send initial prompt with hub communication instructions.
+		// Bug #2 fix: replace brittle time.Sleep(3s) gate with a state-gated
+		// WaitForPrompt. The 3s sleep failed when Claude's boot was slower
+		// than expected (cold cache, --mcp-config loading) — the prompt got
+		// sent into a pre-prompt buffer and was eaten. Now we poll until
+		// the input prompt is visible. BOT_HQ_CC_BOOT_TIMEOUT env var
+		// overrides the default 30s for slow-CI / cold-cache contexts.
+		bootTimeout := 30 * time.Second
+		if v := os.Getenv("BOT_HQ_CC_BOOT_TIMEOUT"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				bootTimeout = d
+			}
+		}
+		if at, _, err := tmuxpkg.WaitForPrompt(sessionName, bootTimeout); err != nil || !at {
+			return mcp.NewToolResultError(fmt.Sprintf("claude session did not reach prompt within %v (bug #2 boot wait)", bootTimeout)), nil
+		}
 		worktreeNote := ""
 		if worktreePath != "" {
 			worktreeNote = fmt.Sprintf(`
