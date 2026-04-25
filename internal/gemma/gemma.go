@@ -515,7 +515,7 @@ func (g *Gemma) shouldFlag(condition string, now time.Time) bool {
 	return true
 }
 
-// runHealthChecks executes Tier 1 checks and reports anomalies to Brian.
+// runHealthChecks executes Tier 1 checks and reports anomalies to Rain.
 // Refinement A: hub-quiet is no longer a standalone flag — it's only
 // useful inside a Tier 3 stall-detector conjunction (Phase F).
 // Refinement B: the whole loop no-ops when nobody is working.
@@ -644,7 +644,7 @@ func (g *Gemma) runHealthChecks() {
 		report := "Monitor check anomalies:\n- " + strings.Join(allowed, "\n- ")
 		g.db.InsertMessage(protocol.Message{
 			FromAgent: agentID,
-			ToAgent:   "brian",
+			ToAgent:   "rain",
 			Type:      protocol.MsgResult,
 			Content:   report,
 		})
