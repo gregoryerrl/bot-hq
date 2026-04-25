@@ -254,6 +254,29 @@ func (db *DB) UnregisterAgent(id string) error {
 	return db.UpdateAgentStatus(id, protocol.StatusOffline)
 }
 
+// ReconcileCoderGhosts flips coder agents whose paired claude session is
+// already marked stopped back to offline. Idempotent. Wired post-OpenDB at
+// boot to clean ghost rows that accumulated before the bug-#4 fix landed
+// (claude_stop used to mark the session stopped but leave the agent row at
+// status=online), and to act as a safety net for any future drift in the
+// stop path. Returns the count of rows flipped so callers can log it.
+//
+// Pure DB scope by design — does NOT use tmux discovery. The discovery-based
+// reconciliation lives in claudeList and conflates registration with cleanup;
+// this is the cleanup-only path with no IO contract.
+func (db *DB) ReconcileCoderGhosts() (int, error) {
+	res, err := db.conn.Exec(`
+		UPDATE agents SET status = ?
+		WHERE type = ? AND status = ?
+		  AND id IN (SELECT id FROM claude_sessions WHERE status = ?)
+	`, string(protocol.StatusOffline), string(protocol.AgentCoder), string(protocol.StatusOnline), "stopped")
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // UpdateAgentLastSeen touches only the last_seen timestamp, leaving status
 // and project intact. Used by the MCP middleware in internal/mcp/tools.go to
 // auto-refresh activity recency on every tool call without disturbing status
