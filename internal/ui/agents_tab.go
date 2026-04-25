@@ -92,7 +92,7 @@ func (a AgentsTab) View() string {
 	}
 
 	var lines []string
-	aliveCount := 0
+	aliveCount, staleCount, offlineCount := 0, 0, 0
 
 	for _, ag := range a.agents {
 		// Resolve activity. Fall back to status-based mapping when pane is
@@ -107,8 +107,15 @@ func (a AgentsTab) View() string {
 		}
 
 		dot := activityDot(activity)
-		if activity == panestate.ActivityWorking || activity == panestate.ActivityOnline {
+		switch activity {
+		case panestate.ActivityWorking, panestate.ActivityOnline:
 			aliveCount++
+		case panestate.ActivityStale:
+			staleCount++
+		case panestate.ActivityOffline:
+			offlineCount++
+		default:
+			offlineCount++ // unknown activity buckets to offline; F-core may add cases
 		}
 
 		statusStyle := lipgloss.NewStyle().Foreground(ColorStatus)
@@ -145,9 +152,8 @@ func (a AgentsTab) View() string {
 		lines = append(lines, fmt.Sprintf("%s %s  %s  %s  %s%s", dot, name, status, project, timeStr, tmuxStr))
 	}
 
-	offlineCount := len(a.agents) - aliveCount
 	summary := lipgloss.NewStyle().Foreground(ColorStatus).Render(
-		fmt.Sprintf("\n[%d alive, %d offline]", aliveCount, offlineCount),
+		fmt.Sprintf("\n[%d alive, %d stale, %d offline]", aliveCount, staleCount, offlineCount),
 	)
 	lines = append(lines, summary)
 
