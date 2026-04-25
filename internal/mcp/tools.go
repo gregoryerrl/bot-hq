@@ -983,28 +983,23 @@ func claudeMessage(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("session not found: %v", err)), nil
 		}
 
-		// Check if Claude is at prompt
-		currentOutput, err := tmuxpkg.CapturePane(sess.TmuxTarget, 10)
+		// Bug #3 fix: detect at-prompt via WaitForPrompt with a 750ms grace
+		// window instead of the brittle last-line-of-10-lines heuristic. The
+		// old heuristic checked if the literal last pane line ended in ❯/>
+		// or was empty — which fails for Claude Code's actual rendering
+		// because the visible ❯ is typically several lines above the literal
+		// last line (input-box bottom rule + footer render below the prompt).
+		// It also false-busy'd on transient mid-render frames during a
+		// pane redraw. WaitForPrompt scans 30 lines for the byte anchor and
+		// the 750ms grace tolerates partial-frame redraws.
+		atPrompt, currentOutput, err := tmuxpkg.WaitForPrompt(sess.TmuxTarget, tmuxpkg.PromptCheckGrace)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("capture failed: %v", err)), nil
 		}
 
-		lines := strings.Split(strings.TrimSpace(currentOutput), "\n")
-		lastLine := ""
-		if len(lines) > 0 {
-			lastLine = lines[len(lines)-1]
-		}
-
-		// Check for prompt indicators (❯, >, or empty line)
-		atPrompt := strings.HasSuffix(strings.TrimSpace(lastLine), "❯") ||
-			strings.HasSuffix(strings.TrimSpace(lastLine), ">") ||
-			strings.TrimSpace(lastLine) == ""
-
 		if !atPrompt {
-			// Claude is busy
-			output, _ := tmuxpkg.CapturePane(sess.TmuxTarget, 50)
-			db.UpdateClaudeSessionStatus(sessionID, "busy", output)
-			return mcp.NewToolResultText(fmt.Sprintf("[Claude is busy — not at prompt]\n%s", output)), nil
+			db.UpdateClaudeSessionStatus(sessionID, "busy", currentOutput)
+			return mcp.NewToolResultText(fmt.Sprintf("[Claude is busy — not at prompt]\n%s", currentOutput)), nil
 		}
 
 		// Send the message
