@@ -74,15 +74,16 @@ func TestAgentsTabFallbackWithoutPane(t *testing.T) {
 	}
 }
 
-// TestAgentsTabAliveSummary verifies the summary line uses the activity-based
-// alive count (working + online), not the legacy status field.
-func TestAgentsTabAliveSummary(t *testing.T) {
+// TestAgentsTabSummaryBuckets verifies the summary line surfaces all three
+// activity-derived buckets — alive (working + online), stale, and offline.
+// Stale agents must surface as their own bucket, not get absorbed into offline.
+func TestAgentsTabSummaryBuckets(t *testing.T) {
 	now := time.Now()
 	stale := now.Add(-2 * time.Minute)
 	agents := []protocol.Agent{
-		{ID: "a1", Name: "A1", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now},      // working
-		{ID: "a2", Name: "A2", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: stale},    // stale (counts as not-alive)
-		{ID: "a3", Name: "A3", Type: protocol.AgentCoder, Status: protocol.StatusOffline, LastSeen: now},     // offline
+		{ID: "a1", Name: "A1", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now},   // working
+		{ID: "a2", Name: "A2", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: stale}, // stale
+		{ID: "a3", Name: "A3", Type: protocol.AgentCoder, Status: protocol.StatusOffline, LastSeen: now},  // offline
 	}
 	pane := newPaneWithAgents(t, agents)
 	tab := NewAgentsTab()
@@ -91,9 +92,11 @@ func TestAgentsTabAliveSummary(t *testing.T) {
 	tab, _ = tab.Update(AgentsUpdated{Agents: agents})
 
 	out := tab.View()
-	// Expect [1 alive, 2 offline] — only a1 is alive (working). a2 is stale.
-	if !strings.Contains(out, "1 alive") {
-		t.Errorf("expected '1 alive' in summary, got:\n%s", out)
+	// Expect [1 alive, 1 stale, 1 offline] — a1 alive (working), a2 stale, a3 offline.
+	for _, want := range []string{"1 alive", "1 stale", "1 offline"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in summary, got:\n%s", want, out)
+		}
 	}
 }
 
