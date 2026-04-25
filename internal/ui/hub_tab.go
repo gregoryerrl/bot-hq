@@ -4,13 +4,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
+
+// inputRows is the visible row count for the command textarea. It expands
+// up to textarea.MaxHeight internally for very long pastes/messages, but
+// the rendered footprint stays at this fixed size.
+const inputRows = 3
 
 // MessageReceived is a Bubbletea message for when a new hub message arrives.
 type MessageReceived struct {
@@ -23,10 +29,16 @@ type CommandSubmitted struct {
 }
 
 // HubTab displays a scrollable, color-coded message feed with a command input.
+//
+// Input is a textarea (not textinput) so users can compose multi-line
+// messages and paste long content without truncation. Keybindings are
+// flipped from textarea's defaults: enter submits, shift+enter / ctrl+j /
+// alt+enter insert a newline. CharLimit is left at textarea's default 0
+// (unlimited).
 type HubTab struct {
 	messages      []protocol.Message
 	viewport      viewport.Model
-	input         textinput.Model
+	input         textarea.Model
 	width         int
 	height        int
 	focused       bool // true when the command input is focused
@@ -43,16 +55,29 @@ func (h *HubTab) SetPane(p *panestate.Manager) {
 
 // NewHubTab creates a new HubTab with default dimensions.
 func NewHubTab() HubTab {
-	ti := textinput.New()
-	ti.Placeholder = "Type a command (@agent message, spawn project, etc.)..."
-	ti.CharLimit = 500
+	ta := textarea.New()
+	ta.Placeholder = "Type a command (@agent message, spawn project, etc.)..."
+	ta.CharLimit = 0 // unlimited; long pastes must round-trip without truncation
+	ta.ShowLineNumbers = false
+	ta.SetHeight(inputRows)
+	// Newline keys: shift+enter (capable terminals), ctrl+j / alt+enter
+	// (universal fallback), and "enter" itself — but only when forwarded
+	// to the textarea. HubTab.Update intercepts non-paste enter keystrokes
+	// as submit BEFORE forwarding, so plain enter on a real keypress
+	// submits while pasted '\n' (delivered as Paste=true enter KeyMsgs by
+	// bubbletea's bracketed-paste handler) inserts the newline as the user
+	// expects.
+	ta.KeyMap.InsertNewline = key.NewBinding(
+		key.WithKeys("enter", "ctrl+m", "shift+enter", "ctrl+j", "alt+enter"),
+		key.WithHelp("shift+enter", "newline"),
+	)
 
 	vp := viewport.New(80, 20)
 	vp.MouseWheelEnabled = true
 
 	return HubTab{
 		viewport: vp,
-		input:    ti,
+		input:    ta,
 	}
 }
 
@@ -74,8 +99,11 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if h.focused {
-			switch msg.String() {
-			case "enter":
+			switch {
+			case msg.String() == "enter" && !msg.Paste:
+				// Real enter keystroke = submit. Pasted '\n' (Paste=true)
+				// falls through to the textarea so it lands as a newline
+				// in the buffer.
 				val := h.input.Value()
 				if val != "" {
 					h.input.Reset()
@@ -83,7 +111,7 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 						return CommandSubmitted{Text: val}
 					})
 				}
-			case "esc":
+			case msg.String() == "esc":
 				h.focused = false
 				h.input.Blur()
 			default:
@@ -142,17 +170,17 @@ func (h *HubTab) SetSessionFilter(sessionID string) {
 
 // resize recalculates viewport and input dimensions.
 func (h *HubTab) resize() {
-	// Reserve 4 lines: 1 separator, 1 strip, 1 input, 1 padding (Phase E commit 4
-	// added the strip line — total reserved was 3 pre-strip).
-	inputHeight := 4
-	vpHeight := h.height - inputHeight
+	// Reserve: 1 separator + 1 strip + inputRows for textarea + 1 padding.
+	reserved := 3 + inputRows
+	vpHeight := h.height - reserved
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
 
 	h.viewport.Width = h.width
 	h.viewport.Height = vpHeight
-	h.input.Width = h.width - 4 // Account for prompt and padding
+	h.input.SetWidth(h.width - 4) // Account for prompt and padding
+	h.input.SetHeight(inputRows)
 
 	h.viewport.SetContent(h.renderMessages())
 }
