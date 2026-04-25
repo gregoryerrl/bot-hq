@@ -230,6 +230,51 @@ func TestWaitForPrompt_CaptureErrorOnUnknownTarget(t *testing.T) {
 	}
 }
 
+// Integration regression: simulates the rendering pattern that broke the
+// old claude_message at-prompt heuristic. A real Claude pane shows the ❯
+// anchor several lines above the literal last pane line because the
+// input-box bottom rule and footer (`-- INSERT -- ⏵⏵ bypass permissions`)
+// render below it. The old heuristic checked only the literal last line
+// and false-busy'd. WaitForPrompt scans the buffer and finds the anchor
+// regardless of position. This test fixes the rendering shape so a
+// future "optimization" that drops back to a last-line-only check fails
+// CI — bug #3 specifically.
+func TestWaitForPrompt_DetectsAnchorAboveFooter(t *testing.T) {
+	name := newTestSession(t)
+	// Render: anchor line, then a rule line, then a footer line. The
+	// literal last line is the footer, NOT the anchor — same shape as a
+	// real Claude pane.
+	if err := SendKeys(name,
+		`printf '\xe2\x9d\xaf\xc2\xa0X\n'; printf -- '----------\n'; printf -- '-- INSERT -- bypass on\n'`,
+		true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(400 * time.Millisecond)
+
+	// New path: WaitForPrompt scans the buffer, finds the anchor.
+	at, out, err := WaitForPrompt(name, PromptCheckGrace)
+	if err != nil {
+		t.Fatalf("WaitForPrompt error: %v", err)
+	}
+	if !at {
+		t.Errorf("expected atPrompt=true (anchor present in buffer above footer). capture:\n%s", out)
+	}
+
+	// Regression evidence: the old last-line heuristic would NOT find the
+	// anchor here because the literal last non-empty line is the footer.
+	// This sub-assertion locks "the new path handles a case the old path
+	// can't" — if anyone reverts to last-line scanning, this fails.
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	lastLine := ""
+	if len(lines) > 0 {
+		lastLine = strings.TrimSpace(lines[len(lines)-1])
+	}
+	oldAtPrompt := strings.HasSuffix(lastLine, "❯") || strings.HasSuffix(lastLine, ">") || lastLine == ""
+	if oldAtPrompt {
+		t.Errorf("test fixture didn't reproduce the bug-#3 shape: literal last line %q would have passed the old heuristic, so this test no longer guards against last-line regression", lastLine)
+	}
+}
+
 func TestSendKeysAndCapture(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping tmux test in short mode")
