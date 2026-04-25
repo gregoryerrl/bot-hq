@@ -491,7 +491,7 @@ func (g *Gemma) replayThroughSentinel() {
 // Emma is a Go-internal monitor with no MCP entry point, so the refresh
 // must be explicit.
 //
-// Interval is well within panestate.OnlineWindow (60s) — 30s gives 2x
+// Interval is well within panestate.HeartbeatOnlineWindow (60s) — 30s gives 2x
 // margin against GC pauses and schedule jitter.
 func (g *Gemma) heartbeatLoop() {
 	ticker := time.NewTicker(heartbeatInterval)

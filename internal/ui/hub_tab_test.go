@@ -89,7 +89,7 @@ func TestHubTabViewWithoutPane(t *testing.T) {
 // TestHubTabViewHidesStaleAgents verifies that stale/offline agents are not
 // rendered in the strip even when the pane snapshot includes them.
 func TestHubTabViewHidesStaleAgents(t *testing.T) {
-	stale := time.Now().Add(-2 * time.Minute) // older than OnlineWindow (60s)
+	stale := time.Now().Add(-2 * time.Minute) // older than HeartbeatOnlineWindow (60s)
 	pane := newPaneWithAgents(t, []protocol.Agent{
 		{ID: "alive-agent", Name: "Alive", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now()},
 		{ID: "stale-agent", Name: "Stale", Type: protocol.AgentCoder, Status: protocol.StatusOnline, LastSeen: stale},

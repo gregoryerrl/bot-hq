@@ -17,10 +17,18 @@ import (
 )
 
 // Threshold windows for activity classification. Tunable from observation.
+//
+// Heartbeat- and pane-tier thresholds are independent per F-core Push 4 lock:
+// pane-content delta and heartbeat-cadence are orthogonal signals; sharing a
+// single threshold would couple their retune paths. Initial pane values match
+// heartbeat values for Phase-E-equivalence at F-core-a (no source wired) but
+// are tunable independently once F-core-b activates pane sourcing.
 const (
-	WorkingWindow    = 5 * time.Second
-	OnlineWindow     = 60 * time.Second
-	StaleAgentWindow = 7 * 24 * time.Hour
+	HeartbeatWorkingWindow = 5 * time.Second
+	HeartbeatOnlineWindow  = 60 * time.Second
+	PaneWorkingWindow      = 5 * time.Second
+	PaneOnlineWindow       = 60 * time.Second
+	StaleAgentWindow       = 7 * 24 * time.Hour
 )
 
 // AgentActivity is the derived activity tier for first-order user check.
@@ -66,6 +74,13 @@ type AgentSnapshot struct {
 	LastSeen time.Time
 	Activity AgentActivity
 
+	// LastPaneActivity is the most recent timestamp at which a pane-content
+	// delta was observed for this agent. F-core-a scaffolds the field through
+	// ComputeActivity but leaves it zero (no source wired); F-core-b will
+	// populate it from the capture-pane source, activating the OR-combination
+	// against LastSeen at runtime.
+	LastPaneActivity time.Time
+
 	// Phase F forward dependencies. Populated in Phase F by capture-pane classifier.
 	LastClassification string
 	RecentErrors       []ClassifierHit
@@ -101,13 +116,17 @@ func (m *Manager) Refresh() error {
 	now := time.Now()
 	snap := make([]AgentSnapshot, len(agents))
 	for i, a := range agents {
+		// F-core-a: paneActive zero — no source wired yet. F-core-b will
+		// populate from the capture-pane source.
+		var paneActive time.Time
 		snap[i] = AgentSnapshot{
-			ID:       a.ID,
-			Name:     a.Name,
-			Type:     a.Type,
-			Status:   a.Status,
-			LastSeen: a.LastSeen,
-			Activity: ComputeActivity(a.Status, a.LastSeen, now),
+			ID:               a.ID,
+			Name:             a.Name,
+			Type:             a.Type,
+			Status:           a.Status,
+			LastSeen:         a.LastSeen,
+			LastPaneActivity: paneActive,
+			Activity:         ComputeActivity(a.Status, a.LastSeen, paneActive, now),
 		}
 	}
 	m.mu.Lock()
@@ -138,26 +157,43 @@ func (m *Manager) Agents() []protocol.Agent {
 	return out
 }
 
-// ComputeActivity derives the activity tier from status + recency.
+// ComputeActivity derives the activity tier from status + heartbeat recency
+// + optional pane-activity recency.
 //
 // Logic:
 //
 //	status == StatusOffline → ActivityOffline (always)
-//	recency <  WorkingWindow → ActivityWorking
-//	recency <  OnlineWindow  → ActivityOnline
-//	otherwise               → ActivityStale
+//	heartbeatRecency < HeartbeatWorkingWindow ||
+//	  (paneActive set && paneRecency < PaneWorkingWindow) → ActivityWorking
+//	heartbeatRecency < HeartbeatOnlineWindow ||
+//	  (paneActive set && paneRecency < PaneOnlineWindow) → ActivityOnline
+//	otherwise → ActivityStale
+//
+// Independent-threshold OR-combination per F-core Push 4 lock: pane-content
+// delta and heartbeat-cadence are orthogonal signals; either being recent
+// counts the agent as working. paneActive zero (no source wired) skips the
+// pane-tier comparisons → behavior reduces to heartbeat-only logic identical
+// to Phase E. F-core-a (case-i ratchet) preserves Phase-E behavior bit-for-
+// bit at runtime; F-core-b activates the source.
 //
 // Status field beyond offline is ignored — Phase E treats last_seen recency as
 // the truthful signal. Existing StatusWorking values in DB are legacy hints.
-func ComputeActivity(status protocol.AgentStatus, lastSeen, now time.Time) AgentActivity {
+func ComputeActivity(status protocol.AgentStatus, lastSeen, paneActive, now time.Time) AgentActivity {
 	if status == protocol.StatusOffline {
 		return ActivityOffline
 	}
-	recency := now.Sub(lastSeen)
+	heartbeatRecency := now.Sub(lastSeen)
+	panePresent := !paneActive.IsZero()
+	var paneRecency time.Duration
+	if panePresent {
+		paneRecency = now.Sub(paneActive)
+	}
 	switch {
-	case recency < WorkingWindow:
+	case heartbeatRecency < HeartbeatWorkingWindow ||
+		(panePresent && paneRecency < PaneWorkingWindow):
 		return ActivityWorking
-	case recency < OnlineWindow:
+	case heartbeatRecency < HeartbeatOnlineWindow ||
+		(panePresent && paneRecency < PaneOnlineWindow):
 		return ActivityOnline
 	default:
 		return ActivityStale

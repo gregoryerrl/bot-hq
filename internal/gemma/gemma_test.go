@@ -249,7 +249,7 @@ func TestRunHealthChecksRoutesToRain(t *testing.T) {
 // TestHeartbeatRefreshesLastSeen locks the per-tick contract of the
 // heartbeat: calling db.UpdateAgentLastSeen(emmaID) must advance Emma's
 // last_seen so panestate.ComputeActivity returns ActivityOnline (not
-// Stale) when queried within OnlineWindow. The goroutine wiring is
+// Stale) when queried within HeartbeatOnlineWindow. The goroutine wiring is
 // covered by the source-level check below.
 func TestHeartbeatRefreshesLastSeen(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
