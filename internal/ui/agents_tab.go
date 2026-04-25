@@ -149,7 +149,7 @@ func (a AgentsTab) View() string {
 			}
 		}
 
-		lines = append(lines, fmt.Sprintf("%s %s  %s  %s  %s%s", dot, name, status, project, timeStr, tmuxStr))
+		lines = append(lines, fmt.Sprintf("%s %s  %s  %s%s  %s", dot, name, status, timeStr, tmuxStr, project))
 	}
 
 	summary := lipgloss.NewStyle().Foreground(ColorStatus).Render(
