@@ -26,6 +26,11 @@ const (
 	defaultModel     = "gemma4:e4b"
 	defaultOllamaURL = "http://localhost:11434"
 	defaultMaxConc   = 3
+
+	// Phase D — flag dedupe + rate cap (shared across all monitor conditions).
+	flagHysteresisWindow   = 30 * time.Minute
+	flagRateCapPerHour     = 3
+	monitorPreconditionGap = 1 * time.Hour
 )
 
 // TaskType determines how command output is handled.
@@ -94,6 +99,13 @@ type Gemma struct {
 	mu      sync.Mutex
 	running bool
 	stopCh  chan struct{}
+
+	// Phase D flag bookkeeping. flagHistory dedupes by condition key
+	// (last-fired timestamp). flagWindow is a sliding 1h record of all
+	// fired flags for the shared rate cap.
+	flagMu      sync.Mutex
+	flagHistory map[string]time.Time
+	flagWindow  []time.Time
 }
 
 // New creates a Gemma instance from config.
@@ -119,6 +131,7 @@ func New(db *hub.DB, cfg hub.GemmaConfig) *Gemma {
 		ollamaURL:       ollamaURL,
 		monitorInterval: defaultMonitorInterval,
 		stopCh:          make(chan struct{}),
+		flagHistory:     make(map[string]time.Time),
 	}
 }
 
@@ -414,9 +427,104 @@ func (g *Gemma) monitorLoop() {
 	}
 }
 
+// anomaly is a single detected condition with a stable key for hysteresis
+// dedupe and a human-readable message for the flag body.
+type anomaly struct {
+	key, msg string
+}
+
+// pseudoFilesystemMounts lists mount-point prefixes whose capacity reading
+// is a kernel artifact, not real disk pressure. Filter them before flagging.
+// macOS: devfs at /dev, VM scratch at /System/Volumes/VM, firmlinks under
+// /System/Volumes/{Preboot,Update}, signed system at /System/Volumes/iSCPreboot.
+// Linux: /proc, /sys, /run, /dev are pseudo-fs.
+var pseudoFilesystemMounts = []string{
+	"/dev",
+	"/proc",
+	"/sys",
+	"/run",
+	"/System/Volumes/VM",
+	"/System/Volumes/Preboot",
+	"/System/Volumes/Update",
+	"/System/Volumes/iSCPreboot",
+	"/System/Volumes/xarts",
+	"/System/Volumes/Hardware",
+	"/private/var/vm",
+}
+
+func isPseudoMount(mount string) bool {
+	for _, prefix := range pseudoFilesystemMounts {
+		if mount == prefix || strings.HasPrefix(mount, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// shouldSkipMonitor returns true when monitorLoop should no-op entirely.
+// Precondition: no non-emma hub traffic in the last hour AND no agents
+// currently in `working` status. Avoids alerting about an empty house.
+func (g *Gemma) shouldSkipMonitor() bool {
+	cutoff := time.Now().Add(-monitorPreconditionGap)
+	msgs, err := g.db.GetRecentMessages(50)
+	if err == nil {
+		for _, m := range msgs {
+			if m.FromAgent != agentID && m.Created.After(cutoff) {
+				return false
+			}
+		}
+	}
+
+	agents, err := g.db.ListAgents("")
+	if err == nil {
+		for _, a := range agents {
+			if a.Status == protocol.StatusWorking {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// shouldFlag applies hysteresis (per-condition) and the shared rate cap.
+// Returns true if this anomaly should be emitted now and records it.
+func (g *Gemma) shouldFlag(condition string, now time.Time) bool {
+	g.flagMu.Lock()
+	defer g.flagMu.Unlock()
+
+	if last, ok := g.flagHistory[condition]; ok {
+		if now.Sub(last) < flagHysteresisWindow {
+			return false
+		}
+	}
+
+	cutoff := now.Add(-time.Hour)
+	pruned := g.flagWindow[:0]
+	for _, t := range g.flagWindow {
+		if t.After(cutoff) {
+			pruned = append(pruned, t)
+		}
+	}
+	g.flagWindow = pruned
+	if len(g.flagWindow) >= flagRateCapPerHour {
+		return false
+	}
+
+	g.flagHistory[condition] = now
+	g.flagWindow = append(g.flagWindow, now)
+	return true
+}
+
 // runHealthChecks executes Tier 1 checks and reports anomalies to Brian.
+// Refinement A: hub-quiet is no longer a standalone flag — it's only
+// useful inside a Tier 3 stall-detector conjunction (Phase F).
+// Refinement B: the whole loop no-ops when nobody is working.
 func (g *Gemma) runHealthChecks() {
-	var anomalies []string
+	if g.shouldSkipMonitor() {
+		return
+	}
+
+	var anomalies []anomaly
 	projectDir := ProjectDir()
 
 	// 1. Run go test in bot-hq project directory
@@ -426,7 +534,10 @@ func (g *Gemma) runHealthChecks() {
 	testOut, testErr := testCmd.CombinedOutput()
 	cancel()
 	if testErr != nil {
-		anomalies = append(anomalies, fmt.Sprintf("go test FAIL: %s", summarizeOutput(string(testOut), 500)))
+		anomalies = append(anomalies, anomaly{
+			key: "go-test-fail",
+			msg: fmt.Sprintf("go test FAIL: %s", summarizeOutput(string(testOut), 500)),
+		})
 	}
 
 	// 2. System health: disk space
@@ -447,11 +558,13 @@ func (g *Gemma) runHealthChecks() {
 			continue
 		}
 		mount := fields[len(fields)-1]
-		// Skip pseudo-filesystems that always report ~100% on macOS.
-		if mount == "/dev" || strings.HasPrefix(mount, "/System/Volumes/VM") || strings.HasPrefix(mount, "/private/var/vm") {
+		if isPseudoMount(mount) {
 			continue
 		}
-		anomalies = append(anomalies, fmt.Sprintf("Disk usage high: %s at %s%%", mount, fields[4]))
+		anomalies = append(anomalies, anomaly{
+			key: "disk:" + mount,
+			msg: fmt.Sprintf("Disk usage high: %s at %s%%", mount, fields[4]),
+		})
 	}
 
 	// 3. System health: memory (macOS vm_stat)
@@ -460,7 +573,7 @@ func (g *Gemma) runHealthChecks() {
 	vmOut, vmErr := vmCmd.CombinedOutput()
 	cancel3()
 	if vmErr != nil {
-		anomalies = append(anomalies, "vm_stat failed")
+		anomalies = append(anomalies, anomaly{key: "vm-stat-failed", msg: "vm_stat failed"})
 	} else {
 		// Sum "available" pages: free + inactive + speculative + purgeable.
 		// macOS reports very few "Pages free" under normal load because the kernel
@@ -493,7 +606,10 @@ func (g *Gemma) runHealthChecks() {
 		}
 		// Flag only if combined available memory drops below ~512MB (16384 pages on Apple Silicon 16KB pages).
 		if availablePages > 0 && availablePages < 32768 {
-			anomalies = append(anomalies, fmt.Sprintf("Low available memory: %d pages (free+inactive+speculative+purgeable)", availablePages))
+			anomalies = append(anomalies, anomaly{
+				key: "low-memory",
+				msg: fmt.Sprintf("Low available memory: %d pages (free+inactive+speculative+purgeable)", availablePages),
+			})
 		}
 	}
 
@@ -509,26 +625,23 @@ func (g *Gemma) runHealthChecks() {
 			}
 		}
 		if offline > online && len(agents) > 1 {
-			anomalies = append(anomalies, fmt.Sprintf("Agent anomaly: %d online, %d offline", online, offline))
+			anomalies = append(anomalies, anomaly{
+				key: "agent-imbalance",
+				msg: fmt.Sprintf("Agent anomaly: %d online, %d offline", online, offline),
+			})
 		}
 	}
 
-	// 5. Hub message activity
-	msgs, err := g.db.GetRecentMessages(10)
-	if err == nil {
-		if len(msgs) == 0 {
-			anomalies = append(anomalies, "No recent hub messages")
-		} else {
-			lastActivity := msgs[0].Created
-			if time.Since(lastActivity) > 30*time.Minute {
-				anomalies = append(anomalies, fmt.Sprintf("Hub quiet: last message %s ago", time.Since(lastActivity).Round(time.Minute)))
-			}
+	// Apply hysteresis + rate cap, then emit the survivors as one bundled flag.
+	now := time.Now()
+	var allowed []string
+	for _, a := range anomalies {
+		if g.shouldFlag(a.key, now) {
+			allowed = append(allowed, a.msg)
 		}
 	}
-
-	// Report anomalies to Brian; stay quiet if all healthy
-	if len(anomalies) > 0 {
-		report := "Monitor check anomalies:\n- " + strings.Join(anomalies, "\n- ")
+	if len(allowed) > 0 {
+		report := "Monitor check anomalies:\n- " + strings.Join(allowed, "\n- ")
 		g.db.InsertMessage(protocol.Message{
 			FromAgent: agentID,
 			ToAgent:   "brian",
