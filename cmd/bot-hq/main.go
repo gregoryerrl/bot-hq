@@ -216,8 +216,6 @@ func statusDot(s protocol.AgentStatus) string {
 		return "\033[32m●\033[0m" // green
 	case protocol.StatusWorking:
 		return "\033[33m●\033[0m" // yellow
-	case protocol.StatusIdle:
-		return "\033[34m●\033[0m" // blue
 	default:
 		return "\033[90m●\033[0m" // gray
 	}

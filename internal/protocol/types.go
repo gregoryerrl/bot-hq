@@ -26,13 +26,12 @@ type AgentStatus string
 const (
 	StatusOnline  AgentStatus = "online"
 	StatusWorking AgentStatus = "working"
-	StatusIdle    AgentStatus = "idle"
 	StatusOffline AgentStatus = "offline"
 )
 
 func (a AgentStatus) Valid() bool {
 	switch a {
-	case StatusOnline, StatusWorking, StatusIdle, StatusOffline:
+	case StatusOnline, StatusWorking, StatusOffline:
 		return true
 	}
 	return false

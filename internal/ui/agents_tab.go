@@ -90,8 +90,6 @@ func (a AgentsTab) View() string {
 		switch ag.Status {
 		case protocol.StatusOnline, protocol.StatusWorking:
 			statusStyle = lipgloss.NewStyle().Foreground(ColorSystem)
-		case protocol.StatusIdle:
-			statusStyle = lipgloss.NewStyle().Foreground(ColorStatus)
 		default:
 			statusStyle = lipgloss.NewStyle().Foreground(ColorStatus)
 		}
