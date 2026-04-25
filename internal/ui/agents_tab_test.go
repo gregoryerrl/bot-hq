@@ -14,7 +14,7 @@ import (
 // raw protocol.AgentStatus. Spec §4 commit 4: source switch.
 func TestAgentsTabReadsActivity(t *testing.T) {
 	now := time.Now()
-	stale := now.Add(-2 * time.Minute) // beyond OnlineWindow (60s)
+	stale := now.Add(-2 * time.Minute) // beyond HeartbeatOnlineWindow (60s)
 
 	cases := []struct {
 		name      string
