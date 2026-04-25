@@ -335,7 +335,7 @@ func hubRead(db *hub.DB) ToolDef {
 func hubAgents(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_agents",
 		mcp.WithDescription("List agents registered in the hub"),
-		mcp.WithString("status", mcp.Description("Filter by status: online, working, idle, offline")),
+		mcp.WithString("status", mcp.Description("Filter by status: online, working, offline")),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -448,7 +448,7 @@ func hubStatus(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_status",
 		mcp.WithDescription("Update agent status"),
 		mcp.WithString("id", mcp.Required(), mcp.Description("Agent ID")),
-		mcp.WithString("status", mcp.Required(), mcp.Description("New status: online, working, idle, offline")),
+		mcp.WithString("status", mcp.Required(), mcp.Description("New status: online, working, offline")),
 		mcp.WithString("project", mcp.Description("Optionally update the project")),
 	)
 
