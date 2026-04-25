@@ -293,11 +293,14 @@ func TestSentinelMatchPositive(t *testing.T) {
 		content    string
 		alwaysFlag bool
 	}{
-		{"panic", "runtime panic: nil pointer dereference", true},
-		{"deadlock", "fatal error: all goroutines are asleep - deadlock!", true},
+		{"panic-colon", "panic: runtime error: index out of range", true},
+		{"panic-paren", "panic({0xc000..., 0xc000...})", true},
+		{"deadlock-bang", "fatal error: all goroutines are asleep - deadlock!", true},
 		{"rate-limit", "anthropic API rate limit exceeded", true},
 		{"process-exit", "coder agent process exited with code 1", true},
-		{"schema-constraint", "schema constraint violation on agents.id", true},
+		{"schema-constraint-violation", "schema constraint violation on agents.id", true},
+		{"schema-constraint-failed", "schema constraint failed during migration", true},
+		{"schema-constraint-error", "schema constraint error: agents.id not unique", true},
 		{"sigsegv", "SIGSEGV: segmentation violation", true},
 		{"fatal-no-flag", "FATAL: connection lost", false},   // pre-filter only, not always-flag
 		{"oom-no-flag", "out of memory: killed worker", false}, // pre-filter only
@@ -329,6 +332,21 @@ func TestSentinelMatchNegative(t *testing.T) {
 		"task complete: 5 files changed",
 		"hello world",
 		"",
+		// F2 false-positive class: panic/deadlock as nouns in planning prose.
+		// Post-tighten patterns require canonical Go runtime delimiters
+		// (`panic:` / `panic(` / `deadlock!`) — bare-word, period-followed,
+		// space-followed, and `=`-followed cases all drop out.
+		"flow on panic.",
+		"resolved a deadlock.",
+		"on panic = retry, on deadlock = abort.",
+		"on panic state",
+		"deadlock condition exists",
+		"discussion on panic in code review",
+		// F2 false-positive class: schema constraint discussed conceptually
+		// without the violation/failed/error follow-on word.
+		"discussing schema constraint design",
+		"the schema constraint is conservative",
+		"constraint violation in our locked spec",
 	}
 	for _, content := range cases {
 		t.Run(content, func(t *testing.T) {

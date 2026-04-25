@@ -15,13 +15,13 @@ import (
 // raises Emma's processing cost (each match runs each regex), so curate
 // rather than expand.
 var preFilterPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bpanic\b`),
+	regexp.MustCompile(`(?i)\bpanic(:|\()`),
 	regexp.MustCompile(`(?i)\bfatal\b`),
-	regexp.MustCompile(`(?i)\bdeadlock\b`),
+	regexp.MustCompile(`(?i)\bdeadlock!`),
 	regexp.MustCompile(`(?i)rate[\s\-]?limit`),
 	regexp.MustCompile(`(?i)\bOOM\b|out[\s\-]of[\s\-]memory`),
 	regexp.MustCompile(`(?i)process\s+exit(ed)?`),
-	regexp.MustCompile(`(?i)schema\s+constraint|constraint\s+violation`),
+	regexp.MustCompile(`(?i)schema\s+constraint\s+(violation|failed|error)`),
 	regexp.MustCompile(`(?i)stack\s+overflow`),
 	regexp.MustCompile(`(?i)segmentation\s+fault|SIGSEGV`),
 }
@@ -30,11 +30,11 @@ var preFilterPatterns = []*regexp.Regexp{
 // here promotes the decision from observation to flag (Type=MsgFlag,
 // rate-cap + hysteresis still apply via Gemma.shouldFlag).
 var alwaysFlagPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\bpanic\b`),
-	regexp.MustCompile(`(?i)\bdeadlock\b`),
+	regexp.MustCompile(`(?i)\bpanic(:|\()`),
+	regexp.MustCompile(`(?i)\bdeadlock!`),
 	regexp.MustCompile(`(?i)rate[\s\-]?limit`),
 	regexp.MustCompile(`(?i)process\s+exit(ed)?`),
-	regexp.MustCompile(`(?i)schema\s+constraint|constraint\s+violation`),
+	regexp.MustCompile(`(?i)schema\s+constraint\s+(violation|failed|error)`),
 	regexp.MustCompile(`(?i)segmentation\s+fault|SIGSEGV`),
 }
 
