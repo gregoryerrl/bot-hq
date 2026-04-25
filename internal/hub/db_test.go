@@ -512,3 +512,57 @@ func TestReconcileCoderGhosts_EmptyDB(t *testing.T) {
 		t.Errorf("flipped count on empty DB: got %d, want 0", n)
 	}
 }
+
+// D2 cleanup: a coder agent with no claude_session row but a last_seen
+// older than staleCoderCutoff is also a ghost — pre-bug-#4 leak rows
+// have no session marker but never get re-touched, so they accumulate
+// at status=online forever. Stale path must catch them.
+func TestReconcileCoderGhosts_FlipsStaleCoder(t *testing.T) {
+	db := setupTestDB(t)
+
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: "stalecoder", Name: "Stale", Type: protocol.AgentCoder, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate last_seen well past the cutoff (8 days ago).
+	stale := time.Now().Add(-8 * 24 * time.Hour).UnixMilli()
+	if _, err := db.conn.Exec(`UPDATE agents SET last_seen = ? WHERE id = ?`, stale, "stalecoder"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh coder with no session: must NOT flip (last_seen recent, no
+	// session marker — the regular path doesn't touch it either).
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: "freshcoder", Name: "Fresh", Type: protocol.AgentCoder, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stale non-coder: type predicate must guard against this.
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: "stalevoice", Name: "Voice", Type: protocol.AgentVoice, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.conn.Exec(`UPDATE agents SET last_seen = ? WHERE id = ?`, stale, "stalevoice"); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := db.ReconcileCoderGhosts()
+	if err != nil {
+		t.Fatalf("ReconcileCoderGhosts error: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("flipped count: got %d, want 1 (stalecoder only)", n)
+	}
+	if a, _ := db.GetAgent("stalecoder"); a.Status != protocol.StatusOffline {
+		t.Errorf("stalecoder: status got %q, want offline", a.Status)
+	}
+	if a, _ := db.GetAgent("freshcoder"); a.Status != protocol.StatusOnline {
+		t.Errorf("freshcoder flipped erroneously: status=%q (last_seen recent)", a.Status)
+	}
+	if a, _ := db.GetAgent("stalevoice"); a.Status != protocol.StatusOnline {
+		t.Errorf("stalevoice flipped erroneously: status=%q (type predicate failed)", a.Status)
+	}
+}
