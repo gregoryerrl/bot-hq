@@ -42,14 +42,28 @@ type App struct {
 
 // NewApp creates a new App model with the Hub tab active.
 func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
+	hubTab := NewHubTab()
+	var lastID int64
+	if db != nil {
+		if recent, err := db.GetRecentMessages(100); err == nil {
+			for i := len(recent) - 1; i >= 0; i-- {
+				m := recent[i]
+				hubTab, _ = hubTab.Update(MessageReceived{Message: m})
+				if m.ID > lastID {
+					lastID = m.ID
+				}
+			}
+		}
+	}
 	return App{
 		activeTab:   TabHub,
-		hubTab:      NewHubTab(),
+		hubTab:      hubTab,
 		agentsTab:   NewAgentsTab(),
 		sessionsTab: NewSessionsTab(),
 		settingsTab: NewSettingsTab(cfg, db),
 		db:          db,
 		brian:       b,
+		lastMsgID:   lastID,
 	}
 }
 
