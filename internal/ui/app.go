@@ -61,10 +61,15 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 	if db != nil {
 		pane = panestate.NewManager(db)
 	}
+	agentsTab := NewAgentsTab()
+	if pane != nil {
+		hubTab.SetPane(pane)
+		agentsTab.SetPane(pane)
+	}
 	return App{
 		activeTab:   TabHub,
 		hubTab:      hubTab,
-		agentsTab:   NewAgentsTab(),
+		agentsTab:   agentsTab,
 		sessionsTab: NewSessionsTab(),
 		settingsTab: NewSettingsTab(cfg, db),
 		db:          db,

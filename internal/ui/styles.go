@@ -1,6 +1,9 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/lipgloss"
+	"github.com/gregoryerrl/bot-hq/internal/panestate"
+)
 
 var (
 	// Tab bar styles
@@ -19,12 +22,32 @@ var (
 	ColorStatus  = lipgloss.Color("#6B7280") // gray — status updates
 	ColorSession = lipgloss.Color("#EAB308") // yellow — handshakes, sessions
 
-	// Status indicator styles
-	StatusOnline  = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).SetString("●")
-	StatusOffline = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).SetString("○")
+	// Activity dot styles. Supersedes Phase D's StatusOnline / StatusOffline pair —
+	// the activity-derived model (panestate) is the single source of dot truth.
+	ActivityWorkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).SetString("●") // green: actively executing
+	ActivityOnlineStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#06B6D4")).SetString("◐") // cyan: present, not active
+	ActivityStaleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).SetString("○") // gray: quiet, escalate
+	ActivityOfflineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#404040")).SetString("·") // dim: disconnected
 
 	// General styles
 	TitleStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF"))
 	SubtitleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
 	BorderStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#555555"))
 )
+
+// activityDot returns the rendered glyph (with color) for the given activity.
+// Used by both the hub-strip render and the agents-tab Status column so the
+// two surfaces stay visually consistent.
+func activityDot(a panestate.AgentActivity) string {
+	switch a {
+	case panestate.ActivityWorking:
+		return ActivityWorkingStyle.String()
+	case panestate.ActivityOnline:
+		return ActivityOnlineStyle.String()
+	case panestate.ActivityStale:
+		return ActivityStaleStyle.String()
+	case panestate.ActivityOffline:
+		return ActivityOfflineStyle.String()
+	}
+	return "?"
+}

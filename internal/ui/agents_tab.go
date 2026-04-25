@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
@@ -29,11 +30,19 @@ type AgentsTab struct {
 	agents []protocol.Agent
 	width  int
 	height int
+	pane   *panestate.Manager // Activity source for Status column (Phase E commit 4)
 }
 
 // NewAgentsTab creates a new AgentsTab.
 func NewAgentsTab() AgentsTab {
 	return AgentsTab{}
+}
+
+// SetPane wires a panestate.Manager so the Status column reads activity
+// recency rather than the raw protocol.AgentStatus field. App calls this
+// after construction.
+func (a *AgentsTab) SetPane(p *panestate.Manager) {
+	a.pane = p
 }
 
 // SetSize updates the tab's dimensions.
@@ -71,34 +80,48 @@ func (a AgentsTab) View() string {
 		maxName = 8
 	}
 
+	// Build an activity lookup from the panestate snapshot so the Status column
+	// reflects derived activity (working/online/stale/offline) rather than the
+	// raw protocol.AgentStatus field. Phase E commit 4: panestate is the source
+	// of truth for what the user sees.
+	activityByID := map[string]panestate.AgentActivity{}
+	if a.pane != nil {
+		for _, s := range a.pane.Snapshot() {
+			activityByID[s.ID] = s.Activity
+		}
+	}
+
 	var lines []string
-	onlineCount := 0
+	aliveCount := 0
 
 	for _, ag := range a.agents {
-		// Status dot
-		var dot string
-		switch ag.Status {
-		case protocol.StatusOnline, protocol.StatusWorking:
-			dot = StatusOnline.String()
-			onlineCount++
-		default:
-			dot = StatusOffline.String()
+		// Resolve activity. Fall back to status-based mapping when pane is
+		// absent (e.g. headless tests pre-SetPane).
+		activity, ok := activityByID[ag.ID]
+		if !ok {
+			if ag.Status == protocol.StatusOffline {
+				activity = panestate.ActivityOffline
+			} else {
+				activity = panestate.ActivityStale
+			}
 		}
 
-		// Status text with color
-		var statusStyle lipgloss.Style
-		switch ag.Status {
-		case protocol.StatusOnline, protocol.StatusWorking:
+		dot := activityDot(activity)
+		if activity == panestate.ActivityWorking || activity == panestate.ActivityOnline {
+			aliveCount++
+		}
+
+		statusStyle := lipgloss.NewStyle().Foreground(ColorStatus)
+		switch activity {
+		case panestate.ActivityWorking, panestate.ActivityOnline:
 			statusStyle = lipgloss.NewStyle().Foreground(ColorSystem)
-		default:
-			statusStyle = lipgloss.NewStyle().Foreground(ColorStatus)
 		}
 
 		safeName := stripANSI(ag.Name)
 		name := lipgloss.NewStyle().Foreground(agentColor(ag.ID)).Render(
 			fmt.Sprintf("%-*s", maxName, safeName),
 		)
-		status := statusStyle.Render(fmt.Sprintf("%-10s", ag.Status))
+		status := statusStyle.Render(fmt.Sprintf("%-10s", activity))
 		safeProject := stripANSI(ag.Project)
 		project := lipgloss.NewStyle().Foreground(ColorSession).Render(
 			fmt.Sprintf("%-18s", safeProject),
@@ -122,9 +145,9 @@ func (a AgentsTab) View() string {
 		lines = append(lines, fmt.Sprintf("%s %s  %s  %s  %s%s", dot, name, status, project, timeStr, tmuxStr))
 	}
 
-	offlineCount := len(a.agents) - onlineCount
+	offlineCount := len(a.agents) - aliveCount
 	summary := lipgloss.NewStyle().Foreground(ColorStatus).Render(
-		fmt.Sprintf("\n[%d online, %d offline]", onlineCount, offlineCount),
+		fmt.Sprintf("\n[%d alive, %d offline]", aliveCount, offlineCount),
 	)
 	lines = append(lines, summary)
 
