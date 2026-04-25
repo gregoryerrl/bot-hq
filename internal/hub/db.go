@@ -254,6 +254,23 @@ func (db *DB) UnregisterAgent(id string) error {
 	return db.UpdateAgentStatus(id, protocol.StatusOffline)
 }
 
+// UpdateAgentLastSeen touches only the last_seen timestamp, leaving status
+// and project intact. Used by the MCP middleware in internal/mcp/tools.go to
+// auto-refresh activity recency on every tool call without disturbing status
+// transitions.
+//
+// Phase F prerequisite: heartbeat goroutine (when added) calls this on a
+// timer for agents that don't initiate MCP calls (e.g. dormant coders
+// awaiting input). See docs/plans/phase-e.md §6.
+func (db *DB) UpdateAgentLastSeen(id string) error {
+	now := time.Now().UnixMilli()
+	_, err := db.conn.Exec(
+		`UPDATE agents SET last_seen = ? WHERE id = ?`,
+		now, id,
+	)
+	return err
+}
+
 // DeleteAgent permanently removes an agent record from the database.
 func (db *DB) DeleteAgent(id string) error {
 	_, err := db.conn.Exec(`DELETE FROM agents WHERE id = ?`, id)

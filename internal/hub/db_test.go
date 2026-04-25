@@ -236,3 +236,56 @@ func TestSaveCheckpointInvalidJSON(t *testing.T) {
 		t.Error("expected error for invalid JSON data")
 	}
 }
+
+func TestUpdateAgentLastSeen(t *testing.T) {
+	db := setupTestDB(t)
+	agent := protocol.Agent{
+		ID:      "lastseen-test",
+		Name:    "Last Seen Test",
+		Type:    protocol.AgentBrian,
+		Status:  protocol.StatusOnline,
+		Project: "/projects/test",
+	}
+	if err := db.RegisterAgent(agent); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := db.GetAgent("lastseen-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for an observably newer timestamp at ms resolution.
+	time.Sleep(5 * time.Millisecond)
+
+	if err := db.UpdateAgentLastSeen("lastseen-test"); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := db.GetAgent("lastseen-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !after.LastSeen.After(initial.LastSeen) {
+		t.Errorf("LastSeen did not advance: initial=%v after=%v", initial.LastSeen, after.LastSeen)
+	}
+	// Status untouched — locks against the bug-pattern where status writes leaked
+	// into recency updates (cf. claude_stop no-offline-flip discussion).
+	if after.Status != protocol.StatusOnline {
+		t.Errorf("Status mutated: got %q want %q", after.Status, protocol.StatusOnline)
+	}
+	if after.Project != "/projects/test" {
+		t.Errorf("Project mutated: got %q want %q", after.Project, "/projects/test")
+	}
+	if after.Name != "Last Seen Test" {
+		t.Errorf("Name mutated: got %q want %q", after.Name, "Last Seen Test")
+	}
+}
+
+func TestUpdateAgentLastSeenUnknownID(t *testing.T) {
+	db := setupTestDB(t)
+	// Unknown ID → UPDATE matches zero rows, no error.
+	if err := db.UpdateAgentLastSeen("nonexistent"); err != nil {
+		t.Errorf("unexpected error for unknown id: %v", err)
+	}
+}

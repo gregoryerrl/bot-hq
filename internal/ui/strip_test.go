@@ -1,0 +1,144 @@
+package ui
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/gregoryerrl/bot-hq/internal/panestate"
+	"github.com/gregoryerrl/bot-hq/internal/protocol"
+)
+
+// makeSnap builds a panestate.AgentSnapshot for tests.
+func makeSnap(id string, t protocol.AgentType, a panestate.AgentActivity) panestate.AgentSnapshot {
+	return panestate.AgentSnapshot{
+		ID:       id,
+		Name:     id,
+		Type:     t,
+		Activity: a,
+	}
+}
+
+func TestRenderStripFiltersAliveOnly(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeSnap("a-working", protocol.AgentBrian, panestate.ActivityWorking),
+		makeSnap("b-online", protocol.AgentQA, panestate.ActivityOnline),
+		makeSnap("c-stale", protocol.AgentCoder, panestate.ActivityStale),
+		makeSnap("d-offline", protocol.AgentCoder, panestate.ActivityOffline),
+	}
+	out := renderStrip(snap)
+	if !strings.Contains(out, "a-working") {
+		t.Errorf("strip should contain a-working, got: %q", out)
+	}
+	if !strings.Contains(out, "b-online") {
+		t.Errorf("strip should contain b-online, got: %q", out)
+	}
+	if strings.Contains(out, "c-stale") {
+		t.Errorf("strip should hide c-stale, got: %q", out)
+	}
+	if strings.Contains(out, "d-offline") {
+		t.Errorf("strip should hide d-offline, got: %q", out)
+	}
+}
+
+func TestRenderStripOrdersByTier(t *testing.T) {
+	// Mixed input order; expected: tier 1 (Brian/QA/Voice) → tier 2 (Discord/Gemma) → tier 3 (Coder).
+	snap := []panestate.AgentSnapshot{
+		makeSnap("worker", protocol.AgentCoder, panestate.ActivityWorking),
+		makeSnap("svc", protocol.AgentDiscord, panestate.ActivityWorking),
+		makeSnap("peer", protocol.AgentBrian, panestate.ActivityWorking),
+	}
+	out := renderStrip(snap)
+	peerPos := strings.Index(out, "peer")
+	svcPos := strings.Index(out, "svc")
+	workerPos := strings.Index(out, "worker")
+	if peerPos < 0 || svcPos < 0 || workerPos < 0 {
+		t.Fatalf("missing IDs in output: %q (peer=%d svc=%d worker=%d)", out, peerPos, svcPos, workerPos)
+	}
+	if !(peerPos < svcPos && svcPos < workerPos) {
+		t.Errorf("tier order broken: peer=%d svc=%d worker=%d in %q", peerPos, svcPos, workerPos, out)
+	}
+}
+
+func TestRenderStripOrdersByNameWithinTier(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		{ID: "z-brian", Name: "z-brian", Type: protocol.AgentBrian, Activity: panestate.ActivityWorking},
+		{ID: "a-rain", Name: "a-rain", Type: protocol.AgentQA, Activity: panestate.ActivityWorking},
+	}
+	out := renderStrip(snap)
+	rainPos := strings.Index(out, "a-rain")
+	brianPos := strings.Index(out, "z-brian")
+	if rainPos < 0 || brianPos < 0 {
+		t.Fatalf("missing IDs: %q", out)
+	}
+	if !(rainPos < brianPos) {
+		t.Errorf("expected name-sort within tier1: a-rain before z-brian, got %q", out)
+	}
+}
+
+func TestRenderStripCapsAt8(t *testing.T) {
+	snap := make([]panestate.AgentSnapshot, 0, 12)
+	for i := 0; i < 12; i++ {
+		snap = append(snap, makeSnap(fmt.Sprintf("agent%02d", i), protocol.AgentCoder, panestate.ActivityWorking))
+	}
+	out := renderStrip(snap)
+	// Exactly 8 distinct IDs visible (agent00 .. agent07).
+	for i := 0; i < 8; i++ {
+		want := fmt.Sprintf("agent%02d", i)
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in capped output: %q", want, out)
+		}
+	}
+	// Surplus 4 should NOT be visible by ID.
+	for i := 8; i < 12; i++ {
+		want := fmt.Sprintf("agent%02d", i)
+		if strings.Contains(out, want) {
+			t.Errorf("surplus %s should be collapsed, got: %q", want, out)
+		}
+	}
+	// "+4" suffix present.
+	if !strings.Contains(out, "+4") {
+		t.Errorf("expected '+4' suffix for 4 surplus agents, got: %q", out)
+	}
+}
+
+func TestRenderStripEmpty(t *testing.T) {
+	out := renderStrip(nil)
+	if strings.Contains(out, "●") || strings.Contains(out, "◐") {
+		t.Errorf("empty input should produce no dot chars, got: %q", out)
+	}
+	if strings.Contains(out, "+") {
+		t.Errorf("empty input should not produce '+N' suffix, got: %q", out)
+	}
+}
+
+func TestRenderStripAllStaleOffline(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeSnap("a", protocol.AgentBrian, panestate.ActivityStale),
+		makeSnap("b", protocol.AgentCoder, panestate.ActivityOffline),
+	}
+	out := renderStrip(snap)
+	if strings.Contains(out, "a") || strings.Contains(out, "b") {
+		t.Errorf("stale/offline-only input should produce no IDs, got: %q", out)
+	}
+}
+
+func TestAgentTypeTier(t *testing.T) {
+	cases := []struct {
+		t    protocol.AgentType
+		want int
+	}{
+		{protocol.AgentBrian, 1},
+		{protocol.AgentQA, 1},
+		{protocol.AgentVoice, 1},
+		{protocol.AgentDiscord, 2},
+		{protocol.AgentGemma, 2},
+		{protocol.AgentCoder, 3},
+		{protocol.AgentType("unknown"), 4},
+	}
+	for _, tc := range cases {
+		if got := agentTypeTier(tc.t); got != tc.want {
+			t.Errorf("agentTypeTier(%q) = %d, want %d", tc.t, got, tc.want)
+		}
+	}
+}

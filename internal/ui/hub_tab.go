@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
@@ -30,6 +31,14 @@ type HubTab struct {
 	height        int
 	focused       bool // true when the command input is focused
 	sessionFilter string
+	pane          *panestate.Manager // first-order activity strip source
+}
+
+// SetPane wires a panestate.Manager so HubTab.View can render the activity
+// strip above the input bar. App calls this after construction. Phase E
+// commit 4 wiring; Phase F may collapse the message-driven path entirely.
+func (h *HubTab) SetPane(p *panestate.Manager) {
+	h.pane = p
 }
 
 // NewHubTab creates a new HubTab with default dimensions.
@@ -133,8 +142,9 @@ func (h *HubTab) SetSessionFilter(sessionID string) {
 
 // resize recalculates viewport and input dimensions.
 func (h *HubTab) resize() {
-	// Reserve 3 lines: 1 for separator, 1 for input, 1 for padding
-	inputHeight := 3
+	// Reserve 4 lines: 1 separator, 1 strip, 1 input, 1 padding (Phase E commit 4
+	// added the strip line — total reserved was 3 pre-strip).
+	inputHeight := 4
 	vpHeight := h.height - inputHeight
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -147,16 +157,32 @@ func (h *HubTab) resize() {
 	h.viewport.SetContent(h.renderMessages())
 }
 
-// View renders the HubTab.
+// View renders the HubTab. Layout (top to bottom):
+//
+//	viewport       — scrollable message feed
+//	separator      — dividing line
+//	strip          — per-agent activity dots (Phase E commit 4)
+//	input          — command input
+//
+// Strip line is reserved even when no agents are alive so the input bar
+// position stays stable across strip-empty/non-empty transitions.
 func (h HubTab) View() string {
 	separator := lipgloss.NewStyle().
 		Width(h.width).
 		Foreground(lipgloss.Color("#555555")).
 		Render(strings.Repeat("─", h.width))
 
+	stripContent := ""
+	if h.pane != nil {
+		stripContent = renderStrip(h.pane.Snapshot())
+	}
+	stripStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
+	strip := stripStyle.Render(stripContent)
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		h.viewport.View(),
 		separator,
+		strip,
 		h.input.View(),
 	)
 }
