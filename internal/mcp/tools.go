@@ -892,10 +892,7 @@ func claudeList(db *hub.DB) ToolDef {
 				}
 			}
 			if !found {
-				db.StopClaudeSession(s.ID)
-				// Bug #4 fix (paired with claudeStop): if tmux session vanished,
-				// the corresponding agent row is also stale-online — flip it.
-				db.UpdateAgentStatus(s.ID, protocol.StatusOffline)
+				markSessionStoppedAndAgentOffline(db, s.ID)
 				s.Status = "stopped"
 			}
 			// Check if already in results
@@ -1093,6 +1090,18 @@ func claudeResume() ToolDef {
 	return ToolDef{Tool: tool, Handler: handler}
 }
 
+// markSessionStoppedAndAgentOffline writes the bug-#4 invariant: stopping a
+// claude session also flips its paired agent row (same ID, registered by
+// hubSpawn) to offline. Without the agent flip, killed coders accumulate as
+// stale-online ghost rows in the agents table. Both claudeStop (explicit
+// kill) and claudeList reconciliation (implicit cleanup when tmux vanishes)
+// must use this — duplicating the two-call sequence inline is what missed
+// the second surface during initial implementation.
+func markSessionStoppedAndAgentOffline(db *hub.DB, sessionID string) {
+	db.StopClaudeSession(sessionID)
+	db.UpdateAgentStatus(sessionID, protocol.StatusOffline)
+}
+
 func claudeStop(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("claude_stop",
 		mcp.WithDescription("Stop a running Claude Code session by killing its tmux session. This is destructive."),
@@ -1115,12 +1124,7 @@ func claudeStop(db *hub.DB) ToolDef {
 			// Session might already be dead — mark as stopped anyway
 		}
 
-		db.StopClaudeSession(sessionID)
-		// Bug #4 fix: also flip the agent row to offline. Spawn registers session
-		// and agent with the same ID (see hubSpawn), so reuse sessionID. Without
-		// this, killed coders accumulate as stale-online ghost rows in the agents
-		// table even though their tmux session is gone.
-		db.UpdateAgentStatus(sessionID, protocol.StatusOffline)
+		markSessionStoppedAndAgentOffline(db, sessionID)
 
 		return mcp.NewToolResultText(toJSON(map[string]string{
 			"status":     "stopped",

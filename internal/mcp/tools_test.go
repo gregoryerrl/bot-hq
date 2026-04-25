@@ -215,6 +215,70 @@ func TestClaudeStop_FlipsAgentToOffline(t *testing.T) {
 	}
 }
 
+// Bug #4 lock for the helper itself, exercising both surface points (claudeStop
+// + claudeList reconciliation) since both now route through this single call.
+// The claudeList path is otherwise hard to test directly because its handler
+// shells out to live tmux via DiscoverClaudeSessions; testing the shared
+// helper covers that surface without a tmux dependency.
+func TestMarkSessionStoppedAndAgentOffline_FlipsBoth(t *testing.T) {
+	db := setupTestDB(t)
+	id := "helper_test_agent"
+
+	if err := db.InsertClaudeSession(hub.ClaudeSession{
+		ID: id, Project: "/tmp", TmuxTarget: "cc-helper-no-tmux",
+		Mode: "managed", Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: id, Name: "Helper Test", Type: protocol.AgentCoder, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	markSessionStoppedAndAgentOffline(db, id)
+
+	agent, err := db.GetAgent(id)
+	if err != nil {
+		t.Fatalf("agent disappeared: %v", err)
+	}
+	if agent.Status != protocol.StatusOffline {
+		t.Errorf("agent status: got %q, want %q", agent.Status, protocol.StatusOffline)
+	}
+	sess, err := db.GetClaudeSession(id)
+	if err != nil {
+		t.Fatalf("session disappeared: %v", err)
+	}
+	if sess.Status != "stopped" {
+		t.Errorf("session status: got %q, want %q", sess.Status, "stopped")
+	}
+}
+
+// Verifies the helper is safe when the agent row is missing (e.g. tmux
+// session was discovered externally with no paired RegisterAgent call).
+// db.UpdateAgentStatus on an unknown ID is a SQL UPDATE-WHERE no-op.
+func TestMarkSessionStoppedAndAgentOffline_NoAgentRowSafe(t *testing.T) {
+	db := setupTestDB(t)
+	id := "orphan_session"
+
+	if err := db.InsertClaudeSession(hub.ClaudeSession{
+		ID: id, Project: "/tmp", TmuxTarget: "cc-orphan-no-tmux",
+		Mode: "attached", Status: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	markSessionStoppedAndAgentOffline(db, id) // must not panic or error
+
+	sess, err := db.GetClaudeSession(id)
+	if err != nil {
+		t.Fatalf("session disappeared: %v", err)
+	}
+	if sess.Status != "stopped" {
+		t.Errorf("session status: got %q, want %q", sess.Status, "stopped")
+	}
+}
+
 func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 	// Per-tool extraction matrix: every tool whose params include a caller-context
 	// agent must expose one of commonAgentIDKeys. Anonymous read/spawn tools and
