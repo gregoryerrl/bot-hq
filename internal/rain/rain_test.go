@@ -140,18 +140,17 @@ func TestInitialPromptContainsOutboundContract(t *testing.T) {
 	}
 }
 
-// Ratchet against regression: OUTBOUND rule must default user-facing replies
-// to broadcast. Mirror of brian_test.go TestInitialPromptContainsBroadcastDefault.
-func TestInitialPromptContainsBroadcastDefault(t *testing.T) {
+// Ratchet against regression: the prompt must embed the canonical
+// DiscV2OutboundRule const verbatim. Mirror of brian_test.go's
+// TestInitialPromptEmbedsDiscV2OutboundRule. The const itself is
+// ratchet-tested in protocol/disc_test.go; this test locks the wiring
+// on the rain end. Drift in either rain.go OR brian.go is now caught
+// by the per-agent wiring tests.
+func TestInitialPromptEmbedsDiscV2OutboundRule(t *testing.T) {
 	r := &Rain{}
 	prompt := r.initialPrompt()
-	for _, literal := range []string{
-		"Default broadcast for user-facing replies",
-		`Private to:"user" only when`,
-	} {
-		if !strings.Contains(prompt, literal) {
-			t.Errorf("initial prompt must contain OUTBOUND broadcast-default literal %q", literal)
-		}
+	if !strings.Contains(prompt, protocol.DiscV2OutboundRule) {
+		t.Errorf("initial prompt must embed protocol.DiscV2OutboundRule verbatim (bug #1 wiring lock)")
 	}
 }
 

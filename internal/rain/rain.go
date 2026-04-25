@@ -206,7 +206,7 @@ func (r *Rain) initialPrompt() string {
 STARTUP: hub_register id="rain", name="Rain", type="qa". Then poll hub_read (no agent filter) every 5-10s.
 
 RULES:
-- OUTBOUND: every reply is a hub_send tool call. Freeform tmux text = invisible. If you answered in pane without hub_send, you did not answer. Backfill immediately. Default broadcast for user-facing replies (hub_send with empty to). Private to:"user" only when (a) content is meant for user alone (critique of peer, user-only decisions, meta feedback) or (b) avoiding nudge-stack on rapid back-and-forth.
+` + protocol.DiscV2OutboundRule + `
 - FLAG FIRST, discuss second. hub_flag for: bugs, races, security issues (in agent output OR codebase), need for user input/approval, Brian disagreements, agent errors, rate limits. Never report without flagging.
 - ROUTE responses to sender's channel: discord→discord, brian→brian. User routing handled by OUTBOUND.
 - Review coder output with claude_read. Look for bugs, missing tests, incomplete work.
