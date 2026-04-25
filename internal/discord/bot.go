@@ -166,8 +166,7 @@ func (b *Bot) forwardToDiscord(ch <-chan protocol.Message) {
 				continue
 			}
 
-			// Forward messages addressed to "discord" OR flag messages (attention notifications)
-			if msg.ToAgent != "discord" && msg.Type != protocol.MsgFlag {
+			if !shouldForwardToDiscord(msg) {
 				continue
 			}
 
@@ -233,4 +232,25 @@ func splitMessage(text string, limit int) []string {
 	}
 
 	return chunks
+}
+
+// shouldForwardToDiscord decides whether a hub message should bridge through
+// to the Discord channel. Bug #1 fix: forward broadcasts (ToAgent=="") in
+// addition to discord-routed and flag messages. The original filter
+// (ToAgent != "discord" && Type != MsgFlag) silently dropped every broadcast,
+// hiding ~half of agent activity from Discord. Audience-driven routing per
+// DISC v2 (msg 2147 lock + Worktree C const extraction in commit 2a/2b).
+//
+// Forward when ANY of:
+//   - ToAgent == "discord" (explicitly addressed)
+//   - ToAgent == "" (broadcast — user is one of the intended audiences)
+//   - Type == MsgFlag (attention notification regardless of routing)
+//
+// Skip peer-routed PMs (ToAgent in {"brian", "rain", ...}). Discord's
+// audience is the user; peer coordination should not surface as Discord noise.
+func shouldForwardToDiscord(msg protocol.Message) bool {
+	if msg.Type == protocol.MsgFlag {
+		return true
+	}
+	return msg.ToAgent == "discord" || msg.ToAgent == ""
 }
