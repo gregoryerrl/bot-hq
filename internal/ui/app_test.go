@@ -72,6 +72,61 @@ func TestNewAppSeedsFromRecentMessages(t *testing.T) {
 	}
 }
 
+// TestNewAppBackfillIsChronological locks the boot-fix iteration order:
+// hubTab.messages must end up oldest→newest, matching the chronological
+// order GetRecentMessages returns. A reversed iteration was the cause of
+// the visible "jump on restart" — newest msgs landed at top, oldest at
+// bottom, and the auto-scroll-to-bottom anchored on the wrong end.
+func TestNewAppBackfillIsChronological(t *testing.T) {
+	db := newTestDB(t)
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		id, err := db.InsertMessage(protocol.Message{
+			FromAgent: "user",
+			Type:      protocol.MsgCommand,
+			Content:   "msg",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	app := NewApp(hub.Config{}, db, nil)
+	if len(app.hubTab.messages) != 5 {
+		t.Fatalf("len(messages) = %d, want 5", len(app.hubTab.messages))
+	}
+	for i := 0; i < 5; i++ {
+		if app.hubTab.messages[i].ID != ids[i] {
+			t.Errorf("messages[%d].ID = %d, want %d (chronological order broken)",
+				i, app.hubTab.messages[i].ID, ids[i])
+		}
+	}
+}
+
+// TestNewAppLastIDMatchesNewest locks that lastMsgID equals the newest
+// inserted message's ID after backfill, regardless of iteration direction.
+// Independent contract from TestNewAppBackfillIsChronological so a future
+// refactor can't drop one without surfacing the other.
+func TestNewAppLastIDMatchesNewest(t *testing.T) {
+	db := newTestDB(t)
+	var newest int64
+	for i := 0; i < 5; i++ {
+		id, err := db.InsertMessage(protocol.Message{
+			FromAgent: "user",
+			Type:      protocol.MsgCommand,
+			Content:   "msg",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		newest = id
+	}
+	app := NewApp(hub.Config{}, db, nil)
+	if app.lastMsgID != newest {
+		t.Errorf("lastMsgID = %d, want %d (newest)", app.lastMsgID, newest)
+	}
+}
+
 // TestNewAppConstructsPanestateManager verifies App owns a non-nil
 // panestate.Manager when a DB is provided. Locks against accidental
 // regression where the field is dropped or left nil.

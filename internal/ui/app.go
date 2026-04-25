@@ -48,7 +48,9 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 	var lastID int64
 	if db != nil {
 		if recent, err := db.GetRecentMessages(100); err == nil {
-			for i := len(recent) - 1; i >= 0; i-- {
+			// GetRecentMessages returns chronological (oldest→newest);
+			// iterate forward so hubTab.messages preserves that order.
+			for i := 0; i < len(recent); i++ {
 				m := recent[i]
 				hubTab, _ = hubTab.Update(MessageReceived{Message: m})
 				if m.ID > lastID {
