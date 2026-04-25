@@ -893,6 +893,9 @@ func claudeList(db *hub.DB) ToolDef {
 			}
 			if !found {
 				db.StopClaudeSession(s.ID)
+				// Bug #4 fix (paired with claudeStop): if tmux session vanished,
+				// the corresponding agent row is also stale-online — flip it.
+				db.UpdateAgentStatus(s.ID, protocol.StatusOffline)
 				s.Status = "stopped"
 			}
 			// Check if already in results
@@ -1113,6 +1116,11 @@ func claudeStop(db *hub.DB) ToolDef {
 		}
 
 		db.StopClaudeSession(sessionID)
+		// Bug #4 fix: also flip the agent row to offline. Spawn registers session
+		// and agent with the same ID (see hubSpawn), so reuse sessionID. Without
+		// this, killed coders accumulate as stale-online ghost rows in the agents
+		// table even though their tmux session is gone.
+		db.UpdateAgentStatus(sessionID, protocol.StatusOffline)
 
 		return mcp.NewToolResultText(toJSON(map[string]string{
 			"status":     "stopped",

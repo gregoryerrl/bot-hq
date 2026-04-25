@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -156,6 +157,61 @@ func TestWithLastSeen_ThrottleExpires(t *testing.T) {
 
 	if !second.LastSeen.After(first.LastSeen) {
 		t.Errorf("Throttle expiry did not allow write: first=%v second=%v", first.LastSeen, second.LastSeen)
+	}
+}
+
+// Bug #4 lock: claude_stop must flip the corresponding agent row to offline.
+// Spawn registers session and agent under the same ID; claude_stop killed the
+// tmux session and the session row but left the agent row stale-online,
+// accumulating ghost coders in the agents table over time.
+func TestClaudeStop_FlipsAgentToOffline(t *testing.T) {
+	db := setupTestDB(t)
+	id := "stop_test_agent"
+
+	// Mirror hubSpawn: register session and agent with same ID.
+	if err := db.InsertClaudeSession(hub.ClaudeSession{
+		ID:         id,
+		Project:    "/tmp",
+		TmuxTarget: "cc-stop-test-no-tmux", // intentionally no real tmux session
+		Mode:       "managed",
+		Status:     "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     id,
+		Name:   "Stop Test",
+		Type:   protocol.AgentCoder,
+		Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	td := claudeStop(db)
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"session_id": id}
+	res, err := td.Handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handler returned error result: %+v", res)
+	}
+
+	agent, err := db.GetAgent(id)
+	if err != nil {
+		t.Fatalf("agent disappeared: %v", err)
+	}
+	if agent.Status != protocol.StatusOffline {
+		t.Errorf("agent status: got %q, want %q (bug #4 regression — claude_stop did not flip agent to offline)", agent.Status, protocol.StatusOffline)
+	}
+
+	sess, err := db.GetClaudeSession(id)
+	if err != nil {
+		t.Fatalf("session disappeared: %v", err)
+	}
+	if sess.Status != "stopped" {
+		t.Errorf("session status: got %q, want %q", sess.Status, "stopped")
 	}
 }
 
