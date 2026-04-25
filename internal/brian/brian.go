@@ -86,12 +86,10 @@ func (b *Brian) Start() error {
 		return fmt.Errorf("brian register: %w", err)
 	}
 
-	// Get current last message ID so we only process new messages
-	msgs, err := b.db.GetRecentMessages(1)
-	if err == nil && len(msgs) > 0 {
-		b.lastMsgID = msgs[0].ID
-	}
-
+	// lastMsgID stays at zero. The first poll-tick uses ReadMessages's tail
+	// semantics (sinceID<=0 → latest N) to replay recent backlog through the
+	// nudge filter chain, so a freshly-booted Brian re-grounds in arc context
+	// rather than starting blind to anything posted before restart.
 	b.running = true
 
 	// Start background polling

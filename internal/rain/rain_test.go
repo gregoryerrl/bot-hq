@@ -417,3 +417,55 @@ func TestProcessNewMessages_SkipsSelf(t *testing.T) {
 		t.Error("expected lastMsgID to advance after processing messages")
 	}
 }
+
+// TestStartInitDoesNotPreSeedLastMsgID is a source ratchet locking the C2
+// deletion: rain.go must NOT pre-seed lastMsgID to the highest existing ID at
+// init. The pre-fix init block called GetRecentMessages(1) and assigned
+// msgs[0].ID to r.lastMsgID, which silently skipped any pre-restart backlog.
+// First poll-tick now relies on ReadMessages tail semantics (sinceID=0 →
+// latest N) to replay recent context.
+func TestStartInitDoesNotPreSeedLastMsgID(t *testing.T) {
+	data, err := os.ReadFile("rain.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	for _, banned := range []string{
+		"r.db.GetRecentMessages(1)",
+		"r.lastMsgID = msgs[0].ID",
+	} {
+		if strings.Contains(src, banned) {
+			t.Errorf("rain.go must not contain %q — reintroduces the pre-restart backlog skip bug", banned)
+		}
+	}
+}
+
+// TestProcessNewMessagesNoSpuriousReplay locks polling stability: a second
+// processNewMessages call after the watermark has advanced returns nothing.
+// This is the C1+C2 interaction at the floor — verifies sinceID=lastID
+// returns empty (Rain's third C1 test assertion expressed at the call site).
+func TestProcessNewMessagesNoSpuriousReplay(t *testing.T) {
+	db := setupTestDB(t)
+
+	for i := 0; i < 30; i++ {
+		if _, err := db.InsertMessage(protocol.Message{
+			FromAgent: "user",
+			Type:      protocol.MsgCommand,
+			Content:   "msg",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := New(db, t.TempDir())
+	r.processNewMessages()
+	advanced := r.lastMsgID
+	if advanced == 0 {
+		t.Fatal("first poll: expected lastMsgID to advance, got 0")
+	}
+
+	r.processNewMessages()
+	if r.lastMsgID != advanced {
+		t.Errorf("second poll: lastMsgID = %d, want %d (no spurious replay)", r.lastMsgID, advanced)
+	}
+}
