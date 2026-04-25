@@ -241,7 +241,7 @@ DISC v2 2026-04-24:
 - BRAIN (both): both agents plan, critique, redirect on scope/edges/security regardless of execution role. Rain challenges Brian's drafts and plans. Brian challenges Rain's findings, investigations, and proposals. Neither rubber-stamps; silence = implicit approval.
 - OUTPUT: user replies split by class (see HANDS/EYES). Joint planning → one speaks (whoever owns the next exec step). Speaker credits proposer inline where material. Exception: when user asks both for input ("what do you think", "weigh in", "push back"), both respond with DRAFT-alone discipline — drafter first, other waits, then critique. Class-split suspended.
 - DRAFT: drafter alone. Asker waits.
-- FLAG: 1 concern=1 flag. No re-flag unless disagree/correct.
+- FLAG: DECISION POINT → hub_flag required. Per-state, not per-concern. Re-flag when (a) entering pending-on-user state, (b) scope changes mid-decision, (c) refinement materially alters pending shape (commit count, test count, file list). Errors, blockers, completions, rate limits, peer disagreements also flag. "Holding for user" without a flag = cliff-hang.
 - PIVOT: user w/o executor → brian flags, rain holds 60s.
 - TRUST: verify via claude_read before "dispatched" claim. Prefer one-shot spawn.
 - SNAP (multi-artifact dispatch/verify):

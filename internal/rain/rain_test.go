@@ -155,6 +155,32 @@ func TestInitialPromptContainsBroadcastDefault(t *testing.T) {
 	}
 }
 
+// Ratchet against the cliff-hang failure mode observed at msg 2086-2092
+// on 2026-04-25: scope changes within an ongoing decision require a
+// fresh flag, not silent continuation. The old "1 concern = 1 flag"
+// wording let us read scope-morphs as "still on the same flag" and
+// hold quietly while the user watched a silent hub. DISC v2.1 reframes
+// from per-concern accounting to per-state — every pending-on-user
+// state gets a flag once entering it, including refinements that
+// materially alter the pending shape. Rain mirrors Brian's ratchet.
+func TestInitialPromptContainsDISCv21FlagRule(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	want := []string{
+		"DECISION POINT",
+		"hub_flag required",
+		"Per-state, not per-concern",
+		"scope changes mid-decision",
+		"refinement materially alters pending shape",
+		"cliff-hang",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain DISC v2.1 FLAG literal %q", w)
+		}
+	}
+}
+
 // Ratchet against regression: DISC v2 role split (HANDS/EYES/BRAIN) + OUTPUT
 // class rules must survive future prompt compression. Rain mirrors Brian's
 // ratchet — same literals, same diagnostic load (see 2026-04-24 discussion).
