@@ -21,6 +21,7 @@ const (
 
 	pollInterval           = 3 * time.Second
 	healthInterval         = 30 * time.Second
+	heartbeatInterval      = 30 * time.Second
 	defaultMonitorInterval = 5 * time.Minute
 
 	defaultModel     = "gemma4:e4b"
@@ -188,6 +189,7 @@ func (g *Gemma) Start() error {
 
 	go g.pollLoop()
 	go g.healthLoop()
+	go g.heartbeatLoop()
 	go g.monitorLoop()
 
 	g.db.InsertMessage(protocol.Message{
@@ -408,6 +410,29 @@ func (g *Gemma) healthLoop() {
 				})
 				g.restartOllama()
 			}
+		}
+	}
+}
+
+// heartbeatLoop refreshes Emma's last_seen on a fast cadence so she stays
+// in panestate.ActivityOnline (and thus visible in the hub strip) during
+// quiet observation periods. Claude-pane agents get this refresh for free
+// via the MCP middleware on every tool call (internal/mcp/tools.go);
+// Emma is a Go-internal monitor with no MCP entry point, so the refresh
+// must be explicit.
+//
+// Interval is well within panestate.OnlineWindow (60s) — 30s gives 2x
+// margin against GC pauses and schedule jitter.
+func (g *Gemma) heartbeatLoop() {
+	ticker := time.NewTicker(heartbeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-g.stopCh:
+			return
+		case <-ticker.C:
+			_ = g.db.UpdateAgentLastSeen(agentID)
 		}
 	}
 }

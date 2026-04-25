@@ -6,9 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gregoryerrl/bot-hq/internal/hub"
+	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
 func TestIsCommandAllowed(t *testing.T) {
@@ -238,5 +242,66 @@ func TestRunHealthChecksRoutesToRain(t *testing.T) {
 	}
 	if strings.Contains(src, `ToAgent:   "brian",`) {
 		t.Errorf("gemma.go must not route anomalies to Brian — that violates EYES/HANDS split")
+	}
+}
+
+// TestHeartbeatRefreshesLastSeen locks the per-tick contract of the
+// heartbeat: calling db.UpdateAgentLastSeen(emmaID) must advance Emma's
+// last_seen so panestate.ComputeActivity returns ActivityOnline (not
+// Stale) when queried within OnlineWindow. The goroutine wiring is
+// covered by the source-level check below.
+func TestHeartbeatRefreshesLastSeen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     agentID,
+		Name:   agentName,
+		Type:   protocol.AgentGemma,
+		Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := db.GetAgent(agentID)
+	before := a.LastSeen
+
+	// Force a non-zero gap so the heartbeat update is detectable even on
+	// hosts where time.Now().UnixMilli() resolution might collide between
+	// adjacent calls.
+	time.Sleep(2 * time.Millisecond)
+
+	if err := db.UpdateAgentLastSeen(agentID); err != nil {
+		t.Fatalf("heartbeat tick failed: %v", err)
+	}
+	a2, _ := db.GetAgent(agentID)
+	after := a2.LastSeen
+
+	if !after.After(before) {
+		t.Errorf("last_seen did not advance: before=%v after=%v", before, after)
+	}
+}
+
+// TestStartWiresHeartbeatLoop locks that gemma.Start() launches the
+// heartbeat goroutine. Source-level check (mirrors the existing
+// TestRunHealthChecksRoutesToRain pattern) — full goroutine integration
+// would require an Ollama dependency.
+func TestStartWiresHeartbeatLoop(t *testing.T) {
+	data, err := os.ReadFile("gemma.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	if !strings.Contains(src, "go g.heartbeatLoop()") {
+		t.Errorf("gemma.go Start() must contain `go g.heartbeatLoop()` — heartbeat goroutine not wired")
+	}
+	if !strings.Contains(src, "func (g *Gemma) heartbeatLoop()") {
+		t.Errorf("gemma.go must define heartbeatLoop on *Gemma")
+	}
+	if !strings.Contains(src, "UpdateAgentLastSeen(agentID)") {
+		t.Errorf("heartbeatLoop must call db.UpdateAgentLastSeen(agentID)")
 	}
 }
