@@ -109,3 +109,72 @@ func TestHubTabViewHidesStaleAgents(t *testing.T) {
 		t.Errorf("strip should hide offline-agent, got:\n%s", out)
 	}
 }
+
+// TestWrapTextPreservesParagraphBreaks locks that explicit `\n` between
+// paragraphs round-trip through wrapping. The pre-fix behavior collapsed
+// all newlines into spaces via strings.Fields, producing one wall of text.
+func TestWrapTextPreservesParagraphBreaks(t *testing.T) {
+	in := "line one\nline two"
+	out := wrapText(in, 80)
+	if !strings.Contains(out, "\n") {
+		t.Fatalf("output lost paragraph break, got: %q", out)
+	}
+	if !strings.Contains(out, "line one") || !strings.Contains(out, "line two") {
+		t.Fatalf("output dropped a paragraph, got: %q", out)
+	}
+	if strings.Count(out, "\n") != 1 {
+		t.Errorf("expected exactly 1 newline, got %d in %q", strings.Count(out, "\n"), out)
+	}
+}
+
+// TestWrapTextPreservesEmptyLines locks that blank lines between paragraphs
+// (e.g. "a\n\nb") round-trip as empty segments, not collapsed.
+func TestWrapTextPreservesEmptyLines(t *testing.T) {
+	in := "para one\n\npara two"
+	out := wrapText(in, 80)
+	parts := strings.Split(out, "\n")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 segments (para1 / empty / para2), got %d: %q", len(parts), parts)
+	}
+	if parts[1] != "" {
+		t.Errorf("middle segment must be empty, got %q", parts[1])
+	}
+}
+
+// TestWrapTextBulletList locks that bullet lines stay on their own lines
+// regardless of width — the most user-visible failure mode of the prior
+// implementation.
+func TestWrapTextBulletList(t *testing.T) {
+	in := "- one\n- two\n- three"
+	out := wrapText(in, 80)
+	parts := strings.Split(out, "\n")
+	if len(parts) != 3 {
+		t.Fatalf("expected 3 bullet lines, got %d: %q", len(parts), parts)
+	}
+	for i, want := range []string{"one", "two", "three"} {
+		if !strings.Contains(parts[i], want) {
+			t.Errorf("part %d missing %q: %q", i, want, parts[i])
+		}
+	}
+}
+
+// TestWrapTextLongLineStillWraps locks that the within-paragraph wrap
+// still happens at maxWidth — paragraph-split must not disable wrap.
+func TestWrapTextLongLineStillWraps(t *testing.T) {
+	in := "x x x x x x x x x x"
+	out := wrapText(in, 5)
+	if !strings.Contains(out, "\n") {
+		t.Fatalf("expected wrap within paragraph, got: %q", out)
+	}
+}
+
+// TestWrapTextNoNewlineRatchet locks that input without any `\n` produces
+// the same shape as the pre-fix behavior for the common single-paragraph
+// case (single line under maxWidth returns unchanged).
+func TestWrapTextNoNewlineRatchet(t *testing.T) {
+	in := "short message"
+	out := wrapText(in, 80)
+	if out != "short message" {
+		t.Errorf("short single-line input changed unexpectedly: in=%q out=%q", in, out)
+	}
+}

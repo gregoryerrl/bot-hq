@@ -319,37 +319,52 @@ func agentColor(name string) lipgloss.Color {
 	return agentColorPalette[hash%uint32(len(agentColorPalette))]
 }
 
-// wrapText wraps text to fit within maxWidth, breaking at spaces.
+// wrapText wraps text to fit within maxWidth, breaking at spaces, while
+// preserving original `\n` paragraph structure. Bullet lists, headers,
+// blank lines, and any other newline-shaped formatting round-trip through
+// wrapping unchanged.
+//
+// Continuation lines (within a paragraph after the first wrap point, and
+// the first line of every paragraph after the first) are indented by 2
+// spaces. The first line of the first paragraph is not indented.
 func wrapText(text string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return text
 	}
-	var lines []string
-	words := strings.Fields(text)
-	var current string
-	for _, word := range words {
-		if current == "" {
-			current = word
-		} else if len(current)+1+len(word) > maxWidth {
-			lines = append(lines, current)
-			current = word
-		} else {
-			current += " " + word
+	indent := strings.Repeat(" ", 2)
+	paragraphs := strings.Split(text, "\n")
+	var out []string
+	for pi, p := range paragraphs {
+		if p == "" {
+			out = append(out, "")
+			continue
+		}
+		words := strings.Fields(p)
+		if len(words) == 0 {
+			out = append(out, "")
+			continue
+		}
+		var lines []string
+		current := words[0]
+		for _, w := range words[1:] {
+			if len(current)+1+len(w) > maxWidth {
+				lines = append(lines, current)
+				current = w
+			} else {
+				current += " " + w
+			}
+		}
+		lines = append(lines, current)
+		first := lines[0]
+		if pi > 0 {
+			first = indent + first
+		}
+		out = append(out, first)
+		for _, l := range lines[1:] {
+			out = append(out, indent+l)
 		}
 	}
-	if current != "" {
-		lines = append(lines, current)
-	}
-	if len(lines) <= 1 {
-		return text
-	}
-	// Indent continuation lines to align with the first line's content
-	indent := strings.Repeat(" ", 2)
-	result := lines[0]
-	for _, line := range lines[1:] {
-		result += "\n" + indent + line
-	}
-	return result
+	return strings.Join(out, "\n")
 }
 
 // messageColor determines the display color for a message based on the sender.
