@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
+	"github.com/gregoryerrl/bot-hq/internal/projects"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -598,6 +600,16 @@ func hubSpawn(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("project path is not a directory: %s", absProject)), nil
 		}
 		project = absProject
+
+		// H-14 pre-flight: hub_spawn requires per-project rules to be loaded
+		// from ~/.bot-hq/projects/<name>.yaml before any dispatch. Missing
+		// rules = bootstrap required. Closes the bcc-ad-manager incident class
+		// (wrong-named branches, force-pushes, destructive ops) structurally.
+		// hub_spawn_gemma is unaffected (gemma allowlist is the gate there).
+		_, rulesErr := preflightProjectRules(project)
+		if rulesErr != nil {
+			return mcp.NewToolResultError(rulesErr.Error()), nil
+		}
 
 		sessionID := uuid.New().String()[:8]
 		sessionName := fmt.Sprintf("cc-%s", sessionID)
@@ -1377,4 +1389,45 @@ func isBlockedPath(absPath string) bool {
 		}
 	}
 	return false
+}
+
+// preflightProjectRules enforces H-14: hub_spawn requires a per-project rules
+// file at ~/.bot-hq/projects/<name>.yaml for the project's git remote. Missing
+// rules surface a structured bootstrap message; mismatch and load errors are
+// passed through with friendly framing.
+//
+// Rules object is returned for the caller to use in subsequent steps (C3
+// will pass it into the coder preamble for H-3c push policy + H-16 tool
+// allowlist). C2 only enforces the gate.
+func preflightProjectRules(project string) (*projects.Rules, error) {
+	rules, err := projects.LoadForProject(project)
+	if err == nil {
+		return rules, nil
+	}
+
+	if errors.Is(err, projects.ErrNoRulesFound) {
+		name := "<project>"
+		if out, gErr := exec.Command("git", "-C", project, "remote", "get-url", "origin").Output(); gErr == nil {
+			if derived := projects.DeriveProjectName(strings.TrimSpace(string(out))); derived != "" {
+				name = derived
+			}
+		}
+		return nil, fmt.Errorf("hub_spawn blocked: no project rules for %q.\n\n"+
+			"Bootstrap required before dispatch:\n"+
+			"  1. Inspect existing branch convention:  git -C %s branch -r | head -20\n"+
+			"  2. Copy template:  cp docs/examples/projects/_default.yaml ~/.bot-hq/projects/%s.yaml\n"+
+			"  3. Edit ~/.bot-hq/projects/%s.yaml — set remote_url, project_name, branch_pattern\n"+
+			"  4. Retry hub_spawn\n\n"+
+			"This gate exists to prevent bot-hq from leaking AI infrastructure or\n"+
+			"taking destructive actions in projects without explicit per-project rules.\n"+
+			"See docs/arcs/phase-h.md (H-4 / H-14).",
+			name, project, name, name)
+	}
+
+	if errors.Is(err, projects.ErrRemoteMismatch) {
+		return nil, fmt.Errorf("hub_spawn blocked: project rules file remote_url does not match the project's actual origin.\n%v\n\n"+
+			"Either edit the rules file's remote_url to match, or remove it and re-bootstrap.", err)
+	}
+
+	return nil, fmt.Errorf("hub_spawn blocked: project rules error: %v", err)
 }
