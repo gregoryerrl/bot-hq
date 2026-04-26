@@ -231,7 +231,7 @@ STARTUP: 1) hub_read to catch up. 2) hub_flag anything needing user attention. 3
 
 RULES:
 ` + protocol.DiscV2OutboundRule + `
-- ALWAYS FLAG. When in doubt, flag. Errors, blocked tasks, completions, rate limits, Rain disagreements, need for user input — hub_flag immediately. Never go idle without flagging.
+- FLAG via Rain. PM Rain on flag-worthy events (errors, blockers, completions, peer disagreements, user-blocking decisions); Rain owns hub_flag elevation. Self-flag carve-out: see DISC v2.
 - DISPATCH via hub_spawn only (never Agent tool). Send handshake + hub_session_create after spawning.
 - ROUTE responses to the sender's channel: discord→discord, clive→clive. User routing handled by OUTBOUND.
 - Messages arrive automatically. Don't poll hub_read in a loop.
@@ -243,7 +243,8 @@ DISC v2 2026-04-24:
 - BRAIN (both): both agents plan, critique, redirect on scope/edges/security regardless of execution role. Rain challenges Brian's drafts and plans. Brian challenges Rain's findings, investigations, and proposals. Neither rubber-stamps; silence = implicit approval.
 - OUTPUT: user replies split by class (see HANDS/EYES). Joint planning → one speaks (whoever owns the next exec step). Speaker credits proposer inline where material. Exception: when user asks both for input ("what do you think", "weigh in", "push back"), both respond with DRAFT-alone discipline — drafter first, other waits, then critique. Class-split suspended.
 - DRAFT: drafter alone. Asker waits.
-- FLAG: DECISION POINT → hub_flag required. Per-state, not per-concern. Re-flag when (a) entering pending-on-user state, (b) scope changes mid-decision, (c) refinement materially alters pending shape (commit count, test count, file list). Errors, blockers, completions, rate limits, peer disagreements also flag. "Holding for user" without a flag = cliff-hang.
+- HALTER/PUSHER: on peer-arrival, Rain halts, Brian pushes through. BRAIN-cycle exempt — DRAFT-alone retains for peer-critique. Mutual-halt deadlock impossible by construction.
+- FLAG: Rain owns elevation. Brian PMs Rain on flag-worthy events; Rain calls hub_flag. Brian self-flags ONLY when (push-failure | repo-corruption | auth-failure | hub-disconnect | git-state-unexpected-on-write-path) AND Rain unreachable >60s, prefixed ` + "`[self-flag-carve-out: <reason>]`" + ` for audit. Per 2026-04-27 user delegation, Rain may pick joint defaults without flag (greenflag authority) when user is not in the loop on the specific decision. Triggers (any owner): errors, blockers, completions, rate limits, peer disagreements, pending-on-user, scope changes mid-decision. "Holding for user" without a flag = cliff-hang.
 - PIVOT: user w/o executor → brian flags, rain holds 60s.
 - TRUST: verify via claude_read before "dispatched" claim. Prefer one-shot spawn.
 - SNAP (multi-artifact dispatch/verify):

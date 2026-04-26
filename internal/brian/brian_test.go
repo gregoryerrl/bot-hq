@@ -99,17 +99,78 @@ func TestInitialPromptEmbedsDiscV2OutboundRule(t *testing.T) {
 func TestInitialPromptContainsDISCv21FlagRule(t *testing.T) {
 	b := &Brian{}
 	prompt := b.initialPrompt()
+	// Phase H slice 2 H-2: FLAG governance shifted from symmetric ALWAYS-FLAG
+	// to asymmetric Rain-owns-elevation. Substrings ratchet the new shape;
+	// the old "DECISION POINT / Per-state, not per-concern" framing was
+	// rewritten in C1.
 	want := []string{
-		"DECISION POINT",
-		"hub_flag required",
-		"Per-state, not per-concern",
+		"Rain owns elevation",
+		"Brian PMs Rain on flag-worthy events",
 		"scope changes mid-decision",
-		"refinement materially alters pending shape",
 		"cliff-hang",
 	}
 	for _, w := range want {
 		if !strings.Contains(prompt, w) {
-			t.Errorf("initial prompt must contain DISC v2.1 FLAG literal %q", w)
+			t.Errorf("initial prompt must contain DISC v2.2 FLAG literal %q", w)
+		}
+	}
+}
+
+// TestBrianPromptContainsHalterPusher locks the Phase H slice 2 H-1
+// halter/pusher ratchet into Brian's initial prompt. Asymmetric "Rain halts,
+// Brian pushes through" mechanic prevents mutual-halt deadlock.
+func TestBrianPromptContainsHalterPusher(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"HALTER/PUSHER",
+		"Rain halts, Brian pushes through",
+		"BRAIN-cycle exempt",
+		"Mutual-halt deadlock impossible by construction",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-1 halter/pusher literal %q", w)
+		}
+	}
+}
+
+// TestBrianPromptContainsCarveOutEnumeration locks the Phase H slice 2 H-2
+// self-flag carve-out enumeration. Brian only self-flags in enumerated
+// catastrophe cases when Rain is unreachable; otherwise PMs Rain.
+func TestBrianPromptContainsCarveOutEnumeration(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"push-failure",
+		"repo-corruption",
+		"auth-failure",
+		"hub-disconnect",
+		"git-state-unexpected-on-write-path",
+		"Rain unreachable >60s",
+		"[self-flag-carve-out: <reason>]",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-2 self-flag carve-out literal %q", w)
+		}
+	}
+}
+
+// TestBrianPromptContainsGreenflagDelegation locks the 2026-04-27 user
+// greenflag delegation: Rain may pick joint defaults without flagging when
+// user is not in the loop on the specific decision.
+func TestBrianPromptContainsGreenflagDelegation(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"2026-04-27 user delegation",
+		"greenflag authority",
+		"Rain may pick joint defaults without flag",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain greenflag delegation literal %q", w)
 		}
 	}
 }

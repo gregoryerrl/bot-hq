@@ -165,17 +165,58 @@ func TestInitialPromptEmbedsDiscV2OutboundRule(t *testing.T) {
 func TestInitialPromptContainsDISCv21FlagRule(t *testing.T) {
 	r := &Rain{}
 	prompt := r.initialPrompt()
+	// Phase H slice 2 H-2: FLAG governance shifted from symmetric to
+	// asymmetric (Rain owns elevation). Mirrors Brian's ratchet.
 	want := []string{
-		"DECISION POINT",
-		"hub_flag required",
-		"Per-state, not per-concern",
+		"Rain owns elevation",
+		"Brian PMs Rain on flag-worthy events",
 		"scope changes mid-decision",
-		"refinement materially alters pending shape",
 		"cliff-hang",
 	}
 	for _, w := range want {
 		if !strings.Contains(prompt, w) {
-			t.Errorf("initial prompt must contain DISC v2.1 FLAG literal %q", w)
+			t.Errorf("initial prompt must contain DISC v2.2 FLAG literal %q", w)
+		}
+	}
+}
+
+// TestRainPromptContainsHalterPusher locks the Phase H slice 2 H-1
+// halter/pusher ratchet into Rain's initial prompt. Mirrors Brian's
+// ratchet — same literals, same load-bearing role.
+func TestRainPromptContainsHalterPusher(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	want := []string{
+		"HALTER/PUSHER",
+		"Rain halts, Brian pushes through",
+		"BRAIN-cycle exempt",
+		"Mutual-halt deadlock impossible by construction",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-1 halter/pusher literal %q", w)
+		}
+	}
+}
+
+// TestRainPromptContainsCarveOutEnumeration locks the Phase H slice 2 H-2
+// self-flag carve-out enumeration into Rain's initial prompt. Mirrors
+// Brian's ratchet so both agents share the same canonical carve-out list.
+func TestRainPromptContainsCarveOutEnumeration(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	want := []string{
+		"push-failure",
+		"repo-corruption",
+		"auth-failure",
+		"hub-disconnect",
+		"git-state-unexpected-on-write-path",
+		"Rain unreachable >60s",
+		"[self-flag-carve-out: <reason>]",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-2 self-flag carve-out literal %q", w)
 		}
 	}
 }
