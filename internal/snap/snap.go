@@ -19,10 +19,10 @@ import "strings"
 // normalize sub-shape (branch@sha(state), id(state)); query workload has not
 // justified the cost. Defer normalization to a later slice if needed.
 type SNAP struct {
-	Branches []string
-	Agents   []string
-	Pending  string
-	Next     string
+	Branches []string `json:"branches"`
+	Agents   []string `json:"agents"`
+	Pending  string   `json:"pending"`
+	Next     string   `json:"next"`
 }
 
 const (
@@ -34,6 +34,11 @@ const (
 
 // Format serializes a SNAP into canonical wire form. The output round-trips
 // through Parse: Parse(Format(s)) equals s for any well-formed s.
+//
+// Format does NOT emit a trailing newline. Callers appending the SNAP block
+// to a message body must supply their own separator (typically "\n\n" before
+// the block) and any trailing newline. This keeps the canonical form a
+// self-contained substring rather than a line-terminated record.
 func (s SNAP) Format() string {
 	var b strings.Builder
 	b.WriteString("SNAP:\n")

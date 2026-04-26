@@ -3,6 +3,7 @@ package hub
 import (
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,6 +253,66 @@ func TestListAgents(t *testing.T) {
 	}
 	if len(online) != 2 {
 		t.Errorf("expected 2 online agents, got %d", len(online))
+	}
+}
+
+// TestInsertMessagePopulatesSnapJSON locks the send-path SNAP extraction
+// hook: messages with a well-formed SNAP block get snap_json populated with
+// canonical JSON; messages without a block get empty string; malformed
+// blocks are tolerated (empty + log warn, no insert failure).
+// Phase G v1 slice 2 C3.
+func TestInsertMessagePopulatesSnapJSON(t *testing.T) {
+	db := setupTestDB(t)
+	db.RegisterAgent(protocol.Agent{ID: "brian", Name: "B", Type: protocol.AgentBrian, Status: protocol.StatusOnline})
+
+	cases := []struct {
+		name       string
+		content    string
+		wantEmpty  bool
+		wantSubstr string
+	}{
+		{
+			name: "well-formed SNAP populates JSON",
+			content: "body text\n\nSNAP:\n" +
+				"Branches: bot-hq:main@abc\n" +
+				"Agents:   brian(idle)\n" +
+				"Pending:  none\n" +
+				"Next:     ship",
+			wantSubstr: `"branches":["bot-hq:main@abc"]`,
+		},
+		{
+			name:      "no SNAP block leaves snap_json empty",
+			content:   "just a regular message with no footer",
+			wantEmpty: true,
+		},
+		{
+			name:      "malformed SNAP tolerates and stores empty",
+			content:   "SNAP:\nBranches: x\nAgents: y", // truncated block
+			wantEmpty: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := db.InsertMessage(protocol.Message{
+				FromAgent: "brian",
+				Type:      protocol.MsgUpdate,
+				Content:   tc.content,
+			})
+			if err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+			var got string
+			if err := db.conn.QueryRow(`SELECT snap_json FROM messages WHERE id = ?`, id).Scan(&got); err != nil {
+				t.Fatalf("scan snap_json: %v", err)
+			}
+			if tc.wantEmpty && got != "" {
+				t.Errorf("snap_json = %q, want empty", got)
+			}
+			if !tc.wantEmpty && !strings.Contains(got, tc.wantSubstr) {
+				t.Errorf("snap_json = %q, want substring %q", got, tc.wantSubstr)
+			}
+		})
 	}
 }
 

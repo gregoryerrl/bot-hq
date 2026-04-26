@@ -136,6 +136,53 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
+// TestParseCRLFTolerant locks that CRLF line endings parse equivalently to
+// LF. Hub messages are LF-only on the wire, but defensive: if a SNAP arrives
+// with CRLF (e.g. pasted from Windows / mid-network conversion), TrimSpace
+// in Parse strips \r and the block still resolves cleanly. Per Rain C1
+// diff-gate observation #3.
+func TestParseCRLFTolerant(t *testing.T) {
+	body := "SNAP:\r\n" +
+		"Branches: bot-hq:main@abc1234\r\n" +
+		"Agents:   brian(idle)\r\n" +
+		"Pending:  none\r\n" +
+		"Next:     ship"
+	got, err := Parse(body)
+	if err != nil {
+		t.Fatalf("Parse(CRLF body): %v", err)
+	}
+	if got.Pending != "none" || got.Next != "ship" {
+		t.Errorf("CRLF \\r leaked into trimmed values: pending=%q next=%q", got.Pending, got.Next)
+	}
+	if len(got.Branches) != 1 || got.Branches[0] != "bot-hq:main@abc1234" {
+		t.Errorf("CRLF mangled Branches: %#v", got.Branches)
+	}
+}
+
+// TestSplitDepth0Malformed documents the contract for malformed paren input.
+// Unclosed `(` keeps depth>0 forever → the entire string returns as one item.
+// Unmatched `)` is guarded by `if depth > 0` → no underflow, splits at the
+// outer `,` as if the rogue `)` were literal. Both cases produce no panic;
+// the parser is permissive on malformed input. Per Rain C1 obs #4.
+func TestSplitDepth0Malformed(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"unclosed paren swallows everything", "a(x, b", []string{"a(x, b"}},
+		{"unmatched close paren splits normally", "a), b", []string{"a)", "b"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitDepth0(tc.in)
+			if !stringSliceEqual(got, tc.want) {
+				t.Errorf("splitDepth0(%q) = %#v, want %#v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSplitDepth0(t *testing.T) {
 	cases := []struct {
 		name string

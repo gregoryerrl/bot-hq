@@ -4,15 +4,22 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	"github.com/gregoryerrl/bot-hq/internal/snap"
 	_ "modernc.org/sqlite"
 )
+
+// sqlIdentifierRE matches the SQLite identifier subset used by addColumnIfMissing.
+// Compile-time literal table/column names always pass; dynamic input fails fast.
+var sqlIdentifierRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Checkpoint represents a persisted agent state snapshot.
 type Checkpoint struct {
@@ -226,10 +233,18 @@ func (db *DB) migrate() error {
 // fresh DBs (CREATE TABLE already includes nothing extra) and on upgraded
 // DBs (ALTER adds the column once, subsequent runs are no-ops).
 //
-// Caller is responsible for safe table/column/decl values — these are
-// interpolated into SQL. All current call sites use literal constants, so
-// no injection surface.
+// Identifier guard: table and column must match `^[A-Za-z_][A-Za-z0-9_]*$`.
+// All current call sites pass compile-time literals, so this only fires if
+// a future contributor introduces dynamic identifiers — at which point we
+// want a hard failure, not a silent SQL-injection vector. decl is not
+// validated (free-form SQL type/constraint clause is the design intent).
 func (db *DB) addColumnIfMissing(table, column, decl string) error {
+	if !sqlIdentifierRE.MatchString(table) {
+		return fmt.Errorf("addColumnIfMissing: invalid table name %q", table)
+	}
+	if !sqlIdentifierRE.MatchString(column) {
+		return fmt.Errorf("addColumnIfMissing: invalid column name %q", column)
+	}
 	pragma := fmt.Sprintf("PRAGMA table_info(%s)", table)
 	rows, err := db.conn.Query(pragma)
 	if err != nil {
@@ -472,14 +487,42 @@ func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
 
 // --- Messages ---
 
+// extractSnapJSON parses a SNAP footer from msg content and returns the
+// canonical JSON form. Empty string is returned when no SNAP block is
+// present (the common case for non-orchestrator messages) or when the
+// block is malformed.
+//
+// Parse-error policy: log+warn + empty. We do not fail the insert on a
+// malformed SNAP — the message itself is still useful, the structured
+// indexable form just isn't available. Logging surfaces footer-convention
+// drift (per Rain's pre-dispatch refinement #1) without polluting storage
+// with raw fragments.
+func extractSnapJSON(fromAgent, content string) string {
+	s, err := snap.Parse(content)
+	if err != nil {
+		if err == snap.ErrNoSNAPBlock {
+			return "" // common case, not a drift signal
+		}
+		log.Printf("[snap] warn: parse failed for message from %s: %v", fromAgent, err)
+		return ""
+	}
+	out, err := json.Marshal(s)
+	if err != nil {
+		log.Printf("[snap] warn: marshal failed for message from %s: %v", fromAgent, err)
+		return ""
+	}
+	return string(out)
+}
+
 func (db *DB) InsertMessage(msg protocol.Message) (int64, error) {
 	if msg.Created.IsZero() {
 		msg.Created = time.Now()
 	}
+	snapJSON := extractSnapJSON(msg.FromAgent, msg.Content)
 	result, err := db.conn.Exec(
-		`INSERT INTO messages (session_id, from_agent, to_agent, type, content, created)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		msg.SessionID, msg.FromAgent, msg.ToAgent, string(msg.Type), msg.Content, msg.Created.UnixMilli(),
+		`INSERT INTO messages (session_id, from_agent, to_agent, type, content, created, snap_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msg.SessionID, msg.FromAgent, msg.ToAgent, string(msg.Type), msg.Content, msg.Created.UnixMilli(), snapJSON,
 	)
 	if err != nil {
 		return 0, err
