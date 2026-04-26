@@ -12,32 +12,11 @@ package panestate
 import (
 	"encoding/json"
 	"hash/fnv"
-	"log"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
-
-// diagLog is a triage-branch instrumentation hook for the F-core-b case-ii
-// runtime FAIL investigation. Writes per-tick observations of pane-source
-// behavior to /tmp/bot-hq-panestate-diag.log so root cause (wrong target,
-// capture stable despite scroll, hash collision, missing per-agent iteration)
-// can be read directly from the log after a saltegge case-ii bash run.
-//
-// Removed in the eventual fix commit. Bubbletea's TUI alt-screen would swallow
-// stderr, so a dedicated file path is required for reliability.
-var diagLog *log.Logger
-
-func init() {
-	f, err := os.OpenFile("/tmp/bot-hq-panestate-diag.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		diagLog = log.New(os.Stderr, "panestate-diag: ", log.Lmicroseconds)
-		return
-	}
-	diagLog = log.New(f, "panestate-diag: ", log.Lmicroseconds)
-}
 
 // Threshold windows for activity classification. Tunable from observation.
 //
@@ -172,7 +151,6 @@ func (m *Manager) Refresh() error {
 		return err
 	}
 	now := time.Now()
-	diagLog.Printf("Refresh tick agents=%d", len(agents))
 	snap := make([]AgentSnapshot, len(agents))
 	for i, a := range agents {
 		paneActive := m.observePaneActivity(a, now)
@@ -209,32 +187,21 @@ func (m *Manager) Refresh() error {
 func (m *Manager) observePaneActivity(a protocol.Agent, now time.Time) time.Time {
 	tmuxTarget := extractTmuxTarget(a)
 	if tmuxTarget == "" {
-		diagLog.Printf("observe skip agent=%s reason=no_tmux_target meta=%q", a.ID, a.Meta)
 		return time.Time{}
 	}
 	cached, hadCache := m.paneCache[a.ID]
 	output, err := m.capturePane(tmuxTarget, paneCaptureLines)
 	if err != nil {
-		diagLog.Printf("observe error agent=%s target=%s err=%v carry=%v", a.ID, tmuxTarget, err, cached.lastActivity)
 		return cached.lastActivity
 	}
 	h := fnv.New64a()
 	h.Write([]byte(output))
 	hash := h.Sum64()
-	diagLog.Printf("observe agent=%s target=%s len=%d hash=%016x cached=%016x differs=%v hadCache=%v",
-		a.ID, tmuxTarget, len(output), hash, cached.lastHash, hash != cached.lastHash, hadCache)
 	if !hadCache {
 		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: time.Time{}}
 		return time.Time{}
 	}
 	if hash != cached.lastHash {
-		if cached.lastActivity.IsZero() || now.Sub(cached.lastActivity) > 30*time.Second {
-			preview := output
-			if len(preview) > 200 {
-				preview = preview[:200]
-			}
-			diagLog.Printf("observe differ-first agent=%s preview=%q", a.ID, preview)
-		}
 		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: now}
 		return now
 	}
