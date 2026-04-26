@@ -27,15 +27,19 @@ type AgentsUpdated struct {
 
 // AgentsTab displays a list of agents with status indicators.
 type AgentsTab struct {
-	agents []protocol.Agent
-	width  int
-	height int
-	pane   *panestate.Manager // Activity source for Status column (Phase E commit 4)
+	agents    []protocol.Agent
+	width     int
+	height    int
+	pane      *panestate.Manager // Activity source for Status column (Phase E commit 4)
+	cursor    int                // selected row index for Enter→pane-modal
+	paneModal *PaneModal         // active modal overlay; nil when closed
+	capture   PaneCaptureFunc    // tmux capture fn injected at construction
 }
 
-// NewAgentsTab creates a new AgentsTab.
-func NewAgentsTab() AgentsTab {
-	return AgentsTab{}
+// NewAgentsTab creates a new AgentsTab. capture is the tmux pane-capture
+// function; production passes tmux.CapturePane, tests pass a stub.
+func NewAgentsTab(capture PaneCaptureFunc) AgentsTab {
+	return AgentsTab{capture: capture}
 }
 
 // SetPane wires a panestate.Manager so the Status column reads activity
@@ -45,23 +49,99 @@ func (a *AgentsTab) SetPane(p *panestate.Manager) {
 	a.pane = p
 }
 
-// SetSize updates the tab's dimensions.
+// SetSize updates the tab's dimensions and propagates to the active modal
+// (if any) so it resizes alongside the surrounding TUI.
 func (a *AgentsTab) SetSize(width, height int) {
 	a.width = width
 	a.height = height
+	if a.paneModal != nil {
+		a.paneModal.SetSize(width, height)
+	}
 }
 
-// Update handles messages for the AgentsTab.
+// Update handles messages for the AgentsTab. When a modal overlay is
+// active it owns input; only PaneModalClosed unblocks the underlying tab.
 func (a AgentsTab) Update(msg tea.Msg) (AgentsTab, tea.Cmd) {
+	if a.paneModal != nil {
+		// Forward everything to the modal until it signals close.
+		newModal, cmd := a.paneModal.Update(msg)
+		a.paneModal = newModal
+		// Watch for close signal carried in cmd output.
+		if cmd != nil {
+			out := cmd()
+			if _, ok := out.(PaneModalClosed); ok {
+				a.paneModal = nil
+				return a, nil
+			}
+			// Re-wrap remaining tea.Msg into a Cmd so caller still gets it.
+			return a, func() tea.Msg { return out }
+		}
+		return a, nil
+	}
+
 	switch msg := msg.(type) {
 	case AgentsUpdated:
 		a.agents = msg.Agents
+		// Clamp cursor when list shrinks.
+		if a.cursor >= len(a.agents) {
+			a.cursor = len(a.agents) - 1
+		}
+		if a.cursor < 0 {
+			a.cursor = 0
+		}
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "j", "down":
+			if a.cursor < len(a.agents)-1 {
+				a.cursor++
+			}
+		case "k", "up":
+			if a.cursor > 0 {
+				a.cursor--
+			}
+		case "enter":
+			if len(a.agents) == 0 || a.cursor >= len(a.agents) || a.capture == nil {
+				return a, nil
+			}
+			target := agentTmuxTarget(a.agents[a.cursor])
+			if target == "" {
+				return a, nil // agent has no tmux pane to view
+			}
+			modal := NewPaneModal(target, a.capture)
+			modal.SetSize(a.width, a.height)
+			_ = modal.Refresh()
+			a.paneModal = modal
+		}
 	}
 	return a, nil
 }
 
-// View renders the AgentsTab.
+// agentTmuxTarget extracts the tmux_target field from an agent's Meta
+// JSON, mirroring the parse done elsewhere. Returns empty string when
+// absent or unparseable.
+func agentTmuxTarget(ag protocol.Agent) string {
+	if ag.Meta == "" {
+		return ""
+	}
+	var meta struct {
+		TmuxTarget string `json:"tmux_target"`
+	}
+	if err := json.Unmarshal([]byte(ag.Meta), &meta); err != nil {
+		return ""
+	}
+	return meta.TmuxTarget
+}
+
+// View renders the AgentsTab. When a modal is active, render it on top of
+// the agents list (lipgloss.Place centers it within the tab area).
 func (a AgentsTab) View() string {
+	if a.paneModal != nil {
+		modal := a.paneModal.View()
+		if a.width <= 0 || a.height <= 0 {
+			return modal
+		}
+		return lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, modal)
+	}
 	if len(a.agents) == 0 {
 		return lipgloss.NewStyle().
 			Foreground(ColorStatus).
@@ -96,7 +176,7 @@ func (a AgentsTab) View() string {
 	var lines []string
 	aliveCount, staleCount, offlineCount := 0, 0, 0
 
-	for _, ag := range a.agents {
+	for i, ag := range a.agents {
 		// Resolve activity. Fall back to status-based mapping when pane is
 		// absent (e.g. headless tests pre-SetPane).
 		activity, ok := activityByID[ag.ID]
@@ -157,13 +237,25 @@ func (a AgentsTab) View() string {
 			}
 		}
 
-		lines = append(lines, fmt.Sprintf("%s %s  %s  %s%s  %s", dot, name, status, timeStr, tmuxStr, project))
+		// Cursor indicator: ▸ on the selected row, two-space pad on others
+		// so the column alignment stays stable regardless of selection.
+		cursor := "  "
+		if i == a.cursor {
+			cursor = "▸ "
+		}
+
+		lines = append(lines, fmt.Sprintf("%s%s %s  %s  %s%s  %s", cursor, dot, name, status, timeStr, tmuxStr, project))
 	}
 
 	summary := lipgloss.NewStyle().Foreground(ColorStatus).Render(
 		fmt.Sprintf("\n[%d alive, %d stale, %d offline]", aliveCount, staleCount, offlineCount),
 	)
 	lines = append(lines, summary)
+
+	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#666666")).Render(
+		"  ↑/↓: navigate  Enter: capture pane  (Esc inside modal to close)",
+	)
+	lines = append(lines, hint)
 
 	return strings.Join(lines, "\n")
 }
