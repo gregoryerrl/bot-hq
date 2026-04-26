@@ -483,6 +483,14 @@ func (g *Gemma) dispatchSentinelHit(msg protocol.Message, d SentinelDecision) {
 	if !g.shouldFlag("sentinel-obs:"+d.Pattern, now) {
 		return
 	}
+	// H-22 dry-run gate: patterns in the tuning-gate period write to a
+	// ledger file instead of pinging Rain via hub. Rain reviews the
+	// ledger out-of-band and flips the pattern to live after ≤5%
+	// false-positive rate confirmed.
+	if name, isDryRun := IsDryRunPattern(d.Pattern); isDryRun {
+		AppendToDryRunLedger(name, fmt.Sprintf("msg #%d from %s | pattern %s | %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)))
+		return
+	}
 	g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
 		ToAgent:   "rain",

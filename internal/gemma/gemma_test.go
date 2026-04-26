@@ -16,6 +16,94 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
+// TestQueueFailRegexMatches locks Phase H slice 2 H-22 — the new
+// queue-fail regex matches the canonical log-line shape and is
+// registered in preFilterPatterns (so SentinelMatch sees it).
+func TestQueueFailRegexMatches(t *testing.T) {
+	cases := []struct {
+		content string
+		want    bool
+	}{
+		{"[queue] failed after 3 attempts", true},
+		{"[queue] failed after 1 attempt", true},  // singular
+		{"[queue] failed after 99 attempts", true}, // multi-digit
+		{"[QUEUE] failed after 5 attempts", true},  // case-insensitive
+		{"[queue]   failed   after   2   attempts", true}, // multi-space
+		{"[queue] succeeded", false},
+		{"queue failed (different shape)", false}, // missing brackets
+		{"[queue] failed", false},                 // missing attempts clause
+	}
+	for _, tc := range cases {
+		t.Run(tc.content, func(t *testing.T) {
+			d := SentinelMatch(protocol.Message{Content: tc.content})
+			if d.Match != tc.want {
+				t.Errorf("queue-fail regex match for %q: got Match=%v, want %v", tc.content, d.Match, tc.want)
+			}
+			if tc.want && d.Pattern != queueFailPattern {
+				// Other preFilter patterns might also match malformed inputs;
+				// for the canonical shape we expect the queue-fail pattern.
+				t.Logf("matched on pattern %q (expected queue-fail; not a hard fail since multiple patterns could match)", d.Pattern)
+			}
+		})
+	}
+}
+
+// TestQueueFailNotInAlwaysFlagPreTuning locks the H-22 tuning-gate
+// promotion ratchet — the queue-fail pattern is in preFilter (observable)
+// but NOT in alwaysFlag (would elevate to MsgFlag). Promotion to
+// alwaysFlag happens only after Rain reviews dry-run ledger and confirms
+// ≤5% false-positive rate.
+func TestQueueFailNotInAlwaysFlagPreTuning(t *testing.T) {
+	for _, p := range alwaysFlagPatterns {
+		if p.String() == queueFailPattern {
+			t.Errorf("queueFailPattern must NOT be in alwaysFlagPatterns until tuning-gate flip — found %q", p.String())
+		}
+	}
+}
+
+// TestQueueFailIsDryRunPattern locks the H-22 dry-run registration —
+// queueFailPattern must be present in dryRunPatterns map so
+// dispatchSentinelHit routes matches to the ledger instead of to Rain.
+func TestQueueFailIsDryRunPattern(t *testing.T) {
+	name, isDryRun := IsDryRunPattern(queueFailPattern)
+	if !isDryRun {
+		t.Fatal("queueFailPattern must be a dry-run pattern during tuning gate")
+	}
+	if name != "queuefail" {
+		t.Errorf("dry-run sentinel name = %q, want %q", name, "queuefail")
+	}
+}
+
+// TestSentinelDryRunWritesToLedger locks the H-22 ledger-append path —
+// AppendToDryRunLedger creates the sentinels dir (if missing) and
+// appends a timestamped one-line observation. BOT_HQ_HOME is honored
+// for test isolation.
+func TestSentinelDryRunWritesToLedger(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+
+	AppendToDryRunLedger("queuefail", "test observation 1")
+	AppendToDryRunLedger("queuefail", "test observation 2")
+
+	path := filepath.Join(home, "sentinels", "queuefail-dryrun.log")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ledger file not created at %s: %v", path, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "test observation 1") {
+		t.Errorf("ledger missing first observation; got: %q", content)
+	}
+	if !strings.Contains(content, "test observation 2") {
+		t.Errorf("ledger missing second observation; got: %q", content)
+	}
+	// Two observations, two lines.
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 ledger lines, got %d: %q", len(lines), content)
+	}
+}
+
 // TestEmmaCanonicalBlockExists locks Phase H slice 2 H-24 — Emma must
 // have a canonical preamble block that asserts her identity + scope.
 // Pre-H-24, Emma had no canonical block (only per-task analyze prompts).
