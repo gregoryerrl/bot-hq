@@ -41,12 +41,11 @@ type DB struct {
 	conn       *sql.DB
 	mu         sync.RWMutex
 	onMessages []func(protocol.Message)
-	// rebuildGen is the hub's current rebuild generation. Set by
-	// IncrementRebuildGen at hub startup (or seeded to 0 until called).
-	// Stamped onto every RegisterAgent call so post-rebuild reads can flag
-	// pre-rebuild registrations as stale.
-	rebuildGen int64
-	rebuildMu  sync.RWMutex
+	// rebuildMu serializes IncrementRebuildGen's read-modify-write across
+	// goroutines in this process. The generation itself lives in the settings
+	// table — there is no in-memory cache, so cross-process readers (e.g. the
+	// MCP subcommand process) always see the authoritative value.
+	rebuildMu sync.Mutex
 }
 
 func OpenDB(path string) (*DB, error) {
@@ -248,11 +247,12 @@ func (db *DB) addAgentColumnIfMissing(column, decl string) error {
 }
 
 // IncrementRebuildGen reads hub_rebuild_gen from settings, increments it by
-// one, persists, and caches the new value on the DB struct. Returns the new
-// generation number. Called once at hub startup (NewHub).
+// one, persists, and returns the new generation number. Called once at hub
+// startup (NewHub).
 //
 // Concurrency: serialized by rebuildMu so a hypothetical double-call from
-// two goroutines doesn't double-bump.
+// two goroutines in this process doesn't double-bump. Cross-process callers
+// rely on SQLite's busy_timeout for serialization at the storage layer.
 func (db *DB) IncrementRebuildGen() (int64, error) {
 	db.rebuildMu.Lock()
 	defer db.rebuildMu.Unlock()
@@ -278,17 +278,24 @@ func (db *DB) IncrementRebuildGen() (int64, error) {
 	); err != nil {
 		return 0, err
 	}
-	db.rebuildGen = next
 	return next, nil
 }
 
-// CurrentRebuildGen returns the cached rebuild generation. Zero before
-// IncrementRebuildGen has been called (or in tests that skip the hub
-// startup path).
+// CurrentRebuildGen reads hub_rebuild_gen from the settings table. Returns 0
+// if the row is absent (pre-feature, or hub never started yet).
+//
+// Reads from settings on every call so cross-process callers (e.g. the MCP
+// subcommand process, which never calls IncrementRebuildGen itself) see the
+// authoritative gen, not a stale per-process cache.
 func (db *DB) CurrentRebuildGen() int64 {
-	db.rebuildMu.RLock()
-	defer db.rebuildMu.RUnlock()
-	return db.rebuildGen
+	var raw string
+	row := db.conn.QueryRow(`SELECT value FROM settings WHERE key = ?`, "hub_rebuild_gen")
+	if err := row.Scan(&raw); err != nil {
+		return 0
+	}
+	var gen int64
+	fmt.Sscanf(raw, "%d", &gen)
+	return gen
 }
 
 // --- Agents ---

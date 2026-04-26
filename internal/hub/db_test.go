@@ -144,6 +144,53 @@ func TestRegisterAgentStampsRebuildGen(t *testing.T) {
 	}
 }
 
+// TestRegisterAgentReadsLatestGenAcrossDBInstances locks that an agent
+// registered through a second DB handle (simulating the MCP subcommand
+// process, which opens its own *DB and never calls IncrementRebuildGen)
+// stamps the current gen from the settings table — not a stale per-process
+// cache. Regression test for the post-rebuild #7 bug where MCP-registered
+// agents were stamped gen=0 while the hub's settings row was already at 1.
+func TestRegisterAgentReadsLatestGenAcrossDBInstances(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cross.db")
+
+	hubDB, err := OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hubDB.Close()
+
+	mcpDB, err := OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mcpDB.Close()
+
+	// Hub process bumps the gen at startup.
+	if _, err := hubDB.IncrementRebuildGen(); err != nil {
+		t.Fatal(err)
+	}
+
+	// MCP process registers an agent. Must observe gen=1 even though it
+	// never called IncrementRebuildGen on its own handle.
+	if got := mcpDB.CurrentRebuildGen(); got != 1 {
+		t.Fatalf("mcpDB.CurrentRebuildGen = %d, want 1 (settings authoritative)", got)
+	}
+	if err := mcpDB.RegisterAgent(protocol.Agent{
+		ID: "mcp-agent", Name: "MCP", Type: protocol.AgentBrian, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read back via the hub handle — confirms storage, not just cache.
+	got, err := hubDB.GetAgent("mcp-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RebuildGen != 1 {
+		t.Errorf("mcp-agent RebuildGen = %d, want 1 (cross-process write)", got.RebuildGen)
+	}
+}
+
 func TestListAgents(t *testing.T) {
 	db := setupTestDB(t)
 
