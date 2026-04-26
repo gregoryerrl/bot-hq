@@ -193,7 +193,8 @@ func (h *HubTab) SetSessionFilter(sessionID string) {
 // bottom after the resize so a terminal resize doesn't strand them mid-feed.
 // When the user has scrolled up, preserve their scroll position.
 func (h *HubTab) resize() {
-	// Reserve: 1 separator + 1 indicator + 1 strip + inputRows for textarea + 1 padding.
+	// Reserve: 1 indicator + 1 strip top border + 1 strip + 1 strip bottom border + inputRows.
+	// Total = 4 + inputRows (unchanged from prior separator+indicator+strip+padding layout).
 	reserved := 4 + inputRows
 	vpHeight := h.height - reserved
 	if vpHeight < 1 {
@@ -214,20 +215,18 @@ func (h *HubTab) resize() {
 // View renders the HubTab. Layout (top to bottom):
 //
 //	viewport       — scrollable message feed
-//	separator      — dividing line
 //	indicator      — scrolled-up hint (empty when followBottom)
+//	strip top      — top border of activity strip
 //	strip          — per-agent activity dots (Phase E commit 4)
+//	strip bottom   — bottom border of activity strip
 //	input          — command input
 //
 // Indicator and strip slots are both always-reserved so the input bar
 // position stays stable across followBottom toggles and strip-empty/
-// non-empty transitions.
+// non-empty transitions. Strip is bracketed by horizontal borders so
+// the activity row is visually separated from both the indicator above
+// and the input below.
 func (h HubTab) View() string {
-	separator := lipgloss.NewStyle().
-		Width(h.width).
-		Foreground(lipgloss.Color("#555555")).
-		Render(strings.Repeat("─", h.width))
-
 	// At narrow widths (<~50 cols) lipgloss may wrap or truncate the hint;
 	// cosmetic-recoverable, revisit if reported.
 	indicatorStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
@@ -241,12 +240,18 @@ func (h HubTab) View() string {
 	if h.pane != nil {
 		stripContent = renderStrip(h.pane.Snapshot())
 	}
-	stripStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
+	// Top+bottom borders only (no side borders) — matches the prior
+	// full-width separator aesthetic while bracketing the strip on both
+	// sides. Border foreground reuses the dim grey from the old separator.
+	stripStyle := lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), true, false, true, false).
+		BorderForeground(lipgloss.Color("#555555")).
+		Width(h.width).
+		Foreground(ColorStatus)
 	strip := stripStyle.Render(stripContent)
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		h.viewport.View(),
-		separator,
 		indicator,
 		strip,
 		h.input.View(),
