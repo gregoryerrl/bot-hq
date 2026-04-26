@@ -1445,6 +1445,15 @@ PUSH POLICY: This project requires explicit user approval before any git push.
 - Wait for explicit approval before pushing.
 `)
 		}
+		if rules.ForcePushBlocked {
+			policy.WriteString(`
+FORCE-PUSH POLICY: Force-pushes are HARD-BLOCKED in this project. This includes ` + "`--force`" + ` AND ` + "`--force-with-lease`" + ` variants.
+- If a force-push is unavoidable, hub_send to brian (PM): "request_force_push: <branch>@<sha>".
+- WAIT for brian to relay an approved greenlight back to you. Do NOT push until approval arrives.
+- Brian will only relay approval after the user types the exact verbatim token. No partial matches accepted.
+- Do NOT attempt to construct or guess the token yourself. The user must type it.
+`)
+		}
 		if len(rules.CoderToolsBlocked) > 0 {
 			var blocked strings.Builder
 			for _, item := range rules.CoderToolsBlocked {

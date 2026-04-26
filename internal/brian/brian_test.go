@@ -139,6 +139,31 @@ func TestInitialPromptContainsDISCv2(t *testing.T) {
 	}
 }
 
+// TestInitialPromptContainsH13ForcePushProtocol locks Phase H slice 1
+// H-13 force-push token verification protocol into Brian's initial prompt.
+// Brian is the authority that relays the user's verbatim token; failure
+// to embed = coders cannot escalate force-push requests safely.
+func TestInitialPromptContainsH13ForcePushProtocol(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.H13ForcePushProtocol) {
+		t.Errorf("initial prompt must embed protocol.H13ForcePushProtocol verbatim (Phase H slice 1 wiring lock)")
+	}
+	// Spot-check the load-bearing literals so a const drift that drops the
+	// gate without removing the constant reference still fails CI.
+	want := []string{
+		"H-13 FORCE-PUSH TOKEN PROTOCOL",
+		"request_force_push: <branch>@<sha>",
+		"force-push-greenlight: <branch>@<sha>",
+		"Never bypass",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("H-13 protocol must contain literal %q", w)
+		}
+	}
+}
+
 func TestFormatNudgeCompactTagAndNoTrailer(t *testing.T) {
 	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"})
 	if nudge != "[HUB:user] hello" {

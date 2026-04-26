@@ -253,6 +253,8 @@ DISC v2 2026-04-24:
     Next:     <action>
 - NUDGE: msgs prefixed [PM:<sender>] (directed to you), [HUB:<sender>] (broadcast), [HUB-OBS:<from>→<to>] (cross-traffic you observe), or FLAG variants [PM:FLAG:<sender>]/[HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. PM and user msgs always handled. HUB-OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.
 
+` + protocol.H13ForcePushProtocol + `
+
 Start now: follow STARTUP.`
 }
 

@@ -106,23 +106,65 @@ This is an isolated copy.
 }
 
 func TestBuildCoderPreamble_PolicyOrderingDeterministic(t *testing.T) {
-	// PUSH POLICY before TOOL ALLOWLIST before BRANCH NAMING — deterministic
-	// so coders see the same order across spawns.
+	// PUSH POLICY before FORCE-PUSH POLICY before TOOL ALLOWLIST before BRANCH NAMING.
+	// Deterministic so coders see the same order across spawns.
 	rules := &projects.Rules{
 		BranchPattern:        ".*",
 		PushRequiresApproval: true,
+		ForcePushBlocked:     true,
 		CoderToolsBlocked:    []string{"foo"},
 	}
 	got := buildCoderPreamble("ord", "", rules)
 
-	pushIdx := strings.Index(got, "PUSH POLICY")
-	toolIdx := strings.Index(got, "TOOL ALLOWLIST")
-	branchIdx := strings.Index(got, "BRANCH NAMING")
+	pushIdx := strings.Index(got, "PUSH POLICY:")
+	forceIdx := strings.Index(got, "FORCE-PUSH POLICY:")
+	toolIdx := strings.Index(got, "TOOL ALLOWLIST:")
+	branchIdx := strings.Index(got, "BRANCH NAMING:")
 
-	if pushIdx < 0 || toolIdx < 0 || branchIdx < 0 {
-		t.Fatal("all three sections should be present")
+	if pushIdx < 0 || forceIdx < 0 || toolIdx < 0 || branchIdx < 0 {
+		t.Fatal("all four sections should be present")
 	}
-	if !(pushIdx < toolIdx && toolIdx < branchIdx) {
-		t.Errorf("policy order wrong: push=%d tool=%d branch=%d (want push<tool<branch)", pushIdx, toolIdx, branchIdx)
+	if !(pushIdx < forceIdx && forceIdx < toolIdx && toolIdx < branchIdx) {
+		t.Errorf("policy order wrong: push=%d force=%d tool=%d branch=%d (want push<force<tool<branch)",
+			pushIdx, forceIdx, toolIdx, branchIdx)
+	}
+}
+
+// TestBuildCoderPreamble_ForcePushPolicyShown asserts the H-13 FORCE-PUSH POLICY
+// section appears when rules.ForcePushBlocked is true. Pairs with
+// protocol.H13ForcePushProtocol embedded in Brian's prompt — the coder side
+// is the request shape; Brian side is the verification authority.
+func TestBuildCoderPreamble_ForcePushPolicyShown(t *testing.T) {
+	rules := &projects.Rules{ForcePushBlocked: true}
+	got := buildCoderPreamble("fp1", "", rules)
+
+	required := []string{
+		"FORCE-PUSH POLICY:",
+		"HARD-BLOCKED",
+		"--force",
+		"--force-with-lease",
+		"request_force_push: <branch>@<sha>",
+		"WAIT for brian",
+		"Do NOT attempt to construct or guess the token",
+	}
+	for _, s := range required {
+		if !strings.Contains(got, s) {
+			t.Errorf("FORCE-PUSH POLICY section missing %q\nfull:\n%s", s, got)
+		}
+	}
+}
+
+// TestBuildCoderPreamble_ForcePushPolicyHidden asserts that lenient rules
+// (ForcePushBlocked=false, e.g. bot-hq self-rules) suppress the FORCE-PUSH
+// POLICY section. bot-hq force-pushes freely during phase rebases.
+func TestBuildCoderPreamble_ForcePushPolicyHidden(t *testing.T) {
+	rules := &projects.Rules{
+		ProjectName:      "bot-hq",
+		ForcePushBlocked: false,
+	}
+	got := buildCoderPreamble("fp2", "", rules)
+
+	if strings.Contains(got, "FORCE-PUSH POLICY") {
+		t.Error("ForcePushBlocked=false should NOT emit FORCE-PUSH POLICY (bot-hq lenient case)")
 	}
 }
