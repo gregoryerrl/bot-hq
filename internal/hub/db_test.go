@@ -61,6 +61,36 @@ func TestRebuildGenMigrationIdempotent(t *testing.T) {
 	}
 }
 
+// TestAddColumnIfMissingRejectsBadIdentifier locks the SQL identifier guard
+// added in slice 2 C3. The guard is unreachable from current call sites
+// (all literal constants), but a future contributor could reintroduce
+// injection by passing dynamic input — the guard fails fast instead.
+func TestAddColumnIfMissingRejectsBadIdentifier(t *testing.T) {
+	db := setupTestDB(t)
+	cases := []struct {
+		name        string
+		table, col  string
+		wantErrFrag string
+	}{
+		{"sql injection in table", "agents; DROP TABLE messages--", "ok", "invalid table"},
+		{"sql injection in column", "agents", "x; DROP TABLE messages--", "invalid column"},
+		{"empty table", "", "ok", "invalid table"},
+		{"leading digit table", "1agents", "ok", "invalid table"},
+		{"space in column", "agents", "bad name", "invalid column"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := db.addColumnIfMissing(tc.table, tc.col, "TEXT")
+			if err == nil {
+				t.Fatalf("expected error for table=%q col=%q, got nil", tc.table, tc.col)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrFrag) {
+				t.Errorf("err = %q, want substring %q", err.Error(), tc.wantErrFrag)
+			}
+		})
+	}
+}
+
 // TestSnapJSONColumnPresent locks that the messages table carries the
 // snap_json column post-migrate, and that re-running migrate is a no-op
 // (no double-add). Phase G v1 slice 2 C2.

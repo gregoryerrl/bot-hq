@@ -3,6 +3,7 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -500,7 +501,7 @@ func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
 func extractSnapJSON(fromAgent, content string) string {
 	s, err := snap.Parse(content)
 	if err != nil {
-		if err == snap.ErrNoSNAPBlock {
+		if errors.Is(err, snap.ErrNoSNAPBlock) {
 			return "" // common case, not a drift signal
 		}
 		log.Printf("[snap] warn: parse failed for message from %s: %v", fromAgent, err)

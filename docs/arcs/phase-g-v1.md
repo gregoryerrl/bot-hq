@@ -1,6 +1,6 @@
 # Arc: Phase G v1
 
-Status: open  | Branch: brian/phase-g-v1-slice-1 (slice 1 in flight)  | Opened: 2026-04-26  | Closed: —
+Status: open  | Branch: brian/phase-g-v1-slice-2 (slice 2 in flight, slices 1 + 1.5 merged)  | Opened: 2026-04-26  | Closed: —
 
 ## Context
 
@@ -20,6 +20,10 @@ Design doc: `docs/plans/2026-04-26-phase-g-v1-design.md`.
 - 2026-04-26 ~12:45 — Slice ordering locked: Slice 1 = A + #20 (UX wins, ships first), Slice 2 = B (persistence, ships post-rebuild). 2 rebuilds total.
 - 2026-04-26 ~13:00 — Rain EYES gate on spec returned conditional greenflag with C1-C4 critical fixes (citation, SetSize gate, drop `-e`, add `-S -500`), P1-P3 soft pushbacks (commit reorder, arc.md skeleton at v1 start, stale-gen UX explicit), A1-A4 test gaps. All accepted; spec respun.
 - 2026-04-26 ~13:05 — Slice 1 commit shape locked: A1 (jump-to-present + arc.md skeleton) → #20 (rebuild_gen) → A2 (agent-pane modal).
+- 2026-04-26 — Slice 1 merged to main; rebuilds #1–#9 closed gate after iterative UX surface fixes.
+- 2026-04-26 — Slice 1.5 (focus model rewrite + scrolled-up indicator + modal cleanup) merged at main@`9b17042`; rebuild #10 + #11 PASS, 5/5 eyeball-gate cleared incl. SQL belt.
+- 2026-04-26 — Slice 2 design refined post-Rain pre-dispatch pushback (msg 3133): no `snap_entries` table, JSON column on messages instead, paren-depth as v1's sole escape mechanism, slice-2-only design doc. User greenflag at msg 3145.
+- 2026-04-26 — Slice 2 shipping: C1 `cf2c4a2` (`internal/snap` package), C2 `0625d5c` (`messages.snap_json` migration), C3 `e29cae9` (send-path hook + 4 Rain obs fold), C4 (this update + design doc).
 
 ## Deferred
 
@@ -33,9 +37,12 @@ Design doc: `docs/plans/2026-04-26-phase-g-v1-design.md`.
 
 ## Refs
 
-- design doc: `docs/plans/2026-04-26-phase-g-v1-design.md`
+- design doc (master): `docs/plans/2026-04-26-phase-g-v1-design.md`
+- design doc (slice 1.5): `docs/plans/2026-04-26-phase-g-v1-slice-1.5-design.md`
+- design doc (slice 2): `docs/plans/2026-04-26-phase-g-v1-slice-2-design.md`
 - prior phase: `docs/plans/phase-e.md`, `docs/plans/2026-04-23-bot-hq-hub-design.md`
-- branch (slice 1): `brian/phase-g-v1-slice-1`
-- branch (slice 2): TBD post-rebuild
-- commits (slice 1): TBD
-- commits (slice 2): TBD
+- branch (slice 1): `brian/phase-g-v1-slice-1` (merged)
+- branch (slice 1.5): `brian/phase-g-v1-slice-1.5` + `brian/phase-g-v1-slice-1.5-followup` (merged at `9b17042`)
+- branch (slice 2): `brian/phase-g-v1-slice-2`
+- commits (slice 1.5): C1 `ba4db0b`, C2 `ce01a0f`, C3 `ef63baf`, followup `9b17042`
+- commits (slice 2): C1 `cf2c4a2`, C2 `0625d5c`, C3 `e29cae9`, C4 (in flight)
