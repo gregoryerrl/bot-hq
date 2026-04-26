@@ -221,6 +221,32 @@ func TestRainPromptContainsCarveOutEnumeration(t *testing.T) {
 	}
 }
 
+// TestRainPromptContainsAsymmetricPivot locks the H-2 consistency fold:
+// PIVOT scenario routes through Rain's hub_flag elevation, not Brian's
+// self-flag. Mirrors Brian's ratchet — identical canonical text per
+// single-source-of-truth pattern established for HALTER/PUSHER + FLAG.
+func TestRainPromptContainsAsymmetricPivot(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	want := []string{
+		"PIVOT: user w/o executor",
+		"Brian PMs Rain",
+		"Rain holds 60s",
+		"elevates via hub_flag",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-2 asymmetric PIVOT literal %q", w)
+		}
+	}
+	// And the OLD symmetric framing must be GONE.
+	for _, gone := range []string{"Brian flags first; step in if no ack"} {
+		if strings.Contains(prompt, gone) {
+			t.Errorf("initial prompt must NOT contain old symmetric PIVOT literal %q", gone)
+		}
+	}
+}
+
 // Ratchet against regression: DISC v2 role split (HANDS/EYES/BRAIN) + OUTPUT
 // class rules must survive future prompt compression. Rain mirrors Brian's
 // ratchet — same literals, same diagnostic load (see 2026-04-24 discussion).

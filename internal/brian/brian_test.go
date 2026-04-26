@@ -175,6 +175,47 @@ func TestBrianPromptContainsGreenflagDelegation(t *testing.T) {
 	}
 }
 
+// TestBrianPromptContainsAsymmetricPivot locks the H-2 consistency fold:
+// PIVOT scenario routes through Rain's hub_flag elevation, not Brian's
+// self-flag. Closes the symmetric-flag residue Rain caught in C1 review.
+func TestBrianPromptContainsAsymmetricPivot(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"PIVOT: user w/o executor",
+		"Brian PMs Rain",
+		"Rain holds 60s",
+		"elevates via hub_flag",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-2 asymmetric PIVOT literal %q", w)
+		}
+	}
+	// And the OLD symmetric framing must be GONE.
+	for _, gone := range []string{"brian flags, rain holds 60s"} {
+		if strings.Contains(prompt, gone) {
+			t.Errorf("initial prompt must NOT contain old symmetric PIVOT literal %q", gone)
+		}
+	}
+}
+
+// TestBrianStartupCarveOutGloss locks the H-2 consistency fold for STARTUP:
+// Brian's startup-time hub_flag is explicitly framed as the implicit
+// carve-out window (Rain not yet registered).
+func TestBrianStartupCarveOutGloss(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"startup carve-out: Rain not yet registered, self-flag is implicit per H-2",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain STARTUP carve-out gloss %q", w)
+		}
+	}
+}
+
 // Ratchet against regression: DISC v2 role split (HANDS/EYES/BRAIN) + OUTPUT
 // class rules must survive future prompt compression. Each literal is
 // load-bearing — missing any of these silently re-opens a drift mode we
