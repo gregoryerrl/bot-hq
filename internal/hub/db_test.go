@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -57,6 +58,45 @@ func TestRebuildGenMigrationIdempotent(t *testing.T) {
 	if err := db.migrate(); err != nil {
 		t.Errorf("third migrate() should still be no-op, got: %v", err)
 	}
+}
+
+// TestSnapJSONColumnPresent locks that the messages table carries the
+// snap_json column post-migrate, and that re-running migrate is a no-op
+// (no double-add). Phase G v1 slice 2 C2.
+func TestSnapJSONColumnPresent(t *testing.T) {
+	db := setupTestDB(t)
+	if !columnExists(t, db, "messages", "snap_json") {
+		t.Fatalf("snap_json column missing on messages after migrate()")
+	}
+	// Idempotent re-run.
+	if err := db.migrate(); err != nil {
+		t.Fatalf("re-migrate err: %v", err)
+	}
+	if !columnExists(t, db, "messages", "snap_json") {
+		t.Fatalf("snap_json column missing after second migrate()")
+	}
+}
+
+func columnExists(t *testing.T, db *DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.conn.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 // TestIncrementRebuildGen locks that the gen monotonically increases

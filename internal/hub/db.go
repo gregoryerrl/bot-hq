@@ -208,20 +208,32 @@ func (db *DB) migrate() error {
 
 	// Phase G v1 #20: rebuild_gen column on agents. Guarded ALTER for
 	// idempotent migration on existing DBs.
-	if err := db.addAgentColumnIfMissing("rebuild_gen", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if err := db.addColumnIfMissing("agents", "rebuild_gen", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// Phase G v1 slice 2 C2: snap_json column on messages. Stores the
+	// serialized SNAP footer extracted by the send-path hook (slice 2 C3).
+	// Empty string for messages with no SNAP block or with malformed blocks
+	// (parse-error policy: log+warn, do not fail the send).
+	if err := db.addColumnIfMissing("messages", "snap_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	return nil
 }
 
-// addAgentColumnIfMissing applies an ALTER TABLE only when the named column
-// is absent on the agents table. Lets the migration block run unchanged on
+// addColumnIfMissing applies an ALTER TABLE only when the named column is
+// absent on the given table. Lets the migration block run unchanged on
 // fresh DBs (CREATE TABLE already includes nothing extra) and on upgraded
 // DBs (ALTER adds the column once, subsequent runs are no-ops).
-func (db *DB) addAgentColumnIfMissing(column, decl string) error {
-	rows, err := db.conn.Query(`PRAGMA table_info(agents)`)
+//
+// Caller is responsible for safe table/column/decl values — these are
+// interpolated into SQL. All current call sites use literal constants, so
+// no injection surface.
+func (db *DB) addColumnIfMissing(table, column, decl string) error {
+	pragma := fmt.Sprintf("PRAGMA table_info(%s)", table)
+	rows, err := db.conn.Query(pragma)
 	if err != nil {
-		return fmt.Errorf("pragma table_info(agents): %w", err)
+		return fmt.Errorf("pragma table_info(%s): %w", table, err)
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -239,9 +251,9 @@ func (db *DB) addAgentColumnIfMissing(column, decl string) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	stmt := fmt.Sprintf("ALTER TABLE agents ADD COLUMN %s %s", column, decl)
+	stmt := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl)
 	if _, err := db.conn.Exec(stmt); err != nil {
-		return fmt.Errorf("alter agents add %s: %w", column, err)
+		return fmt.Errorf("alter %s add %s: %w", table, column, err)
 	}
 	return nil
 }
