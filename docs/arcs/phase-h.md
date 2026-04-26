@@ -28,12 +28,15 @@ Design doc (master): `docs/plans/2026-04-26-phase-h-design.md`.
 - 2026-04-26 — Halter/pusher rule converged after 3 iterations: **Rain halts on peer-arrival, Brian pushes through.** Reasoning: H-1 two-message ordering (action-first, synthesis-second) preserved; action-results easier to fold into delayed synthesis than vice versa; mutual-halt deadlock impossible by construction. BRAIN cycles exempt (DRAFT-alone retains for peer-critique).
 - 2026-04-26 — User locked final scope. Emma pick: revised (4 active, H-26 deferred). Halter/pusher: confirmed Rain halts / Brian pushes. Implicit-accept on H-19, H-21, H-3a-relabel, H-22-replaces-H-20-mechanism, tuning-gate discipline, H-24 two-class boundary.
 - 2026-04-26 — Slice 1 implementation complete (in-flight): C1 `edbcc09` (`internal/projects/` package, H-4 load-bearing), C2 `fc6064a` (hub_spawn pre-flight gate, H-14), C3 `2846146` (coder preamble extension, H-3c + H-16), C4 `fcd8cb6` (force-push token mechanism, H-13). All 4 Rain diff-gates PASS. C5 closure folds 7 micro-observations from C1/C2/C3 reviews + bcc-ad-manager.yaml + 988-utah-gov.yaml exemplars + slice 1 design framing fold + branch-advance-race v2 risk-matrix add. **Branch:** `brian/phase-h-slice-1`.
+- 2026-04-26 — Slice 1 ff-merged to main as `b06961c` (C5 closure `b06961c`). All 5 Rain diff-gates PASS. Branch `brian/phase-h-slice-1` retained on origin for rollback safety.
+- 2026-04-26 — Rebuild #13 fired post-merge; trio (brian/rain/emma) re-registered under slice 1 gates active. Test-first methodology adopted (per Rain pre-rebuild rec) — runtime test on first dispatch instead of slice 2 design.
+- 2026-04-26 — Slice 1 runtime test surfaced exemplar form-coupling bug (rules SSH vs actual HTTPS for `bot-hq.yaml`). H-14 gate fired correctly with no side-effects (verified empirically via `claude_list` across both block paths — neither tmux session nor worktree created on block). Hotfix `4440425` (Path C) unifies all 4 exemplars to empty-placeholder + MUST-set convention; A1 fix to installed `~/.bot-hq/projects/bot-hq.yaml` (HTTPS form) lives outside repo. Path B (gate canonicalization SSH↔HTTPS) deferred to slice 2 candidate. Rain hotfix diff-gate PASS. Path 1 retry preamble verified GREEN (lenient bot-hq dispatch: BRANCH NAMING present, PUSH/FORCE-PUSH/BLOCKED suppressed — load-bearing conditional-emitter check). **Slice 1 H-14 gate 5/5 paths verified live.** Slice 1 CLOSED.
 
 ## Slices
 
 | Slice | Theme | Items | Status |
 |---|---|---|---|
-| **Slice 1** | Real-project safety (BLAST) | H-4 + H-3c + H-13 + H-14 + H-16 | implementation complete (C1-C5 on `brian/phase-h-slice-1`); pending Rain C5 diff-gate + ff-merge to main |
+| **Slice 1** | Real-project safety (BLAST) | H-4 + H-3c + H-13 + H-14 + H-16 | CLOSED — merged to main (`b06961c`) + hotfix `4440425` (Path C exemplar form-coupling fix); 5/5 H-14 gate paths runtime-verified live |
 | **Slice 2** | Discipline + comm hardening (PROMPT-MOSTLY) | H-2 + H-1 + H-11 + H-18 + H-22 + H-23 + H-24 | design-pending |
 | **Slice 3** | Coder lifecycle (RELIABILITY) | H-3b + H-3a + H-9 + H-25 | design-pending |
 | **Slice 4** | State + discipline structures (RATCHET) | H-6 + H-10a + H-15 + H-19 + H-21 | design-pending |
