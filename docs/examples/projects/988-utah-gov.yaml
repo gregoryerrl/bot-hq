@@ -1,0 +1,39 @@
+# 988.utah.gov (WordPress / Pro Child Theme) project rules.
+#
+# Bootstrap: copy to ~/.bot-hq/projects/988-utah-gov.yaml (or whatever the
+# project_name derivation produces) after first `hub_spawn` into the project
+# dir hits the bootstrap-fail. WordPress projects on WP Engine have specific
+# deployment workflows — review the branch_pattern against the team's
+# conventions before relying on this template.
+
+remote_url: ""              # MUST set: derive from `git -C <project> remote get-url origin`
+project_name: "988-utah-gov"
+
+# Branch pattern: WordPress projects vary widely. Inspect `git branch -r`
+# before locking. This pattern is a permissive starting point.
+branch_pattern: "^[a-z0-9][a-z0-9/-]*$"
+branch_examples: []
+branch_pattern_help: "Lowercase, alphanumeric + dashes + optional slashes (feature/foo)"
+
+# Push approval REQUIRED — production WP site, blast radius is real.
+push_requires_approval: true
+
+# Force-push HARD-BLOCKED — H-13 user-token gate.
+force_push_blocked: true
+force_push_token_format: "force-push-greenlight: {branch}@{sha}"
+
+# Coders cannot push, deploy, run wp-cli destructively, or rm -rf.
+coder_tools_blocked:
+  - "git push"
+  - "git push --force"
+  - "git push --force-with-lease"
+  - "gh pr create"
+  - "gh pr merge"
+  - "wp db drop"
+  - "wp db reset"
+  - "wp post delete"
+  - "rm -rf"
+coder_tools_per_action_approval: []
+
+commit_style: "descriptive"
+require_issue_link: false

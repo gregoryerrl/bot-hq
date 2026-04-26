@@ -10,6 +10,10 @@
 #
 # Copy this file as a starting point; fill in remote_url + project_name + branch_pattern.
 
+# REMOTE_URL IS REQUIRED FOR MISMATCH PROTECTION — never omit. The loader
+# only enforces ErrRemoteMismatch when remote_url is non-empty; an empty
+# remote_url silently skips the safety check and lets a wrong-project rules
+# file load successfully. Always populate this field.
 remote_url: ""              # MUST set: must match `git remote get-url origin` exactly
 project_name: ""            # MUST set: canonical name (typically the repo name)
 

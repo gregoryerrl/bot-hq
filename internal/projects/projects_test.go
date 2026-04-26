@@ -131,6 +131,85 @@ coder_tools_blocked:
 	}
 }
 
+// TestLoadForProjectFullSchemaRoundTrip locks parsing of every Rules field —
+// catches a future schema field-rename or yaml-tag drift that the partial
+// assertions in TestLoadForProjectSuccess would miss. Per Rain msg 3273
+// obs #3 (C1 fold).
+func TestLoadForProjectFullSchemaRoundTrip(t *testing.T) {
+	repo := initGitRepo(t, "git@github.com:gregoryerrl/full-schema.git")
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+
+	if err := os.MkdirAll(filepath.Join(home, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `remote_url: "git@github.com:gregoryerrl/full-schema.git"
+project_name: "full-schema"
+branch_pattern: "^[0-9]+-[a-z0-9-]+$"
+branch_examples:
+  - "346-test-one"
+  - "355-test-two"
+branch_pattern_help: "Use [issueNo]-[title-with-dashes]; lowercase only"
+push_requires_approval: true
+force_push_blocked: true
+force_push_token_format: "force-push-greenlight: {branch}@{sha}"
+coder_tools_blocked:
+  - "git push"
+  - "gh pr create"
+  - "rm -rf"
+coder_tools_per_action_approval:
+  - "git commit"
+commit_style: "imperative-mood"
+require_issue_link: true
+`
+	if err := os.WriteFile(filepath.Join(home, "projects", "full-schema.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, err := LoadForProject(repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Assert every Rules field surfaces correctly post-parse.
+	if rules.RemoteURL != "git@github.com:gregoryerrl/full-schema.git" {
+		t.Errorf("RemoteURL = %q", rules.RemoteURL)
+	}
+	if rules.ProjectName != "full-schema" {
+		t.Errorf("ProjectName = %q", rules.ProjectName)
+	}
+	if rules.BranchPattern != `^[0-9]+-[a-z0-9-]+$` {
+		t.Errorf("BranchPattern = %q", rules.BranchPattern)
+	}
+	if len(rules.BranchExamples) != 2 || rules.BranchExamples[0] != "346-test-one" || rules.BranchExamples[1] != "355-test-two" {
+		t.Errorf("BranchExamples = %v", rules.BranchExamples)
+	}
+	if rules.BranchPatternHelp != "Use [issueNo]-[title-with-dashes]; lowercase only" {
+		t.Errorf("BranchPatternHelp = %q", rules.BranchPatternHelp)
+	}
+	if !rules.PushRequiresApproval {
+		t.Error("PushRequiresApproval should be true")
+	}
+	if !rules.ForcePushBlocked {
+		t.Error("ForcePushBlocked should be true")
+	}
+	if rules.ForcePushTokenFormat != "force-push-greenlight: {branch}@{sha}" {
+		t.Errorf("ForcePushTokenFormat = %q", rules.ForcePushTokenFormat)
+	}
+	if len(rules.CoderToolsBlocked) != 3 {
+		t.Errorf("CoderToolsBlocked len = %d, want 3", len(rules.CoderToolsBlocked))
+	}
+	if len(rules.CoderToolsPerActionApproval) != 1 || rules.CoderToolsPerActionApproval[0] != "git commit" {
+		t.Errorf("CoderToolsPerActionApproval = %v", rules.CoderToolsPerActionApproval)
+	}
+	if rules.CommitStyle != "imperative-mood" {
+		t.Errorf("CommitStyle = %q", rules.CommitStyle)
+	}
+	if !rules.RequireIssueLink {
+		t.Error("RequireIssueLink should be true")
+	}
+}
+
 func TestValidateBranchName(t *testing.T) {
 	r := &Rules{
 		BranchPattern:     `^[0-9]+-[a-z0-9-]+$`,

@@ -1398,13 +1398,12 @@ func preflightProjectRules(project string) (*projects.Rules, error) {
 	}
 
 	if errors.Is(err, projects.ErrNoRulesFound) {
-		name := "<project>"
-		if out, gErr := exec.Command("git", "-C", project, "remote", "get-url", "origin").Output(); gErr == nil {
-			if derived := projects.DeriveProjectName(strings.TrimSpace(string(out))); derived != "" {
-				name = derived
-			}
-		}
-		return nil, fmt.Errorf("hub_spawn blocked: no project rules for %q.\n\n"+
+		// LoadForProject's error message includes the canonical project name
+		// (its derivation from the actual git remote URL). Extract it from
+		// the message rather than re-running `exec.Command("git", "remote",
+		// "get-url")` — saves one I/O round-trip per failed dispatch.
+		name := projectNameFromNoRulesErr(err)
+		msg := fmt.Sprintf("hub_spawn blocked: no project rules for %q.\n\n"+
 			"Bootstrap required before dispatch:\n"+
 			"  1. Inspect existing branch convention:  git -C %s branch -r | head -20\n"+
 			"  2. Copy template:  cp docs/examples/projects/_default.yaml ~/.bot-hq/projects/%s.yaml\n"+
@@ -1414,14 +1413,46 @@ func preflightProjectRules(project string) (*projects.Rules, error) {
 			"taking destructive actions in projects without explicit per-project rules.\n"+
 			"See docs/arcs/phase-h.md (H-4 / H-14).",
 			name, project, name, name)
+		return nil, &preflightError{msg: msg, underlying: projects.ErrNoRulesFound}
 	}
 
 	if errors.Is(err, projects.ErrRemoteMismatch) {
-		return nil, fmt.Errorf("hub_spawn blocked: project rules file remote_url does not match the project's actual origin.\n%v\n\n"+
+		msg := fmt.Sprintf("hub_spawn blocked: project rules file remote_url does not match the project's actual origin.\n%v\n\n"+
 			"Either edit the rules file's remote_url to match, or remove it and re-bootstrap.", err)
+		return nil, &preflightError{msg: msg, underlying: projects.ErrRemoteMismatch}
 	}
 
-	return nil, fmt.Errorf("hub_spawn blocked: project rules error: %v", err)
+	return nil, fmt.Errorf("hub_spawn blocked: project rules error: %w", err)
+}
+
+// preflightError wraps a user-facing message with an underlying sentinel so
+// callers can `errors.Is(err, projects.ErrNoRulesFound)` etc. without the
+// sentinel's text appearing twice in the visible message.
+type preflightError struct {
+	msg        string
+	underlying error
+}
+
+func (e *preflightError) Error() string { return e.msg }
+func (e *preflightError) Unwrap() error { return e.underlying }
+
+// projectNameFromNoRulesErr extracts the canonical project name from the
+// LoadForProject no-rules error message (`for project "<name>"`). Returns
+// "<project>" as a defensive fallback if parsing fails (would only happen
+// if LoadForProject's message format changes — covered by tests).
+func projectNameFromNoRulesErr(err error) string {
+	msg := err.Error()
+	const marker = `for project "`
+	i := strings.LastIndex(msg, marker)
+	if i < 0 {
+		return "<project>"
+	}
+	rest := msg[i+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end < 0 {
+		return "<project>"
+	}
+	return rest[:end]
 }
 
 // buildCoderPreamble constructs the initial-prompt prefix sent to a spawned
@@ -1459,10 +1490,14 @@ FORCE-PUSH POLICY: Force-pushes are HARD-BLOCKED in this project. This includes 
 			for _, item := range rules.CoderToolsBlocked {
 				blocked.WriteString("  - " + item + "\n")
 			}
+			// Header reads as a list of blocked commands (literal). The H-16
+			// feature name is "coder tool allowlist" framed as the policy
+			// concept, but the runtime artifact a coder reads is a blocklist —
+			// avoid the cognitive mismatch by labeling the section after what
+			// it actually is. Per Rain msg 3294 obs #1.
 			policy.WriteString(`
-TOOL ALLOWLIST: The following commands are BLOCKED in this project. Do not run them.
+BLOCKED COMMANDS: The following commands are BLOCKED in this project. Do not run them.
 If asked to run one of these, refuse and PM brian explaining the block.
-Blocked commands:
 ` + strings.TrimRight(blocked.String(), "\n") + "\n")
 		}
 		if rules.BranchPattern != "" {

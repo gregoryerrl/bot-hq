@@ -210,6 +210,19 @@ V1: option (a) — simpler, no new tool. Token verification = brian re-reads rec
 | Bootstrap flow user confirms wrong rules | Low-medium | Rain's inspection step shows examples from `git branch -r`; user reviews before confirming. Rules file is plain YAML, easy to edit later. |
 | H-4 `_default.yaml` accidentally auto-applied to unknown project | Low | Loader hard-fails with `ErrNoRulesFound` instead of fallback; `_default.yaml` only shown in error message. |
 | `git remote get-url origin` returns nothing or non-standard URL | Low | Loader handles gracefully; bootstrap message includes raw remote URL for user to specify project name manually. |
+| **H-13 branch-advance race** (per Rain msg 3294 obs) — between `request_force_push: feature@abc123` and user's `force-push-greenlight: feature@abc123` reply, branch tip advances to `def456`. User authorized abc123 SHA but coder force-pushes def456. | Low | Requires active branch advancement during user approval window — rare in practice. **v2 mitigation:** brian re-verifies SHA at relay-time; if local branch HEAD ≠ token's SHA, deny + ask coder to re-request with current SHA. v1 acceptable since user-typed token is still required for any force-push at all. |
+
+## Framing note: structural vs preamble-enforced (per Rain msg 3272)
+
+The master design's "structurally impossible" framing applies cleanly to **H-4 + H-3c + H-13 + H-14**:
+- H-4 (rules schema) — structural: project rules are loaded or they aren't; no judgment surface.
+- H-14 (dispatch gate) — structural: hub_spawn cannot proceed without rules; not a discipline check.
+- H-3c (push approval) — structural at the *gate level* (rules.PushRequiresApproval is a hard switch); the coder's compliance with the prompt is preamble-enforced.
+- H-13 (force-push token) — structural at the *verification level* (Brian's substring-match is mechanical); the coder's compliance with the request flow is preamble-enforced.
+
+**H-16** (coder tool allowlist) is **preamble-enforced in v1**, not structural. Coders are *instructed* to refuse blocked commands and PM brian; an adversarial coder could bypass at the bash layer. v2 candidate (actual shell-wrapper / coder runtime that intercepts forbidden tool calls before exec).
+
+The honest framing: v1 closes the *common* failure mode structurally (the disciplined coder follows the preamble) and *most* of the adversarial failure mode (the rules + Brian's gate prevent unintended dispatch). v2 closes the adversarial-coder-bypass class.
 
 ## Out of scope (v1)
 

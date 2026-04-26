@@ -60,6 +60,12 @@ func projectsDir() (string, error) {
 //   git@github.com:org/foo.git    -> foo
 //   https://github.com/org/foo    -> foo
 //   https://github.com/org/foo.git -> foo
+//
+// Character class extends [\w-] (per slice 1 design schema) to [\w.-] to
+// support project names like "988.utah.gov" or "foo.bar". Dots are common
+// enough in real project names that excluding them caused derivation
+// failure on legitimate remotes; safe extension since we still reject any
+// URL without a leading `/` or `:` (returns "" on bare tokens).
 var remoteNameRE = regexp.MustCompile(`[/:]([\w.-]+?)(?:\.git)?/?$`)
 
 // DeriveProjectName extracts the canonical project name from a git remote URL.

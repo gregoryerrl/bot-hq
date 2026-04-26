@@ -26,7 +26,7 @@ func TestBuildCoderPreamble_BaselineAlwaysIncluded(t *testing.T) {
 func TestBuildCoderPreamble_NilRulesEmitsNoPolicy(t *testing.T) {
 	got := buildCoderPreamble("xyz", "", nil)
 
-	mustNot := []string{"PUSH POLICY", "TOOL ALLOWLIST", "BRANCH NAMING"}
+	mustNot := []string{"PUSH POLICY", "BLOCKED COMMANDS", "BRANCH NAMING"}
 	for _, s := range mustNot {
 		if strings.Contains(got, s) {
 			t.Errorf("nil rules should emit no policy section, but %q present\nfull:\n%s", s, got)
@@ -47,8 +47,8 @@ func TestBuildCoderPreamble_LenientBotHqRules(t *testing.T) {
 	if strings.Contains(got, "PUSH POLICY") {
 		t.Error("lenient rules (no push approval) should not include PUSH POLICY")
 	}
-	if strings.Contains(got, "TOOL ALLOWLIST") {
-		t.Error("empty CoderToolsBlocked should not include TOOL ALLOWLIST")
+	if strings.Contains(got, "BLOCKED COMMANDS") {
+		t.Error("empty CoderToolsBlocked should not include BLOCKED COMMANDS")
 	}
 	// Branch pattern is set, so naming guidance should appear.
 	if !strings.Contains(got, "BRANCH NAMING") {
@@ -74,7 +74,7 @@ func TestBuildCoderPreamble_StrictRules(t *testing.T) {
 		"PUSH POLICY",
 		"explicit user approval before any git push",
 		"awaiting approval",
-		"TOOL ALLOWLIST",
+		"BLOCKED COMMANDS",
 		"  - git push",
 		"  - gh pr create",
 		"  - rm -rf",
@@ -106,7 +106,7 @@ This is an isolated copy.
 }
 
 func TestBuildCoderPreamble_PolicyOrderingDeterministic(t *testing.T) {
-	// PUSH POLICY before FORCE-PUSH POLICY before TOOL ALLOWLIST before BRANCH NAMING.
+	// PUSH POLICY before FORCE-PUSH POLICY before BLOCKED COMMANDS before BRANCH NAMING.
 	// Deterministic so coders see the same order across spawns.
 	rules := &projects.Rules{
 		BranchPattern:        ".*",
@@ -118,7 +118,7 @@ func TestBuildCoderPreamble_PolicyOrderingDeterministic(t *testing.T) {
 
 	pushIdx := strings.Index(got, "PUSH POLICY:")
 	forceIdx := strings.Index(got, "FORCE-PUSH POLICY:")
-	toolIdx := strings.Index(got, "TOOL ALLOWLIST:")
+	toolIdx := strings.Index(got, "BLOCKED COMMANDS:")
 	branchIdx := strings.Index(got, "BRANCH NAMING:")
 
 	if pushIdx < 0 || forceIdx < 0 || toolIdx < 0 || branchIdx < 0 {
@@ -166,5 +166,48 @@ func TestBuildCoderPreamble_ForcePushPolicyHidden(t *testing.T) {
 
 	if strings.Contains(got, "FORCE-PUSH POLICY") {
 		t.Error("ForcePushBlocked=false should NOT emit FORCE-PUSH POLICY (bot-hq lenient case)")
+	}
+}
+
+// TestBuildCoderPreamble_WorktreeAndStrictRulesCombined locks the combined
+// flow: a coder spawned in a worktree (bot-hq self-spawn) under strict
+// rules (e.g. dispatched into a client project that happens to be cloned
+// inside bot-hq's worktree dir) sees both the worktree note AND every
+// applicable policy section. Per Rain msg 3294 obs #3.
+func TestBuildCoderPreamble_WorktreeAndStrictRulesCombined(t *testing.T) {
+	worktreeNote := `
+NOTE: You are working in a git worktree at /tmp/wt-strict (branch: 346-test).
+This is an isolated copy.
+`
+	rules := &projects.Rules{
+		ProjectName:          "bcc-ad-manager",
+		BranchPattern:        "^[0-9]+-[a-z0-9-]+$",
+		PushRequiresApproval: true,
+		ForcePushBlocked:     true,
+		CoderToolsBlocked:    []string{"git push", "rm -rf"},
+	}
+	got := buildCoderPreamble("combined", worktreeNote, rules)
+
+	required := []string{
+		// Baseline always present
+		"coder agent (ID: combined)",
+		"Your task:",
+		// Worktree note flowed through
+		"git worktree at /tmp/wt-strict",
+		"branch: 346-test",
+		// All four conditional policy sections present
+		"PUSH POLICY:",
+		"FORCE-PUSH POLICY:",
+		"BLOCKED COMMANDS:",
+		"BRANCH NAMING:",
+		// Strict rules content surfaced
+		"  - git push",
+		"  - rm -rf",
+		"^[0-9]+-[a-z0-9-]+$",
+	}
+	for _, s := range required {
+		if !strings.Contains(got, s) {
+			t.Errorf("combined preamble missing %q\nfull:\n%s", s, got)
+		}
 	}
 }

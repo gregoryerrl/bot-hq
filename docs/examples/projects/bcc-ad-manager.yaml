@@ -1,0 +1,41 @@
+# bcc-ad-manager project rules — strict (real client project, boss-safety class).
+#
+# Bootstrap: copy to ~/.bot-hq/projects/bcc-ad-manager.yaml after first
+# `hub_spawn` into the bcc-ad-manager dir hits the bootstrap-fail.
+# This is a starting point — review the branch_pattern + blocked tools
+# against the project's actual conventions before relying on it.
+
+remote_url: "git@github.com:gregoryerrl/bcc-ad-manager.git"
+project_name: "bcc-ad-manager"
+
+# Branch convention observed: [issueNo]-[title-with-dashes]
+# Examples from history: 346-streamline-onboarding-process,
+#                        355-duplicateadjob-fails-for-lead-generation-campaigns
+branch_pattern: "^[0-9]+-[a-z0-9-]+$"
+branch_examples:
+  - "346-streamline-onboarding-process"
+  - "355-duplicateadjob-fails-for-lead-generation-campaigns"
+branch_pattern_help: "Use [issueNo]-[title-with-dashes]; lowercase only; no slashes"
+
+# Push approval REQUIRED — boss may catch unauthorized pushes (msg 1736).
+push_requires_approval: true
+
+# Force-push HARD-BLOCKED — H-13 user-token gate.
+force_push_blocked: true
+force_push_token_format: "force-push-greenlight: {branch}@{sha}"
+
+# Coders cannot push, create PRs, merge PRs, close issues, or rm -rf
+# without per-action approval through brian.
+coder_tools_blocked:
+  - "git push"
+  - "git push --force"
+  - "git push --force-with-lease"
+  - "gh pr create"
+  - "gh pr merge"
+  - "gh issue close"
+  - "rm -rf"
+coder_tools_per_action_approval:
+  - "git commit"   # require Brian/user approval per commit (boss may scrutinize commit messages)
+
+commit_style: "imperative-mood"
+require_issue_link: true   # bcc-ad-manager PRs typically reference issue numbers
