@@ -606,7 +606,7 @@ func hubSpawn(db *hub.DB) ToolDef {
 		// rules = bootstrap required. Closes the bcc-ad-manager incident class
 		// (wrong-named branches, force-pushes, destructive ops) structurally.
 		// hub_spawn_gemma is unaffected (gemma allowlist is the gate there).
-		_, rulesErr := preflightProjectRules(project)
+		rules, rulesErr := preflightProjectRules(project)
 		if rulesErr != nil {
 			return mcp.NewToolResultError(rulesErr.Error()), nil
 		}
@@ -729,15 +729,7 @@ This is an isolated copy — the main repo is running a live server. Commit your
 When done, Brian or the user will merge your branch into main.
 `, worktreePath, worktreeBranch)
 		}
-		hubPreamble := fmt.Sprintf(`You are a coder agent (ID: %s) in the bot-hq system. You have bot-hq MCP tools available.
-
-IMPORTANT: Communicate your progress on the hub so other agents can see what you're doing.
-- When you START work: hub_send(from="%s", to="brian", type="update", content="Starting: <brief description>")
-- When you FINISH or hit a blocker: hub_send(from="%s", to="brian", type="result", content="<what you did or what's blocking>")
-- Keep hub messages short — one or two sentences max.
-%s
-Your task:
-`, sessionID, sessionID, sessionID, worktreeNote)
+		hubPreamble := buildCoderPreamble(sessionID, worktreeNote, rules)
 		fullPrompt := hubPreamble + prompt
 		if prompt == "" {
 			fullPrompt = hubPreamble + "Awaiting instructions. Register yourself and stand by."
@@ -1430,4 +1422,58 @@ func preflightProjectRules(project string) (*projects.Rules, error) {
 	}
 
 	return nil, fmt.Errorf("hub_spawn blocked: project rules error: %v", err)
+}
+
+// buildCoderPreamble constructs the initial-prompt prefix sent to a spawned
+// coder. Always includes the baseline hub-comm instructions; conditionally
+// includes a worktree note (when the coder is working in a git worktree)
+// and per-project policy sections derived from rules:
+//
+//   - PUSH POLICY (H-3c) — when rules.PushRequiresApproval
+//   - TOOL ALLOWLIST (H-16) — when rules.CoderToolsBlocked is non-empty
+//   - BRANCH NAMING — when rules.BranchPattern is non-empty
+//
+// rules may be nil (defensive); a nil rules object emits no policy sections.
+func buildCoderPreamble(sessionID, worktreeNote string, rules *projects.Rules) string {
+	var policy strings.Builder
+	if rules != nil {
+		if rules.PushRequiresApproval {
+			policy.WriteString(`
+PUSH POLICY: This project requires explicit user approval before any git push.
+- Do NOT run ` + "`git push`" + ` or ` + "`git push --set-upstream`" + ` without approval.
+- When push is needed, hub_send to brian: "ready to push branch <name>, awaiting approval".
+- Wait for explicit approval before pushing.
+`)
+		}
+		if len(rules.CoderToolsBlocked) > 0 {
+			var blocked strings.Builder
+			for _, item := range rules.CoderToolsBlocked {
+				blocked.WriteString("  - " + item + "\n")
+			}
+			policy.WriteString(`
+TOOL ALLOWLIST: The following commands are BLOCKED in this project. Do not run them.
+If asked to run one of these, refuse and PM brian explaining the block.
+Blocked commands:
+` + strings.TrimRight(blocked.String(), "\n") + "\n")
+		}
+		if rules.BranchPattern != "" {
+			policy.WriteString("\nBRANCH NAMING: Branches in this project must match pattern: " + rules.BranchPattern + "\n")
+			if rules.BranchPatternHelp != "" {
+				policy.WriteString("Hint: " + rules.BranchPatternHelp + "\n")
+			}
+			if len(rules.BranchExamples) > 0 {
+				policy.WriteString("Examples: " + strings.Join(rules.BranchExamples, ", ") + "\n")
+			}
+		}
+	}
+
+	return fmt.Sprintf(`You are a coder agent (ID: %s) in the bot-hq system. You have bot-hq MCP tools available.
+
+IMPORTANT: Communicate your progress on the hub so other agents can see what you're doing.
+- When you START work: hub_send(from="%s", to="brian", type="update", content="Starting: <brief description>")
+- When you FINISH or hit a blocker: hub_send(from="%s", to="brian", type="result", content="<what you did or what's blocking>")
+- Keep hub messages short — one or two sentences max.
+%s%s
+Your task:
+`, sessionID, sessionID, sessionID, worktreeNote, policy.String())
 }
