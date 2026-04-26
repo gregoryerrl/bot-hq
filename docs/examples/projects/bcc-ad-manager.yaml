@@ -4,8 +4,14 @@
 # `hub_spawn` into the bcc-ad-manager dir hits the bootstrap-fail.
 # This is a starting point — review the branch_pattern + blocked tools
 # against the project's actual conventions before relying on it.
+#
+# Paste the EXACT output of `git remote get-url origin` into remote_url
+# below. The H-14 gate compares strings exactly; SSH and HTTPS forms of
+# the same repo do NOT match. Common forms:
+#   https://github.com/<org>/bcc-ad-manager.git  (HTTPS clone)
+#   git@github.com:<org>/bcc-ad-manager.git      (SSH clone)
 
-remote_url: "git@github.com:gregoryerrl/bcc-ad-manager.git"
+remote_url: ""              # MUST set: must match `git remote get-url origin` exactly
 project_name: "bcc-ad-manager"
 
 # Branch convention observed: [issueNo]-[title-with-dashes]

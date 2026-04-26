@@ -2,8 +2,13 @@
 #
 # Copy to ~/.bot-hq/projects/bot-hq.yaml after slice 1 ships, so hub_spawn
 # into the bot-hq directory itself does not get blocked by H-14.
+#
+# Bootstrap: paste the EXACT output of `git remote get-url origin` into
+# remote_url below. Both SSH (git@github.com:...) and HTTPS
+# (https://github.com/...) forms exist depending on how the repo was cloned;
+# the H-14 gate compares strings exactly, so the form must match the clone.
 
-remote_url: "git@github.com:gregoryerrl/bot-hq.git"
+remote_url: ""              # MUST set: must match `git remote get-url origin` exactly
 project_name: "bot-hq"
 
 # Lenient branch pattern: brian/*, rain/*, coder-<hex>/* worktree branches.
