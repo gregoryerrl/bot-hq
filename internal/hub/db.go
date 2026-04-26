@@ -41,6 +41,12 @@ type DB struct {
 	conn       *sql.DB
 	mu         sync.RWMutex
 	onMessages []func(protocol.Message)
+	// rebuildGen is the hub's current rebuild generation. Set by
+	// IncrementRebuildGen at hub startup (or seeded to 0 until called).
+	// Stamped onto every RegisterAgent call so post-rebuild reads can flag
+	// pre-rebuild registrations as stale.
+	rebuildGen int64
+	rebuildMu  sync.RWMutex
 }
 
 func OpenDB(path string) (*DB, error) {
@@ -197,8 +203,92 @@ func (db *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_mq_status ON message_queue(status);
 	CREATE INDEX IF NOT EXISTS idx_mq_target ON message_queue(target_agent);
 	`
-	_, err := db.conn.Exec(schema)
-	return err
+	if _, err := db.conn.Exec(schema); err != nil {
+		return err
+	}
+
+	// Phase G v1 #20: rebuild_gen column on agents. Guarded ALTER for
+	// idempotent migration on existing DBs.
+	if err := db.addAgentColumnIfMissing("rebuild_gen", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// addAgentColumnIfMissing applies an ALTER TABLE only when the named column
+// is absent on the agents table. Lets the migration block run unchanged on
+// fresh DBs (CREATE TABLE already includes nothing extra) and on upgraded
+// DBs (ALTER adds the column once, subsequent runs are no-ops).
+func (db *DB) addAgentColumnIfMissing(column, decl string) error {
+	rows, err := db.conn.Query(`PRAGMA table_info(agents)`)
+	if err != nil {
+		return fmt.Errorf("pragma table_info(agents): %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil // already present
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	stmt := fmt.Sprintf("ALTER TABLE agents ADD COLUMN %s %s", column, decl)
+	if _, err := db.conn.Exec(stmt); err != nil {
+		return fmt.Errorf("alter agents add %s: %w", column, err)
+	}
+	return nil
+}
+
+// IncrementRebuildGen reads hub_rebuild_gen from settings, increments it by
+// one, persists, and caches the new value on the DB struct. Returns the new
+// generation number. Called once at hub startup (NewHub).
+//
+// Concurrency: serialized by rebuildMu so a hypothetical double-call from
+// two goroutines doesn't double-bump.
+func (db *DB) IncrementRebuildGen() (int64, error) {
+	db.rebuildMu.Lock()
+	defer db.rebuildMu.Unlock()
+
+	var current int64
+	row := db.conn.QueryRow(`SELECT value FROM settings WHERE key = ?`, "hub_rebuild_gen")
+	var raw string
+	switch err := row.Scan(&raw); err {
+	case nil:
+		fmt.Sscanf(raw, "%d", &current)
+	case sql.ErrNoRows:
+		current = 0
+	default:
+		return 0, err
+	}
+
+	next := current + 1
+	now := time.Now().UnixMilli()
+	if _, err := db.conn.Exec(
+		`INSERT INTO settings (key, value, updated) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated = excluded.updated`,
+		"hub_rebuild_gen", fmt.Sprintf("%d", next), now,
+	); err != nil {
+		return 0, err
+	}
+	db.rebuildGen = next
+	return next, nil
+}
+
+// CurrentRebuildGen returns the cached rebuild generation. Zero before
+// IncrementRebuildGen has been called (or in tests that skip the hub
+// startup path).
+func (db *DB) CurrentRebuildGen() int64 {
+	db.rebuildMu.RLock()
+	defer db.rebuildMu.RUnlock()
+	return db.rebuildGen
 }
 
 // --- Agents ---
@@ -208,11 +298,12 @@ func (db *DB) RegisterAgent(agent protocol.Agent) error {
 	if agent.Registered.IsZero() {
 		agent.Registered = time.Now()
 	}
+	gen := db.CurrentRebuildGen()
 	_, err := db.conn.Exec(
-		`INSERT OR REPLACE INTO agents (id, name, type, status, project, meta, registered, last_seen)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR REPLACE INTO agents (id, name, type, status, project, meta, registered, last_seen, rebuild_gen)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		agent.ID, agent.Name, string(agent.Type), string(agent.Status),
-		agent.Project, agent.Meta, agent.Registered.UnixMilli(), now,
+		agent.Project, agent.Meta, agent.Registered.UnixMilli(), now, gen,
 	)
 	return err
 }
@@ -222,8 +313,8 @@ func (db *DB) GetAgent(id string) (protocol.Agent, error) {
 	var typ, status string
 	var registered, lastSeen int64
 	err := db.conn.QueryRow(
-		`SELECT id, name, type, status, project, meta, registered, last_seen FROM agents WHERE id = ?`, id,
-	).Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen)
+		`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen FROM agents WHERE id = ?`, id,
+	).Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen)
 	if err != nil {
 		return a, err
 	}
@@ -328,11 +419,11 @@ func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
 	var err error
 	if statusFilter != "" {
 		rows, err = db.conn.Query(
-			`SELECT id, name, type, status, project, meta, registered, last_seen FROM agents WHERE status = ? ORDER BY last_seen DESC`, statusFilter,
+			`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen FROM agents WHERE status = ? ORDER BY last_seen DESC`, statusFilter,
 		)
 	} else {
 		rows, err = db.conn.Query(
-			`SELECT id, name, type, status, project, meta, registered, last_seen FROM agents ORDER BY last_seen DESC`,
+			`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen FROM agents ORDER BY last_seen DESC`,
 		)
 	}
 	if err != nil {
@@ -345,7 +436,7 @@ func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
 		var a protocol.Agent
 		var typ, status string
 		var registered, lastSeen int64
-		if err := rows.Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen); err != nil {
 			return nil, err
 		}
 		a.Type = protocol.AgentType(typ)

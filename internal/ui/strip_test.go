@@ -19,6 +19,13 @@ func makeSnap(id string, t protocol.AgentType, a panestate.AgentActivity) panest
 	}
 }
 
+// makeStaleGenSnap is makeSnap + StaleGen=true. Phase G v1 #20 helper.
+func makeStaleGenSnap(id string, t protocol.AgentType, a panestate.AgentActivity) panestate.AgentSnapshot {
+	s := makeSnap(id, t, a)
+	s.StaleGen = true
+	return s
+}
+
 func TestRenderStripShowsAllExceptOffline(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
 		makeSnap("a-working", protocol.AgentBrian, panestate.ActivityWorking),
@@ -190,5 +197,23 @@ func TestAgentTypeTier(t *testing.T) {
 		if got := agentTypeTier(tc.t); got != tc.want {
 			t.Errorf("agentTypeTier(%q) = %d, want %d", tc.t, got, tc.want)
 		}
+	}
+}
+
+// TestRenderStripOmitsStaleGen locks Phase G v1 #20 strip behavior:
+// stale-gen agents (registered pre-rebuild) are omitted from the strip
+// even though their activity is non-Offline. They remain visible in the
+// agents tab with a (stale-gen) suffix for manual pruning.
+func TestRenderStripOmitsStaleGen(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeSnap("current-gen", protocol.AgentBrian, panestate.ActivityWorking),
+		makeStaleGenSnap("prior-gen", protocol.AgentQA, panestate.ActivityOnline),
+	}
+	out := renderStrip(snap)
+	if !strings.Contains(out, "current-gen") {
+		t.Errorf("strip should contain current-gen agent, got: %q", out)
+	}
+	if strings.Contains(out, "prior-gen") {
+		t.Errorf("strip should omit stale-gen agent, got: %q", out)
 	}
 }

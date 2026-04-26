@@ -13,11 +13,16 @@ import (
 // fakeSource implements panestate.AgentSource for ui-package tests without
 // touching a real DB. Returns the embedded slice unchanged.
 type fakeSource struct {
-	agents []protocol.Agent
+	agents     []protocol.Agent
+	rebuildGen int64
 }
 
 func (f *fakeSource) ListAgents(string) ([]protocol.Agent, error) {
 	return f.agents, nil
+}
+
+func (f *fakeSource) CurrentRebuildGen() int64 {
+	return f.rebuildGen
 }
 
 // noPaneCapture is a no-op capturePane for ui-package tests that don't
@@ -289,6 +294,166 @@ func TestHubTabAccepts10kbInput(t *testing.T) {
 	h.input.SetValue(long)
 	if got := len(h.input.Value()); got != size {
 		t.Errorf("long input truncated: got len=%d, want %d", got, size)
+	}
+}
+
+// fillMessages appends n synthetic messages to the HubTab so the viewport
+// has scrollable content. Returns the updated HubTab. Each message is one
+// short line so message count maps directly to rendered line count.
+func fillMessages(h HubTab, n int) HubTab {
+	for i := 0; i < n; i++ {
+		msg := protocol.Message{
+			ID:        int64(i + 1),
+			FromAgent: "user",
+			Type:      protocol.MsgUpdate,
+			Content:   "msg",
+			Created:   time.Now(),
+		}
+		h, _ = h.Update(MessageReceived{Message: msg})
+	}
+	return h
+}
+
+// TestHubTabFollowBottomDefault locks the constructor invariant:
+// followBottom must default true so the post-restart initial render snaps
+// to the latest message rather than rendering mid-conversation.
+func TestHubTabFollowBottomDefault(t *testing.T) {
+	h := NewHubTab()
+	if !h.followBottom {
+		t.Errorf("NewHubTab should default followBottom=true, got false")
+	}
+}
+
+// TestHubTabAutoFollowOnNewMessage locks that when followBottom is engaged,
+// new messages snap the viewport to the bottom. This is the unconditional
+// behavior pre-Phase-G; Phase G only adds the user-can-disengage path.
+func TestHubTabAutoFollowOnNewMessage(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h = fillMessages(h, 50)
+	if !h.viewport.AtBottom() {
+		t.Errorf("auto-follow should keep viewport at bottom after messages, AtBottom=false YOffset=%d", h.viewport.YOffset)
+	}
+	if !h.followBottom {
+		t.Errorf("followBottom should remain true after appended messages, got false")
+	}
+}
+
+// TestHubTabUserScrollUpDisablesFollow locks that PgUp via the unfocused
+// keystroke routes to the viewport, disengages followBottom, and a
+// subsequent MessageReceived does NOT snap to bottom.
+func TestHubTabUserScrollUpDisablesFollow(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h = fillMessages(h, 100)
+
+	// PgUp arrives unfocused → routes to viewport, recomputes follow.
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+
+	if h.viewport.AtBottom() {
+		t.Fatalf("PgUp should scroll up; viewport still at bottom (content too short for scroll?)")
+	}
+	if h.followBottom {
+		t.Errorf("followBottom should disengage after user scroll-up, still true")
+	}
+
+	// New message arrives — must NOT snap user back.
+	yBefore := h.viewport.YOffset
+	h, _ = h.Update(MessageReceived{Message: protocol.Message{
+		ID: 9999, FromAgent: "user", Type: protocol.MsgUpdate, Content: "late", Created: time.Now(),
+	}})
+	if h.viewport.AtBottom() {
+		t.Errorf("MessageReceived snapped user to bottom despite followBottom=false")
+	}
+	if h.viewport.YOffset != yBefore {
+		t.Errorf("MessageReceived shifted YOffset from %d to %d while followBottom=false", yBefore, h.viewport.YOffset)
+	}
+}
+
+// TestHubTabJumpToPresentKey locks that "G" (vim convention) jumps the
+// viewport to the bottom and re-engages followBottom.
+func TestHubTabJumpToPresentKey(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h = fillMessages(h, 100)
+
+	// Scroll up first.
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if h.followBottom {
+		t.Fatalf("setup precondition failed: followBottom still true after PgUp")
+	}
+
+	// Press "G".
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+
+	if !h.followBottom {
+		t.Errorf("G should re-engage followBottom, still false")
+	}
+	if !h.viewport.AtBottom() {
+		t.Errorf("G should snap viewport to bottom, AtBottom=false")
+	}
+}
+
+// TestHubTabEndKeyJumpsToPresent locks the non-vim binding parity. `end` is
+// a discoverable shortcut for non-vim users; should behave identically to G.
+func TestHubTabEndKeyJumpsToPresent(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h = fillMessages(h, 100)
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if h.followBottom {
+		t.Fatalf("setup precondition failed: followBottom still true after PgUp")
+	}
+
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyEnd})
+
+	if !h.followBottom {
+		t.Errorf("end should re-engage followBottom")
+	}
+	if !h.viewport.AtBottom() {
+		t.Errorf("end should snap viewport to bottom")
+	}
+}
+
+// TestHubTabResizePreservesScrollPosition (Rain A1) locks that a terminal
+// resize while the user has scrolled up does NOT snap them back to bottom.
+// The follow-bottom flag is the source of truth for "snap on resize"; if
+// the user disengaged it, resize honors that.
+func TestHubTabResizePreservesScrollPosition(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h = fillMessages(h, 100)
+
+	// Scroll up to disengage follow.
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if h.followBottom {
+		t.Fatalf("setup precondition failed: followBottom still true after PgUp")
+	}
+
+	// Resize. Must NOT snap to bottom.
+	h.SetSize(120, 30)
+	if h.viewport.AtBottom() {
+		t.Errorf("resize snapped to bottom despite followBottom=false")
+	}
+	if h.followBottom {
+		t.Errorf("resize spuriously re-engaged followBottom")
+	}
+}
+
+// TestHubTabResizeSnapsWhenFollowing locks the counterpart: when
+// followBottom is true, resize keeps the viewport pinned to the latest
+// content (so terminal-resize during normal use stays at the bottom).
+func TestHubTabResizeSnapsWhenFollowing(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h = fillMessages(h, 100)
+	if !h.followBottom {
+		t.Fatalf("setup precondition failed: followBottom should be true")
+	}
+
+	h.SetSize(120, 30)
+	if !h.viewport.AtBottom() {
+		t.Errorf("resize while following should keep viewport at bottom")
 	}
 }
 

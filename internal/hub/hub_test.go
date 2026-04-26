@@ -8,6 +8,33 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
+// TestHubStartIncrementsRebuildGen locks that NewHub bumps the rebuild
+// generation once per call. Two consecutive NewHub calls against the same
+// DB path should produce gen N then N+1. Phase G v1 #20.
+func TestHubStartIncrementsRebuildGen(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Hub.DBPath = filepath.Join(t.TempDir(), "rebuild_gen.db")
+
+	h1, err := NewHub(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g1 := h1.RebuildGen
+	if g1 != 1 {
+		t.Errorf("first NewHub expected gen 1, got %d", g1)
+	}
+	h1.Stop()
+
+	h2, err := NewHub(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h2.Stop()
+	if h2.RebuildGen != 2 {
+		t.Errorf("second NewHub expected gen 2, got %d", h2.RebuildGen)
+	}
+}
+
 func TestHubDispatchToTmux(t *testing.T) {
 	h := &Hub{}
 	cmd := h.FormatTmuxMessage("claude-abc", protocol.Message{

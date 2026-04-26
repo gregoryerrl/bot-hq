@@ -101,6 +101,11 @@ type AgentSnapshot struct {
 	// against LastSeen at runtime.
 	LastPaneActivity time.Time
 
+	// StaleGen is true when this agent's registered rebuild_gen does not
+	// match the current hub rebuild_gen, indicating a pre-rebuild
+	// registration leak. Phase G v1 #20.
+	StaleGen bool
+
 	// Phase F forward dependencies. Populated in Phase F by capture-pane classifier.
 	LastClassification string
 	RecentErrors       []ClassifierHit
@@ -110,6 +115,10 @@ type AgentSnapshot struct {
 // Tests pass a fake; production passes *hub.DB.
 type AgentSource interface {
 	ListAgents(statusFilter string) ([]protocol.Agent, error)
+	// CurrentRebuildGen returns the hub's current rebuild generation. Phase G
+	// v1 #20. Sources unaware of the feature (legacy tests) may return 0,
+	// which disables the stale-gen flag entirely (every agent looks current).
+	CurrentRebuildGen() int64
 }
 
 // Manager owns the shared snapshot. Tabs read via Snapshot(), App refreshes via Refresh().
@@ -151,9 +160,14 @@ func (m *Manager) Refresh() error {
 		return err
 	}
 	now := time.Now()
+	currentGen := m.src.CurrentRebuildGen()
 	snap := make([]AgentSnapshot, len(agents))
 	for i, a := range agents {
 		paneActive := m.observePaneActivity(a, now)
+		// StaleGen flags pre-rebuild registrations: agents stamped with a
+		// non-zero gen that doesn't match the current hub gen. Zero gen
+		// (legacy rows or pre-feature DBs) is never flagged stale.
+		stale := currentGen != 0 && a.RebuildGen != 0 && a.RebuildGen != currentGen
 		snap[i] = AgentSnapshot{
 			ID:               a.ID,
 			Name:             a.Name,
@@ -161,6 +175,7 @@ func (m *Manager) Refresh() error {
 			Status:           a.Status,
 			LastSeen:         a.LastSeen,
 			LastPaneActivity: paneActive,
+			StaleGen:         stale,
 			Activity:         ComputeActivity(a.Status, a.LastSeen, paneActive, now),
 		}
 	}

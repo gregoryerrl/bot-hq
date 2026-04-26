@@ -18,6 +18,10 @@ import (
 type Hub struct {
 	Config         Config
 	DB             *DB
+	// RebuildGen is the rebuild generation assigned at this hub's startup.
+	// Bumped once per NewHub call. Used to flag pre-rebuild stale agent
+	// registrations leaking into post-rebuild state.
+	RebuildGen     int64
 	wsClients      map[string]chan protocol.Message // agent_id -> WebSocket channel
 	mu             sync.RWMutex
 	lastPollID     int64
@@ -35,9 +39,16 @@ func NewHub(cfg Config) (*Hub, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
+	gen, err := db.IncrementRebuildGen()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("increment rebuild gen: %w", err)
+	}
+
 	h := &Hub{
 		Config:        cfg,
 		DB:            db,
+		RebuildGen:    gen,
 		wsClients:     make(map[string]chan protocol.Message),
 		stopPollCh:    make(chan struct{}),
 		dispatchedIDs: make(map[int64]bool),

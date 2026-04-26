@@ -42,9 +42,17 @@ func agentTypeTier(t protocol.AgentType) int {
 func renderStrip(snap []panestate.AgentSnapshot) string {
 	alive := make([]panestate.AgentSnapshot, 0, len(snap))
 	for _, s := range snap {
-		if s.Activity != panestate.ActivityOffline {
-			alive = append(alive, s)
+		if s.Activity == panestate.ActivityOffline {
+			continue
 		}
+		// Phase G v1 #20: stale-gen agents (registered pre-rebuild) are
+		// omitted from the strip — they're definitely-stale and would
+		// clutter the first-order check. Agents tab still shows them with
+		// a (stale-gen) suffix for the user to prune manually.
+		if s.StaleGen {
+			continue
+		}
+		alive = append(alive, s)
 	}
 	sort.SliceStable(alive, func(i, j int) bool {
 		ti, tj := agentTypeTier(alive[i].Type), agentTypeTier(alive[j].Type)

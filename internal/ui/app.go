@@ -64,7 +64,7 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 	if db != nil {
 		pane = panestate.NewManager(db, tmux.CapturePane)
 	}
-	agentsTab := NewAgentsTab()
+	agentsTab := NewAgentsTab(tmux.CapturePane)
 	if pane != nil {
 		hubTab.SetPane(pane)
 		agentsTab.SetPane(pane)

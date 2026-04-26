@@ -34,7 +34,7 @@ func TestAgentsTabReadsActivity(t *testing.T) {
 				{ID: "x-test", Name: "X Test", Type: protocol.AgentBrian, Status: tc.status, LastSeen: tc.lastSeen},
 			}
 			pane := newPaneWithAgents(t, agents)
-			tab := NewAgentsTab()
+			tab := NewAgentsTab(noPaneCapture)
 			tab.SetPane(pane)
 			tab.SetSize(120, 30)
 			tab, _ = tab.Update(AgentsUpdated{Agents: agents})
@@ -55,7 +55,7 @@ func TestAgentsTabFallbackWithoutPane(t *testing.T) {
 		{ID: "fallback-online", Name: "FallbackOnline", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now()},
 		{ID: "fallback-offline", Name: "FallbackOffline", Type: protocol.AgentCoder, Status: protocol.StatusOffline, LastSeen: time.Now()},
 	}
-	tab := NewAgentsTab()
+	tab := NewAgentsTab(noPaneCapture)
 	tab.SetSize(120, 30)
 	tab, _ = tab.Update(AgentsUpdated{Agents: agents})
 
@@ -86,7 +86,7 @@ func TestAgentsTabSummaryBuckets(t *testing.T) {
 		{ID: "a3", Name: "A3", Type: protocol.AgentCoder, Status: protocol.StatusOffline, LastSeen: now},  // offline
 	}
 	pane := newPaneWithAgents(t, agents)
-	tab := NewAgentsTab()
+	tab := NewAgentsTab(noPaneCapture)
 	tab.SetPane(pane)
 	tab.SetSize(120, 30)
 	tab, _ = tab.Update(AgentsUpdated{Agents: agents})
@@ -97,6 +97,47 @@ func TestAgentsTabSummaryBuckets(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in summary, got:\n%s", want, out)
 		}
+	}
+}
+
+// TestAgentsTabStaleGenSuffix locks Phase G v1 #20 agents-tab UX:
+// stale-gen agents stay visible in the agents tab but with a "(stale-gen)"
+// suffix appended to their name so the user can see and prune them.
+func TestAgentsTabStaleGenSuffix(t *testing.T) {
+	now := time.Now()
+	agents := []protocol.Agent{
+		{ID: "current", Name: "Current", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now, RebuildGen: 2},
+		{ID: "stalegen", Name: "StaleGen", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now, RebuildGen: 1},
+	}
+	mgr := panestate.NewManager(&fakeSource{agents: agents, rebuildGen: 2}, noPaneCapture)
+	if err := mgr.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	tab := NewAgentsTab(noPaneCapture)
+	tab.SetPane(mgr)
+	tab.SetSize(120, 30)
+	tab, _ = tab.Update(AgentsUpdated{Agents: agents})
+
+	out := tab.View()
+	if !strings.Contains(out, "Current") {
+		t.Errorf("agents tab should render current-gen agent name, got:\n%s", out)
+	}
+	if !strings.Contains(out, "StaleGen") {
+		t.Errorf("agents tab should still render stale-gen agent name, got:\n%s", out)
+	}
+	if !strings.Contains(out, "(stale-gen)") {
+		t.Errorf("stale-gen agent should carry (stale-gen) suffix, got:\n%s", out)
+	}
+	// Current-gen agent should not get the suffix.
+	currentLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Current") && !strings.Contains(line, "StaleGen") {
+			currentLine = line
+			break
+		}
+	}
+	if currentLine != "" && strings.Contains(currentLine, "(stale-gen)") {
+		t.Errorf("current-gen agent line should NOT carry (stale-gen) suffix: %q", currentLine)
 	}
 }
 

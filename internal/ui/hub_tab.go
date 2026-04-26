@@ -44,6 +44,10 @@ type HubTab struct {
 	focused       bool // true when the command input is focused
 	sessionFilter string
 	pane          *panestate.Manager // first-order activity strip source
+	// followBottom sticks the viewport to the latest message. Default true so
+	// hub initial render snaps to present (fixes post-restart "rendered mid-
+	// conversation"). Disengages on user scroll-up; re-engages on G / end.
+	followBottom bool
 }
 
 // SetPane wires a panestate.Manager so HubTab.View can render the activity
@@ -76,8 +80,9 @@ func NewHubTab() HubTab {
 	vp.MouseWheelEnabled = true
 
 	return HubTab{
-		viewport: vp,
-		input:    ta,
+		viewport:     vp,
+		input:        ta,
+		followBottom: true,
 	}
 }
 
@@ -94,8 +99,11 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 	case MessageReceived:
 		h.messages = append(h.messages, msg.Message)
 		h.viewport.SetContent(h.renderMessages())
-		// Auto-scroll to bottom when a new message arrives
-		h.viewport.GotoBottom()
+		// Auto-scroll only if user is following the bottom. If they scrolled
+		// up to read history, don't snap them back on each new message.
+		if h.followBottom {
+			h.viewport.GotoBottom()
+		}
 
 	case tea.KeyMsg:
 		if h.focused {
@@ -125,6 +133,10 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 			case "/", "i":
 				h.focused = true
 				cmds = append(cmds, h.input.Focus())
+			case "G", "end":
+				// Jump to present: snap to bottom and re-engage auto-follow.
+				h.viewport.GotoBottom()
+				h.followBottom = true
 			default:
 				// Auto-focus input on any printable character OR on a
 				// bracketed-paste delivery. Without the Paste branch a
@@ -143,6 +155,9 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 					var cmd tea.Cmd
 					h.viewport, cmd = h.viewport.Update(msg)
 					cmds = append(cmds, cmd)
+					// Recompute follow state after viewport scroll. User
+					// scrolled to bottom = follow re-engages; otherwise off.
+					h.followBottom = h.viewport.AtBottom()
 				}
 			}
 		}
@@ -152,6 +167,7 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 			var cmd tea.Cmd
 			h.viewport, cmd = h.viewport.Update(msg)
 			cmds = append(cmds, cmd)
+			h.followBottom = h.viewport.AtBottom()
 		}
 	}
 
@@ -166,14 +182,19 @@ func (h *HubTab) SetSize(width, height int) {
 }
 
 // SetSessionFilter filters the hub to only show messages from a specific session.
-// Pass an empty string to clear the filter.
+// Pass an empty string to clear the filter. Re-engages auto-follow on the new
+// view since switching filter is the user asking to see "latest of this slice."
 func (h *HubTab) SetSessionFilter(sessionID string) {
 	h.sessionFilter = sessionID
 	h.viewport.SetContent(h.renderMessages())
 	h.viewport.GotoBottom()
+	h.followBottom = true
 }
 
-// resize recalculates viewport and input dimensions.
+// resize recalculates viewport and input dimensions. When the user is in
+// follow-bottom mode (initial render or actively tracking latest), snap to
+// bottom after the resize so a terminal resize doesn't strand them mid-feed.
+// When the user has scrolled up, preserve their scroll position.
 func (h *HubTab) resize() {
 	// Reserve: 1 separator + 1 strip + inputRows for textarea + 1 padding.
 	reserved := 3 + inputRows
@@ -188,6 +209,9 @@ func (h *HubTab) resize() {
 	h.input.SetHeight(inputRows)
 
 	h.viewport.SetContent(h.renderMessages())
+	if h.followBottom {
+		h.viewport.GotoBottom()
+	}
 }
 
 // View renders the HubTab. Layout (top to bottom):
