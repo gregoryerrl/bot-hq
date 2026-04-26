@@ -68,6 +68,72 @@ func projectsDir() (string, error) {
 // URL without a leading `/` or `:` (returns "" on bare tokens).
 var remoteNameRE = regexp.MustCompile(`[/:]([\w.-]+?)(?:\.git)?/?$`)
 
+// canonicalizeRemoteURL normalizes a git remote URL to a scheme-agnostic,
+// suffix-agnostic form for equality comparison. Used by LoadForProject's
+// remote_url mismatch check so SSH and HTTPS clones of the same repo are
+// treated as equal — the gate concerns project identity, not transport.
+//
+// Recognized transformations:
+//
+//	git@github.com:org/foo.git       -> github.com/org/foo
+//	git@github.com:org/foo           -> github.com/org/foo
+//	https://github.com/org/foo.git   -> github.com/org/foo
+//	https://github.com/org/foo       -> github.com/org/foo
+//	http://github.com/org/foo        -> github.com/org/foo  (deliberate http<->https equivalence)
+//	ssh://git@github.com/org/foo.git -> github.com/org/foo
+//	'git@github.com:org/foo.git'     -> github.com/org/foo  (shell-escape stripped)
+//	  https://github.com/org/foo/    -> github.com/org/foo  (whitespace + trailing-slash trimmed)
+//
+// Org/owner segments are PRESERVED — `upstream/foo` and `fork/foo` stay
+// distinct. Host segments are PRESERVED — `github.com` and `gitlab.com`
+// stay distinct, as do GitHub Enterprise hosts (`github.acme.corp`) and
+// gist hosts (`gist.github.com`). Case is preserved (Git is case-sensitive
+// on most hosts).
+//
+// http vs https equivalence is deliberate: the gate concerns project
+// identity, not transport security. User handling of transport security
+// is out-of-band.
+//
+// SSH custom-port handling: scp-form URLs `user@host:path` cannot specify
+// a port (per scp syntax). The colon is interpreted as the host:path
+// separator unconditionally. To use a custom SSH port, the URL form
+// `ssh://user@host:port/path` is required; that form's `:port` survives
+// canonicalization since only the URL scheme is stripped, not the colon
+// inside the authority.
+//
+// The function never mutates user-visible URLs — it only produces a
+// comparison key. Error messages still surface the original verbatim
+// strings so users see what mismatched.
+func canonicalizeRemoteURL(u string) string {
+	u = strings.TrimSpace(u)
+	u = strings.Trim(u, `'"`)
+	if u == "" {
+		return ""
+	}
+	for _, scheme := range []string{"https://", "http://", "git://", "ssh://"} {
+		u = strings.TrimPrefix(u, scheme)
+	}
+	// scp-form SSH: `[user@]host:path`. Convert the host:path colon to a
+	// slash so the result aligns with HTTPS's `host/path` shape. We only
+	// transform when there is a `user@` prefix to avoid touching URLs that
+	// already used `:` as a port separator after their scheme was stripped
+	// (e.g., `https://host:8443/path` left as `host:8443/path`).
+	if i := strings.Index(u, "@"); i >= 0 {
+		userPart := u[:i]
+		rest := u[i+1:]
+		if j := strings.Index(rest, ":"); j >= 0 {
+			rest = rest[:j] + "/" + rest[j+1:]
+		}
+		// Drop the `user@` prefix entirely. The user component (typically
+		// `git`) is irrelevant to project identity.
+		_ = userPart
+		u = rest
+	}
+	u = strings.TrimSuffix(u, ".git")
+	u = strings.TrimRight(u, "/")
+	return u
+}
+
 // DeriveProjectName extracts the canonical project name from a git remote URL.
 // Returns "" if the URL doesn't match an expected shape.
 func DeriveProjectName(remoteURL string) string {
@@ -114,7 +180,10 @@ func LoadForProject(projectDir string) (*Rules, error) {
 	if err := yaml.Unmarshal(data, &rules); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", rulesPath, err)
 	}
-	if rules.RemoteURL != "" && rules.RemoteURL != remoteURL {
+	// Equality is canonical — SSH and HTTPS clones of the same repo are
+	// treated as equal per H-29. The error message surfaces the verbatim
+	// strings so users see exactly what mismatched, not the canonical form.
+	if rules.RemoteURL != "" && canonicalizeRemoteURL(rules.RemoteURL) != canonicalizeRemoteURL(remoteURL) {
 		return nil, fmt.Errorf("%w: file says %q, actual is %q", ErrRemoteMismatch, rules.RemoteURL, remoteURL)
 	}
 	return &rules, nil

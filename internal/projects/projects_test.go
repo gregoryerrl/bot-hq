@@ -50,6 +50,111 @@ func initGitRepo(t *testing.T, originURL string) string {
 	return dir
 }
 
+// TestCanonicalizeRemoteURL_FalseNegative locks Phase H slice 2 H-29 — the
+// canonicalizer MUST equate variant forms of the same repo. SSH and HTTPS
+// clones, .git suffix presence, trailing slash, ssh:// URL form, http vs
+// https, and shell-escape quoting all canonicalize to the same key.
+func TestCanonicalizeRemoteURL_FalseNegative(t *testing.T) {
+	pairs := [][2]string{
+		{"git@github.com:org/foo.git", "https://github.com/org/foo.git"},
+		{"git@github.com:org/foo", "https://github.com/org/foo"},
+		{"git@github.com:org/foo.git", "https://github.com/org/foo"},
+		{"https://github.com/org/foo.git", "https://github.com/org/foo"},
+		{"ssh://git@github.com/org/foo.git", "https://github.com/org/foo"},
+		{"git@gitlab.com:group/sub/proj.git", "https://gitlab.com/group/sub/proj"},
+		{"https://github.com/org/foo/", "https://github.com/org/foo"},
+		{"'git@github.com:org/foo.git'", "git@github.com:org/foo.git"},
+		{"  https://github.com/org/foo.git  ", "https://github.com/org/foo"},
+		{"http://github.com/org/foo", "https://github.com/org/foo"}, // deliberate http<->https equivalence
+	}
+	for _, p := range pairs {
+		a, b := canonicalizeRemoteURL(p[0]), canonicalizeRemoteURL(p[1])
+		if a != b {
+			t.Errorf("canonicalizeRemoteURL(%q) = %q, canonicalizeRemoteURL(%q) = %q — should be equal", p[0], a, p[1], b)
+		}
+	}
+}
+
+// TestCanonicalizeRemoteURL_FalsePositive locks H-29 — the canonicalizer
+// MUST keep distinct repos distinct. Different host, org, repo, gist host,
+// GitHub Enterprise host, and case-difference all stay non-equal.
+func TestCanonicalizeRemoteURL_FalsePositive(t *testing.T) {
+	pairs := [][2]string{
+		{"git@github.com:org/foo", "git@gitlab.com:org/foo"},        // different host
+		{"git@github.com:upstream/foo", "git@github.com:fork/foo"},  // different org
+		{"git@github.com:org/foo", "git@github.com:org/bar"},        // different repo
+		{"https://gist.github.com/abc", "https://github.com/org/abc"}, // gist vs repo (different host)
+		{"git@github.acme.corp:foo/bar", "git@github.com:foo/bar"},  // GitHub Enterprise vs github.com
+		{"https://github.com/Org/foo", "https://github.com/org/foo"}, // case sensitivity
+	}
+	for _, p := range pairs {
+		a, b := canonicalizeRemoteURL(p[0]), canonicalizeRemoteURL(p[1])
+		if a == b {
+			t.Errorf("canonicalizeRemoteURL(%q) = canonicalizeRemoteURL(%q) = %q — should be DISTINCT", p[0], p[1], a)
+		}
+	}
+}
+
+// TestCanonicalizeRemoteURL_Idempotent locks H-29 — applying the
+// canonicalizer twice produces the same result as applying it once.
+// Idempotency guards against drift if the canonical form is itself
+// canonicalized (e.g., during stable-equality caching).
+func TestCanonicalizeRemoteURL_Idempotent(t *testing.T) {
+	inputs := []string{
+		"git@github.com:org/foo.git",
+		"https://github.com/org/foo.git",
+		"https://github.com/org/foo",
+		"ssh://git@github.com/org/foo.git",
+		"http://github.com/org/foo",
+		"'git@github.com:org/foo.git'",
+		"  https://github.com/org/foo/  ",
+		"",
+		"github.com/org/foo", // already canonical
+	}
+	for _, in := range inputs {
+		once := canonicalizeRemoteURL(in)
+		twice := canonicalizeRemoteURL(once)
+		if once != twice {
+			t.Errorf("canonicalizeRemoteURL not idempotent for %q: once=%q, twice=%q", in, once, twice)
+		}
+	}
+}
+
+// TestLoadForProjectAcceptsCanonicallyEqualForms is the H-29 integration
+// test — when the rules file specifies SSH form but `git remote get-url
+// origin` returns HTTPS form (or vice versa), LoadForProject must accept
+// the rules instead of erroring with ErrRemoteMismatch. Closes the slice
+// 1 runtime-test bug class (msg 3327) at the gate level.
+func TestLoadForProjectAcceptsCanonicallyEqualForms(t *testing.T) {
+	// Repo's actual origin returns HTTPS form.
+	repo := initGitRepo(t, "https://github.com/gregoryerrl/canon-test.git")
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Rules file specifies SSH form. Pre-H-29, this would have raised
+	// ErrRemoteMismatch (verbatim string compare); post-H-29, canonical
+	// equality accepts it.
+	yaml := `remote_url: "git@github.com:gregoryerrl/canon-test.git"
+project_name: "canon-test"
+branch_pattern: ".*"
+`
+	if err := os.WriteFile(filepath.Join(home, "projects", "canon-test.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := LoadForProject(repo)
+	if err != nil {
+		t.Fatalf("expected canonical-equality acceptance, got error: %v", err)
+	}
+	if rules == nil {
+		t.Fatal("expected non-nil rules")
+	}
+	if rules.ProjectName != "canon-test" {
+		t.Errorf("expected project_name 'canon-test', got %q", rules.ProjectName)
+	}
+}
+
 func TestLoadForProjectMissingFile(t *testing.T) {
 	repo := initGitRepo(t, "git@github.com:gregoryerrl/test-missing.git")
 	home := t.TempDir()
