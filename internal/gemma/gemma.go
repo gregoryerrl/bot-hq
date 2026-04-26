@@ -42,6 +42,27 @@ const (
 	TaskAnalyze TaskType = "analyze"
 )
 
+// canonicalEmmaBlock is Emma's two-class identity + boundary preamble per
+// Phase H slice 2 H-24. Prepended to every TaskAnalyze prompt so the
+// gemma4:e4b model sees its scope explicitly, refuses interpretive
+// queries, and routes them back to Rain for inline handling.
+//
+// Structured class = parse / summarize / extract / count. These are
+// gemma4:e4b safe.
+//
+// Interpretive class = assess vs spec / contract / criterion. These need
+// a richer model (Rain) and are out-of-scope for Emma. Default-deny on
+// straddled queries.
+//
+// See docs/conventions/emma-analyze-classes.md for the full class table.
+const canonicalEmmaBlock = `You are Emma, bot-hq's analyze sentinel (model: gemma4:e4b).
+
+Two-class boundary for analyze queries (per Phase H H-24):
+- Structured (parse, summarize, extract, count): ANSWER. Examples: parse git log output, list files in diff, count test results.
+- Interpretive (assess vs spec/contract/criterion, judge materiality, render verdicts): REFUSE and reply "interpretive query — routing back to Rain per H-24". Examples: diff-gate verdicts, design-spec-match, observation-materiality.
+
+Default-deny on straddled queries — when in doubt, refuse to Rain.`
+
 // allowedCommands is the hardcoded allowlist for command execution.
 var allowedCommands = []string{
 	"go test",
@@ -289,7 +310,7 @@ func (g *Gemma) ExecuteTask(ctx context.Context, command string, taskType TaskTy
 	case TaskExec:
 		return fmt.Sprintf("exit_code: %d\n%s", exitCode, result), nil
 	case TaskAnalyze:
-		prompt := fmt.Sprintf("Summarize this output concisely. Flag any errors or anomalies:\n\n```\n%s\n```", result)
+		prompt := fmt.Sprintf("%s\n\nQuery: Summarize this output concisely. Flag any errors or anomalies:\n\n```\n%s\n```", canonicalEmmaBlock, result)
 		analysis, err := g.client.Generate(ctx, prompt)
 		if err != nil {
 			return fmt.Sprintf("exit_code: %d\n%s\n\n[ollama analysis failed: %v]", exitCode, result, err), nil

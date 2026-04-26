@@ -16,6 +16,41 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
+// TestEmmaCanonicalBlockExists locks Phase H slice 2 H-24 — Emma must
+// have a canonical preamble block that asserts her identity + scope.
+// Pre-H-24, Emma had no canonical block (only per-task analyze prompts).
+func TestEmmaCanonicalBlockExists(t *testing.T) {
+	if canonicalEmmaBlock == "" {
+		t.Fatal("canonicalEmmaBlock must be non-empty")
+	}
+	if !strings.Contains(canonicalEmmaBlock, "You are Emma") {
+		t.Error("canonicalEmmaBlock must open with the Emma identity assertion")
+	}
+	if !strings.Contains(canonicalEmmaBlock, "gemma4:e4b") {
+		t.Error("canonicalEmmaBlock must declare the model so Emma sees its own scope")
+	}
+}
+
+// TestEmmaPromptContainsTwoClassBoundary locks H-24's two-class boundary
+// (Structured vs Interpretive) into Emma's canonical block. Refusal text
+// must be specific so callers can pattern-match the routing-back signal.
+func TestEmmaPromptContainsTwoClassBoundary(t *testing.T) {
+	want := []string{
+		"Two-class boundary",
+		"Structured",
+		"Interpretive",
+		"H-24",
+		"REFUSE",
+		"routing back to Rain per H-24",
+		"Default-deny on straddled queries",
+	}
+	for _, w := range want {
+		if !strings.Contains(canonicalEmmaBlock, w) {
+			t.Errorf("canonicalEmmaBlock must contain H-24 two-class literal %q", w)
+		}
+	}
+}
+
 func TestIsCommandAllowed(t *testing.T) {
 	tests := []struct {
 		cmd     string
