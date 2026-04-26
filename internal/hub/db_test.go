@@ -46,6 +46,104 @@ func TestRegisterAndGetAgent(t *testing.T) {
 	}
 }
 
+// TestRebuildGenMigrationIdempotent locks that re-running migrate against
+// an already-migrated DB does not double-add the rebuild_gen column or
+// otherwise error. Phase G v1 #20.
+func TestRebuildGenMigrationIdempotent(t *testing.T) {
+	db := setupTestDB(t)
+	if err := db.migrate(); err != nil {
+		t.Errorf("second migrate() should be no-op, got: %v", err)
+	}
+	if err := db.migrate(); err != nil {
+		t.Errorf("third migrate() should still be no-op, got: %v", err)
+	}
+}
+
+// TestIncrementRebuildGen locks that the gen monotonically increases
+// across calls and persists between DB reopens via the settings row.
+func TestIncrementRebuildGen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gen.db")
+	db1, err := OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g1, err := db1.IncrementRebuildGen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g1 != 1 {
+		t.Errorf("first increment expected 1, got %d", g1)
+	}
+	if got := db1.CurrentRebuildGen(); got != 1 {
+		t.Errorf("CurrentRebuildGen after first increment = %d, want 1", got)
+	}
+	g2, err := db1.IncrementRebuildGen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g2 != 2 {
+		t.Errorf("second increment expected 2, got %d", g2)
+	}
+	db1.Close()
+
+	// Reopen — gen should persist via settings row.
+	db2, err := OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	g3, err := db2.IncrementRebuildGen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g3 != 3 {
+		t.Errorf("post-reopen increment expected 3 (continues from 2), got %d", g3)
+	}
+}
+
+// TestRegisterAgentStampsRebuildGen locks that RegisterAgent stamps the
+// current rebuild_gen onto the row, and that legacy rows registered before
+// the first IncrementRebuildGen carry gen=0.
+func TestRegisterAgentStampsRebuildGen(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Register before any IncrementRebuildGen call → gen 0 (legacy).
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: "legacy", Name: "Legacy", Type: protocol.AgentCoder, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := db.GetAgent("legacy")
+	if got.RebuildGen != 0 {
+		t.Errorf("legacy agent expected gen 0, got %d", got.RebuildGen)
+	}
+
+	// After increment, new registrations stamp the current gen.
+	if _, err := db.IncrementRebuildGen(); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RegisterAgent(protocol.Agent{
+		ID: "fresh", Name: "Fresh", Type: protocol.AgentBrian, Status: protocol.StatusOnline,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = db.GetAgent("fresh")
+	if got.RebuildGen != 1 {
+		t.Errorf("fresh agent expected gen 1, got %d", got.RebuildGen)
+	}
+
+	// ListAgents carries the gen too.
+	agents, _ := db.ListAgents("")
+	for _, a := range agents {
+		if a.ID == "fresh" && a.RebuildGen != 1 {
+			t.Errorf("ListAgents fresh row gen = %d, want 1", a.RebuildGen)
+		}
+		if a.ID == "legacy" && a.RebuildGen != 0 {
+			t.Errorf("ListAgents legacy row gen = %d, want 0", a.RebuildGen)
+		}
+	}
+}
+
 func TestListAgents(t *testing.T) {
 	db := setupTestDB(t)
 

@@ -99,6 +99,11 @@ type Agent struct {
 	Meta       string      `json:"meta,omitempty"`
 	Registered time.Time   `json:"registered"`
 	LastSeen   time.Time   `json:"last_seen"`
+	// RebuildGen records the hub's rebuild generation at the time this
+	// agent registered. Compared against hub.CurrentRebuildGen at read time
+	// to detect pre-rebuild stale registrations leaking into post-rebuild
+	// state. Zero on legacy rows that predate the column.
+	RebuildGen int64 `json:"rebuild_gen,omitempty"`
 }
 
 type Session struct {

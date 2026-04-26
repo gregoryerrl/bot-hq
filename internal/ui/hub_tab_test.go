@@ -13,11 +13,16 @@ import (
 // fakeSource implements panestate.AgentSource for ui-package tests without
 // touching a real DB. Returns the embedded slice unchanged.
 type fakeSource struct {
-	agents []protocol.Agent
+	agents     []protocol.Agent
+	rebuildGen int64
 }
 
 func (f *fakeSource) ListAgents(string) ([]protocol.Agent, error) {
 	return f.agents, nil
+}
+
+func (f *fakeSource) CurrentRebuildGen() int64 {
+	return f.rebuildGen
 }
 
 // noPaneCapture is a no-op capturePane for ui-package tests that don't

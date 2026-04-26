@@ -133,6 +133,60 @@ func TestManagerSnapshotFreshness(t *testing.T) {
 	}
 }
 
+// TestSnapshotMarksStaleGen locks Phase G v1 #20: when an agent's
+// rebuild_gen does not match the source's CurrentRebuildGen(), the
+// snapshot's StaleGen flag is set. Zero-gen rows (legacy / pre-feature)
+// are never flagged stale.
+func TestSnapshotMarksStaleGen(t *testing.T) {
+	now := time.Now()
+	fake := &fakeSource{
+		rebuildGen: 5,
+		agents: []protocol.Agent{
+			{ID: "current", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now, RebuildGen: 5},
+			{ID: "prior", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now, RebuildGen: 4},
+			{ID: "legacy", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now, RebuildGen: 0},
+		},
+	}
+	m := NewManager(fake, noPaneCapture)
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	snap := m.Snapshot()
+
+	byID := map[string]AgentSnapshot{}
+	for _, s := range snap {
+		byID[s.ID] = s
+	}
+	if byID["current"].StaleGen {
+		t.Errorf("current-gen agent should not be flagged stale")
+	}
+	if !byID["prior"].StaleGen {
+		t.Errorf("prior-gen agent should be flagged stale")
+	}
+	if byID["legacy"].StaleGen {
+		t.Errorf("legacy (gen=0) agent should not be flagged stale")
+	}
+}
+
+// TestSnapshotStaleGenDisabledWhenSourceGenZero locks the back-compat
+// invariant: if the source returns CurrentRebuildGen()==0 (pre-feature
+// hub), no agent is ever flagged stale regardless of their RebuildGen.
+func TestSnapshotStaleGenDisabledWhenSourceGenZero(t *testing.T) {
+	fake := &fakeSource{
+		rebuildGen: 0, // disabled
+		agents: []protocol.Agent{
+			{ID: "anything", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now(), RebuildGen: 99},
+		},
+	}
+	m := NewManager(fake, noPaneCapture)
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if m.Snapshot()[0].StaleGen {
+		t.Errorf("StaleGen should never be true when source returns gen=0")
+	}
+}
+
 func TestManagerSnapshotIsCopy(t *testing.T) {
 	// Snapshot must return a copy; mutating it must not affect Manager state.
 	fake := &fakeSource{
@@ -173,11 +227,16 @@ func TestThresholds(t *testing.T) {
 }
 
 type fakeSource struct {
-	agents []protocol.Agent
+	agents     []protocol.Agent
+	rebuildGen int64
 }
 
 func (f *fakeSource) ListAgents(string) ([]protocol.Agent, error) {
 	return f.agents, nil
+}
+
+func (f *fakeSource) CurrentRebuildGen() int64 {
+	return f.rebuildGen
 }
 
 // noPaneCapture is the test default for tests that don't exercise pane logic.

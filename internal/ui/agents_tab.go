@@ -85,9 +85,11 @@ func (a AgentsTab) View() string {
 	// raw protocol.AgentStatus field. Phase E commit 4: panestate is the source
 	// of truth for what the user sees.
 	activityByID := map[string]panestate.AgentActivity{}
+	staleGenByID := map[string]bool{}
 	if a.pane != nil {
 		for _, s := range a.pane.Snapshot() {
 			activityByID[s.ID] = s.Activity
+			staleGenByID[s.ID] = s.StaleGen
 		}
 	}
 
@@ -125,6 +127,12 @@ func (a AgentsTab) View() string {
 		}
 
 		safeName := stripANSI(ag.Name)
+		// Phase G v1 #20: append (stale-gen) suffix to agents from a prior
+		// rebuild generation. Visible-but-flagged in agents tab (so user
+		// can prune via hub_unregister); strip omits them entirely.
+		if staleGenByID[ag.ID] {
+			safeName = safeName + " (stale-gen)"
+		}
 		name := lipgloss.NewStyle().Foreground(agentColor(ag.ID)).Render(
 			fmt.Sprintf("%-*s", maxName, safeName),
 		)

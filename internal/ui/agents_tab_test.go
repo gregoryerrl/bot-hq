@@ -100,6 +100,47 @@ func TestAgentsTabSummaryBuckets(t *testing.T) {
 	}
 }
 
+// TestAgentsTabStaleGenSuffix locks Phase G v1 #20 agents-tab UX:
+// stale-gen agents stay visible in the agents tab but with a "(stale-gen)"
+// suffix appended to their name so the user can see and prune them.
+func TestAgentsTabStaleGenSuffix(t *testing.T) {
+	now := time.Now()
+	agents := []protocol.Agent{
+		{ID: "current", Name: "Current", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now, RebuildGen: 2},
+		{ID: "stalegen", Name: "StaleGen", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now, RebuildGen: 1},
+	}
+	mgr := panestate.NewManager(&fakeSource{agents: agents, rebuildGen: 2}, noPaneCapture)
+	if err := mgr.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	tab := NewAgentsTab()
+	tab.SetPane(mgr)
+	tab.SetSize(120, 30)
+	tab, _ = tab.Update(AgentsUpdated{Agents: agents})
+
+	out := tab.View()
+	if !strings.Contains(out, "Current") {
+		t.Errorf("agents tab should render current-gen agent name, got:\n%s", out)
+	}
+	if !strings.Contains(out, "StaleGen") {
+		t.Errorf("agents tab should still render stale-gen agent name, got:\n%s", out)
+	}
+	if !strings.Contains(out, "(stale-gen)") {
+		t.Errorf("stale-gen agent should carry (stale-gen) suffix, got:\n%s", out)
+	}
+	// Current-gen agent should not get the suffix.
+	currentLine := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Current") && !strings.Contains(line, "StaleGen") {
+			currentLine = line
+			break
+		}
+	}
+	if currentLine != "" && strings.Contains(currentLine, "(stale-gen)") {
+		t.Errorf("current-gen agent line should NOT carry (stale-gen) suffix: %q", currentLine)
+	}
+}
+
 // Compile-time assert that activityDot covers all four activity values.
 // Surface a regression if a future ActivityFoo enum value is added without
 // styles.go being updated.
