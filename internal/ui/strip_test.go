@@ -158,8 +158,12 @@ func TestRenderStripFourTierVisibility(t *testing.T) {
 			t.Errorf("expected %q visible, got: %q", want, out)
 		}
 	}
-	if strings.Contains(out, " x") || strings.HasSuffix(out, "x") {
-		t.Errorf("expected offline 'x' hidden, got: %q", out)
+	// Glyph count is format-stable: an offline-'x' leak forces count=4 regardless
+	// of separator/glyph-mapping changes. Substring "x" check would false-pass if
+	// 'x' became a substring of an unrelated render token.
+	glyphCount := strings.Count(out, "●") + strings.Count(out, "◐") + strings.Count(out, "○")
+	if glyphCount != 3 {
+		t.Errorf("expected 3 glyphs (one per visible agent), got %d in: %q", glyphCount, out)
 	}
 	// All three visible glyphs should be present.
 	for _, glyph := range []string{"●", "◐", "○"} {
