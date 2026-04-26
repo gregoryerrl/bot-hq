@@ -31,13 +31,15 @@ Design doc (master): `docs/plans/2026-04-26-phase-h-design.md`.
 - 2026-04-26 — Slice 1 ff-merged to main as `b06961c` (C5 closure `b06961c`). All 5 Rain diff-gates PASS. Branch `brian/phase-h-slice-1` retained on origin for rollback safety.
 - 2026-04-26 — Rebuild #13 fired post-merge; trio (brian/rain/emma) re-registered under slice 1 gates active. Test-first methodology adopted (per Rain pre-rebuild rec) — runtime test on first dispatch instead of slice 2 design.
 - 2026-04-26 — Slice 1 runtime test surfaced exemplar form-coupling bug (rules SSH vs actual HTTPS for `bot-hq.yaml`). H-14 gate fired correctly with no side-effects (verified empirically via `claude_list` across both block paths — neither tmux session nor worktree created on block). Hotfix `4440425` (Path C) unifies all 4 exemplars to empty-placeholder + MUST-set convention; A1 fix to installed `~/.bot-hq/projects/bot-hq.yaml` (HTTPS form) lives outside repo. Path B (gate canonicalization SSH↔HTTPS) deferred to slice 2 candidate. Rain hotfix diff-gate PASS. Path 1 retry preamble verified GREEN (lenient bot-hq dispatch: BRANCH NAMING present, PUSH/FORCE-PUSH/BLOCKED suppressed — load-bearing conditional-emitter check). **Slice 1 H-14 gate 5/5 paths verified live.** Slice 1 CLOSED.
+- 2026-04-27 — Slice 2 design opened (`23979e0`) with Rain greenflag authority delegation (msg 3354). 9 items: H-1, H-2, H-11, H-18, H-22, H-23, H-24 (master design), H-29 (Path B canonicalization, slice 1 cross-cut), P-1 (process item ratcheting test-first methodology into Phase H standing operating procedure). 3 blocking factual corrections + 3 refinements landed via Rain BRAIN-review (msg 3360 → revision `23979e0`).
+- 2026-04-27 — Slice 2 implementation complete (in-flight): C1 `ebdf4e7` (H-1 halter/pusher + H-2 FLAG asymmetry/carve-out/greenflag), C1 fold `fdfc1ad` (PIVOT asymmetry + STARTUP carve-out gloss), C2 `5fecfca` (H-11 arc-pointer-discipline doc + H-18 Rain polling drop), C3 `ec111fa` (H-29 SSH↔HTTPS canonicalization), C3 fold `f134643` (`.git/` trailing-slash bug + docstring port accuracy), C4 `7f99377` (H-24 Emma analyze pre-screen — canonical block + class doc), C5 `b946aa7` (H-22 queue-fail sentinel + universal dry-run ledger plumbing), C6 `34cf4e4` (H-23 doc-drift sentinel — periodic scan + integration tests), C6 fold `8a3fadf` (main self-ref filter + emit silent-drop warning + scaling note + branch@sha test). 6 Rain diff-gates PASS, 2 Rain fold-diff-gates PASS. **Branch:** `brian/phase-h-slice-2`. P-1 doc + slices table update + this entry land in C7a; C7b cap commits after rebuild #14 + joint Brian+Rain runtime-test PASS verdict on the 7 load-bearing surfaces (4 prompt verified at commit-time, 3 code verified post-rebuild).
 
 ## Slices
 
 | Slice | Theme | Items | Status |
 |---|---|---|---|
 | **Slice 1** | Real-project safety (BLAST) | H-4 + H-3c + H-13 + H-14 + H-16 | CLOSED — merged to main (`b06961c`) + hotfix `4440425` (Path C exemplar form-coupling fix); 5/5 H-14 gate paths runtime-verified live |
-| **Slice 2** | Discipline + comm hardening (PROMPT-MOSTLY) | H-2 + H-1 + H-11 + H-18 + H-22 + H-23 + H-24 | design-pending |
+| **Slice 2** | Discipline + comm hardening (PROMPT-MOSTLY + EMMA + canonicalization) | H-2 + H-1 + H-11 + H-18 + H-22 + H-23 + H-24 + H-29 + P-1 | implementation complete (C1-C6 + 3 folds on `brian/phase-h-slice-2`); pending Rain joint runtime-test verdict post-rebuild #14 |
 | **Slice 3** | Coder lifecycle (RELIABILITY) | H-3b + H-3a + H-9 + H-25 | design-pending |
 | **Slice 4** | State + discipline structures (RATCHET) | H-6 + H-10a + H-15 + H-19 + H-21 | design-pending |
 
@@ -66,6 +68,8 @@ Design doc (master): `docs/plans/2026-04-26-phase-h-design.md`.
 | H-23 | Emma doc-drift sentinel (arc.md `Status: open` + branch/SHA reachable from main = drift) | 2 |
 | H-24 | Emma analyze pre-screen with two-class boundary (structured → Emma; interpretive → Rain inline) | 2 |
 | H-25 | Emma roster hygiene (auto-prune stale registrations >24h or auto-flag live agent's last_seen >5min) | 3 |
+| H-29 | Path B SSH↔HTTPS canonicalization in `remote_url` gate (slice 1 cross-cut deferral) | 2 |
+| P-1 | Per-slice runtime test cadence (process item; ratchets test-first methodology into Phase H standing operating procedure) | 2 |
 
 ## Deferred
 
