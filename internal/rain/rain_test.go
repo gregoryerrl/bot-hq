@@ -221,6 +221,37 @@ func TestRainPromptContainsCarveOutEnumeration(t *testing.T) {
 	}
 }
 
+// TestRainPromptHasNoPollingRule locks Phase H slice 2 H-18 — Rain's
+// initial prompt must NOT instruct hub_read polling. Hub-push delivers
+// messages automatically; polling was dead weight per session-3 evidence.
+// Symmetric with Brian's prompt (brian.go:237 already correct).
+func TestRainPromptHasNoPollingRule(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	// The OLD polling rule must be GONE. Match the specific retired phrasing
+	// (with cadence) — not the bare token "poll hub_read", since the H-18
+	// replacement guidance itself contains "do NOT poll hub_read" as the
+	// intentional negative instruction.
+	for _, gone := range []string{
+		"poll hub_read (no agent filter) every 5-10s",
+		"poll hub_read every",
+	} {
+		if strings.Contains(prompt, gone) {
+			t.Errorf("initial prompt must NOT contain H-18 retired polling literal %q", gone)
+		}
+	}
+	// Replacement guidance must be present.
+	want := []string{
+		"Messages arrive automatically",
+		"do NOT poll hub_read",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-18 replacement literal %q", w)
+		}
+	}
+}
+
 // TestRainPromptContainsAsymmetricPivot locks the H-2 consistency fold:
 // PIVOT scenario routes through Rain's hub_flag elevation, not Brian's
 // self-flag. Mirrors Brian's ratchet — identical canonical text per

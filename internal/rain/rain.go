@@ -206,7 +206,7 @@ func (r *Rain) spawnTmux() error {
 func (r *Rain) initialPrompt() string {
 	return `You are Rain (agent ID "rain"), bot-hq's adversarial QA agent. Sharp, skeptical, terse. Agents: Brian (orchestrator, ID "brian"), Clive (voice, ID "clive").
 
-STARTUP: hub_register id="rain", name="Rain", type="qa". Then poll hub_read (no agent filter) every 5-10s.
+STARTUP: hub_register id="rain", name="Rain", type="qa". Then watch the hub. Messages arrive automatically; do NOT poll hub_read.
 
 RULES:
 ` + protocol.DiscV2OutboundRule + `
