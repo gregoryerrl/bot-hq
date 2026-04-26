@@ -375,3 +375,96 @@ func TestPanestateSnapshotFreshness(t *testing.T) {
 	t.Fatal("agent missing from second snapshot")
 }
 
+// TestAppNumberKeysAutoFocusHubInput locks Path C: numeric keys (1-4) no
+// longer jump to a specific tab. They auto-focus the hub input and type
+// literally, like any other printable. Tab cycling via tab/shift+tab is
+// the only path between tabs.
+func TestAppNumberKeysAutoFocusHubInput(t *testing.T) {
+	for _, ch := range []string{"1", "2", "3", "4"} {
+		t.Run("key="+ch, func(t *testing.T) {
+			app := NewApp(hub.Config{}, nil, nil)
+			app.activeTab = TabHub
+			startTab := app.activeTab
+
+			updated, _ := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(ch)})
+			app = updated.(App)
+
+			if !app.hubTab.focused {
+				t.Errorf("key %q: hubTab.focused = false, want true (auto-focus on printable)", ch)
+			}
+			if got := app.hubTab.input.Value(); got != ch {
+				t.Errorf("key %q: input.Value() = %q, want %q", ch, got, ch)
+			}
+			if app.activeTab != startTab {
+				t.Errorf("key %q: activeTab changed from %v to %v (number keys must NOT jump tabs)", ch, startTab, app.activeTab)
+			}
+		})
+	}
+}
+
+// TestAppQAutoFocusesHubInput locks Path C: q is no longer a quit alias.
+// It auto-focuses the hub input and types literally. Quit is ctrl+c only.
+func TestAppQAutoFocusesHubInput(t *testing.T) {
+	app := NewApp(hub.Config{}, nil, nil)
+	app.activeTab = TabHub
+
+	updated, cmd := app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	app = updated.(App)
+
+	if !app.hubTab.focused {
+		t.Errorf("hubTab.focused = false, want true (q must auto-focus, not quit)")
+	}
+	if got := app.hubTab.input.Value(); got != "q" {
+		t.Errorf("input.Value() = %q, want %q (q must type literally)", got, "q")
+	}
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			if _, ok := msg.(tea.QuitMsg); ok {
+				t.Errorf("q returned tea.QuitMsg — q must NOT quit under Path C")
+			}
+		}
+	}
+}
+
+// TestAppCtrlCStillQuits is the sanity check that the q-quit removal didn't
+// break ctrl+c quit. ctrl+c remains the sole quit binding under Path C.
+func TestAppCtrlCStillQuits(t *testing.T) {
+	app := NewApp(hub.Config{}, nil, nil)
+
+	_, cmd := app.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c returned nil cmd, want a quit command")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Errorf("ctrl+c cmd returned %T, want tea.QuitMsg", msg)
+	}
+}
+
+// TestAppTabCyclingUnchanged locks that tab/shift+tab still cycle through
+// all 4 tabs and back to the start. The Path C trim (removing 1/2/3/4)
+// must not regress this surface.
+func TestAppTabCyclingUnchanged(t *testing.T) {
+	app := NewApp(hub.Config{}, nil, nil)
+	app.activeTab = TabHub
+
+	expect := []Tab{TabAgents, TabSessions, TabSettings, TabHub}
+	for i, want := range expect {
+		updated, _ := app.Update(tea.KeyMsg{Type: tea.KeyTab})
+		app = updated.(App)
+		if app.activeTab != want {
+			t.Errorf("tab cycle step %d: activeTab = %v, want %v", i+1, app.activeTab, want)
+		}
+	}
+
+	// Reverse cycle via shift+tab.
+	expect = []Tab{TabSettings, TabSessions, TabAgents, TabHub}
+	for i, want := range expect {
+		updated, _ := app.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+		app = updated.(App)
+		if app.activeTab != want {
+			t.Errorf("shift+tab cycle step %d: activeTab = %v, want %v", i+1, app.activeTab, want)
+		}
+	}
+}
+

@@ -225,20 +225,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return a, tea.Quit
 		case "tab":
 			a.activeTab = Tab((int(a.activeTab) + 1) % len(tabNames))
 		case "shift+tab":
 			a.activeTab = Tab((int(a.activeTab) + len(tabNames) - 1) % len(tabNames))
-		case "1":
-			a.activeTab = TabHub
-		case "2":
-			a.activeTab = TabAgents
-		case "3":
-			a.activeTab = TabSessions
-		case "4":
-			a.activeTab = TabSettings
 		default:
 			if a.activeTab == TabHub {
 				var cmd tea.Cmd

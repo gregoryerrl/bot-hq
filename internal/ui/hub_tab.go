@@ -130,10 +130,7 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 		} else {
 			key := msg.String()
 			switch key {
-			case "/", "i":
-				h.focused = true
-				cmds = append(cmds, h.input.Focus())
-			case "G", "end":
+			case "end":
 				// Jump to present: snap to bottom and re-engage auto-follow.
 				h.viewport.GotoBottom()
 				h.followBottom = true

@@ -370,9 +370,10 @@ func TestHubTabUserScrollUpDisablesFollow(t *testing.T) {
 	}
 }
 
-// TestHubTabJumpToPresentKey locks that "G" (vim convention) jumps the
-// viewport to the bottom and re-engages followBottom.
-func TestHubTabJumpToPresentKey(t *testing.T) {
+// TestHubTabCapitalGAutoFocuses locks Path C: capital "G" is no longer a
+// jump-to-bottom shortcut. It auto-focuses the input and types literally,
+// like any other printable. `end` remains the sole jump-to-present binding.
+func TestHubTabCapitalGAutoFocuses(t *testing.T) {
 	h := NewHubTab()
 	h.SetSize(80, 24)
 	h = fillMessages(h, 100)
@@ -382,15 +383,54 @@ func TestHubTabJumpToPresentKey(t *testing.T) {
 	if h.followBottom {
 		t.Fatalf("setup precondition failed: followBottom still true after PgUp")
 	}
+	yBefore := h.viewport.YOffset
 
 	// Press "G".
 	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 
-	if !h.followBottom {
-		t.Errorf("G should re-engage followBottom, still false")
+	if !h.focused {
+		t.Errorf("capital G should auto-focus input, focused=false")
 	}
-	if !h.viewport.AtBottom() {
-		t.Errorf("G should snap viewport to bottom, AtBottom=false")
+	if got := h.input.Value(); got != "G" {
+		t.Errorf("capital G should type literally into input, value=%q want %q", got, "G")
+	}
+	if h.viewport.AtBottom() {
+		t.Errorf("capital G must NOT snap viewport to bottom under Path C")
+	}
+	if h.viewport.YOffset != yBefore {
+		t.Errorf("capital G shifted YOffset from %d to %d (must not jump under Path C)", yBefore, h.viewport.YOffset)
+	}
+}
+
+// TestHubTabSlashAutoFocuses locks Path C: "/" is no longer a focus-only
+// shortcut. It auto-focuses and types literally.
+func TestHubTabSlashAutoFocuses(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+
+	if !h.focused {
+		t.Errorf("/ should auto-focus input, focused=false")
+	}
+	if got := h.input.Value(); got != "/" {
+		t.Errorf("/ should type literally, value=%q want %q", got, "/")
+	}
+}
+
+// TestHubTabIAutoFocuses locks Path C: "i" is no longer a vim-style
+// focus-only shortcut. It auto-focuses and types literally.
+func TestHubTabIAutoFocuses(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("i")})
+
+	if !h.focused {
+		t.Errorf("i should auto-focus input, focused=false")
+	}
+	if got := h.input.Value(); got != "i" {
+		t.Errorf("i should type literally, value=%q want %q", got, "i")
 	}
 }
 
