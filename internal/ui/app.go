@@ -250,6 +250,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.sessionsTab, cmd = a.sessionsTab.Update(msg)
 				return a, cmd
 			}
+			if a.activeTab == TabAgents {
+				var cmd tea.Cmd
+				a.agentsTab, cmd = a.agentsTab.Update(msg)
+				return a, cmd
+			}
 			if a.activeTab == TabSettings {
 				var cmd tea.Cmd
 				a.settingsTab, cmd = a.settingsTab.Update(msg)
