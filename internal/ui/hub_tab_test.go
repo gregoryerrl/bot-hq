@@ -93,9 +93,11 @@ func TestHubTabViewWithoutPane(t *testing.T) {
 	}
 }
 
-// TestHubTabViewHidesStaleAgents verifies that stale/offline agents are not
-// rendered in the strip even when the pane snapshot includes them.
-func TestHubTabViewHidesStaleAgents(t *testing.T) {
+// TestHubTabViewShowsStaleHidesOffline verifies the post-strip-show-stale
+// behavior: stale agents (registered but quiet >60s) stay visible with the
+// dim Stale dot so they don't vanish during system-wide idle. Only agents
+// with Status=offline (routed to ActivityOffline) are filtered.
+func TestHubTabViewShowsStaleHidesOffline(t *testing.T) {
 	stale := time.Now().Add(-2 * time.Minute) // older than HeartbeatOnlineWindow (60s)
 	pane := newPaneWithAgents(t, []protocol.Agent{
 		{ID: "alive-agent", Name: "Alive", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now()},
@@ -110,8 +112,8 @@ func TestHubTabViewHidesStaleAgents(t *testing.T) {
 	if !strings.Contains(out, "alive-agent") {
 		t.Errorf("strip should contain alive-agent, got:\n%s", out)
 	}
-	if strings.Contains(out, "stale-agent") {
-		t.Errorf("strip should hide stale-agent, got:\n%s", out)
+	if !strings.Contains(out, "stale-agent") {
+		t.Errorf("strip should contain stale-agent (visible after filter relax), got:\n%s", out)
 	}
 	if strings.Contains(out, "offline-agent") {
 		t.Errorf("strip should hide offline-agent, got:\n%s", out)
