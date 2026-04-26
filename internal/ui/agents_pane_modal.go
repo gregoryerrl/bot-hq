@@ -60,11 +60,13 @@ func NewPaneModal(target string, capture PaneCaptureFunc) *PaneModal {
 func (m *PaneModal) SetSize(w, h int) {
 	m.width = w
 	m.height = h
+	// 2-col right gutter inside border for breathing room (border = 2 cols,
+	// gutter = 2 cols, innerW = w - 4).
 	innerW := w - 4
 	if innerW < 1 {
 		innerW = 1
 	}
-	innerH := h - 5
+	innerH := h - 4
 	if innerH < 1 {
 		innerH = 1
 	}
@@ -82,7 +84,12 @@ func (m *PaneModal) Refresh() error {
 		return err
 	}
 	m.lastErr = nil
-	m.viewport.SetContent(stripANSI(output))
+	// Wrap to viewport width so over-long pane lines don't escape past the
+	// rounded border and visually break it. lipgloss Style.Width(N).Render
+	// wraps each newline-separated line independently; verified via scratch
+	// test (multi-paragraph input → per-paragraph wrap, no concatenation).
+	wrapped := lipgloss.NewStyle().Width(m.viewport.Width).Render(stripANSI(output))
+	m.viewport.SetContent(wrapped)
 	m.viewport.GotoBottom()
 	return nil
 }

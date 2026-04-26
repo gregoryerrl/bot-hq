@@ -228,6 +228,8 @@ func (h HubTab) View() string {
 		Foreground(lipgloss.Color("#555555")).
 		Render(strings.Repeat("─", h.width))
 
+	// At narrow widths (<~50 cols) lipgloss may wrap or truncate the hint;
+	// cosmetic-recoverable, revisit if reported.
 	indicatorStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
 	indicatorText := ""
 	if !h.followBottom {

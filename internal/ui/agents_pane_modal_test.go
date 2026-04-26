@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
@@ -164,6 +165,27 @@ func TestAgentsTabModalEscClosesModal(t *testing.T) {
 
 	if tab.paneModal != nil {
 		t.Errorf("Esc inside modal should clear paneModal, still set")
+	}
+}
+
+// TestPaneModalViewSnapshotLongLines locks the C6 border-not-broken contract.
+// A capture payload containing a line wider than the inner viewport must be
+// wrapped before SetContent so no rendered line exceeds the modal's outer
+// width. Pre-fix: 200×'x' on a single line escapes the rounded border on the
+// right side, visually breaking the modal frame.
+func TestPaneModalViewSnapshotLongLines(t *testing.T) {
+	payload := "normal line\n" + strings.Repeat("x", 200) + "\nnormal line"
+	m := NewPaneModal("bot-hq-brian-1", stubCapture(payload))
+	m.SetSize(80, 24)
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := m.View()
+	for i, line := range strings.Split(out, "\n") {
+		if w := lipgloss.Width(line); w > 80 {
+			t.Errorf("line %d exceeds outer width 80: width=%d, content=%q", i, w, line)
+		}
 	}
 }
 

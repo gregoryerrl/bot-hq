@@ -14,7 +14,10 @@ import (
 )
 
 // stripANSI removes ANSI escape sequences from a string to prevent terminal injection.
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)|\x1b[^[\]()]`)
+// CSI alternative covers the private-mode prefix `?<>=!` (e.g. `\x1b[?2004h`
+// for bracketed-paste enable, which bubbletea writes on app start and which
+// tmux capture-pane -p preserves through the buffer).
+var ansiRegex = regexp.MustCompile(`\x1b\[[?<>=!]?[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)|\x1b[^[\]()]`)
 
 func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
