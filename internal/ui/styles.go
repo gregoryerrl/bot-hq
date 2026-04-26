@@ -26,7 +26,7 @@ var (
 	// the activity-derived model (panestate) is the single source of dot truth.
 	ActivityWorkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#22C55E")).SetString("●") // green: actively executing
 	ActivityOnlineStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#06B6D4")).SetString("◐") // cyan: present, not active
-	ActivityStaleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).SetString("○") // gray: quiet, escalate
+	ActivityStaleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).SetString("○") // light gray: quiet, escalate (visible on dark themes)
 	ActivityOfflineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#404040")).SetString("·") // dim: disconnected
 
 	// General styles

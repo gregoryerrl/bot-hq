@@ -19,7 +19,7 @@ func makeSnap(id string, t protocol.AgentType, a panestate.AgentActivity) panest
 	}
 }
 
-func TestRenderStripFiltersAliveOnly(t *testing.T) {
+func TestRenderStripShowsAllExceptOffline(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
 		makeSnap("a-working", protocol.AgentBrian, panestate.ActivityWorking),
 		makeSnap("b-online", protocol.AgentQA, panestate.ActivityOnline),
@@ -33,8 +33,8 @@ func TestRenderStripFiltersAliveOnly(t *testing.T) {
 	if !strings.Contains(out, "b-online") {
 		t.Errorf("strip should contain b-online, got: %q", out)
 	}
-	if strings.Contains(out, "c-stale") {
-		t.Errorf("strip should hide c-stale, got: %q", out)
+	if !strings.Contains(out, "c-stale") {
+		t.Errorf("strip should contain c-stale (visible after filter relax), got: %q", out)
 	}
 	if strings.Contains(out, "d-offline") {
 		t.Errorf("strip should hide d-offline, got: %q", out)
@@ -112,14 +112,60 @@ func TestRenderStripEmpty(t *testing.T) {
 	}
 }
 
-func TestRenderStripAllStaleOffline(t *testing.T) {
+func TestRenderStripStaleVisibleOfflineHidden(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
-		makeSnap("a", protocol.AgentBrian, panestate.ActivityStale),
+		makeSnap("stale-agent", protocol.AgentBrian, panestate.ActivityStale),
+		makeSnap("offline-agent", protocol.AgentCoder, panestate.ActivityOffline),
+	}
+	out := renderStrip(snap)
+	if !strings.Contains(out, "stale-agent") {
+		t.Errorf("stale agent should be visible (filter relaxed), got: %q", out)
+	}
+	if strings.Contains(out, "offline-agent") {
+		t.Errorf("offline agent should remain hidden, got: %q", out)
+	}
+	// Stale glyph (○) should appear; Offline glyph (·) should not.
+	if !strings.Contains(out, "○") {
+		t.Errorf("expected Stale glyph ○ in output, got: %q", out)
+	}
+	if strings.Contains(out, "·") {
+		t.Errorf("Offline glyph · should not appear in output, got: %q", out)
+	}
+}
+
+func TestRenderStripAllOfflineEmpty(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeSnap("a", protocol.AgentBrian, panestate.ActivityOffline),
 		makeSnap("b", protocol.AgentCoder, panestate.ActivityOffline),
 	}
 	out := renderStrip(snap)
 	if strings.Contains(out, "a") || strings.Contains(out, "b") {
-		t.Errorf("stale/offline-only input should produce no IDs, got: %q", out)
+		t.Errorf("all-offline input should produce no IDs, got: %q", out)
+	}
+}
+
+func TestRenderStripFourTierVisibility(t *testing.T) {
+	// Spec lock: Working, Online, Stale visible; Offline hidden.
+	snap := []panestate.AgentSnapshot{
+		makeSnap("w", protocol.AgentBrian, panestate.ActivityWorking),
+		makeSnap("o", protocol.AgentQA, panestate.ActivityOnline),
+		makeSnap("s", protocol.AgentVoice, panestate.ActivityStale),
+		makeSnap("x", protocol.AgentCoder, panestate.ActivityOffline),
+	}
+	out := renderStrip(snap)
+	for _, want := range []string{"w", "o", "s"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q visible, got: %q", want, out)
+		}
+	}
+	if strings.Contains(out, " x") || strings.HasSuffix(out, "x") {
+		t.Errorf("expected offline 'x' hidden, got: %q", out)
+	}
+	// All three visible glyphs should be present.
+	for _, glyph := range []string{"●", "◐", "○"} {
+		if !strings.Contains(out, glyph) {
+			t.Errorf("expected glyph %q in output, got: %q", glyph, out)
+		}
 	}
 }
 

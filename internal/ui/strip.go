@@ -30,9 +30,11 @@ func agentTypeTier(t protocol.AgentType) int {
 }
 
 // renderStrip renders the per-agent activity strip displayed above the
-// HubTab input bar. Hides ActivityStale and ActivityOffline (they're
-// surfaced in the Agents tab Status column instead). Caps at stripAgentCap
-// agents; surplus collapses to "+N".
+// HubTab input bar. Hides only ActivityOffline (explicitly disconnected /
+// status=offline short-circuits to ActivityOffline at panestate.go:303-304).
+// ActivityStale agents stay visible with the dim Stale dot so quiet-but-
+// registered agents don't vanish during system-wide idle windows. Caps at
+// stripAgentCap agents; surplus collapses to "+N".
 //
 // Returns an empty string when zero alive agents — caller should still
 // reserve a separator line so the input bar position stays stable across
@@ -40,7 +42,7 @@ func agentTypeTier(t protocol.AgentType) int {
 func renderStrip(snap []panestate.AgentSnapshot) string {
 	alive := make([]panestate.AgentSnapshot, 0, len(snap))
 	for _, s := range snap {
-		if s.Activity == panestate.ActivityWorking || s.Activity == panestate.ActivityOnline {
+		if s.Activity != panestate.ActivityOffline {
 			alive = append(alive, s)
 		}
 	}
