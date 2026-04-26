@@ -63,6 +63,7 @@ func TestCanonicalizeRemoteURL_FalseNegative(t *testing.T) {
 		{"ssh://git@github.com/org/foo.git", "https://github.com/org/foo"},
 		{"git@gitlab.com:group/sub/proj.git", "https://gitlab.com/group/sub/proj"},
 		{"https://github.com/org/foo/", "https://github.com/org/foo"},
+		{"https://github.com/org/foo.git/", "https://github.com/org/foo"}, // `.git/` combo (Rain C3 fold)
 		{"'git@github.com:org/foo.git'", "git@github.com:org/foo.git"},
 		{"  https://github.com/org/foo.git  ", "https://github.com/org/foo"},
 		{"http://github.com/org/foo", "https://github.com/org/foo"}, // deliberate http<->https equivalence

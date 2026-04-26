@@ -95,11 +95,11 @@ var remoteNameRE = regexp.MustCompile(`[/:]([\w.-]+?)(?:\.git)?/?$`)
 // is out-of-band.
 //
 // SSH custom-port handling: scp-form URLs `user@host:path` cannot specify
-// a port (per scp syntax). The colon is interpreted as the host:path
-// separator unconditionally. To use a custom SSH port, the URL form
-// `ssh://user@host:port/path` is required; that form's `:port` survives
-// canonicalization since only the URL scheme is stripped, not the colon
-// inside the authority.
+// a port (per scp syntax). For URL-form SSH `ssh://user@host:port/path`,
+// the user@ triggers scp-form normalization, which absorbs the port digits
+// into the path key (`host/port/path`). Different ports still canonicalize
+// distinctly (port digits make path-keys differ), but the mechanism is
+// absorption, not preservation. Custom SSH ports are rare in practice.
 //
 // The function never mutates user-visible URLs — it only produces a
 // comparison key. Error messages still surface the original verbatim
@@ -119,18 +119,18 @@ func canonicalizeRemoteURL(u string) string {
 	// already used `:` as a port separator after their scheme was stripped
 	// (e.g., `https://host:8443/path` left as `host:8443/path`).
 	if i := strings.Index(u, "@"); i >= 0 {
-		userPart := u[:i]
+		// Drop the `user@` prefix entirely — user component (typically `git`)
+		// is irrelevant to project identity.
 		rest := u[i+1:]
 		if j := strings.Index(rest, ":"); j >= 0 {
 			rest = rest[:j] + "/" + rest[j+1:]
 		}
-		// Drop the `user@` prefix entirely. The user component (typically
-		// `git`) is irrelevant to project identity.
-		_ = userPart
 		u = rest
 	}
-	u = strings.TrimSuffix(u, ".git")
+	// Order matters: trim trailing slashes BEFORE `.git` suffix so the
+	// `.git/` combo canonicalizes the same as `.git` alone.
 	u = strings.TrimRight(u, "/")
+	u = strings.TrimSuffix(u, ".git")
 	return u
 }
 
