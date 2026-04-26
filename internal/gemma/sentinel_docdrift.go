@@ -64,6 +64,10 @@ func ScanArcsForDocDrift(arcsDir, repoDir string) ([]DocDriftObservation, error)
 	if err != nil {
 		return nil, fmt.Errorf("glob arcs: %w", err)
 	}
+	// Scaling note: every backticked token shells out to git for
+	// classification. Acceptable at v1 scale (~50 backticks per arc, ~2
+	// open arcs). If arcs grow past ~500 backticks total, pre-filter by
+	// shape (heuristic prefix or hex shape) before shelling out.
 	var observations []DocDriftObservation
 	seen := make(map[string]struct{})
 	for _, path := range files {
@@ -116,7 +120,14 @@ func isAncestorOfOriginMain(repoDir, sha string) bool {
 // isBranchMergedToMain reports whether `branch` exists as `origin/<branch>`
 // in repoDir AND its tip is an ancestor of `origin/main`. Returns false
 // for non-existent or unmerged branches (best-effort).
+//
+// Self-reference filter: `main` and `master` always satisfy "tip is
+// ancestor of main" (a tip is its own ancestor). Treat those as not-
+// drift to avoid noise on every arc that mentions the trunk by name.
 func isBranchMergedToMain(repoDir, branch string) bool {
+	if branch == "main" || branch == "master" {
+		return false
+	}
 	out, err := exec.Command("git", "-C", repoDir, "rev-parse", "origin/"+branch).Output()
 	if err != nil {
 		return false // ref doesn't exist
@@ -132,7 +143,12 @@ func isBranchMergedToMain(repoDir, branch string) bool {
 // (deferred per slice 2 design out-of-scope: "multi-sentinel coordinator").
 func EmitDocDriftObservations(observations []DocDriftObservation) {
 	if !docDriftDryRunActive {
-		return // post-tuning-gate hub emit deferred to slice 3
+		// TODO(slice 3): replace with hub_send MsgUpdate to Rain via the
+		// universal sentinel coordinator (master design "Out of scope" item:
+		// multi-sentinel coordinator). Until that wiring lands, flipping
+		// docDriftDryRunActive to false silently DROPS observations — do
+		// NOT flip the flag without slice 3's coordinator in place.
+		return
 	}
 	for _, o := range observations {
 		AppendToDryRunLedger(docDriftSentinelName, fmt.Sprintf("arc=%s | kind=%s | ref=%s", relPath(o.ArcPath), o.Kind, o.Reference))

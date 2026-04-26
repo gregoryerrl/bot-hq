@@ -169,6 +169,75 @@ func TestDocDriftSentinelIgnoresClosedArcs(t *testing.T) {
 	}
 }
 
+// TestDocDriftSentinelSplitsBranchAtSHA locks the H-23 token-splitting
+// path — when an open arc references a combined `branch@sha` token (the
+// most common reference shape used in arc decision-logs), the scan must
+// classify both pieces and emit observations for each independently.
+func TestDocDriftSentinelSplitsBranchAtSHA(t *testing.T) {
+	repoDir, mainSHA, branchName, _ := makeRepoWithMergedBranch(t)
+	shortSHA := mainSHA[:7]
+
+	arcsDir := filepath.Join(repoDir, "docs", "arcs")
+	if err := os.MkdirAll(arcsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Single backticked token containing branch@sha. Both pieces refer
+	// to merged state — both should produce observations.
+	arcContent := "# Combined ref arc\n\nStatus: open  | Branch: `" + branchName + "@" + shortSHA + "`\n"
+	if err := os.WriteFile(filepath.Join(arcsDir, "combined.md"), []byte(arcContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, err := ScanArcsForDocDrift(arcsDir, repoDir)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	var sawBranch, sawSHA bool
+	for _, o := range obs {
+		if o.Kind == "merged-branch" && o.Reference == branchName {
+			sawBranch = true
+		}
+		if o.Kind == "ancestor-sha" && o.Reference == shortSHA {
+			sawSHA = true
+		}
+	}
+	if !sawBranch {
+		t.Errorf("expected merged-branch observation for split branch %q; got %+v", branchName, obs)
+	}
+	if !sawSHA {
+		t.Errorf("expected ancestor-sha observation for split sha %q; got %+v", shortSHA, obs)
+	}
+}
+
+// TestDocDriftSentinelIgnoresMainSelfReference locks the H-23 self-ref
+// filter — `main` and `master` would trivially satisfy "tip is ancestor
+// of main" (a tip is its own ancestor). The sentinel must NOT emit a
+// merged-branch observation for a `main` reference, since most arcs
+// reference the trunk by name and that would generate noise on every
+// scan.
+func TestDocDriftSentinelIgnoresMainSelfReference(t *testing.T) {
+	repoDir, _, _, _ := makeRepoWithMergedBranch(t)
+
+	arcsDir := filepath.Join(repoDir, "docs", "arcs")
+	if err := os.MkdirAll(arcsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	arcContent := "# Trunk reference arc\n\nStatus: open  | Branch: `main`\n\nMerged into `main` at slice close.\n"
+	if err := os.WriteFile(filepath.Join(arcsDir, "main-ref.md"), []byte(arcContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, err := ScanArcsForDocDrift(arcsDir, repoDir)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	for _, o := range obs {
+		if o.Kind == "merged-branch" && (o.Reference == "main" || o.Reference == "master") {
+			t.Errorf("self-ref filter must skip %q; got observation %+v", o.Reference, o)
+		}
+	}
+}
+
 // TestDocDriftSentinelEmitWritesLedgerWhenDryRunActive locks the dry-run
 // dispatch path — EmitDocDriftObservations writes to the docdrift ledger
 // when docDriftDryRunActive is true.
