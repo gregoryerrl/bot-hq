@@ -1,6 +1,6 @@
 # Arc: Phase G v1
 
-Status: open  | Branch: brian/phase-g-v1-slice-2 (slice 2 in flight, slices 1 + 1.5 merged)  | Opened: 2026-04-26  | Closed: —
+Status: closed  | Branch: — (all slices merged to main@`209f6f0`)  | Opened: 2026-04-26  | Closed: 2026-04-26
 
 ## Context
 
@@ -27,6 +27,7 @@ Design doc: `docs/plans/2026-04-26-phase-g-v1-design.md`.
 
 ## Deferred
 
+- **Phase G v1 slice 3** — normalized `snap_entries` rows / query layer over `messages.snap_json`; held pending workload trigger (Brian probe SQL pattern from msg 3174 recurs ≥3× as a recurring status-check). Until then, design doc §6 escape hatch holds.
 - **F-core-c #2** — DI architecture cleanup (design call, awaits engagement).
 - **F-core-c #3** — concurrent-spawn collision (Rain scan: no evidence, kept on shelf for completeness).
 - **F-core-c #4** — zombie-coder lifecycle (design call: graceful unregister vs cron-prune).
@@ -43,6 +44,6 @@ Design doc: `docs/plans/2026-04-26-phase-g-v1-design.md`.
 - prior phase: `docs/plans/phase-e.md`, `docs/plans/2026-04-23-bot-hq-hub-design.md`
 - branch (slice 1): `brian/phase-g-v1-slice-1` (merged)
 - branch (slice 1.5): `brian/phase-g-v1-slice-1.5` + `brian/phase-g-v1-slice-1.5-followup` (merged at `9b17042`)
-- branch (slice 2): `brian/phase-g-v1-slice-2`
+- branch (slice 2): `brian/phase-g-v1-slice-2` (merged at `209f6f0`)
 - commits (slice 1.5): C1 `ba4db0b`, C2 `ce01a0f`, C3 `ef63baf`, followup `9b17042`
-- commits (slice 2): C1 `cf2c4a2`, C2 `0625d5c`, C3 `e29cae9`, C4 (in flight)
+- commits (slice 2): C1 `cf2c4a2`, C2 `0625d5c`, C3 `e29cae9`, C4 `209f6f0`
