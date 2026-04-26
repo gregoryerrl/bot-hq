@@ -523,3 +523,65 @@ func TestHubTabPasteWhileUnfocusedAutoFocuses(t *testing.T) {
 		t.Errorf("paste content should land in input buffer, got %q", got)
 	}
 }
+
+// TestHubTabIndicatorHiddenAtBottom locks γ-row default-hidden state. With
+// followBottom=true (initial render or post-end snap), the indicator slot
+// renders as a width-padded empty row so the layout reserves the line
+// without showing the "scrolled up" hint text.
+func TestHubTabIndicatorHiddenAtBottom(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	if !h.followBottom {
+		t.Fatalf("setup precondition: followBottom must default true")
+	}
+
+	out := h.View()
+	if strings.Contains(out, "scrolled up") {
+		t.Errorf("indicator hint must be hidden when followBottom=true; View=%q", out)
+	}
+}
+
+// TestHubTabIndicatorShownWhenScrolledUp locks γ-row visible state. After
+// PgUp disengages followBottom, the indicator row renders the default text
+// "↓ scrolled up — press end to return".
+func TestHubTabIndicatorShownWhenScrolledUp(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h = fillMessages(h, 100)
+
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if h.followBottom {
+		t.Fatalf("setup precondition: followBottom should disengage after PgUp")
+	}
+
+	out := h.View()
+	if !strings.Contains(out, "↓ scrolled up — press end to return") {
+		t.Errorf("indicator hint must be visible when followBottom=false; View=%q", out)
+	}
+}
+
+// TestHubTabIndicatorHidesAfterEndKey locks γ-row toggle-back. Indicator
+// shown after PgUp must hide once `end` re-engages followBottom.
+func TestHubTabIndicatorHidesAfterEndKey(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	h = fillMessages(h, 100)
+
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if h.followBottom {
+		t.Fatalf("setup precondition: PgUp should disengage followBottom")
+	}
+	if !strings.Contains(h.View(), "scrolled up") {
+		t.Fatalf("setup precondition: indicator should be visible after PgUp")
+	}
+
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if !h.followBottom {
+		t.Fatalf("end should re-engage followBottom")
+	}
+
+	out := h.View()
+	if strings.Contains(out, "scrolled up") {
+		t.Errorf("indicator must hide after end re-engages followBottom; View=%q", out)
+	}
+}

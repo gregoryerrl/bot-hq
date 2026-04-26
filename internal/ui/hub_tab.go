@@ -193,8 +193,8 @@ func (h *HubTab) SetSessionFilter(sessionID string) {
 // bottom after the resize so a terminal resize doesn't strand them mid-feed.
 // When the user has scrolled up, preserve their scroll position.
 func (h *HubTab) resize() {
-	// Reserve: 1 separator + 1 strip + inputRows for textarea + 1 padding.
-	reserved := 3 + inputRows
+	// Reserve: 1 separator + 1 indicator + 1 strip + inputRows for textarea + 1 padding.
+	reserved := 4 + inputRows
 	vpHeight := h.height - reserved
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -215,16 +215,25 @@ func (h *HubTab) resize() {
 //
 //	viewport       — scrollable message feed
 //	separator      — dividing line
+//	indicator      — scrolled-up hint (empty when followBottom)
 //	strip          — per-agent activity dots (Phase E commit 4)
 //	input          — command input
 //
-// Strip line is reserved even when no agents are alive so the input bar
-// position stays stable across strip-empty/non-empty transitions.
+// Indicator and strip slots are both always-reserved so the input bar
+// position stays stable across followBottom toggles and strip-empty/
+// non-empty transitions.
 func (h HubTab) View() string {
 	separator := lipgloss.NewStyle().
 		Width(h.width).
 		Foreground(lipgloss.Color("#555555")).
 		Render(strings.Repeat("─", h.width))
+
+	indicatorStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
+	indicatorText := ""
+	if !h.followBottom {
+		indicatorText = "↓ scrolled up — press end to return"
+	}
+	indicator := indicatorStyle.Render(indicatorText)
 
 	stripContent := ""
 	if h.pane != nil {
@@ -236,6 +245,7 @@ func (h HubTab) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		h.viewport.View(),
 		separator,
+		indicator,
 		strip,
 		h.input.View(),
 	)
