@@ -249,21 +249,24 @@ func (h *Hub) getAgentMu(agentID string) *sync.Mutex {
 // (or $BOT_HQ_HOME/diag/... when overridden).
 //
 // Slice-5 H-22-bis instrumentation: writes one JSON record per
-// dispatchToTmux invocation capturing isAtPrompt decision + last-line bytes
-// + action taken. Cross-correlated with retry-exhaust events to pin the
-// "isAtPrompt race vs. mid-render pane" hypothesis.
+// dispatchToTmux invocation capturing isReady decision + last-line bytes
+// + action taken. Cross-correlated with retry-exhaust events to pin
+// dispatch-classification failure modes.
 const dispatchDecisionEnvVar = "BOT_HQ_DIAG_DISPATCH"
 
 // dispatchDecisionRecord is the JSONL row shape for dispatch-decisions.jsonl.
 // Field names are stable wire format — change only with a corresponding
 // reader update in any analysis tooling.
 //
-// Decision = at_prompt (the isAtPrompt return). Outcome = what happened
-// next (the actual action result, including SendKeys / Enqueue errors).
-// Decision + outcome is the diagnostic unit — a clean "at_prompt=true /
-// outcome=sent" entry that still produces a retry-exhaust event implicates
-// the prompt-buffer-interleave hypothesis (Class A candidate c); a
-// "send_keys_err" with a non-empty err disambiguates a transport failure.
+// Decision = ready (the isReady return). Outcome = what happened next
+// (the actual action result, including SendKeys / Enqueue errors). Decision
+// + outcome is the diagnostic unit — a clean "ready=true / outcome=sent"
+// entry that still produces a retry-exhaust event implicates the
+// paste-buffer-interleave hypothesis; a "send_keys_err" with a non-empty
+// err disambiguates a transport failure.
+//
+// Field rename history: "at_prompt" → "ready" in hub-hotfix-isReady-inversion
+// (2026-04-28). Old logs use "at_prompt"; new logs use "ready".
 //
 // TODO: log rotation when retention > 7d. Slice-5 diagnostic window is
 // days-to-weeks so v1 is no-rotation; mark for follow-up if instrumentation
@@ -273,7 +276,7 @@ type dispatchDecisionRecord struct {
 	MsgID      int64  `json:"msg_id"`
 	ToAgent    string `json:"to_agent"`
 	TmuxTarget string `json:"tmux_target,omitempty"`
-	AtPrompt   bool   `json:"at_prompt"`
+	Ready      bool   `json:"ready"`
 	LastLine   string `json:"last_line,omitempty"`
 	Outcome    string `json:"outcome"`
 	Err        string `json:"err,omitempty"`
@@ -360,18 +363,85 @@ func (h *Hub) emitRetryExhaustAlert(messageID int64, targetAgent string, attempt
 	})
 }
 
-// isAtPrompt checks if the tmux pane output indicates the agent is at a prompt.
-// Empty output is treated as "at prompt" — intentional.
-// CapturePane errors are handled by the caller before reaching here,
-// so empty output means the pane exists but has no visible content (idle).
-func (h *Hub) isAtPrompt(paneOutput string) bool {
-	lines := strings.Split(strings.TrimSpace(paneOutput), "\n")
-	if len(lines) == 0 {
-		return false
+// busyMarkerGlyphs are spinner glyphs that appear ONLY during active model
+// processing. Claude Code redraws the line in-place during animation, so
+// when capture sees `✶` in a frozen frame the agent is mid-stream. After
+// the turn completes the line is rewritten to a static `✻ Crunched for Xs`
+// summary — different glyph, not flagged. ✻ is intentionally excluded
+// because it persists in idle scrollback.
+var busyMarkerGlyphs = []string{"✶"}
+
+// busyMarkerLinePrefixes are tool-active state suffixes. Both contain the
+// U+2026 ellipsis (`…`, not three dots `...`) which is how Claude Code
+// distinguishes them from arbitrary text. Anchored on line-start (after
+// trim) to avoid false-busy on quoted log text in agent replies.
+var busyMarkerLinePrefixes = []string{"Running…", "Working…"}
+
+// isReady determines whether a tmux pane can accept a hub message paste.
+// Defaults to ready; returns false ONLY on positive busy-markers (spinner
+// glyph ✶ via substring match, or tool-active Running…/Working… via
+// line-start match after trim).
+//
+// Inversion of the prior isAtPrompt predicate. Failure-mode asymmetry
+// rationale: false-ready degrades to benign paste-buffering — Claude Code
+// queues input to next-turn submit. False-busy degrades to queue-exhaust
+// + ledger spam (the H-22-bis incident: persistent INSERT-mode footer
+// `-- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)` broke the
+// last-line-suffix heuristic, classifying every trio agent as busy and
+// exhausting every directed PM at 30/30). Pick the failure mode you can
+// survive.
+//
+// Trio runs with --dangerously-skip-permissions; coders inheriting via
+// spawn-contract get the same. Pane-with-active-modal-prompt panes
+// (non-bypass coders) will be classified ready and may receive paste
+// into the modal — acceptable per spawn-contract baseline.
+//
+// Scan window: the 7 lines immediately above the most-recent prompt-box
+// border (`──...` line). Spinners always render above the input box,
+// never inside or below it. Falls back to last 7 lines if no border
+// found (older Claude Code UI or transient pane states). Empty capture
+// → ready=true (fail-safe: we couldn't read the pane, default to ready).
+//
+// Glyph-list and line-prefix audits are required on Claude Code UI
+// revisions — see ratchet item: migrate to agent-self-reported idle
+// (Stop-hook → DB pulse → dispatch reads DB) to obviate the heuristic.
+func (h *Hub) isReady(paneOutput string) bool {
+	if paneOutput == "" {
+		return true
 	}
-	lastLine := strings.TrimSpace(lines[len(lines)-1])
-	return lastLine == "" || strings.HasSuffix(lastLine, "❯") ||
-		strings.HasSuffix(lastLine, ">") || strings.HasSuffix(lastLine, "$")
+	lines := strings.Split(strings.TrimRight(paneOutput, "\n"), "\n")
+
+	scanEnd := len(lines)
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "──") {
+			scanEnd = i
+			break
+		}
+	}
+	scanStart := scanEnd - 7
+	if scanStart < 0 {
+		scanStart = 0
+	}
+
+	for _, line := range lines[scanStart:scanEnd] {
+		for _, glyph := range busyMarkerGlyphs {
+			if strings.Contains(line, glyph) {
+				return false
+			}
+		}
+		// Strip leading whitespace + tool-output box-drawing prefix `⎿`
+		// (Claude Code uses ⎿ to nest tool stdout under the ⏺ Bash(...)
+		// header line). Anchoring on the post-strip start preserves the
+		// false-busy regression-lock against arbitrary text containing
+		// "Running…" as a substring.
+		trimmed := strings.TrimSpace(strings.TrimLeft(line, " \t⎿"))
+		for _, prefix := range busyMarkerLinePrefixes {
+			if strings.HasPrefix(trimmed, prefix) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // dispatchToTmux sends a message to a coder agent's tmux session.
@@ -438,16 +508,16 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 	}
 
 	text := h.FormatTmuxMessage(tmuxTarget, msg)
-	atPrompt := h.isAtPrompt(output)
+	ready := h.isReady(output)
 	lastLine := lastLineSummary(output)
 
-	if atPrompt {
+	if ready {
 		sendErr := tmuxpkg.SendKeys(tmuxTarget, text, true)
 		rec := dispatchDecisionRecord{
 			MsgID:      msg.ID,
 			ToAgent:    msg.ToAgent,
 			TmuxTarget: tmuxTarget,
-			AtPrompt:   true,
+			Ready:      true,
 			LastLine:   lastLine,
 		}
 		if sendErr != nil {
@@ -469,7 +539,7 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 			MsgID:      msg.ID,
 			ToAgent:    msg.ToAgent,
 			TmuxTarget: tmuxTarget,
-			AtPrompt:   false,
+			Ready:      false,
 			LastLine:   lastLine,
 		}
 		if enqErr != nil {
@@ -498,7 +568,7 @@ func (h *Hub) drainQueue(tmuxTarget, agentID string) {
 		if err != nil {
 			break
 		}
-		if !h.isAtPrompt(output) {
+		if !h.isReady(output) {
 			break
 		}
 		if err := tmuxpkg.SendKeys(tmuxTarget, qm.FormattedText, true); err != nil {
@@ -564,7 +634,7 @@ func (h *Hub) processMessageQueue() {
 					continue
 				}
 
-				if !h.isAtPrompt(output) {
+				if !h.isReady(output) {
 					for _, qm := range messages {
 						if qm.Attempts >= qm.MaxAttempts {
 							h.DB.UpdateQueueStatus(qm.ID, "failed", qm.Attempts+1)
@@ -581,7 +651,7 @@ func (h *Hub) processMessageQueue() {
 				// Agent is at prompt — deliver queued messages in order
 				for _, qm := range messages {
 					output, err = tmuxpkg.CapturePane(tmuxTarget, 5)
-					if err != nil || !h.isAtPrompt(output) {
+					if err != nil || !h.isReady(output) {
 						break
 					}
 					if err := tmuxpkg.SendKeys(tmuxTarget, qm.FormattedText, true); err != nil {
