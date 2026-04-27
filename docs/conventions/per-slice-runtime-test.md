@@ -103,6 +103,52 @@ This becomes the audit trail for which surfaces were exercised and how. Future-s
 
 P-1 self-applies to slice 2. The slice 2 design's §"P-1 self-application" section enumerates the 7 load-bearing surfaces (4 prompt + 3 code) with per-surface success/fail plans. Prompt surfaces verified at C1/C2/C4 commit-time; code surfaces (H-29 / H-22 / H-23) verified post-rebuild #14 before C7b cap.
 
+## Acceptance class taxonomy (gold vs silver)
+
+Runtime tests fall into two classes by the path they exercise. Both are valid P-1 acceptance evidence; the distinction matters for closure transparency and for tracking when later slices need to ratchet a surface's coverage.
+
+### Gold (live cross-process)
+
+Exercises the full production runtime path including any cross-process or cross-session boundary the surface depends on. For a sentinel surface, gold means: hub_send (from a different process than the monitor) → DB row insert → in-process polling/callback fires → SentinelMatch → dispatch → ledger or hub-emit. The test is run against the actual installed binary in a representative invocation context, not via `go test`.
+
+Gold-class tests are the strongest acceptance signal because they catch wiring defects that unit tests can miss by construction (e.g., process-local callback lists not firing for cross-process inserts — slice 2's H-22 acceptance gap, msg 3424).
+
+### Silver (unit-test direct-invocation)
+
+Exercises the surface at the function-level under filesystem and environment isolation (e.g., `t.Setenv("BOT_HQ_HOME", ...)` redirects the ledger path so production state is not touched). The production code paths run; only the I/O surface is redirected for test hygiene.
+
+Silver is the right class when:
+- The surface has no live periodic invoker yet (e.g., slice 2's H-23 docdrift sentinel deferred its periodic invoker to slice-3 backlog #6 by design — so the only gate at slice 2 is "ledger-emit when invoked").
+- The surface's invoker is itself the gold-tested infrastructure (transitive confidence — see below).
+
+Silver alone is weaker than gold; silver paired with gold-class verification of the surrounding infrastructure is **transitive-gold-equivalent**.
+
+### Transitive confidence
+
+Silver-class unit tests gain transitive gold-confidence when adjacent gold-class runtime tests exercise a shared path or related sentinel surface. Pattern:
+
+- Silver test A exercises function-level correctness for surface X under FS-redirect
+- Gold test B exercises the same dispatcher / ledger primitive end-to-end for surface Y
+- Joint signal: surface X inherits transitive confidence in the shared infrastructure being correct, leaving only X's function-level logic as the new acceptance gate
+
+Slice 2 worked example: H-23 (silver) inherits transitive confidence from H-22 (gold) because both share the `SentinelMatch` dispatcher, the `dispatchSentinelHit` shape, the `AppendToDryRunLedger` filesystem semantics, and the dryRun-gate primitive. Tests 1/2/4 (gold) end-to-end-verify that dispatch chain; tests 5/6 (silver) only need to verify H-23's function-level scan logic on top.
+
+When a later slice adds a periodic invoker for a previously-silver surface, the gold-equivalent gate re-arms at that closure. Document the planned re-arm in the originating slice's closure decision-log entry.
+
+### Decision-log shape
+
+Slice closure decision-log entries should mark each surface's class explicitly:
+
+```
+- 2026-MM-DD — Slice N runtime test PASS (joint Brian+Rain).
+  - Surface 1 (gold): success-path ..., fail-path ..., side-effect check ...
+  - Surface 2 (silver): unit-test runtime via go test ...; transitive gold via Surface 3
+  - Surface 3 (gold): ...
+  Slice N CLOSED at <SHA>.
+```
+
+This audit trail lets a future reader reconstruct not just "which surfaces were exercised" but "by what class of evidence" — and identify which silver-class surfaces still owe a gold-equivalent gate at a future slice's closure.
+
 ## Refs
 
 - arc: `docs/arcs/phase-h.md` (P-1 item)
