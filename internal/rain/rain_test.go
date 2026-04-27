@@ -201,13 +201,16 @@ func TestRainPromptContainsHalterPusher(t *testing.T) {
 
 // TestRainPromptContainsHaltAllWork locks the H-31 halt-all-work convention
 // into Rain's initial prompt. Mirrors Brian's ratchet so both agents
-// recognize Emma's context-cap FLAG identically.
+// recognize Emma's context-cap FLAG identically. Slice 4 C7 M1 fold per
+// Rain msg 3820: rephrased from regex-anchor notation to "contains
+// substring" framing.
 func TestRainPromptContainsHaltAllWork(t *testing.T) {
 	r := &Rain{}
 	prompt := r.initialPrompt()
 	want := []string{
 		"HALT-ALL-WORK (H-31)",
-		`^agent .* at \d+%, halt`,
+		`"agent <id> at <N>%, halt"`,
+		"Match by substring meaning, not regex anchors",
 		"hub_session_close",
 		"fresh-context session",
 		"H-15 ledger pre-loads context",

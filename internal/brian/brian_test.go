@@ -222,16 +222,20 @@ func TestBrianStartupBootstrapIterate(t *testing.T) {
 }
 
 // TestBrianPromptContainsHaltAllWork locks the H-31 halt-all-work convention
-// into the initial prompt. The literal substrings ratchet the regex
-// recognition pattern, the close-via-H15 directive, and the fresh-session
-// restart contract — silent removal of any of these would let Brian receive
-// the FLAG without recognizing it as the halt trigger.
+// into the initial prompt. The literal substrings ratchet the substring
+// recognition pattern (slice 4 C7 M1 fold per Rain msg 3820: rephrased from
+// regex-anchor notation to "contains substring" framing since agents are
+// LLM-interpreters and semantic-match the pattern; regex-anchor notation
+// could mislead future-Brian into thinking literal pattern-match was
+// authoritative), the close-via-H15 directive, and the fresh-session
+// restart contract.
 func TestBrianPromptContainsHaltAllWork(t *testing.T) {
 	b := &Brian{}
 	prompt := b.initialPrompt()
 	want := []string{
 		"HALT-ALL-WORK (H-31)",
-		`^agent .* at \d+%, halt`,
+		`"agent <id> at <N>%, halt"`,
+		"Match by substring meaning, not regex anchors",
 		"hub_session_close",
 		"fresh-context session",
 		"H-15 ledger pre-loads context",
