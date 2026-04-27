@@ -842,3 +842,203 @@ func TestReconcileCoderGhosts_FlipsStaleCoder(t *testing.T) {
 		t.Errorf("stalevoice flipped erroneously: status=%q (type predicate failed)", a.Status)
 	}
 }
+
+// --- Phase H slice 3 C1 (#7) wake_schedule ---
+
+func TestWakeScheduleMigrationCreatesTableAndIndex(t *testing.T) {
+	db := setupTestDB(t)
+	// Table exists (PRAGMA table_info returns rows).
+	rows, err := db.conn.Query(`PRAGMA table_info(wake_schedule)`)
+	if err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		cols[name] = true
+	}
+	rows.Close()
+	for _, want := range []string{"id", "target_agent", "fire_at", "payload", "created_by", "created_at", "fired_at", "fire_status"} {
+		if !cols[want] {
+			t.Errorf("wake_schedule missing column %q", want)
+		}
+	}
+	// Index exists under either the partial-index name or the fallback name.
+	idxRows, err := db.conn.Query(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='wake_schedule'`)
+	if err != nil {
+		t.Fatalf("sqlite_master: %v", err)
+	}
+	defer idxRows.Close()
+	found := false
+	for idxRows.Next() {
+		var name string
+		if err := idxRows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		if name == "idx_wake_schedule_pending_fire_at" || name == "idx_wake_schedule_status_fire_at" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("wake_schedule index missing — expected partial or fallback variant")
+	}
+	// Idempotent.
+	if err := db.migrate(); err != nil {
+		t.Fatalf("re-migrate: %v", err)
+	}
+}
+
+func TestSqliteSupportsPartialIndex(t *testing.T) {
+	cases := map[string]bool{
+		"3.45.1": true,
+		"3.8.0":  true,
+		"3.8.5":  true,
+		"3.7.17": false,
+		"3.7.0":  false,
+		"2.9.9":  false,
+		"4.0.0":  true,
+		"":       false,
+		"foo":    false,
+	}
+	for ver, want := range cases {
+		if got := sqliteSupportsPartialIndex(ver); got != want {
+			t.Errorf("sqliteSupportsPartialIndex(%q) = %v, want %v", ver, got, want)
+		}
+	}
+}
+
+func TestWakeScheduleInsertAndList(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now()
+
+	// Two pending wakes — one due, one future.
+	dueID, err := db.InsertWakeSchedule("brian", "rain", "wake-up payload", now.Add(-1*time.Second))
+	if err != nil {
+		t.Fatalf("insert due: %v", err)
+	}
+	if _, err := db.InsertWakeSchedule("rain", "brian", "future payload", now.Add(1*time.Hour)); err != nil {
+		t.Fatalf("insert future: %v", err)
+	}
+
+	pending, err := db.ListPendingWakes(now)
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("ListPendingWakes returned %d rows, want 1 (only the due wake)", len(pending))
+	}
+	if pending[0].ID != dueID {
+		t.Errorf("expected due wake id=%d, got id=%d", dueID, pending[0].ID)
+	}
+	if pending[0].TargetAgent != "brian" || pending[0].Payload != "wake-up payload" {
+		t.Errorf("row contents drifted: target=%q payload=%q", pending[0].TargetAgent, pending[0].Payload)
+	}
+	if pending[0].FireStatus != WakeStatusPending {
+		t.Errorf("status got %q, want pending", pending[0].FireStatus)
+	}
+}
+
+func TestWakeScheduleStateMachine(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now()
+
+	mkPending := func(t *testing.T) int64 {
+		t.Helper()
+		id, err := db.InsertWakeSchedule("brian", "rain", "p", now.Add(-1*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+
+	// pending → fired
+	id := mkPending(t)
+	ok, err := db.MarkWakeFired(id)
+	if err != nil || !ok {
+		t.Fatalf("MarkWakeFired: ok=%v err=%v", ok, err)
+	}
+	w, _ := db.GetWakeSchedule(id)
+	if w.FireStatus != WakeStatusFired {
+		t.Errorf("status after fire: %q", w.FireStatus)
+	}
+	if w.FiredAt.IsZero() {
+		t.Error("fired_at should be set after MarkWakeFired")
+	}
+	// Re-firing an already-fired row is a no-op.
+	if ok, _ := db.MarkWakeFired(id); ok {
+		t.Error("MarkWakeFired on fired row should report false (terminal)")
+	}
+
+	// pending → failed
+	id = mkPending(t)
+	ok, err = db.MarkWakeFailed(id)
+	if err != nil || !ok {
+		t.Fatalf("MarkWakeFailed: ok=%v err=%v", ok, err)
+	}
+	w, _ = db.GetWakeSchedule(id)
+	if w.FireStatus != WakeStatusFailed {
+		t.Errorf("status after fail: %q", w.FireStatus)
+	}
+	if !w.FiredAt.IsZero() {
+		t.Error("fired_at should remain zero on failed (per state-machine doc)")
+	}
+
+	// pending → cancelled, idempotent
+	id = mkPending(t)
+	ok, err = db.CancelWake(id)
+	if err != nil || !ok {
+		t.Fatalf("CancelWake first call: ok=%v err=%v", ok, err)
+	}
+	ok, err = db.CancelWake(id)
+	if err != nil {
+		t.Fatalf("CancelWake idempotent err: %v", err)
+	}
+	if ok {
+		t.Error("CancelWake second call should report false (already cancelled, no transition)")
+	}
+
+	// Cancel after fire is also a no-op (terminal).
+	id = mkPending(t)
+	if _, err := db.MarkWakeFired(id); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = db.CancelWake(id)
+	if err != nil || ok {
+		t.Errorf("CancelWake on fired row: ok=%v err=%v (want false, nil)", ok, err)
+	}
+}
+
+func TestWakeScheduleListExcludesTerminal(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now()
+	pendID, _ := db.InsertWakeSchedule("brian", "rain", "p", now.Add(-1*time.Second))
+	firedID, _ := db.InsertWakeSchedule("brian", "rain", "f", now.Add(-1*time.Second))
+	cancID, _ := db.InsertWakeSchedule("brian", "rain", "c", now.Add(-1*time.Second))
+	if _, err := db.MarkWakeFired(firedID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CancelWake(cancID); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.ListPendingWakes(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != pendID {
+		t.Errorf("ListPendingWakes after terminal flips: got %+v, want only id=%d", rows, pendID)
+	}
+}
+
+func TestWakeScheduleCancelMissingID(t *testing.T) {
+	db := setupTestDB(t)
+	_, err := db.CancelWake(99999)
+	if err != sql.ErrNoRows {
+		t.Errorf("CancelWake on missing id: err=%v want sql.ErrNoRows", err)
+	}
+}

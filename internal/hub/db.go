@@ -31,6 +31,37 @@ type Checkpoint struct {
 	Updated time.Time `json:"updated"`
 }
 
+// WakeSchedule is a row in the wake_schedule table — the persisted
+// agentic time-trigger primitive landed in Phase H slice 3 C1 (#7).
+//
+// State machine (per design doc O6, locked at slice-3 design open):
+//
+//	pending → fired      (Emma tick-loop dispatched payload via hub_send)
+//	pending → failed     (Emma hub_send returned error; drop, no retry per arch lean 4)
+//	pending → cancelled  (caller invoked hub_cancel_wake before dispatch)
+//
+// No other transitions in v1. Future state additions ("retrying", etc.)
+// require state-machine consistency review.
+type WakeSchedule struct {
+	ID          int64
+	TargetAgent string
+	FireAt      time.Time
+	Payload     string
+	CreatedBy   string
+	CreatedAt   time.Time
+	FiredAt     time.Time // zero if not yet fired
+	FireStatus  string
+}
+
+// Wake-schedule status constants. The CHECK constraint on the table column
+// pins these values; anything else is a migration-class change.
+const (
+	WakeStatusPending   = "pending"
+	WakeStatusFired     = "fired"
+	WakeStatusFailed    = "failed"
+	WakeStatusCancelled = "cancelled"
+)
+
 // QueuedMessage represents a message waiting to be delivered to a busy agent.
 type QueuedMessage struct {
 	ID            int64
@@ -209,8 +240,29 @@ func (db *DB) migrate() error {
 
 	CREATE INDEX IF NOT EXISTS idx_mq_status ON message_queue(status);
 	CREATE INDEX IF NOT EXISTS idx_mq_target ON message_queue(target_agent);
+
+	CREATE TABLE IF NOT EXISTS wake_schedule (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		target_agent  TEXT NOT NULL,
+		fire_at       INTEGER NOT NULL,
+		payload       TEXT NOT NULL DEFAULT '',
+		created_by    TEXT NOT NULL,
+		created_at    INTEGER NOT NULL,
+		fired_at      INTEGER NOT NULL DEFAULT 0,
+		fire_status   TEXT NOT NULL DEFAULT 'pending'
+		             CHECK(fire_status IN ('pending','fired','failed','cancelled'))
+	);
 	`
 	if _, err := db.conn.Exec(schema); err != nil {
+		return err
+	}
+
+	// Phase H slice 3 C1 (#7): wake_schedule index. Partial-index needs SQLite
+	// >=3.8.0 (per design doc O4). modernc.org/sqlite ships a recent embedded
+	// build, so the partial form is the expected branch — but we probe at
+	// runtime and fall back to a full composite index on older engines so an
+	// embedded-version downgrade doesn't break migration.
+	if err := db.createWakeScheduleIndex(); err != nil {
 		return err
 	}
 
@@ -272,6 +324,53 @@ func (db *DB) addColumnIfMissing(table, column, decl string) error {
 		return fmt.Errorf("alter %s add %s: %w", table, column, err)
 	}
 	return nil
+}
+
+// createWakeScheduleIndex installs the index Emma's tick loop relies on for
+// the `WHERE fire_status='pending' AND fire_at <= ?` scan. Partial indexes
+// (the narrow, scan-friendly form) require SQLite >=3.8.0; we probe via
+// `SELECT sqlite_version()` and fall back to a full composite index on older
+// engines. Either form keeps the tick query off a table scan; the partial
+// variant is just leaner because non-pending rows never enter the b-tree.
+func (db *DB) createWakeScheduleIndex() error {
+	var ver string
+	if err := db.conn.QueryRow("SELECT sqlite_version()").Scan(&ver); err != nil {
+		return fmt.Errorf("query sqlite_version: %w", err)
+	}
+	stmt := `CREATE INDEX IF NOT EXISTS idx_wake_schedule_pending_fire_at
+		ON wake_schedule(fire_at) WHERE fire_status = 'pending'`
+	if !sqliteSupportsPartialIndex(ver) {
+		stmt = `CREATE INDEX IF NOT EXISTS idx_wake_schedule_status_fire_at
+			ON wake_schedule(fire_status, fire_at)`
+	}
+	if _, err := db.conn.Exec(stmt); err != nil {
+		return fmt.Errorf("create wake_schedule index: %w", err)
+	}
+	return nil
+}
+
+// sqliteSupportsPartialIndex reports whether ver (e.g. "3.45.1") is at or
+// above the 3.8.0 partial-index threshold. Defensive parser — anything
+// unparseable falls back to the safe (full-index) branch.
+func sqliteSupportsPartialIndex(ver string) bool {
+	parts := strings.SplitN(ver, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	var major, minor int
+	if _, err := fmt.Sscanf(parts[0], "%d", &major); err != nil {
+		return false
+	}
+	if _, err := fmt.Sscanf(parts[1], "%d", &minor); err != nil {
+		return false
+	}
+	if major > 3 {
+		return true
+	}
+	if major < 3 {
+		return false
+	}
+	return minor >= 8
 }
 
 // IncrementRebuildGen reads hub_rebuild_gen from settings, increments it by
@@ -1103,4 +1202,120 @@ func (db *DB) UpdateIssue(id, status, assignedTo, resolution string) (map[string
 		issue["line_number"] = nil
 	}
 	return issue, nil
+}
+
+// --- Wake schedule (Phase H slice 3 C1 #7) ---
+
+// InsertWakeSchedule persists a pending wake row and returns the assigned
+// row id. Caller is responsible for ISO 8601 parsing — this layer takes a
+// time.Time. Status is always 'pending' on insert; transitions go through
+// MarkWakeFired / MarkWakeFailed / CancelWake.
+func (db *DB) InsertWakeSchedule(targetAgent, createdBy, payload string, fireAt time.Time) (int64, error) {
+	res, err := db.conn.Exec(
+		`INSERT INTO wake_schedule (target_agent, fire_at, payload, created_by, created_at, fire_status)
+		 VALUES (?, ?, ?, ?, ?, 'pending')`,
+		targetAgent, fireAt.UnixMilli(), payload, createdBy, time.Now().UnixMilli(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// ListPendingWakes returns wake rows whose fire_at is at or before the given
+// instant and whose status is still pending. Caller (Emma tick loop) iterates
+// the result and dispatches each via hub_send. Bounded scan via the index
+// installed in migrate().
+func (db *DB) ListPendingWakes(asOf time.Time) ([]WakeSchedule, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, target_agent, fire_at, payload, created_by, created_at, fired_at, fire_status
+		 FROM wake_schedule
+		 WHERE fire_status = 'pending' AND fire_at <= ?
+		 ORDER BY fire_at ASC, id ASC`,
+		asOf.UnixMilli(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WakeSchedule
+	for rows.Next() {
+		var w WakeSchedule
+		var fireAt, createdAt, firedAt int64
+		if err := rows.Scan(&w.ID, &w.TargetAgent, &fireAt, &w.Payload, &w.CreatedBy, &createdAt, &firedAt, &w.FireStatus); err != nil {
+			return nil, err
+		}
+		w.FireAt = time.UnixMilli(fireAt)
+		w.CreatedAt = time.UnixMilli(createdAt)
+		if firedAt > 0 {
+			w.FiredAt = time.UnixMilli(firedAt)
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// GetWakeSchedule fetches a single row by id. sql.ErrNoRows when absent.
+func (db *DB) GetWakeSchedule(id int64) (WakeSchedule, error) {
+	var w WakeSchedule
+	var fireAt, createdAt, firedAt int64
+	err := db.conn.QueryRow(
+		`SELECT id, target_agent, fire_at, payload, created_by, created_at, fired_at, fire_status
+		 FROM wake_schedule WHERE id = ?`, id,
+	).Scan(&w.ID, &w.TargetAgent, &fireAt, &w.Payload, &w.CreatedBy, &createdAt, &firedAt, &w.FireStatus)
+	if err != nil {
+		return w, err
+	}
+	w.FireAt = time.UnixMilli(fireAt)
+	w.CreatedAt = time.UnixMilli(createdAt)
+	if firedAt > 0 {
+		w.FiredAt = time.UnixMilli(firedAt)
+	}
+	return w, nil
+}
+
+// markWakeTerminal flips a pending row to a terminal state (fired/failed/
+// cancelled). Pending-only WHERE clause makes the call idempotent — a
+// concurrent transition (e.g. cancel racing fire) leaves the second caller
+// with RowsAffected==0 instead of corrupting the state machine. Returns
+// whether this call performed the transition.
+func (db *DB) markWakeTerminal(id int64, status string, firedAt int64) (bool, error) {
+	res, err := db.conn.Exec(
+		`UPDATE wake_schedule SET fire_status = ?, fired_at = ?
+		 WHERE id = ? AND fire_status = 'pending'`,
+		status, firedAt, id,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// MarkWakeFired records a successful dispatch. Sets fired_at = now and flips
+// status to 'fired'. Returns true if the row was pending; false if it had
+// already moved to a terminal state (cancel race).
+func (db *DB) MarkWakeFired(id int64) (bool, error) {
+	return db.markWakeTerminal(id, WakeStatusFired, time.Now().UnixMilli())
+}
+
+// MarkWakeFailed records a hub_send failure. fired_at is left at zero so the
+// row distinguishes "tried and failed" (status=failed, fired_at=0) from
+// "successfully fired" (status=fired, fired_at>0).
+func (db *DB) MarkWakeFailed(id int64) (bool, error) {
+	return db.markWakeTerminal(id, WakeStatusFailed, 0)
+}
+
+// CancelWake transitions a pending wake to 'cancelled'. Idempotent on rows
+// that have already left the pending state — returns (false, nil) so the MCP
+// tool can report status=already_terminal without surfacing an error. A
+// missing id surfaces as sql.ErrNoRows.
+func (db *DB) CancelWake(id int64) (bool, error) {
+	if _, err := db.GetWakeSchedule(id); err != nil {
+		return false, err
+	}
+	return db.markWakeTerminal(id, WakeStatusCancelled, 0)
 }
