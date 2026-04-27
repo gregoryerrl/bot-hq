@@ -246,6 +246,63 @@ func TestMessageQueueMaxAttempts(t *testing.T) {
 	}
 }
 
+// TestEmitRetryExhaustAlertInsertsBridgedMessage locks the slice-5
+// H-22-bis bridge: hub's retry-exhaust event emits a synthetic
+// protocol.Message that flows through Emma's sentinel pipeline (which
+// reads protocol.Message content, not stdout logs). FromAgent must be
+// the non-registered "hub" so Emma's source-filter does not suppress it.
+func TestEmitRetryExhaustAlertInsertsBridgedMessage(t *testing.T) {
+	db := setupTestDB(t)
+	h := &Hub{DB: db}
+
+	h.emitRetryExhaustAlert(42, "coder-abc123", 30)
+
+	msgs, err := db.GetRecentMessages(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bridged *protocol.Message
+	for i := range msgs {
+		if msgs[i].FromAgent == retryExhaustFromAgent {
+			bridged = &msgs[i]
+			break
+		}
+	}
+	if bridged == nil {
+		t.Fatalf("expected synthetic bridge message from %q, got %d messages: %v", retryExhaustFromAgent, len(msgs), msgs)
+	}
+	want := "[queue] Message 42 to coder-abc123 failed after 30 attempts"
+	if bridged.Content != want {
+		t.Errorf("bridge content = %q, want %q", bridged.Content, want)
+	}
+	if bridged.Type != protocol.MsgUpdate {
+		t.Errorf("bridge type = %q, want %q", bridged.Type, protocol.MsgUpdate)
+	}
+}
+
+// TestRetryExhaustFromAgentNotRegistrable locks the source-filter
+// interaction: bridge emit must use a from_agent that is never present
+// in the agents table, otherwise Emma's source-filter (which excludes
+// registered agents to defeat queueFailPattern prose FPs) would also
+// suppress the bridge emit. Concretely: confirm "hub" is not registered
+// at the time of an emit by leaving the agents table empty.
+func TestRetryExhaustFromAgentNotRegistrable(t *testing.T) {
+	db := setupTestDB(t)
+	h := &Hub{DB: db}
+
+	h.emitRetryExhaustAlert(7, "rain", 30)
+
+	agents, err := db.ListAgents("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range agents {
+		if a.ID == retryExhaustFromAgent {
+			t.Fatalf("retryExhaustFromAgent %q must not be in agents table; emit would be suppressed by Emma's source-filter", retryExhaustFromAgent)
+		}
+	}
+}
+
 func TestMessageQueueCleanup(t *testing.T) {
 	db := setupTestDB(t)
 

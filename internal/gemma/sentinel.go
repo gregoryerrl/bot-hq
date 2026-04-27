@@ -18,13 +18,18 @@ import (
 // free-form observations and are not deduped.
 var ledgerMsgIDRe = regexp.MustCompile(`msg #(\d+)\b`)
 
-// queueFailPattern is the Phase H slice 2 H-22 regex shape — pattern-
-// match on `[queue] failed after K attempts` log lines. Pure pattern
-// (no interpretation, no spec-comparison) so gemma4:e4b safe.
+// queueFailPattern matches the hub's retry-exhaust log line shape, anchored
+// to the canonical emit format `[queue] Message <id> to <agent> failed after
+// <N> attempts` (hub.go processMessageQueue). The Message/to anchors reject
+// loose prose mentions of the pattern in agent chatter — slice-5 H-22-bis
+// tightening after dry-run review showed 100% FP rate against the prior
+// `\[queue\]\s+failed\s+after` shape.
+//
+// `[\w-]+` covers hyphenated agent IDs (`coder-<sessionID>`, `gemma-<hash>`).
 //
 // Tracked as a const so tests can reference it and so dispatchSentinelHit
 // can map matched patterns to the dry-run ledger without re-compiling.
-const queueFailPattern = `(?i)\[queue\]\s+failed\s+after\s+\d+\s+attempts?`
+const queueFailPattern = `(?i)\[queue\]\s+Message\s+\d+\s+to\s+[\w-]+\s+failed\s+after\s+\d+\s+attempts?`
 
 // preFilterPatterns is the sole volume gate for hub-reactive Emma. A hub
 // message whose content does NOT match any of these regexes is silently

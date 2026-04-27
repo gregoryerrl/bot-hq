@@ -16,22 +16,34 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
-// TestQueueFailRegexMatches locks Phase H slice 2 H-22 — the new
-// queue-fail regex matches the canonical log-line shape and is
-// registered in preFilterPatterns (so SentinelMatch sees it).
+// TestQueueFailRegexMatches locks the slice-5 H-22-bis tightening — the
+// regex matches the hub's canonical retry-exhaust emit format
+// (`[queue] Message <id> to <agent> failed after <N> attempts`) and
+// rejects loose prose mentions that drove 100% FP in the original
+// dry-run ledger.
 func TestQueueFailRegexMatches(t *testing.T) {
 	cases := []struct {
 		content string
 		want    bool
 	}{
-		{"[queue] failed after 3 attempts", true},
-		{"[queue] failed after 1 attempt", true},  // singular
-		{"[queue] failed after 99 attempts", true}, // multi-digit
-		{"[QUEUE] failed after 5 attempts", true},  // case-insensitive
-		{"[queue]   failed   after   2   attempts", true}, // multi-space
+		// Canonical hub emit format (positive).
+		{"[queue] Message 42 to rain failed after 30 attempts", true},
+		{"[queue] Message 1 to brian failed after 1 attempt", true},     // singular
+		{"[queue] Message 9999 to emma failed after 99 attempts", true}, // multi-digit
+		{"[QUEUE] Message 7 to rain failed after 5 attempts", true},     // case-insensitive
+		{"[queue]  Message  3  to  brian  failed  after  2  attempts", true}, // multi-space
+		// Hyphenated agent IDs (coder-*, gemma-*).
+		{"[queue] Message 12 to coder-abc123 failed after 30 attempts", true},
+		{"[queue] Message 88 to gemma-9ce4e794 failed after 30 attempts", true},
+
+		// Loose prose forms that previously matched — must reject now.
+		{"[queue] failed after 3 attempts", false},  // missing Message/to anchor (prose)
+		{"[queue] failed after 30 attempts", false}, // SNAP-block prose mention
+		{"[queue] failed", false},                   // missing attempts clause
 		{"[queue] succeeded", false},
 		{"queue failed (different shape)", false}, // missing brackets
-		{"[queue] failed", false},                 // missing attempts clause
+		// Negative on missing target agent.
+		{"[queue] Message 5 failed after 30 attempts", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.content, func(t *testing.T) {
@@ -40,8 +52,6 @@ func TestQueueFailRegexMatches(t *testing.T) {
 				t.Errorf("queue-fail regex match for %q: got Match=%v, want %v", tc.content, d.Match, tc.want)
 			}
 			if tc.want && d.Pattern != queueFailPattern {
-				// Other preFilter patterns might also match malformed inputs;
-				// for the canonical shape we expect the queue-fail pattern.
 				t.Logf("matched on pattern %q (expected queue-fail; not a hard fail since multiple patterns could match)", d.Pattern)
 			}
 		})
@@ -560,6 +570,82 @@ func TestOnHubMessageEmitsFlagOnAlwaysFlagPattern(t *testing.T) {
 	}
 	if !strings.Contains(flag.Content, "panic") && !strings.Contains(flag.Content, "PANIC") {
 		t.Errorf("flag content should reference matched panic, got %q", flag.Content)
+	}
+}
+
+// TestOnHubMessageSourceFilterDropsRegisteredAgentQueueFail locks the
+// slice-5 H-22-bis source-filter: queueFailPattern hits from registered
+// agents are prose mentions (e.g. SNAP blocks discussing the pattern),
+// not real retry-exhaust events, and must drop without dispatch.
+// The real emit comes from FromAgent="hub", which is never registered.
+func TestOnHubMessageSourceFilterDropsRegisteredAgentQueueFail(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.RegisterAgent(protocol.Agent{ID: "rain", Name: "Rain", Type: protocol.AgentQA, Status: protocol.StatusOnline}); err != nil {
+		t.Fatal(err)
+	}
+
+	g := New(db, hub.GemmaConfig{})
+
+	// Rain (registered) discussing the canonical pattern in prose — the
+	// content matches queueFailPattern but the source is a registered
+	// agent. Source-filter must drop.
+	g.OnHubMessage(protocol.Message{
+		FromAgent: "rain",
+		Content:   "SNAP includes [queue] Message 42 to coder-abc failed after 30 attempts as expected",
+	})
+
+	msgs, err := db.GetRecentMessages(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if m.FromAgent == agentID {
+			t.Errorf("source-filter must drop queueFail prose from registered agent; got Emma dispatch: %+v", m)
+		}
+	}
+}
+
+// TestOnHubMessageSourceFilterAllowsHubBridgeEmit locks the
+// complementary contract: when the hub bridge emits a real retry-exhaust
+// alert with FromAgent="hub" (non-registered), Emma's source-filter must
+// pass it through to dispatchSentinelHit. Verified via the dry-run
+// ledger write since queueFailPattern is currently in the dry-run map.
+func TestOnHubMessageSourceFilterAllowsHubBridgeEmit(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	g := New(db, hub.GemmaConfig{})
+
+	// Hub bridge emit — FromAgent="hub" is not in the agents table,
+	// so source-filter passes through. queueFailPattern is dry-run, so
+	// dispatch writes to the ledger.
+	g.OnHubMessage(protocol.Message{
+		ID:        1,
+		FromAgent: "hub",
+		Type:      protocol.MsgUpdate,
+		Content:   "[queue] Message 99 to coder-xyz failed after 30 attempts",
+	})
+
+	ledgerPath := filepath.Join(home, "sentinels", "queuefail-dryrun.log")
+	data, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatalf("expected dry-run ledger write at %s, got err: %v", ledgerPath, err)
+	}
+	if !strings.Contains(string(data), "msg #1 from hub") {
+		t.Errorf("ledger missing bridged-emit observation; content = %q", string(data))
 	}
 }
 

@@ -241,6 +241,29 @@ func (h *Hub) getAgentMu(agentID string) *sync.Mutex {
 	return mu.(*sync.Mutex)
 }
 
+// retryExhaustFromAgent is the synthetic from_agent used by the bridge
+// emit at retry-exhaust. Must be a non-registered agent ID so Emma's
+// source-filter (which suppresses queueFailPattern hits from registered
+// agents to defeat prose false-positives) does not also suppress the
+// real bridge emit.
+const retryExhaustFromAgent = "hub"
+
+// emitRetryExhaustAlert inserts a synthetic protocol.Message that mirrors
+// the hub's retry-exhaust log line, so Emma's sentinel pipeline (which
+// reads protocol.Message content, not stdout) can detect real exhaust
+// events. Without this bridge the queueFailPattern sentinel is
+// architecturally disconnected from its emit source — see the slice-5
+// H-22-bis diagnosis. Best-effort: insert errors are swallowed so a DB
+// hiccup does not crash the queue worker.
+func (h *Hub) emitRetryExhaustAlert(messageID int64, targetAgent string, attempts int) {
+	content := fmt.Sprintf("[queue] Message %d to %s failed after %d attempts", messageID, targetAgent, attempts)
+	h.DB.InsertMessage(protocol.Message{
+		FromAgent: retryExhaustFromAgent,
+		Type:      protocol.MsgUpdate,
+		Content:   content,
+	})
+}
+
 // isAtPrompt checks if the tmux pane output indicates the agent is at a prompt.
 // Empty output is treated as "at prompt" — intentional.
 // CapturePane errors are handled by the caller before reaching here,
@@ -389,6 +412,7 @@ func (h *Hub) processMessageQueue() {
 						if qm.Attempts >= qm.MaxAttempts {
 							h.DB.UpdateQueueStatus(qm.ID, "failed", qm.Attempts+1)
 							log.Printf("[queue] Message %d to %s failed after %d attempts", qm.MessageID, agentID, qm.Attempts)
+							h.emitRetryExhaustAlert(qm.MessageID, agentID, qm.Attempts)
 						} else {
 							h.DB.UpdateQueueStatus(qm.ID, "pending", qm.Attempts+1)
 						}
@@ -402,6 +426,7 @@ func (h *Hub) processMessageQueue() {
 						if qm.Attempts >= qm.MaxAttempts {
 							h.DB.UpdateQueueStatus(qm.ID, "failed", qm.Attempts+1)
 							log.Printf("[queue] Message %d to %s failed after %d attempts", qm.MessageID, agentID, qm.Attempts)
+							h.emitRetryExhaustAlert(qm.MessageID, agentID, qm.Attempts)
 						} else {
 							h.DB.UpdateQueueStatus(qm.ID, "pending", qm.Attempts+1)
 						}

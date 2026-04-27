@@ -49,7 +49,7 @@ func TestPollSentinelCatchesCrossProcessInserts(t *testing.T) {
 	if _, err := db.InsertMessage(protocol.Message{
 		FromAgent: "brian",
 		Type:      protocol.MsgUpdate,
-		Content:   "[queue] failed after 5 attempts",
+		Content:   "[queue] Message 5 to coder-abc failed after 5 attempts",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestPollSentinelCatchesCrossProcessInserts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ledger missing post-poll — cross-process polling not wired: %v", err)
 	}
-	if !strings.Contains(string(data), "[queue] failed after 5 attempts") {
+	if !strings.Contains(string(data), "[queue] Message 5 to coder-abc failed after 5 attempts") {
 		t.Errorf("ledger missing expected entry, got: %s", data)
 	}
 	if !strings.Contains(string(data), "from brian") {
@@ -92,7 +92,7 @@ func TestPollSentinelWatermarkPreventsReprocess(t *testing.T) {
 
 	if _, err := db.InsertMessage(protocol.Message{
 		FromAgent: "brian",
-		Content:   "[queue] failed after 2 attempts",
+		Content:   "[queue] Message 2 to coder-xyz failed after 2 attempts",
 	}); err != nil {
 		t.Fatal(err)
 	}

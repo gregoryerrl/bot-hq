@@ -583,7 +583,36 @@ func (g *Gemma) OnHubMessage(msg protocol.Message) {
 	if !d.Match {
 		return // default-ignore
 	}
+	// Source-filter for hub-bridged patterns. queueFailPattern is emitted
+	// by the hub itself (FromAgent="hub", non-registered) — any match from
+	// a registered agent is prose, not a real event. Drop. Other patterns
+	// (panic, fatal, OOM, …) can legitimately come from any source, so
+	// they bypass this filter.
+	if d.Pattern == queueFailPattern && g.isFromRegisteredAgent(msg.FromAgent) {
+		return
+	}
 	g.dispatchSentinelHit(msg, d)
+}
+
+// isFromRegisteredAgent reports whether the given agent ID is currently
+// registered in the hub. Used by OnHubMessage as a source-filter for
+// hub-bridged sentinel patterns. Best-effort: a DB error returns false
+// (fail-open — let the sentinel evaluate; the cost of an extra dispatch
+// is lower than the cost of suppressing a real event).
+func (g *Gemma) isFromRegisteredAgent(id string) bool {
+	if id == "" {
+		return false
+	}
+	agents, err := g.db.ListAgents("")
+	if err != nil {
+		return false
+	}
+	for _, a := range agents {
+		if a.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // dispatchSentinelHit emits the appropriate hub message for a sentinel
@@ -646,6 +675,12 @@ func (g *Gemma) OnHubMessageReplay(msg protocol.Message) {
 	}
 	d := SentinelMatch(msg)
 	if !d.Match {
+		return
+	}
+	// Source-filter for hub-bridged patterns — keep replay-path symmetric
+	// with OnHubMessage so boot-replay does not write prose-FPs into the
+	// dry-run ledger.
+	if d.Pattern == queueFailPattern && g.isFromRegisteredAgent(msg.FromAgent) {
 		return
 	}
 	if d.AlwaysFlag {

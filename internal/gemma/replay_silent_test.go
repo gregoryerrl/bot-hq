@@ -32,7 +32,7 @@ func TestReplaySilentDoesNotArmHysteresis(t *testing.T) {
 	if _, err := db.InsertMessage(protocol.Message{
 		FromAgent: "brian",
 		Type:      protocol.MsgUpdate,
-		Content:   "[queue] failed after 5 attempts",
+		Content:   "[queue] Message 5 to coder-abc failed after 5 attempts",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestReplaySilentWritesDryRunLedger(t *testing.T) {
 	if _, err := db.InsertMessage(protocol.Message{
 		FromAgent: "brian",
 		Type:      protocol.MsgUpdate,
-		Content:   "[queue] failed after 7 attempts",
+		Content:   "[queue] Message 7 to coder-xyz failed after 7 attempts",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestReplaySilentWritesDryRunLedger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ledger missing post-replay — silent-mode dropped ledger write: %v", err)
 	}
-	if !strings.Contains(string(data), "[queue] failed after 7 attempts") {
+	if !strings.Contains(string(data), "[queue] Message 7 to coder-xyz failed after 7 attempts") {
 		t.Errorf("ledger missing expected entry, got: %s", data)
 	}
 }
@@ -103,7 +103,7 @@ func TestReplayThenLiveDispatchFiresShouldFlag(t *testing.T) {
 	if _, err := db.InsertMessage(protocol.Message{
 		FromAgent: "brian",
 		Type:      protocol.MsgUpdate,
-		Content:   "[queue] failed after 3 attempts",
+		Content:   "[queue] Message 3 to coder-foo failed after 3 attempts",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestReplayThenLiveDispatchFiresShouldFlag(t *testing.T) {
 		ID:        9999,
 		FromAgent: "rain",
 		Type:      protocol.MsgUpdate,
-		Content:   "[queue] failed after 4 attempts",
+		Content:   "[queue] Message 4 to coder-bar failed after 4 attempts",
 	}
 	g.OnHubMessage(live)
 
@@ -158,7 +158,7 @@ func TestReplaySilentSkipsAlwaysFlag(t *testing.T) {
 	// path.
 	matched := false
 	for _, content := range []string{
-		"[queue] failed after 2 attempts",
+		"[queue] Message 2 to coder-baz failed after 2 attempts",
 	} {
 		d := SentinelMatch(protocol.Message{Content: content})
 		if d.Match && d.AlwaysFlag {
