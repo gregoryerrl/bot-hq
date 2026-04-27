@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -645,10 +646,14 @@ func hubSpawn(db *hub.DB) ToolDef {
 						project = wtPath // coder works in the worktree
 						// H-3b: install pre-commit freshness gate so the coder
 						// can't merge a stale-base commit if main advances
-						// during their session. Soft-failure: log via the
-						// returned error but don't abort spawn — the hook is
-						// a safety rail, not a hard prerequisite.
-						_ = installWorktreeFreshnessHook(ctx, wtPath)
+						// during their session. Soft-failure: log on error but
+						// don't abort spawn — the hook is a safety rail, not a
+						// hard prerequisite. Logging matters: a silent install
+						// regression would leave the gate disabled invisibly,
+						// defeating its purpose.
+						if err := installWorktreeFreshnessHook(ctx, wtPath); err != nil {
+							log.Printf("[hub-spawn] freshness hook install failed for %s: %v (spawn continuing without gate)", wtPath, err)
+						}
 					}
 				}
 			}
