@@ -651,8 +651,8 @@ func hubSpawn(db *hub.DB) ToolDef {
 						// hard prerequisite. Logging matters: a silent install
 						// regression would leave the gate disabled invisibly,
 						// defeating its purpose.
-						if err := installWorktreeFreshnessHook(ctx, wtPath); err != nil {
-							log.Printf("[hub-spawn] freshness hook install failed for %s: %v (spawn continuing without gate)", wtPath, err)
+						if err := installWorktreeHooks(ctx, wtPath); err != nil {
+							log.Printf("[hub-spawn] worktree hooks install failed for %s: %v (spawn continuing without gates)", wtPath, err)
 						}
 					}
 				}

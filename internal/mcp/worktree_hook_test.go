@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,10 +35,29 @@ func makeWorktreeTestRepo(t *testing.T) (string, string, string) {
 	mustGit(t, worktreePath, "config", "user.email", "t@t.local")
 	mustGit(t, worktreePath, "config", "user.name", "t")
 
-	if err := installWorktreeFreshnessHook(context.Background(), worktreePath); err != nil {
+	if err := installWorktreeHooks(context.Background(), worktreePath); err != nil {
 		t.Fatalf("install hook: %v", err)
 	}
 	return mainRepo, worktreePath, bareRemote
+}
+
+// seedClosedArcRepo provisions a worktree with a single seed arc.md whose
+// frontmatter carries `Status: <status>`. Returns (worktreePath, arcRelPath).
+// The seed commit itself is allowed (newly added file has no HEAD blob, so
+// the closed-arc gate skips it).
+func seedArcRepo(t *testing.T, status string) (string, string) {
+	t.Helper()
+	_, wt, _ := makeWorktreeTestRepo(t)
+	arcRel := "docs/arcs/test-arc.md"
+	arcAbs := filepath.Join(wt, arcRel)
+	if err := os.MkdirAll(filepath.Dir(arcAbs), 0o755); err != nil {
+		t.Fatalf("mkdir arc dir: %v", err)
+	}
+	body := fmt.Sprintf("# Arc: Test\n\nStatus: %s  | Branch: —\n\n## Body\n\nalpha\nbravo\ncharlie\n", status)
+	mustWriteFile(t, arcAbs, body)
+	mustGit(t, wt, "add", arcRel)
+	mustGit(t, wt, "commit", "-m", "seed test arc")
+	return wt, arcRel
 }
 
 func TestWorktreeHookInstallsOnSpawn(t *testing.T) {
@@ -125,6 +145,84 @@ func TestPreCommitHookPassesOnFreshBase(t *testing.T) {
 	mustGit(t, worktreePath, "add", "fresh.txt")
 	if out, err := exec.Command("git", "-C", worktreePath, "commit", "-m", "fresh-base commit").CombinedOutput(); err != nil {
 		t.Fatalf("expected commit on fresh base to succeed:\n%s\n%v", out, err)
+	}
+}
+
+// H-6 gate tests --------------------------------------------------------
+
+func TestClosedArcRetroactiveEditRejected(t *testing.T) {
+	wt, arcRel := seedArcRepo(t, "closed")
+	arcAbs := filepath.Join(wt, arcRel)
+	body, err := os.ReadFile(arcAbs)
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	edited := strings.Replace(string(body), "bravo", "MODIFIED", 1)
+	if edited == string(body) {
+		t.Fatalf("test setup broken: bravo not present in seed")
+	}
+	mustWriteFile(t, arcAbs, edited)
+	mustGit(t, wt, "add", arcRel)
+	out, err := exec.Command("git", "-C", wt, "commit", "-m", "retroactive edit").CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected commit to fail; succeeded:\n%s", out)
+	}
+	got := string(out)
+	if !strings.Contains(got, "closed arc") || !strings.Contains(got, "append-only") {
+		t.Errorf("expected closed-arc/append-only error, got:\n%s", got)
+	}
+	if !strings.Contains(got, arcRel) {
+		t.Errorf("expected error to name the offending file %q, got:\n%s", arcRel, got)
+	}
+}
+
+func TestClosedArcAppendPasses(t *testing.T) {
+	wt, arcRel := seedArcRepo(t, "closed")
+	arcAbs := filepath.Join(wt, arcRel)
+	body, err := os.ReadFile(arcAbs)
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	appended := string(body) + "delta\necho\n"
+	mustWriteFile(t, arcAbs, appended)
+	mustGit(t, wt, "add", arcRel)
+	if out, err := exec.Command("git", "-C", wt, "commit", "-m", "append to closed arc").CombinedOutput(); err != nil {
+		t.Fatalf("expected EOF append on closed arc to succeed:\n%s\n%v", out, err)
+	}
+}
+
+func TestOpenArcEditPasses(t *testing.T) {
+	wt, arcRel := seedArcRepo(t, "open")
+	arcAbs := filepath.Join(wt, arcRel)
+	body, err := os.ReadFile(arcAbs)
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	edited := strings.Replace(string(body), "bravo", "MODIFIED", 1)
+	mustWriteFile(t, arcAbs, edited)
+	mustGit(t, wt, "add", arcRel)
+	if out, err := exec.Command("git", "-C", wt, "commit", "-m", "open arc edit").CombinedOutput(); err != nil {
+		t.Fatalf("expected open-arc edit to succeed (gate scoped to Status: closed):\n%s\n%v", out, err)
+	}
+}
+
+func TestNonArcMdEditPasses(t *testing.T) {
+	_, wt, _ := makeWorktreeTestRepo(t)
+	nonArcRel := "docs/notes.md"
+	nonArcAbs := filepath.Join(wt, nonArcRel)
+	if err := os.MkdirAll(filepath.Dir(nonArcAbs), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Frontmatter literally says `Status: closed` — but the file is NOT
+	// under docs/arcs/, so the gate must skip it (path scope, not content
+	// scope).
+	mustWriteFile(t, nonArcAbs, "Status: closed\n\nalpha\nbravo\ncharlie\n")
+	mustGit(t, wt, "add", nonArcRel)
+	mustGit(t, wt, "commit", "-m", "seed non-arc md")
+	mustWriteFile(t, nonArcAbs, "Status: closed\n\nalpha\nMODIFIED\ncharlie\n")
+	mustGit(t, wt, "add", nonArcRel)
+	if out, err := exec.Command("git", "-C", wt, "commit", "-m", "non-arc md mid-edit").CombinedOutput(); err != nil {
+		t.Fatalf("expected non-arc md edit to succeed (gate scoped to docs/arcs/):\n%s\n%v", out, err)
 	}
 }
 
