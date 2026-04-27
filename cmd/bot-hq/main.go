@@ -17,6 +17,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/live"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
+	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
@@ -35,6 +36,12 @@ func main() {
 		case "audit-pane-drift":
 			runAuditPaneDrift()
 			return
+		case "outbound-miss-hook":
+			runOutboundMissHook()
+			return
+		case "install-trio-hook":
+			runInstallTrioHook()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -42,7 +49,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -326,6 +333,52 @@ func runAuditPaneDrift() {
 			ageSec,
 		)
 	}
+}
+
+// runOutboundMissHook is the Claude Code Stop-hook entry. Reads the
+// hook input JSON from stdin (transcript_path et al), evaluates the
+// three-clause filter, and emits an OUTBOUND-MISS alert via the hub
+// when the agent produced pane text without a hub_send tool call.
+// All errors are silenced — a Stop hook must never block agent exit.
+func runOutboundMissHook() {
+	outboundhook.RunHook(os.Stdin)
+}
+
+// runInstallTrioHook installs the OUTBOUND-MISS Stop hook into the
+// trio agent's Claude settings.json. Idempotent + non-clobbering.
+//
+// Usage:
+//
+//	bot-hq install-trio-hook            # writes ~/.claude/settings.json
+//	bot-hq install-trio-hook <path>     # writes a custom path
+//
+// User must additionally export BOT_HQ_AGENT_ID=<id> in the agent's
+// pane environment so the hook knows which agent it is firing for.
+func runInstallTrioHook() {
+	settingsPath := ""
+	if len(os.Args) > 2 {
+		settingsPath = os.Args[2]
+	}
+	if settingsPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "resolve home dir: %v\n", err)
+			os.Exit(1)
+		}
+		settingsPath = filepath.Join(home, ".claude", "settings.json")
+	}
+	botHQPath, err := os.Executable()
+	if err != nil || botHQPath == "" {
+		fmt.Fprintf(os.Stderr, "resolve bot-hq binary path: %v\n", err)
+		os.Exit(1)
+	}
+	if err := outboundhook.InstallTrioHook(settingsPath, botHQPath); err != nil {
+		fmt.Fprintf(os.Stderr, "install: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("OUTBOUND-MISS hook installed in %s\n", settingsPath)
+	fmt.Printf("Hook command: %s\n", outboundhook.SettingsHookCommand(botHQPath))
+	fmt.Printf("Reminder: export BOT_HQ_AGENT_ID=<id> in the agent's tmux pane env so the hook knows the agent identity.\n")
 }
 
 func statusDot(s protocol.AgentStatus) string {

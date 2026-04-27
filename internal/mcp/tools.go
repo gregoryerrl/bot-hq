@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
+	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
 	"github.com/gregoryerrl/bot-hq/internal/projects"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
@@ -755,10 +756,25 @@ func hubSpawn(db *hub.DB) ToolDef {
 			}
 		}
 
-		// Create a new tmux session in the project directory
+		// Spawn-contract bake (slice-5 H-22-bis item 3): install the
+		// OUTBOUND-MISS Stop hook into the project-scoped settings.json
+		// and set BOT_HQ_AGENT_ID in the tmux session env so the hook
+		// knows which agent it fires for. Best-effort — soft-failure
+		// logged but spawn continues. Mirrors the worktree-hooks pattern.
+		if mcpErr == nil {
+			projectSettingsPath := filepath.Join(project, ".claude", "settings.json")
+			if err := outboundhook.InstallTrioHook(projectSettingsPath, botHQPath); err != nil {
+				log.Printf("[hub-spawn] outbound-miss hook install failed for %s: %v (spawn continuing without hook)", projectSettingsPath, err)
+			}
+		}
+
+		// Create a new tmux session in the project directory. Set
+		// BOT_HQ_AGENT_ID via -e so the spawned claude process inherits
+		// it and the Stop hook subcommand can identify the agent.
 		cmd := exec.CommandContext(ctx, "tmux", "new-session", "-d",
 			"-s", sessionName,
 			"-c", project,
+			"-e", fmt.Sprintf("BOT_HQ_AGENT_ID=%s", sessionID),
 		)
 		if err := cmd.Run(); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("spawn failed: %v", err)), nil
