@@ -643,6 +643,12 @@ func hubSpawn(db *hub.DB) ToolDef {
 						worktreePath = wtPath
 						worktreeBranch = branchName
 						project = wtPath // coder works in the worktree
+						// H-3b: install pre-commit freshness gate so the coder
+						// can't merge a stale-base commit if main advances
+						// during their session. Soft-failure: log via the
+						// returned error but don't abort spawn — the hook is
+						// a safety rail, not a hard prerequisite.
+						_ = installWorktreeFreshnessHook(ctx, wtPath)
 					}
 				}
 			}
@@ -736,6 +742,8 @@ func hubSpawn(db *hub.DB) ToolDef {
 NOTE: You are working in a git worktree at %s (branch: %s).
 This is an isolated copy — the main repo is running a live server. Commit your changes to this branch.
 When done, Brian or the user will merge your branch into main.
+Your worktree has a pre-commit hook that blocks commits if origin/main has advanced past your base.
+If a commit fails with "stale base", run `+"`git fetch origin && git rebase origin/main`"+` then retry.
 `, worktreePath, worktreeBranch)
 		}
 		hubPreamble := buildCoderPreamble(sessionID, worktreeNote, rules)
