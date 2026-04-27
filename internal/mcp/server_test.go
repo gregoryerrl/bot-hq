@@ -43,6 +43,7 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_spawn_gemma",
 		"hub_schedule_wake",
 		"hub_cancel_wake",
+		"hub_session_close",
 		"hub_checkpoint",
 		"hub_restore",
 		"hub_issue_create",
@@ -794,5 +795,144 @@ func TestIssueUpdate(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("expected error for non-existent issue ID")
+	}
+}
+
+// decodeResultMap unmarshals a successful tool result's JSON text payload.
+func decodeResultMap(t *testing.T, result *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	if result.IsError {
+		t.Fatalf("unexpected error result: %v", result.Content)
+	}
+	tc, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	out := map[string]any{}
+	if err := json.Unmarshal([]byte(tc.Text), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return out
+}
+
+// TestSessionCloseStoresSnap locks the basic contract: hub_session_close
+// upserts a session_ledger row keyed on agent_id with the supplied snap_text.
+// Phase H slice 4 C4 (H-15).
+func TestSessionCloseStoresSnap(t *testing.T) {
+	db := setupTestDB(t)
+	handler := findHandler(BuildTools(db), "hub_session_close")
+	if handler == nil {
+		t.Fatal("hub_session_close not found")
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"agent_id":  "coder-abc",
+		"snap_text": "SNAP v1: focus=H-15; cursor=db.go:468; next=tools wiring",
+	}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := decodeResultMap(t, result)
+	if out["status"] != "stored" {
+		t.Errorf("status = %v, want stored", out["status"])
+	}
+
+	snap, err := db.GetLastSessionSnap("coder-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(snap, "focus=H-15") {
+		t.Errorf("ledger snap_text = %q, want substring focus=H-15", snap)
+	}
+}
+
+// TestRegisterReturnsPriorSnap locks bootstrap consumption: when a prior
+// session_ledger row exists for the agent, hub_register surfaces it as
+// last_session_snap so cold-start callers can pre-load context. Phase H
+// slice 4 C4 (H-15).
+func TestRegisterReturnsPriorSnap(t *testing.T) {
+	db := setupTestDB(t)
+	const want = "SNAP v1: prior-session anchor"
+	if err := db.StoreSessionClose("coder-prior", want); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := findHandler(BuildTools(db), "hub_register")
+	if handler == nil {
+		t.Fatal("hub_register not found")
+	}
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"id":   "coder-prior",
+		"name": "Coder Prior",
+		"type": "coder",
+	}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := decodeResultMap(t, result)
+	if got := out["last_session_snap"]; got != want {
+		t.Errorf("last_session_snap = %q, want %q", got, want)
+	}
+
+	// Negative branch: a never-closed agent registers with empty snap.
+	req.Params.Arguments = map[string]any{
+		"id":   "coder-fresh",
+		"name": "Coder Fresh",
+		"type": "coder",
+	}
+	result, err = handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = decodeResultMap(t, result)
+	if got := out["last_session_snap"]; got != "" {
+		t.Errorf("first-time agent last_session_snap = %q, want empty", got)
+	}
+}
+
+// TestSessionCloseOverwritesPrior locks upsert semantics: a second
+// hub_session_close for the same agent_id wins; only the latest SNAP is
+// surfaced on next register. Phase H slice 4 C4 (H-15).
+func TestSessionCloseOverwritesPrior(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	closeHandler := findHandler(tools, "hub_session_close")
+	registerHandler := findHandler(tools, "hub_register")
+	if closeHandler == nil || registerHandler == nil {
+		t.Fatal("required tools not found")
+	}
+
+	for _, snap := range []string{"first", "second"} {
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = map[string]any{
+			"agent_id":  "coder-up",
+			"snap_text": snap,
+		}
+		result, err := closeHandler(context.Background(), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.IsError {
+			t.Fatalf("close failed: %v", result.Content)
+		}
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"id":   "coder-up",
+		"name": "Coder Up",
+		"type": "coder",
+	}
+	result, err := registerHandler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := decodeResultMap(t, result)
+	if got := out["last_session_snap"]; got != "second" {
+		t.Errorf("last_session_snap = %q, want %q (upsert second-write-wins)", got, "second")
 	}
 }

@@ -1151,7 +1151,7 @@ func TestHubRegisterReturnsCurrentMaxMsgID(t *testing.T) {
 		lastID = id
 	}
 
-	wm, err := db.RegisterAgentWithWatermark(protocol.Agent{
+	wm, _, err := db.RegisterAgentWithWatermark(protocol.Agent{
 		ID: "wm_basic", Name: "WM", Type: protocol.AgentBrian, Status: protocol.StatusOnline,
 	})
 	if err != nil {
@@ -1218,7 +1218,7 @@ func TestHubRegisterAtomicWithMaxMsgID(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			<-startCh
-			wm, err := db.RegisterAgentWithWatermark(protocol.Agent{
+			wm, _, err := db.RegisterAgentWithWatermark(protocol.Agent{
 				ID:     fmt.Sprintf("wm_race_%d", idx),
 				Name:   "WM",
 				Type:   protocol.AgentCoder,
@@ -1265,7 +1265,7 @@ func TestHubRegisterRerunAdvancesWatermark(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wm1, err := db.RegisterAgentWithWatermark(protocol.Agent{
+	wm1, _, err := db.RegisterAgentWithWatermark(protocol.Agent{
 		ID: "wm_rerun", Name: "WM", Type: protocol.AgentBrian, Status: protocol.StatusOnline,
 	})
 	if err != nil {
@@ -1276,7 +1276,7 @@ func TestHubRegisterRerunAdvancesWatermark(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wm2, err := db.RegisterAgentWithWatermark(protocol.Agent{
+	wm2, _, err := db.RegisterAgentWithWatermark(protocol.Agent{
 		ID: "wm_rerun", Name: "WM", Type: protocol.AgentBrian, Status: protocol.StatusOnline,
 	})
 	if err != nil {

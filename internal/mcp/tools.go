@@ -119,6 +119,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSpawnGemma(db),
 		hubScheduleWake(db),
 		hubCancelWake(db),
+		hubSessionClose(db),
 		claudeList(db),
 		claudeRead(db),
 		claudeMessage(db),
@@ -218,7 +219,7 @@ func hubRegister(db *hub.DB) ToolDef {
 		// MAX(messages.id) at register-commit so the agent self-filters
 		// inbound msg.ID <= current_max_msg_id as boot-replay (post-rebuild
 		// context-bootstrap-replay pathology — see design doc §C3).
-		watermark, err := db.RegisterAgentWithWatermark(agent)
+		watermark, lastSnap, err := db.RegisterAgentWithWatermark(agent)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("register failed: %v", err)), nil
 		}
@@ -227,6 +228,46 @@ func hubRegister(db *hub.DB) ToolDef {
 			"status":             "registered",
 			"agent_id":           id,
 			"current_max_msg_id": watermark,
+			"last_session_snap":  lastSnap,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubSessionClose stores the calling agent's final SNAP into session_ledger.
+// Voluntary-only by design (Phase H slice 4 C4 / H-15) — agents invoke this
+// before graceful idle so the next register call surfaces it as
+// `last_session_snap` for cold-start context. Best-effort: rebuild-mid-flight
+// or hard-crash close never fires, which is acceptable per the H-27
+// deferral rationale.
+func hubSessionClose(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_session_close",
+		mcp.WithDescription("Voluntarily store this agent's final SNAP into the session ledger before graceful idle. The next hub_register for this agent_id will return it as last_session_snap for cold-start bootstrap context. Best-effort: rebuild-mid-flight or crash-close skips it."),
+		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent ID whose SNAP is being stored")),
+		mcp.WithString("snap_text", mcp.Required(), mcp.Description("Final SNAP text (typically the SNAP-block content from the agent's last cycle)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		agentID, err := req.RequireString("agent_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if strings.TrimSpace(agentID) == "" {
+			return mcp.NewToolResultError("agent_id must not be empty"), nil
+		}
+		snapText, err := req.RequireString("snap_text")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		if err := db.StoreSessionClose(agentID, snapText); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("session_close failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(toJSON(map[string]string{
+			"status":   "stored",
+			"agent_id": agentID,
 		})), nil
 	}
 

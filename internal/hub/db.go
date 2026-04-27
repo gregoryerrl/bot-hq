@@ -252,6 +252,12 @@ func (db *DB) migrate() error {
 		fire_status   TEXT NOT NULL DEFAULT 'pending'
 		             CHECK(fire_status IN ('pending','fired','failed','cancelled'))
 	);
+
+	CREATE TABLE IF NOT EXISTS session_ledger (
+		agent_id    TEXT PRIMARY KEY,
+		snap_text   TEXT NOT NULL,
+		closed_at   INTEGER NOT NULL
+	);
 	`
 	if _, err := db.conn.Exec(schema); err != nil {
 		return err
@@ -465,7 +471,7 @@ func (db *DB) RegisterAgent(agent protocol.Agent) error {
 // boundary guarantee no concurrent message INSERT slips between the SELECT
 // and the watermark UPDATE — the returned watermark equals the highest
 // committed msg.id that existed at register-commit-time.
-func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, error) {
+func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, string, error) {
 	if agent.Registered.IsZero() {
 		agent.Registered = time.Now()
 	}
@@ -474,7 +480,7 @@ func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, error) {
 
 	tx, err := db.conn.Begin()
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer tx.Rollback()
 
@@ -484,12 +490,12 @@ func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, error) {
 		agent.ID, agent.Name, string(agent.Type), string(agent.Status),
 		agent.Project, agent.Meta, agent.Registered.UnixMilli(), now, gen,
 	); err != nil {
-		return 0, err
+		return 0, "", err
 	}
 
 	var maxID sql.NullInt64
 	if err := tx.QueryRow(`SELECT MAX(id) FROM messages`).Scan(&maxID); err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	watermark := maxID.Int64 // 0 when messages table is empty (NULL → 0)
 
@@ -497,13 +503,60 @@ func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, error) {
 		`UPDATE agents SET last_seen_msg_id = ? WHERE id = ?`,
 		watermark, agent.ID,
 	); err != nil {
-		return 0, err
+		return 0, "", err
+	}
+
+	// Phase H slice 4 C4 (H-15): fetch this agent's last voluntarily-stored
+	// SNAP from session_ledger so the cold-start caller can pre-load it as
+	// boot context. Empty string when no prior close ever fired (first
+	// registration, or rebuild-mid-flight skipped the voluntary call).
+	var snap sql.NullString
+	if err := tx.QueryRow(
+		`SELECT snap_text FROM session_ledger WHERE agent_id = ?`, agent.ID,
+	).Scan(&snap); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, "", err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return watermark, nil
+	return watermark, snap.String, nil
+}
+
+// GetLastSessionSnap returns the snap_text last stored via StoreSessionClose
+// for the given agent, or "" when no row exists. Phase H slice 4 C4 (H-15).
+func (db *DB) GetLastSessionSnap(agentID string) (string, error) {
+	var snap sql.NullString
+	err := db.conn.QueryRow(
+		`SELECT snap_text FROM session_ledger WHERE agent_id = ?`, agentID,
+	).Scan(&snap)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return snap.String, nil
+}
+
+// StoreSessionClose upserts the agent's final SNAP into session_ledger.
+// Best-effort, voluntary-only — agents call this before graceful idle so the
+// next register (typically post-rebuild fresh-context) can pre-load it as
+// cold-start context. Phase H slice 4 C4 (H-15).
+func (db *DB) StoreSessionClose(agentID, snapText string) error {
+	if agentID == "" {
+		return errors.New("StoreSessionClose: agent_id must not be empty")
+	}
+	now := time.Now().UnixMilli()
+	_, err := db.conn.Exec(
+		`INSERT INTO session_ledger (agent_id, snap_text, closed_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(agent_id) DO UPDATE SET
+		   snap_text = excluded.snap_text,
+		   closed_at = excluded.closed_at`,
+		agentID, snapText, now,
+	)
+	return err
 }
 
 func (db *DB) GetAgent(id string) (protocol.Agent, error) {
