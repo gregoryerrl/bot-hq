@@ -26,6 +26,11 @@ const (
 	// sentinelPollInterval gates the H-22 cross-process MCP-insert catch-up
 	// path. See sentinelPollLoop for the rationale on why this exists.
 	sentinelPollInterval = 5 * time.Second
+	// wakeDispatchInterval is the slice-3 C1 (#7) wake_schedule fire cadence.
+	// 1s gives sub-second round-up against the seconds-precision fire_at
+	// granularity locked by arch lean 1, and stays comfortably inside the
+	// "fires within tick_interval + 1s" acceptance bound from the design.
+	wakeDispatchInterval = 1 * time.Second
 
 	defaultModel     = "gemma4:e4b"
 	defaultOllamaURL = "http://localhost:11434"
@@ -221,6 +226,7 @@ func (g *Gemma) Start() error {
 	go g.heartbeatLoop()
 	go g.monitorLoop()
 	go g.sentinelPollLoop()
+	go g.wakeDispatchLoop()
 
 	// Boot-time replay: run the most recent N hub messages through the
 	// sentinel so any active failures from the pre-restart window are
@@ -602,6 +608,67 @@ func (g *Gemma) pollSentinel() {
 		g.lastSentinelMsgID = maxID
 	}
 	g.sentinelMu.Unlock()
+}
+
+// wakeDispatchLoop is the agentic time-trigger primitive landed in Phase H
+// slice 3 C1 (#7). Each tick, it scans wake_schedule for pending rows whose
+// fire_at is now in the past and dispatches each via hub_send (from='emma',
+// type='command'). Reuses Emma's already-running clock infrastructure so no
+// new daemon is needed; this is the third in-process Emma tick loop after
+// sentinelPollLoop and monitorLoop.
+//
+// Cross-process safety: db.OnMessage callbacks fire only for inserts made by
+// the registering process (per H-22 distinction), but wake dispatch happens
+// inside Emma's own process via db.InsertMessage, so the resulting message
+// reaches OnMessage subscribers without crossing process boundaries here.
+// The MCP wake-schedule writes (cross-process) are caught by reading the
+// shared wake_schedule table directly each tick — same pattern as
+// sentinelPollLoop's read of the shared messages table.
+func (g *Gemma) wakeDispatchLoop() {
+	ticker := time.NewTicker(wakeDispatchInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-g.stopCh:
+			return
+		case <-ticker.C:
+			g.dispatchWakes()
+		}
+	}
+}
+
+// dispatchWakes fires every pending wake whose fire_at has elapsed. Each row
+// transitions to a terminal state (fired on hub_send success, failed on
+// hub_send error) — drop-on-fail per arch lean 4 (no retry in v1; failed
+// rows surface via the Emma log path). The terminal-flip uses
+// MarkWakeFired/MarkWakeFailed which are pending-only UPDATEs, so a concurrent
+// hub_cancel_wake racing the dispatch tick will leave the row in whichever
+// state won the race without state-machine corruption.
+func (g *Gemma) dispatchWakes() {
+	wakes, err := g.db.ListPendingWakes(time.Now())
+	if err != nil {
+		log.Printf("[wake] list pending: %v", err)
+		return
+	}
+	for _, w := range wakes {
+		msg := protocol.Message{
+			FromAgent: agentID,
+			ToAgent:   w.TargetAgent,
+			Type:      protocol.MsgCommand,
+			Content:   w.Payload,
+			Created:   time.Now(),
+		}
+		if _, err := g.db.InsertMessage(msg); err != nil {
+			log.Printf("[wake] dispatch failed (id=%d target=%s): %v", w.ID, w.TargetAgent, err)
+			if _, mErr := g.db.MarkWakeFailed(w.ID); mErr != nil {
+				log.Printf("[wake] mark-failed errored (id=%d): %v", w.ID, mErr)
+			}
+			continue
+		}
+		if _, err := g.db.MarkWakeFired(w.ID); err != nil {
+			log.Printf("[wake] mark-fired errored (id=%d): %v", w.ID, err)
+		}
+	}
 }
 
 // heartbeatLoop refreshes Emma's last_seen on a fast cadence so she stays
