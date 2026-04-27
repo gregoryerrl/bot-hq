@@ -515,10 +515,48 @@ func (g *Gemma) dispatchSentinelHit(msg protocol.Message, d SentinelDecision) {
 	})
 }
 
+// OnHubMessageReplay is the silent-mode variant of OnHubMessage used by
+// replayThroughSentinel at boot. It runs SentinelMatch and writes to the
+// dry-run ledger for matched dry-run patterns (correctness — preserves
+// cross-bounce dedup), but skips shouldFlag entirely so boot-replay
+// never arms the hysteresis window for live triggers, and skips
+// always-flag/Rain-emit paths so replay never spams Discord/Rain.
+//
+// Phase H slice 3 #4 (replay silent-mode): caught live during slice-2
+// closure cycle (msgs 3463/3467) — boot-replay over the last 50 msgs
+// could arm flagHistory["sentinel-obs:queueFailPattern"] for the full
+// 30-min hysteresis window, blocking subsequent live triggers. The
+// slipping pathology becomes worse under repeated rebuilds within a
+// 50-msg traffic burst (sliding-window arming).
+//
+// Splits replay-path from dispatch-path so hydration side-effects
+// (ledger write) are decoupled from notification side-effects
+// (hysteresis arm + Rain/Discord emit).
+func (g *Gemma) OnHubMessageReplay(msg protocol.Message) {
+	if msg.FromAgent == agentID {
+		return
+	}
+	d := SentinelMatch(msg)
+	if !d.Match {
+		return
+	}
+	if d.AlwaysFlag {
+		return
+	}
+	if name, isDryRun := IsDryRunPattern(d.Pattern); isDryRun {
+		AppendToDryRunLedger(name, fmt.Sprintf("msg #%d from %s | pattern %s | %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)))
+		return
+	}
+}
+
 // replayThroughSentinel feeds the last replayBacklog hub messages
-// through OnHubMessage at boot. Catches active failures from the
+// through OnHubMessageReplay at boot. Catches active failures from the
 // pre-restart window without requiring a separate silence-poll path
 // (deferred to post-Phase-F per locked msg 2442).
+//
+// Uses OnHubMessageReplay (silent variant) instead of OnHubMessage to
+// prevent boot-replay from arming hysteresis for live post-boot
+// triggers (Phase H slice 3 #4).
 //
 // Advances lastSentinelMsgID past the replayed window so the
 // sentinelPollLoop tick doesn't re-process the same messages. Cross-
@@ -531,7 +569,7 @@ func (g *Gemma) replayThroughSentinel() {
 	}
 	var maxID int64
 	for _, m := range msgs {
-		g.OnHubMessage(m)
+		g.OnHubMessageReplay(m)
 		if m.ID > maxID {
 			maxID = m.ID
 		}
