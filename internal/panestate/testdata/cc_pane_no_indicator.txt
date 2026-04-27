@@ -1,0 +1,10 @@
+⏺ Bash(go test ./...)
+  ⎿  ok  	github.com/gregoryerrl/bot-hq/internal/panestate	0.241s
+     ok  	github.com/gregoryerrl/bot-hq/internal/ui	0.183s
+
+⏺ Tests pass.
+
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)

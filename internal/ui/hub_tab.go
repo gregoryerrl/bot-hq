@@ -238,7 +238,7 @@ func (h HubTab) View() string {
 
 	stripContent := ""
 	if h.pane != nil {
-		stripContent = renderStrip(h.pane.Snapshot())
+		stripContent = renderStrip(h.pane.Snapshot(), h.width)
 	}
 	// Top+bottom borders only (no side borders) — matches the prior
 	// full-width separator aesthetic while bracketing the strip on both

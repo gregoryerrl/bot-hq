@@ -12,6 +12,8 @@ package panestate
 import (
 	"encoding/json"
 	"hash/fnv"
+	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
@@ -49,6 +51,11 @@ const paneCaptureLines = 50
 type paneState struct {
 	lastHash     uint64
 	lastActivity time.Time
+	// lastUsagePct caches the most recent parsed UsagePct so a transient
+	// capturePane error carries the prior value forward instead of regressing
+	// to -1 (parse-unknown). Mirrors the carry-forward semantic for
+	// lastActivity. -1 = unknown / never observed.
+	lastUsagePct int
 }
 
 // AgentActivity is the derived activity tier for first-order user check.
@@ -109,6 +116,13 @@ type AgentSnapshot struct {
 	// Phase F forward dependencies. Populated in Phase F by capture-pane classifier.
 	LastClassification string
 	RecentErrors       []ClassifierHit
+
+	// UsagePct is the parsed Claude Code context-usage percentage (0-100,
+	// high = closer to auto-compact). -1 means unknown: no tmux_target, no
+	// pane content captured yet, or the indicator is absent (CC only renders
+	// it past ~70-80% usage). H-30: drives the right-aligned hub-strip
+	// segment; H-31 will consume it for the context-cap halt-flag.
+	UsagePct int
 }
 
 // AgentSource is the dependency for Manager.Refresh — anything that lists agents.
@@ -163,7 +177,7 @@ func (m *Manager) Refresh() error {
 	currentGen := m.src.CurrentRebuildGen()
 	snap := make([]AgentSnapshot, len(agents))
 	for i, a := range agents {
-		paneActive := m.observePaneActivity(a, now)
+		paneActive, usagePct := m.observePaneActivity(a, now)
 		// StaleGen flags pre-rebuild registrations: agents stamped with a
 		// non-zero gen that doesn't match the current hub gen. Zero gen
 		// (legacy rows or pre-feature DBs) is never flagged stale.
@@ -177,6 +191,7 @@ func (m *Manager) Refresh() error {
 			LastPaneActivity: paneActive,
 			StaleGen:         stale,
 			Activity:         ComputeActivity(a.Status, a.LastSeen, paneActive, now),
+			UsagePct:         usagePct,
 		}
 	}
 	m.mu.Lock()
@@ -199,28 +214,65 @@ func (m *Manager) Refresh() error {
 //     startup).
 //   - Hash differs → paneActive = now, cache updated.
 //   - Hash matches → carry forward cached lastActivity.
-func (m *Manager) observePaneActivity(a protocol.Agent, now time.Time) time.Time {
+func (m *Manager) observePaneActivity(a protocol.Agent, now time.Time) (time.Time, int) {
 	tmuxTarget := extractTmuxTarget(a)
 	if tmuxTarget == "" {
-		return time.Time{}
+		return time.Time{}, -1
 	}
 	cached, hadCache := m.paneCache[a.ID]
 	output, err := m.capturePane(tmuxTarget, paneCaptureLines)
 	if err != nil {
-		return cached.lastActivity
+		// Carry forward both signals: a transient tmux error must not
+		// regress UsagePct to -1 any more than it regresses lastActivity to
+		// zero. Cache default for non-existent entry has lastUsagePct=0,
+		// which would falsely advertise "unknown" as "0% usage" — guard.
+		if !hadCache {
+			return time.Time{}, -1
+		}
+		return cached.lastActivity, cached.lastUsagePct
 	}
 	h := fnv.New64a()
 	h.Write([]byte(output))
 	hash := h.Sum64()
+	usagePct := parseUsagePct(output)
 	if !hadCache {
-		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: time.Time{}}
-		return time.Time{}
+		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: time.Time{}, lastUsagePct: usagePct}
+		return time.Time{}, usagePct
 	}
 	if hash != cached.lastHash {
-		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: now}
-		return now
+		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: now, lastUsagePct: usagePct}
+		return now, usagePct
 	}
-	return cached.lastActivity
+	// Hash unchanged — content stable. UsagePct re-parses to the same value
+	// (parser is pure over content), so cached.lastUsagePct is correct.
+	return cached.lastActivity, cached.lastUsagePct
+}
+
+// usagePctRe matches Claude Code's auto-compact countdown indicator. The
+// literal display string sourced from the published binary at
+// `@anthropic-ai/claude-code/cli.js` 2.1.119 is `${D}% until auto-compact`
+// (optionally suffixed `· ${MESSAGE}`), where D is the percentage of context
+// REMAINING until auto-compact triggers — high D = lots of room, low D =
+// imminent compaction. UsagePct inverts to a high-is-bad signal so the
+// strip's color tiers (yellow ≥80% / orange ≥90% / red ≥95%) align naturally
+// with squeeze severity.
+var usagePctRe = regexp.MustCompile(`(\d+)% until auto-compact`)
+
+// parseUsagePct extracts a context-usage percentage (0-100, high = closer to
+// auto-compact) from a captured tmux pane. Returns -1 when the indicator is
+// absent or the parse fails — display silently omits the segment, so a CC
+// version that changes the format degrades gracefully rather than producing
+// false 0%/100% readings.
+func parseUsagePct(paneContent string) int {
+	match := usagePctRe.FindStringSubmatch(paneContent)
+	if len(match) < 2 {
+		return -1
+	}
+	remaining, err := strconv.Atoi(match[1])
+	if err != nil || remaining < 0 || remaining > 100 {
+		return -1
+	}
+	return 100 - remaining
 }
 
 // extractTmuxTarget reads the tmux_target field from an agent's Meta JSON.

@@ -33,7 +33,7 @@ func TestRenderStripShowsAllExceptOffline(t *testing.T) {
 		makeSnap("c-stale", protocol.AgentCoder, panestate.ActivityStale),
 		makeSnap("d-offline", protocol.AgentCoder, panestate.ActivityOffline),
 	}
-	out := renderStrip(snap)
+	out := renderStrip(snap, 0)
 	if !strings.Contains(out, "a-working") {
 		t.Errorf("strip should contain a-working, got: %q", out)
 	}
@@ -55,7 +55,7 @@ func TestRenderStripOrdersByTier(t *testing.T) {
 		makeSnap("svc", protocol.AgentDiscord, panestate.ActivityWorking),
 		makeSnap("peer", protocol.AgentBrian, panestate.ActivityWorking),
 	}
-	out := renderStrip(snap)
+	out := renderStrip(snap, 0)
 	peerPos := strings.Index(out, "peer")
 	svcPos := strings.Index(out, "svc")
 	workerPos := strings.Index(out, "worker")
@@ -72,7 +72,7 @@ func TestRenderStripOrdersByNameWithinTier(t *testing.T) {
 		{ID: "z-brian", Name: "z-brian", Type: protocol.AgentBrian, Activity: panestate.ActivityWorking},
 		{ID: "a-rain", Name: "a-rain", Type: protocol.AgentQA, Activity: panestate.ActivityWorking},
 	}
-	out := renderStrip(snap)
+	out := renderStrip(snap, 0)
 	rainPos := strings.Index(out, "a-rain")
 	brianPos := strings.Index(out, "z-brian")
 	if rainPos < 0 || brianPos < 0 {
@@ -88,7 +88,7 @@ func TestRenderStripCapsAt8(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		snap = append(snap, makeSnap(fmt.Sprintf("agent%02d", i), protocol.AgentCoder, panestate.ActivityWorking))
 	}
-	out := renderStrip(snap)
+	out := renderStrip(snap, 0)
 	// Exactly 8 distinct IDs visible (agent00 .. agent07).
 	for i := 0; i < 8; i++ {
 		want := fmt.Sprintf("agent%02d", i)
@@ -110,7 +110,7 @@ func TestRenderStripCapsAt8(t *testing.T) {
 }
 
 func TestRenderStripEmpty(t *testing.T) {
-	out := renderStrip(nil)
+	out := renderStrip(nil, 0)
 	if strings.Contains(out, "●") || strings.Contains(out, "◐") {
 		t.Errorf("empty input should produce no dot chars, got: %q", out)
 	}
@@ -124,7 +124,7 @@ func TestRenderStripStaleVisibleOfflineHidden(t *testing.T) {
 		makeSnap("stale-agent", protocol.AgentBrian, panestate.ActivityStale),
 		makeSnap("offline-agent", protocol.AgentCoder, panestate.ActivityOffline),
 	}
-	out := renderStrip(snap)
+	out := renderStrip(snap, 0)
 	if !strings.Contains(out, "stale-agent") {
 		t.Errorf("stale agent should be visible (filter relaxed), got: %q", out)
 	}
@@ -145,7 +145,7 @@ func TestRenderStripAllOfflineEmpty(t *testing.T) {
 		makeSnap("a", protocol.AgentBrian, panestate.ActivityOffline),
 		makeSnap("b", protocol.AgentCoder, panestate.ActivityOffline),
 	}
-	out := renderStrip(snap)
+	out := renderStrip(snap, 0)
 	if strings.Contains(out, "a") || strings.Contains(out, "b") {
 		t.Errorf("all-offline input should produce no IDs, got: %q", out)
 	}
@@ -159,7 +159,7 @@ func TestRenderStripFourTierVisibility(t *testing.T) {
 		makeSnap("s", protocol.AgentVoice, panestate.ActivityStale),
 		makeSnap("x", protocol.AgentCoder, panestate.ActivityOffline),
 	}
-	out := renderStrip(snap)
+	out := renderStrip(snap, 0)
 	for _, want := range []string{"w", "o", "s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q visible, got: %q", want, out)
@@ -209,11 +209,77 @@ func TestRenderStripOmitsStaleGen(t *testing.T) {
 		makeSnap("current-gen", protocol.AgentBrian, panestate.ActivityWorking),
 		makeStaleGenSnap("prior-gen", protocol.AgentQA, panestate.ActivityOnline),
 	}
-	out := renderStrip(snap)
+	out := renderStrip(snap, 0)
 	if !strings.Contains(out, "current-gen") {
 		t.Errorf("strip should contain current-gen agent, got: %q", out)
 	}
 	if strings.Contains(out, "prior-gen") {
 		t.Errorf("strip should omit stale-gen agent, got: %q", out)
+	}
+}
+
+// makeUsageSnap is makeSnap + UsagePct setter for H-30 strip tests.
+func makeUsageSnap(id string, t protocol.AgentType, a panestate.AgentActivity, pct int) panestate.AgentSnapshot {
+	s := makeSnap(id, t, a)
+	s.UsagePct = pct
+	return s
+}
+
+// TestStripRendersUsageSegmentWhenDataPresent locks H-30: when at least one
+// visible agent has UsagePct ≥ usageSegmentMinPct (80), the strip appends a
+// right-aligned `<id> NN%` segment. The agent with the *maximum* UsagePct is
+// the one named — this is the worst-case squeeze, the one users need to see
+// first.
+func TestStripRendersUsageSegmentWhenDataPresent(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeUsageSnap("low", protocol.AgentBrian, panestate.ActivityWorking, 30),
+		makeUsageSnap("hot", protocol.AgentCoder, panestate.ActivityWorking, 87),
+	}
+	out := renderStrip(snap, 80)
+	if !strings.Contains(out, "hot") {
+		t.Errorf("expected hottest agent id 'hot' in usage segment, got: %q", out)
+	}
+	if !strings.Contains(out, "87%") {
+		t.Errorf("expected '87%%' in usage segment, got: %q", out)
+	}
+	// Right-aligned: the segment must come after the dot row, separated by
+	// at least usageSegmentMinSpacer spaces. Locating "hot 87%" past the
+	// dot-row body proves the spacer was inserted.
+	idx := strings.Index(out, "hot 87%")
+	if idx < 0 {
+		t.Fatalf("expected literal 'hot 87%%' substring (segment), got: %q", out)
+	}
+	// The dot row contains "low" (the non-hot agent) — verify the segment
+	// trails it. lipgloss color escapes around 'low' are fine; we only need
+	// 'low' to appear before 'hot 87%'.
+	lowIdx := strings.Index(out, "low")
+	if lowIdx < 0 || lowIdx >= idx {
+		t.Errorf("expected dot-row 'low' to precede segment 'hot 87%%', got: %q", out)
+	}
+}
+
+// TestStripOmitsUsageSegmentWhenAllUnknown locks H-30 fail-soft: when every
+// visible agent has UsagePct=-1 (no pane / parse-unknown) OR when all known
+// values are below the threshold, the segment is omitted entirely. No false
+// 0% display, no clutter at low usage. Two-stage: (1) all unknown, (2) all
+// known but sub-threshold.
+func TestStripOmitsUsageSegmentWhenAllUnknown(t *testing.T) {
+	// Stage 1: all UsagePct = -1.
+	allUnknown := []panestate.AgentSnapshot{
+		makeUsageSnap("emma", protocol.AgentBrian, panestate.ActivityWorking, -1),
+		makeUsageSnap("disc", protocol.AgentDiscord, panestate.ActivityOnline, -1),
+	}
+	out := renderStrip(allUnknown, 80)
+	if strings.Contains(out, "%") {
+		t.Errorf("all-unknown input should produce no '%%' in output, got: %q", out)
+	}
+	// Stage 2: all known but sub-threshold.
+	subThreshold := []panestate.AgentSnapshot{
+		makeUsageSnap("a", protocol.AgentBrian, panestate.ActivityWorking, 30),
+		makeUsageSnap("b", protocol.AgentCoder, panestate.ActivityWorking, 79),
+	}
+	out2 := renderStrip(subThreshold, 80)
+	if strings.Contains(out2, "%") {
+		t.Errorf("sub-threshold input should produce no '%%' in output, got: %q", out2)
 	}
 }

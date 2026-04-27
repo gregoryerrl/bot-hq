@@ -1,6 +1,8 @@
 package panestate
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -426,6 +428,115 @@ func TestRefreshPaneActivity_CaptureErrorCarriesForward(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// TestParseUsagePctKnownFormat locks H-30 parser against the published Claude
+// Code 2.1.119 indicator format `${D}% until auto-compact`. UsagePct inverts
+// remaining-pct to high-is-bad: D=5 → UsagePct=95.
+//
+// Format source: `@anthropic-ai/claude-code/cli.js` template literal
+// `${D}% until auto-compact[· ${MESSAGE}]` (published-source discovery, not
+// hypothesis). The high-usage fixture mirrors a CC pane near auto-compact.
+func TestParseUsagePctKnownFormat(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"bare 5% remaining → 95% used", "  5% until auto-compact", 95},
+		{"with message suffix", "20% until auto-compact · approaching cap", 80},
+		{"zero remaining → 100 used", "0% until auto-compact", 100},
+		{"max remaining → 0 used", "100% until auto-compact", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseUsagePct(tc.in); got != tc.want {
+				t.Errorf("parseUsagePct(%q) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+
+	// Fixture-driven regression — committed pane capture re-parses to the
+	// same UsagePct. If CC changes the indicator format and the fixture is
+	// refreshed, this asserts the parser stays in sync.
+	data, err := os.ReadFile(filepath.Join("testdata", "cc_pane_high_usage.txt"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if got := parseUsagePct(string(data)); got != 95 {
+		t.Errorf("fixture parseUsagePct = %d, want 95 (5%% remaining)", got)
+	}
+}
+
+// TestParseUsagePctUnknownFallback locks fail-soft: any input that doesn't
+// match the indicator regex returns -1. Display silently omits the segment
+// rather than rendering a misleading 0% / 100%. This is the FIRST-class path
+// per design: format-mismatch must never break runtime.
+func TestParseUsagePctUnknownFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"empty string", ""},
+		{"no indicator at all", "⏺ Bash(go test ./...)\n  ⎿ ok"},
+		{"missing percent suffix", "5 until auto-compact"},
+		{"malformed: word instead of digits", "five% until auto-compact"},
+		{"truncated: missing 'auto-compact'", "5% until auto"},
+		{"different feature mentioned", "Context: 50% complete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseUsagePct(tc.in); got != -1 {
+				t.Errorf("parseUsagePct(%q) = %d, want -1 (unknown)", tc.in, got)
+			}
+		})
+	}
+
+	// Fixture-driven — the no-indicator pane capture must parse to -1.
+	data, err := os.ReadFile(filepath.Join("testdata", "cc_pane_no_indicator.txt"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if got := parseUsagePct(string(data)); got != -1 {
+		t.Errorf("no-indicator fixture parseUsagePct = %d, want -1", got)
+	}
+}
+
+// TestRefreshPaneActivity_UsagePctPropagates locks the wiring path: a fresh
+// capture containing the indicator surfaces UsagePct on the snapshot, AND a
+// subsequent capture-error tick carries the prior value forward instead of
+// regressing to -1. Three-step shape — prior-zero step would falsely pass a
+// trivial implementation.
+func TestRefreshPaneActivity_UsagePctPropagates(t *testing.T) {
+	fake := &fakeSource{agents: []protocol.Agent{agentWithTmux("a1", "session:0.0")}}
+	captureErr := errString("tmux gone")
+	cap := &scriptedCapture{
+		outputs: []string{"5% until auto-compact", "", ""},
+		errs:    []error{nil, nil, captureErr},
+	}
+	m := NewManager(fake, cap.fn)
+
+	// Tick 1: seed with high-usage indicator → UsagePct=95.
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Snapshot()[0].UsagePct; got != 95 {
+		t.Errorf("tick 1 UsagePct = %d, want 95 (5%% remaining)", got)
+	}
+	// Tick 2: empty pane (no indicator) → UsagePct=-1 (parse-unknown).
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Snapshot()[0].UsagePct; got != -1 {
+		t.Errorf("tick 2 UsagePct = %d, want -1 (no indicator)", got)
+	}
+	// Tick 3: capture errors → carry forward prior cached value (-1).
+	if err := m.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Snapshot()[0].UsagePct; got != -1 {
+		t.Errorf("tick 3 UsagePct = %d, want -1 (carry-forward)", got)
+	}
+}
 
 // TestRefreshPaneActivity_H6_LauncherShapedMeta locks the H6 fix path:
 // launcher-registered agents (internal/brian/brian.go, internal/rain/rain.go)
