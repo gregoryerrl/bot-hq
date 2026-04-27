@@ -126,7 +126,11 @@ func AppendToDryRunLedger(name string, line string) {
 
 	if m := ledgerMsgIDRe.FindStringSubmatch(line); m != nil {
 		if existing, err := os.ReadFile(path); err == nil {
-			needle := fmt.Sprintf("msg #%s ", m[1])
+			// Anchor the dedup needle to the canonical-format position:
+			// `<RFC3339> | msg #<id> ...`. The leading " | " separator
+			// disambiguates against a free-form ledger line that mentions
+			// the same msg-id in its body (e.g., "see msg #42 for context").
+			needle := fmt.Sprintf(" | msg #%s ", m[1])
 			if strings.Contains(string(existing), needle) {
 				return
 			}

@@ -152,6 +152,39 @@ func TestAppendToDryRunLedgerDedupsByMsgID(t *testing.T) {
 	}
 }
 
+// TestAppendToDryRunLedgerLineAnchorsDedup locks the line-anchor
+// refinement (Rain msg 3439): a free-form ledger line that mentions
+// `msg #<id>` in its body MUST NOT cause a subsequent canonical
+// entry with the same msg-id to be dedup-suppressed. The dedup needle
+// anchors to ` | msg #<id> ` (canonical-format leading separator) so
+// only canonical-position occurrences count as a hit.
+func TestAppendToDryRunLedgerLineAnchorsDedup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+
+	// Free-form line that mentions msg #42 in its body — must NOT
+	// preempt a future canonical entry for the same msg-id.
+	AppendToDryRunLedger("queuefail", "see msg #42 for context")
+	// Canonical-format entry for msg #42 — must still write.
+	AppendToDryRunLedger("queuefail", "msg #42 from brian | pattern X | excerpt-A")
+
+	ledgerPath := filepath.Join(home, "sentinels", "queuefail-dryrun.log")
+	data, err := os.ReadFile(ledgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Errorf("expected 2 ledger lines (free-form mention + canonical entry); got %d: %q", len(lines), data)
+	}
+	if !strings.Contains(string(data), "see msg #42 for context") {
+		t.Errorf("ledger missing free-form mention, got: %s", data)
+	}
+	if !strings.Contains(string(data), "excerpt-A") {
+		t.Errorf("canonical entry must be written despite free-form prior containing same msg-id, got: %s", data)
+	}
+}
+
 // TestAppendToDryRunLedgerKeepsLegacyCallers locks that lines without
 // embedded msg-id tokens are still appended unconditionally. The existing
 // TestSentinelDryRunWritesToLedger uses such legacy-shaped lines.
