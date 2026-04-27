@@ -200,6 +200,27 @@ func TestBrianPromptContainsAsymmetricPivot(t *testing.T) {
 	}
 }
 
+// TestBrianStartupBootstrapIterate locks the H-19 caller-side iterate
+// discipline into STARTUP step 1. Without iteration, large backlogs
+// (post-rebuild, post-idle) silently truncate at 50; the agent acts on
+// a partial mental model. Substrings ratchet the iterate-pattern + the
+// convention-doc pointer.
+func TestBrianStartupBootstrapIterate(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"iterate with `since_id = last_msg.id`",
+		"empty batch",
+		"hub_read caps at 50",
+		"docs/conventions/bootstrap-iterate.md",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-19 bootstrap-iterate literal %q", w)
+		}
+	}
+}
+
 // TestBrianStartupCarveOutGloss locks the H-2 consistency fold for STARTUP:
 // Brian's startup-time hub_flag is explicitly framed as the implicit
 // carve-out window (Rain not yet registered).
