@@ -130,14 +130,23 @@ func (g *Gemma) checkStaleAgentsAt(now time.Time) {
 	}
 }
 
-// flagStaleAgent emits the [STALE-CODER] PM to Rain, gated by shouldFlag's
-// existing 30min hysteresis on key "stale-coder:<id>" so the same agent
-// across multiple ticks produces a single PM until the window elapses.
+// flagStaleAgent emits the [STALE-CODER] PM to Rain, gated by the per-agent
+// LastSeen advance-check (lean (b)): re-firing is suppressed when LastSeen
+// has not advanced since the most recent stale-coder flag for this agent.
+// "Stale" is sticky once observed — the agent is either dead (won't recover)
+// or intentional-idle (covered upstream by halt-state). A new flag fires
+// only when LastSeen advances past the tracked value, which captures the
+// meaningful event: "agent came back, then went stale again."
+//
+// Caller (checkStaleAgentsAt) holds g.staleMu, so direct map access is safe.
 func (g *Gemma) flagStaleAgent(a protocol.Agent, now time.Time) {
-	key := "stale-coder:" + a.ID
-	if !g.shouldFlag(key, now) {
-		return
+	if g.staleFlagTracker == nil {
+		g.staleFlagTracker = make(map[string]time.Time)
 	}
+	if last, seen := g.staleFlagTracker[a.ID]; seen && last.Equal(a.LastSeen) {
+		return // LastSeen unchanged → same incident → suppress
+	}
+	g.staleFlagTracker[a.ID] = a.LastSeen
 	age := now.Sub(a.LastSeen).Round(time.Second)
 	g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,

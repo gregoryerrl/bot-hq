@@ -146,9 +146,22 @@ type Gemma struct {
 	// tracks the previous tick's tmux #{pane_last_activity} per agent so the
 	// next tick can decide "any pane output since last observation?". Mutex
 	// guards both the map and the paneActivity injection point.
-	staleMu      sync.Mutex
-	paneBaseline map[string]int64
-	paneActivity paneActivityFn
+	//
+	// Phase H slice 4 C7 (H-3a hysteresis lean-(b)): staleFlagTracker remembers
+	// the LastSeen value at the moment of the most recent stale-coder flag for
+	// each agent. Re-firing is suppressed until LastSeen advances past that
+	// value — semantically tighter than the prior 30min window, since a stale
+	// agent doesn't spontaneously un-stale (re-firing every 30min is pure
+	// noise; the meaningful event is "agent came back, then went stale again",
+	// which the advance check captures). Per Rain C3.5 finding (msg 3801):
+	// observed ~60min duplicate-fire was 30min hysteresis + 3/hr rate cap
+	// interaction; lean (b) replaces the hysteresis gate for stale-coder
+	// specifically. Halt-state suppression at checkStaleAgentsAt entry still
+	// takes precedence; advance-check operates only when halt is inactive.
+	staleMu          sync.Mutex
+	paneBaseline     map[string]int64
+	paneActivity     paneActivityFn
+	staleFlagTracker map[string]time.Time
 
 	// Phase H slice 3 C5 (H-25 roster hygiene) state. lastPruneAt is read+
 	// written only from healthLoop so no mutex needed; zero value means

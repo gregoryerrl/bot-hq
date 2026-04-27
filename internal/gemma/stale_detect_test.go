@@ -167,8 +167,12 @@ func TestStaleDetectionFallbackForNoTmuxTarget(t *testing.T) {
 }
 
 // TestStaleDetectionHysteresis locks the no-spam invariant: same stale agent
-// across multiple ticks emits exactly ONE PM thanks to shouldFlag's existing
-// 30min hysteresis window keyed on stale-coder:<id>.
+// across multiple ticks emits exactly ONE PM. Phase H slice 4 C7 replaced
+// the 30min shouldFlag hysteresis with the lean-(b) advance-check: re-fire
+// is suppressed until LastSeen advances. A frozen agent's LastSeen never
+// advances, so 4 ticks still collapse to 1 PM — same observable result,
+// tighter semantic (no spurious re-fires every 30min on persistent dead
+// agents). Per Rain C3.5 finding (msg 3801).
 func TestStaleDetectionHysteresis(t *testing.T) {
 	g, db := newTestGemma(t)
 
@@ -195,5 +199,75 @@ func TestStaleDetectionHysteresis(t *testing.T) {
 
 	if got := countStaleCoderMsgs(t, db); got != 1 {
 		t.Errorf("hysteresis must collapse repeated stale ticks to 1 PM; got %d", got)
+	}
+}
+
+// TestStaleFlagFiresWhenLastSeenAdvances locks the lean-(b) re-arm semantic:
+// once a stale-coder flag has fired for an agent, the advance-check tracks
+// the LastSeen value at flag time. When LastSeen later advances (agent
+// recovered) and then the agent goes stale again with a new LastSeen
+// further in the past relative to a later virtual-now, a second flag must
+// fire. This is the meaningful event the lean-(b) framing was designed to
+// surface — agent came back, then went stale again — that the prior 30min
+// shouldFlag window could miss or delay arbitrarily depending on rate-cap
+// interactions (Rain C3.5 msg 3801).
+func TestStaleFlagFiresWhenLastSeenAdvances(t *testing.T) {
+	g, db := newTestGemma(t)
+
+	target := "test:0.4"
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     "coder-recovered",
+		Name:   "Recovered",
+		Type:   protocol.AgentCoder,
+		Status: protocol.StatusOnline,
+		Meta:   `{"tmux_target":"` + target + `"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := newFakePaneActivity()
+	// First incident: sustained silence (500, 500). Recovery + second incident:
+	// pane advances briefly (700) then goes silent again (700) — simulates
+	// "agent did some work, then froze a second time."
+	fake.queue(target, 500, 500, 700, 700)
+	g.paneActivity = fake.check
+
+	// First incident: virtual-now is past register-time + staleThreshold.
+	// Tick 1 establishes baseline; tick 2 sees cur==prev → flag fires.
+	firstNow := time.Now().Add(6 * time.Minute)
+	g.checkStaleAgentsAt(firstNow)
+	g.checkStaleAgentsAt(firstNow.Add(30 * time.Second))
+
+	if got := countStaleCoderMsgs(t, db); got != 1 {
+		t.Fatalf("first incident: expected 1 flag, got %d", got)
+	}
+
+	// Agent recovers — bump LastSeen via the production path. This advances
+	// the tracked value past what flagStaleAgent stored at first-flag time,
+	// re-arming the advance-check. Sleep guarantees millisecond separation
+	// from RegisterAgent's now() so LastSeen strictly advances even on fast
+	// hardware (UnixMilli resolution + tight scheduling can otherwise yield
+	// equal timestamps; the advance-check relies on strict inequality).
+	time.Sleep(2 * time.Millisecond)
+	if err := db.UpdateAgentLastSeen("coder-recovered"); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := db.GetAgent("coder-recovered")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second incident: virtual-now advances past the new LastSeen +
+	// staleThreshold. Tick 3 sees pane advance 500→700 (agent's brief
+	// recovery activity) → continue (alive). Tick 4 sees cur==prev=700
+	// (silent again) → fall through to flagStaleAgent. Tracker has
+	// LastSeen=T_register from first flag; current LastSeen=T_recover →
+	// not equal → second flag fires.
+	secondNow := recovered.LastSeen.Add(6 * time.Minute)
+	g.checkStaleAgentsAt(secondNow)
+	g.checkStaleAgentsAt(secondNow.Add(30 * time.Second))
+
+	if got := countStaleCoderMsgs(t, db); got != 2 {
+		t.Errorf("second incident after LastSeen advance: expected 2 total flags, got %d", got)
 	}
 }
