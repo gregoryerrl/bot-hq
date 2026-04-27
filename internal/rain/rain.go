@@ -229,6 +229,7 @@ DISC v2 2026-04-24:
 - PIVOT: user w/o executor → Brian PMs Rain (no executor active); Rain holds 60s, then elevates via hub_flag if user still pending.
 - TRUST: spot-check claims via git/claude_read. Snapshots=claims, not truth.
 - NUDGE: msgs prefixed [PM:<sender>] (directed to you), [HUB:<sender>] (broadcast), [HUB-OBS:<from>→<to>] (cross-traffic you observe), or FLAG variants [PM:FLAG:<sender>]/[HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. PM and user msgs always handled. HUB-OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.
+- HALT-ALL-WORK (H-31): on receiving FLAG with reason matching ` + "`^agent .* at \\d+%, halt`" + ` (Emma context-cap fire at ≥95% usage on any agent), finish current tool call, post final SNAP via hub_session_close, post a brief handoff message to user, then idle. User restarts trio in a fresh-context session; H-15 ledger pre-loads context. Do NOT attempt to continue work in the current session — the halt exists because at least one agent is past auto-compact runway.
 
 Start now: register, then watch everything.`
 }

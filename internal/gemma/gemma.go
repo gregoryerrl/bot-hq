@@ -154,6 +154,11 @@ type Gemma struct {
 	// written only from healthLoop so no mutex needed; zero value means
 	// "never pruned this run", which triggers a first-tick prune.
 	lastPruneAt time.Time
+
+	// Phase H slice 4 C6 (H-31) context-cap halt-flag source. Tests assign
+	// directly; production wires a panestate.Manager-backed closure on
+	// Start via initContextCapDefault.
+	paneSnapFn paneSnapshotFn
 }
 
 // New creates a Gemma instance from config.
@@ -233,6 +238,11 @@ func (g *Gemma) Start() error {
 	}
 
 	g.running = true
+
+	// Phase H slice 4 C6 (H-31): wire the panestate snapshot source if a
+	// test hasn't already injected one. Default uses a hub-DB-backed
+	// panestate.Manager + real tmux.CapturePane.
+	g.initContextCapDefault()
 
 	go g.pollLoop()
 	go g.healthLoop()
@@ -478,6 +488,10 @@ func (g *Gemma) healthLoop() {
 			g.checkStaleAgents()
 			// Phase H slice 3 C5: piggyback roster prune at hourly cadence.
 			g.runRosterPrune()
+			// Phase H slice 4 C6 (H-31): scan panestate for context-cap
+			// squeeze; fire halt-flag + set halt_state when any non-emma
+			// agent is at or above 95% usage.
+			g.checkContextCap(time.Now())
 		}
 	}
 }

@@ -120,6 +120,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubScheduleWake(db),
 		hubCancelWake(db),
 		hubSessionClose(db),
+		hubClearHalt(db),
 		claudeList(db),
 		claudeRead(db),
 		claudeMessage(db),
@@ -268,6 +269,40 @@ func hubSessionClose(db *hub.DB) ToolDef {
 		return mcp.NewToolResultText(toJSON(map[string]string{
 			"status":   "stored",
 			"agent_id": agentID,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubClearHalt is the explicit operator-invocable clear path for the
+// halt_state machine landed in Phase H slice 4 C6 (H-31). The default
+// halt-clear path is causality-only — set on Emma's context-cap flag, cleared
+// when the trio re-registers post-rebuild past set_at. This tool provides an
+// abort lever for the case where the operator wants to dismiss the halt
+// without restarting trio sessions (e.g. false-fire investigation, manual
+// recovery). No args; idempotent — calling on an inactive halt returns
+// `not_active`.
+func hubClearHalt(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_clear_halt",
+		mcp.WithDescription("Manually clear an active halt_state without trio re-register. Use when an operator wants to abort the halt-all-work convention (e.g. false-fire, in-place recovery). The default halt-clear is causality-only via trio re-registration; this is the explicit override."),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		active, _, err := db.IsHaltActive()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("halt status check failed: %v", err)), nil
+		}
+		if !active {
+			return mcp.NewToolResultText(toJSON(map[string]string{
+				"status": "not_active",
+			})), nil
+		}
+		if err := db.ClearHaltManually(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("clear halt failed: %v", err)), nil
+		}
+		return mcp.NewToolResultText(toJSON(map[string]string{
+			"status": "cleared",
 		})), nil
 	}
 

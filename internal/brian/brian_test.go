@@ -221,6 +221,28 @@ func TestBrianStartupBootstrapIterate(t *testing.T) {
 	}
 }
 
+// TestBrianPromptContainsHaltAllWork locks the H-31 halt-all-work convention
+// into the initial prompt. The literal substrings ratchet the regex
+// recognition pattern, the close-via-H15 directive, and the fresh-session
+// restart contract — silent removal of any of these would let Brian receive
+// the FLAG without recognizing it as the halt trigger.
+func TestBrianPromptContainsHaltAllWork(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"HALT-ALL-WORK (H-31)",
+		`^agent .* at \d+%, halt`,
+		"hub_session_close",
+		"fresh-context session",
+		"H-15 ledger pre-loads context",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-31 halt-all-work literal %q", w)
+		}
+	}
+}
+
 // TestBrianStartupCarveOutGloss locks the H-2 consistency fold for STARTUP:
 // Brian's startup-time hub_flag is explicitly framed as the implicit
 // carve-out window (Rain not yet registered).

@@ -258,6 +258,15 @@ func (db *DB) migrate() error {
 		snap_text   TEXT NOT NULL,
 		closed_at   INTEGER NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS halt_state (
+		id      INTEGER PRIMARY KEY CHECK (id = 1),
+		active  INTEGER NOT NULL DEFAULT 0,
+		set_by  TEXT NOT NULL DEFAULT '',
+		set_at  INTEGER NOT NULL DEFAULT 0,
+		reason  TEXT NOT NULL DEFAULT ''
+	);
+	INSERT OR IGNORE INTO halt_state (id, active) VALUES (1, 0);
 	`
 	if _, err := db.conn.Exec(schema); err != nil {
 		return err
@@ -520,6 +529,18 @@ func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, string, e
 	if err := tx.Commit(); err != nil {
 		return 0, "", err
 	}
+
+	// Phase H slice 4 C6 (H-31): causality-only halt-state auto-clear. After
+	// commit, check whether this register advances the trio past the active
+	// halt's set_at; if every currently-registered trio member's last_seen is
+	// now past set_at, clear. Best-effort — clear errors are logged but never
+	// fail the register.
+	if cleared, cerr := db.ClearHaltIfTrioReregistered(HaltStateTrio); cerr != nil {
+		log.Printf("[halt-state] auto-clear check failed: %v", cerr)
+	} else if cleared {
+		log.Printf("[halt-state] auto-cleared after %s re-register completed trio", agent.ID)
+	}
+
 	return watermark, snap.String, nil
 }
 
@@ -557,6 +578,103 @@ func (db *DB) StoreSessionClose(agentID, snapText string) error {
 		agentID, snapText, now,
 	)
 	return err
+}
+
+// HaltStateTrio names the agents whose joint re-registration auto-clears an
+// active halt_state. Causality-only: a halt set by Emma at T_h clears once
+// every currently-registered trio member has last_seen > T_h. Members absent
+// from the agents table (pruned/never-registered) are excluded from the
+// comparison set so a partial trio can still produce a clear; an empty
+// comparison set never clears (would be a false positive).
+//
+// Phase H slice 4 C6 (H-31).
+var HaltStateTrio = []string{"brian", "rain", "clive"}
+
+// IsHaltActive reports whether the single-row halt_state machine is currently
+// active, returning the set_at timestamp alongside so callers can compare it
+// against per-agent last_seen for causality-clear logic.
+func (db *DB) IsHaltActive() (bool, time.Time, error) {
+	var active int
+	var setAt int64
+	err := db.conn.QueryRow(
+		`SELECT active, set_at FROM halt_state WHERE id = 1`,
+	).Scan(&active, &setAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, time.Time{}, nil
+	}
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	return active == 1, time.UnixMilli(setAt), nil
+}
+
+// SetHaltActive flips the single-row halt_state to active=1 with the given
+// set_by + reason and stamps set_at=now. Idempotent — subsequent calls update
+// set_at and reason; callers wrap with hysteresis to avoid set_at thrash.
+func (db *DB) SetHaltActive(setBy, reason string) error {
+	now := time.Now().UnixMilli()
+	_, err := db.conn.Exec(
+		`UPDATE halt_state SET active = 1, set_by = ?, set_at = ?, reason = ? WHERE id = 1`,
+		setBy, now, reason,
+	)
+	return err
+}
+
+// ClearHaltManually unconditionally clears the halt flag. Backs the
+// hub_clear_halt MCP tool: explicit operator-initiated abort path that does
+// not require a fresh trio re-register (e.g. user wants to resume work in the
+// existing sessions rather than restart).
+func (db *DB) ClearHaltManually() error {
+	_, err := db.conn.Exec(
+		`UPDATE halt_state SET active = 0, set_by = '', set_at = 0, reason = '' WHERE id = 1`,
+	)
+	return err
+}
+
+// ClearHaltIfTrioReregistered clears halt_state iff every currently-registered
+// trio member has last_seen > halt_state.set_at. Members missing from the
+// agents table (e.g. pruned, never-registered) are excluded from the
+// comparison set so a partial trio can still trigger a clear. An empty
+// comparison set (no trio member registered at all) does not clear — that
+// is not evidence of fresh-context re-arrival, just absence.
+//
+// Returns (true, nil) when the clear fired, (false, nil) when the halt was
+// not active or the trio condition was unmet.
+func (db *DB) ClearHaltIfTrioReregistered(trioIDs []string) (bool, error) {
+	active, setAt, err := db.IsHaltActive()
+	if err != nil {
+		return false, err
+	}
+	if !active {
+		return false, nil
+	}
+	setAtMs := setAt.UnixMilli()
+
+	considered := 0
+	advanced := 0
+	for _, id := range trioIDs {
+		var lastSeen int64
+		err := db.conn.QueryRow(
+			`SELECT last_seen FROM agents WHERE id = ?`, id,
+		).Scan(&lastSeen)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue // pruned/never-registered — exclude from comparison
+		}
+		if err != nil {
+			return false, err
+		}
+		considered++
+		if lastSeen > setAtMs {
+			advanced++
+		}
+	}
+	if considered == 0 || advanced != considered {
+		return false, nil
+	}
+	if err := db.ClearHaltManually(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (db *DB) GetAgent(id string) (protocol.Agent, error) {

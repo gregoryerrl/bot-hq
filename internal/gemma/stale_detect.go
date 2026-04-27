@@ -72,6 +72,16 @@ func (g *Gemma) checkStaleAgents() {
 // so tests can advance simulated time past staleThreshold without sleeping
 // or backdating database rows.
 func (g *Gemma) checkStaleAgentsAt(now time.Time) {
+	// Phase H slice 4 C6 (H-31): halt-state suppresses ALL H-3a stale-fires
+	// during an active halt. Halt = all-hands-idle by convention; agents
+	// finishing their final tool call before posting close-SNAP would
+	// otherwise read as stale on this tick. The early-return drops the
+	// tmux_target qualifier per BRAIN P1 fold rationale: selective
+	// suppression leaks alerts on non-pane agents (Emma, voice/discord)
+	// during the halt window.
+	if active, _, _ := g.db.IsHaltActive(); active {
+		return
+	}
 	agents, err := g.db.ListAgents("")
 	if err != nil {
 		return

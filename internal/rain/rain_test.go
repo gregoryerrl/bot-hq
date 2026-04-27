@@ -199,6 +199,26 @@ func TestRainPromptContainsHalterPusher(t *testing.T) {
 	}
 }
 
+// TestRainPromptContainsHaltAllWork locks the H-31 halt-all-work convention
+// into Rain's initial prompt. Mirrors Brian's ratchet so both agents
+// recognize Emma's context-cap FLAG identically.
+func TestRainPromptContainsHaltAllWork(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	want := []string{
+		"HALT-ALL-WORK (H-31)",
+		`^agent .* at \d+%, halt`,
+		"hub_session_close",
+		"fresh-context session",
+		"H-15 ledger pre-loads context",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain H-31 halt-all-work literal %q", w)
+		}
+	}
+}
+
 // TestRainPromptContainsCarveOutEnumeration locks the Phase H slice 2 H-2
 // self-flag carve-out enumeration into Rain's initial prompt. Mirrors
 // Brian's ratchet so both agents share the same canonical carve-out list.

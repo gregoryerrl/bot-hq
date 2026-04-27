@@ -312,6 +312,10 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// Anonymous create operations.
 		"hub_session_create": "creates a session; caller not bound to an agent yet",
 		"hub_issue_create":   "creates an issue; caller anonymous in current schema",
+
+		// Phase H slice 4 C6 (H-31): explicit operator-invocable halt clear.
+		// No caller-context — the tool dismisses a global halt-state machine.
+		"hub_clear_halt": "manually clears global halt_state; no per-caller context",
 	}
 
 	db := setupTestDB(t)
