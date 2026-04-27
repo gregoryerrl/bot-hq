@@ -1312,6 +1312,25 @@ func (db *DB) UpdateIssue(id, status, assignedTo, resolution string) (map[string
 
 // --- Wake schedule (Phase H slice 3 C1 #7) ---
 
+// HasPendingWakeForTarget reports whether any wake_schedule row exists for
+// targetAgent in fire_status='pending'. Used by C7 (#6 H-23 periodic
+// invoker) bootstrap to avoid double-scheduling _internal:docdrift across
+// rebuilds when a prior boot's pending wake is still in the table.
+func (db *DB) HasPendingWakeForTarget(target string) (bool, error) {
+	var one int
+	err := db.conn.QueryRow(
+		`SELECT 1 FROM wake_schedule WHERE target_agent = ? AND fire_status = 'pending' LIMIT 1`,
+		target,
+	).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // InsertWakeSchedule persists a pending wake row and returns the assigned
 // row id. Caller is responsible for ISO 8601 parsing — this layer takes a
 // time.Time. Status is always 'pending' on insert; transitions go through
