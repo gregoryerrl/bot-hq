@@ -47,8 +47,9 @@ const (
 )
 
 // Window is a single utilization-window entry from /api/oauth/usage.
-// Utilization is normalized 0-1 by the API; callers scale to 0-100 for
-// display.
+// Wire format is 0-100 float; Fetch divides by 100 before return so the
+// public Window.Utilization surface is normalized 0-1 for downstream
+// threshold comparisons.
 type Window struct {
 	Utilization float64   `json:"utilization"`
 	ResetsAt    time.Time `json:"resets_at"`
@@ -161,6 +162,12 @@ func (c *UsageClient) Fetch(ctx context.Context) (float64, string, map[string]Wi
 	}
 	req.Header.Set("Authorization", "Bearer "+creds.AccessToken)
 	req.Header.Set("Accept", "application/json")
+	// anthropic-beta is the OAuth-on-/api/oauth/usage gate. Without it the
+	// endpoint returns 401 "OAuth authentication is currently not supported"
+	// even with a valid bearer token. Verified against cli.js 2.1.73 LO():
+	// `{Authorization: Bearer ..., "anthropic-beta": "oauth-2025-04-20"}`.
+	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	req.Header.Set("User-Agent", "claude-code/2.1.73")
 
 	resp, err := c.httpc.Do(req)
 	if err != nil {
@@ -187,18 +194,27 @@ func (c *UsageClient) Fetch(ctx context.Context) (float64, string, map[string]Wi
 		return 0, "", nil, fmt.Errorf("decode body: %w", err)
 	}
 
+	// Wire-format normalization: API returns utilization 0-100; Window's
+	// public contract is 0-1. Apply the divide here so all downstream
+	// threshold comparisons (planUsageThreshold=0.95) stay in normalized
+	// units regardless of where consumers read from.
+	normalize := func(w *Window) Window {
+		c := *w
+		c.Utilization = c.Utilization / 100.0
+		return c
+	}
 	perWindow := map[string]Window{}
 	if raw.FiveHour != nil {
-		perWindow[WindowFiveHour] = *raw.FiveHour
+		perWindow[WindowFiveHour] = normalize(raw.FiveHour)
 	}
 	if raw.SevenDay != nil {
-		perWindow[WindowSevenDay] = *raw.SevenDay
+		perWindow[WindowSevenDay] = normalize(raw.SevenDay)
 	}
 	if raw.SevenDaySonnet != nil {
-		perWindow[WindowSevenDaySonnet] = *raw.SevenDaySonnet
+		perWindow[WindowSevenDaySonnet] = normalize(raw.SevenDaySonnet)
 	}
 	if raw.SevenDayOpus != nil {
-		perWindow[WindowSevenDayOpus] = *raw.SevenDayOpus
+		perWindow[WindowSevenDayOpus] = normalize(raw.SevenDayOpus)
 	}
 
 	maxUtil := -1.0

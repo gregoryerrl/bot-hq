@@ -191,7 +191,16 @@ func (g *Gemma) handlePlanUsageError(now time.Time, err error) {
 	log.Printf("[plan-cap] fetch failed: %v — backing off %s", err, planUsageBackoffInterval)
 	g.planUsageMu.Lock()
 	g.planBackoffUntil = now.Add(planUsageBackoffInterval)
+	publisher := g.hubPublisher
 	g.planUsageMu.Unlock()
+	// H-40: surface the producer-errored state on the strip via `--%` so
+	// it's visually distinguishable from "fresh boot, no observation yet."
+	// PlanWindow=five_hour is the conventional default tag (renders bare per
+	// planWindowTag); if a future producer-side error preserves prior window,
+	// substitute it here (slice-5 H-40b candidate).
+	if publisher != nil {
+		publisher(panestate.HubSnapshot{PlanUsagePct: -1, PlanWindow: anthropic.WindowFiveHour})
+	}
 }
 
 // firePlanCapHalt fires hub_flag and sets the halt_state row. Wraps

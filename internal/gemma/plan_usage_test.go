@@ -187,6 +187,32 @@ func TestPlanCapNearExpirySkipsSilently(t *testing.T) {
 	}
 }
 
+// TestPlanCapAuthFailPublishesUnknownSnapshot — H-40: on auth-fail / 5xx
+// the producer enters 600s backoff but ALSO publishes
+// HubSnapshot{-1, five_hour} so the strip surfaces `--%` instead of
+// staying blank. Without this, "fresh boot" and "producer errored" render
+// identically and the user can't tell the producer is alive but failing.
+func TestPlanCapAuthFailPublishesUnknownSnapshot(t *testing.T) {
+	g, _ := newContextCapGemma(t)
+	rec := &hubRecorder{}
+	g.SetHubPublisher(rec.publish)
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		err: []error{errors.New("auth failed: status 401")},
+	})
+
+	g.checkPlanUsage(time.Now())
+
+	if rec.calls != 1 {
+		t.Fatalf("auth-fail must publish exactly once; got %d", rec.calls)
+	}
+	if rec.last.PlanUsagePct != -1 {
+		t.Errorf("PlanUsagePct = %d, want -1 (unknown)", rec.last.PlanUsagePct)
+	}
+	if rec.last.PlanWindow != anthropic.WindowFiveHour {
+		t.Errorf("PlanWindow = %q, want %q (default tag for --%% render)", rec.last.PlanWindow, anthropic.WindowFiveHour)
+	}
+}
+
 // TestPlanCapBackoffCadenceOn5xx — fetcher returns a generic 5xx-shaped
 // error; checkPlanUsage records lastPlanPoll AND sets planBackoffUntil
 // to now+600s. Subsequent calls inside that window short-circuit without

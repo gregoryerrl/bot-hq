@@ -22,21 +22,31 @@ func (f fakeCreds) Get(context.Context) (Credentials, error) {
 
 // stubServer returns an httptest.Server that serves the given JSON body at
 // /api/oauth/usage with the given status code. Captures the Authorization
-// header so tests can assert the bearer wiring.
-func stubServer(t *testing.T, status int, body string) (*httptest.Server, *string) {
+// + anthropic-beta + User-Agent headers so tests can assert the auth-gate
+// wiring (cli.js 2.1.73 sends all three; missing anthropic-beta returns 401
+// "OAuth authentication is currently not supported" against production).
+func stubServer(t *testing.T, status int, body string) (*httptest.Server, *capturedHeaders) {
 	t.Helper()
-	var lastAuth string
+	captured := &capturedHeaders{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/oauth/usage" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
-		lastAuth = r.Header.Get("Authorization")
+		captured.Authorization = r.Header.Get("Authorization")
+		captured.AnthropicBeta = r.Header.Get("anthropic-beta")
+		captured.UserAgent = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return srv, &lastAuth
+	return srv, captured
+}
+
+type capturedHeaders struct {
+	Authorization string
+	AnthropicBeta string
+	UserAgent     string
 }
 
 // validToken is a non-expired credential to drive happy-path fetches.
@@ -47,11 +57,14 @@ func validToken() Credentials {
 // TestFetchAllFourWindowsMaxUtilDetected locks the canonical happy path:
 // API returns four windows; client picks the max + names the binding window.
 func TestFetchAllFourWindowsMaxUtilDetected(t *testing.T) {
+	// Wire format is 0-100 (verified against live /api/oauth/usage); Fetch
+	// normalizes to 0-1 before return so downstream threshold logic is
+	// unit-stable. Assertions below check the normalized public surface.
 	body := `{
-		"five_hour":        {"utilization": 0.20, "resets_at": "2026-04-28T12:00:00Z"},
-		"seven_day":        {"utilization": 0.40, "resets_at": "2026-05-04T00:00:00Z"},
-		"seven_day_sonnet": {"utilization": 0.10, "resets_at": "2026-05-04T00:00:00Z"},
-		"seven_day_opus":   {"utilization": 0.95, "resets_at": "2026-05-04T00:00:00Z"}
+		"five_hour":        {"utilization": 20.0, "resets_at": "2026-04-28T12:00:00Z"},
+		"seven_day":        {"utilization": 40.0, "resets_at": "2026-05-04T00:00:00Z"},
+		"seven_day_sonnet": {"utilization": 10.0, "resets_at": "2026-05-04T00:00:00Z"},
+		"seven_day_opus":   {"utilization": 95.0, "resets_at": "2026-05-04T00:00:00Z"}
 	}`
 	srv, _ := stubServer(t, http.StatusOK, body)
 	c := NewUsageClient(srv.URL, fakeCreds{creds: validToken()})
@@ -78,9 +91,9 @@ func TestFetchAllFourWindowsMaxUtilDetected(t *testing.T) {
 // window present, max correctly resolved across the remaining three.
 func TestFetchOptsMissingOpusWindow(t *testing.T) {
 	body := `{
-		"five_hour":        {"utilization": 0.92, "resets_at": "2026-04-28T12:00:00Z"},
-		"seven_day":        {"utilization": 0.40, "resets_at": "2026-05-04T00:00:00Z"},
-		"seven_day_sonnet": {"utilization": 0.10, "resets_at": "2026-05-04T00:00:00Z"}
+		"five_hour":        {"utilization": 92.0, "resets_at": "2026-04-28T12:00:00Z"},
+		"seven_day":        {"utilization": 40.0, "resets_at": "2026-05-04T00:00:00Z"},
+		"seven_day_sonnet": {"utilization": 10.0, "resets_at": "2026-05-04T00:00:00Z"}
 	}`
 	srv, _ := stubServer(t, http.StatusOK, body)
 	c := NewUsageClient(srv.URL, fakeCreds{creds: validToken()})
@@ -104,15 +117,59 @@ func TestFetchOptsMissingOpusWindow(t *testing.T) {
 // silent missing-bearer regression would surface as 401 in production but
 // look like a transient auth failure to operators.
 func TestFetchPassesBearerAuth(t *testing.T) {
-	body := `{"five_hour":{"utilization":0.5,"resets_at":"2026-04-28T12:00:00Z"}}`
-	srv, lastAuth := stubServer(t, http.StatusOK, body)
+	body := `{"five_hour":{"utilization":50.0,"resets_at":"2026-04-28T12:00:00Z"}}`
+	srv, hdrs := stubServer(t, http.StatusOK, body)
 	c := NewUsageClient(srv.URL, fakeCreds{creds: Credentials{AccessToken: "sk-XYZ", ExpiresAt: time.Now().Add(time.Hour)}})
 
 	if _, _, _, err := c.Fetch(context.Background()); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if got, want := *lastAuth, "Bearer sk-XYZ"; got != want {
+	if got, want := hdrs.Authorization, "Bearer sk-XYZ"; got != want {
 		t.Errorf("Authorization header = %q, want %q", got, want)
+	}
+}
+
+// TestFetchPassesAnthropicBetaAndUserAgent locks the OAuth-on-/usage gate
+// wiring. Production-grounded ratchet: without anthropic-beta the API
+// returns 401 "OAuth authentication is currently not supported" — silent
+// regression here would re-introduce the slice-5 H-32 producer-blank bug.
+// User-Agent parity with cli.js 2.1.73 keeps server-side request fingerprint
+// consistent with the published client.
+func TestFetchPassesAnthropicBetaAndUserAgent(t *testing.T) {
+	body := `{"five_hour":{"utilization":50.0,"resets_at":"2026-04-28T12:00:00Z"}}`
+	srv, hdrs := stubServer(t, http.StatusOK, body)
+	c := NewUsageClient(srv.URL, fakeCreds{creds: validToken()})
+
+	if _, _, _, err := c.Fetch(context.Background()); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got, want := hdrs.AnthropicBeta, "oauth-2025-04-20"; got != want {
+		t.Errorf("anthropic-beta header = %q, want %q", got, want)
+	}
+	if hdrs.UserAgent == "" {
+		t.Errorf("User-Agent header missing; want claude-code/<version>")
+	}
+}
+
+// TestFetchNormalizesWireToZeroOne locks the unit-conversion contract:
+// API returns utilization 0-100; Fetch divides by 100 so all downstream
+// threshold comparisons stay in the 0-1 convention shared with
+// context_cap.go (planUsageThreshold=0.95). Regression here would make the
+// strip render 100% on every poll once auth-gate is satisfied.
+func TestFetchNormalizesWireToZeroOne(t *testing.T) {
+	body := `{"five_hour":{"utilization":91.0,"resets_at":"2026-04-28T12:00:00Z"}}`
+	srv, _ := stubServer(t, http.StatusOK, body)
+	c := NewUsageClient(srv.URL, fakeCreds{creds: validToken()})
+
+	maxUtil, _, per, err := c.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if maxUtil != 0.91 {
+		t.Errorf("maxUtil = %v, want 0.91 (normalized from wire 91.0)", maxUtil)
+	}
+	if per[WindowFiveHour].Utilization != 0.91 {
+		t.Errorf("per[five_hour].Utilization = %v, want 0.91", per[WindowFiveHour].Utilization)
 	}
 }
 
@@ -165,7 +222,7 @@ func TestFetchNearExpirySkipsAPI(t *testing.T) {
 // overriding the clock; locks the SetNow hook + the boundary semantic
 // (now+skew > expiresAt → ErrTokenExpired).
 func TestFetchExpiredTokenWithCustomNow(t *testing.T) {
-	srv, _ := stubServer(t, http.StatusOK, `{"five_hour":{"utilization":0.5,"resets_at":"2026-04-28T12:00:00Z"}}`)
+	srv, _ := stubServer(t, http.StatusOK, `{"five_hour":{"utilization":50.0,"resets_at":"2026-04-28T12:00:00Z"}}`)
 	expiry := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
 
 	c := NewUsageClient(srv.URL, fakeCreds{creds: Credentials{
@@ -182,7 +239,7 @@ func TestFetchExpiredTokenWithCustomNow(t *testing.T) {
 // TestFetchValidTokenWithCustomNow is the negative-control twin: just
 // outside the skew window, Fetch proceeds normally.
 func TestFetchValidTokenWithCustomNow(t *testing.T) {
-	srv, _ := stubServer(t, http.StatusOK, `{"five_hour":{"utilization":0.5,"resets_at":"2026-04-28T12:00:00Z"}}`)
+	srv, _ := stubServer(t, http.StatusOK, `{"five_hour":{"utilization":50.0,"resets_at":"2026-04-28T12:00:00Z"}}`)
 	expiry := time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC)
 
 	c := NewUsageClient(srv.URL, fakeCreds{creds: Credentials{
