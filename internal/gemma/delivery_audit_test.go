@@ -152,3 +152,96 @@ func TestDeliveryGapAgeConstant(t *testing.T) {
 		t.Errorf("deliveryGapAge = %v, want 60s (slice-5 v1 lean per Rain BRAIN 4071)", deliveryGapAge)
 	}
 }
+
+// TestQueueRowCreatedRoundTrip locks that GetPendingMessages returns
+// rows whose Created field is non-zero and recent — i.e. the SQL
+// scan correctly populates time.Time from the TIMESTAMP column.
+//
+// Regression lock for the H-22-bis post-deploy bug: prior code did
+// `time.Parse(time.DateTime, created)` against driver-formatted RFC3339
+// strings, swallowed the parse error into `_`, left Created at the
+// zero value. Production `now.Sub(time.Time{})` overflowed to
+// math.MaxInt64 nanoseconds, so the auditor fired with a 292-year
+// "age" sentinel. The unit tests at the time used virtual-now anchored
+// to whatever the read returned (zero) so they passed.
+//
+// This test forces a real round-trip: insert via EnqueueMessage (which
+// fires SQLite CURRENT_TIMESTAMP server-side), read back via
+// GetPendingMessages, assert Created is sane.
+func TestQueueRowCreatedRoundTrip(t *testing.T) {
+	_, db := newTestGemma(t)
+
+	before := time.Now().Add(-2 * time.Second)
+	if err := db.EnqueueMessage(7, "rain", "bot-hq-rain", "[brian] roundtrip"); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now().Add(2 * time.Second)
+
+	pending, err := db.GetPendingMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending row, got %d", len(pending))
+	}
+	got := pending[0].Created
+	if got.IsZero() {
+		t.Fatalf("Created is zero — SQL scan failed to populate time.Time (regression: H-22-bis format-mismatch swallow)")
+	}
+	if got.Before(before) || got.After(after) {
+		t.Errorf("Created = %v, want within [%v, %v] (clock-coherent round-trip)", got, before, after)
+	}
+}
+
+// TestAuditDeliveryGapPositiveFireOnRealClock is the ratchet-7
+// integration test: a real SQL row + real time.Now() audit produce a
+// real [DELIVERY-GAP] alert with a sane age string. Sister of the
+// virtual-now tests above — those locked logic, this locks
+// SQL-round-trip correctness end-to-end.
+//
+// Without this, virtual-now tests pass even when Created is zeroed,
+// because their `virtualNow := pending[0].Created.Add(...)` arithmetic
+// stays self-consistent inside the year-0001 anchor. Production fires
+// math.MaxInt64 sentinels.
+func TestAuditDeliveryGapPositiveFireOnRealClock(t *testing.T) {
+	g, db := newTestGemma(t)
+
+	if err := db.EnqueueMessage(11, "rain", "bot-hq-rain", "[brian] real-clock"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Backdate created column so the row exceeds deliveryGapAge under
+	// real time.Now(). EnqueueMessage uses server-side CURRENT_TIMESTAMP,
+	// so we override with the test helper.
+	if err := db.SetQueueRowCreatedForTest(11, time.Now().Add(-90*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	g.auditDeliveryGap()
+
+	msgs, err := db.GetRecentMessages(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alert string
+	for _, m := range msgs {
+		if m.FromAgent == agentID && strings.Contains(m.Content, "[DELIVERY-GAP]") {
+			alert = m.Content
+			break
+		}
+	}
+	if alert == "" {
+		t.Fatal("expected one [DELIVERY-GAP] alert from real-clock audit; got none")
+	}
+
+	// Sanity-check the age substring: must NOT be the math.MaxInt64
+	// nanosecond sentinel that surfaced in production.
+	if strings.Contains(alert, "2562047h") {
+		t.Errorf("alert contains MaxInt64 duration sentinel — Created is zero (regression): %s", alert)
+	}
+	// And must report a plausible age (≥60s, ≤24h) — anchored in
+	// real-clock arithmetic, not virtual.
+	if !strings.Contains(alert, "pending for 1m") && !strings.Contains(alert, "pending for 2m") {
+		t.Errorf("alert age looks wrong; got %q (expected ~90s real-clock window)", alert)
+	}
+}

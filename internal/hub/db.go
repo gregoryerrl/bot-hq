@@ -1382,16 +1382,14 @@ func (db *DB) GetPendingMessages() ([]QueuedMessage, error) {
 	var msgs []QueuedMessage
 	for rows.Next() {
 		var qm QueuedMessage
-		var created string
-		var lastAttempt sql.NullString
+		var lastAttempt sql.NullTime
 		if err := rows.Scan(&qm.ID, &qm.MessageID, &qm.TargetAgent, &qm.TmuxTarget,
 			&qm.FormattedText, &qm.Attempts, &qm.MaxAttempts, &qm.Status,
-			&created, &lastAttempt); err != nil {
+			&qm.Created, &lastAttempt); err != nil {
 			return nil, err
 		}
-		qm.Created, _ = time.Parse(time.DateTime, created)
 		if lastAttempt.Valid {
-			qm.LastAttempt, _ = time.Parse(time.DateTime, lastAttempt.String)
+			qm.LastAttempt = lastAttempt.Time
 		}
 		msgs = append(msgs, qm)
 	}
@@ -1412,20 +1410,32 @@ func (db *DB) GetPendingMessagesForAgent(agentID string) ([]QueuedMessage, error
 	var msgs []QueuedMessage
 	for rows.Next() {
 		var qm QueuedMessage
-		var created string
-		var lastAttempt sql.NullString
+		var lastAttempt sql.NullTime
 		if err := rows.Scan(&qm.ID, &qm.MessageID, &qm.TargetAgent, &qm.TmuxTarget,
 			&qm.FormattedText, &qm.Attempts, &qm.MaxAttempts, &qm.Status,
-			&created, &lastAttempt); err != nil {
+			&qm.Created, &lastAttempt); err != nil {
 			return nil, err
 		}
-		qm.Created, _ = time.Parse(time.DateTime, created)
 		if lastAttempt.Valid {
-			qm.LastAttempt, _ = time.Parse(time.DateTime, lastAttempt.String)
+			qm.LastAttempt = lastAttempt.Time
 		}
 		msgs = append(msgs, qm)
 	}
 	return msgs, rows.Err()
+}
+
+// SetQueueRowCreatedForTest overrides the `created` column on a queued
+// message row, identified by message_id. Test-only helper: lets tests
+// age a row past deliveryGapAge / egress thresholds without sleeping.
+// Lives on the production type because callers in other packages'
+// `_test.go` files need it, but the `ForTest` suffix is the call-site
+// signal — never invoke from production paths.
+func (db *DB) SetQueueRowCreatedForTest(messageID int64, t time.Time) error {
+	_, err := db.conn.Exec(
+		`UPDATE message_queue SET created = ? WHERE message_id = ?`,
+		t.UTC().Format(time.DateTime), messageID,
+	)
+	return err
 }
 
 // UpdateQueueStatus updates the status and attempt count of a queued message.
