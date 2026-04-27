@@ -149,6 +149,11 @@ type Gemma struct {
 	staleMu      sync.Mutex
 	paneBaseline map[string]int64
 	paneActivity paneActivityFn
+
+	// Phase H slice 3 C5 (H-25 roster hygiene) state. lastPruneAt is read+
+	// written only from healthLoop so no mutex needed; zero value means
+	// "never pruned this run", which triggers a first-tick prune.
+	lastPruneAt time.Time
 }
 
 // New creates a Gemma instance from config.
@@ -466,8 +471,45 @@ func (g *Gemma) healthLoop() {
 			// 5min staleThreshold so the two-tick baseline + flag pattern
 			// detects a frozen pane within ~5min30s of the threshold trip.
 			g.checkStaleAgents()
+			// Phase H slice 3 C5: piggyback roster prune at hourly cadence.
+			g.runRosterPrune()
 		}
 	}
+}
+
+// pruneInterval is how often runRosterPrune fires (only one prune per
+// pruneInterval window even though healthLoop ticks every 30s).
+const pruneInterval = 1 * time.Hour
+
+// pruneThreshold is the last_seen age beyond which an offline agent row is
+// eligible for deletion. 24h ensures intermittent agents that go offline
+// briefly are not pruned; only long-dead rows reclaim space.
+const pruneThreshold = 24 * time.Hour
+
+// runRosterPrune deletes offline agent rows older than pruneThreshold and
+// PMs Rain with the pruned IDs for audit. Idempotent (no-op when nothing
+// to prune). Live agents (online/working) are protected by the status
+// filter inside PruneStaleOfflineAgents — never pruned regardless of age.
+func (g *Gemma) runRosterPrune() {
+	now := time.Now()
+	if !g.lastPruneAt.IsZero() && now.Sub(g.lastPruneAt) < pruneInterval {
+		return
+	}
+	g.lastPruneAt = now
+	ids, err := g.db.PruneStaleOfflineAgents(pruneThreshold)
+	if err != nil {
+		log.Printf("[gemma] roster prune failed: %v", err)
+		return
+	}
+	if len(ids) == 0 {
+		return
+	}
+	g.db.InsertMessage(protocol.Message{
+		FromAgent: agentID,
+		ToAgent:   "rain",
+		Type:      protocol.MsgUpdate,
+		Content:   fmt.Sprintf("[ROSTER-PRUNE] Removed %d stale-offline agent rows (last_seen >24h): %s", len(ids), strings.Join(ids, ", ")),
+	})
 }
 
 // replayBacklog is the number of recent hub messages Emma re-classifies

@@ -589,6 +589,48 @@ func (db *DB) ReconcileCoderGhosts() (int, error) {
 	return int(n), nil
 }
 
+// PruneStaleOfflineAgents deletes agent rows whose status is 'offline' and
+// last_seen older than threshold, returning the IDs removed for audit. Live
+// agents (status='online' or 'working') are protected by the status filter
+// — only confirmed-offline rows are eligible.
+//
+// Phase H slice 3 H-25 (Emma roster hygiene). Distinct from
+// ReconcileCoderGhosts (which only flips status, never deletes); this path
+// reclaims long-dead rows so the agents table doesn't accumulate forever.
+func (db *DB) PruneStaleOfflineAgents(threshold time.Duration) ([]string, error) {
+	cutoffMillis := time.Now().Add(-threshold).UnixMilli()
+	rows, err := db.conn.Query(
+		`SELECT id FROM agents WHERE status = ? AND last_seen < ?`,
+		string(protocol.StatusOffline), cutoffMillis,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if _, err := db.conn.Exec(
+		`DELETE FROM agents WHERE status = ? AND last_seen < ?`,
+		string(protocol.StatusOffline), cutoffMillis,
+	); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
 // UpdateAgentLastSeen touches only the last_seen timestamp, leaving status
 // and project intact. Used by the MCP middleware in internal/mcp/tools.go to
 // auto-refresh activity recency on every tool call without disturbing status

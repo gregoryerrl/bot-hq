@@ -23,6 +23,91 @@ func setupTestDB(t *testing.T) *DB {
 	return db
 }
 
+// insertAgentWithLastSeen registers an agent then backdates last_seen via
+// direct SQL — needed by C5 prune tests since RegisterAgent always stamps
+// last_seen = now.
+func insertAgentWithLastSeen(t *testing.T, db *DB, id string, status protocol.AgentStatus, lastSeen time.Time) {
+	t.Helper()
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     id,
+		Name:   id,
+		Type:   protocol.AgentCoder,
+		Status: status,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.conn.Exec(
+		`UPDATE agents SET last_seen = ? WHERE id = ?`,
+		lastSeen.UnixMilli(), id,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPruneRemovesStaleOffline locks the slice 3 C5 (H-25) primary
+// invariant: an offline agent whose last_seen is older than threshold is
+// pruned + its ID returned for audit.
+func TestPruneRemovesStaleOffline(t *testing.T) {
+	db := setupTestDB(t)
+	old := time.Now().Add(-48 * time.Hour)
+	insertAgentWithLastSeen(t, db, "stale-1", protocol.StatusOffline, old)
+
+	ids, err := db.PruneStaleOfflineAgents(24 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "stale-1" {
+		t.Errorf("expected pruned ids = [stale-1], got %v", ids)
+	}
+	if _, err := db.GetAgent("stale-1"); err == nil {
+		t.Errorf("agent stale-1 still present after prune")
+	}
+}
+
+// TestPruneSparesOnline locks the live-agent protection invariant:
+// agents with status='online' or 'working' are NEVER pruned regardless of
+// last_seen age. The status filter alone gates eligibility.
+func TestPruneSparesOnline(t *testing.T) {
+	db := setupTestDB(t)
+	old := time.Now().Add(-48 * time.Hour)
+	insertAgentWithLastSeen(t, db, "online-old", protocol.StatusOnline, old)
+	insertAgentWithLastSeen(t, db, "working-old", protocol.StatusWorking, old)
+
+	ids, err := db.PruneStaleOfflineAgents(24 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected 0 pruned ids, got %v", ids)
+	}
+	if _, err := db.GetAgent("online-old"); err != nil {
+		t.Errorf("online-old should be retained: %v", err)
+	}
+	if _, err := db.GetAgent("working-old"); err != nil {
+		t.Errorf("working-old should be retained: %v", err)
+	}
+}
+
+// TestPruneSparesRecentOffline locks the threshold-respecting invariant:
+// recently-offline agents (within threshold) survive prune. Reclamation
+// only targets long-dead rows.
+func TestPruneSparesRecentOffline(t *testing.T) {
+	db := setupTestDB(t)
+	recent := time.Now().Add(-1 * time.Hour)
+	insertAgentWithLastSeen(t, db, "recent-offline", protocol.StatusOffline, recent)
+
+	ids, err := db.PruneStaleOfflineAgents(24 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected 0 pruned ids, got %v", ids)
+	}
+	if _, err := db.GetAgent("recent-offline"); err != nil {
+		t.Errorf("recent-offline should be retained: %v", err)
+	}
+}
+
 func TestRegisterAndGetAgent(t *testing.T) {
 	db := setupTestDB(t)
 
