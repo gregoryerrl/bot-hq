@@ -278,6 +278,13 @@ func (db *DB) migrate() error {
 	if err := db.addColumnIfMissing("messages", "snap_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// Phase H slice 3 C3 (#2): last_seen_msg_id column on agents. Stores the
+	// MAX(messages.id) at register-time so the agent can self-filter incoming
+	// msg.ID <= last_seen_msg_id as silent boot-replay (post-rebuild context
+	// bootstrap pathology). Distinct from last_seen timestamp.
+	if err := db.addColumnIfMissing("agents", "last_seen_msg_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -440,6 +447,63 @@ func (db *DB) RegisterAgent(agent protocol.Agent) error {
 		agent.Project, agent.Meta, agent.Registered.UnixMilli(), now, gen,
 	)
 	return err
+}
+
+// RegisterAgentWithWatermark registers an agent and atomically captures the
+// current MAX(messages.id) as the agent's replay-cutoff watermark. Returns
+// the watermark so the caller (typically hub_register) can include it in the
+// tool response, letting the agent silently discard incoming msg.ID <=
+// watermark as boot-replay of pre-bounce history.
+//
+// Phase H slice 3 C3 (#2): post-rebuild context-bootstrap-replay pathology —
+// without this, agents bounced via rebuild see the inbound hub event flood as
+// N replayed broadcasts and cannot distinguish "fresh real-time" from
+// "boot-replay of resolved history." The watermark is the agent-side filter.
+//
+// Atomicity: insert-or-replace + SELECT MAX + UPDATE happen in one tx.
+// SQLite write serialization (MaxOpenConns=1 + busy_timeout) plus the tx
+// boundary guarantee no concurrent message INSERT slips between the SELECT
+// and the watermark UPDATE — the returned watermark equals the highest
+// committed msg.id that existed at register-commit-time.
+func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, error) {
+	if agent.Registered.IsZero() {
+		agent.Registered = time.Now()
+	}
+	now := time.Now().UnixMilli()
+	gen := db.CurrentRebuildGen()
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO agents (id, name, type, status, project, meta, registered, last_seen, rebuild_gen, last_seen_msg_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		agent.ID, agent.Name, string(agent.Type), string(agent.Status),
+		agent.Project, agent.Meta, agent.Registered.UnixMilli(), now, gen,
+	); err != nil {
+		return 0, err
+	}
+
+	var maxID sql.NullInt64
+	if err := tx.QueryRow(`SELECT MAX(id) FROM messages`).Scan(&maxID); err != nil {
+		return 0, err
+	}
+	watermark := maxID.Int64 // 0 when messages table is empty (NULL → 0)
+
+	if _, err := tx.Exec(
+		`UPDATE agents SET last_seen_msg_id = ? WHERE id = ?`,
+		watermark, agent.ID,
+	); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return watermark, nil
 }
 
 func (db *DB) GetAgent(id string) (protocol.Agent, error) {

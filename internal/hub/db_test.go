@@ -2,8 +2,10 @@ package hub
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1040,5 +1042,162 @@ func TestWakeScheduleCancelMissingID(t *testing.T) {
 	_, err := db.CancelWake(99999)
 	if err != sql.ErrNoRows {
 		t.Errorf("CancelWake on missing id: err=%v want sql.ErrNoRows", err)
+	}
+}
+
+// --- Phase H slice 3 C3 (#2): atomic register-return watermark ---
+
+// TestHubRegisterReturnsCurrentMaxMsgID locks the basic contract: after
+// inserting N messages, RegisterAgentWithWatermark returns N as the watermark
+// and persists it to last_seen_msg_id on the agent row.
+func TestHubRegisterReturnsCurrentMaxMsgID(t *testing.T) {
+	db := setupTestDB(t)
+	const n = 5
+	var lastID int64
+	for i := 0; i < n; i++ {
+		id, err := db.InsertMessage(protocol.Message{
+			FromAgent: "tester",
+			Type:      protocol.MsgUpdate,
+			Content:   "msg",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		lastID = id
+	}
+
+	wm, err := db.RegisterAgentWithWatermark(protocol.Agent{
+		ID: "wm_basic", Name: "WM", Type: protocol.AgentBrian, Status: protocol.StatusOnline,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wm != lastID {
+		t.Errorf("watermark = %d, want %d (MAX(messages.id))", wm, lastID)
+	}
+
+	var stored int64
+	if err := db.conn.QueryRow(`SELECT last_seen_msg_id FROM agents WHERE id = ?`, "wm_basic").Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != lastID {
+		t.Errorf("last_seen_msg_id stored = %d, want %d", stored, lastID)
+	}
+}
+
+// TestHubRegisterAtomicWithMaxMsgID exercises the race-window contract:
+// concurrent InsertMessage + RegisterAgentWithWatermark must leave no message
+// with id <= watermark unaccounted for. The returned watermark must be a
+// valid prefix-id of the messages table — every msg.id <= watermark exists.
+//
+// SQLite write serialization (MaxOpenConns=1 + busy_timeout) plus the tx
+// boundary in RegisterAgentWithWatermark guarantee this; the test confirms
+// no committed message slips between SELECT MAX and the watermark commit.
+func TestHubRegisterAtomicWithMaxMsgID(t *testing.T) {
+	db := setupTestDB(t)
+	// Pre-load some messages so the registers race with both pre-existing
+	// and concurrently-inserted rows.
+	for i := 0; i < 10; i++ {
+		if _, err := db.InsertMessage(protocol.Message{FromAgent: "pre", Type: protocol.MsgUpdate, Content: "p"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const inserters = 4
+	const insertsPerWorker = 25
+	const registers = 10
+
+	var wg sync.WaitGroup
+	startCh := make(chan struct{})
+
+	wg.Add(inserters)
+	for w := 0; w < inserters; w++ {
+		go func() {
+			defer wg.Done()
+			<-startCh
+			for i := 0; i < insertsPerWorker; i++ {
+				if _, err := db.InsertMessage(protocol.Message{FromAgent: "race", Type: protocol.MsgUpdate, Content: "r"}); err != nil {
+					t.Errorf("insert: %v", err)
+					return
+				}
+			}
+		}()
+	}
+
+	type wmResult struct {
+		watermark int64
+	}
+	wmCh := make(chan wmResult, registers)
+	wg.Add(registers)
+	for r := 0; r < registers; r++ {
+		go func(idx int) {
+			defer wg.Done()
+			<-startCh
+			wm, err := db.RegisterAgentWithWatermark(protocol.Agent{
+				ID:     fmt.Sprintf("wm_race_%d", idx),
+				Name:   "WM",
+				Type:   protocol.AgentCoder,
+				Status: protocol.StatusOnline,
+			})
+			if err != nil {
+				t.Errorf("register: %v", err)
+				return
+			}
+			wmCh <- wmResult{watermark: wm}
+		}(r)
+	}
+
+	close(startCh)
+	wg.Wait()
+	close(wmCh)
+
+	// Every returned watermark must point at a message that exists in the
+	// table — i.e. no register call returned a watermark <= MAX-at-that-time
+	// while a concurrent insert was in-flight uncommitted.
+	for r := range wmCh {
+		if r.watermark <= 0 {
+			t.Errorf("watermark = %d, want > 0 (pre-loaded msgs exist)", r.watermark)
+			continue
+		}
+		var exists int
+		err := db.conn.QueryRow(`SELECT COUNT(*) FROM messages WHERE id = ?`, r.watermark).Scan(&exists)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exists != 1 {
+			t.Errorf("watermark %d does not point at a real message row", r.watermark)
+		}
+	}
+}
+
+// TestHubRegisterRerunAdvancesWatermark exercises the rebuild semantics: an
+// agent re-registering after additional messages have landed gets a strictly
+// greater watermark, advancing the silent-discard horizon.
+func TestHubRegisterRerunAdvancesWatermark(t *testing.T) {
+	db := setupTestDB(t)
+	for i := 0; i < 3; i++ {
+		if _, err := db.InsertMessage(protocol.Message{FromAgent: "x", Type: protocol.MsgUpdate, Content: "a"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wm1, err := db.RegisterAgentWithWatermark(protocol.Agent{
+		ID: "wm_rerun", Name: "WM", Type: protocol.AgentBrian, Status: protocol.StatusOnline,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if _, err := db.InsertMessage(protocol.Message{FromAgent: "x", Type: protocol.MsgUpdate, Content: "b"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wm2, err := db.RegisterAgentWithWatermark(protocol.Agent{
+		ID: "wm_rerun", Name: "WM", Type: protocol.AgentBrian, Status: protocol.StatusOnline,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wm2 <= wm1 {
+		t.Errorf("rerun watermark = %d, want > %d (first register)", wm2, wm1)
 	}
 }

@@ -229,6 +229,8 @@ func (b *Brian) initialPrompt() string {
 
 STARTUP: 1) hub_read to catch up. 2) hub_flag anything needing user attention (startup carve-out: Rain not yet registered, self-flag is implicit per H-2). 3) hub_register id="brian", name="Brian", type="brian". 4) Announce online.
 
+REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cutoff watermark — silently discard any incoming hub message with msg.ID <= current_max_msg_id (post-rebuild boot-replay; not fresh traffic). Apply the filter for the duration of this session.
+
 RULES:
 ` + protocol.DiscV2OutboundRule + `
 - FLAG via Rain. PM Rain on flag-worthy events (errors, blockers, completions, peer disagreements, user-blocking decisions); Rain owns hub_flag elevation. Self-flag carve-out: see DISC v2.

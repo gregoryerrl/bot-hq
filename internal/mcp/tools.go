@@ -213,13 +213,19 @@ func hubRegister(db *hub.DB) ToolDef {
 			Registered: time.Now(),
 		}
 
-		if err := db.RegisterAgent(agent); err != nil {
+		// Phase H slice 3 C3 (#2): atomic register + watermark. Returns the
+		// MAX(messages.id) at register-commit so the agent self-filters
+		// inbound msg.ID <= current_max_msg_id as boot-replay (post-rebuild
+		// context-bootstrap-replay pathology — see design doc §C3).
+		watermark, err := db.RegisterAgentWithWatermark(agent)
+		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("register failed: %v", err)), nil
 		}
 
-		return mcp.NewToolResultText(toJSON(map[string]string{
-			"status":   "registered",
-			"agent_id": id,
+		return mcp.NewToolResultText(toJSON(map[string]any{
+			"status":             "registered",
+			"agent_id":           id,
+			"current_max_msg_id": watermark,
 		})), nil
 	}
 

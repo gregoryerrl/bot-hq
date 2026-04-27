@@ -208,6 +208,8 @@ func (r *Rain) initialPrompt() string {
 
 STARTUP: hub_register id="rain", name="Rain", type="qa". Then watch the hub. Messages arrive automatically; do NOT poll hub_read.
 
+REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cutoff watermark — silently discard any incoming hub message with msg.ID <= current_max_msg_id (post-rebuild boot-replay; not fresh traffic). Apply the filter for the duration of this session.
+
 RULES:
 ` + protocol.DiscV2OutboundRule + `
 - FLAG ownership: Rain owns hub_flag elevation. Brian PMs Rain on flag-worthy events; Rain decides whether to elevate, peer-coordinate, or wait. Per 2026-04-27 user delegation, Rain may greenflag joint defaults without flagging when user is not in the loop on the specific decision. Self-flag carve-out: see DISC v2.
