@@ -67,7 +67,7 @@ Design doc (master): `docs/plans/2026-04-26-phase-h-design.md`.
 | **Slice 1** | Real-project safety (BLAST) | H-4 + H-3c + H-13 + H-14 + H-16 | CLOSED — merged to main (`b06961c`) + hotfix `4440425` (Path C exemplar form-coupling fix); 5/5 H-14 gate paths runtime-verified live |
 | **Slice 2** | Discipline + comm hardening (PROMPT-MOSTLY + EMMA + canonicalization) | H-2 + H-1 + H-11 + H-18 + H-22 + H-23 + H-24 + H-29 + P-1 | CLOSED — merged to main (`4f5d75e`) including hotfix `fc4913a` + `4f5d75e` (H-22 cross-process MCP-insert wiring gap); 6/6 runtime tests joint Brian+Rain PASS (4 gold + 2 silver-with-transitive-gold); slice-3 backlog enriched with items #2, #4, #6, #7 |
 | **Slice 3** | Coder lifecycle (RELIABILITY) | H-3a + H-3b + H-9 + H-25 + #2 (subsumes H-10a) + #4 + #6 + #7 | CLOSED — ff-merged to main (`3269e45`) + runtime verification PASS post-rebuild #18 (7/7 synthetic subtests via coder 70fbadcc + 4 organic confirmations from rebuild cycle itself); 4 gold (#4 + #2 + H-3a + H-3b) + 3 silver-with-transitive-gold (H-25 + #6 + H-9 doc) |
-| **Slice 4** | State + discipline structures (RATCHET) | H-6 + H-15 + H-19 + H-21 | design-pending; H-10a removed (subsumed by slice 3 #2) |
+| **Slice 4** | RATCHET + context-budget awareness | H-6 + H-15 + H-19 + H-21 + H-30 + H-31 | design landed (Rain solo, msg 3764 user-greenlight); H-30/H-31 added mid-flight at 95% session cap to address self-evidenced gap; design `docs/plans/2026-04-27-phase-h-slice-4-design.md`; implementation deferred to fresh-context session |
 
 ## Item index
 
@@ -95,6 +95,8 @@ Design doc (master): `docs/plans/2026-04-26-phase-h-design.md`.
 | H-24 | Emma analyze pre-screen with two-class boundary (structured → Emma; interpretive → Rain inline) | 2 |
 | H-25 | Emma roster hygiene (auto-prune stale registrations >24h or auto-flag live agent's last_seen >5min) | 3 |
 | H-29 | Path B SSH↔HTTPS canonicalization in `remote_url` gate (slice 1 cross-cut deferral) | 2 |
+| H-30 | TUI claude-code-usage display (hub strip right-end; per-pane context-left parse via tmux capture) | 4 |
+| H-31 | Emma context-cap halt-flag (95% threshold; halt-all-work + checkpoint via H-15 for fresh-session handoff; hysteresis-armed) | 4 |
 | P-1 | Per-slice runtime test cadence (process item; ratchets test-first methodology into Phase H standing operating procedure) | 2 |
 
 ## Deferred
