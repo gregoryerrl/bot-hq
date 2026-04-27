@@ -465,6 +465,47 @@ func TestInsertAndReadMessages(t *testing.T) {
 	}
 }
 
+// TestGetMessagesFromAgent locks the slice-5 H-22-bis item 4 helper
+// the egress-gap auditor uses: returns hub messages emitted by a
+// specific from_agent (chronological, sinceID-incremented). Filter
+// must be on from_agent, not to_agent — the auditor needs to know
+// whether the agent has SPOKEN, regardless of routing.
+func TestGetMessagesFromAgent(t *testing.T) {
+	db := setupTestDB(t)
+	db.RegisterAgent(protocol.Agent{ID: "rain", Name: "Rain", Type: protocol.AgentQA, Status: protocol.StatusOnline})
+	db.RegisterAgent(protocol.Agent{ID: "brian", Name: "Brian", Type: protocol.AgentBrian, Status: protocol.StatusOnline})
+
+	idA, _ := db.InsertMessage(protocol.Message{FromAgent: "rain", Type: protocol.MsgUpdate, Content: "first"})
+	db.InsertMessage(protocol.Message{FromAgent: "brian", Type: protocol.MsgUpdate, Content: "noise"})
+	idC, _ := db.InsertMessage(protocol.Message{FromAgent: "rain", Type: protocol.MsgUpdate, Content: "second"})
+
+	got, err := db.GetMessagesFromAgent("rain", 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 messages from rain, got %d: %+v", len(got), got)
+	}
+	if got[0].ID != idA || got[1].ID != idC {
+		t.Errorf("messages out of order or wrong: got IDs %d, %d, want %d, %d", got[0].ID, got[1].ID, idA, idC)
+	}
+
+	// sinceID excludes earlier messages.
+	since, err := db.GetMessagesFromAgent("rain", idA, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(since) != 1 || since[0].ID != idC {
+		t.Errorf("sinceID=idA should return only idC; got %+v", since)
+	}
+
+	// Non-matching agent returns empty.
+	none, _ := db.GetMessagesFromAgent("emma", 0, 10)
+	if len(none) != 0 {
+		t.Errorf("from emma should be empty; got %+v", none)
+	}
+}
+
 // TestReadMessagesTailContract locks the restart-context-recovery contract:
 // sinceID<=0 returns the latest N rows in chronological order, sinceID>0 returns
 // the next-after-sinceID rows in chronological order, sinceID==lastID returns

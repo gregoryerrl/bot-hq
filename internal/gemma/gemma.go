@@ -187,6 +187,26 @@ type Gemma struct {
 	lastPlanPoll      time.Time
 	planBackoffUntil  time.Time
 	planUsageWarnedOS bool // logged-once flag for ErrUnsupportedPlatform
+
+	// Slice-5 H-22-bis item 4 auditor state.
+	//
+	// deliveryFlagTracker dedupes [DELIVERY-GAP] alerts by message_queue
+	// row id — one fire per stalled queue row, no re-fires until the row
+	// drains or exhausts. Pruned each tick of rows no longer pending.
+	deliveryFlagMu      sync.Mutex
+	deliveryFlagTracker map[int64]struct{}
+
+	// Egress auditor state. egressBaseline is the per-agent prior-tick
+	// pane content hash + max-msg-id + consecutive-gap-tick count. The
+	// auditor flags only after egressGapTickThreshold consecutive ticks
+	// of pane-advanced-no-hub-msg, suppressing single-tick legitimate
+	// mid-thought silence. egressFlagTracker dedupes by `agent_id:hash`
+	// so a new pane state re-arms the alert (Rain Q4 caveat).
+	// egressPaneCapture is injected for tests.
+	egressMu           sync.Mutex
+	egressBaseline     map[string]egressBaselineEntry
+	egressFlagTracker  map[string]struct{}
+	egressPaneCapture  egressPaneCaptureFn
 }
 
 // New creates a Gemma instance from config.
@@ -526,6 +546,11 @@ func (g *Gemma) healthLoop() {
 			// squeeze; fire halt-flag + set halt_state when any non-emma
 			// agent is at or above 95% usage.
 			g.checkContextCap(time.Now())
+			// Slice-5 H-22-bis item 4 (cheap-tier auditor): piggyback
+			// delivery-gap detection on the 30s healthLoop tick. Single
+			// SQL scan + flag-tracker dedupe; cheap enough not to need
+			// its own ticker.
+			g.auditDeliveryGap()
 		}
 	}
 }
@@ -974,6 +999,12 @@ func (g *Gemma) monitorLoop() {
 			return
 		case <-ticker.C:
 			g.runHealthChecks()
+			// Slice-5 H-22-bis item 4 (expensive-tier auditor): pane
+			// content + cross-agent hub-msg scan once per 5min cadence.
+			// Late-detection backstop redundant with item 3 Stop hook —
+			// catches missed-hook cases (env var absent, install drift,
+			// hook script bug) within 10min wall (egressGapTickThreshold=2).
+			g.auditEgressGap()
 		}
 	}
 }

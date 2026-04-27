@@ -1140,6 +1140,44 @@ func (db *DB) ReadMessages(agentID string, sinceID int64, limit int) ([]protocol
 	return msgs, nil
 }
 
+// GetMessagesFromAgent returns hub messages emitted by the given agent
+// (from_agent = fromAgent) since sinceID, in chronological order.
+// Slice-5 H-22-bis item 4 helper for the egress-gap auditor: it needs to
+// know whether the agent has produced any hub messages in a window,
+// regardless of routing target. Mirrors ReadMessages' shape so callers
+// can iterate uniformly.
+func (db *DB) GetMessagesFromAgent(fromAgent string, sinceID int64, limit int) ([]protocol.Message, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, session_id, from_agent, to_agent, type, content, created
+		 FROM messages
+		 WHERE from_agent = ? AND id > ?
+		 ORDER BY id ASC
+		 LIMIT ?`,
+		fromAgent, sinceID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []protocol.Message
+	for rows.Next() {
+		var m protocol.Message
+		var typ string
+		var created int64
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.FromAgent, &m.ToAgent, &typ, &m.Content, &created); err != nil {
+			return nil, err
+		}
+		m.Type = protocol.MessageType(typ)
+		m.Created = time.UnixMilli(created)
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
 func (db *DB) GetRecentMessages(limit int) ([]protocol.Message, error) {
 	if limit <= 0 {
 		limit = 100
