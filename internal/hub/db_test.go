@@ -1289,7 +1289,7 @@ func TestHubRegisterRerunAdvancesWatermark(t *testing.T) {
 
 // TestHaltStateMultiCauseAPI locks the slice-5 C1 (H-32+H-33) cause-keyed
 // halt_state surface: independent SetHaltActive(cause), ClearHalt(cause),
-// IsHalted, GetHaltCauses. Each cause must coexist independently and a
+// IsHalted, GetHaltCause. Each cause must coexist independently and a
 // per-cause clear must not touch unrelated rows.
 func TestHaltStateMultiCauseAPI(t *testing.T) {
 	db := setupTestDB(t)
@@ -1308,19 +1308,19 @@ func TestHaltStateMultiCauseAPI(t *testing.T) {
 		t.Errorf("IsHalted must be true with two causes active")
 	}
 
-	causes, err := db.GetHaltCauses()
+	ctxRow, ok, err := db.GetHaltCause(HaltCauseContextCap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(causes) != 2 {
-		t.Fatalf("GetHaltCauses len = %d, want 2", len(causes))
+	if !ok || ctxRow.Reason != "ctx 95%" {
+		t.Errorf("context-cap row = %+v ok=%v, want reason=%q", ctxRow, ok, "ctx 95%")
 	}
-	got := map[string]string{}
-	for _, c := range causes {
-		got[c.Cause] = c.Reason
+	planRow, ok, err := db.GetHaltCause(HaltCausePlanCap)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got[HaltCauseContextCap] != "ctx 95%" || got[HaltCausePlanCap] != "plan 96%" {
-		t.Errorf("GetHaltCauses payloads = %v, want both reasons preserved", got)
+	if !ok || planRow.Reason != "plan 96%" {
+		t.Errorf("plan-cap row = %+v ok=%v, want reason=%q", planRow, ok, "plan 96%")
 	}
 
 	// Clear context-cap only — plan-cap row must survive.
@@ -1358,15 +1358,15 @@ func TestSetHaltActiveIdempotentUpsert(t *testing.T) {
 	if err := db.SetHaltActive(HaltCausePlanCap, "second", "emma"); err != nil {
 		t.Fatal(err)
 	}
-	causes, err := db.GetHaltCauses()
+	row, ok, err := db.GetHaltCause(HaltCausePlanCap)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(causes) != 1 {
-		t.Errorf("upsert must produce one row per cause; got %d", len(causes))
+	if !ok {
+		t.Fatalf("upsert must leave the cause active")
 	}
-	if causes[0].Reason != "second" {
-		t.Errorf("upsert must overwrite reason; got %q", causes[0].Reason)
+	if row.Reason != "second" {
+		t.Errorf("upsert must overwrite reason; got %q", row.Reason)
 	}
 }
 

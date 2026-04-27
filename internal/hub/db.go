@@ -606,7 +606,7 @@ const (
 )
 
 // HaltState is one row of the cause-keyed halt_state table. Returned by
-// GetHaltCauses for diagnostics + agents-tab/strip rendering.
+// GetHaltCause for production callers (e.g. trio-re-register clear path).
 type HaltState struct {
 	Cause  string
 	SetAt  time.Time
@@ -744,30 +744,6 @@ func (db *DB) ClearHalt(cause string) error {
 func (db *DB) ClearHaltManually() error {
 	_, err := db.conn.Exec(`DELETE FROM halt_state`)
 	return err
-}
-
-// GetHaltCauses returns the active halt rows ordered by set_at ascending so
-// the oldest (most likely root cause) sorts first. Used by diagnostics +
-// agents-tab/strip rendering. Empty slice when no halts are active.
-func (db *DB) GetHaltCauses() ([]HaltState, error) {
-	rows, err := db.conn.Query(
-		`SELECT cause, set_at, set_by, reason FROM halt_state ORDER BY set_at ASC`,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []HaltState
-	for rows.Next() {
-		var h HaltState
-		var setAt int64
-		if err := rows.Scan(&h.Cause, &setAt, &h.SetBy, &h.Reason); err != nil {
-			return nil, err
-		}
-		h.SetAt = time.UnixMilli(setAt)
-		out = append(out, h)
-	}
-	return out, rows.Err()
 }
 
 // GetHaltCause returns the row for a specific cause. (true, ...) when the

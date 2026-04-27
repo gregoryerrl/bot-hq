@@ -122,7 +122,7 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), planUsageFetchTimeout)
 	defer cancel()
-	maxUtil, maxWindow, perWindow, err := fetch.Fetch(ctx)
+	maxUtil, maxWindow, _, err := fetch.Fetch(ctx)
 	g.planUsageMu.Lock()
 	g.lastPlanPoll = now
 	g.planUsageMu.Unlock()
@@ -140,13 +140,9 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 	if pctInt > 100 {
 		pctInt = 100
 	}
-	if pctInt < 0 {
-		pctInt = 0
-	}
 	if publisher != nil {
 		publisher(panestate.HubSnapshot{PlanUsagePct: pctInt, PlanWindow: maxWindow})
 	}
-	_ = perWindow // reserved for future per-window strip detail
 
 	// Halt + clear logic. Threshold crossing fires hub_flag; a clean drop
 	// below the reset threshold deletes the plan-cap row regardless of
