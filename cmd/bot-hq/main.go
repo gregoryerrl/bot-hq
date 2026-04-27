@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gregoryerrl/bot-hq/internal/brian"
@@ -16,6 +19,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
+	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
 )
 
@@ -28,6 +32,9 @@ func main() {
 		case "status":
 			runStatus()
 			return
+		case "audit-pane-drift":
+			runAuditPaneDrift()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -35,7 +42,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -233,6 +240,92 @@ func runStatus() {
 		fmt.Printf("  %s  %-15s %-10s %s\n", statusDot(a.Status), a.Name, a.Status, a.Project)
 	}
 	fmt.Printf("\n[%d agents, %d online]\n", len(agents), online)
+}
+
+// runAuditPaneDrift cross-references registered agent tmux_targets
+// against live `tmux list-panes` output and reports ghost-targets
+// (registered but not present in tmux). Slice-5 H-22-bis instrumentation
+// for Class A failure-mode candidate (b): pane regenerated under same
+// agent_id without Meta refresh leaves the hub sending to a dead target.
+//
+// Output: tab-separated text, one row per agent, headers + body. Designed
+// for hub_send relay during retry-exhaust events. Staleness column
+// (age_seconds) is the smoking-gun field for stale-mapping diagnosis.
+func runAuditPaneDrift() {
+	home, _ := os.UserHomeDir()
+	dbPath := filepath.Join(home, ".bot-hq", "hub.db")
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "db error: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	agents, err := db.ListAgents("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list agents: %v\n", err)
+		os.Exit(1)
+	}
+
+	livePanes, err := tmuxpkg.ListPanes()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list panes: %v\n", err)
+		os.Exit(1)
+	}
+	// tmux ListPanes returns full `session:window.pane` triples, but
+	// agents register tmux_target as session-name-only (so `tmux send-keys
+	// -t <session>` routes to the active pane). Normalize both sides to
+	// the session-name prefix for comparison; otherwise every registered
+	// target reports missing even when the session is alive.
+	liveTargets := make(map[string]struct{}, len(livePanes))
+	liveSessions := make(map[string]struct{}, len(livePanes))
+	for _, p := range livePanes {
+		liveTargets[p.Target] = struct{}{}
+		if i := strings.IndexByte(p.Target, ':'); i >= 0 {
+			liveSessions[p.Target[:i]] = struct{}{}
+		}
+	}
+
+	now := time.Now().UTC()
+	fmt.Printf("agent_id\ttype\tregistered_target\tlive_status\tlast_seen\tnow\tage_seconds\n")
+	for _, a := range agents {
+		var meta struct {
+			TmuxTarget string `json:"tmux_target"`
+		}
+		if a.Meta != "" {
+			json.Unmarshal([]byte(a.Meta), &meta)
+		}
+		target := meta.TmuxTarget
+		live := "-"
+		if target != "" {
+			sessionPart := target
+			if i := strings.IndexByte(target, ':'); i >= 0 {
+				sessionPart = target[:i]
+			}
+			if _, ok := liveTargets[target]; ok {
+				live = "alive"
+			} else if _, ok := liveSessions[sessionPart]; ok {
+				// Session present, exact pane index may have shifted —
+				// dispatch still works (sends to active pane). Treat as alive.
+				live = "alive"
+			} else {
+				live = "missing"
+			}
+		}
+		if target == "" {
+			target = "(none)"
+		}
+		ageSec := int64(now.Sub(a.LastSeen.UTC()).Seconds())
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%d\n",
+			a.ID,
+			string(a.Type),
+			target,
+			live,
+			a.LastSeen.UTC().Format(time.RFC3339),
+			now.Format(time.RFC3339),
+			ageSec,
+		)
+	}
 }
 
 func statusDot(s protocol.AgentStatus) string {

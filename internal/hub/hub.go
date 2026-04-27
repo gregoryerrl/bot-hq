@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -241,6 +243,100 @@ func (h *Hub) getAgentMu(agentID string) *sync.Mutex {
 	return mu.(*sync.Mutex)
 }
 
+// dispatchDecisionEnvVar gates the dispatchToTmux JSONL instrumentation.
+// Empty/unset = no-op (production default). Set to any non-empty value to
+// enable per-call decision logging at ~/.bot-hq/diag/dispatch-decisions.jsonl
+// (or $BOT_HQ_HOME/diag/... when overridden).
+//
+// Slice-5 H-22-bis instrumentation: writes one JSON record per
+// dispatchToTmux invocation capturing isAtPrompt decision + last-line bytes
+// + action taken. Cross-correlated with retry-exhaust events to pin the
+// "isAtPrompt race vs. mid-render pane" hypothesis.
+const dispatchDecisionEnvVar = "BOT_HQ_DIAG_DISPATCH"
+
+// dispatchDecisionRecord is the JSONL row shape for dispatch-decisions.jsonl.
+// Field names are stable wire format — change only with a corresponding
+// reader update in any analysis tooling.
+//
+// Decision = at_prompt (the isAtPrompt return). Outcome = what happened
+// next (the actual action result, including SendKeys / Enqueue errors).
+// Decision + outcome is the diagnostic unit — a clean "at_prompt=true /
+// outcome=sent" entry that still produces a retry-exhaust event implicates
+// the prompt-buffer-interleave hypothesis (Class A candidate c); a
+// "send_keys_err" with a non-empty err disambiguates a transport failure.
+//
+// TODO: log rotation when retention > 7d. Slice-5 diagnostic window is
+// days-to-weeks so v1 is no-rotation; mark for follow-up if instrumentation
+// stays past slice-5 close-out.
+type dispatchDecisionRecord struct {
+	TS         string `json:"ts"`
+	MsgID      int64  `json:"msg_id"`
+	ToAgent    string `json:"to_agent"`
+	TmuxTarget string `json:"tmux_target,omitempty"`
+	AtPrompt   bool   `json:"at_prompt"`
+	LastLine   string `json:"last_line,omitempty"`
+	Outcome    string `json:"outcome"`
+	Err        string `json:"err,omitempty"`
+}
+
+// diagDir returns the directory for diagnostic output files. Honors
+// BOT_HQ_HOME for test isolation, mirroring the convention used by
+// internal/gemma sentinelsDir.
+func diagDir() (string, error) {
+	if h := os.Getenv("BOT_HQ_HOME"); h != "" {
+		return filepath.Join(h, "diag"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".bot-hq", "diag"), nil
+}
+
+// recordDispatchDecision appends a dispatchToTmux decision record to the
+// diag JSONL file when the env gate is set. Best-effort: errors swallowed
+// because diagnostic instrumentation must not crash the dispatch path.
+func recordDispatchDecision(rec dispatchDecisionRecord) {
+	if os.Getenv(dispatchDecisionEnvVar) == "" {
+		return
+	}
+	dir, err := diagDir()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	rec.TS = time.Now().UTC().Format(time.RFC3339Nano)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "dispatch-decisions.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.Write(data)
+	f.Write([]byte("\n"))
+}
+
+// lastLineSummary extracts the trailing pane line for diagnostic logging,
+// truncated to 80 bytes to keep JSONL records compact. Whitespace is
+// preserved so a true mid-render frame is distinguishable from a clean
+// "❯" prompt.
+func lastLineSummary(paneOutput string) string {
+	if paneOutput == "" {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(paneOutput, "\n"), "\n")
+	last := lines[len(lines)-1]
+	if len(last) > 80 {
+		last = last[:80]
+	}
+	return last
+}
+
 // retryExhaustFromAgent is the synthetic from_agent used by the bridge
 // emit at retry-exhaust. Must be a non-registered agent ID so Emma's
 // source-filter (which suppresses queueFailPattern hits from registered
@@ -285,6 +381,12 @@ func (h *Hub) isAtPrompt(paneOutput string) bool {
 func (h *Hub) dispatchToTmux(msg protocol.Message) {
 	agent, err := h.DB.GetAgent(msg.ToAgent)
 	if err != nil {
+		recordDispatchDecision(dispatchDecisionRecord{
+			MsgID:   msg.ID,
+			ToAgent: msg.ToAgent,
+			Outcome: "no_target",
+			Err:     err.Error(),
+		})
 		return
 	}
 
@@ -309,6 +411,11 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 	}
 
 	if tmuxTarget == "" {
+		recordDispatchDecision(dispatchDecisionRecord{
+			MsgID:   msg.ID,
+			ToAgent: msg.ToAgent,
+			Outcome: "no_target",
+		})
 		return
 	}
 
@@ -320,13 +427,36 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 
 	output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
 	if err != nil {
+		recordDispatchDecision(dispatchDecisionRecord{
+			MsgID:      msg.ID,
+			ToAgent:    msg.ToAgent,
+			TmuxTarget: tmuxTarget,
+			Outcome:    "capture_err",
+			Err:        err.Error(),
+		})
 		return
 	}
 
 	text := h.FormatTmuxMessage(tmuxTarget, msg)
+	atPrompt := h.isAtPrompt(output)
+	lastLine := lastLineSummary(output)
 
-	if h.isAtPrompt(output) {
-		tmuxpkg.SendKeys(tmuxTarget, text, true)
+	if atPrompt {
+		sendErr := tmuxpkg.SendKeys(tmuxTarget, text, true)
+		rec := dispatchDecisionRecord{
+			MsgID:      msg.ID,
+			ToAgent:    msg.ToAgent,
+			TmuxTarget: tmuxTarget,
+			AtPrompt:   true,
+			LastLine:   lastLine,
+		}
+		if sendErr != nil {
+			rec.Outcome = "send_keys_err"
+			rec.Err = sendErr.Error()
+		} else {
+			rec.Outcome = "sent"
+		}
+		recordDispatchDecision(rec)
 		// Drain any previously queued messages for this agent
 		// Note: drainQueue is called under the same lock — do not re-lock inside it.
 		h.drainQueue(tmuxTarget, msg.ToAgent)
@@ -334,10 +464,23 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 		// Agent is busy — queue for retry.
 		// Delivery is at-least-once: if we crash between SendKeys and
 		// UpdateQueueStatus, the message stays "pending" and may be re-sent.
-		if err := h.DB.EnqueueMessage(msg.ID, msg.ToAgent, tmuxTarget, text); err != nil {
-			log.Printf("[dispatch] Failed to enqueue message %d for %s: %v", msg.ID, msg.ToAgent, err)
+		enqErr := h.DB.EnqueueMessage(msg.ID, msg.ToAgent, tmuxTarget, text)
+		rec := dispatchDecisionRecord{
+			MsgID:      msg.ID,
+			ToAgent:    msg.ToAgent,
+			TmuxTarget: tmuxTarget,
+			AtPrompt:   false,
+			LastLine:   lastLine,
+		}
+		if enqErr != nil {
+			rec.Outcome = "enqueue_err"
+			rec.Err = enqErr.Error()
+			recordDispatchDecision(rec)
+			log.Printf("[dispatch] Failed to enqueue message %d for %s: %v", msg.ID, msg.ToAgent, enqErr)
 			return
 		}
+		rec.Outcome = "queued"
+		recordDispatchDecision(rec)
 		log.Printf("[dispatch] Agent %s busy, queued message %d", msg.ToAgent, msg.ID)
 	}
 }

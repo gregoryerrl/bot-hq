@@ -1,7 +1,10 @@
 package hub
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -300,6 +303,74 @@ func TestRetryExhaustFromAgentNotRegistrable(t *testing.T) {
 		if a.ID == retryExhaustFromAgent {
 			t.Fatalf("retryExhaustFromAgent %q must not be in agents table; emit would be suppressed by Emma's source-filter", retryExhaustFromAgent)
 		}
+	}
+}
+
+// TestRecordDispatchDecisionEnvGate locks the no-op contract: when the
+// env gate is unset, recordDispatchDecision must not create the diag
+// directory or any files. Production default = no instrumentation.
+func TestRecordDispatchDecisionEnvGate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+	t.Setenv(dispatchDecisionEnvVar, "")
+
+	recordDispatchDecision(dispatchDecisionRecord{MsgID: 1, ToAgent: "rain", Outcome: "sent"})
+
+	if _, err := os.Stat(filepath.Join(home, "diag")); !os.IsNotExist(err) {
+		t.Errorf("diag dir should not exist when env gate unset; stat err = %v", err)
+	}
+}
+
+// TestRecordDispatchDecisionWritesJSONL locks the JSONL append shape when
+// the env gate is set: one record per line, RFC3339Nano timestamp,
+// canonical field names, decision + outcome together.
+func TestRecordDispatchDecisionWritesJSONL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+	t.Setenv(dispatchDecisionEnvVar, "1")
+
+	recordDispatchDecision(dispatchDecisionRecord{
+		MsgID:      42,
+		ToAgent:    "coder-abc",
+		TmuxTarget: "bot-hq-coder-abc:0.0",
+		AtPrompt:   true,
+		LastLine:   "❯",
+		Outcome:    "sent",
+	})
+	recordDispatchDecision(dispatchDecisionRecord{
+		MsgID:      43,
+		ToAgent:    "coder-abc",
+		TmuxTarget: "bot-hq-coder-abc:0.0",
+		AtPrompt:   true,
+		LastLine:   "❯",
+		Outcome:    "send_keys_err",
+		Err:        "tmux: connect failed",
+	})
+
+	path := filepath.Join(home, "diag", "dispatch-decisions.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected JSONL at %s, err: %v", path, err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 JSONL lines, got %d: %q", len(lines), data)
+	}
+	for i, line := range lines {
+		var rec dispatchDecisionRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Errorf("line %d not valid JSON: %v (%q)", i, err, line)
+		}
+		if rec.TS == "" {
+			t.Errorf("line %d missing ts", i)
+		}
+	}
+	// Spot-check err propagation.
+	if !strings.Contains(string(data), `"outcome":"send_keys_err"`) {
+		t.Errorf("send_keys_err outcome missing from JSONL: %q", data)
+	}
+	if !strings.Contains(string(data), `"err":"tmux: connect failed"`) {
+		t.Errorf("err field missing from JSONL: %q", data)
 	}
 }
 
