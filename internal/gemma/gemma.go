@@ -23,6 +23,9 @@ const (
 	healthInterval         = 30 * time.Second
 	heartbeatInterval      = 30 * time.Second
 	defaultMonitorInterval = 5 * time.Minute
+	// sentinelPollInterval gates the H-22 cross-process MCP-insert catch-up
+	// path. See sentinelPollLoop for the rationale on why this exists.
+	sentinelPollInterval = 5 * time.Second
 
 	defaultModel     = "gemma4:e4b"
 	defaultOllamaURL = "http://localhost:11434"
@@ -122,6 +125,11 @@ type Gemma struct {
 	running bool
 	stopCh  chan struct{}
 
+	// sentinelMu guards lastSentinelMsgID. The watermark is read+advanced
+	// from sentinelPollLoop and replayThroughSentinel — distinct goroutines.
+	sentinelMu         sync.Mutex
+	lastSentinelMsgID  int64
+
 	// Phase D flag bookkeeping. flagHistory dedupes by condition key
 	// (last-fired timestamp). flagWindow is a sliding 1h record of all
 	// fired flags for the shared rate cap.
@@ -212,11 +220,13 @@ func (g *Gemma) Start() error {
 	go g.healthLoop()
 	go g.heartbeatLoop()
 	go g.monitorLoop()
+	go g.sentinelPollLoop()
 
 	// Boot-time replay: run the most recent N hub messages through the
 	// sentinel so any active failures from the pre-restart window are
-	// caught. Live messages from this point onward arrive via the
-	// OnMessage subscriber wired in cmd/bot-hq/main.go.
+	// caught. Live in-process messages from this point onward arrive via
+	// the OnMessage subscriber wired in cmd/bot-hq/main.go; cross-process
+	// MCP-routed inserts arrive via sentinelPollLoop's tick.
 	g.replayThroughSentinel()
 
 	g.db.InsertMessage(protocol.Message{
@@ -503,14 +513,95 @@ func (g *Gemma) dispatchSentinelHit(msg protocol.Message, d SentinelDecision) {
 // through OnHubMessage at boot. Catches active failures from the
 // pre-restart window without requiring a separate silence-poll path
 // (deferred to post-Phase-F per locked msg 2442).
+//
+// Advances lastSentinelMsgID past the replayed window so the
+// sentinelPollLoop tick doesn't re-process the same messages. Cross-
+// bounce dedup of ledger entries is handled by AppendToDryRunLedger's
+// msg-id parse.
 func (g *Gemma) replayThroughSentinel() {
 	msgs, err := g.db.GetRecentMessages(replayBacklog)
 	if err != nil {
 		return
 	}
+	var maxID int64
 	for _, m := range msgs {
 		g.OnHubMessage(m)
+		if m.ID > maxID {
+			maxID = m.ID
+		}
 	}
+	g.sentinelMu.Lock()
+	if maxID > g.lastSentinelMsgID {
+		g.lastSentinelMsgID = maxID
+	}
+	g.sentinelMu.Unlock()
+}
+
+// sentinelPollLoop is the cross-process catch-up path for sentinel
+// detection. Closes the H-22 acceptance gap discovered at slice 2
+// runtime test 3.
+//
+// Why this exists: db.OnMessage callbacks (where Emma's OnHubMessage
+// is wired in cmd/bot-hq/main.go) are a process-local Go list. They
+// fire only for inserts made by *the same process* that registered
+// the callback. Brian, Rain, and coders all emit hub_send via the
+// MCP server (separate process), so their inserts never traverse the
+// TUI process's onMessages list. Pre-hotfix, Emma's only path to see
+// such messages was the boot-time replayThroughSentinel window of
+// the last 50 messages.
+//
+// Distinction vs H-18 (Rain's MCP polling rule dropped): Rain polls
+// from a Claude Code session via MCP, where messages-arrive-
+// automatically is delivered by MCP push. Emma is the in-process Go
+// monitor with direct DB access; she has no MCP push primitive for
+// cross-process inserts. Different architectural surface — H-18's
+// "don't poll" rule applies to MCP clients, not to in-process agents
+// reading their own DB.
+func (g *Gemma) sentinelPollLoop() {
+	ticker := time.NewTicker(sentinelPollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-g.stopCh:
+			return
+		case <-ticker.C:
+			g.pollSentinel()
+		}
+	}
+}
+
+// pollSentinel reads all DB messages newer than the watermark and
+// feeds each through OnHubMessage. Updates the watermark to the max
+// processed ID so the next tick is incremental, not cumulative.
+//
+// Batch limit (200) bounds work per tick. Under sustained burst
+// the loop catches up across consecutive ticks; the ledger dedup
+// invariant guards against double-write if a boot-replay window
+// overlaps with the polling window.
+func (g *Gemma) pollSentinel() {
+	g.sentinelMu.Lock()
+	since := g.lastSentinelMsgID
+	g.sentinelMu.Unlock()
+
+	msgs, err := g.db.ReadMessages("", since, 200)
+	if err != nil {
+		return
+	}
+
+	maxID := since
+	for _, m := range msgs {
+		g.OnHubMessage(m)
+		if m.ID > maxID {
+			maxID = m.ID
+		}
+	}
+
+	g.sentinelMu.Lock()
+	if maxID > g.lastSentinelMsgID {
+		g.lastSentinelMsgID = maxID
+	}
+	g.sentinelMu.Unlock()
 }
 
 // heartbeatLoop refreshes Emma's last_seen on a fast cadence so she stays

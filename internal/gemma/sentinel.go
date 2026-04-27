@@ -5,10 +5,18 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
+
+// ledgerMsgIDRe extracts a `msg #<id>` token from a ledger line so
+// AppendToDryRunLedger can dedup cross-bounce re-fires (e.g., Emma
+// boot-replay processing the same 50-msg window already ledgered in
+// a prior boot). Lines without this token are treated as legacy
+// free-form observations and are not deduped.
+var ledgerMsgIDRe = regexp.MustCompile(`msg #(\d+)\b`)
 
 // queueFailPattern is the Phase H slice 2 H-22 regex shape — pattern-
 // match on `[queue] failed after K attempts` log lines. Pure pattern
@@ -100,6 +108,12 @@ func sentinelsDir() (string, error) {
 // don't want a missing-dir or permission issue to crash sentinel
 // processing. Format is timestamped one-line-per-observation so Rain
 // can grep-review false-positive rate during tuning gate.
+//
+// Cross-bounce dedup: if `line` embeds a `msg #<id>` token (the
+// dispatchSentinelHit format), an entry already on file for the same
+// msg-id is a no-op. Idempotent across Emma boot-replay re-fires that
+// would otherwise re-append the same hit each bounce. Lines without
+// the token (legacy free-form callers, tests) bypass dedup.
 func AppendToDryRunLedger(name string, line string) {
 	dir, err := sentinelsDir()
 	if err != nil {
@@ -109,6 +123,16 @@ func AppendToDryRunLedger(name string, line string) {
 		return
 	}
 	path := filepath.Join(dir, name+"-dryrun.log")
+
+	if m := ledgerMsgIDRe.FindStringSubmatch(line); m != nil {
+		if existing, err := os.ReadFile(path); err == nil {
+			needle := fmt.Sprintf("msg #%s ", m[1])
+			if strings.Contains(string(existing), needle) {
+				return
+			}
+		}
+	}
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
