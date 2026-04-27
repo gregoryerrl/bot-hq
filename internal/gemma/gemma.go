@@ -141,6 +141,14 @@ type Gemma struct {
 	flagMu      sync.Mutex
 	flagHistory map[string]time.Time
 	flagWindow  []time.Time
+
+	// Phase H slice 3 C4 (H-3a Shape γ) stale-detection state. paneBaseline
+	// tracks the previous tick's tmux #{pane_last_activity} per agent so the
+	// next tick can decide "any pane output since last observation?". Mutex
+	// guards both the map and the paneActivity injection point.
+	staleMu      sync.Mutex
+	paneBaseline map[string]int64
+	paneActivity paneActivityFn
 }
 
 // New creates a Gemma instance from config.
@@ -453,6 +461,11 @@ func (g *Gemma) healthLoop() {
 				})
 				g.restartOllama()
 			}
+			// Phase H slice 3 C4: piggyback stale-coder detection on the
+			// healthLoop tick (30s) — no new ticker, cadence well below the
+			// 5min staleThreshold so the two-tick baseline + flag pattern
+			// detects a frozen pane within ~5min30s of the threshold trip.
+			g.checkStaleAgents()
 		}
 	}
 }
