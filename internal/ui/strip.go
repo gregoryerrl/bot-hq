@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/gregoryerrl/bot-hq/internal/anthropic"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
@@ -42,11 +41,12 @@ func agentTypeTier(t protocol.AgentType) int {
 // visible. Caps at stripAgentCap agents; surplus collapses to "+N".
 //
 // width controls the right-aligned plan-usage segment introduced by
-// slice 5 C1 (H-32). When width > 0 and hub.PlanUsagePct >= 0, append a
-// `${pct}%${tag}` segment color-tiered by severity at the right edge,
-// padded by spaces. width <= 0 skips the right segment entirely — output
-// is the bare dot row. Slice 5 dropped the per-pane context-% segment
-// (now lives in agents_tab.go as a column); the right segment is
+// slice 5 C1 (H-32) and reshaped to dual-window by the slice-5 hotfix.
+// When width > 0 and hub.PlanUsagePct >= 0, append a `5h:NN% 7d:NN%`
+// segment color-tiered by max severity at the right edge, padded by
+// spaces. width <= 0 skips the right segment entirely — output is the
+// bare dot row. Slice 5 dropped the per-pane context-% segment (now
+// lives in agents_tab.go as a column); the right segment is
 // account-scoped plan utilization.
 func renderStrip(snap []panestate.AgentSnapshot, hub panestate.HubSnapshot, width int) string {
 	alive := make([]panestate.AgentSnapshot, 0, len(snap))
@@ -96,17 +96,21 @@ func renderStrip(snap []panestate.AgentSnapshot, hub panestate.HubSnapshot, widt
 	return left + strings.Repeat(" ", spacer) + right
 }
 
-// renderPlanSegment renders the right-aligned plan-usage segment. Empty
-// string means "omit segment" — only when hub.PlanUsagePct == -1 AND no
-// window has been observed yet (fresh-boot strip stays clean). Format:
+// renderPlanSegment renders the right-aligned plan-usage dual-window
+// segment. Format: `5h:NN% 7d:NN%` where each NN is the per-window pct
+// or `--` when the window is unobserved/missing. Color tier is driven by
+// PlanUsagePct (max-of-all) so the user's worst-case window dominates
+// urgency signaling. Slice-5 hotfix: previous single-max display
+// concealed the non-binding window — dual-window surfaces both at once.
 //
-//   - five_hour or unknown-window: `${pct}%`
-//   - non-five_hour:               `${pct}%${tag}` with tag in
-//     { " weekly", " opus", " extra" } per planWindowTag.
-//   - PlanUsagePct = -1 with a known window: `--%` (signals the producer
-//     hit a transient error, prior known state lost).
+// Edge cases:
+//   - PlanUsagePct == -1 + empty PlanWindow → return "" (fresh boot,
+//     omit segment so the strip stays clean before the first poll).
+//   - PlanUsagePct == -1 + non-empty PlanWindow → render single `--%`
+//     (producer hit a transient error after first observation; preserves
+//     "alive but failing" diagnostic surface from H-40).
 //
-// Color tier: green <70 / yellow 70-89 / red ≥90.
+// Color tier: green <70 / yellow 70-89 / red ≥90 against PlanUsagePct.
 func renderPlanSegment(hub panestate.HubSnapshot) string {
 	if hub.PlanUsagePct < 0 {
 		if hub.PlanWindow == "" {
@@ -115,27 +119,18 @@ func renderPlanSegment(hub panestate.HubSnapshot) string {
 		style := lipgloss.NewStyle().Foreground(ColorStatus)
 		return style.Render("--%")
 	}
-	tag := planWindowTag(hub.PlanWindow)
 	style := planUsageTierStyle(hub.PlanUsagePct)
-	return style.Render(fmt.Sprintf("%d%%%s", hub.PlanUsagePct, tag))
+	return style.Render(fmt.Sprintf("5h:%s 7d:%s", planPctText(hub.FiveHourPct), planPctText(hub.SevenDayPct)))
 }
 
-// planWindowTag maps an oauth_usage window name to the strip suffix tag.
-// five_hour (the default, most-frequently-binding window) renders bare so
-// the segment stays compact; other windows surface as " weekly" /
-// " opus" / " extra" so the binding limit is obvious.
-func planWindowTag(window string) string {
-	switch window {
-	case anthropic.WindowFiveHour, "":
-		return ""
-	case anthropic.WindowSevenDay:
-		return " weekly"
-	case anthropic.WindowSevenDayOpus:
-		return " opus"
-	case anthropic.WindowSevenDaySonnet:
-		return " extra"
+// planPctText formats a per-window pct for the dual-window strip. -1
+// renders as `--%` to signal "window absent from API response" without
+// confusing the reader into thinking it's a real 0% reading.
+func planPctText(pct int) string {
+	if pct < 0 {
+		return "--%"
 	}
-	return " " + window
+	return fmt.Sprintf("%d%%", pct)
 }
 
 // planUsageTierStyle picks the color tier for the right-aligned plan-

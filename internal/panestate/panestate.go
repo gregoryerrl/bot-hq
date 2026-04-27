@@ -134,13 +134,21 @@ type AgentSnapshot struct {
 type HubSnapshot struct {
 	// PlanUsagePct is the maximum utilization across the four oauth/usage
 	// windows (five_hour, seven_day, seven_day_sonnet, seven_day_opus),
-	// rendered as 0-100. -1 = unknown / never observed (e.g. non-darwin
-	// host, keychain miss, fetch error, or near-token-expiry skip).
+	// rendered as 0-100. Drives the halt threshold + strip color tier.
+	// -1 = unknown / never observed (e.g. non-darwin host, keychain miss,
+	// fetch error, or near-token-expiry skip).
 	PlanUsagePct int
-	// PlanWindow names the window that produced PlanUsagePct so the strip
-	// can suffix a tag distinguishing five_hour vs weekly/opus/extra. Empty
-	// string when PlanUsagePct == -1.
+	// PlanWindow names the window that produced PlanUsagePct. Used by the
+	// halt reason text to label the binding limit. Empty string when
+	// PlanUsagePct == -1.
 	PlanWindow string
+	// FiveHourPct + SevenDayPct surface the two strip-displayed windows
+	// independently of the max-of-all PlanUsagePct. -1 = window missing
+	// from API response or fresh-boot/error. Slice-5 hotfix dual-window:
+	// strip renders `5h:NN% 7d:NN%` so the user sees both binding limits
+	// at once rather than only whichever happens to be max.
+	FiveHourPct int
+	SevenDayPct int
 }
 
 // AgentSource is the dependency for Manager.Refresh — anything that lists agents.
@@ -182,7 +190,7 @@ func NewManager(src AgentSource, capturePane func(string, int) (string, error)) 
 		src:         src,
 		capturePane: capturePane,
 		paneCache:   make(map[string]paneState),
-		hub:         HubSnapshot{PlanUsagePct: -1},
+		hub:         HubSnapshot{PlanUsagePct: -1, FiveHourPct: -1, SevenDayPct: -1},
 	}
 }
 

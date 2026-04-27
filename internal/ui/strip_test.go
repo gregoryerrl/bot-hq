@@ -29,8 +29,9 @@ func makeStaleGenSnap(id string, t protocol.AgentType, a panestate.AgentActivity
 
 // emptyHub is the zero-snapshot HubSnapshot used by tests that don't
 // exercise the right-aligned plan segment. PlanUsagePct=-1 with empty
-// PlanWindow means "omit segment".
-var emptyHub = panestate.HubSnapshot{PlanUsagePct: -1}
+// PlanWindow means "omit segment". FiveHourPct/SevenDayPct=-1 mirror
+// the producer's fresh-boot publish for the dual-window strip.
+var emptyHub = panestate.HubSnapshot{PlanUsagePct: -1, FiveHourPct: -1, SevenDayPct: -1}
 
 func TestRenderStripShowsAllExceptOffline(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
@@ -211,43 +212,71 @@ func TestRenderStripOmitsStaleGen(t *testing.T) {
 	}
 }
 
-// TestStripRendersPlanSegmentFiveHour locks slice 5 C1 (H-32) right-aligned
-// segment for the default five_hour window — bare percent suffix.
-func TestStripRendersPlanSegmentFiveHour(t *testing.T) {
+// TestStripRendersDualWindowSegment locks the slice-5 hotfix dual-window
+// shape: both 5h and 7d render side-by-side regardless of which is max.
+// Color tier follows PlanUsagePct (max-of-both) so the worst-case window
+// drives urgency signaling.
+func TestStripRendersDualWindowSegment(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
 		makeSnap("brian", protocol.AgentBrian, panestate.ActivityWorking),
 	}
-	hub := panestate.HubSnapshot{PlanUsagePct: 87, PlanWindow: anthropic.WindowFiveHour}
-	out := renderStrip(snap, hub, 80)
-	if !strings.Contains(out, "87%") {
-		t.Errorf("expected '87%%' in output, got: %q", out)
+	hub := panestate.HubSnapshot{
+		PlanUsagePct: 91,
+		PlanWindow:   anthropic.WindowFiveHour,
+		FiveHourPct:  91,
+		SevenDayPct:  15,
 	}
-	if strings.Contains(out, "87% weekly") || strings.Contains(out, "87% opus") || strings.Contains(out, "87% extra") {
-		t.Errorf("five_hour must render bare '87%%' without window tag, got: %q", out)
+	out := renderStrip(snap, hub, 80)
+	if !strings.Contains(out, "5h:91%") {
+		t.Errorf("expected '5h:91%%' in output, got: %q", out)
+	}
+	if !strings.Contains(out, "7d:15%") {
+		t.Errorf("expected '7d:15%%' in output, got: %q", out)
 	}
 }
 
-// TestStripRendersPlanSegmentNonFiveHour locks the window-tag suffix path.
-func TestStripRendersPlanSegmentNonFiveHour(t *testing.T) {
+// TestStripRendersDualWindowMissingSeven locks the missing-window path:
+// when the API didn't include seven_day (lower-tier accounts), the strip
+// renders `5h:NN% 7d:--%` so the user knows the second window is
+// unobserved rather than truly 0%.
+func TestStripRendersDualWindowMissingSeven(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
 		makeSnap("brian", protocol.AgentBrian, panestate.ActivityWorking),
 	}
-	cases := []struct {
-		window string
-		want   string
-	}{
-		{anthropic.WindowSevenDay, "92% weekly"},
-		{anthropic.WindowSevenDayOpus, "92% opus"},
-		{anthropic.WindowSevenDaySonnet, "92% extra"},
+	hub := panestate.HubSnapshot{
+		PlanUsagePct: 50,
+		PlanWindow:   anthropic.WindowFiveHour,
+		FiveHourPct:  50,
+		SevenDayPct:  -1,
 	}
-	for _, tc := range cases {
-		t.Run(tc.window, func(t *testing.T) {
-			hub := panestate.HubSnapshot{PlanUsagePct: 92, PlanWindow: tc.window}
-			out := renderStrip(snap, hub, 80)
-			if !strings.Contains(out, tc.want) {
-				t.Errorf("window=%s: expected %q in output, got: %q", tc.window, tc.want, out)
-			}
-		})
+	out := renderStrip(snap, hub, 80)
+	if !strings.Contains(out, "5h:50%") {
+		t.Errorf("expected '5h:50%%' in output, got: %q", out)
+	}
+	if !strings.Contains(out, "7d:--%") {
+		t.Errorf("expected '7d:--%%' for missing window, got: %q", out)
+	}
+}
+
+// TestStripRendersDualWindowMissingFive locks the symmetric case where
+// only seven_day is present — keeps the format stable regardless of
+// which window is the unobserved one.
+func TestStripRendersDualWindowMissingFive(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeSnap("brian", protocol.AgentBrian, panestate.ActivityWorking),
+	}
+	hub := panestate.HubSnapshot{
+		PlanUsagePct: 30,
+		PlanWindow:   anthropic.WindowSevenDay,
+		FiveHourPct:  -1,
+		SevenDayPct:  30,
+	}
+	out := renderStrip(snap, hub, 80)
+	if !strings.Contains(out, "5h:--%") {
+		t.Errorf("expected '5h:--%%' for missing window, got: %q", out)
+	}
+	if !strings.Contains(out, "7d:30%") {
+		t.Errorf("expected '7d:30%%' in output, got: %q", out)
 	}
 }
 

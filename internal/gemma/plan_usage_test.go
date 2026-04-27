@@ -108,6 +108,64 @@ func TestPlanCapFiresAt95(t *testing.T) {
 	}
 }
 
+// TestPlanCapPublishesDualWindowPcts locks the slice-5 hotfix dual-window
+// publish: each successful poll surfaces both five_hour + seven_day pcts
+// independently of which is max. Missing windows publish -1.
+func TestPlanCapPublishesDualWindowPcts(t *testing.T) {
+	g, _ := newContextCapGemma(t)
+	rec := &hubRecorder{}
+	g.SetHubPublisher(rec.publish)
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.91},
+		window:  []string{anthropic.WindowFiveHour},
+		perWindow: map[string]anthropic.Window{
+			anthropic.WindowFiveHour: {Utilization: 0.91},
+			anthropic.WindowSevenDay: {Utilization: 0.15},
+		},
+	})
+
+	g.checkPlanUsage(time.Now())
+
+	if rec.calls != 1 {
+		t.Fatalf("expected 1 publish, got %d", rec.calls)
+	}
+	if rec.last.FiveHourPct != 91 {
+		t.Errorf("FiveHourPct = %d, want 91", rec.last.FiveHourPct)
+	}
+	if rec.last.SevenDayPct != 15 {
+		t.Errorf("SevenDayPct = %d, want 15", rec.last.SevenDayPct)
+	}
+	if rec.last.PlanUsagePct != 91 {
+		t.Errorf("PlanUsagePct (max) = %d, want 91", rec.last.PlanUsagePct)
+	}
+}
+
+// TestPlanCapMissingSevenDayPublishesNeg1 — when the API response omits
+// the seven_day window (lower-tier account), the publish carries
+// SevenDayPct=-1 so the strip can render `7d:--%` distinguishably from
+// `7d:0%`.
+func TestPlanCapMissingSevenDayPublishesNeg1(t *testing.T) {
+	g, _ := newContextCapGemma(t)
+	rec := &hubRecorder{}
+	g.SetHubPublisher(rec.publish)
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.50},
+		window:  []string{anthropic.WindowFiveHour},
+		perWindow: map[string]anthropic.Window{
+			anthropic.WindowFiveHour: {Utilization: 0.50},
+		},
+	})
+
+	g.checkPlanUsage(time.Now())
+
+	if rec.last.FiveHourPct != 50 {
+		t.Errorf("FiveHourPct = %d, want 50", rec.last.FiveHourPct)
+	}
+	if rec.last.SevenDayPct != -1 {
+		t.Errorf("SevenDayPct = %d, want -1 (missing)", rec.last.SevenDayPct)
+	}
+}
+
 // TestPlanCapResetClearsHaltAndRearmsHysteresis — fire at 96%, then a
 // later poll at 70% deletes the plan-cap halt row AND re-arms the
 // shouldFlag hysteresis so a fresh squeeze past 95% fires anew.
@@ -210,6 +268,9 @@ func TestPlanCapAuthFailPublishesUnknownSnapshot(t *testing.T) {
 	}
 	if rec.last.PlanWindow != anthropic.WindowFiveHour {
 		t.Errorf("PlanWindow = %q, want %q (default tag for --%% render)", rec.last.PlanWindow, anthropic.WindowFiveHour)
+	}
+	if rec.last.FiveHourPct != -1 || rec.last.SevenDayPct != -1 {
+		t.Errorf("auth-fail must publish dual-window -1 sentinels; got 5h=%d 7d=%d", rec.last.FiveHourPct, rec.last.SevenDayPct)
 	}
 }
 

@@ -86,7 +86,7 @@ func (g *Gemma) initPlanUsageDefault() {
 		// instead of stale-zero, then leave fetch nil — checkPlanUsage
 		// short-circuits when fetch is nil.
 		if g.hubPublisher != nil {
-			g.hubPublisher(panestate.HubSnapshot{PlanUsagePct: -1})
+			g.hubPublisher(panestate.HubSnapshot{PlanUsagePct: -1, FiveHourPct: -1, SevenDayPct: -1})
 		}
 		return
 	}
@@ -122,7 +122,7 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), planUsageFetchTimeout)
 	defer cancel()
-	maxUtil, maxWindow, _, err := fetch.Fetch(ctx)
+	maxUtil, maxWindow, perWindow, err := fetch.Fetch(ctx)
 	g.planUsageMu.Lock()
 	g.lastPlanPoll = now
 	g.planUsageMu.Unlock()
@@ -136,12 +136,14 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 	g.planUsageMu.Lock()
 	g.planBackoffUntil = time.Time{}
 	g.planUsageMu.Unlock()
-	pctInt := int(maxUtil*100 + 0.5)
-	if pctInt > 100 {
-		pctInt = 100
-	}
+	pctInt := utilToPct(maxUtil)
 	if publisher != nil {
-		publisher(panestate.HubSnapshot{PlanUsagePct: pctInt, PlanWindow: maxWindow})
+		publisher(panestate.HubSnapshot{
+			PlanUsagePct: pctInt,
+			PlanWindow:   maxWindow,
+			FiveHourPct:  windowPct(perWindow, anthropic.WindowFiveHour),
+			SevenDayPct:  windowPct(perWindow, anthropic.WindowSevenDay),
+		})
 	}
 
 	// Halt + clear logic. Threshold crossing fires hub_flag; a clean drop
@@ -184,7 +186,7 @@ func (g *Gemma) handlePlanUsageError(now time.Time, err error) {
 			log.Printf("[plan-cap] %v — plan-usage producer disabled", err)
 		}
 		if publisher != nil {
-			publisher(panestate.HubSnapshot{PlanUsagePct: -1})
+			publisher(panestate.HubSnapshot{PlanUsagePct: -1, FiveHourPct: -1, SevenDayPct: -1})
 		}
 		return
 	}
@@ -199,8 +201,35 @@ func (g *Gemma) handlePlanUsageError(now time.Time, err error) {
 	// planWindowTag); if a future producer-side error preserves prior window,
 	// substitute it here (slice-5 H-40b candidate).
 	if publisher != nil {
-		publisher(panestate.HubSnapshot{PlanUsagePct: -1, PlanWindow: anthropic.WindowFiveHour})
+		publisher(panestate.HubSnapshot{
+			PlanUsagePct: -1,
+			PlanWindow:   anthropic.WindowFiveHour,
+			FiveHourPct:  -1,
+			SevenDayPct:  -1,
+		})
 	}
+}
+
+// windowPct returns the integer 0-100 percent for a named window in the
+// Fetch response, or -1 if absent. Slice-5 hotfix dual-window: lets the
+// strip render `5h:NN% 7d:NN%` with `--%` for windows the API didn't
+// include (e.g. accounts that haven't yet observed seven_day traffic).
+func windowPct(perWindow map[string]anthropic.Window, name string) int {
+	w, ok := perWindow[name]
+	if !ok {
+		return -1
+	}
+	return utilToPct(w.Utilization)
+}
+
+// utilToPct rounds a 0-1 utilization float to 0-100, clamping the upper
+// bound. Centralized so the max + per-window fields share rounding.
+func utilToPct(u float64) int {
+	pctInt := int(u*100 + 0.5)
+	if pctInt > 100 {
+		pctInt = 100
+	}
+	return pctInt
 }
 
 // firePlanCapHalt fires hub_flag and sets the halt_state row. Wraps
