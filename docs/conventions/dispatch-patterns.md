@@ -47,7 +47,7 @@ exec.Command("tmux", "send-keys", "-t", target, content) // raw mode interprets 
 
 ## Pattern 3 — Gemma allowlist gate for shell-out commands
 
-Gemma (Emma's analyze-class commands) gates external command execution through a static allowlist defined in `internal/gemma/allowlist.go`. Any new shell-out from a gemma surface must:
+Gemma (Emma's analyze-class commands) gates external command execution through a static allowlist defined in `internal/gemma/gemma.go` (`allowedCommands` constant at line 74; `IsCommandAllowed` enforcement at line 299). Any new shell-out from a gemma surface must:
 
 1. Add the binary name to the allowlist (compile-time constant; no dynamic appends)
 2. Use `exec.Command` arg arrays (Pattern 1)
@@ -75,7 +75,7 @@ When a guard checks "should this commit be allowed?", read the **HEAD blob** of 
 ## Refs
 
 - `internal/mcp/worktree_hook.go` — applies Pattern 4 (HEAD-blob read for closed-arc gate)
-- `internal/gemma/allowlist.go` — Pattern 3 enforcement surface
+- `internal/gemma/gemma.go` (`allowedCommands` + `IsCommandAllowed`) — Pattern 3 enforcement surface
 - `internal/mcp/tools.go` — `hub_spawn` + tmux `send-keys -l` callsites (Pattern 1 + Pattern 2 example)
 - `feedback_bcc_disguise_and_origin_rules.md` — allowlist-change authority
 - Slice 1 verify pass (msgs 3250-3251) — original hardening discovery
