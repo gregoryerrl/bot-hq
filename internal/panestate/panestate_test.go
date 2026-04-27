@@ -429,14 +429,14 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-// TestParseUsagePctKnownFormat locks H-30 parser against the published Claude
+// TestParseContextPctKnownFormat locks H-30 parser against the published Claude
 // Code 2.1.119 indicator format `${D}% until auto-compact`. UsagePct inverts
 // remaining-pct to high-is-bad: D=5 → UsagePct=95.
 //
 // Format source: `@anthropic-ai/claude-code/cli.js` template literal
 // `${D}% until auto-compact[· ${MESSAGE}]` (published-source discovery, not
 // hypothesis). The high-usage fixture mirrors a CC pane near auto-compact.
-func TestParseUsagePctKnownFormat(t *testing.T) {
+func TestParseContextPctKnownFormat(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -449,8 +449,8 @@ func TestParseUsagePctKnownFormat(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := parseUsagePct(tc.in); got != tc.want {
-				t.Errorf("parseUsagePct(%q) = %d, want %d", tc.in, got, tc.want)
+			if got := parseContextPct(tc.in); got != tc.want {
+				t.Errorf("parseContextPct(%q) = %d, want %d", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -462,16 +462,16 @@ func TestParseUsagePctKnownFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	if got := parseUsagePct(string(data)); got != 95 {
-		t.Errorf("fixture parseUsagePct = %d, want 95 (5%% remaining)", got)
+	if got := parseContextPct(string(data)); got != 95 {
+		t.Errorf("fixture parseContextPct = %d, want 95 (5%% remaining)", got)
 	}
 }
 
-// TestParseUsagePctUnknownFallback locks fail-soft: any input that doesn't
+// TestParseContextPctUnknownFallback locks fail-soft: any input that doesn't
 // match the indicator regex returns -1. Display silently omits the segment
 // rather than rendering a misleading 0% / 100%. This is the FIRST-class path
 // per design: format-mismatch must never break runtime.
-func TestParseUsagePctUnknownFallback(t *testing.T) {
+func TestParseContextPctUnknownFallback(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -485,8 +485,8 @@ func TestParseUsagePctUnknownFallback(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := parseUsagePct(tc.in); got != -1 {
-				t.Errorf("parseUsagePct(%q) = %d, want -1 (unknown)", tc.in, got)
+			if got := parseContextPct(tc.in); got != -1 {
+				t.Errorf("parseContextPct(%q) = %d, want -1 (unknown)", tc.in, got)
 			}
 		})
 	}
@@ -496,17 +496,17 @@ func TestParseUsagePctUnknownFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	if got := parseUsagePct(string(data)); got != -1 {
-		t.Errorf("no-indicator fixture parseUsagePct = %d, want -1", got)
+	if got := parseContextPct(string(data)); got != -1 {
+		t.Errorf("no-indicator fixture parseContextPct = %d, want -1", got)
 	}
 }
 
-// TestRefreshPaneActivity_UsagePctPropagates locks the wiring path: a fresh
+// TestRefreshPaneActivity_ContextPctPropagates locks the wiring path: a fresh
 // capture containing the indicator surfaces UsagePct on the snapshot, AND a
 // subsequent capture-error tick carries the prior value forward instead of
 // regressing to -1. Three-step shape — prior-zero step would falsely pass a
 // trivial implementation.
-func TestRefreshPaneActivity_UsagePctPropagates(t *testing.T) {
+func TestRefreshPaneActivity_ContextPctPropagates(t *testing.T) {
 	fake := &fakeSource{agents: []protocol.Agent{agentWithTmux("a1", "session:0.0")}}
 	captureErr := errString("tmux gone")
 	cap := &scriptedCapture{
@@ -519,21 +519,21 @@ func TestRefreshPaneActivity_UsagePctPropagates(t *testing.T) {
 	if err := m.Refresh(); err != nil {
 		t.Fatal(err)
 	}
-	if got := m.Snapshot()[0].UsagePct; got != 95 {
+	if got := m.Snapshot()[0].ContextPct; got != 95 {
 		t.Errorf("tick 1 UsagePct = %d, want 95 (5%% remaining)", got)
 	}
 	// Tick 2: empty pane (no indicator) → UsagePct=-1 (parse-unknown).
 	if err := m.Refresh(); err != nil {
 		t.Fatal(err)
 	}
-	if got := m.Snapshot()[0].UsagePct; got != -1 {
+	if got := m.Snapshot()[0].ContextPct; got != -1 {
 		t.Errorf("tick 2 UsagePct = %d, want -1 (no indicator)", got)
 	}
 	// Tick 3: capture errors → carry forward prior cached value (-1).
 	if err := m.Refresh(); err != nil {
 		t.Fatal(err)
 	}
-	if got := m.Snapshot()[0].UsagePct; got != -1 {
+	if got := m.Snapshot()[0].ContextPct; got != -1 {
 		t.Errorf("tick 3 UsagePct = %d, want -1 (carry-forward)", got)
 	}
 }

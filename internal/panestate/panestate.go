@@ -51,11 +51,11 @@ const paneCaptureLines = 50
 type paneState struct {
 	lastHash     uint64
 	lastActivity time.Time
-	// lastUsagePct caches the most recent parsed UsagePct so a transient
+	// lastContextPct caches the most recent parsed ContextPct so a transient
 	// capturePane error carries the prior value forward instead of regressing
 	// to -1 (parse-unknown). Mirrors the carry-forward semantic for
 	// lastActivity. -1 = unknown / never observed.
-	lastUsagePct int
+	lastContextPct int
 }
 
 // AgentActivity is the derived activity tier for first-order user check.
@@ -117,12 +117,30 @@ type AgentSnapshot struct {
 	LastClassification string
 	RecentErrors       []ClassifierHit
 
-	// UsagePct is the parsed Claude Code context-usage percentage (0-100,
-	// high = closer to auto-compact). -1 means unknown: no tmux_target, no
-	// pane content captured yet, or the indicator is absent (CC only renders
-	// it past ~70-80% usage). H-30: drives the right-aligned hub-strip
-	// segment; H-31 will consume it for the context-cap halt-flag.
-	UsagePct int
+	// ContextPct is the parsed Claude Code per-pane context-usage percentage
+	// (0-100, high = closer to auto-compact). -1 means unknown: no
+	// tmux_target, no pane content captured yet, or the indicator is absent
+	// (CC only renders it past ~70-80% usage). H-30 drove the right-aligned
+	// hub-strip segment; slice 5 C1 (H-32) moved that segment to the
+	// account-scoped plan-usage signal and surfaced ContextPct as a per-row
+	// column in the agents tab. H-31 consumes ContextPct for the context-cap
+	// halt-flag.
+	ContextPct int
+}
+
+// HubSnapshot is the account-scoped surface populated by Emma's
+// plan-usage producer (internal/gemma/plan_usage.go). The strip reads it
+// for the right-aligned plan-% segment introduced by slice 5 C1 (H-32).
+type HubSnapshot struct {
+	// PlanUsagePct is the maximum utilization across the four oauth/usage
+	// windows (five_hour, seven_day, seven_day_sonnet, seven_day_opus),
+	// rendered as 0-100. -1 = unknown / never observed (e.g. non-darwin
+	// host, keychain miss, fetch error, or near-token-expiry skip).
+	PlanUsagePct int
+	// PlanWindow names the window that produced PlanUsagePct so the strip
+	// can suffix a tag distinguishing five_hour vs weekly/opus/extra. Empty
+	// string when PlanUsagePct == -1.
+	PlanWindow string
 }
 
 // AgentSource is the dependency for Manager.Refresh — anything that lists agents.
@@ -147,6 +165,7 @@ type Manager struct {
 	mu          sync.RWMutex
 	snapshot    []AgentSnapshot
 	raw         []protocol.Agent
+	hub         HubSnapshot
 }
 
 // NewManager constructs a Manager bound to the given source and pane-capture
@@ -163,6 +182,7 @@ func NewManager(src AgentSource, capturePane func(string, int) (string, error)) 
 		src:         src,
 		capturePane: capturePane,
 		paneCache:   make(map[string]paneState),
+		hub:         HubSnapshot{PlanUsagePct: -1},
 	}
 }
 
@@ -177,7 +197,7 @@ func (m *Manager) Refresh() error {
 	currentGen := m.src.CurrentRebuildGen()
 	snap := make([]AgentSnapshot, len(agents))
 	for i, a := range agents {
-		paneActive, usagePct := m.observePaneActivity(a, now)
+		paneActive, contextPct := m.observePaneActivity(a, now)
 		// StaleGen flags pre-rebuild registrations: agents stamped with a
 		// non-zero gen that doesn't match the current hub gen. Zero gen
 		// (legacy rows or pre-feature DBs) is never flagged stale.
@@ -191,7 +211,7 @@ func (m *Manager) Refresh() error {
 			LastPaneActivity: paneActive,
 			StaleGen:         stale,
 			Activity:         ComputeActivity(a.Status, a.LastSeen, paneActive, now),
-			UsagePct:         usagePct,
+			ContextPct:       contextPct,
 		}
 	}
 	m.mu.Lock()
@@ -223,48 +243,49 @@ func (m *Manager) observePaneActivity(a protocol.Agent, now time.Time) (time.Tim
 	output, err := m.capturePane(tmuxTarget, paneCaptureLines)
 	if err != nil {
 		// Carry forward both signals: a transient tmux error must not
-		// regress UsagePct to -1 any more than it regresses lastActivity to
-		// zero. Cache default for non-existent entry has lastUsagePct=0,
-		// which would falsely advertise "unknown" as "0% usage" — guard.
+		// regress ContextPct to -1 any more than it regresses lastActivity
+		// to zero. Cache default for non-existent entry has
+		// lastContextPct=0, which would falsely advertise "unknown" as
+		// "0% usage" — guard.
 		if !hadCache {
 			return time.Time{}, -1
 		}
-		return cached.lastActivity, cached.lastUsagePct
+		return cached.lastActivity, cached.lastContextPct
 	}
 	h := fnv.New64a()
 	h.Write([]byte(output))
 	hash := h.Sum64()
-	usagePct := parseUsagePct(output)
+	contextPct := parseContextPct(output)
 	if !hadCache {
-		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: time.Time{}, lastUsagePct: usagePct}
-		return time.Time{}, usagePct
+		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: time.Time{}, lastContextPct: contextPct}
+		return time.Time{}, contextPct
 	}
 	if hash != cached.lastHash {
-		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: now, lastUsagePct: usagePct}
-		return now, usagePct
+		m.paneCache[a.ID] = paneState{lastHash: hash, lastActivity: now, lastContextPct: contextPct}
+		return now, contextPct
 	}
-	// Hash unchanged — content stable. UsagePct re-parses to the same value
-	// (parser is pure over content), so cached.lastUsagePct is correct.
-	return cached.lastActivity, cached.lastUsagePct
+	// Hash unchanged — content stable. ContextPct re-parses to the same
+	// value (parser is pure over content), so cached.lastContextPct holds.
+	return cached.lastActivity, cached.lastContextPct
 }
 
-// usagePctRe matches Claude Code's auto-compact countdown indicator. The
+// contextPctRe matches Claude Code's auto-compact countdown indicator. The
 // literal display string sourced from the published binary at
 // `@anthropic-ai/claude-code/cli.js` 2.1.119 is `${D}% until auto-compact`
 // (optionally suffixed `· ${MESSAGE}`), where D is the percentage of context
 // REMAINING until auto-compact triggers — high D = lots of room, low D =
-// imminent compaction. UsagePct inverts to a high-is-bad signal so the
-// strip's color tiers (yellow ≥80% / orange ≥90% / red ≥95%) align naturally
-// with squeeze severity.
-var usagePctRe = regexp.MustCompile(`(\d+)% until auto-compact`)
+// imminent compaction. ContextPct inverts to a high-is-bad signal so the
+// agents-tab color tiers (yellow ≥80% / orange ≥90% / red ≥95%) align
+// naturally with squeeze severity.
+var contextPctRe = regexp.MustCompile(`(\d+)% until auto-compact`)
 
-// parseUsagePct extracts a context-usage percentage (0-100, high = closer to
-// auto-compact) from a captured tmux pane. Returns -1 when the indicator is
-// absent or the parse fails — display silently omits the segment, so a CC
-// version that changes the format degrades gracefully rather than producing
-// false 0%/100% readings.
-func parseUsagePct(paneContent string) int {
-	match := usagePctRe.FindStringSubmatch(paneContent)
+// parseContextPct extracts the per-pane context-usage percentage (0-100,
+// high = closer to auto-compact) from a captured tmux pane. Returns -1 when
+// the indicator is absent or the parse fails — display silently omits the
+// column, so a CC version that changes the format degrades gracefully rather
+// than producing false 0%/100% readings.
+func parseContextPct(paneContent string) int {
+	match := contextPctRe.FindStringSubmatch(paneContent)
 	if len(match) < 2 {
 		return -1
 	}
@@ -298,6 +319,27 @@ func (m *Manager) Snapshot() []AgentSnapshot {
 	out := make([]AgentSnapshot, len(m.snapshot))
 	copy(out, m.snapshot)
 	return out
+}
+
+// HubSnapshot returns the account-scoped surface (plan-usage % + window).
+// Slice 5 C1 (H-32) accessor consumed by ui/strip.go to drive the
+// right-aligned plan-% segment. Defaults to {-1, ""} until SetHubSnapshot
+// fires for the first time.
+func (m *Manager) HubSnapshot() HubSnapshot {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hub
+}
+
+// SetHubSnapshot publishes a new account-scoped surface. Emma's plan-usage
+// producer calls this on each successful poll (every 60s); a near-expiry
+// skip or fetch error leaves the prior value unchanged so the UI doesn't
+// flicker between known and -1 when the producer hits a transient hiccup.
+// Callers explicitly publish {-1, ""} when they need to reset to unknown.
+func (m *Manager) SetHubSnapshot(s HubSnapshot) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hub = s
 }
 
 // Agents returns a copy of the raw agent list as last seen by Refresh.

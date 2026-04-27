@@ -1286,3 +1286,221 @@ func TestHubRegisterRerunAdvancesWatermark(t *testing.T) {
 		t.Errorf("rerun watermark = %d, want > %d (first register)", wm2, wm1)
 	}
 }
+
+// TestHaltStateMultiCauseAPI locks the slice-5 C1 (H-32+H-33) cause-keyed
+// halt_state surface: independent SetHaltActive(cause), ClearHalt(cause),
+// IsHalted, GetHaltCauses. Each cause must coexist independently and a
+// per-cause clear must not touch unrelated rows.
+func TestHaltStateMultiCauseAPI(t *testing.T) {
+	db := setupTestDB(t)
+
+	if h, _ := db.IsHalted(); h {
+		t.Fatalf("fresh DB must not be halted")
+	}
+
+	if err := db.SetHaltActive(HaltCauseContextCap, "ctx 95%", "emma"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetHaltActive(HaltCausePlanCap, "plan 96%", "emma"); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := db.IsHalted(); !h {
+		t.Errorf("IsHalted must be true with two causes active")
+	}
+
+	causes, err := db.GetHaltCauses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(causes) != 2 {
+		t.Fatalf("GetHaltCauses len = %d, want 2", len(causes))
+	}
+	got := map[string]string{}
+	for _, c := range causes {
+		got[c.Cause] = c.Reason
+	}
+	if got[HaltCauseContextCap] != "ctx 95%" || got[HaltCausePlanCap] != "plan 96%" {
+		t.Errorf("GetHaltCauses payloads = %v, want both reasons preserved", got)
+	}
+
+	// Clear context-cap only — plan-cap row must survive.
+	if err := db.ClearHalt(HaltCauseContextCap); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := db.GetHaltCause(HaltCauseContextCap); ok {
+		t.Errorf("ClearHalt(context-cap) must delete that row")
+	}
+	if _, ok, _ := db.GetHaltCause(HaltCausePlanCap); !ok {
+		t.Errorf("ClearHalt(context-cap) must NOT touch plan-cap row")
+	}
+	if h, _ := db.IsHalted(); !h {
+		t.Errorf("IsHalted must still be true with plan-cap active")
+	}
+
+	// Manual clear wipes everything.
+	if err := db.ClearHaltManually(); err != nil {
+		t.Fatal(err)
+	}
+	if h, _ := db.IsHalted(); h {
+		t.Errorf("ClearHaltManually must wipe all rows")
+	}
+}
+
+// TestSetHaltActiveIdempotentUpsert locks the upsert semantic — repeated
+// fires for the same cause refresh set_at/reason without producing a
+// duplicate row.
+func TestSetHaltActiveIdempotentUpsert(t *testing.T) {
+	db := setupTestDB(t)
+	if err := db.SetHaltActive(HaltCausePlanCap, "first", "emma"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := db.SetHaltActive(HaltCausePlanCap, "second", "emma"); err != nil {
+		t.Fatal(err)
+	}
+	causes, err := db.GetHaltCauses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(causes) != 1 {
+		t.Errorf("upsert must produce one row per cause; got %d", len(causes))
+	}
+	if causes[0].Reason != "second" {
+		t.Errorf("upsert must overwrite reason; got %q", causes[0].Reason)
+	}
+}
+
+// TestClearHaltIfTrioReregisteredScopedToContextCap locks the H-33
+// scoping: the auto-clear path now only deletes the context-cap row,
+// even when the plan-cap row is also active. Plan-cap clears organically
+// via window-rollover or poll-shows-decay, not via re-register.
+func TestClearHaltIfTrioReregisteredScopedToContextCap(t *testing.T) {
+	db := setupTestDB(t)
+
+	if err := db.SetHaltActive(HaltCauseContextCap, "ctx", "emma"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetHaltActive(HaltCausePlanCap, "plan", "emma"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	for _, id := range HaltStateTrio {
+		if err := db.RegisterAgent(protocol.Agent{
+			ID: id, Name: id, Type: protocol.AgentBrian, Status: protocol.StatusOnline,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleared, err := db.ClearHaltIfTrioReregistered(HaltStateTrio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cleared {
+		t.Fatalf("expected context-cap clear after trio re-register past set_at")
+	}
+	if _, ok, _ := db.GetHaltCause(HaltCauseContextCap); ok {
+		t.Errorf("context-cap row must be deleted")
+	}
+	if _, ok, _ := db.GetHaltCause(HaltCausePlanCap); !ok {
+		t.Errorf("plan-cap row must SURVIVE trio re-register (H-33 scoping)")
+	}
+}
+
+// TestHaltStateMigrationFromLegacySchema locks the slice-5 C1 idempotent
+// migration: a DB pre-seeded with the legacy (id=1, active flag) schema
+// holding an active row must end up on the new (cause PRIMARY KEY)
+// schema with the active row migrated to cause='context-cap'.
+func TestHaltStateMigrationFromLegacySchema(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Phase 1: simulate a legacy DB by opening sqlite directly + writing
+	// the old schema with an active row, then closing.
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+		CREATE TABLE halt_state (
+			id      INTEGER PRIMARY KEY CHECK (id = 1),
+			active  INTEGER NOT NULL DEFAULT 0,
+			set_by  TEXT NOT NULL DEFAULT '',
+			set_at  INTEGER NOT NULL DEFAULT 0,
+			reason  TEXT NOT NULL DEFAULT ''
+		);
+		INSERT INTO halt_state (id, active, set_by, set_at, reason)
+		VALUES (1, 1, 'emma', 1700000000000, 'legacy ctx fire');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	legacy.Close()
+
+	// Phase 2: open via the production OpenDB, which runs migrate() and
+	// MUST detect + rewrite the legacy schema in place.
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB on legacy schema: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	row, ok, err := db.GetHaltCause(HaltCauseContextCap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("legacy active row must migrate to cause=context-cap")
+	}
+	if row.Reason != "legacy ctx fire" {
+		t.Errorf("migrated reason = %q, want 'legacy ctx fire'", row.Reason)
+	}
+	if row.SetBy != "emma" {
+		t.Errorf("migrated set_by = %q, want 'emma'", row.SetBy)
+	}
+
+	// Phase 3: re-running migrate (simulated by closing+reopening) must
+	// be a no-op — idempotent. The cause row must persist.
+	db.Close()
+	db2, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("re-open after migration: %v", err)
+	}
+	defer db2.Close()
+	if _, ok, _ := db2.GetHaltCause(HaltCauseContextCap); !ok {
+		t.Errorf("context-cap row must survive re-run of migrate (idempotent)")
+	}
+}
+
+// TestHaltStateMigrationLegacyInactive locks the inactive-row case: a
+// legacy DB with active=0 must end up on the new schema with NO rows.
+func TestHaltStateMigrationLegacyInactive(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`
+		CREATE TABLE halt_state (
+			id      INTEGER PRIMARY KEY CHECK (id = 1),
+			active  INTEGER NOT NULL DEFAULT 0,
+			set_by  TEXT NOT NULL DEFAULT '',
+			set_at  INTEGER NOT NULL DEFAULT 0,
+			reason  TEXT NOT NULL DEFAULT ''
+		);
+		INSERT INTO halt_state (id, active) VALUES (1, 0);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	legacy.Close()
+
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB on legacy inactive schema: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if h, _ := db.IsHalted(); h {
+		t.Errorf("legacy active=0 must migrate to zero-row halt_state; IsHalted=true")
+	}
+}

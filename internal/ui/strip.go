@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/gregoryerrl/bot-hq/internal/anthropic"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
@@ -14,16 +15,11 @@ import (
 // agents collapse to a "+N" suffix. Spec §4 commit 4.
 const stripAgentCap = 8
 
-// usageSegmentMinPct is the threshold below which the right-aligned usage
-// segment is omitted. ≥80% = squeeze worth surfacing; below that the segment
-// would clutter the strip during normal operation. H-30.
-const usageSegmentMinPct = 80
-
-// usageSegmentMinSpacer is the minimum gap between the left dot row and the
-// right usage segment. Below this we omit the segment rather than render
-// agents touching the percent — narrow widths shouldn't squeeze the strip
-// into illegibility.
-const usageSegmentMinSpacer = 2
+// planSegmentMinSpacer is the minimum gap between the left dot row and
+// the right plan-usage segment. Below this we omit the segment rather
+// than render agents touching the percent — narrow widths shouldn't
+// squeeze the strip into illegibility.
+const planSegmentMinSpacer = 2
 
 // agentTypeTier returns the display tier for an agent type. Lower = earlier
 // in the strip ordering. Locked at three tiers per spec §4 commit 4.
@@ -42,31 +38,24 @@ func agentTypeTier(t protocol.AgentType) int {
 }
 
 // renderStrip renders the per-agent activity strip displayed above the
-// HubTab input bar. Hides only ActivityOffline (explicitly disconnected /
-// status=offline short-circuits to ActivityOffline at panestate.go:303-304).
-// ActivityStale agents stay visible with the dim Stale dot so quiet-but-
-// registered agents don't vanish during system-wide idle windows. Caps at
-// stripAgentCap agents; surplus collapses to "+N".
+// HubTab input bar. Hides only ActivityOffline; ActivityStale agents stay
+// visible. Caps at stripAgentCap agents; surplus collapses to "+N".
 //
-// Returns an empty string when zero alive agents — caller should still
-// reserve a separator line so the input bar position stays stable across
-// strip-empty/non-empty transitions.
-//
-// width controls the right-aligned UsagePct segment (H-30). When width > 0
-// and at least one visible agent has UsagePct ≥ usageSegmentMinPct, append a
-// `<agent-id> NN%` segment color-tiered by severity at the right edge,
-// padded by spaces. width ≤ 0 (legacy callsites / tests not exercising the
-// segment) skips the right segment entirely — output is the bare dot row.
-func renderStrip(snap []panestate.AgentSnapshot, width int) string {
+// width controls the right-aligned plan-usage segment introduced by
+// slice 5 C1 (H-32). When width > 0 and hub.PlanUsagePct >= 0, append a
+// `${pct}%${tag}` segment color-tiered by severity at the right edge,
+// padded by spaces. width <= 0 skips the right segment entirely — output
+// is the bare dot row. Slice 5 dropped the per-pane context-% segment
+// (now lives in agents_tab.go as a column); the right segment is
+// account-scoped plan utilization.
+func renderStrip(snap []panestate.AgentSnapshot, hub panestate.HubSnapshot, width int) string {
 	alive := make([]panestate.AgentSnapshot, 0, len(snap))
 	for _, s := range snap {
 		if s.Activity == panestate.ActivityOffline {
 			continue
 		}
 		// Phase G v1 #20: stale-gen agents (registered pre-rebuild) are
-		// omitted from the strip — they're definitely-stale and would
-		// clutter the first-order check. Agents tab still shows them with
-		// a (stale-gen) suffix for the user to prune manually.
+		// omitted from the strip — they'd clutter the first-order check.
 		if s.StaleGen {
 			continue
 		}
@@ -96,49 +85,66 @@ func renderStrip(snap []panestate.AgentSnapshot, width int) string {
 	}
 	left := strings.Join(parts, "  ")
 
-	right := renderUsageSegment(visible)
+	right := renderPlanSegment(hub)
 	if right == "" || width <= 0 {
 		return left
 	}
 	spacer := width - lipgloss.Width(left) - lipgloss.Width(right)
-	if spacer < usageSegmentMinSpacer {
+	if spacer < planSegmentMinSpacer {
 		return left
 	}
 	return left + strings.Repeat(" ", spacer) + right
 }
 
-// renderUsageSegment returns the colored right-aligned segment when at least
-// one visible agent has UsagePct ≥ usageSegmentMinPct. Empty string means
-// "omit segment" — either no agent has known UsagePct or none crosses the
-// threshold. Agents with UsagePct == -1 are excluded from the max calc per
-// design (parse-unknown / no-pane should not surface as 0%).
-func renderUsageSegment(visible []panestate.AgentSnapshot) string {
-	maxPct := -1
-	maxAgent := ""
-	for _, s := range visible {
-		if s.UsagePct < 0 {
-			continue
+// renderPlanSegment renders the right-aligned plan-usage segment. Empty
+// string means "omit segment" — only when hub.PlanUsagePct == -1 AND no
+// window has been observed yet (fresh-boot strip stays clean). Format:
+//
+//   - five_hour or unknown-window: `${pct}%`
+//   - non-five_hour:               `${pct}%${tag}` with tag in
+//     { " weekly", " opus", " extra" } per planWindowTag.
+//   - PlanUsagePct = -1 with a known window: `--%` (signals the producer
+//     hit a transient error, prior known state lost).
+//
+// Color tier: green <70 / yellow 70-89 / red ≥90.
+func renderPlanSegment(hub panestate.HubSnapshot) string {
+	if hub.PlanUsagePct < 0 {
+		if hub.PlanWindow == "" {
+			return ""
 		}
-		if s.UsagePct > maxPct {
-			maxPct = s.UsagePct
-			maxAgent = s.ID
-		}
+		style := lipgloss.NewStyle().Foreground(ColorStatus)
+		return style.Render("--%")
 	}
-	if maxPct < usageSegmentMinPct {
-		return ""
-	}
-	style := usageTierStyle(maxPct)
-	return style.Render(fmt.Sprintf("%s %d%%", maxAgent, maxPct))
+	tag := planWindowTag(hub.PlanWindow)
+	style := planUsageTierStyle(hub.PlanUsagePct)
+	return style.Render(fmt.Sprintf("%d%%%s", hub.PlanUsagePct, tag))
 }
 
-// usageTierStyle picks the color tier for the right-aligned usage segment.
-// yellow ≥80, orange ≥90, red ≥95 per H-30 design. Reuses palette colors
-// from styles.go for cross-surface consistency.
-func usageTierStyle(pct int) lipgloss.Style {
+// planWindowTag maps an oauth_usage window name to the strip suffix tag.
+// five_hour (the default, most-frequently-binding window) renders bare so
+// the segment stays compact; other windows surface as " weekly" /
+// " opus" / " extra" so the binding limit is obvious.
+func planWindowTag(window string) string {
+	switch window {
+	case anthropic.WindowFiveHour, "":
+		return ""
+	case anthropic.WindowSevenDay:
+		return " weekly"
+	case anthropic.WindowSevenDayOpus:
+		return " opus"
+	case anthropic.WindowSevenDaySonnet:
+		return " extra"
+	}
+	return " " + window
+}
+
+// planUsageTierStyle picks the color tier for the right-aligned plan-
+// usage segment. green <70 / yellow 70-89 / red ≥90.
+func planUsageTierStyle(pct int) lipgloss.Style {
 	switch {
-	case pct >= 95:
-		return lipgloss.NewStyle().Foreground(ColorError).Bold(true)
 	case pct >= 90:
+		return lipgloss.NewStyle().Foreground(ColorError).Bold(true)
+	case pct >= 70:
 		return lipgloss.NewStyle().Foreground(ColorBrian).Bold(true)
 	default:
 		return lipgloss.NewStyle().Foreground(ColorSession)

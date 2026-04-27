@@ -54,7 +54,7 @@ func countContextCapFlags(t *testing.T, db *hub.DB) int {
 func TestH31FlagFiresAt95(t *testing.T) {
 	g, db := newContextCapGemma(t)
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
-		{ID: "brian", UsagePct: 95},
+		{ID: "brian", ContextPct: 95},
 	})
 
 	g.checkContextCap(time.Now())
@@ -62,7 +62,7 @@ func TestH31FlagFiresAt95(t *testing.T) {
 	if got := countContextCapFlags(t, db); got != 1 {
 		t.Fatalf("expected 1 critical context-cap flag at 95%%, got %d", got)
 	}
-	active, _, err := db.IsHaltActive()
+	active, err := db.IsHalted()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestH31FlagFiresAt95(t *testing.T) {
 func TestH31NoFlagBelow95(t *testing.T) {
 	g, db := newContextCapGemma(t)
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
-		{ID: "brian", UsagePct: 94},
+		{ID: "brian", ContextPct: 94},
 	})
 
 	g.checkContextCap(time.Now())
@@ -85,7 +85,7 @@ func TestH31NoFlagBelow95(t *testing.T) {
 	if got := countContextCapFlags(t, db); got != 0 {
 		t.Errorf("must not fire below 95%%; got %d flags", got)
 	}
-	active, _, err := db.IsHaltActive()
+	active, err := db.IsHalted()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestH31NoFlagBelow95(t *testing.T) {
 func TestH31HysteresisAndHaltSuppressDoubleFire(t *testing.T) {
 	g, db := newContextCapGemma(t)
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
-		{ID: "brian", UsagePct: 96},
+		{ID: "brian", ContextPct: 96},
 	})
 
 	now := time.Now()
@@ -112,7 +112,7 @@ func TestH31HysteresisAndHaltSuppressDoubleFire(t *testing.T) {
 	if got := countContextCapFlags(t, db); got != 1 {
 		t.Errorf("expected 1 flag across 3 ticks (halt+hysteresis dual gate); got %d", got)
 	}
-	active, _, _ := db.IsHaltActive()
+	active, _ := db.IsHalted()
 	if !active {
 		t.Errorf("halt_state must remain active across silent re-ticks")
 	}
@@ -130,7 +130,7 @@ func TestH31ResetBelow85Rearms(t *testing.T) {
 
 	// Tick 1: squeeze hits 95.
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
-		{ID: "brian", UsagePct: 95},
+		{ID: "brian", ContextPct: 95},
 	})
 	g.checkContextCap(now)
 	if got := countContextCapFlags(t, db); got != 1 {
@@ -144,13 +144,13 @@ func TestH31ResetBelow85Rearms(t *testing.T) {
 
 	// Tick 2: usage drops below reset threshold; hysteresis re-arms.
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
-		{ID: "brian", UsagePct: 70},
+		{ID: "brian", ContextPct: 70},
 	})
 	g.checkContextCap(now.Add(time.Minute))
 
 	// Tick 3: squeeze returns to 95 → fresh fire.
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
-		{ID: "brian", UsagePct: 95},
+		{ID: "brian", ContextPct: 95},
 	})
 	g.checkContextCap(now.Add(2 * time.Minute))
 
@@ -175,7 +175,7 @@ func TestHaltSuppressesH3aStaleFire(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetHaltActive("emma", "test halt"); err != nil {
+	if err := db.SetHaltActive(hub.HaltCauseContextCap, "test halt", "emma"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -205,10 +205,10 @@ func TestHaltSuppressesH3aStaleFire(t *testing.T) {
 func TestHaltClearsOnTrioReregister(t *testing.T) {
 	_, db := newContextCapGemma(t)
 
-	if err := db.SetHaltActive("emma", "test halt"); err != nil {
+	if err := db.SetHaltActive(hub.HaltCauseContextCap, "test halt", "emma"); err != nil {
 		t.Fatal(err)
 	}
-	active, _, err := db.IsHaltActive()
+	active, err := db.IsHalted()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestHaltClearsOnTrioReregister(t *testing.T) {
 	if !cleared {
 		t.Fatalf("expected halt to clear after trio re-register past set_at")
 	}
-	active, _, _ = db.IsHaltActive()
+	active, _ = db.IsHalted()
 	if active {
 		t.Errorf("halt_state must be inactive after trio-re-register clear")
 	}
@@ -255,7 +255,7 @@ func TestHaltClearsOnTrioReregister(t *testing.T) {
 func TestHaltDoesNotClearWithPrunedTrioMember(t *testing.T) {
 	_, db := newContextCapGemma(t)
 
-	if err := db.SetHaltActive("emma", "test halt"); err != nil {
+	if err := db.SetHaltActive(hub.HaltCauseContextCap, "test halt", "emma"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -280,7 +280,7 @@ func TestHaltDoesNotClearWithPrunedTrioMember(t *testing.T) {
 	if !cleared {
 		t.Fatalf("expected halt to clear when registered-trio-subset all advanced past set_at; got cleared=false")
 	}
-	active, _, _ := db.IsHaltActive()
+	active, _ := db.IsHalted()
 	if active {
 		t.Errorf("halt_state must be inactive after partial-trio-all-advanced clear")
 	}
@@ -292,7 +292,7 @@ func TestHaltDoesNotClearWithPrunedTrioMember(t *testing.T) {
 func TestHaltDoesNotClearWithEmptyComparisonSet(t *testing.T) {
 	_, db := newContextCapGemma(t)
 
-	if err := db.SetHaltActive("emma", "test halt"); err != nil {
+	if err := db.SetHaltActive(hub.HaltCauseContextCap, "test halt", "emma"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -303,7 +303,7 @@ func TestHaltDoesNotClearWithEmptyComparisonSet(t *testing.T) {
 	if cleared {
 		t.Errorf("empty comparison set must not clear; got cleared=true")
 	}
-	active, _, _ := db.IsHaltActive()
+	active, _ := db.IsHalted()
 	if !active {
 		t.Errorf("halt_state must remain active when no trio member is registered")
 	}

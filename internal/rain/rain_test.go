@@ -208,16 +208,18 @@ func TestRainPromptContainsHaltAllWork(t *testing.T) {
 	r := &Rain{}
 	prompt := r.initialPrompt()
 	want := []string{
-		"HALT-ALL-WORK (H-31)",
+		"HALT-ALL-WORK (H-31, H-33)",
 		`"agent <id> at <N>%, halt"`,
-		"Match by substring meaning, not regex anchors",
+		`"plan usage at <N>%, halt"`,
+		"Match by substring meaning across BOTH triggers (agent context-cap OR plan-usage), not regex anchors",
+		"Both fire HALT-ALL-WORK",
 		"hub_session_close",
 		"fresh-context session",
 		"H-15 ledger pre-loads context",
 	}
 	for _, w := range want {
 		if !strings.Contains(prompt, w) {
-			t.Errorf("initial prompt must contain H-31 halt-all-work literal %q", w)
+			t.Errorf("initial prompt must contain HALT-ALL-WORK literal %q", w)
 		}
 	}
 }

@@ -260,15 +260,20 @@ func (db *DB) migrate() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS halt_state (
-		id      INTEGER PRIMARY KEY CHECK (id = 1),
-		active  INTEGER NOT NULL DEFAULT 0,
-		set_by  TEXT NOT NULL DEFAULT '',
-		set_at  INTEGER NOT NULL DEFAULT 0,
-		reason  TEXT NOT NULL DEFAULT ''
+		cause   TEXT PRIMARY KEY,
+		set_at  INTEGER NOT NULL,
+		set_by  TEXT NOT NULL,
+		reason  TEXT NOT NULL
 	);
-	INSERT OR IGNORE INTO halt_state (id, active) VALUES (1, 0);
 	`
 	if _, err := db.conn.Exec(schema); err != nil {
+		return err
+	}
+
+	// Phase H slice 5 C1 (H-32+H-33): migrate single-row halt_state
+	// (id=1, active flag) to multi-row cause-keyed schema. Idempotent —
+	// no-op when already on the new schema.
+	if err := db.migrateHaltStateMultiCause(); err != nil {
 		return err
 	}
 
@@ -581,74 +586,230 @@ func (db *DB) StoreSessionClose(agentID, snapText string) error {
 }
 
 // HaltStateTrio names the agents whose joint re-registration auto-clears an
-// active halt_state. Causality-only: a halt set by Emma at T_h clears once
-// every currently-registered trio member has last_seen > T_h. Members absent
-// from the agents table (pruned/never-registered) are excluded from the
-// comparison set so a partial trio can still produce a clear; an empty
-// comparison set never clears (would be a false positive).
+// active context-cap halt_state. Causality-only: a halt set by Emma at T_h
+// clears once every currently-registered trio member has last_seen > T_h.
+// Members absent from the agents table (pruned/never-registered) are excluded
+// from the comparison set so a partial trio can still produce a clear; an
+// empty comparison set never clears (would be a false positive).
 //
-// Phase H slice 4 C6 (H-31).
+// Phase H slice 4 C6 (H-31). Slice 5 C1 (H-33) scopes the auto-clear to
+// cause="context-cap" only — plan-cap clears organically via window-rollover
+// or poll-shows-decay, not via re-register.
 var HaltStateTrio = []string{"brian", "rain", "clive"}
 
-// IsHaltActive reports whether the single-row halt_state machine is currently
-// active, returning the set_at timestamp alongside so callers can compare it
-// against per-agent last_seen for causality-clear logic.
-func (db *DB) IsHaltActive() (bool, time.Time, error) {
-	var active int
-	var setAt int64
-	err := db.conn.QueryRow(
-		`SELECT active, set_at FROM halt_state WHERE id = 1`,
-	).Scan(&active, &setAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, time.Time{}, nil
-	}
-	if err != nil {
-		return false, time.Time{}, err
-	}
-	return active == 1, time.UnixMilli(setAt), nil
+// Halt cause constants. cause is the primary key of halt_state in the
+// multi-row cause-keyed schema (Phase H slice 5 C1). Each cause can be
+// independently active; IsHalted() reports whether any cause is active.
+const (
+	HaltCauseContextCap = "context-cap"
+	HaltCausePlanCap    = "plan-cap"
+)
+
+// HaltState is one row of the cause-keyed halt_state table. Returned by
+// GetHaltCauses for diagnostics + agents-tab/strip rendering.
+type HaltState struct {
+	Cause  string
+	SetAt  time.Time
+	SetBy  string
+	Reason string
 }
 
-// SetHaltActive flips the single-row halt_state to active=1 with the given
-// set_by + reason and stamps set_at=now. Idempotent — subsequent calls update
-// set_at and reason; callers wrap with hysteresis to avoid set_at thrash.
-func (db *DB) SetHaltActive(setBy, reason string) error {
-	now := time.Now().UnixMilli()
-	_, err := db.conn.Exec(
-		`UPDATE halt_state SET active = 1, set_by = ?, set_at = ?, reason = ? WHERE id = 1`,
-		setBy, now, reason,
-	)
-	return err
-}
-
-// ClearHaltManually unconditionally clears the halt flag. Backs the
-// hub_clear_halt MCP tool: explicit operator-initiated abort path that does
-// not require a fresh trio re-register (e.g. user wants to resume work in the
-// existing sessions rather than restart).
-func (db *DB) ClearHaltManually() error {
-	_, err := db.conn.Exec(
-		`UPDATE halt_state SET active = 0, set_by = '', set_at = 0, reason = '' WHERE id = 1`,
-	)
-	return err
-}
-
-// ClearHaltIfTrioReregistered clears halt_state iff every currently-registered
-// trio member has last_seen > halt_state.set_at. Members missing from the
-// agents table (e.g. pruned, never-registered) are excluded from the
-// comparison set so a partial trio can still trigger a clear. An empty
-// comparison set (no trio member registered at all) does not clear — that
-// is not evidence of fresh-context re-arrival, just absence.
+// migrateHaltStateMultiCause migrates the legacy single-row halt_state schema
+// (id=1 CHECK, active flag) to the multi-row cause-keyed schema. Idempotent:
+// detects the legacy "id" column via PRAGMA table_info and rewrites the table
+// in-place. Fresh DBs already have the new schema and skip migration.
 //
-// Returns (true, nil) when the clear fired, (false, nil) when the halt was
-// not active or the trio condition was unmet.
-func (db *DB) ClearHaltIfTrioReregistered(trioIDs []string) (bool, error) {
-	active, setAt, err := db.IsHaltActive()
+// Migration path:
+//  1. PRAGMA table_info(halt_state) — if columns include "id" (legacy schema):
+//     a. Read the active=1 row (if any) into local vars.
+//     b. DROP TABLE halt_state.
+//     c. Recreate with new schema.
+//     d. If the legacy row was active, INSERT cause='context-cap' preserving
+//     set_at/set_by/reason — slice-4 callers fired exclusively on context-cap.
+//  2. Otherwise (already new schema or empty pragma) — no-op.
+func (db *DB) migrateHaltStateMultiCause() error {
+	rows, err := db.conn.Query("PRAGMA table_info(halt_state)")
+	if err != nil {
+		return fmt.Errorf("pragma table_info(halt_state): %w", err)
+	}
+	defer rows.Close()
+	hasIDColumn := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "id" {
+			hasIDColumn = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasIDColumn {
+		return nil
+	}
+
+	// Legacy schema present. Capture the active row before recreating.
+	var active int
+	var setBy, reason string
+	var setAt int64
+	err = db.conn.QueryRow(
+		`SELECT active, set_by, set_at, reason FROM halt_state WHERE id = 1`,
+	).Scan(&active, &setBy, &setAt, &reason)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read legacy halt_state: %w", err)
+	}
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DROP TABLE halt_state`); err != nil {
+		return fmt.Errorf("drop legacy halt_state: %w", err)
+	}
+	if _, err := tx.Exec(`
+		CREATE TABLE halt_state (
+			cause   TEXT PRIMARY KEY,
+			set_at  INTEGER NOT NULL,
+			set_by  TEXT NOT NULL,
+			reason  TEXT NOT NULL
+		)`); err != nil {
+		return fmt.Errorf("recreate halt_state: %w", err)
+	}
+	if active == 1 {
+		if setBy == "" {
+			setBy = "emma"
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO halt_state (cause, set_at, set_by, reason) VALUES (?, ?, ?, ?)`,
+			HaltCauseContextCap, setAt, setBy, reason,
+		); err != nil {
+			return fmt.Errorf("seed migrated context-cap row: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// IsHalted reports whether any cause is currently active in halt_state.
+// Backed by EXISTS so the predicate stays cheap regardless of how many
+// causes accumulate.
+func (db *DB) IsHalted() (bool, error) {
+	var one int
+	err := db.conn.QueryRow(`SELECT 1 FROM halt_state LIMIT 1`).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	if !active {
+	return true, nil
+}
+
+// SetHaltActive upserts a halt_state row keyed by cause. Idempotent —
+// repeated calls for the same cause refresh set_at/set_by/reason; callers
+// wrap with hysteresis to avoid set_at thrash. Multiple causes coexist
+// independently (e.g. plan-cap + context-cap can both be active).
+func (db *DB) SetHaltActive(cause, reason, setBy string) error {
+	if cause == "" {
+		return errors.New("SetHaltActive: cause must not be empty")
+	}
+	now := time.Now().UnixMilli()
+	_, err := db.conn.Exec(
+		`INSERT INTO halt_state (cause, set_at, set_by, reason) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(cause) DO UPDATE SET
+		   set_at = excluded.set_at,
+		   set_by = excluded.set_by,
+		   reason = excluded.reason`,
+		cause, now, setBy, reason,
+	)
+	return err
+}
+
+// ClearHalt deletes the halt_state row for the given cause. Idempotent —
+// missing cause is not an error. Other active causes are unaffected.
+func (db *DB) ClearHalt(cause string) error {
+	_, err := db.conn.Exec(`DELETE FROM halt_state WHERE cause = ?`, cause)
+	return err
+}
+
+// ClearHaltManually unconditionally clears every halt_state row. Backs the
+// hub_clear_halt MCP tool — explicit operator-initiated abort that dismisses
+// all causes, no causality requirement (e.g. user wants to resume in current
+// sessions rather than restart). Plan-cap and context-cap are both wiped.
+func (db *DB) ClearHaltManually() error {
+	_, err := db.conn.Exec(`DELETE FROM halt_state`)
+	return err
+}
+
+// GetHaltCauses returns the active halt rows ordered by set_at ascending so
+// the oldest (most likely root cause) sorts first. Used by diagnostics +
+// agents-tab/strip rendering. Empty slice when no halts are active.
+func (db *DB) GetHaltCauses() ([]HaltState, error) {
+	rows, err := db.conn.Query(
+		`SELECT cause, set_at, set_by, reason FROM halt_state ORDER BY set_at ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HaltState
+	for rows.Next() {
+		var h HaltState
+		var setAt int64
+		if err := rows.Scan(&h.Cause, &setAt, &h.SetBy, &h.Reason); err != nil {
+			return nil, err
+		}
+		h.SetAt = time.UnixMilli(setAt)
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// GetHaltCause returns the row for a specific cause. (true, ...) when the
+// cause is active; (false, zero-value, nil) when not active.
+func (db *DB) GetHaltCause(cause string) (HaltState, bool, error) {
+	var h HaltState
+	var setAt int64
+	err := db.conn.QueryRow(
+		`SELECT cause, set_at, set_by, reason FROM halt_state WHERE cause = ?`, cause,
+	).Scan(&h.Cause, &setAt, &h.SetBy, &h.Reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HaltState{}, false, nil
+	}
+	if err != nil {
+		return HaltState{}, false, err
+	}
+	h.SetAt = time.UnixMilli(setAt)
+	return h, true, nil
+}
+
+// ClearHaltIfTrioReregistered clears the context-cap halt iff every
+// currently-registered trio member has last_seen > halt_state.set_at.
+// Scoped to cause="context-cap" per slice-5 C1 (H-33) — plan-cap halts do
+// not auto-clear on trio re-register; they clear organically via
+// window-rollover or poll-shows-decay.
+//
+// Members missing from the agents table (e.g. pruned, never-registered) are
+// excluded from the comparison set so a partial trio can still trigger a
+// clear. An empty comparison set (no trio member registered at all) does not
+// clear — that is not evidence of fresh-context re-arrival, just absence.
+//
+// Returns (true, nil) when the clear fired, (false, nil) when the
+// context-cap halt was not active or the trio condition was unmet.
+func (db *DB) ClearHaltIfTrioReregistered(trioIDs []string) (bool, error) {
+	row, ok, err := db.GetHaltCause(HaltCauseContextCap)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
 		return false, nil
 	}
-	setAtMs := setAt.UnixMilli()
+	setAtMs := row.SetAt.UnixMilli()
 
 	considered := 0
 	advanced := 0
@@ -671,7 +832,7 @@ func (db *DB) ClearHaltIfTrioReregistered(trioIDs []string) (bool, error) {
 	if considered == 0 || advanced != considered {
 		return false, nil
 	}
-	if err := db.ClearHaltManually(); err != nil {
+	if err := db.ClearHalt(HaltCauseContextCap); err != nil {
 		return false, err
 	}
 	return true, nil

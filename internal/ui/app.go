@@ -82,6 +82,14 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 	}
 }
 
+// Pane returns the App's panestate.Manager. Nil when constructed without
+// a hub.DB. Slice 5 C1 (H-32) wiring hook: cmd/bot-hq/main.go connects
+// Emma's plan-usage producer to this Manager so successful 60s polls
+// publish HubSnapshot{PlanUsagePct, PlanWindow} that the strip reads.
+func (a App) Pane() *panestate.Manager {
+	return a.pane
+}
+
 // Init implements tea.Model.
 func (a App) Init() tea.Cmd {
 	return tea.Batch(

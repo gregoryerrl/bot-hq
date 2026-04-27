@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
+	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
@@ -172,6 +173,20 @@ type Gemma struct {
 	// directly; production wires a panestate.Manager-backed closure on
 	// Start via initContextCapDefault.
 	paneSnapFn paneSnapshotFn
+
+	// Phase H slice 5 C1 (H-32+H-33) plan-usage state. planUsageFetch is
+	// the fetcher abstraction (default wired to a real
+	// anthropic.UsageClient on Start; tests inject a fake). hubPublisher
+	// is the panestate.Manager.SetHubSnapshot sink — production wires it
+	// in cmd/bot-hq/main.go after the TUI's Manager exists; tests inject
+	// a recorder. lastPlanPoll/planBackoffUntil gate the 60s cadence and
+	// 600s backoff respectively.
+	planUsageFetch    PlanUsageFetcher
+	hubPublisher      func(panestate.HubSnapshot)
+	planUsageMu       sync.Mutex
+	lastPlanPoll      time.Time
+	planBackoffUntil  time.Time
+	planUsageWarnedOS bool // logged-once flag for ErrUnsupportedPlatform
 }
 
 // New creates a Gemma instance from config.
@@ -256,6 +271,12 @@ func (g *Gemma) Start() error {
 	// test hasn't already injected one. Default uses a hub-DB-backed
 	// panestate.Manager + real tmux.CapturePane.
 	g.initContextCapDefault()
+
+	// Phase H slice 5 C1 (H-32+H-33): wire the production plan-usage
+	// fetcher (keychain + /api/oauth/usage) when no test fake is
+	// already injected. Non-darwin hosts publish PlanUsagePct=-1 and
+	// skip polling forever per ErrUnsupportedPlatform contract.
+	g.initPlanUsageDefault()
 
 	go g.pollLoop()
 	go g.healthLoop()
@@ -698,6 +719,11 @@ func (g *Gemma) sentinelPollLoop() {
 			return
 		case <-ticker.C:
 			g.pollSentinel()
+			// Phase H slice 5 C1 (H-32+H-33): plan-usage check
+			// piggybacks on the 5s sentinel tick. The 60s base
+			// cadence + 600s backoff gates live inside checkPlanUsage
+			// so this loop stays a uniform 5s tick.
+			g.checkPlanUsage(time.Now())
 		}
 	}
 }

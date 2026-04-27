@@ -141,6 +141,57 @@ func TestAgentsTabStaleGenSuffix(t *testing.T) {
 	}
 }
 
+// TestAgentsTabRendersContextPctColumn locks slice 5 C1 (H-32) per-row
+// context-% column. Sources from panestate snapshot's ContextPct (a
+// rename of the slice-4 UsagePct). Three-row scenario covers the three
+// surface states: known squeeze, known low, and unknown (-1) → " --%".
+func TestAgentsTabRendersContextPctColumn(t *testing.T) {
+	now := time.Now()
+	agents := []protocol.Agent{
+		{ID: "hot", Name: "Hot", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now,
+			Meta: `{"tmux_target":"hot:0.0"}`},
+		{ID: "cool", Name: "Cool", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now,
+			Meta: `{"tmux_target":"cool:0.0"}`},
+		{ID: "ghost", Name: "Ghost", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: now},
+	}
+	mgr := panestate.NewManager(&fakeSource{agents: agents}, func(target string, _ int) (string, error) {
+		switch target {
+		case "hot:0.0":
+			return "5% until auto-compact", nil // → ContextPct = 95
+		case "cool:0.0":
+			return "70% until auto-compact", nil // → ContextPct = 30
+		}
+		return "", nil
+	})
+	// Two ticks: first seeds the cache (LastPaneActivity=zero); second
+	// promotes ContextPct so the agents-tab snapshot reflects it.
+	if err := mgr.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	// Refresh again to lock the seeded cache values into the snapshot
+	// (first-tick contract is "no prior frame to compare", but ContextPct
+	// is published on the first tick already).
+	if err := mgr.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+
+	tab := NewAgentsTab(noPaneCapture)
+	tab.SetPane(mgr)
+	tab.SetSize(160, 30)
+	tab, _ = tab.Update(AgentsUpdated{Agents: agents})
+	out := tab.View()
+
+	if !strings.Contains(out, "95%") {
+		t.Errorf("hot agent (95%% context) must surface in column; got:\n%s", out)
+	}
+	if !strings.Contains(out, "30%") {
+		t.Errorf("cool agent (30%% context) must surface in column; got:\n%s", out)
+	}
+	if !strings.Contains(out, " --%") {
+		t.Errorf("ghost agent (no tmux_target → -1) must render as ' --%%' cell; got:\n%s", out)
+	}
+}
+
 // Compile-time assert that activityDot covers all four activity values.
 // Surface a regression if a future ActivityFoo enum value is added without
 // styles.go being updated.

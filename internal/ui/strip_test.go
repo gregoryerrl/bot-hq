@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gregoryerrl/bot-hq/internal/anthropic"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
@@ -26,6 +27,11 @@ func makeStaleGenSnap(id string, t protocol.AgentType, a panestate.AgentActivity
 	return s
 }
 
+// emptyHub is the zero-snapshot HubSnapshot used by tests that don't
+// exercise the right-aligned plan segment. PlanUsagePct=-1 with empty
+// PlanWindow means "omit segment".
+var emptyHub = panestate.HubSnapshot{PlanUsagePct: -1}
+
 func TestRenderStripShowsAllExceptOffline(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
 		makeSnap("a-working", protocol.AgentBrian, panestate.ActivityWorking),
@@ -33,7 +39,7 @@ func TestRenderStripShowsAllExceptOffline(t *testing.T) {
 		makeSnap("c-stale", protocol.AgentCoder, panestate.ActivityStale),
 		makeSnap("d-offline", protocol.AgentCoder, panestate.ActivityOffline),
 	}
-	out := renderStrip(snap, 0)
+	out := renderStrip(snap, emptyHub, 0)
 	if !strings.Contains(out, "a-working") {
 		t.Errorf("strip should contain a-working, got: %q", out)
 	}
@@ -49,13 +55,12 @@ func TestRenderStripShowsAllExceptOffline(t *testing.T) {
 }
 
 func TestRenderStripOrdersByTier(t *testing.T) {
-	// Mixed input order; expected: tier 1 (Brian/QA/Voice) → tier 2 (Discord/Gemma) → tier 3 (Coder).
 	snap := []panestate.AgentSnapshot{
 		makeSnap("worker", protocol.AgentCoder, panestate.ActivityWorking),
 		makeSnap("svc", protocol.AgentDiscord, panestate.ActivityWorking),
 		makeSnap("peer", protocol.AgentBrian, panestate.ActivityWorking),
 	}
-	out := renderStrip(snap, 0)
+	out := renderStrip(snap, emptyHub, 0)
 	peerPos := strings.Index(out, "peer")
 	svcPos := strings.Index(out, "svc")
 	workerPos := strings.Index(out, "worker")
@@ -72,7 +77,7 @@ func TestRenderStripOrdersByNameWithinTier(t *testing.T) {
 		{ID: "z-brian", Name: "z-brian", Type: protocol.AgentBrian, Activity: panestate.ActivityWorking},
 		{ID: "a-rain", Name: "a-rain", Type: protocol.AgentQA, Activity: panestate.ActivityWorking},
 	}
-	out := renderStrip(snap, 0)
+	out := renderStrip(snap, emptyHub, 0)
 	rainPos := strings.Index(out, "a-rain")
 	brianPos := strings.Index(out, "z-brian")
 	if rainPos < 0 || brianPos < 0 {
@@ -88,29 +93,26 @@ func TestRenderStripCapsAt8(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		snap = append(snap, makeSnap(fmt.Sprintf("agent%02d", i), protocol.AgentCoder, panestate.ActivityWorking))
 	}
-	out := renderStrip(snap, 0)
-	// Exactly 8 distinct IDs visible (agent00 .. agent07).
+	out := renderStrip(snap, emptyHub, 0)
 	for i := 0; i < 8; i++ {
 		want := fmt.Sprintf("agent%02d", i)
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s in capped output: %q", want, out)
 		}
 	}
-	// Surplus 4 should NOT be visible by ID.
 	for i := 8; i < 12; i++ {
 		want := fmt.Sprintf("agent%02d", i)
 		if strings.Contains(out, want) {
 			t.Errorf("surplus %s should be collapsed, got: %q", want, out)
 		}
 	}
-	// "+4" suffix present.
 	if !strings.Contains(out, "+4") {
 		t.Errorf("expected '+4' suffix for 4 surplus agents, got: %q", out)
 	}
 }
 
 func TestRenderStripEmpty(t *testing.T) {
-	out := renderStrip(nil, 0)
+	out := renderStrip(nil, emptyHub, 0)
 	if strings.Contains(out, "●") || strings.Contains(out, "◐") {
 		t.Errorf("empty input should produce no dot chars, got: %q", out)
 	}
@@ -124,14 +126,13 @@ func TestRenderStripStaleVisibleOfflineHidden(t *testing.T) {
 		makeSnap("stale-agent", protocol.AgentBrian, panestate.ActivityStale),
 		makeSnap("offline-agent", protocol.AgentCoder, panestate.ActivityOffline),
 	}
-	out := renderStrip(snap, 0)
+	out := renderStrip(snap, emptyHub, 0)
 	if !strings.Contains(out, "stale-agent") {
 		t.Errorf("stale agent should be visible (filter relaxed), got: %q", out)
 	}
 	if strings.Contains(out, "offline-agent") {
 		t.Errorf("offline agent should remain hidden, got: %q", out)
 	}
-	// Stale glyph (○) should appear; Offline glyph (·) should not.
 	if !strings.Contains(out, "○") {
 		t.Errorf("expected Stale glyph ○ in output, got: %q", out)
 	}
@@ -145,34 +146,29 @@ func TestRenderStripAllOfflineEmpty(t *testing.T) {
 		makeSnap("a", protocol.AgentBrian, panestate.ActivityOffline),
 		makeSnap("b", protocol.AgentCoder, panestate.ActivityOffline),
 	}
-	out := renderStrip(snap, 0)
+	out := renderStrip(snap, emptyHub, 0)
 	if strings.Contains(out, "a") || strings.Contains(out, "b") {
 		t.Errorf("all-offline input should produce no IDs, got: %q", out)
 	}
 }
 
 func TestRenderStripFourTierVisibility(t *testing.T) {
-	// Spec lock: Working, Online, Stale visible; Offline hidden.
 	snap := []panestate.AgentSnapshot{
 		makeSnap("w", protocol.AgentBrian, panestate.ActivityWorking),
 		makeSnap("o", protocol.AgentQA, panestate.ActivityOnline),
 		makeSnap("s", protocol.AgentVoice, panestate.ActivityStale),
 		makeSnap("x", protocol.AgentCoder, panestate.ActivityOffline),
 	}
-	out := renderStrip(snap, 0)
+	out := renderStrip(snap, emptyHub, 0)
 	for _, want := range []string{"w", "o", "s"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q visible, got: %q", want, out)
 		}
 	}
-	// Glyph count is format-stable: an offline-'x' leak forces count=4 regardless
-	// of separator/glyph-mapping changes. Substring "x" check would false-pass if
-	// 'x' became a substring of an unrelated render token.
 	glyphCount := strings.Count(out, "●") + strings.Count(out, "◐") + strings.Count(out, "○")
 	if glyphCount != 3 {
 		t.Errorf("expected 3 glyphs (one per visible agent), got %d in: %q", glyphCount, out)
 	}
-	// All three visible glyphs should be present.
 	for _, glyph := range []string{"●", "◐", "○"} {
 		if !strings.Contains(out, glyph) {
 			t.Errorf("expected glyph %q in output, got: %q", glyph, out)
@@ -200,16 +196,13 @@ func TestAgentTypeTier(t *testing.T) {
 	}
 }
 
-// TestRenderStripOmitsStaleGen locks Phase G v1 #20 strip behavior:
-// stale-gen agents (registered pre-rebuild) are omitted from the strip
-// even though their activity is non-Offline. They remain visible in the
-// agents tab with a (stale-gen) suffix for manual pruning.
+// TestRenderStripOmitsStaleGen locks Phase G v1 #20 strip behavior.
 func TestRenderStripOmitsStaleGen(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
 		makeSnap("current-gen", protocol.AgentBrian, panestate.ActivityWorking),
 		makeStaleGenSnap("prior-gen", protocol.AgentQA, panestate.ActivityOnline),
 	}
-	out := renderStrip(snap, 0)
+	out := renderStrip(snap, emptyHub, 0)
 	if !strings.Contains(out, "current-gen") {
 		t.Errorf("strip should contain current-gen agent, got: %q", out)
 	}
@@ -218,68 +211,97 @@ func TestRenderStripOmitsStaleGen(t *testing.T) {
 	}
 }
 
-// makeUsageSnap is makeSnap + UsagePct setter for H-30 strip tests.
-func makeUsageSnap(id string, t protocol.AgentType, a panestate.AgentActivity, pct int) panestate.AgentSnapshot {
-	s := makeSnap(id, t, a)
-	s.UsagePct = pct
-	return s
-}
-
-// TestStripRendersUsageSegmentWhenDataPresent locks H-30: when at least one
-// visible agent has UsagePct ≥ usageSegmentMinPct (80), the strip appends a
-// right-aligned `<id> NN%` segment. The agent with the *maximum* UsagePct is
-// the one named — this is the worst-case squeeze, the one users need to see
-// first.
-func TestStripRendersUsageSegmentWhenDataPresent(t *testing.T) {
+// TestStripRendersPlanSegmentFiveHour locks slice 5 C1 (H-32) right-aligned
+// segment for the default five_hour window — bare percent suffix.
+func TestStripRendersPlanSegmentFiveHour(t *testing.T) {
 	snap := []panestate.AgentSnapshot{
-		makeUsageSnap("low", protocol.AgentBrian, panestate.ActivityWorking, 30),
-		makeUsageSnap("hot", protocol.AgentCoder, panestate.ActivityWorking, 87),
+		makeSnap("brian", protocol.AgentBrian, panestate.ActivityWorking),
 	}
-	out := renderStrip(snap, 80)
-	if !strings.Contains(out, "hot") {
-		t.Errorf("expected hottest agent id 'hot' in usage segment, got: %q", out)
-	}
+	hub := panestate.HubSnapshot{PlanUsagePct: 87, PlanWindow: anthropic.WindowFiveHour}
+	out := renderStrip(snap, hub, 80)
 	if !strings.Contains(out, "87%") {
-		t.Errorf("expected '87%%' in usage segment, got: %q", out)
+		t.Errorf("expected '87%%' in output, got: %q", out)
 	}
-	// Right-aligned: the segment must come after the dot row, separated by
-	// at least usageSegmentMinSpacer spaces. Locating "hot 87%" past the
-	// dot-row body proves the spacer was inserted.
-	idx := strings.Index(out, "hot 87%")
-	if idx < 0 {
-		t.Fatalf("expected literal 'hot 87%%' substring (segment), got: %q", out)
-	}
-	// The dot row contains "low" (the non-hot agent) — verify the segment
-	// trails it. lipgloss color escapes around 'low' are fine; we only need
-	// 'low' to appear before 'hot 87%'.
-	lowIdx := strings.Index(out, "low")
-	if lowIdx < 0 || lowIdx >= idx {
-		t.Errorf("expected dot-row 'low' to precede segment 'hot 87%%', got: %q", out)
+	if strings.Contains(out, "87% weekly") || strings.Contains(out, "87% opus") || strings.Contains(out, "87% extra") {
+		t.Errorf("five_hour must render bare '87%%' without window tag, got: %q", out)
 	}
 }
 
-// TestStripOmitsUsageSegmentWhenAllUnknown locks H-30 fail-soft: when every
-// visible agent has UsagePct=-1 (no pane / parse-unknown) OR when all known
-// values are below the threshold, the segment is omitted entirely. No false
-// 0% display, no clutter at low usage. Two-stage: (1) all unknown, (2) all
-// known but sub-threshold.
-func TestStripOmitsUsageSegmentWhenAllUnknown(t *testing.T) {
-	// Stage 1: all UsagePct = -1.
-	allUnknown := []panestate.AgentSnapshot{
-		makeUsageSnap("emma", protocol.AgentBrian, panestate.ActivityWorking, -1),
-		makeUsageSnap("disc", protocol.AgentDiscord, panestate.ActivityOnline, -1),
+// TestStripRendersPlanSegmentNonFiveHour locks the window-tag suffix path.
+func TestStripRendersPlanSegmentNonFiveHour(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeSnap("brian", protocol.AgentBrian, panestate.ActivityWorking),
 	}
-	out := renderStrip(allUnknown, 80)
+	cases := []struct {
+		window string
+		want   string
+	}{
+		{anthropic.WindowSevenDay, "92% weekly"},
+		{anthropic.WindowSevenDayOpus, "92% opus"},
+		{anthropic.WindowSevenDaySonnet, "92% extra"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.window, func(t *testing.T) {
+			hub := panestate.HubSnapshot{PlanUsagePct: 92, PlanWindow: tc.window}
+			out := renderStrip(snap, hub, 80)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("window=%s: expected %q in output, got: %q", tc.window, tc.want, out)
+			}
+		})
+	}
+}
+
+// TestStripOmitsPlanSegmentWhenUnknownAndNoWindow locks the fresh-boot
+// behavior: PlanUsagePct=-1 + empty PlanWindow → segment omitted entirely.
+func TestStripOmitsPlanSegmentWhenUnknownAndNoWindow(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeSnap("brian", protocol.AgentBrian, panestate.ActivityWorking),
+	}
+	out := renderStrip(snap, panestate.HubSnapshot{PlanUsagePct: -1}, 80)
 	if strings.Contains(out, "%") {
-		t.Errorf("all-unknown input should produce no '%%' in output, got: %q", out)
+		t.Errorf("unknown-without-window must omit segment; got: %q", out)
 	}
-	// Stage 2: all known but sub-threshold.
-	subThreshold := []panestate.AgentSnapshot{
-		makeUsageSnap("a", protocol.AgentBrian, panestate.ActivityWorking, 30),
-		makeUsageSnap("b", protocol.AgentCoder, panestate.ActivityWorking, 79),
+	if strings.Contains(out, "--") {
+		t.Errorf("unknown-without-window must not render --%%; got: %q", out)
 	}
-	out2 := renderStrip(subThreshold, 80)
-	if strings.Contains(out2, "%") {
-		t.Errorf("sub-threshold input should produce no '%%' in output, got: %q", out2)
+}
+
+// TestStripRendersDashesWhenUnknownButWindowKnown locks the
+// transient-error path: producer published PlanUsagePct=-1 alongside a
+// last-known window.
+func TestStripRendersDashesWhenUnknownButWindowKnown(t *testing.T) {
+	snap := []panestate.AgentSnapshot{
+		makeSnap("brian", protocol.AgentBrian, panestate.ActivityWorking),
+	}
+	hub := panestate.HubSnapshot{PlanUsagePct: -1, PlanWindow: anthropic.WindowFiveHour}
+	out := renderStrip(snap, hub, 80)
+	if !strings.Contains(out, "--%") {
+		t.Errorf("unknown-with-known-window must render --%%; got: %q", out)
+	}
+}
+
+// TestStripPlanSegmentColorTiers locks the green/yellow/red boundaries.
+// Inspects the returned style directly (lipgloss render output depends on
+// terminal capabilities, which differ between CI and local runs); the
+// style's Bold flag is the stable contract.
+func TestStripPlanSegmentColorTiers(t *testing.T) {
+	cases := []struct {
+		pct  int
+		bold bool // red/yellow tiers render bold; green does not
+	}{
+		{50, false}, // green
+		{69, false}, // green (just below yellow)
+		{70, true},  // yellow boundary
+		{89, true},  // yellow
+		{90, true},  // red boundary
+		{100, true}, // red
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("pct=%d", tc.pct), func(t *testing.T) {
+			style := planUsageTierStyle(tc.pct)
+			if got := style.GetBold(); got != tc.bold {
+				t.Errorf("pct=%d bold=%v, want bold=%v", tc.pct, got, tc.bold)
+			}
+		})
 	}
 }

@@ -106,6 +106,7 @@ func runHub() {
 	// step 9 below now reach the TUI immediately; cross-process MCP inserts
 	// continue to surface via the tick poll in App.Update.
 	app := ui.NewApp(cfg, h.DB, brianOrch)
+	uiPane := app.Pane()
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	h.DB.OnMessage(func(msg protocol.Message) {
 		p.Send(ui.MessageReceived{Message: msg})
@@ -145,6 +146,14 @@ func runHub() {
 	// 9c. Start Emma (the persistent monitor agent, backed by the gemma package + model) if configured
 	if cfg.Gemma.AutoStart {
 		emmaAgent := gemma.New(h.DB, cfg.Gemma)
+		// Phase H slice 5 C1 (H-32): wire Emma's plan-usage producer to
+		// the TUI's panestate.Manager so successful 60s polls publish
+		// HubSnapshot{PlanUsagePct, PlanWindow} that strip.go reads. Set
+		// before Start so the first poll's publish lands in the same
+		// Manager the UI is reading from.
+		if uiPane != nil {
+			emmaAgent.SetHubPublisher(uiPane.SetHubSnapshot)
+		}
 		if err := emmaAgent.Start(); err != nil {
 			log.Printf("[autostart] emma FAILED: %v", err)
 			h.DB.InsertMessage(protocol.Message{

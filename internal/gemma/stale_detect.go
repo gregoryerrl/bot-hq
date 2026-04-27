@@ -79,7 +79,7 @@ func (g *Gemma) checkStaleAgentsAt(now time.Time) {
 	// tmux_target qualifier per BRAIN P1 fold rationale: selective
 	// suppression leaks alerts on non-pane agents (Emma, voice/discord)
 	// during the halt window.
-	if active, _, _ := g.db.IsHaltActive(); active {
+	if halted, _ := g.db.IsHalted(); halted {
 		return
 	}
 	agents, err := g.db.ListAgents("")

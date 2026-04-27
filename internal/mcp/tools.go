@@ -289,11 +289,11 @@ func hubClearHalt(db *hub.DB) ToolDef {
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		active, _, err := db.IsHaltActive()
+		halted, err := db.IsHalted()
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("halt status check failed: %v", err)), nil
 		}
-		if !active {
+		if !halted {
 			return mcp.NewToolResultText(toJSON(map[string]string{
 				"status": "not_active",
 			})), nil

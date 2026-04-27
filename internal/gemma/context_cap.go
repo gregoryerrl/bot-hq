@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
@@ -22,11 +23,12 @@ const contextCapThreshold = 95
 // past 95% may fire a fresh halt.
 const contextCapResetThreshold = 85
 
-// haltReasonPrefix is the literal substring that brian/rain STARTUP prompts
-// match against (`^agent .* at \d+%, halt`). Any reformat of this string MUST
+// haltReasonPrefix is the literal substring brian/rain STARTUP prompts
+// match against ("agent <id> at <N>%, halt"). Any reformat of this string MUST
 // be mirrored in the prompt convention or the halt-all-work contract breaks
 // silently — agents would receive the FLAG but not recognize it as the halt
-// trigger.
+// trigger. Slice-5 C1 (H-32+H-33) introduces a parallel plan-cap substring;
+// see internal/gemma/plan_usage.go for the matching producer.
 const haltReasonPrefix = "agent %s at %d%%, halt + checkpoint via H-15 + idle for fresh session"
 
 // paneSnapshotFn returns the current per-agent panestate snapshot. Abstracted
@@ -64,12 +66,12 @@ func (g *Gemma) checkContextCap(now time.Time) {
 	if g.paneSnapFn == nil {
 		return
 	}
-	active, _, err := g.db.IsHaltActive()
+	halted, err := g.db.IsHalted()
 	if err != nil {
 		log.Printf("[context-cap] halt status check failed: %v", err)
 		return
 	}
-	if active {
+	if halted {
 		return
 	}
 
@@ -81,18 +83,18 @@ func (g *Gemma) checkContextCap(now time.Time) {
 		// Hysteresis reset: drop below contextCapResetThreshold re-arms the
 		// per-agent flag history so a fresh squeeze past 95% can fire again
 		// after a successful fresh-session restart.
-		if s.UsagePct >= 0 && s.UsagePct < contextCapResetThreshold {
+		if s.ContextPct >= 0 && s.ContextPct < contextCapResetThreshold {
 			g.resetContextCapHysteresis(s.ID)
 			continue
 		}
-		if s.UsagePct < contextCapThreshold {
+		if s.ContextPct < contextCapThreshold {
 			continue
 		}
 		key := "context-cap:" + s.ID
 		if !g.shouldFlag(key, now) {
 			continue
 		}
-		reason := fmt.Sprintf(haltReasonPrefix, s.ID, s.UsagePct)
+		reason := fmt.Sprintf(haltReasonPrefix, s.ID, s.ContextPct)
 		content := fmt.Sprintf("[CRITICAL] %s", reason)
 		if _, err := g.db.InsertMessage(protocol.Message{
 			FromAgent: agentID,
@@ -104,7 +106,7 @@ func (g *Gemma) checkContextCap(now time.Time) {
 			log.Printf("[context-cap] flag insert failed for %s: %v", s.ID, err)
 			continue
 		}
-		if err := g.db.SetHaltActive(agentID, reason); err != nil {
+		if err := g.db.SetHaltActive(hub.HaltCauseContextCap, reason, agentID); err != nil {
 			log.Printf("[context-cap] set halt active failed: %v", err)
 		}
 	}

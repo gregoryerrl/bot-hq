@@ -167,12 +167,19 @@ func (a AgentsTab) View() string {
 	// reflects derived activity (working/online/stale/offline) rather than the
 	// raw protocol.AgentStatus field. Phase E commit 4: panestate is the source
 	// of truth for what the user sees.
+	//
+	// Slice 5 C1 (H-32): also lift each pane's ContextPct so the per-row
+	// context-% column can render. -1 = unknown (no tmux_target / parse-
+	// unknown / first-tick seed); rendered as "  --" so the column stays
+	// alignment-stable across observed and unknown rows.
 	activityByID := map[string]panestate.AgentActivity{}
 	staleGenByID := map[string]bool{}
+	contextPctByID := map[string]int{}
 	if a.pane != nil {
 		for _, s := range a.pane.Snapshot() {
 			activityByID[s.ID] = s.Activity
 			staleGenByID[s.ID] = s.StaleGen
+			contextPctByID[s.ID] = s.ContextPct
 		}
 	}
 
@@ -247,7 +254,17 @@ func (a AgentsTab) View() string {
 			cursor = "▸ "
 		}
 
-		lines = append(lines, fmt.Sprintf("%s%s %s  %s  %s%s  %s", cursor, dot, name, status, timeStr, tmuxStr, project))
+		// Slice 5 C1 (H-32): per-row context-% column. -1 = unknown
+		// (rendered as "  --" so column width stays stable). Color tier
+		// matches the strip's plan-segment palette for consistency:
+		// green <70 / yellow 70-89 / red ≥90.
+		ctxPct, hasCtx := contextPctByID[ag.ID]
+		if !hasCtx {
+			ctxPct = -1
+		}
+		ctxStr := renderContextPctCell(ctxPct)
+
+		lines = append(lines, fmt.Sprintf("%s%s %s  %s  %s  %s%s  %s", cursor, dot, name, status, ctxStr, timeStr, tmuxStr, project))
 	}
 
 	summary := lipgloss.NewStyle().Foreground(ColorStatus).Render(
@@ -261,6 +278,18 @@ func (a AgentsTab) View() string {
 	lines = append(lines, hint)
 
 	return strings.Join(lines, "\n")
+}
+
+// renderContextPctCell renders a fixed-width context-pct cell for the
+// agents-tab row. Unknown (-1) is "  --" so the column stays alignment-
+// stable. 0-99 right-pads two digits; 100 fills three. Color tier mirrors
+// the strip's plan-segment palette for cross-surface consistency.
+func renderContextPctCell(pct int) string {
+	if pct < 0 {
+		return lipgloss.NewStyle().Foreground(ColorStatus).Render(" --%")
+	}
+	style := planUsageTierStyle(pct)
+	return style.Render(fmt.Sprintf("%3d%%", pct))
 }
 
 // formatElapsed returns a human-readable elapsed time string.
