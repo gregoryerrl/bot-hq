@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,6 +116,8 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubIssueList(db),
 		hubIssueUpdate(db),
 		hubSpawnGemma(db),
+		hubScheduleWake(db),
+		hubCancelWake(db),
 		claudeList(db),
 		claudeRead(db),
 		claudeMessage(db),
@@ -1520,4 +1523,97 @@ IMPORTANT: Communicate your progress on the hub so other agents can see what you
 %s%s
 Your task:
 `, sessionID, sessionID, sessionID, worktreeNote, policy.String())
+}
+
+// --- Phase H slice 3 C1 (#7) wake-schedule MCP tools ---
+
+// hubScheduleWake persists a future hub_send the Emma tick loop will dispatch
+// at fire_at. ISO 8601 only on input (per O5) — relative-time syntactic sugar
+// is deferred to v2 to keep the input-parse error surface minimal. Open ACL:
+// any agent may schedule a wake for any target (per arch lean 5).
+func hubScheduleWake(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_schedule_wake",
+		mcp.WithDescription("Schedule a future hub_send. Emma's tick loop dispatches the payload to target_agent at fire_at. Use for cross-session wakes (any agent → any target). Brian-side ScheduleWakeup is now fallback for self-wake-only."),
+		mcp.WithString("from", mcp.Required(), mcp.Description("Scheduler agent ID — recorded as created_by")),
+		mcp.WithString("target_agent", mcp.Required(), mcp.Description("Agent ID to wake (or scheduler's own ID for self-wake)")),
+		mcp.WithString("fire_at", mcp.Required(), mcp.Description("ISO 8601 timestamp — when Emma should dispatch (e.g. 2026-04-27T15:30:00Z)")),
+		mcp.WithString("payload", mcp.Description("Raw message content delivered to target_agent (default empty string)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		from, err := req.RequireString("from")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if strings.TrimSpace(from) == "" {
+			return mcp.NewToolResultError("from must not be empty"), nil
+		}
+		target, err := req.RequireString("target_agent")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if strings.TrimSpace(target) == "" {
+			return mcp.NewToolResultError("target_agent must not be empty"), nil
+		}
+		fireAtRaw, err := req.RequireString("fire_at")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		fireAt, err := time.Parse(time.RFC3339, fireAtRaw)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("fire_at must be ISO 8601 (RFC3339, e.g. 2026-04-27T15:30:00Z): %v", err)), nil
+		}
+		payload := req.GetString("payload", "")
+
+		id, err := db.InsertWakeSchedule(target, from, payload, fireAt)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("schedule failed: %v", err)), nil
+		}
+		return mcp.NewToolResultText(toJSON(map[string]any{
+			"status":        "scheduled",
+			"wake_id":       id,
+			"scheduled_for": fireAt.UTC().Format(time.RFC3339),
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubCancelWake transitions a pending wake to cancelled. Idempotent on rows
+// that already left pending — surfaces status=already_terminal so callers can
+// distinguish "you cancelled" from "too late, it already fired/was cancelled"
+// without needing a separate read. Missing IDs return an error.
+func hubCancelWake(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_cancel_wake",
+		mcp.WithDescription("Cancel a pending wake scheduled via hub_schedule_wake. Idempotent: cancelling an already-fired or already-cancelled wake reports status=already_terminal, not an error."),
+		mcp.WithString("from", mcp.Description("Caller agent ID (for last_seen middleware)")),
+		mcp.WithNumber("wake_id", mcp.Required(), mcp.Description("wake_id returned by hub_schedule_wake")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		idF := req.GetFloat("wake_id", 0)
+		if idF <= 0 {
+			return mcp.NewToolResultError("wake_id must be a positive integer"), nil
+		}
+		id := int64(idF)
+		cancelled, err := db.CancelWake(id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return mcp.NewToolResultError(fmt.Sprintf("wake_id %d not found", id)), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("cancel failed: %v", err)), nil
+		}
+		w, _ := db.GetWakeSchedule(id)
+		status := "cancelled"
+		if !cancelled {
+			status = "already_terminal"
+		}
+		return mcp.NewToolResultText(toJSON(map[string]any{
+			"status":      status,
+			"wake_id":     id,
+			"fire_status": w.FireStatus,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
 }

@@ -41,6 +41,8 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_status",
 		"hub_spawn",
 		"hub_spawn_gemma",
+		"hub_schedule_wake",
+		"hub_cancel_wake",
 		"hub_checkpoint",
 		"hub_restore",
 		"hub_issue_create",
