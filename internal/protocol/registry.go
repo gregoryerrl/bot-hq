@@ -120,6 +120,7 @@ var Rules = []Rule{
 	{ID: "R17", Name: "SOURCE-OF-TRUTH-HIERARCHY", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R17", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
 	{ID: "R18", Name: "CITE-ANCHOR-REQUIRED", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R18", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
 	{ID: "R19", Name: "CYCLE-CLOSE-USER-BLOCKING", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R19", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
+	{ID: "R21", Name: "MSG-TYPE-TAXONOMY", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R21", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestMessageTypeTaxonomy"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
 	{
 		ID:                 "H-13",
 		Name:               "FORCE-PUSH-TOKEN-PROTOCOL",

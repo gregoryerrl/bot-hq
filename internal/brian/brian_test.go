@@ -125,6 +125,8 @@ func TestPhaseIv1ContentShape(t *testing.T) {
 		"SOURCE-OF-TRUTH-HIERARCHY",
 		"CITE-ANCHOR-REQUIRED",
 		"CYCLE-CLOSE-USER-BLOCKING",
+		// Phase J T1.7 addition
+		"MSG-TYPE-TAXONOMY",
 	}
 	for _, rule := range rules {
 		if !strings.Contains(protocol.PhaseIv1ProtocolHardening, rule) {

@@ -165,6 +165,8 @@ func TestRuleRegistryCoversAllConstRules(t *testing.T) {
 		"SOURCE-OF-TRUTH-HIERARCHY",
 		"CITE-ANCHOR-REQUIRED",
 		"CYCLE-CLOSE-USER-BLOCKING",
+		// Phase J T1.7 addition
+		"MSG-TYPE-TAXONOMY",
 	}
 	for _, name := range mustHave {
 		if !phaseIRuleNames[name] {
