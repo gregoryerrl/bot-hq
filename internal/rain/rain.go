@@ -291,11 +291,25 @@ func formatRainNudge(msg protocol.Message) string {
 // be nudged into Rain's tmux pane. Extracted as a pure function for testing.
 //
 // Rain sees: to="rain", any user/discord traffic regardless of target,
-// results/errors/commands/flags from any peer (QA coverage), MsgResponse
-// broadcasts from Brian (peer visibility on user-facing work), and broadcasts
-// whose content mentions hub_flag/hub_spawn.
-// Rain skips: own messages, inter-agent chatter between coders or
-// non-Brian MsgResponse broadcasts (handshakes, acks, "standing by").
+// results/errors/commands/flags from any peer (QA coverage), any broadcast
+// (to="") from Brian regardless of Type, and broadcasts whose content
+// mentions hub_flag/hub_spawn (catches non-Brian agents like Emma calling
+// out elevation events).
+// Rain skips: own messages, inter-agent chatter between coders, non-Brian
+// MsgUpdate broadcasts without flag/spawn substrings (handshakes, acks,
+// "standing by" — coder-broadcast-flood protection).
+//
+// Phase I W2 I-7 fix: prior implementation gated FromAgent=="brian"
+// broadcasts to Type==MsgResponse only, dropping all of Brian's MsgUpdate
+// broadcasts (commit notices, scope-dumps, halt-acks). Today's session
+// produced 14 specific dropped msg-IDs (4358, 4386, 4393, 4401, 4408,
+// 4420, 4435, 4480, 4491, 4522, 4547, 4563, 4639, 4646), all type=update,
+// to_agent='', no flag/spawn substring. Widen the from-brian-broadcast
+// branch to forward regardless of Type. The hub_flag/hub_spawn substring
+// check is preserved as the secondary catch-all for non-Brian agents
+// emitting visibility-worthy broadcasts (existing test contract:
+// "hub_flag mention forwards" — emma update content "calling hub_flag"
+// must reach Rain).
 func shouldForwardToRain(msg protocol.Message) bool {
 	if msg.FromAgent == agentID {
 		return false
@@ -312,11 +326,13 @@ func shouldForwardToRain(msg protocol.Message) bool {
 		return true
 	}
 	if msg.ToAgent == "" {
-		// Peer-visibility: Brian's broadcast responses reach Rain in real time.
-		// Scoped to FromAgent=="brian" to avoid coder MsgResponse flood.
-		if msg.Type == protocol.MsgResponse && msg.FromAgent == "brian" {
+		// Peer-visibility: all Brian broadcasts reach Rain regardless of Type.
+		// FromAgent=="brian" gate preserves coder-broadcast-flood protection.
+		if msg.FromAgent == "brian" {
 			return true
 		}
+		// Catch-all for non-Brian agents emitting visibility-worthy
+		// broadcasts via content keywords (e.g., emma elevation prose).
 		if strings.Contains(msg.Content, "hub_flag") || strings.Contains(msg.Content, "hub_spawn") {
 			return true
 		}
@@ -338,6 +354,10 @@ func (r *Rain) processNewMessages() {
 			r.lastMsgID = msg.ID
 		}
 		if !shouldForwardToRain(msg) {
+			// Phase I W2 I-7 observability: structured filter-drop log so
+			// future filter regressions surface via log analysis without
+			// grep heuristics. Quiet-by-default (single line per drop).
+			log.Printf("rain: filter-drop msg %d type=%s from=%s to=%s", msg.ID, msg.Type, msg.FromAgent, msg.ToAgent)
 			continue
 		}
 		nudge := formatRainNudge(msg)

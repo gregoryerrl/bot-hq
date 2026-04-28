@@ -411,6 +411,8 @@ func TestShouldForwardToRain_PeerToUserVisibility(t *testing.T) {
 		{"brian to user forwards", protocol.Message{FromAgent: "brian", ToAgent: "user", Type: protocol.MsgResponse, Content: "x"}, true},
 		{"brian to discord forwards", protocol.Message{FromAgent: "brian", ToAgent: "discord", Type: protocol.MsgResponse, Content: "x"}, true},
 		{"brian broadcast response forwards (peer visibility)", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgResponse, Content: "x"}, true},
+		{"brian broadcast update forwards (Phase I I-7 fix — was dropped)", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgUpdate, Content: "scope-dump x"}, true},
+		{"brian broadcast handshake forwards (any Type from Brian)", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgHandshake, Content: "."}, true},
 		{"user to brian forwards (visible coordination)", protocol.Message{FromAgent: "user", ToAgent: "brian", Type: protocol.MsgCommand, Content: "x"}, true},
 		{"directed to rain forwards", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgResponse, Content: "x"}, true},
 		{"user broadcast forwards", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgCommand, Content: "x"}, true},
