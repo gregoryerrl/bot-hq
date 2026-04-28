@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -300,5 +301,61 @@ func TestSendKeysAndCapture(t *testing.T) {
 	}
 	if !strings.Contains(output, "hello-test") {
 		t.Errorf("expected output to contain 'hello-test', got: %s", output)
+	}
+}
+
+// TestSendKeysLargePayloadViaBuffer locks the post-Phase-I hotfix:
+// payloads larger than sendKeysArgvLimit must route through the
+// load-buffer/paste-buffer path instead of inline `-l`. The inline
+// path exits 1 ("command too long") on tmux's command parser at
+// ~16KB; the buffer path is unbounded.
+//
+// Regression-lock for the Phase I rebuild failure where Brian + Rain
+// auto-start failed at "tmux send prompt: exit status 1" because the
+// const expansion (R10-R16 + Fix-3 H-31 wording) pushed initialPrompt()
+// past the inline limit.
+//
+// Assertion shape: SendKeys must return nil for a payload that would
+// have failed the inline path. We don't try to verify full content
+// delivery via capture-pane because pane history is bounded and the
+// payload's ~600 newlines produce thousands of "command not found"
+// echoes that scroll past the window. The no-error return + a paired
+// inline-path-fails assertion is sufficient signal.
+func TestSendKeysLargePayloadViaBuffer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping tmux test in short mode")
+	}
+	if !HasTmux() {
+		t.Skip("tmux not available")
+	}
+	name := fmt.Sprintf("bot-hq-test-large-%d", time.Now().UnixNano())
+	if err := NewSession(name, "/tmp"); err != nil {
+		t.Fatal(err)
+	}
+	defer KillSession(name)
+
+	// Build a payload comfortably past sendKeysArgvLimit so the buffer
+	// path is exercised.
+	var b strings.Builder
+	for i := 0; i < 600; i++ {
+		fmt.Fprintf(&b, "Line %d with content: backtick `, brackets [a], curly {b}, paren (c), pipe |, etc.\n", i)
+	}
+	payload := b.String()
+	if len(payload) <= sendKeysArgvLimit {
+		t.Fatalf("payload too small to exercise buffer path: %d bytes (need >%d)", len(payload), sendKeysArgvLimit)
+	}
+
+	// Buffer path must succeed.
+	if err := SendKeys(name, payload, false); err != nil {
+		t.Fatalf("SendKeys with large payload via buffer: %v", err)
+	}
+
+	// Sanity: the inline `-l` path that SendKeys used to take WOULD
+	// fail on this payload — exit 1 "command too long" from tmux's
+	// command parser. Confirms the buffer routing is doing real work,
+	// not just succeeding because the payload was actually small.
+	inlineErr := exec.Command("tmux", "send-keys", "-t", name, "-l", payload).Run()
+	if inlineErr == nil {
+		t.Errorf("inline send-keys -l path expected to fail at this payload size (%d bytes); got nil — sendKeysArgvLimit may need raising", len(payload))
 	}
 }

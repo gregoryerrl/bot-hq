@@ -71,11 +71,29 @@ func KillSession(name string) error {
 	return err
 }
 
+// sendKeysArgvLimit is the byte threshold above which SendKeys routes
+// through the load-buffer / paste-buffer pattern instead of inline `-l`.
+// tmux's internal command parser caps input at ~16KB ("command too long"
+// exit 1). 4KB leaves comfortable headroom for chunks-with-newlines —
+// observed on macOS tmux 3.x, 2026-04-29 hotfix after Phase I const
+// expansion pushed initialPrompt() past the inline limit.
+const sendKeysArgvLimit = 4096
+
 // SendKeys sends keystrokes to a tmux target (session:window.pane).
 // Uses -l (literal) flag so key names in content are not interpreted by tmux.
 // When enter is true, a small delay is inserted before sending Enter to allow
 // the target application's bracketed paste handler to finish processing.
+//
+// For payloads larger than sendKeysArgvLimit, routes through tmux's
+// load-buffer / paste-buffer pair (stdin-fed, no argv limit) instead of
+// inline `-l`. tmux's command parser exits 1 with "command too long"
+// when the inline path overflows; the buffer path is unbounded. The
+// buffer is created with a unique name per call and deleted on
+// completion to avoid leaking buffer slots.
 func SendKeys(target, keys string, enter bool) error {
+	if len(keys) > sendKeysArgvLimit {
+		return sendKeysViaBuffer(target, keys, enter)
+	}
 	args := []string{"send-keys", "-t", target, "-l", keys}
 	if enter {
 		// Enter must be sent as a separate non-literal send-keys call
@@ -89,6 +107,35 @@ func SendKeys(target, keys string, enter bool) error {
 	}
 	_, err := Exec(args...)
 	return err
+}
+
+// sendKeysViaBuffer is the load-buffer / paste-buffer path for large
+// payloads. Avoids tmux's inline-command-length limit by feeding content
+// through stdin into a named buffer, pasting it to the target, and
+// deleting the buffer to keep the slot pool clean.
+func sendKeysViaBuffer(target, keys string, enter bool) error {
+	bufName := fmt.Sprintf("bot-hq-%d", time.Now().UnixNano())
+	loadCmd := exec.Command("tmux", "load-buffer", "-b", bufName, "-")
+	loadCmd.Stdin = strings.NewReader(keys)
+	if out, err := loadCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux load-buffer: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	pasteCmd := exec.Command("tmux", "paste-buffer", "-b", bufName, "-t", target)
+	if out, err := pasteCmd.CombinedOutput(); err != nil {
+		// Best-effort cleanup before returning.
+		exec.Command("tmux", "delete-buffer", "-b", bufName).Run()
+		return fmt.Errorf("tmux paste-buffer: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	// Best-effort cleanup; failure is non-fatal (worst case: buffer
+	// occupies a slot until tmux's idle pruning reclaims it).
+	exec.Command("tmux", "delete-buffer", "-b", bufName).Run()
+	if enter {
+		time.Sleep(500 * time.Millisecond)
+		if _, err := Exec("send-keys", "-t", target, "Enter"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CapturePane captures visible content of a tmux pane.

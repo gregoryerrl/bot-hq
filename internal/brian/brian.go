@@ -12,6 +12,7 @@ import (
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/gregoryerrl/bot-hq/internal/tmuxsink"
 )
 
@@ -229,13 +230,11 @@ func (b *Brian) spawnTmux() error {
 	configPath := filepath.Join(b.workDir, ".bot-hq-brian-mcp.json")
 	claudeCmd := fmt.Sprintf("claude --mcp-config %s --dangerously-skip-permissions", configPath)
 
-	// Send the claude command to the tmux session
-	sendCmd := exec.Command("tmux", "send-keys", "-t", b.tmuxSession, "-l", claudeCmd)
-	if err := sendCmd.Run(); err != nil {
+	// Use tmux.SendKeys for both the claude invocation + the prompt paste:
+	// it auto-routes large payloads (Phase I const expansion took initialPrompt
+	// past tmux's inline command-length limit, exit 1 "command too long").
+	if err := tmuxpkg.SendKeys(b.tmuxSession, claudeCmd, true); err != nil {
 		return fmt.Errorf("tmux send claude cmd: %w", err)
-	}
-	if err := exec.Command("tmux", "send-keys", "-t", b.tmuxSession, "Enter").Run(); err != nil {
-		return fmt.Errorf("tmux send enter: %w", err)
 	}
 
 	// Wait for Claude to initialize
@@ -243,13 +242,10 @@ func (b *Brian) spawnTmux() error {
 
 	// Send the initial brian prompt
 	prompt := b.initialPrompt()
-	sendPrompt := exec.Command("tmux", "send-keys", "-t", b.tmuxSession, "-l", prompt)
-	if err := sendPrompt.Run(); err != nil {
+	if err := tmuxpkg.SendKeys(b.tmuxSession, prompt, true); err != nil {
 		return fmt.Errorf("tmux send prompt: %w", err)
 	}
-	// Claude Code's bracketed paste needs time to process before Enter
-	time.Sleep(500 * time.Millisecond)
-	return exec.Command("tmux", "send-keys", "-t", b.tmuxSession, "Enter").Run()
+	return nil
 }
 
 // initialPrompt returns the system prompt that tells Claude how to be the brian.

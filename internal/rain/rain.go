@@ -13,6 +13,7 @@ import (
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/gregoryerrl/bot-hq/internal/tmuxsink"
 )
 
@@ -218,23 +219,20 @@ func (r *Rain) spawnTmux() error {
 	configPath := filepath.Join(r.workDir, ".bot-hq-rain-mcp.json")
 	claudeCmd := fmt.Sprintf("claude --mcp-config %s --dangerously-skip-permissions", configPath)
 
-	sendCmd := exec.Command("tmux", "send-keys", "-t", r.tmuxSession, "-l", claudeCmd)
-	if err := sendCmd.Run(); err != nil {
+	// Use tmux.SendKeys for both the claude invocation + the prompt paste:
+	// it auto-routes large payloads (Phase I const expansion took initialPrompt
+	// past tmux's inline command-length limit, exit 1 "command too long").
+	if err := tmuxpkg.SendKeys(r.tmuxSession, claudeCmd, true); err != nil {
 		return fmt.Errorf("tmux send claude cmd: %w", err)
-	}
-	if err := exec.Command("tmux", "send-keys", "-t", r.tmuxSession, "Enter").Run(); err != nil {
-		return fmt.Errorf("tmux send enter: %w", err)
 	}
 
 	time.Sleep(3 * time.Second)
 
 	prompt := r.initialPrompt()
-	sendPrompt := exec.Command("tmux", "send-keys", "-t", r.tmuxSession, "-l", prompt)
-	if err := sendPrompt.Run(); err != nil {
+	if err := tmuxpkg.SendKeys(r.tmuxSession, prompt, true); err != nil {
 		return fmt.Errorf("tmux send prompt: %w", err)
 	}
-	time.Sleep(500 * time.Millisecond)
-	return exec.Command("tmux", "send-keys", "-t", r.tmuxSession, "Enter").Run()
+	return nil
 }
 
 func (r *Rain) initialPrompt() string {
