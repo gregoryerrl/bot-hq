@@ -121,6 +121,10 @@ func TestPhaseIv1ContentShape(t *testing.T) {
 		"HALT-95%-SNAP",
 		"AGENT-AUTHORITY-MATRIX",
 		"CROSS-RESTART-RESUME-OPERATIONAL",
+		// Phase J T1.1 additions
+		"SOURCE-OF-TRUTH-HIERARCHY",
+		"CITE-ANCHOR-REQUIRED",
+		"CYCLE-CLOSE-USER-BLOCKING",
 	}
 	for _, rule := range rules {
 		if !strings.Contains(protocol.PhaseIv1ProtocolHardening, rule) {

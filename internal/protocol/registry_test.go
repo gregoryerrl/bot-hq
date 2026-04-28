@@ -143,7 +143,7 @@ func TestRuleRegistryCoversAllConstRules(t *testing.T) {
 		}
 	}
 
-	// Locked at Phase I close — must be present (R17-R19 add later in T1.1).
+	// Locked at Phase J T1.1 close — Phase I R1-R16 + Phase J T1.1 R17-R19.
 	mustHave := []string{
 		"HANDSHAKE-TERMINATOR",
 		"CROSS-TIMING-DEDUP",
@@ -161,6 +161,10 @@ func TestRuleRegistryCoversAllConstRules(t *testing.T) {
 		"HALT-95%-SNAP",
 		"AGENT-AUTHORITY-MATRIX",
 		"CROSS-RESTART-RESUME-OPERATIONAL",
+		// Phase J T1.1 additions
+		"SOURCE-OF-TRUTH-HIERARCHY",
+		"CITE-ANCHOR-REQUIRED",
+		"CYCLE-CLOSE-USER-BLOCKING",
 	}
 	for _, name := range mustHave {
 		if !phaseIRuleNames[name] {

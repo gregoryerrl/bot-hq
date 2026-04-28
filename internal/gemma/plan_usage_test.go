@@ -508,3 +508,41 @@ func TestPlanCapResetWithoutPriorHaltDoesNotEmitResumeNudge(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanCapPayloadMirrorSymmetry asserts the runtime emit format strings
+// (planCapResumeFmt + planCapReasonFmt) contain the shared-substring set
+// declared by the protocol package's PayloadMirrorSubstrings(ruleID) helper.
+// Phase J T1.1 (B1(iv)) — first-instance runtime-half of the Option B
+// shared-substring-set discipline (B3d rule-namespace-ratchet payload-mirror
+// attribute). Companion to TestRuleNamespaceRatchet (registry_test.go) which
+// asserts the const-text half.
+//
+// On wording drift: if planCapResumeFmt or planCapReasonFmt diverge from the
+// shared substring set, this test fires. Either (a) update the runtime fmt
+// to restore the substrings, OR (b) update the substring set with explicit
+// review — the registry-side test will then fire if the corresponding const
+// drifts from the new set, surfacing both halves.
+func TestPlanCapPayloadMirrorSymmetry(t *testing.T) {
+	cases := []struct {
+		ruleID  string
+		runtime string
+	}{
+		{"R16", planCapResumeFmt},
+		{"RESUME-FROM-HALT", planCapResumeFmt},
+		{"H-31-HALT", planCapReasonFmt},
+	}
+	for _, c := range cases {
+		t.Run(c.ruleID, func(t *testing.T) {
+			subs := protocol.PayloadMirrorSubstrings(c.ruleID)
+			if len(subs) == 0 {
+				t.Errorf("rule %q: PayloadMirrorSubstrings empty — schema gap", c.ruleID)
+				return
+			}
+			for _, s := range subs {
+				if !strings.Contains(c.runtime, s) {
+					t.Errorf("rule %q: runtime fmt missing payload-mirror substring %q (runtime=%q)", c.ruleID, s, c.runtime)
+				}
+			}
+		})
+	}
+}

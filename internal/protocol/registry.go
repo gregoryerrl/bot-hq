@@ -114,6 +114,12 @@ var Rules = []Rule{
 		PayloadMirror:      "internal/gemma/plan_usage.go:59:planCapResumeFmt",
 		AgentApplicability: []string{"brian", "rain"},
 	},
+	// Phase J T1.1 const additions: R17/R18/R19 added per pass-3 user
+	// scope-correction (msgs 5042-5049) + pass-3 AFK-pass exhibit
+	// (msgs 5060-5067).
+	{ID: "R17", Name: "SOURCE-OF-TRUTH-HIERARCHY", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R17", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
+	{ID: "R18", Name: "CITE-ANCHOR-REQUIRED", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R18", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
+	{ID: "R19", Name: "CYCLE-CLOSE-USER-BLOCKING", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R19", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
 	{
 		ID:                 "H-13",
 		Name:               "FORCE-PUSH-TOKEN-PROTOCOL",
