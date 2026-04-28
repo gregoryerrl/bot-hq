@@ -248,6 +248,10 @@ func (b *Brian) spawnTmux() error {
 	return nil
 }
 
+// InitialPromptForTest exposes initialPrompt() for cross-package integration
+// tests (Phase J T1.4 / B5 promptrule_test.go). Not for production use.
+func (b *Brian) InitialPromptForTest() string { return b.initialPrompt() }
+
 // initialPrompt returns the system prompt that tells Claude how to be the brian.
 func (b *Brian) initialPrompt() string {
 	return `You are Brian (agent ID "brian"), the bot-hq orchestrator. Agents: Clive (voice, ID "clive"), Rain (QA, ID "rain").

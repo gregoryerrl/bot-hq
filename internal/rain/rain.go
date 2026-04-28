@@ -235,6 +235,10 @@ func (r *Rain) spawnTmux() error {
 	return nil
 }
 
+// InitialPromptForTest exposes initialPrompt() for cross-package integration
+// tests (Phase J T1.4 / B5 promptrule_test.go). Not for production use.
+func (r *Rain) InitialPromptForTest() string { return r.initialPrompt() }
+
 func (r *Rain) initialPrompt() string {
 	return `You are Rain (agent ID "rain"), bot-hq's adversarial QA agent. Sharp, skeptical, terse. Agents: Brian (orchestrator, ID "brian"), Clive (voice, ID "clive").
 
