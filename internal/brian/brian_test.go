@@ -114,6 +114,11 @@ func TestPhaseIv1ContentShape(t *testing.T) {
 		"SUBAGENT-DISPATCH",
 		"COMPACT-COMMIT-FORMAT",
 		"AUDIENCE-CLASS-DISCRIMINATOR",
+		"SCOPE-LOCK-BEFORE-IMPL",
+		"HALT-DISCIPLINE",
+		"GATE-PROTOCOL",
+		"SCOPE-VERIFY-PRE-DRAFT",
+		"HALT-95%-SNAP",
 	}
 	for _, rule := range rules {
 		if !strings.Contains(protocol.PhaseIv1ProtocolHardening, rule) {
