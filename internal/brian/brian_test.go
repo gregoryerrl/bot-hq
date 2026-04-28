@@ -119,6 +119,8 @@ func TestPhaseIv1ContentShape(t *testing.T) {
 		"GATE-PROTOCOL",
 		"SCOPE-VERIFY-PRE-DRAFT",
 		"HALT-95%-SNAP",
+		"AGENT-AUTHORITY-MATRIX",
+		"CROSS-RESTART-RESUME-OPERATIONAL",
 	}
 	for _, rule := range rules {
 		if !strings.Contains(protocol.PhaseIv1ProtocolHardening, rule) {
