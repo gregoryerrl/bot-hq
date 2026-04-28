@@ -41,9 +41,26 @@ const queueFailPattern = `(?i)\[queue\]\s+Message\s+\d+\s+to\s+[\w-]+\s+failed\s
 // rather than expand.
 var preFilterPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bpanic(:|\()`),
-	regexp.MustCompile(`(?i)\bfatal\b`),
+	// Phase J T1.3 (B4): replaced loose `\bfatal\b` with shape-anchored
+	// patterns. Rationale: bare `\bfatal\b` would match user-prose Q&A
+	// patterns (FP class). Shape-anchored patterns require Go-runtime
+	// emit shape — line-leading `fatal error:`, runtime: prefix, or
+	// signal SIGSEGV bracket — preserving paste-from-terminal coverage
+	// while dropping prose mentions. Per
+	// docs/plans/2026-04-29-sentinel-content-shape-corpus.md §6.1.
+	regexp.MustCompile(`(?im)^fatal error:`),
+	regexp.MustCompile(`(?i)\bruntime:\s+(out\s+of\s+memory|goroutine\s+stack\s+exceeds)`),
+	regexp.MustCompile(`(?i)\[signal\s+SIGSEGV:`),
 	regexp.MustCompile(`(?i)\bdeadlock!`),
-	regexp.MustCompile(`(?i)rate[\s\-]?limit`),
+	// Phase J T1.3 (B4): replaced loose `(?i)rate[\s\-]?limit` with
+	// shape-anchored pattern. msg 4977 elevation traced to this loose
+	// pattern (alwaysFlag fired on user-prose "rate-limit response from
+	// an HTTP API"). Tightened to require HTTP-status, verb-context, or
+	// response-header anchor — drops prose Q&A while preserving real
+	// emit coverage. Mirrored exact-string in alwaysFlagPatterns to
+	// preserve TestSentinelAlwaysFlagSubsetOfPreFilter strict-subset
+	// invariant.
+	regexp.MustCompile(`(?i)(?:http\s+)?429\b|rate[\s\-]?limit(?:ed)?\s+(?:exceeded|hit|backoff)\b|(?:exceeded|hit|backoff(?:ing)?)\s+(?:the\s+)?rate[\s\-]?limit\b|X-RateLimit-(?:Remaining|Limit|Reset)\b`),
 	regexp.MustCompile(`(?i)\bOOM\b|out[\s\-]of[\s\-]memory`),
 	regexp.MustCompile(`(?i)process\s+exit(ed)?`),
 	regexp.MustCompile(`(?i)schema\s+constraint\s+(violation|failed|error)`),
@@ -58,7 +75,9 @@ var preFilterPatterns = []*regexp.Regexp{
 var alwaysFlagPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bpanic(:|\()`),
 	regexp.MustCompile(`(?i)\bdeadlock!`),
-	regexp.MustCompile(`(?i)rate[\s\-]?limit`),
+	// Phase J T1.3 (B4) tightened — see preFilterPatterns comment + corpus §6.2.
+	// msg 4977 elevation FP source. Mirrored exact-string per strict-subset.
+	regexp.MustCompile(`(?i)(?:http\s+)?429\b|rate[\s\-]?limit(?:ed)?\s+(?:exceeded|hit|backoff)\b|(?:exceeded|hit|backoff(?:ing)?)\s+(?:the\s+)?rate[\s\-]?limit\b|X-RateLimit-(?:Remaining|Limit|Reset)\b`),
 	regexp.MustCompile(`(?i)process\s+exit(ed)?`),
 	regexp.MustCompile(`(?i)schema\s+constraint\s+(violation|failed|error)`),
 	regexp.MustCompile(`(?i)segmentation\s+fault|SIGSEGV`),

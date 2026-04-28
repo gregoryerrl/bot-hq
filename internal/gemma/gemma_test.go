@@ -436,8 +436,9 @@ func TestSentinelMatchPositive(t *testing.T) {
 		{"schema-constraint-failed", "schema constraint failed during migration", true},
 		{"schema-constraint-error", "schema constraint error: agents.id not unique", true},
 		{"sigsegv", "SIGSEGV: segmentation violation", true},
-		{"fatal-no-flag", "FATAL: connection lost", false},   // pre-filter only, not always-flag
-		{"oom-no-flag", "out of memory: killed worker", false}, // pre-filter only
+		{"fatal-error-canonical", "fatal error: concurrent map writes\ngoroutine 1 [running]:", false}, // Phase J T1.3: shape-anchored fatal error: line-leading
+		{"runtime-oom", "runtime: out of memory: cannot allocate", false},                                // Phase J T1.3: shape-anchored runtime: prefix
+		{"oom-no-flag", "out of memory: killed worker", false},                                           // pre-filter only (loose OOM pattern still in observation tier)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -481,6 +482,17 @@ func TestSentinelMatchNegative(t *testing.T) {
 		"discussing schema constraint design",
 		"the schema constraint is conservative",
 		"constraint violation in our locked spec",
+		// Phase J T1.3 (B4) false-positive corpus. Source:
+		// docs/plans/2026-04-29-sentinel-content-shape-corpus.md FP-1..7.
+		// FP-1 is msg 4977 exhibit verbatim (rate-limit prose); the
+		// rate-limit pattern was tightened in same T1.3 commit (preFilter
+		// + alwaysFlag) so prose drops at preFilter.
+		"one-sentence reply: in Go runtime, what triggers a panic vs a fatal error vs a rate-limit response from an HTTP API? Just prose, no implementation.", // FP-1 — msg 4977 verbatim
+		"The new design must handle fatal errors gracefully. We can't let a panic propagate to the parent process; rate-limit responses should retry with backoff.", // FP-2
+		"See issue #1234 — fatal error in the migration script if rate-limit hits zero.",                                                                            // FP-3
+		"// returns fatal error if config fails to load",                                                                                                              // FP-4 code-comment
+		"The Go spec says: \"A program that encounters a fatal error must terminate.\"",                                                                             // FP-6
+		"Yeah Tom mentioned fatal errors on his end too. Their queue was rate-limited.",                                                                              // FP-7
 	}
 	for _, content := range cases {
 		t.Run(content, func(t *testing.T) {
