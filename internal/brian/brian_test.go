@@ -266,10 +266,12 @@ func TestBrianStartupBootstrapIterate(t *testing.T) {
 // into the initial prompt. The literal substrings ratchet the substring
 // recognition pattern (slice 4 C7 M1 fold per Rain msg 3820: rephrased from
 // regex-anchor notation to "contains substring" framing since agents are
-// LLM-interpreters and semantic-match the pattern; regex-anchor notation
-// could mislead future-Brian into thinking literal pattern-match was
-// authoritative), the close-via-H15 directive, and the fresh-session
-// restart contract.
+// LLM-interpreters and semantic-match the pattern).
+//
+// Phase I W2 hotfix Fix-3 (msg 4926/4929 user (D)+SNAP-gate): halt
+// protocol shifted from "kill-and-rebuild-fresh" to "idle-in-pane and
+// watch for RESUME". Old fresh-session-restart assertions removed; new
+// assertions cover idle-in-pane + RESUME-FROM-HALT protocol.
 func TestBrianPromptContainsHaltAllWork(t *testing.T) {
 	b := &Brian{}
 	prompt := b.initialPrompt()
@@ -280,12 +282,39 @@ func TestBrianPromptContainsHaltAllWork(t *testing.T) {
 		"Match by substring meaning across BOTH triggers (agent context-cap OR plan-usage), not regex anchors",
 		"Both fire HALT-ALL-WORK",
 		"hub_session_close",
-		"fresh-context session",
-		"H-15 ledger pre-loads context",
+		"idle in pane",
+		"do NOT close the claude session",
 	}
 	for _, w := range want {
 		if !strings.Contains(prompt, w) {
 			t.Errorf("initial prompt must contain HALT-ALL-WORK literal %q", w)
+		}
+	}
+}
+
+// TestBrianPromptContainsResumeFromHalt locks the Phase I W2 hotfix Fix-3
+// RESUME-FROM-HALT rule into Brian's initial prompt. Mirrors Rain's
+// ratchet so both agents recognize Emma's resume-substring identically
+// and apply the same SNAP-gate discipline.
+//
+// User msg 4929 SNAP-gate refinement: 0% resume flag must check for
+// last-session SNAP. If SNAP exists, R16 bootstrap. If no SNAP, idle —
+// do NOT auto-engage on empty state.
+func TestBrianPromptContainsResumeFromHalt(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	want := []string{
+		"RESUME-FROM-HALT",
+		`"plan usage reset"`,
+		"last_session_snap",
+		"if SNAP exists",
+		"R16 CROSS-RESTART-RESUME-OPERATIONAL",
+		"if no SNAP exists, remain idle",
+		"do NOT auto-engage on empty state",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain RESUME-FROM-HALT literal %q", w)
 		}
 	}
 }
