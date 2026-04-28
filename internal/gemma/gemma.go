@@ -608,12 +608,27 @@ func (g *Gemma) OnHubMessage(msg protocol.Message) {
 	if !d.Match {
 		return // default-ignore
 	}
-	// Source-filter for hub-bridged patterns. queueFailPattern is emitted
-	// by the hub itself (FromAgent="hub", non-registered) — any match from
-	// a registered agent is prose, not a real event. Drop. Other patterns
-	// (panic, fatal, OOM, …) can legitimately come from any source, so
-	// they bypass this filter.
-	if d.Pattern == queueFailPattern && g.isFromRegisteredAgent(msg.FromAgent) {
+	// Source-filter: registered-agent hub_send is process-self-tool-call
+	// (agent-prose by construction), not a crash-report channel. Real crash
+	// reports arrive via out-of-band capture (stderr/tmux/PID-monitor),
+	// since a panicking process can't emit a tool call from itself.
+	//
+	// Empirical anchor (hub.db FP-rate query 2026-04-28, Phase I msg #4778):
+	// 14/14 always-flag hits from registered agents over months were
+	// prose-mention FPs (panic 5, fatal 4, rate-limit 3, schema-constraint 1,
+	// segfault 1) — zero observed real-event loss against 100% observed FP
+	// suppression. Earlier H-22-bis source-filter (queueFailPattern only)
+	// was conservative; data-supported extension to all sentinel patterns
+	// landed Phase I W1b. The original "other patterns can legitimately
+	// come from any source" framing was theoretical-but-unmatched-by-traffic.
+	//
+	// Revisit-trigger: if a future monitor/sidecar architecture routes
+	// crash-reports via hub_send with from_agent set to a registered agent
+	// (e.g., a watchdog that registers + emits crash events), this filter
+	// will suppress them. Refine to content-shape-based discrimination at
+	// that point — out-of-band capture stays the canonical crash-report
+	// channel for now.
+	if g.isFromRegisteredAgent(msg.FromAgent) {
 		return
 	}
 	g.dispatchSentinelHit(msg, d)
@@ -702,10 +717,12 @@ func (g *Gemma) OnHubMessageReplay(msg protocol.Message) {
 	if !d.Match {
 		return
 	}
-	// Source-filter for hub-bridged patterns — keep replay-path symmetric
-	// with OnHubMessage so boot-replay does not write prose-FPs into the
-	// dry-run ledger.
-	if d.Pattern == queueFailPattern && g.isFromRegisteredAgent(msg.FromAgent) {
+	// Source-filter — keep replay-path symmetric with OnHubMessage so
+	// boot-replay does not write prose-FPs into the dry-run ledger.
+	// Registered-agent hub_send is process-self-tool-call (agent-prose),
+	// not a crash-report channel; see OnHubMessage for the architectural
+	// rationale + empirical anchor (hub.db 14/14 FP query 2026-04-28).
+	if g.isFromRegisteredAgent(msg.FromAgent) {
 		return
 	}
 	if d.AlwaysFlag {

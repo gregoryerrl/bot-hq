@@ -611,6 +611,54 @@ func TestOnHubMessageSourceFilterDropsRegisteredAgentQueueFail(t *testing.T) {
 	}
 }
 
+// TestOnHubMessageSourceFilterDropsRegisteredAgentAllAlwaysFlag locks the
+// Phase I W1b extension of the source-filter: prose-mention of any
+// alwaysFlag sentinel pattern from a registered agent must drop without
+// dispatch (registered-agent hub_send is process-self-tool-call, not a
+// crash-report channel). The hub.db 14/14 FP query (msg #4778) supplied
+// the empirical anchor; this test covers each pattern independently so
+// future drift is caught at the per-pattern level.
+func TestOnHubMessageSourceFilterDropsRegisteredAgentAllAlwaysFlag(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{"panic", "discussion of panic: nil pointer in handler design"},
+		{"deadlock", "the deadlock! diagnostic from yesterday's incident"},
+		{"rate-limit", "rate-limit handling needs work in the retry loop"},
+		{"process-exit", "process exited cleanly per the SNAP block"},
+		{"schema-constraint", "schema constraint violation in the migration"},
+		{"segfault", "segmentation fault scenarios in the test plan"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			db, err := hub.OpenDB(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+
+			if err := db.RegisterAgent(protocol.Agent{ID: "brian", Name: "Brian", Type: protocol.AgentBrian, Status: protocol.StatusOnline}); err != nil {
+				t.Fatal(err)
+			}
+
+			g := New(db, hub.GemmaConfig{})
+			g.OnHubMessage(protocol.Message{FromAgent: "brian", Content: tc.content})
+
+			msgs, err := db.GetRecentMessages(10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range msgs {
+				if m.FromAgent == agentID {
+					t.Errorf("source-filter must drop %s prose from registered agent; got Emma dispatch: %+v", tc.name, m)
+				}
+			}
+		})
+	}
+}
+
 // TestOnHubMessageSourceFilterAllowsHubBridgeEmit locks the
 // complementary contract: when the hub bridge emits a real retry-exhaust
 // alert with FromAgent="hub" (non-registered), Emma's source-filter must
