@@ -792,3 +792,55 @@ func TestAgentImbalanceCoderOnlyNoFlag(t *testing.T) {
 		t.Errorf("expected no anomaly (coder-only roster), got %+v", a)
 	}
 }
+
+// TestHeartbeatLedgerEmitsAtInterval (Phase J T2.3 B1b) — locks the
+// every-N-msgs cadence: heartbeat fires when latestID-lastHeartbeatMsgID
+// >= heartbeatMsgInterval. Two emits to brian + rain (4 if 2 cycles).
+func TestHeartbeatLedgerEmitsAtInterval(t *testing.T) {
+	g, db := newContextCapGemma(t)
+
+	// Seed the DB with N msgs to drive the latestID forward past
+	// heartbeatMsgInterval threshold.
+	for i := 0; i < heartbeatMsgInterval+1; i++ {
+		if _, err := db.InsertMessage(protocol.Message{
+			FromAgent: "brian",
+			Type:      protocol.MsgUpdate,
+			Content:   "filler",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	g.runHeartbeatLedger()
+
+	// Expect 2 [HEARTBEAT-LEDGER] msgs (brian + rain).
+	msgs, err := db.GetRecentMessages(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeats := 0
+	for _, m := range msgs {
+		if m.FromAgent == agentID && strings.Contains(m.Content, "[HEARTBEAT-LEDGER]") {
+			heartbeats++
+		}
+	}
+	if heartbeats != 2 {
+		t.Errorf("expected 2 [HEARTBEAT-LEDGER] msgs (brian + rain) on first cadence trip, got %d", heartbeats)
+	}
+
+	// Re-fire without advancing latestID — must NOT emit again (cadence gate).
+	g.runHeartbeatLedger()
+	msgs2, err := db.GetRecentMessages(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeats2 := 0
+	for _, m := range msgs2 {
+		if m.FromAgent == agentID && strings.Contains(m.Content, "[HEARTBEAT-LEDGER]") {
+			heartbeats2++
+		}
+	}
+	if heartbeats2 != 2 {
+		t.Errorf("cadence gate broken: 2nd call without msg advance produced %d total heartbeats (want 2 unchanged)", heartbeats2)
+	}
+}

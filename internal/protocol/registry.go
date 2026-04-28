@@ -123,6 +123,7 @@ var Rules = []Rule{
 	{ID: "R20", Name: "BOOTSTRAP-ON-CONVERSATION-RESUME", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R20", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestAgentStateRoundTrip"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
 	{ID: "R21", Name: "MSG-TYPE-TAXONOMY", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R21", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestMessageTypeTaxonomy"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
 	{ID: "R22", Name: "PRE-COMPACT-SNAP", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R22", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestPreCompactSnapEmitAtThreshold", "TestPreCompactSnapCooldown"}, HistoryPointer: "internal/protocol/disc.go:25-62", PayloadMirror: "internal/gemma/plan_usage.go:planCapPreSnapFmt", AgentApplicability: []string{"brian", "rain"}},
+	{ID: "R23", Name: "HEARTBEAT-LEDGER", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R23", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestHeartbeatLedgerEmitsAtInterval"}, HistoryPointer: "internal/protocol/disc.go:25-62", PayloadMirror: "internal/gemma/gemma.go:runHeartbeatLedger", AgentApplicability: []string{"brian", "rain"}},
 	{
 		ID:                 "H-13",
 		Name:               "FORCE-PUSH-TOKEN-PROTOCOL",
@@ -192,6 +193,12 @@ func PayloadMirrorSubstrings(ruleID string) []string {
 		// Agents grep for "[PRE-COMPACT-SNAP]" — must appear in both.
 		return []string{
 			"[PRE-COMPACT-SNAP]",
+		}
+	case "R23":
+		// Phase J T2.3 (B1b). Trigger-substring shared between R23
+		// HEARTBEAT-LEDGER rule and runHeartbeatLedger emitter content.
+		return []string{
+			"[HEARTBEAT-LEDGER]",
 		}
 	}
 	return nil

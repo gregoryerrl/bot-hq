@@ -131,6 +131,8 @@ func TestPhaseIv1ContentShape(t *testing.T) {
 		"MSG-TYPE-TAXONOMY",
 		// Phase J T2.2 addition
 		"PRE-COMPACT-SNAP",
+		// Phase J T2.3 addition
+		"HEARTBEAT-LEDGER",
 	}
 	for _, rule := range rules {
 		if !strings.Contains(protocol.PhaseIv1ProtocolHardening, rule) {

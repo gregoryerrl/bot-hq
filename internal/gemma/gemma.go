@@ -210,6 +210,12 @@ type Gemma struct {
 	// Same pattern as lastPlanCapResumeAt; mu-protected via planUsageMu.
 	lastPreCompactSnapAt time.Time
 
+	// Phase J T2.3 (B1b structured-state ledger heartbeat): tracks the
+	// hub-message-id at last heartbeat fire so cadence is msg-count-
+	// driven (every heartbeatMsgInterval messages) rather than wall-clock.
+	heartbeatMu        sync.Mutex
+	lastHeartbeatMsgID int64
+
 	// Slice-5 H-22-bis item 4 auditor state.
 	//
 	// deliveryFlagTracker dedupes [DELIVERY-GAP] alerts by message_queue
@@ -573,6 +579,51 @@ func (g *Gemma) healthLoop() {
 			// SQL scan + flag-tracker dedupe; cheap enough not to need
 			// its own ticker.
 			g.auditDeliveryGap()
+			// Phase J T2.3 (B1b structured-state ledger heartbeat):
+			// every-N-msgs cadence emit of state-anchor pointers. Caps
+			// summary-fragmentation drift between phase-close events by
+			// keeping ratchet-ledger reachable from recent hub history.
+			g.runHeartbeatLedger()
+		}
+	}
+}
+
+// heartbeatMsgInterval — Phase J T2.3 (B1b). Heartbeat fires when
+// cumulative hub-message count has advanced ≥ N since the last fire.
+// N=25 candidate per phase-j.md§T2.3 — small enough to keep state
+// reachable in 30+ msg context windows, large enough that low-traffic
+// sessions don't generate gratuitous heartbeats.
+const heartbeatMsgInterval = 25
+
+// runHeartbeatLedger emits a [HEARTBEAT-LEDGER] update to brian + rain
+// at heartbeatMsgInterval cadence. Content: state anchors (latest
+// commit SHA placeholder, active phase-doc path, ratchet-ledger path).
+// Same defense-in-depth role as B1(v) CLAUDE.md Compact Instructions
+// (static) and R20 BOOTSTRAP-ON-CONVERSATION-RESUME (reactive) — this
+// is regular-cadence reinforcement.
+func (g *Gemma) runHeartbeatLedger() {
+	recent, err := g.db.GetRecentMessages(1)
+	if err != nil || len(recent) == 0 {
+		return
+	}
+	latestID := recent[0].ID
+	g.heartbeatMu.Lock()
+	if latestID-g.lastHeartbeatMsgID < heartbeatMsgInterval {
+		g.heartbeatMu.Unlock()
+		return
+	}
+	g.lastHeartbeatMsgID = latestID
+	g.heartbeatMu.Unlock()
+
+	content := fmt.Sprintf("[HEARTBEAT-LEDGER] msg-count cadence cycle (every %d msgs). State anchors: phase-doc=~/.bot-hq/phase/<active>.md ratchet-ledger=~/.bot-hq/ratchets/active.md latest-msg-id=%d. R20 AgentState write opportunity.", heartbeatMsgInterval, latestID)
+	for _, target := range []string{"brian", "rain"} {
+		if _, err := g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			ToAgent:   target,
+			Type:      protocol.MsgUpdate,
+			Content:   content,
+		}); err != nil {
+			log.Printf("[heartbeat-ledger] insert failed for %s: %v", target, err)
 		}
 	}
 }
