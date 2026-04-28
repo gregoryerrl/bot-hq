@@ -163,6 +163,101 @@ func TestIsReady_RunningWithBoxDrawingPrefix(t *testing.T) {
 	}
 }
 
+// TestIsReady_RealWorldFixtures locks IsReady against real-world Claude
+// Code pane captures (idle trio, active synth ✶ spinner, active bash
+// Running…, quoted Running… inside agent reply).
+//
+// Ported from internal/hub/hub_test.go TestIsReady (which tested the prior
+// *Hub.isReady method, removed in Phase I W2 I-7 Layer-2 refactor when
+// the pure tmuxsink.IsReady function replaced it). H-22-bis regression
+// locks preserved: INSERT-mode footer + ✻ summary glyph must NOT
+// false-busy; spinner ✶ in scan window MUST classify busy.
+func TestIsReady_RealWorldFixtures(t *testing.T) {
+	// Realistic capture of an idle trio agent pane: prompt-box bordered by
+	// `──` lines, INSERT-mode footer below. The `✻ Crunched` line is the
+	// most-recent turn's static summary glyph — must not flag busy.
+	idleTrioPane := strings.Join([]string{
+		"⏺ Brian's drive. Watching.",
+		"",
+		"✻ Crunched for 3s",
+		"",
+		"────────────────────────",
+		"❯ ",
+		"────────────────────────",
+		"  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)",
+		"",
+	}, "\n")
+
+	// Active synthesizing — `✶` glyph in the live spinner frame.
+	activeSynthPane := strings.Join([]string{
+		"⏺ Working through the change set.",
+		"",
+		"✶ Synthesizing… (49s · ↓ 2.9k tokens)",
+		"",
+		"────────────────────────",
+		"❯ ",
+		"────────────────────────",
+		"  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)",
+	}, "\n")
+
+	// Active bash tool — `Running…` indented under the `⏺ Bash(...)` line.
+	activeBashPane := strings.Join([]string{
+		"⏺ Bash(cd ~/Projects/bot-hq && go test ./...)",
+		"  ⎿  Running…",
+		"",
+		"────────────────────────",
+		"❯ ",
+		"────────────────────────",
+		"  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)",
+	}, "\n")
+
+	// Regression-lock for line-prefix discipline: agent reply text contains
+	// "Running…" as substring (e.g. quoting a log line). Must NOT false-busy
+	// because the substring is not at line-start (after trim).
+	quotedRunningPane := strings.Join([]string{
+		"⏺ Investigating the failure log:",
+		`  "[queue] Message 4123 to rain — Running… retry pending"`,
+		"  Diagnosis complete.",
+		"",
+		"────────────────────────",
+		"❯ ",
+		"────────────────────────",
+	}, "\n")
+
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		// Pre-inversion test cases — kept for backwards-compat baseline.
+		{"shell prompt $", "some output\n$ ", true},
+		{"zsh prompt ❯", "some output\n❯", true},
+		{"generic prompt >", "some output\n>", true},
+		// Inversion philosophy: heuristic-miss → fail-safe-to-ready. Both of
+		// the following were `false` under the old isAtPrompt (last-line check
+		// failed because content didn't end with a known prompt suffix). Under
+		// IsReady, no busy-marker present → ready=true. The shift IS the fix.
+		{"trailing newline only", "some output\n", true},
+		{"unknown content no busy markers", "Processing your request\n  working on it", true},
+		{"prompt after output", "some output\n$ ", true},
+
+		// H-22-bis regression-lock + Rain's real-world pane fixtures.
+		{"idle trio pane with INSERT footer + ✻ summary glyph", idleTrioPane, true},
+		{"active synthesizing — ✶ glyph above prompt box", activeSynthPane, false},
+		{"active bash — Running… line-prefix above prompt box", activeBashPane, false},
+		{"quoted Running… inside agent reply (substring not prefix)", quotedRunningPane, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsReady(tt.output)
+			if got != tt.want {
+				t.Errorf("IsReady(%q) = %v, want %v", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
 // === LastLineSummary tests ===
 
 func TestLastLineSummary_Empty(t *testing.T) {

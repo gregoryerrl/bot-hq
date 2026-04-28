@@ -6,12 +6,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
+	"github.com/gregoryerrl/bot-hq/internal/tmuxsink"
 )
 
 // Hub is the central orchestrator that routes messages between agents.
@@ -30,7 +30,14 @@ type Hub struct {
 	stopPollCh     chan struct{}
 	dispatchedIDs  map[int64]bool // tracks in-process dispatched message IDs
 	dispatchedMu   sync.Mutex
-	dispatchMu     sync.Map       // per-agent *sync.Mutex for tmux send serialization
+
+	// Phase I W2 I-7 Layer-2: per-agent tmuxsink.Sink registry. Sinks own
+	// their own per-target sync.Mutex (replacing the old dispatchMu sync.Map);
+	// sinkMu protects only the registry map for lazy get-or-create. All
+	// pane-delivery semantics (capture → IsReady → send-or-enqueue → drain)
+	// live in tmuxsink.Sink, shared with rain/brian self-paste paths.
+	sinks   map[string]*tmuxsink.Sink
+	sinkMu  sync.RWMutex
 }
 
 // NewHub creates a new Hub, opens the database, and wires up the
@@ -54,6 +61,7 @@ func NewHub(cfg Config) (*Hub, error) {
 		wsClients:     make(map[string]chan protocol.Message),
 		stopPollCh:    make(chan struct{}),
 		dispatchedIDs: make(map[int64]bool),
+		sinks:         make(map[string]*tmuxsink.Sink),
 	}
 
 	db.OnMessage(h.dispatch)
@@ -235,12 +243,58 @@ func (h *Hub) dispatchToClients(msg protocol.Message) {
 	}
 }
 
-// getAgentMu returns a per-agent mutex for serializing tmux sends.
-// Both dispatchToTmux and processMessageQueue use this to prevent
-// interleaved input on the same tmux pane.
-func (h *Hub) getAgentMu(agentID string) *sync.Mutex {
-	mu, _ := h.dispatchMu.LoadOrStore(agentID, &sync.Mutex{})
-	return mu.(*sync.Mutex)
+// getSink returns the tmuxsink.Sink for the given agent, lazily creating
+// it on first access. Sinks own per-target sync.Mutex internally; sinkMu
+// protects only the map's get-or-create. Phase I W2 I-7 Layer-2 — replaces
+// the old getAgentMu / dispatchMu sync.Map.
+func (h *Hub) getSink(agentID, target string) *tmuxsink.Sink {
+	h.sinkMu.RLock()
+	if s, ok := h.sinks[agentID]; ok {
+		h.sinkMu.RUnlock()
+		return s
+	}
+	h.sinkMu.RUnlock()
+
+	h.sinkMu.Lock()
+	defer h.sinkMu.Unlock()
+	// Double-check after acquiring write lock.
+	if s, ok := h.sinks[agentID]; ok {
+		return s
+	}
+	s := tmuxsink.New(sinkStore{db: h.DB}, agentID, target)
+	h.sinks[agentID] = s
+	return s
+}
+
+// sinkStore is the thin adapter wrapping *DB to satisfy tmuxsink.Store.
+// Lives in package hub so tmuxsink stays free of hub imports (cycle break).
+type sinkStore struct {
+	db *DB
+}
+
+func (s sinkStore) EnqueueMessage(messageID int64, targetAgent, tmuxTarget, formattedText string) error {
+	return s.db.EnqueueMessage(messageID, targetAgent, tmuxTarget, formattedText)
+}
+
+func (s sinkStore) PendingForAgent(agentID string) ([]tmuxsink.QueuedItem, error) {
+	rows, err := s.db.GetPendingMessagesForAgent(agentID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tmuxsink.QueuedItem, len(rows))
+	for i, r := range rows {
+		out[i] = tmuxsink.QueuedItem{
+			ID:            r.ID,
+			MessageID:     r.MessageID,
+			FormattedText: r.FormattedText,
+			Attempts:      r.Attempts,
+		}
+	}
+	return out, nil
+}
+
+func (s sinkStore) UpdateQueueStatus(id int64, status string, attempts int) error {
+	return s.db.UpdateQueueStatus(id, status, attempts)
 }
 
 // dispatchDecisionEnvVar gates the dispatchToTmux JSONL instrumentation.
@@ -324,22 +378,6 @@ func recordDispatchDecision(rec dispatchDecisionRecord) {
 	f.Write([]byte("\n"))
 }
 
-// lastLineSummary extracts the trailing pane line for diagnostic logging,
-// truncated to 80 bytes to keep JSONL records compact. Whitespace is
-// preserved so a true mid-render frame is distinguishable from a clean
-// "❯" prompt.
-func lastLineSummary(paneOutput string) string {
-	if paneOutput == "" {
-		return ""
-	}
-	lines := strings.Split(strings.TrimRight(paneOutput, "\n"), "\n")
-	last := lines[len(lines)-1]
-	if len(last) > 80 {
-		last = last[:80]
-	}
-	return last
-}
-
 // retryExhaustFromAgent is the synthetic from_agent used by the bridge
 // emit at retry-exhaust. Must be a non-registered agent ID so Emma's
 // source-filter (which suppresses queueFailPattern hits from registered
@@ -363,91 +401,22 @@ func (h *Hub) emitRetryExhaustAlert(messageID int64, targetAgent string, attempt
 	})
 }
 
-// busyMarkerGlyphs are spinner glyphs that appear ONLY during active model
-// processing. Claude Code redraws the line in-place during animation, so
-// when capture sees `✶` in a frozen frame the agent is mid-stream. After
-// the turn completes the line is rewritten to a static `✻ Crunched for Xs`
-// summary — different glyph, not flagged. ✻ is intentionally excluded
-// because it persists in idle scrollback.
-var busyMarkerGlyphs = []string{"✶"}
-
-// busyMarkerLinePrefixes are tool-active state suffixes. Both contain the
-// U+2026 ellipsis (`…`, not three dots `...`) which is how Claude Code
-// distinguishes them from arbitrary text. Anchored on line-start (after
-// trim) to avoid false-busy on quoted log text in agent replies.
-var busyMarkerLinePrefixes = []string{"Running…", "Working…"}
-
-// isReady determines whether a tmux pane can accept a hub message paste.
-// Defaults to ready; returns false ONLY on positive busy-markers (spinner
-// glyph ✶ via substring match, or tool-active Running…/Working… via
-// line-start match after trim).
-//
-// Inversion of the prior isAtPrompt predicate. Failure-mode asymmetry
-// rationale: false-ready degrades to benign paste-buffering — Claude Code
-// queues input to next-turn submit. False-busy degrades to queue-exhaust
-// + ledger spam (the H-22-bis incident: persistent INSERT-mode footer
-// `-- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)` broke the
-// last-line-suffix heuristic, classifying every trio agent as busy and
-// exhausting every directed PM at 30/30). Pick the failure mode you can
-// survive.
-//
-// Trio runs with --dangerously-skip-permissions; coders inheriting via
-// spawn-contract get the same. Pane-with-active-modal-prompt panes
-// (non-bypass coders) will be classified ready and may receive paste
-// into the modal — acceptable per spawn-contract baseline.
-//
-// Scan window: the 7 lines immediately above the most-recent prompt-box
-// border (`──...` line). Spinners always render above the input box,
-// never inside or below it. Falls back to last 7 lines if no border
-// found (older Claude Code UI or transient pane states). Empty capture
-// → ready=true (fail-safe: we couldn't read the pane, default to ready).
-//
-// Glyph-list and line-prefix audits are required on Claude Code UI
-// revisions — see ratchet item: migrate to agent-self-reported idle
-// (Stop-hook → DB pulse → dispatch reads DB) to obviate the heuristic.
-func (h *Hub) isReady(paneOutput string) bool {
-	if paneOutput == "" {
-		return true
-	}
-	lines := strings.Split(strings.TrimRight(paneOutput, "\n"), "\n")
-
-	scanEnd := len(lines)
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.HasPrefix(strings.TrimSpace(lines[i]), "──") {
-			scanEnd = i
-			break
-		}
-	}
-	scanStart := scanEnd - 7
-	if scanStart < 0 {
-		scanStart = 0
-	}
-
-	for _, line := range lines[scanStart:scanEnd] {
-		for _, glyph := range busyMarkerGlyphs {
-			if strings.Contains(line, glyph) {
-				return false
-			}
-		}
-		// Strip leading whitespace + tool-output box-drawing prefix `⎿`
-		// (Claude Code uses ⎿ to nest tool stdout under the ⏺ Bash(...)
-		// header line). Anchoring on the post-strip start preserves the
-		// false-busy regression-lock against arbitrary text containing
-		// "Running…" as a substring.
-		trimmed := strings.TrimSpace(strings.TrimLeft(line, " \t⎿"))
-		for _, prefix := range busyMarkerLinePrefixes {
-			if strings.HasPrefix(trimmed, prefix) {
-				return false
-			}
-		}
-	}
-	return true
-}
+// IsReady, busy-marker glyphs/prefixes, and lastLineSummary moved to
+// internal/tmuxsink package in Phase I W2 I-7 Layer-2 (commit 407113d).
+// Hub callers use tmuxsink.IsReady and tmuxsink.LastLineSummary directly,
+// or route through Sink.Deliver which encapsulates capture + IsReady +
+// send-or-enqueue.
 
 // dispatchToTmux sends a message to a coder agent's tmux session.
-// It looks up the agent's tmux target, checks if Claude is at a prompt,
-// and sends the message text as keystrokes. If the agent is busy, the
-// message is queued for retry delivery.
+// It looks up the agent's tmux target, then routes through tmuxsink.Sink
+// which handles isReady-check + send-or-enqueue + drain-on-ready. The
+// returned Decision is recorded as a JSONL diag record.
+//
+// Phase I W2 I-7 Layer-2 refactor: prior implementation inlined
+// CapturePane + isReady + SendKeys + drainQueue under a per-agent Mutex.
+// Now delegates to Sink (which owns its per-target Mutex internally and
+// shares the same delivery path with rain/brian self-paste calls — single
+// source of truth for at-least-once tmux delivery semantics).
 func (h *Hub) dispatchToTmux(msg protocol.Message) {
 	agent, err := h.DB.GetAgent(msg.ToAgent)
 	if err != nil {
@@ -489,95 +458,28 @@ func (h *Hub) dispatchToTmux(msg protocol.Message) {
 		return
 	}
 
-	// Lock per-agent mutex to prevent interleaved tmux input
-	// from concurrent dispatchToTmux and processMessageQueue calls.
-	mu := h.getAgentMu(msg.ToAgent)
-	mu.Lock()
-	defer mu.Unlock()
-
-	output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
-	if err != nil {
-		recordDispatchDecision(dispatchDecisionRecord{
-			MsgID:      msg.ID,
-			ToAgent:    msg.ToAgent,
-			TmuxTarget: tmuxTarget,
-			Outcome:    "capture_err",
-			Err:        err.Error(),
-		})
-		return
-	}
-
 	text := h.FormatTmuxMessage(tmuxTarget, msg)
-	ready := h.isReady(output)
-	lastLine := lastLineSummary(output)
+	sink := h.getSink(msg.ToAgent, tmuxTarget)
+	dec := sink.Deliver(msg.ID, text)
 
-	if ready {
-		sendErr := tmuxpkg.SendKeys(tmuxTarget, text, true)
-		rec := dispatchDecisionRecord{
-			MsgID:      msg.ID,
-			ToAgent:    msg.ToAgent,
-			TmuxTarget: tmuxTarget,
-			Ready:      true,
-			LastLine:   lastLine,
-		}
-		if sendErr != nil {
-			rec.Outcome = "send_keys_err"
-			rec.Err = sendErr.Error()
-		} else {
-			rec.Outcome = "sent"
-		}
-		recordDispatchDecision(rec)
-		// Drain any previously queued messages for this agent
-		// Note: drainQueue is called under the same lock — do not re-lock inside it.
-		h.drainQueue(tmuxTarget, msg.ToAgent)
-	} else {
-		// Agent is busy — queue for retry.
-		// Delivery is at-least-once: if we crash between SendKeys and
-		// UpdateQueueStatus, the message stays "pending" and may be re-sent.
-		enqErr := h.DB.EnqueueMessage(msg.ID, msg.ToAgent, tmuxTarget, text)
-		rec := dispatchDecisionRecord{
-			MsgID:      msg.ID,
-			ToAgent:    msg.ToAgent,
-			TmuxTarget: tmuxTarget,
-			Ready:      false,
-			LastLine:   lastLine,
-		}
-		if enqErr != nil {
-			rec.Outcome = "enqueue_err"
-			rec.Err = enqErr.Error()
-			recordDispatchDecision(rec)
-			log.Printf("[dispatch] Failed to enqueue message %d for %s: %v", msg.ID, msg.ToAgent, enqErr)
-			return
-		}
-		rec.Outcome = "queued"
-		recordDispatchDecision(rec)
+	rec := dispatchDecisionRecord{
+		MsgID:      msg.ID,
+		ToAgent:    msg.ToAgent,
+		TmuxTarget: tmuxTarget,
+		Ready:      dec.Ready,
+		LastLine:   dec.LastLine,
+		Outcome:    dec.Outcome,
+	}
+	if dec.Err != nil {
+		rec.Err = dec.Err.Error()
+	}
+	recordDispatchDecision(rec)
+
+	switch dec.Outcome {
+	case "enqueue_err":
+		log.Printf("[dispatch] Failed to enqueue message %d for %s: %v", msg.ID, msg.ToAgent, dec.Err)
+	case "queued":
 		log.Printf("[dispatch] Agent %s busy, queued message %d", msg.ToAgent, msg.ID)
-	}
-}
-
-// drainQueue delivers any previously queued messages to an agent that is now at a prompt.
-// Called from dispatchToTmux which already holds the per-agent mutex — do NOT lock here.
-func (h *Hub) drainQueue(tmuxTarget, agentID string) {
-	pending, err := h.DB.GetPendingMessagesForAgent(agentID)
-	if err != nil {
-		return
-	}
-	for _, qm := range pending {
-		// Re-check prompt before each send
-		output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
-		if err != nil {
-			break
-		}
-		if !h.isReady(output) {
-			break
-		}
-		if err := tmuxpkg.SendKeys(tmuxTarget, qm.FormattedText, true); err != nil {
-			log.Printf("[queue] Failed to send queued message %d: %v", qm.ID, err)
-			break
-		}
-		// SendKeys already sleeps 500ms for bracketed paste — no extra delay needed.
-		h.DB.UpdateQueueStatus(qm.ID, "delivered", qm.Attempts+1)
-		log.Printf("[queue] Delivered queued message %d to %s", qm.MessageID, agentID)
 	}
 }
 
@@ -605,7 +507,7 @@ func (h *Hub) processMessageQueue() {
 				continue
 			}
 
-			// Group by target agent
+			// Group by target agent.
 			byAgent := make(map[string][]QueuedMessage)
 			for _, qm := range pending {
 				byAgent[qm.TargetAgent] = append(byAgent[qm.TargetAgent], qm)
@@ -614,13 +516,16 @@ func (h *Hub) processMessageQueue() {
 			for agentID, messages := range byAgent {
 				tmuxTarget := messages[0].TmuxTarget
 
-				// Lock per-agent mutex to prevent interleaved sends
-				// with concurrent dispatchToTmux calls.
-				mu := h.getAgentMu(agentID)
-				mu.Lock()
-
+				// Probe pane state independently of Sink's lock so we can
+				// preserve attempt-tracking semantics for busy panes:
+				// every tick where the pane is busy = +1 attempt against
+				// every still-pending message; exhaust-at-max emits the
+				// retry-exhaust alert. Sink.Drain handles the ready-pane
+				// path (delivering each row in order, stopping on busy).
 				output, err := tmuxpkg.CapturePane(tmuxTarget, 5)
-				if err != nil {
+				paneAvailable := err == nil && tmuxsink.IsReady(output)
+
+				if !paneAvailable {
 					for _, qm := range messages {
 						if qm.Attempts >= qm.MaxAttempts {
 							h.DB.UpdateQueueStatus(qm.ID, "failed", qm.Attempts+1)
@@ -630,40 +535,18 @@ func (h *Hub) processMessageQueue() {
 							h.DB.UpdateQueueStatus(qm.ID, "pending", qm.Attempts+1)
 						}
 					}
-					mu.Unlock()
 					continue
 				}
 
-				if !h.isReady(output) {
-					for _, qm := range messages {
-						if qm.Attempts >= qm.MaxAttempts {
-							h.DB.UpdateQueueStatus(qm.ID, "failed", qm.Attempts+1)
-							log.Printf("[queue] Message %d to %s failed after %d attempts", qm.MessageID, agentID, qm.Attempts)
-							h.emitRetryExhaustAlert(qm.MessageID, agentID, qm.Attempts)
-						} else {
-							h.DB.UpdateQueueStatus(qm.ID, "pending", qm.Attempts+1)
-						}
-					}
-					mu.Unlock()
-					continue
+				// Pane ready — delegate to Sink. Drain delivers each row
+				// in order, stopping at first busy/error. Successfully
+				// delivered rows are marked "delivered" by Sink; any
+				// remaining rows survive to the next tick. Errors are
+				// returned but non-fatal — same pending rows retry.
+				sink := h.getSink(agentID, tmuxTarget)
+				if delivered, err := sink.Drain(); err != nil {
+					log.Printf("[queue] sink.Drain error for %s after %d delivered: %v", agentID, delivered, err)
 				}
-
-				// Agent is at prompt — deliver queued messages in order
-				for _, qm := range messages {
-					output, err = tmuxpkg.CapturePane(tmuxTarget, 5)
-					if err != nil || !h.isReady(output) {
-						break
-					}
-					if err := tmuxpkg.SendKeys(tmuxTarget, qm.FormattedText, true); err != nil {
-						log.Printf("[queue] Failed to send queued message %d: %v", qm.ID, err)
-						break
-					}
-					// SendKeys already sleeps 500ms for bracketed paste — no extra delay needed.
-					h.DB.UpdateQueueStatus(qm.ID, "delivered", qm.Attempts+1)
-					log.Printf("[queue] Delivered queued message %d to %s", qm.MessageID, agentID)
-				}
-
-				mu.Unlock()
 			}
 
 			// Cleanup old delivered messages every ~100 ticks (~5 min at 3s interval)
