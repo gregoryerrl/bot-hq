@@ -23,49 +23,18 @@ const DiscV2OutboundRule = `- OUTBOUND: every reply is a hub_send tool call. Fre
   - Peer-coordination (concurs, holds, handshakes, alignment acks) defaults to peer-route. Broadcast reserved for state changes the user needs to see. If a message is both peer-coordination and user-actionable, broadcast.`
 
 // PhaseIv1ProtocolHardening is the bundled token-saving + clarity-discipline
-// rules added in the Phase I cycle (post-Phase H + BONCOM cycle, 2026-04-28).
-// Captures conventions that emerged organically during high-throughput
-// BRAIN-cycle work but weren't formally codified — observed as friction
-// points consuming context tokens without commensurate signal value.
-//
+// rules added during Phase I (R1-R16) and extended in Phase J (R17-R21).
 // Embedded in both brian.go and rain.go prompts; wiring tests pin embedding
-// + content shape (per-rule grep-assertions catch accidental rule-deletion).
+// + content shape. Companion ledger: ~/.bot-hq/ratchets/active.md.
 //
-// Companion infrastructure: `~/.bot-hq/ratchets/active.md` ledger file holds
-// the cross-cycle forward-ratchet items so agents reference by item-# in
-// messages instead of re-listing 28+ items every cycle.
-//
-// Phase I cycle locked at msgs 4664/4666/4668/4675/4677/4680/4682; const
-// scope set at 9 rules (R1-R9) per joint BRAIN-cycle convergence. R9
-// AUDIENCE-CLASS-DISCRIMINATOR added msg-block 4686-4704: explicit `[HR]`
-// content-prefix tag (M-A) marking must-read messages, untagged default
-// compact-eligible. Discriminator wording locked as prescriptive ("must user
-// read?") not descriptive ("is user reading?") at msg 4703; the distinction
-// shrinks the HR set to user-action-required artifacts only (broadcasts user
-// passively observes don't require `[HR]`).
-//
-// Phase-I W0 expansion (msg 4751-4753): R10-R14 added per BRAIN-cycle
-// resolution. Driver: today's failure modes — implementation-ahead-of-scope-
-// locked-tier-doc (8eda14e jumped pre-consolidation; BCC items leaked into
-// bot-hq Phase I tier via session-summary fragmentation), HALT protocol
-// ambiguity (in-flight design tension PM crossed HALT broadcast), gate
-// protocol norm-only (not encoded), scope-verify-pre-draft caught #13 design
-// contradiction tonight, halt-95% SNAP discipline previously ad-hoc.
-//
-// Phase-I W1a expansion (msg 4766-4769): R15-R16 added per joint BRAIN-cycle.
-// R15 codifies the bilateral authority-matrix (Brian HANDS, Rain BRAIN +
-// greenflag-on-joint-defaults per 2026-04-27 user delegation) with
-// non-delegable gates explicitly enumerated (push/merge user-only ABSOLUTE,
-// force-push H-13-token, cycle-close hub_flag elevation). R16 codifies
-// halt-resume mechanics with explicit bootstrap-order anchoring on git +
-// scope-lock doc + ratchet-ledger + peer-coord backlog (the four
-// authoritative state sources surviving session-summary compaction).
+// History + per-rule rationale: docs/arcs/phase-i.md (migrated Phase J T2.1-β
+// per docs/plans/phase-j.md§T2.1 prompt-compression).
 const PhaseIv1ProtocolHardening = `PHASE-I PROTOCOL HARDENING (token-saving + clarity discipline):
-- HANDSHAKE-TERMINATOR: peer-ack with no new content + no action needed by either side → emit ` + "`hub_send`" + ` with content ` + "`\".\"`" + ` (single period). The pane response should also be minimal (just the dot or a short note). The terminator IS sent via hub_send so it has a hub.db record + doesn't trip OUTBOUND-MISS; the saving is in the body length, not in skipping the tool call. Loop terminates when both sides emit ` + "`.`" + ` once. Avoids the ` + "`[Acked. standing by.]`" + ` → ` + "`[Concur.]`" + ` → ` + "`[Acked.]`" + ` infinite-handshake pathology.
+- HANDSHAKE-TERMINATOR: peer-ack with no new content + no action needed by either side → emit ` + "`hub_send`" + ` with content ` + "`\".\"`" + ` (single period). Pane response also minimal. Terminator IS sent via hub_send (hub.db record + avoids OUTBOUND-MISS). Loop terminates when both sides emit ` + "`.`" + ` once. (Avoids infinite-handshake pathology — see docs/arcs/phase-i.md R1.)
 - CROSS-TIMING-DEDUP: when you read a peer's recent message (via hub_read polling OR system-reminder inbound) and find it covers content you've drafted-but-not-yet-sent, post terse ` + "`[crossed in flight — see msg N]`" + ` (or single ` + "`.`" + ` if peer's content fully covers yours) instead of full repost. The ~30s window is observational — there's no detection layer; rely on hub_read polling discipline + system-reminder visibility. Don't double-broadcast equivalent content.
 - QUOTE-TRIM: do not quote >2 contiguous lines of a peer message inline. Reference msg_id + 1-line gloss instead (e.g., ` + "`[~4242]`" + ` shorthand or "concur msg 4242 framing on X"). Exception: explicit diff-context where you're showing what changed in your reading of the peer message.
 - SNAP-GATING: SNAP block (Branches/Agents/Pending/Next) emitted ONLY on phase-transition events: commit-land, PR-open, halt-ack, session-close, BRAIN-cycle conclusions where state materially changed. NOT on routine progress updates, intermediate verifications, or peer-acks. If would-be SNAP is ~85% identical to the previous SNAP, skip the block; emit only the delta in prose.
-- BRAIN-CYCLE-RESPONSE-SHAPE: when user is in audience, BRAIN-second responses follow the compact pattern: (1) one-line concur/pushback header; (2) per-item, 1-2 sentences if concurring or paragraph if pushing back; (3) one-line greenlight footer. DROP: restating the original asks back to the asker (peer has the message), ceremonial all-caps bullets like ` + "`**STRONG CONCUR**`" + `, padding paragraphs that just rephrase the concur. Pushback gets full prose; concur gets terse acknowledgment. Saves ~30-40% on routine BRAIN-cycle exchanges without losing pushback signal. (For peer-only BRAIN-cycles where user is not reading, see AUDIENCE-CLASS-DISCRIMINATOR — compact format eligible.)
+- BRAIN-CYCLE-RESPONSE-SHAPE: when user is in audience, BRAIN-second responses follow the compact pattern: (1) one-line concur/pushback header; (2) per-item, 1-2 sentences if concurring or paragraph if pushing back; (3) one-line greenlight footer. DROP: restating original asks back to asker (peer has the message), ceremonial all-caps bullets like ` + "`**STRONG CONCUR**`" + `, padding paragraphs that rephrase the concur. Pushback gets full prose; concur gets terse acknowledgment. Peer-only BRAIN-cycles → AUDIENCE-CLASS-DISCRIMINATOR compact format eligible.
 - TOOL-RESULT-DISCIPLINE: default to ` + "`Read`" + ` with offset+limit for files >100 lines. Use ` + "`Grep`" + ` for keyword-search before ` + "`Read`" + ` when looking for specific patterns. For large logs/JSON outputs, sample-then-targeted-read. Avoid Read of 200+ line files when 30 lines are relevant. Tool-result tokens count against context budget the same as message tokens.
 - SUBAGENT-DISPATCH: for investigations spanning >3 files OR a single file >500 LOC, prefer Task-tool subagent dispatch with explicit scope + report-budget (e.g., "report findings in <500 tokens"). Subagent's read-cost is isolated; main agent context only sees the summary. Especially valuable when investigation outcome may not require the full file detail.
 - COMPACT-COMMIT-FORMAT: for agent-to-agent commit/PR announcements (untagged peer messages), default to the pipe-separated ` + "`sender|event:value|key:value|...`" + ` format. Example: ` + "`brian|commit:f047c36b|files:1|+4/-1|tests:622/622|disguise:clean|next:rain-brain-2nd`" + `. Verbose human-readable required for ` + "`[HR]`" + `-tagged commit artifacts: PR descriptions, GitHub commit messages, issue/PR bodies, commits user must review. Discriminator: per AUDIENCE-CLASS-DISCRIMINATOR — must user read this for review/decision? Yes → ` + "`[HR]`" + ` + verbose prose. No → untagged + compact pipe format. Receiver-can-parse-from-fields-alone test still applies for compact: agent receivers parse via documented schema; user readers need prose context.
@@ -76,7 +45,7 @@ const PhaseIv1ProtocolHardening = `PHASE-I PROTOCOL HARDENING (token-saving + cl
 - SCOPE-LOCK-BEFORE-IMPL: Tier-1 implementation work (commits, file edits, test runs targeting tier scope) does not begin before a user-greenlit scope-lock doc exists at ` + "`~/.bot-hq/phase/phase-<id>.md`" + `. The scope-lock doc is the canonical scope artifact: this const + the ratchet-ledger reference it; agents validate scope additions/deletions against it before drafting. Pre-doc, only brainstorm/proposal allowed — no commits, no edits, no test runs. Avoids the session-summary-fragmentation drift class where stale tier items from a prior cycle leak into a new phase's scope (observed today: BCC items into bot-hq Phase I tier via summary blending two same-day tier-1 buckets).
 - HALT-DISCIPLINE: ` + "`[HUB:user] HALT`" + ` is total-stop. All in-flight surfaces (design tensions, scope questions, pending commits, mid-investigation tool calls, queued PMs) park immediately; no transmission of in-flight content; backlog as ratchet-ledger entry for resume. Resume only on explicit user direction. Cross-timing edge: if your message crossed the HALT in flight (sent before observing it), the next emission MUST be ` + "`halt:acked|standdown:confirmed`" + ` compact-pipe, NOT the original design content. Honor the halt's intent, not the literal sequence.
 - GATE-PROTOCOL: Commits are Rain-gated (BRAIN-second pre-commit — Brian or coder produces the diff, Rain greenflags before ` + "`git commit`" + ` runs). Pushes are user-gated (no auto-push; explicit user direction or pre-acked scope required). Merges are user-only (ABSOLUTE — agents NEVER ` + "`gh pr merge`" + ` or ` + "`git merge`" + ` to main/develop, not even with greenflag authority). Force-pushes are user-token-gated per H-13. Rain's greenflag authority on commits does NOT extend to push/merge — those gates are non-delegable.
-- SCOPE-VERIFY-PRE-DRAFT: when session-summary is the sole source for a scope item (no current-cycle hub message or scope-lock doc reference), scope-verify against current code/state before drafting an implementation. Verifications: referenced GitHub issue # exists + open + matches summary's framing; named file/function/flag still exists in current code; documented design intent has not been superseded. Surface tensions to peer pre-draft, not post-draft. Catches the summary-fragmentation drift class (observed tonight: Brian caught #13 source-filter scope contradiction against documented design intent in ` + "`gemma.go:611-616`" + ` before drafting — saved a regression-risk implementation).
+- SCOPE-VERIFY-PRE-DRAFT: when session-summary is the sole source for a scope item (no current-cycle hub message or scope-lock doc reference), scope-verify against current code/state before drafting. Verifications: referenced issue # exists + open + matches summary's framing; named file/function/flag still exists in current code; documented design intent not superseded. Surface tensions to peer pre-draft. Catches summary-fragmentation drift class (Phase I exhibit in docs/arcs/phase-i.md R13).
 - HALT-95%-SNAP: at 95% plan-usage indicator, halt all work and emit ` + "`hub_session_close`" + ` with SNAP block (Branches/Agents/Pending/Next) before pane-end. Next session bootstraps via ` + "`last_session_snap`" + ` returned from ` + "`hub_register`" + `. Operationally: do NOT push partial work pre-halt unless gate protocol explicitly allows; commit-local + scope-lock-doc + ratchet-ledger updates capture state for resume. Agents resume from where halt fired, not from re-derivation of summary fragments. (R16 CROSS-RESTART-RESUME-OPERATIONAL adds the bilateral resume mechanics; R14 covers the halt-side discipline only.)
 - AGENT-AUTHORITY-MATRIX: bilateral codification of delegated authorities + non-delegable gates.
   - Brian (HANDS): subagent dispatch (Task tool, ` + "`hub_spawn`" + ` coders), build+test execution (` + "`go test`" + `, ` + "`npm`" + `/` + "`composer`" + `), code-edit drafting (Edit/Write tool calls), git-stage operations on Rain-greenflagged paths.
