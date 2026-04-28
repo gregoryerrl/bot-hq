@@ -90,6 +90,30 @@ const PhaseIv1ProtocolHardening = `PHASE-I PROTOCOL HARDENING (token-saving + cl
   - Resume validation: cross-check ratchet-ledger Tier-1 active items vs current commit log; flag stale entries to peer before resuming work. New implementation blocked until SCOPE-LOCK doc (R10) reflects resume context.
   - Cadence per active phase doc; consult ` + "`~/.bot-hq/phase/<active-phase>.md`" + ` for current restart schedule.`
 
+// PhaseJv1HaltResumeProtocol bundles the H-31 HALT-ALL-WORK and
+// RESUME-FROM-HALT rules previously inlined into brian.go and rain.go.
+// Phase J T1.2 (B3b) extraction: collapses the dual-edit drift surface
+// observed during Phase I W2 Fix-3 (msgs 4929-4936) where symmetric
+// updates required touching both agent files. Embedded in both prompts;
+// wiring locked via TestBrianPromptContainsHaltAllWork +
+// TestRainPromptContainsHaltAllWork (substring presence) and the
+// registry-slice ratchet TestRuleNamespaceRatchet (registry.go).
+//
+// History: H-31 HALT-ALL-WORK rule originated Phase I W2 Fix-3 (commit
+// bfa5b26, msg 4936) — replaced "idle for fresh session" with "idle in
+// pane" + paired RESUME-FROM-HALT with 3-step SNAP-gate (user msg 4929
+// refinement). Phase I W2 hotfix shipped both rules inline; Phase J
+// T1.2 extracts them here to eliminate the dual-edit class.
+//
+// F2 fold (per docs/plans/2026-04-29-rule-loci-audit.md F2 finding):
+// the paired emitter `planCapReasonFmt` at plan_usage.go:48 had stale
+// post-Fix-3 wording ("checkpoint via H-15 + idle for fresh session");
+// updated co-shipped this commit to align with the post-Fix-3 prompt
+// rule. Substring-trigger compatibility preserved ("plan usage at" +
+// "halt" still match).
+const PhaseJv1HaltResumeProtocol = `- HALT-ALL-WORK (H-31, H-33): on receiving FLAG whose content contains EITHER the substring "agent <id> at <N>%, halt" (Emma context-cap fire at ≥95% per-pane context usage) OR the substring "plan usage at <N>%, halt" (Emma plan-cap fire at ≥95% account-scoped 5h/7d window utilization), finish current tool call, post final SNAP via hub_session_close (stores SNAP into session ledger as recovery anchor), post a brief handoff message to user, then idle in pane (do NOT close the claude session — stay alive to receive RESUME). Match by substring meaning across BOTH triggers (agent context-cap OR plan-usage), not regex anchors. Both fire HALT-ALL-WORK.
+- RESUME-FROM-HALT: on receiving FLAG/COMMAND from emma whose content contains the substring "plan usage reset" (Emma's auto-clear emit when plan-usage drops below reset threshold OR scheduled-wake fires post-rollover): (1) check for last-session SNAP via hub_register return value (last_session_snap field) or hub_read of self-stored SNAP; (2) if SNAP exists, re-bootstrap via R16 CROSS-RESTART-RESUME-OPERATIONAL — read git status / ` + "`~/.bot-hq/phase/<active-phase>.md`" + ` / ` + "`~/.bot-hq/ratchets/active.md`" + ` / hub_read backlog filtered to peer-coord since halt-fire, then resume work from SNAP context; (3) if no SNAP exists, remain idle — do NOT auto-engage on empty state (would burn tokens with no work-thread). User msg 4929 SNAP-gate refinement on Phase I W2 hotfix (D).`
+
 // H13ForcePushProtocol is the locked text describing how Brian relays
 // force-push requests through the user-token gate. Coders configured under
 // project rules with force_push_blocked must request via the protocol; Brian

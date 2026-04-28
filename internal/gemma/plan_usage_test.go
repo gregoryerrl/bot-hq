@@ -64,7 +64,7 @@ func countPlanCapFlags(t *testing.T, db *hub.DB) int {
 		if m.FromAgent == agentID && m.Type == protocol.MsgFlag &&
 			strings.Contains(m.Content, "[CRITICAL]") &&
 			strings.Contains(m.Content, "plan usage at") &&
-			strings.Contains(m.Content, "halt + checkpoint via H-15") {
+			strings.Contains(m.Content, "halt + idle in pane") {
 			n++
 		}
 	}

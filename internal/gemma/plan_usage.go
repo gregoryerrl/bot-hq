@@ -45,7 +45,17 @@ const planUsageFetchTimeout = 6 * time.Second
 // match against ("plan usage at <N>%, halt"). Any reformat MUST be
 // mirrored in the prompt convention or the halt-all-work contract breaks
 // silently. Slice-5 C1 (H-33).
-const planCapReasonFmt = "plan usage at %d%%%s, halt + checkpoint via H-15 + idle for fresh session"
+//
+// Phase J T1.2 (B3b F2 fold) cleanup: post-Fix-3 wording realignment.
+// Prompt-rule (PhaseJv1HaltResumeProtocol H-31) says "idle in pane (do
+// NOT close session — stay alive to receive RESUME)"; emitter previously
+// said "checkpoint via H-15 + idle for fresh session" (pre-Fix-3 stale).
+// Aligned: "halt + idle in pane" preserves the load-bearing trigger
+// substrings ("plan usage at" + "halt") while removing the obsolete
+// post-halt-action wording. Per docs/plans/2026-04-29-rule-loci-audit.md
+// F2. The R16 ratchet test (TestRuleNamespaceRatchet) cross-checks the
+// shared substrings between this fmt and the prompt-rule.
+const planCapReasonFmt = "plan usage at %d%%%s, halt + idle in pane"
 
 // planCapResumeFmt is the literal substring brian/rain STARTUP prompts
 // match against to detect plan-window-rollover resume directives. Phase I
