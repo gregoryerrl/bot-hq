@@ -87,7 +87,7 @@ func TestStaleDetectionFiresOnSilentMcpAndPane(t *testing.T) {
 	g.paneActivity = fake.check
 
 	// Tick 1: establish baseline (no flag yet — no prior observation).
-	virtualNow := time.Now().Add(6 * time.Minute)
+	virtualNow := time.Now().Add(staleThreshold + time.Minute)
 	g.checkStaleAgentsAt(virtualNow)
 	if got := countStaleCoderMsgs(t, db); got != 0 {
 		t.Fatalf("first tick must establish baseline without flagging; got %d stale msgs", got)
@@ -122,7 +122,7 @@ func TestStaleDetectionSuppressedByPaneActivity(t *testing.T) {
 	fake.queue(target, 1000, 1042) // pane advancing — bash producing output
 	g.paneActivity = fake.check
 
-	virtualNow := time.Now().Add(6 * time.Minute)
+	virtualNow := time.Now().Add(staleThreshold + time.Minute)
 	g.checkStaleAgentsAt(virtualNow)
 	g.checkStaleAgentsAt(virtualNow.Add(30 * time.Second))
 
@@ -155,7 +155,7 @@ func TestStaleDetectionFallbackForNoTmuxTarget(t *testing.T) {
 		return 0, nil
 	}
 
-	virtualNow := time.Now().Add(6 * time.Minute)
+	virtualNow := time.Now().Add(staleThreshold + time.Minute)
 	g.checkStaleAgentsAt(virtualNow)
 
 	if called {
@@ -191,7 +191,7 @@ func TestStaleDetectionHysteresis(t *testing.T) {
 	fake.queue(target, 500, 500, 500, 500) // sustained silence
 	g.paneActivity = fake.check
 
-	base := time.Now().Add(6 * time.Minute)
+	base := time.Now().Add(staleThreshold + time.Minute)
 	// Tick 1 establishes baseline; ticks 2-4 each see silent pane.
 	for i := 0; i < 4; i++ {
 		g.checkStaleAgentsAt(base.Add(time.Duration(i) * 30 * time.Second))
@@ -234,7 +234,7 @@ func TestStaleFlagFiresWhenLastSeenAdvances(t *testing.T) {
 
 	// First incident: virtual-now is past register-time + staleThreshold.
 	// Tick 1 establishes baseline; tick 2 sees cur==prev → flag fires.
-	firstNow := time.Now().Add(6 * time.Minute)
+	firstNow := time.Now().Add(staleThreshold + time.Minute)
 	g.checkStaleAgentsAt(firstNow)
 	g.checkStaleAgentsAt(firstNow.Add(30 * time.Second))
 
@@ -263,11 +263,124 @@ func TestStaleFlagFiresWhenLastSeenAdvances(t *testing.T) {
 	// (silent again) → fall through to flagStaleAgent. Tracker has
 	// LastSeen=T_register from first flag; current LastSeen=T_recover →
 	// not equal → second flag fires.
-	secondNow := recovered.LastSeen.Add(6 * time.Minute)
+	secondNow := recovered.LastSeen.Add(staleThreshold + time.Minute)
 	g.checkStaleAgentsAt(secondNow)
 	g.checkStaleAgentsAt(secondNow.Add(30 * time.Second))
 
 	if got := countStaleCoderMsgs(t, db); got != 2 {
 		t.Errorf("second incident after LastSeen advance: expected 2 total flags, got %d", got)
+	}
+}
+
+// TestStaleDetectionSuppressedByUserHalt locks Phase I W1b I-6 C1: when
+// the latest user message is a HALT directive, all stale-checks suppress.
+// Trio is intentionally idle on user direction; flag-fires would be FPs.
+// The check is content-pattern based because user-HALT doesn't transition
+// halt_state — only Emma-initiated halts (context-cap) set halt_state.
+func TestStaleDetectionSuppressedByUserHalt(t *testing.T) {
+	g, db := newTestGemma(t)
+
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     "voice-1",
+		Name:   "Voice",
+		Type:   protocol.AgentVoice,
+		Status: protocol.StatusOnline,
+		Meta:   "", // Shape α — would flag without suppression
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// User emits HALT directive.
+	if _, err := db.InsertMessage(protocol.Message{
+		FromAgent: "user",
+		Type:      protocol.MsgCommand,
+		Content:   "[HUB:user] HALT",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	virtualNow := time.Now().Add(staleThreshold + time.Minute)
+	g.checkStaleAgentsAt(virtualNow)
+
+	if got := countStaleCoderMsgs(t, db); got != 0 {
+		t.Errorf("user-HALT directive must suppress all stale-checks; got %d flags", got)
+	}
+}
+
+// TestStaleDetectionResumesAfterNonHaltUserMsg locks the implicit-clear
+// semantic of Phase I W1b I-6 C1: when user emits a non-HALT directive
+// (e.g., "proceed"), the latest-user-msg check naturally resolves to
+// non-HALT and stale-checks resume normally.
+func TestStaleDetectionResumesAfterNonHaltUserMsg(t *testing.T) {
+	g, db := newTestGemma(t)
+
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     "voice-1",
+		Name:   "Voice",
+		Type:   protocol.AgentVoice,
+		Status: protocol.StatusOnline,
+		Meta:   "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// User emits HALT, then proceeds — only the latest msg matters.
+	if _, err := db.InsertMessage(protocol.Message{
+		FromAgent: "user",
+		Type:      protocol.MsgCommand,
+		Content:   "[HUB:user] HALT",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.InsertMessage(protocol.Message{
+		FromAgent: "user",
+		Type:      protocol.MsgCommand,
+		Content:   "proceed please",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	virtualNow := time.Now().Add(staleThreshold + time.Minute)
+	g.checkStaleAgentsAt(virtualNow)
+
+	if got := countStaleCoderMsgs(t, db); got != 1 {
+		t.Errorf("non-HALT latest user msg must resume normal stale-check; expected 1 flag, got %d", got)
+	}
+}
+
+// TestStaleDetectionBackstopSuppressesOnRecentHubSend locks Phase I W1b
+// I-6 (B): even when LastSeen has aged past staleThreshold (simulating a
+// LastSeen-write-failure-race), a recent hub_send from the agent in the
+// staleThreshold window proves activity and must suppress the flag.
+func TestStaleDetectionBackstopSuppressesOnRecentHubSend(t *testing.T) {
+	g, db := newTestGemma(t)
+
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     "voice-active",
+		Name:   "Active",
+		Type:   protocol.AgentVoice,
+		Status: protocol.StatusOnline,
+		Meta:   "", // Shape α
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate active hub_send cadence: agent sent a message recently
+	// (within staleThreshold of virtualNow) but its LastSeen is somehow
+	// stale (write race). The hub.db backstop must catch this.
+	virtualNow := time.Now().Add(staleThreshold + time.Minute)
+	if _, err := db.InsertMessage(protocol.Message{
+		FromAgent: "voice-active",
+		Type:      protocol.MsgUpdate,
+		Content:   "still alive",
+		Created:   virtualNow.Add(-30 * time.Second), // 30s before virtualNow
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	g.checkStaleAgentsAt(virtualNow)
+
+	if got := countStaleCoderMsgs(t, db); got != 0 {
+		t.Errorf("hub.db backstop must suppress flag when agent has recent hub_send; got %d flags", got)
 	}
 }

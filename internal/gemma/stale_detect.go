@@ -3,6 +3,7 @@ package gemma
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -13,10 +14,31 @@ import (
 
 // staleThreshold is the last_seen-age cutoff after which Emma considers an
 // agent's MCP heartbeat stale and falls back to the tmux pane backup signal
-// (Shape γ hybrid). 5min comfortably exceeds the longest legitimate Bash
-// timeout (600s) used by coders without alarming on idle quiet periods, and
-// matches the design-doc lock for slice 3 C4.
-const staleThreshold = 5 * time.Minute
+// (Shape γ hybrid).
+//
+// Bumped from 5min → 10min in Phase I W1b (I-6 fix). Driver: compact-pipe
+// peer-coordination mode produces 4-6min thinking-windows between hub_send
+// tool calls (BRAIN-cycle reasoning chains, peer-message reading + drafting
+// in compact format). 5min was tuned for prose-cadence; compact-mode
+// routinely exceeded it, generating FP stale-fires while agents were
+// actively reasoning. 10min comfortably accommodates compact-mode thinking
+// while still flagging genuinely-silent agents within the next tick window
+// (real-incident detection latency now ~10min vs prior ~5min — acceptable
+// trade for the FP-rate reduction).
+const staleThreshold = 10 * time.Minute
+
+// userHaltPatternRe matches the canonical user-HALT directive shape in
+// hub message content. Used by checkStaleAgentsAt (Phase I W1b I-6 C1) to
+// suppress stale-checks while the trio is intentionally halted by user
+// directive — agents are legitimately idle and stale-flag-fires would be
+// FPs. The check is content-pattern based rather than halt_state-based
+// because user-HALT is currently a content-only signal: no path
+// transitions hub.halt_state to active on user-HALT (existing
+// SetHaltActive paths fire only on context-cap 95%, not user direction).
+// When user emits a non-HALT directive (e.g., "proceed", "go"), the
+// halt-state implicitly clears via the latest-user-message check —
+// no explicit halt-clear API needed for this surgical fix.
+var userHaltPatternRe = regexp.MustCompile(`(?i)\bHALT\b`)
 
 // paneActivityFn returns the tmux #{pane_last_activity} unix timestamp for
 // the given pane target. Abstracted as a function field so stale-detection
@@ -82,6 +104,18 @@ func (g *Gemma) checkStaleAgentsAt(now time.Time) {
 	if halted, _ := g.db.IsHalted(); halted {
 		return
 	}
+
+	// Phase I W1b I-6 C1: user-HALT-directive suppresses stale-checks. The
+	// halt_state path above only catches Emma-initiated halts (context-cap
+	// 95%); user-typed `[HUB:user] HALT` is a content-only signal that
+	// doesn't transition halt_state. Surgical fix: check the latest user
+	// message; if it's a HALT directive, suppress until user emits a
+	// non-HALT directive (latest-message check naturally clears once user
+	// proceeds). Errors fail-open — if the query fails, fall through to
+	// normal stale-check logic rather than silently disabling detection.
+	if last, ok, err := g.db.GetLatestMessageFrom("user"); err == nil && ok && userHaltPatternRe.MatchString(last.Content) {
+		return
+	}
 	agents, err := g.db.ListAgents("")
 	if err != nil {
 		return
@@ -138,6 +172,14 @@ func (g *Gemma) checkStaleAgentsAt(now time.Time) {
 // only when LastSeen advances past the tracked value, which captures the
 // meaningful event: "agent came back, then went stale again."
 //
+// Phase I W1b I-6 (B): hub.db backstop check. Before flagging, query for
+// any message from the agent in the last staleThreshold window. If the
+// agent has hub_send activity in the window, suppress the flag — defends
+// against the LastSeen-write-failure-race class where UpdateAgentLastSeen
+// silently failed (writes are best-effort per mcp/tools.go withLastSeen).
+// Errors fail-open — query failures fall through to flag, since silent
+// suppression on DB error is worse than an FP.
+//
 // Caller (checkStaleAgentsAt) holds g.staleMu, so direct map access is safe.
 func (g *Gemma) flagStaleAgent(a protocol.Agent, now time.Time) {
 	if g.staleFlagTracker == nil {
@@ -145,6 +187,11 @@ func (g *Gemma) flagStaleAgent(a protocol.Agent, now time.Time) {
 	}
 	if last, seen := g.staleFlagTracker[a.ID]; seen && last.Equal(a.LastSeen) {
 		return // LastSeen unchanged → same incident → suppress
+	}
+	if hasRecent, err := g.db.HasRecentMessageFrom(a.ID, now.Add(-staleThreshold)); err == nil && hasRecent {
+		// Recent hub_send proves agent active despite stale LastSeen —
+		// LastSeen-write-failure-race likely. Suppress flag.
+		return
 	}
 	g.staleFlagTracker[a.ID] = a.LastSeen
 	age := now.Sub(a.LastSeen).Round(time.Second)

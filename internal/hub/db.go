@@ -1178,6 +1178,58 @@ func (db *DB) GetMessagesFromAgent(fromAgent string, sinceID int64, limit int) (
 	return msgs, rows.Err()
 }
 
+// HasRecentMessageFrom reports whether any message from the given agent
+// has a created timestamp at or after `since`. Used by Emma's stale-coder
+// detection (Phase I I-6) as a defense-in-depth backstop against the
+// LastSeen-write-failure-race class — even if UpdateAgentLastSeen silently
+// failed, a recent hub message from the agent proves they were active in
+// the window. Cheap query: indexed by created via the messages table's
+// implicit btree on the id PRIMARY KEY (id is monotonic with created in
+// practice).
+func (db *DB) HasRecentMessageFrom(fromAgent string, since time.Time) (bool, error) {
+	sinceMillis := since.UnixMilli()
+	var count int
+	err := db.conn.QueryRow(
+		`SELECT 1 FROM messages WHERE from_agent = ? AND created >= ? LIMIT 1`,
+		fromAgent, sinceMillis,
+	).Scan(&count)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// GetLatestMessageFrom returns the most recent message from the given
+// agent, or (Message{}, false, nil) if no message exists. Used by Emma's
+// stale-coder detection (Phase I I-6 C1) to check whether the latest user
+// message is a HALT directive — if so, the trio is intentionally idle and
+// stale-checks must suppress until user emits a non-HALT directive.
+func (db *DB) GetLatestMessageFrom(fromAgent string) (protocol.Message, bool, error) {
+	var m protocol.Message
+	var typ string
+	var created int64
+	err := db.conn.QueryRow(
+		`SELECT id, session_id, from_agent, to_agent, type, content, created
+		 FROM messages
+		 WHERE from_agent = ?
+		 ORDER BY id DESC
+		 LIMIT 1`,
+		fromAgent,
+	).Scan(&m.ID, &m.SessionID, &m.FromAgent, &m.ToAgent, &typ, &m.Content, &created)
+	if err == sql.ErrNoRows {
+		return protocol.Message{}, false, nil
+	}
+	if err != nil {
+		return protocol.Message{}, false, err
+	}
+	m.Type = protocol.MessageType(typ)
+	m.Created = time.UnixMilli(created)
+	return m, true, nil
+}
+
 func (db *DB) GetRecentMessages(limit int) ([]protocol.Message, error) {
 	if limit <= 0 {
 		limit = 100

@@ -188,7 +188,7 @@ func TestHaltSuppressesH3aStaleFire(t *testing.T) {
 		return 1000, nil
 	}
 
-	virtualNow := time.Now().Add(6 * time.Minute)
+	virtualNow := time.Now().Add(staleThreshold + time.Minute)
 	g.checkStaleAgentsAt(virtualNow)
 	g.checkStaleAgentsAt(virtualNow.Add(30 * time.Second))
 
