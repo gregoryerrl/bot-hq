@@ -129,6 +129,8 @@ func TestPhaseIv1ContentShape(t *testing.T) {
 		"BOOTSTRAP-ON-CONVERSATION-RESUME",
 		// Phase J T1.7 addition
 		"MSG-TYPE-TAXONOMY",
+		// Phase J T2.2 addition
+		"PRE-COMPACT-SNAP",
 	}
 	for _, rule := range rules {
 		if !strings.Contains(protocol.PhaseIv1ProtocolHardening, rule) {

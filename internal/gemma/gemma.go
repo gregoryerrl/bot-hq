@@ -204,6 +204,12 @@ type Gemma struct {
 	// emits to once per planCapResumeCooldown window.
 	lastPlanCapResumeAt time.Time
 
+	// Phase J T2.2-α (B1a pre-compact-snap proactive checkpoint): cooldown
+	// timer suppresses repeated emitPreCompactSnap calls when maxUtil
+	// hovers in [planUsagePreSnapThreshold, planUsageThreshold) band.
+	// Same pattern as lastPlanCapResumeAt; mu-protected via planUsageMu.
+	lastPreCompactSnapAt time.Time
+
 	// Slice-5 H-22-bis item 4 auditor state.
 	//
 	// deliveryFlagTracker dedupes [DELIVERY-GAP] alerts by message_queue

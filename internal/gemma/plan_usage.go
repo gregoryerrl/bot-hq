@@ -26,6 +26,25 @@ const planUsageThreshold = 0.95
 // halt only re-arms after a clean drop below 0.85.
 const planUsageResetThreshold = 0.85
 
+// planUsagePreSnapThreshold is the proactive checkpoint threshold (Phase J
+// T2.2-α B1a). Below the halt-fire threshold (0.95) but above the reset
+// threshold (0.85) so it fires while agents still have headroom to commit
+// in-flight work + write AgentState before halt. Pre-compact-snap fires
+// once per planCapPreSnapCooldown window (5min) to prevent spam when
+// maxUtil hovers in the [0.90, 0.95) band.
+const planUsagePreSnapThreshold = 0.90
+
+// planCapPreSnapCooldown caps emitPreCompactSnap to once per window. Same
+// pattern as planCapResumeCooldown — bounded suppress of poll-cycle spam
+// when maxUtil hovers near threshold.
+const planCapPreSnapCooldown = 5 * time.Minute
+
+// planCapPreSnapFmt is the locked content substring for [PRE-COMPACT-SNAP]
+// emit. Format: structured payload telling agents to checkpoint AgentState
+// + emit hub_session_close-style SNAP if mid-substantive-work. Recipient
+// behavior governed by R22 PRE-COMPACT-SNAP rule.
+const planCapPreSnapFmt = "[PRE-COMPACT-SNAP] plan usage at %d%%, approaching halt threshold — checkpoint AgentState (R20) + emit SNAP if mid-substantive-work to preserve resume anchors. headroom remaining before halt-fire."
+
 // planUsageBaseInterval is the steady-state poll cadence (60s). Tests
 // override via SetPlanUsageNow to step the gate deterministically.
 const planUsageBaseInterval = 60 * time.Second
@@ -195,6 +214,17 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 		g.firePlanCapHalt(now, pctInt, maxWindow)
 		return
 	}
+	// Phase J T2.2-α (B1a): proactive pre-compact-snap signal in
+	// [planUsagePreSnapThreshold, planUsageThreshold). Fires once per
+	// planCapPreSnapCooldown window. Cooldown suppresses spam when maxUtil
+	// hovers in the band; cooldown stamp shared with resume-emit pattern
+	// (mu-protected via planUsageMu).
+	if maxUtil >= planUsagePreSnapThreshold {
+		g.emitPreCompactSnap(now, pctInt)
+		// Fall through — pre-snap is informational; halt + clear logic
+		// below still applies on the same poll if state crossed back below
+		// reset threshold (rare since we only land here when ≥ 0.90).
+	}
 	if maxUtil < planUsageResetThreshold {
 		// Phase I W2 hotfix: only emit RESUME nudge when a halt was actually
 		// active prior to clear (avoids spurious resume-emits on every poll
@@ -256,6 +286,38 @@ func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
 			Created:   now,
 		}); err != nil {
 			log.Printf("[plan-cap] resume nudge insert failed for %s: %v", target, err)
+		}
+	}
+}
+
+// emitPreCompactSnap inserts MsgUpdate records to brian + rain telling
+// each agent to checkpoint AgentState (R20) + emit hub_session_close-style
+// SNAP if mid-substantive-work. Phase J T2.2-α (B1a). Substring
+// "[PRE-COMPACT-SNAP]" matches the R22 prompt-rule recognition gate.
+//
+// Cooldown via planCapPreSnapCooldown (5min) suppresses spam when maxUtil
+// hovers in [0.90, 0.95) band. Cooldown stamp is per-Gemma-instance
+// (lastPreCompactSnapAt field, mu-protected via planUsageMu).
+func (g *Gemma) emitPreCompactSnap(now time.Time, pct int) {
+	g.planUsageMu.Lock()
+	coolingDown := !g.lastPreCompactSnapAt.IsZero() && now.Sub(g.lastPreCompactSnapAt) < planCapPreSnapCooldown
+	if !coolingDown {
+		g.lastPreCompactSnapAt = now
+	}
+	g.planUsageMu.Unlock()
+	if coolingDown {
+		return
+	}
+	content := fmt.Sprintf(planCapPreSnapFmt, pct)
+	for _, target := range []string{"brian", "rain"} {
+		if _, err := g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			ToAgent:   target,
+			Type:      protocol.MsgUpdate,
+			Content:   content,
+			Created:   now,
+		}); err != nil {
+			log.Printf("[plan-cap] pre-compact-snap insert failed for %s: %v", target, err)
 		}
 	}
 }
