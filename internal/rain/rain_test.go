@@ -592,3 +592,28 @@ func TestProcessNewMessagesNoSpuriousReplay(t *testing.T) {
 		t.Errorf("second poll: lastMsgID = %d, want %d (no spurious replay)", r.lastMsgID, advanced)
 	}
 }
+
+// Regression-lock for the autostart env-var injection. The Stop hook in
+// internal/outboundhook/hook.go:88 reads BOT_HQ_AGENT_ID to attribute
+// OUTBOUND-MISS sentinel events to a specific agent. Without the -e flag,
+// hooks fire anonymously. See msg 4197/4205 for the failure-mode framing.
+func TestNewSessionArgsInjectsAgentIDEnvFlag(t *testing.T) {
+	r := &Rain{tmuxSession: "test-session", workDir: "/tmp"}
+	args := r.newSessionArgs()
+
+	want := "BOT_HQ_AGENT_ID=" + agentID
+	found := false
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "-e" && args[i+1] == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("newSessionArgs missing `-e %s` env-injection flag pair; got %v", want, args)
+	}
+
+	if !strings.Contains(strings.Join(args, " "), "test-session") {
+		t.Errorf("session name not in args: %v", args)
+	}
+}

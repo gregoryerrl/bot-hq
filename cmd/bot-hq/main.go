@@ -378,7 +378,7 @@ func runInstallTrioHook() {
 	}
 	fmt.Printf("OUTBOUND-MISS hook installed in %s\n", settingsPath)
 	fmt.Printf("Hook command: %s\n", outboundhook.SettingsHookCommand(botHQPath))
-	fmt.Printf("Reminder: export BOT_HQ_AGENT_ID=<id> in the agent's tmux pane env so the hook knows the agent identity.\n")
+	fmt.Printf("Reminder: autostart trio panes set BOT_HQ_AGENT_ID automatically. For panes launched outside autostart (manual claude exec), export BOT_HQ_AGENT_ID=<id> before launch.\n")
 }
 
 func statusDot(s protocol.AgentStatus) string {

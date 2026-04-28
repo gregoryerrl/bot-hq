@@ -187,11 +187,24 @@ func (b *Brian) writeMCPConfig() error {
 	return os.WriteFile(configPath, data, 0600)
 }
 
+// newSessionArgs returns the `tmux new-session` argument list for spawning
+// brian's pane. Extracted as a private method so brian_test.go can assert the
+// list contains the BOT_HQ_AGENT_ID env-injection flag without exec'ing tmux.
+//
+// BOT_HQ_AGENT_ID consumed by internal/outboundhook/hook.go:88 for Stop-hook
+// agent attribution. Same pattern as internal/mcp/tools.go:774-778 (hub_spawn).
+func (b *Brian) newSessionArgs() []string {
+	return []string{
+		"new-session", "-d", "-s", b.tmuxSession,
+		"-c", b.workDir, "-x", "200", "-y", "50",
+		"-e", "BOT_HQ_AGENT_ID=" + agentID,
+	}
+}
+
 // spawnTmux creates a new tmux session running Claude Code with the brian prompt.
 func (b *Brian) spawnTmux() error {
 	// Create detached tmux session
-	createCmd := exec.Command("tmux", "new-session", "-d", "-s", b.tmuxSession,
-		"-c", b.workDir, "-x", "200", "-y", "50")
+	createCmd := exec.Command("tmux", b.newSessionArgs()...)
 	if err := createCmd.Run(); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}

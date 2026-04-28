@@ -174,9 +174,22 @@ func (r *Rain) writeMCPConfig() error {
 	return os.WriteFile(configPath, data, 0600)
 }
 
+// newSessionArgs returns the `tmux new-session` argument list for spawning
+// rain's pane. Extracted as a private method so rain_test.go can assert the
+// list contains the BOT_HQ_AGENT_ID env-injection flag without exec'ing tmux.
+//
+// BOT_HQ_AGENT_ID consumed by internal/outboundhook/hook.go:88 for Stop-hook
+// agent attribution. Same pattern as internal/mcp/tools.go:774-778 (hub_spawn).
+func (r *Rain) newSessionArgs() []string {
+	return []string{
+		"new-session", "-d", "-s", r.tmuxSession,
+		"-c", r.workDir, "-x", "200", "-y", "50",
+		"-e", "BOT_HQ_AGENT_ID=" + agentID,
+	}
+}
+
 func (r *Rain) spawnTmux() error {
-	createCmd := exec.Command("tmux", "new-session", "-d", "-s", r.tmuxSession,
-		"-c", r.workDir, "-x", "200", "-y", "50")
+	createCmd := exec.Command("tmux", r.newSessionArgs()...)
 	if err := createCmd.Run(); err != nil {
 		return fmt.Errorf("tmux new-session: %w", err)
 	}
