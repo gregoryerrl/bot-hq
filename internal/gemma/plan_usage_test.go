@@ -199,6 +199,45 @@ func TestPlanCapResetClearsHaltAndRearmsHysteresis(t *testing.T) {
 	}
 }
 
+// TestPlanCapResumeCooldownSuppressesRapidReEmits — Phase J tail fix
+// (per hub.db trace msgs 5194-5218 — ~30 RESUME emits between two
+// legit halt cycles caused by maxUtil bouncing 95%↔0% across polls).
+// Cooldown caps emitPlanCapResume to once per planCapResumeCooldown
+// window even if hadHalt-gate fires on multiple polls.
+func TestPlanCapResumeCooldownSuppressesRapidReEmits(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	rec := &hubRecorder{}
+	g.SetHubPublisher(rec.publish)
+	// Sequence: fire→clear (cycle 1) → fire→clear (cycle 2) within
+	// cooldown window. Cycle 2's RESUME must be suppressed.
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.96, 0.50, 0.96, 0.50},
+		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour},
+	})
+
+	now := time.Now()
+	g.checkPlanUsage(now)                                                  // halt fires
+	g.checkPlanUsage(now.Add(planUsageBaseInterval + time.Second))         // RESUME emit (cooldown stamps now)
+	g.checkPlanUsage(now.Add(2 * (planUsageBaseInterval + time.Second)))   // halt re-fires
+	g.checkPlanUsage(now.Add(3 * (planUsageBaseInterval + time.Second)))   // RESUME suppressed (within cooldown)
+
+	msgs, err := db.GetRecentMessages(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumes := 0
+	for _, m := range msgs {
+		if m.FromAgent == agentID && strings.Contains(m.Content, "plan usage reset") {
+			resumes++
+		}
+	}
+	// Expected: ONE RESUME per emitPlanCapResume call × 2 recipients (brian+rain) = 2 msgs.
+	// If cooldown were broken, we'd see 4 (2 cycles × 2 recipients).
+	if resumes != 2 {
+		t.Errorf("expected 2 RESUME msgs (1 emit cycle × 2 recipients) post-cooldown; got %d (cooldown broken — re-emit not suppressed)", resumes)
+	}
+}
+
 // TestPlanCapBetweenThresholdsHoldsState — utilization in [0.85, 0.95)
 // neither fires nor clears. The HubSnapshot is updated but halt_state
 // remains in whichever state the prior tick left it.

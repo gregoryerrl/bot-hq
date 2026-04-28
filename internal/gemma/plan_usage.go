@@ -68,6 +68,19 @@ const planCapReasonFmt = "plan usage at %d%%%s, halt + idle in pane"
 // reset" — agents grep this in their initial-prompt match-rule.
 const planCapResumeFmt = "plan usage reset to %d%%, resume work via R16 cross-restart-resume protocol bootstrap (a) git status (b) ~/.bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/ratchets/active.md (d) hub_read backlog since halt-fire"
 
+// planCapResumeCooldown caps emitPlanCapResume to once per window even
+// if the hadHalt-gate keeps firing on each poll (observed Phase J pass-3,
+// hub.db msgs 5194-5218: ~30 RESUME emits between two legit halt cycles).
+// Suspected root cause: maxUtil fluctuation around 95% threshold causes
+// firePlanCapHalt to re-create halt-state row each fluctuation poll;
+// next <85% poll then emits RESUME. The DB-side hadHalt check is correct
+// per-event but doesn't dedup across many rapid event cycles.
+//
+// 10min window: smaller than the observed ~30min gap between legitimate
+// halt-fires (so legit halt→reset transitions still get one RESUME emit
+// each), large enough to absorb any rapid-fluctuation noise.
+const planCapResumeCooldown = 10 * time.Minute
+
 // planCapWakeOffset is the duration past lastPlanPoll at which the
 // scheduled-wake fires. 5h + 1min: just past Anthropic's plan-window
 // rollover so Emma re-polls into the post-rollover usage figure
@@ -206,8 +219,21 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 		// Substring "plan usage reset" matches the agent prompt rule.
 		// Only fires when a halt was previously active to avoid spurious
 		// resume-nudges during normal sub-threshold usage.
+		//
+		// Phase J tail: also gated by planCapResumeCooldown to suppress
+		// rapid re-emits when plan-usage fluctuates around threshold
+		// (per hub.db trace msgs 5194-5218 — ~30 RESUME emits between
+		// two legit halt cycles caused by maxUtil bouncing 95%↔0%).
 		if hadHalt {
-			g.emitPlanCapResume(now, pctInt)
+			g.planUsageMu.Lock()
+			coolingDown := !g.lastPlanCapResumeAt.IsZero() && now.Sub(g.lastPlanCapResumeAt) < planCapResumeCooldown
+			if !coolingDown {
+				g.lastPlanCapResumeAt = now
+			}
+			g.planUsageMu.Unlock()
+			if !coolingDown {
+				g.emitPlanCapResume(now, pctInt)
+			}
 		}
 	}
 }

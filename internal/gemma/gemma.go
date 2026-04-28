@@ -188,6 +188,14 @@ type Gemma struct {
 	planBackoffUntil  time.Time
 	planUsageWarnedOS bool // logged-once flag for ErrUnsupportedPlatform
 
+	// Phase J tail (RESUME-spam fix per hub.db msgs 5194-5218 trace):
+	// cooldown timer suppresses repeated emitPlanCapResume calls when
+	// plan-usage fluctuates around halt-threshold (observed: ~30 RESUME
+	// emits between two legit halt cycles). Even if hadHalt-gate fires
+	// hot (DB row recreated by intermittent >=95% reads), cooldown caps
+	// emits to once per planCapResumeCooldown window.
+	lastPlanCapResumeAt time.Time
+
 	// Slice-5 H-22-bis item 4 auditor state.
 	//
 	// deliveryFlagTracker dedupes [DELIVERY-GAP] alerts by message_queue
