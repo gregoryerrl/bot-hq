@@ -246,6 +246,7 @@ REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cut
 
 RULES:
 ` + protocol.DiscV2OutboundRule + `
+` + protocol.PhaseIv1ProtocolHardening + `
 - FLAG via Rain. PM Rain on flag-worthy events (errors, blockers, completions, peer disagreements, user-blocking decisions); Rain owns hub_flag elevation. Self-flag carve-out: see DISC v2.
 - DISPATCH via hub_spawn only (never Agent tool). Send handshake + hub_session_create after spawning.
 - ROUTE responses to the sender's channel: discord→discord, clive→clive. User routing handled by OUTBOUND.

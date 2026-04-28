@@ -88,6 +88,40 @@ func TestInitialPromptEmbedsDiscV2OutboundRule(t *testing.T) {
 	}
 }
 
+// TestInitialPromptEmbedsPhaseIv1ProtocolHardening verifies the Phase I
+// const is wired into Brian's prompt. Mirror in rain_test.go locks the
+// rain-side wiring. The const itself is locked via TestPhaseIv1ContentShape.
+func TestInitialPromptEmbedsPhaseIv1ProtocolHardening(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseIv1ProtocolHardening) {
+		t.Errorf("initial prompt must embed protocol.PhaseIv1ProtocolHardening verbatim (Phase I wiring lock)")
+	}
+}
+
+// TestPhaseIv1ContentShape pins the load-bearing rule names inside the
+// Phase I const so accidental rule-deletion in future edits fails CI.
+// One assertion per rule. If a rule name needs to change, this test
+// must update with the rename — forcing intentional, reviewed change.
+func TestPhaseIv1ContentShape(t *testing.T) {
+	rules := []string{
+		"HANDSHAKE-TERMINATOR",
+		"CROSS-TIMING-DEDUP",
+		"QUOTE-TRIM",
+		"SNAP-GATING",
+		"BRAIN-CYCLE-RESPONSE-SHAPE",
+		"TOOL-RESULT-DISCIPLINE",
+		"SUBAGENT-DISPATCH",
+		"COMPACT-COMMIT-FORMAT",
+		"AUDIENCE-CLASS-DISCRIMINATOR",
+	}
+	for _, rule := range rules {
+		if !strings.Contains(protocol.PhaseIv1ProtocolHardening, rule) {
+			t.Errorf("Phase I const missing rule name %q (accidental deletion?)", rule)
+		}
+	}
+}
+
 // Ratchet against the cliff-hang failure mode observed at msg 2086-2092
 // on 2026-04-25: scope changes within an ongoing decision require a
 // fresh flag, not silent continuation. The old "1 concern = 1 flag"

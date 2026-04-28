@@ -225,6 +225,7 @@ REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cut
 
 RULES:
 ` + protocol.DiscV2OutboundRule + `
+` + protocol.PhaseIv1ProtocolHardening + `
 - FLAG ownership: Rain owns hub_flag elevation. Brian PMs Rain on flag-worthy events; Rain decides whether to elevate, peer-coordinate, or wait. Per 2026-04-27 user delegation, Rain may greenflag joint defaults without flagging when user is not in the loop on the specific decision. Self-flag carve-out: see DISC v2.
 - ROUTE responses to sender's channel: discord→discord, brian→brian. User routing handled by OUTBOUND.
 - Review coder output with claude_read. Look for bugs, missing tests, incomplete work.
