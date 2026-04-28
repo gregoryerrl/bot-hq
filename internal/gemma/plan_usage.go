@@ -47,6 +47,25 @@ const planUsageFetchTimeout = 6 * time.Second
 // silently. Slice-5 C1 (H-33).
 const planCapReasonFmt = "plan usage at %d%%%s, halt + checkpoint via H-15 + idle for fresh session"
 
+// planCapResumeFmt is the literal substring brian/rain STARTUP prompts
+// match against to detect plan-window-rollover resume directives. Phase I
+// W2 hotfix (msg 4906): emitted by Emma at the auto-clear path when
+// maxUtil drops below planUsageResetThreshold AND a halt was previously
+// active. Format: "plan usage reset to <N>%, resume work via R16
+// cross-restart-resume protocol bootstrap (a) git status (b)
+// ~/.bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/ratchets/active.md
+// (d) hub_read backlog since halt-fire". Locked substring: "plan usage
+// reset" — agents grep this in their initial-prompt match-rule.
+const planCapResumeFmt = "plan usage reset to %d%%, resume work via R16 cross-restart-resume protocol bootstrap (a) git status (b) ~/.bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/ratchets/active.md (d) hub_read backlog since halt-fire"
+
+// planCapWakeOffset is the duration past lastPlanPoll at which the
+// scheduled-wake fires. 5h + 1min: just past Anthropic's plan-window
+// rollover so Emma re-polls into the post-rollover usage figure
+// (typically near 0%) and emits the immediate resume nudge via the
+// auto-clear path. The 1min cushion absorbs polling jitter + clock
+// skew. Phase I W2 hotfix.
+const planCapWakeOffset = 5*time.Hour + 1*time.Minute
+
 // PlanUsageFetcher abstracts the anthropic.UsageClient for testability.
 // Production wires a real client; tests inject a deterministic fake.
 type PlanUsageFetcher interface {
@@ -154,6 +173,14 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 		return
 	}
 	if maxUtil < planUsageResetThreshold {
+		// Phase I W2 hotfix: only emit RESUME nudge when a halt was actually
+		// active prior to clear (avoids spurious resume-emits on every poll
+		// when usage hovers at 0% in normal operation). ClearHalt returns
+		// silently whether or not a row existed; check via GetHaltCause first.
+		_, hadHalt, err := g.db.GetHaltCause(hub.HaltCausePlanCap)
+		if err != nil {
+			log.Printf("[plan-cap] get halt cause check failed: %v", err)
+		}
 		if err := g.db.ClearHalt(hub.HaltCausePlanCap); err != nil {
 			log.Printf("[plan-cap] clear halt failed: %v", err)
 		}
@@ -162,6 +189,38 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 		g.flagMu.Lock()
 		delete(g.flagHistory, "plan-cap")
 		g.flagMu.Unlock()
+
+		// Phase I W2 hotfix Fix-2: emit RESUME nudge to brian + rain so
+		// agents idling in their panes (post-(D)-hybrid halt protocol)
+		// observe the plan-window-rollover and re-bootstrap via R16.
+		// Substring "plan usage reset" matches the agent prompt rule.
+		// Only fires when a halt was previously active to avoid spurious
+		// resume-nudges during normal sub-threshold usage.
+		if hadHalt {
+			g.emitPlanCapResume(now, pctInt)
+		}
+	}
+}
+
+// emitPlanCapResume inserts MsgCommand records to brian + rain telling
+// each agent to resume work after a plan-window-rollover. Substring
+// "plan usage reset" is the locked match against initial-prompt rule
+// (mirror of the halt-substring discipline).
+//
+// Phase I W2 hotfix Fix-2 (msg 4906 user directive — continuability
+// when user-AFK).
+func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
+	content := fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, pct))
+	for _, target := range []string{"brian", "rain"} {
+		if _, err := g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			ToAgent:   target,
+			Type:      protocol.MsgCommand,
+			Content:   content,
+			Created:   now,
+		}); err != nil {
+			log.Printf("[plan-cap] resume nudge insert failed for %s: %v", target, err)
+		}
 	}
 }
 
@@ -254,6 +313,26 @@ func (g *Gemma) firePlanCapHalt(now time.Time, pct int, window string) {
 	}
 	if err := g.db.SetHaltActive(hub.HaltCausePlanCap, reason, agentID); err != nil {
 		log.Printf("[plan-cap] set halt active failed: %v", err)
+	}
+
+	// Phase I W2 hotfix Fix-1: schedule wakes for brian + rain at
+	// now+5h+1min. Anthropic's plan-window-rollover is ~5h; the wake
+	// triggers a forced poll-cycle (Emma's tick + agent re-engagement
+	// via tmuxsink-delivered MsgCommand) just past rollover. Belt-and-
+	// suspenders backup to Emma's continuous polling — if Anthropic API
+	// is itself rate-limited or backoff-blocked at rollover-time, the
+	// scheduled wake provides the resume trigger.
+	//
+	// The wake's payload IS the resume content; dispatchWakes() inserts
+	// it as MsgCommand to target_agent at fire-time, matching the
+	// emitPlanCapResume substring "plan usage reset" so agents recognize
+	// it identically to the auto-clear path.
+	wakeAt := now.Add(planCapWakeOffset)
+	wakePayload := fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, 0))
+	for _, target := range []string{"brian", "rain"} {
+		if _, err := g.db.InsertWakeSchedule(target, agentID, wakePayload, wakeAt); err != nil {
+			log.Printf("[plan-cap] schedule wake insert failed for %s: %v", target, err)
+		}
 	}
 }
 

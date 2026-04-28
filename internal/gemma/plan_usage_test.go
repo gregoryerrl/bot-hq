@@ -401,3 +401,110 @@ func TestPlanCapNilFetcherIsNoop(t *testing.T) {
 		t.Errorf("nil fetcher must not publish; got %d calls", rec.calls)
 	}
 }
+
+// TestPlanCapFireSchedulesWakes locks Phase I W2 hotfix Fix-1: when the
+// plan-cap halt fires at 95%+, Emma schedules wakes for brian + rain at
+// now + planCapWakeOffset (5h+1min). Belt-and-suspenders backup against
+// Anthropic API itself being rate-limited at rollover-time.
+func TestPlanCapFireSchedulesWakes(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.96},
+		window:  []string{anthropic.WindowFiveHour},
+	})
+
+	now := time.Now()
+	g.checkPlanUsage(now)
+
+	wakes, err := db.ListPendingWakes(now.Add(planCapWakeOffset + time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string]int{}
+	for _, w := range wakes {
+		targets[w.TargetAgent]++
+	}
+	if targets["brian"] != 1 {
+		t.Errorf("expected 1 brian wake, got %d", targets["brian"])
+	}
+	if targets["rain"] != 1 {
+		t.Errorf("expected 1 rain wake, got %d", targets["rain"])
+	}
+	for _, w := range wakes {
+		if !strings.Contains(w.Payload, "plan usage reset") {
+			t.Errorf("wake payload must contain resume substring 'plan usage reset'; got %q", w.Payload)
+		}
+		fireDelta := w.FireAt.Sub(now)
+		if fireDelta < planCapWakeOffset-time.Second || fireDelta > planCapWakeOffset+time.Second {
+			t.Errorf("wake fire-at offset = %s, want ~%s", fireDelta, planCapWakeOffset)
+		}
+	}
+}
+
+// TestPlanCapResetEmitsResumeNudge locks Phase I W2 hotfix Fix-2: when
+// the plan-cap halt clears (maxUtil drops below 0.85 from a prior halt),
+// Emma emits MsgCommand records to brian + rain with content containing
+// "plan usage reset" so agents recognize the resume directive and
+// re-bootstrap via R16.
+func TestPlanCapResetEmitsResumeNudge(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	fake := &fakePlanUsageFetch{
+		maxUtil: []float64{0.96, 0.70},
+		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour},
+	}
+	g.SetPlanUsageFetcher(fake)
+
+	now := time.Now()
+	g.checkPlanUsage(now)
+	// Advance past base interval so the next poll fires.
+	g.checkPlanUsage(now.Add(planUsageBaseInterval + time.Second))
+
+	msgs, err := db.GetRecentMessages(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotBrian, gotRain := 0, 0
+	for _, m := range msgs {
+		if m.FromAgent != agentID || m.Type != protocol.MsgCommand {
+			continue
+		}
+		if !strings.Contains(m.Content, "plan usage reset") {
+			continue
+		}
+		switch m.ToAgent {
+		case "brian":
+			gotBrian++
+		case "rain":
+			gotRain++
+		}
+	}
+	if gotBrian != 1 {
+		t.Errorf("expected 1 resume MsgCommand to brian, got %d", gotBrian)
+	}
+	if gotRain != 1 {
+		t.Errorf("expected 1 resume MsgCommand to rain, got %d", gotRain)
+	}
+}
+
+// TestPlanCapResetWithoutPriorHaltDoesNotEmitResumeNudge locks the
+// idempotency guard: at sub-threshold usage with no prior halt active,
+// no resume nudges fire. Otherwise every steady-state poll would re-emit.
+func TestPlanCapResetWithoutPriorHaltDoesNotEmitResumeNudge(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.50},
+		window:  []string{anthropic.WindowFiveHour},
+	})
+
+	g.checkPlanUsage(time.Now())
+
+	msgs, err := db.GetRecentMessages(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if m.FromAgent == agentID && m.Type == protocol.MsgCommand && strings.Contains(m.Content, "plan usage reset") {
+			t.Errorf("steady-state sub-threshold poll must not emit resume nudge; got: %+v", m)
+		}
+	}
+}
