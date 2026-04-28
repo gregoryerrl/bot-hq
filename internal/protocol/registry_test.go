@@ -165,6 +165,8 @@ func TestRuleRegistryCoversAllConstRules(t *testing.T) {
 		"SOURCE-OF-TRUTH-HIERARCHY",
 		"CITE-ANCHOR-REQUIRED",
 		"CYCLE-CLOSE-USER-BLOCKING",
+		// Phase J T1.5 addition
+		"BOOTSTRAP-ON-CONVERSATION-RESUME",
 		// Phase J T1.7 addition
 		"MSG-TYPE-TAXONOMY",
 	}
