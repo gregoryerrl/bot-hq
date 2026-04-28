@@ -384,3 +384,46 @@ func TestStaleDetectionBackstopSuppressesOnRecentHubSend(t *testing.T) {
 		t.Errorf("hub.db backstop must suppress flag when agent has recent hub_send; got %d flags", got)
 	}
 }
+
+// TestStaleEmitRateCap (Phase J T2.4 B5b) — locks the time-windowed
+// rate-cap on stale-coder PMs. After staleEmitMaxPerWindow emits per
+// agent in rolling staleEmitWindow, additional emits suppress until
+// the window slides past the earliest tracked timestamp.
+func TestStaleEmitRateCap(t *testing.T) {
+	g, db := newContextCapGemma(t)
+
+	// Register a Shape-α agent (no tmux meta) so each tick that sees stale
+	// LastSeen becomes a flag candidate (the LastSeen-advance gate is the
+	// only baseline gate; we drive it via repeated re-registration with
+	// monotonically advancing LastSeen).
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     "voice-spammy",
+		Name:   "Spammy",
+		Type:   protocol.AgentVoice,
+		Status: protocol.StatusOnline,
+		Meta:   "",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+
+	// Drive 5 stale-fire cycles. Between each, advance LastSeen by 1s
+	// (so LastSeen-advance gate releases) but keep the agent "stale"
+	// per staleThreshold by also advancing virtual now.
+	for i := 0; i < 5; i++ {
+		// Re-register with slightly-advanced LastSeen to release lean-(b) gate.
+		if err := db.UpdateAgentLastSeen("voice-spammy"); err != nil {
+			t.Fatal(err)
+		}
+		virtualNow := now.Add(staleThreshold + time.Duration(i+1)*time.Minute)
+		g.checkStaleAgentsAt(virtualNow)
+	}
+
+	// Expect at most staleEmitMaxPerWindow emits (3) — 5 candidate cycles
+	// minus 2 throttled = 3 actual PMs.
+	got := countStaleCoderMsgs(t, db)
+	if got > staleEmitMaxPerWindow {
+		t.Errorf("rate-cap broken: got %d stale-coder PMs in window, want ≤ %d", got, staleEmitMaxPerWindow)
+	}
+}

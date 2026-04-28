@@ -164,21 +164,22 @@ func (g *Gemma) checkStaleAgentsAt(now time.Time) {
 	}
 }
 
-// flagStaleAgent emits the [STALE-CODER] PM to Rain, gated by the per-agent
-// LastSeen advance-check (lean (b)): re-firing is suppressed when LastSeen
-// has not advanced since the most recent stale-coder flag for this agent.
-// "Stale" is sticky once observed — the agent is either dead (won't recover)
-// or intentional-idle (covered upstream by halt-state). A new flag fires
-// only when LastSeen advances past the tracked value, which captures the
-// meaningful event: "agent came back, then went stale again."
-//
-// Phase I W1b I-6 (B): hub.db backstop check. Before flagging, query for
-// any message from the agent in the last staleThreshold window. If the
-// agent has hub_send activity in the window, suppress the flag — defends
-// against the LastSeen-write-failure-race class where UpdateAgentLastSeen
-// silently failed (writes are best-effort per mcp/tools.go withLastSeen).
-// Errors fail-open — query failures fall through to flag, since silent
-// suppression on DB error is worse than an FP.
+// staleEmitWindow + staleEmitMaxPerWindow: Phase J T2.4 (B5b) cadence
+// throttle. AFK-window observation showed stale-coder PMs spamming when
+// LastSeen-advance gate (lean (b)) releases on every re-registration
+// heartbeat but agent remains effectively idle. Per-agent rate-cap:
+// at most staleEmitMaxPerWindow stale-coder PMs in any rolling
+// staleEmitWindow. Cleaner than relying solely on LastSeen-advance gate.
+const staleEmitWindow = 1 * time.Hour
+const staleEmitMaxPerWindow = 3
+
+// flagStaleAgent emits the [STALE-CODER] PM to Rain, gated by:
+//  1. LastSeen-advance check (lean (b), Phase H slice 4 C7) — suppress
+//     re-fire when LastSeen has not advanced.
+//  2. hub.db backstop (Phase I W1b I-6) — recent hub_send activity
+//     suppresses flag (LastSeen-write-failure-race defense).
+//  3. Time-windowed rate-cap (Phase J T2.4 B5b) — at most
+//     staleEmitMaxPerWindow PMs per agent in rolling staleEmitWindow.
 //
 // Caller (checkStaleAgentsAt) holds g.staleMu, so direct map access is safe.
 func (g *Gemma) flagStaleAgent(a protocol.Agent, now time.Time) {
@@ -193,7 +194,24 @@ func (g *Gemma) flagStaleAgent(a protocol.Agent, now time.Time) {
 		// LastSeen-write-failure-race likely. Suppress flag.
 		return
 	}
+	// Phase J T2.4 (B5b) time-windowed rate-cap.
+	if g.staleEmitTimes == nil {
+		g.staleEmitTimes = make(map[string][]time.Time)
+	}
+	cutoff := now.Add(-staleEmitWindow)
+	prev := g.staleEmitTimes[a.ID]
+	pruned := prev[:0]
+	for _, t := range prev {
+		if t.After(cutoff) {
+			pruned = append(pruned, t)
+		}
+	}
+	if len(pruned) >= staleEmitMaxPerWindow {
+		g.staleEmitTimes[a.ID] = pruned
+		return // throttled
+	}
 	g.staleFlagTracker[a.ID] = a.LastSeen
+	g.staleEmitTimes[a.ID] = append(pruned, now)
 	age := now.Sub(a.LastSeen).Round(time.Second)
 	g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,

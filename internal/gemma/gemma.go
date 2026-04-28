@@ -164,6 +164,14 @@ type Gemma struct {
 	paneActivity     paneActivityFn
 	staleFlagTracker map[string]time.Time
 
+	// Phase J T2.4 (B5b roster-prune cadence throttle): time-windowed
+	// emit cap on stale-coder PMs to suppress spam during AFK windows
+	// where the LastSeen-advance gate (lean (b)) releases on every
+	// re-registration heartbeat but agent remains effectively idle.
+	// staleEmitTimes[agentID] = ordered list of emit timestamps in last
+	// staleEmitWindow; cap at staleEmitMaxPerWindow.
+	staleEmitTimes map[string][]time.Time
+
 	// Phase H slice 3 C5 (H-25 roster hygiene) state. lastPruneAt is read+
 	// written only from healthLoop so no mutex needed; zero value means
 	// "never pruned this run", which triggers a first-tick prune.
