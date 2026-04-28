@@ -12,6 +12,7 @@ import (
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	"github.com/gregoryerrl/bot-hq/internal/tmuxsink"
 )
 
 const (
@@ -30,6 +31,12 @@ type Brian struct {
 	workDir     string
 	tmuxSession string
 	lastMsgID   int64
+
+	// sink wraps tmux pane delivery with isReady-check + retry-queue
+	// semantics shared with hub.dispatchToTmux. Constructed in Start()
+	// after the tmux session spawns; rebuilt in restart() with the new
+	// session name. Phase I W2 Layer-2 (c).
+	sink *tmuxsink.Sink
 
 	mu      sync.Mutex
 	running bool
@@ -90,6 +97,14 @@ func (b *Brian) Start() error {
 		return fmt.Errorf("brian register: %w", err)
 	}
 
+	// Construct tmuxsink.Sink wrapping brian's pane. Same Sink instance the
+	// hub uses for targeted dispatch to brian (lazy-init in hub.getSink),
+	// keyed by agentID — but brian owns its own here for self-paste from
+	// the poll loop. Per-target sync.Mutex inside Sink serializes against
+	// the hub-side instance via Sink's internal lock (both paths route
+	// through Sink.Deliver which holds the same mu). Phase I W2 Layer-2 (c).
+	b.sink = tmuxsink.New(hub.NewTmuxSinkStore(b.db), agentID, b.tmuxSession)
+
 	// lastMsgID stays at zero. The first poll-tick uses ReadMessages's tail
 	// semantics (sinceID<=0 → latest N) to replay recent backlog through the
 	// nudge filter chain, so a freshly-booted Brian re-grounds in arc context
@@ -135,26 +150,27 @@ func (b *Brian) IsRunning() bool {
 }
 
 // SendCommand sends a user command to the brian's Claude Code session via tmux.
+//
+// Phase I W2 Layer-2 (c): routes through tmuxsink.Sink.Deliver. If the
+// pane is busy at send-time (mid-tool-call, modal up), Sink enqueues the
+// paste for retry by hub.processMessageQueue's drain ticker — eliminates
+// the prior naked tmux send-keys + 500ms sleep race that silently dropped
+// keystrokes (dispatch-fail #16 Layer-2). Self-paste calls use msgID=0
+// sentinel; queue rows reflect that until a schema-cleanup ratchet lands.
 func (b *Brian) SendCommand(text string) error {
 	b.mu.Lock()
 	if !b.running {
 		b.mu.Unlock()
 		return fmt.Errorf("brian is not running")
 	}
-	session := b.tmuxSession
+	sink := b.sink
 	b.mu.Unlock()
 
-	// No need to echo the nudge back into the hub — Brian's Claude Code
-	// session will respond via hub_send which creates its own message.
-
-	// Send the text to the tmux pane
-	cmd := exec.Command("tmux", "send-keys", "-t", session, "-l", text)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tmux send: %w", err)
+	if sink == nil {
+		return fmt.Errorf("brian sink not initialized")
 	}
-	// Claude Code's bracketed paste needs time to process before Enter
-	time.Sleep(500 * time.Millisecond)
-	return exec.Command("tmux", "send-keys", "-t", session, "Enter").Run()
+	dec := sink.Deliver(0, text)
+	return dec.Err
 }
 
 // writeMCPConfig creates a temporary MCP config file that gives the brian
@@ -413,6 +429,10 @@ func (b *Brian) restart() error {
 	if err := b.spawnTmux(); err != nil {
 		return err
 	}
+
+	// Rebuild sink with the new session target. Old Sink (with old target)
+	// is garbage; no shared state with the new one besides the DB.
+	b.sink = tmuxsink.New(hub.NewTmuxSinkStore(b.db), agentID, b.tmuxSession)
 
 	b.db.UpdateAgentStatus(agentID, protocol.StatusOnline, "")
 	b.db.InsertMessage(protocol.Message{

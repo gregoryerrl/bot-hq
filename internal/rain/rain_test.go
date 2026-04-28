@@ -629,3 +629,49 @@ func TestNewSessionArgsInjectsAgentIDEnvFlag(t *testing.T) {
 		t.Errorf("session name not in args: %v", args)
 	}
 }
+
+// TestSendCommandRequiresSinkInitialized locks the Phase I W2 Layer-2 (c)
+// safety branch: if Rain is marked running but the sink field is nil
+// (defensive — should never happen if Start completed), SendCommand
+// returns a "sink not initialized" error instead of panicking with a nil
+// dereference inside Sink.Deliver.
+func TestSendCommandRequiresSinkInitialized(t *testing.T) {
+	r := &Rain{running: true} // sink intentionally nil
+	err := r.SendCommand("test")
+	if err == nil {
+		t.Fatal("expected error when sink not initialized, got nil")
+	}
+	if !strings.Contains(err.Error(), "sink not initialized") {
+		t.Errorf("expected 'sink not initialized' error, got: %v", err)
+	}
+}
+
+// TestSendCommandRoutesThroughSink is a source ratchet locking the
+// Phase I W2 Layer-2 (c) refactor: rain.go SendCommand must NOT contain
+// the prior naked tmux send-keys + sleep + Enter pattern. All pane
+// delivery routes through tmuxsink.Sink so isReady-check + retry-queue
+// semantics apply uniformly with hub.dispatchToTmux.
+func TestSendCommandRoutesThroughSink(t *testing.T) {
+	data, err := os.ReadFile("rain.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	for _, banned := range []string{
+		`exec.Command("tmux", "send-keys", "-t", session, "-l", text)`,
+		`exec.Command("tmux", "send-keys", "-t", session, "Enter")`,
+	} {
+		if strings.Contains(src, banned) {
+			t.Errorf("rain.go SendCommand must not contain %q — bypasses tmuxsink isReady+retry", banned)
+		}
+	}
+	for _, want := range []string{
+		"sink.Deliver",
+		"tmuxsink.New",
+		"hub.NewTmuxSinkStore",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("rain.go must contain %q — Phase I W2 Layer-2 (c) sink wiring", want)
+		}
+	}
+}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	"github.com/gregoryerrl/bot-hq/internal/tmuxsink"
 )
 
 const (
@@ -32,6 +33,12 @@ type Rain struct {
 	workDir     string
 	tmuxSession string
 	lastMsgID   int64
+
+	// sink wraps tmux pane delivery with isReady-check + retry-queue
+	// semantics shared with hub.dispatchToTmux. Constructed in Start()
+	// after the tmux session spawns; rebuilt in restart() with the new
+	// session name. Phase I W2 Layer-2 (c).
+	sink *tmuxsink.Sink
 
 	mu      sync.Mutex
 	running bool
@@ -91,6 +98,14 @@ func (r *Rain) Start() error {
 		return fmt.Errorf("rain register: %w", err)
 	}
 
+	// Construct tmuxsink.Sink wrapping rain's pane. Same Sink instance the
+	// hub uses for targeted dispatch to rain (lazy-init in hub.getSink),
+	// keyed by agentID — but rain owns its own here for self-paste from
+	// the poll loop. Per-target sync.Mutex inside Sink serializes against
+	// the hub-side instance via Sink's internal lock (both paths route
+	// through Sink.Deliver which holds the same mu). Phase I W2 Layer-2 (c).
+	r.sink = tmuxsink.New(hub.NewTmuxSinkStore(r.db), agentID, r.tmuxSession)
+
 	// lastMsgID stays at zero. The first poll-tick uses ReadMessages's tail
 	// semantics (sinceID<=0 → latest N) to replay recent backlog through the
 	// nudge filter chain.
@@ -130,21 +145,27 @@ func (r *Rain) IsRunning() bool {
 }
 
 // SendCommand sends text to Rain's Claude Code session via tmux.
+//
+// Phase I W2 Layer-2 (c): routes through tmuxsink.Sink.Deliver. If the
+// pane is busy at send-time (mid-tool-call, modal up), Sink enqueues the
+// paste for retry by hub.processMessageQueue's drain ticker — eliminates
+// the prior naked tmux send-keys + 500ms sleep race that silently dropped
+// keystrokes (dispatch-fail #16 Layer-2). Self-paste calls use msgID=0
+// sentinel; queue rows reflect that until a schema-cleanup ratchet lands.
 func (r *Rain) SendCommand(text string) error {
 	r.mu.Lock()
 	if !r.running {
 		r.mu.Unlock()
 		return fmt.Errorf("rain is not running")
 	}
-	session := r.tmuxSession
+	sink := r.sink
 	r.mu.Unlock()
 
-	cmd := exec.Command("tmux", "send-keys", "-t", session, "-l", text)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tmux send: %w", err)
+	if sink == nil {
+		return fmt.Errorf("rain sink not initialized")
 	}
-	time.Sleep(500 * time.Millisecond)
-	return exec.Command("tmux", "send-keys", "-t", session, "Enter").Run()
+	dec := sink.Deliver(0, text)
+	return dec.Err
 }
 
 func (r *Rain) writeMCPConfig() error {
@@ -408,6 +429,10 @@ func (r *Rain) restart() error {
 	if err := r.spawnTmux(); err != nil {
 		return err
 	}
+
+	// Rebuild sink with the new session target. Old Sink (with old target)
+	// is garbage; no shared state with the new one besides the DB.
+	r.sink = tmuxsink.New(hub.NewTmuxSinkStore(r.db), agentID, r.tmuxSession)
 
 	r.db.UpdateAgentStatus(agentID, protocol.StatusOnline, "")
 	r.db.InsertMessage(protocol.Message{

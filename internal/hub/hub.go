@@ -266,6 +266,14 @@ func (h *Hub) getSink(agentID, target string) *tmuxsink.Sink {
 	return s
 }
 
+// NewTmuxSinkStore returns a tmuxsink.Store adapter wrapping the given DB.
+// External packages (rain, brian) call this to construct a Sink without
+// importing hub's private sinkStore type. Phase I W2 Layer-2 (c) — keeps
+// the adapter struct unexported while exposing the canonical factory.
+func NewTmuxSinkStore(db *DB) tmuxsink.Store {
+	return sinkStore{db: db}
+}
+
 // sinkStore is the thin adapter wrapping *DB to satisfy tmuxsink.Store.
 // Lives in package hub so tmuxsink stays free of hub imports (cycle break).
 type sinkStore struct {
