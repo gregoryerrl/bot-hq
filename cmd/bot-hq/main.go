@@ -21,6 +21,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
+	"github.com/gregoryerrl/bot-hq/internal/toolgate"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
 )
 
@@ -42,6 +43,12 @@ func main() {
 		case "install-trio-hook":
 			runInstallTrioHook()
 			return
+		case "tool-permission-hook":
+			runToolPermissionHook()
+			return
+		case "install-toolgate-hook":
+			runInstallToolgateHook()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -49,7 +56,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -379,6 +386,48 @@ func runInstallTrioHook() {
 	fmt.Printf("OUTBOUND-MISS hook installed in %s\n", settingsPath)
 	fmt.Printf("Hook command: %s\n", outboundhook.SettingsHookCommand(botHQPath))
 	fmt.Printf("Reminder: autostart trio panes set BOT_HQ_AGENT_ID automatically. For panes launched outside autostart (manual claude exec), export BOT_HQ_AGENT_ID=<id> before launch.\n")
+}
+
+// runToolPermissionHook is the PreToolUse hook entry point for the K-16
+// class-split gate. Reads PreToolUse hook input from stdin, applies the
+// gate, exits with 0 (allow) or 2 (block).
+func runToolPermissionHook() {
+	os.Exit(toolgate.RunHook(os.Stdin, os.Stderr))
+}
+
+// runInstallToolgateHook installs the K-16 PreToolUse class-split gate
+// hook into the trio agent's Claude settings.json. Idempotent +
+// non-clobbering, mirroring runInstallTrioHook's pattern.
+//
+// Usage:
+//
+//	bot-hq install-toolgate-hook            # writes ~/.claude/settings.json
+//	bot-hq install-toolgate-hook <path>     # writes a custom path
+func runInstallToolgateHook() {
+	settingsPath := ""
+	if len(os.Args) > 2 {
+		settingsPath = os.Args[2]
+	}
+	if settingsPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "resolve home dir: %v\n", err)
+			os.Exit(1)
+		}
+		settingsPath = filepath.Join(home, ".claude", "settings.json")
+	}
+	botHQPath, err := os.Executable()
+	if err != nil || botHQPath == "" {
+		fmt.Fprintf(os.Stderr, "resolve bot-hq binary path: %v\n", err)
+		os.Exit(1)
+	}
+	if err := toolgate.InstallTrioHook(settingsPath, botHQPath); err != nil {
+		fmt.Fprintf(os.Stderr, "install: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("K-16 toolgate hook installed in %s\n", settingsPath)
+	fmt.Printf("Hook command: %s\n", toolgate.SettingsHookCommand(botHQPath))
+	fmt.Printf("Reminder: gate is rain-only (BOT_HQ_AGENT_ID=rain). Brian agent calls pass through unblocked.\n")
 }
 
 func statusDot(s protocol.AgentStatus) string {
