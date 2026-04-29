@@ -143,6 +143,39 @@ const R24MutualHaltProtocol = `- MUTUAL-HALT-PROTOCOL (R24): bilateral peer-halt
 // K-16 (PreToolUse class-split gate), K-17 (mutual-halt protocol).
 // Helper: protocol.MessageClass type + IsAuthorizationEligible
 // method (types.go).
+// R29ForcePushElevatedGate is the locked text codifying the elevated
+// gate for force-push operations. Force-push rewrites git history —
+// higher reversibility cost than regular push — so the gate stacks
+// strictly above R26 commit-gate AND R28 per-instance fire-greenflag:
+// requires BOTH peer-greenflag AND user-explicit-verbatim. NO
+// BRAIN-AGREED bypass even within user-granted Phase K work-thread
+// scope (msg 6396) — bilateral agent convergence is INSUFFICIENT for
+// force-push class.
+//
+// Closes the force-push-without-elevated-gate failure class observed
+// bcc-ad-manager session 2026-04-29 (Brian fired staging force-push
+// at msg 6326 without explicit Rain-BRAIN-2nd-pre-greenflag, despite
+// user msg 6314 "we can reset after" being a valid user-conditional
+// pre-authorization for the specific staging reset case).
+//
+// Phase K K-19. Pure-rule mechanism (no toolgate hook) — defense-in-
+// depth via siblings: K-12 anchor-checksum, K-17 mutual-halt protocol
+// (R24, with explicit TriggerForcePushWithoutElevatedGate class).
+// Drift on K-19 is catchable by peer via MsgPeerHalt; recovery flow
+// per R24. Future K-19-ext could mechanically verify dual-cite via
+// toolgate extension if drift surfaces.
+//
+// H-13 (PHASE H force-push token protocol for coder-relay) is scoped
+// differently — coders are remote/risky and require Brian as gate
+// authority via verbatim user-issued token. K-19 is the parallel
+// rule for trio agents (brian/rain) self-pushing locally; same
+// elevated-gate class but discipline-rule + footer-convention rather
+// than full token-relay protocol.
+const R29ForcePushElevatedGate = `- FORCE-PUSH-ELEVATED-GATE (R29): force-push (` + "`git push --force` / `--force-with-lease` / `-f`" + ` variants per IsForcePushPattern) requires BOTH peer-greenflag AND user-explicit-verbatim authorization PER INSTANCE. Stacks strictly above R26 commit-gate (peer-greenflag) and R28 per-instance fire-greenflag (user verbatim). NO BRAIN-AGREED bypass — even within user-granted Phase K work-thread scope (msg 6396), force-push REQUIRES per-instance user verbatim; bilateral agent convergence is INSUFFICIENT for force-push class. User-explicit-verbatim specificity criterion: must be SPECIFIC to the force-push action ("force-push X" / "reset staging" / "rewrite history on Y"); generic broader-auth ("ship", "make a PR", "deploy when ready") does NOT cover force-push (R28 default applies). User-conditional pre-authorization counts ONLY if explicitly cited AND the conditional matches the specific force-push context (e.g., msg 6314 "we can reset after" was VALID for SPECIFIC staging reset; would NOT cover unrelated main-branch force-push). Force-push commit messages SHOULD include dual-cite footer:
+` + "`peer-greenflag-msg-id: <N>`" + ` (per R26)
+` + "`user-force-push-auth-msg-id: <M>`" + ` (per R29 — user verbatim or matching conditional auth msg-id)
+Drift class → peer fires MsgPeerHalt with TriggerForcePushWithoutElevatedGate per R24 mutual-halt protocol. Cite_anchors: msg 6326 (Brian staging force-push pre-Rain-greenflag, primary failure-class), msg 6314 (user "we can reset after" — example of valid user-conditional authorization that counted), H-13 (PHASE H coder force-push token protocol — parallel scope). Per R18 CITE-ANCHOR-REQUIRED.`
+
 // R28PerInstanceFireGreenflag is the locked text codifying the per-
 // instance user-verbatim requirement for HANDS execute actions, with
 // explicit enumeration of the BRAIN-AGREED bypass conditions.
