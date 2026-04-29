@@ -729,3 +729,80 @@ func TestFirePlanCapHaltIdempotentOnRepeatedOverThresholdPolls(t *testing.T) {
 		t.Errorf("repeated over-threshold polls must emit exactly 1 flag (false→true transition); got %d", got)
 	}
 }
+
+// TestPlanCapWakeScheduleDedupesAcrossOscillation locks the Phase J post-
+// rebuild fix (2026-04-29) for the wake_schedule accumulation observed in
+// production: oscillating maxUtil (0.96 → 0.50 → 0.96 → 0.50) caused
+// firePlanCapHalt to schedule a fresh +5h+1min RESUME wake on every
+// oscillation cycle (each looked like a new false→true transition because
+// the < 0.85 branch cleared planCapHaltActive). 30min of oscillation
+// accumulated 200+ pending rows that all fired at fire_at as RESUME spam.
+//
+// Fix: HasPendingWakeForTarget gate inside firePlanCapHalt's wake-schedule
+// block — if a pending RESUME wake already exists for the agent, skip
+// scheduling another. Defense-in-depth alongside the existing transition
+// gate.
+func TestPlanCapWakeScheduleDedupesAcrossOscillation(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.96, 0.50, 0.96, 0.50, 0.96, 0.50},
+		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour},
+	})
+	now := time.Now()
+	for i := 0; i < 6; i++ {
+		g.checkPlanUsage(now.Add(time.Duration(i) * (planUsageBaseInterval + time.Second)))
+	}
+
+	wakes, err := db.ListPendingWakes(now.Add(planCapWakeOffset + time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingByTarget := map[string]int{}
+	for _, w := range wakes {
+		if !strings.Contains(w.Payload, "plan usage reset") {
+			continue
+		}
+		pendingByTarget[w.TargetAgent]++
+	}
+	// Across 3 halt-fires, at most ONE pending RESUME wake per target
+	// should remain. Earlier accumulation bug would produce 3 per target.
+	if pendingByTarget["brian"] > 1 {
+		t.Errorf("oscillation-with-cancel-on-clear should accumulate at most 1 pending RESUME wake per target; got brian=%d", pendingByTarget["brian"])
+	}
+	if pendingByTarget["rain"] > 1 {
+		t.Errorf("oscillation-with-cancel-on-clear should accumulate at most 1 pending RESUME wake per target; got rain=%d", pendingByTarget["rain"])
+	}
+}
+
+// TestEmitPlanCapResumeCancelsPendingWakes locks the Phase J post-rebuild
+// fix (2026-04-29): when Emma emits RESUME via the auto-clear path, any
+// pending future +5h+1min RESUME wakes for the same targets must be
+// cancelled. Otherwise the scheduled wakes fire later as redundant
+// re-spam (observed: 504 fired wakes today during the failure window).
+func TestEmitPlanCapResumeCancelsPendingWakes(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.96, 0.50},
+		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour},
+	})
+
+	now := time.Now()
+	g.checkPlanUsage(now)
+	// After halt fire: 2 wakes scheduled (brian + rain).
+	wakes, _ := db.ListPendingWakes(now.Add(planCapWakeOffset + time.Hour))
+	if len(wakes) < 2 {
+		t.Fatalf("expected >=2 pending wakes after halt-fire, got %d", len(wakes))
+	}
+
+	g.checkPlanUsage(now.Add(planUsageBaseInterval + time.Second)) // <0.85: emitPlanCapResume runs
+	wakes, _ = db.ListPendingWakes(now.Add(planCapWakeOffset + time.Hour))
+	pending := 0
+	for _, w := range wakes {
+		if strings.Contains(w.Payload, "plan usage reset") {
+			pending++
+		}
+	}
+	if pending != 0 {
+		t.Errorf("emitPlanCapResume must cancel pending RESUME wakes; %d still pending", pending)
+	}
+}

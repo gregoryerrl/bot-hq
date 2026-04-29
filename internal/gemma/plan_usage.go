@@ -271,6 +271,15 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 //
 // Phase I W2 hotfix Fix-2 (msg 4906 user directive — continuability
 // when user-AFK).
+//
+// Phase J post-rebuild fix (2026-04-29): also cancel any pending future
+// RESUME wakes for the same targets. The +5h+1min wake_schedule rows
+// were belt-and-suspenders backup for the case where Emma's auto-clear
+// path missed the rollover (API backoff at the moment). Now that we're
+// emitting RESUME via the auto-clear path itself, any scheduled wakes
+// are redundant and would just re-spam the agents' panes when fire_at
+// hits. Observed root cause: 200+ accumulated wakes fired at 1/min today
+// because oscillating maxUtil scheduled one wake per oscillation cycle.
 func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
 	content := fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, pct))
 	for _, target := range []string{"brian", "rain"} {
@@ -282,6 +291,13 @@ func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
 			Created:   now,
 		}); err != nil {
 			log.Printf("[plan-cap] resume nudge insert failed for %s: %v", target, err)
+		}
+		// Cancel any pending future RESUME wakes for this target — they're
+		// now redundant (we just emitted via the auto-clear path).
+		if n, err := g.db.CancelPendingWakesForTargetByPayloadPrefix(target, "[RESUME]"); err != nil {
+			log.Printf("[plan-cap] cancel pending RESUME wakes for %s failed: %v", target, err)
+		} else if n > 0 {
+			log.Printf("[plan-cap] cancelled %d pending RESUME wakes for %s (auto-clear path emitted)", n, target)
 		}
 	}
 }
@@ -432,10 +448,23 @@ func (g *Gemma) firePlanCapHalt(now time.Time, pct int, window string) {
 	// it as MsgCommand to target_agent at fire-time, matching the
 	// emitPlanCapResume substring "plan usage reset" so agents recognize
 	// it identically to the auto-clear path.
+	//
+	// Phase J post-rebuild fix (2026-04-29): the transition-gate above is
+	// not sufficient when planCapHaltActive flips false→true→false→true
+	// across maxUtil oscillation cycles (each oscillation looks like a
+	// "new halt" to the gate and schedules another wake). Add a per-target
+	// HasPendingWakeForTarget check as defense-in-depth: if a pending
+	// RESUME wake already exists for the agent, skip scheduling another.
+	// The first wake's payload is identical to the second's, so deduping
+	// at schedule-time is correct.
 	if !wasActive {
 		wakeAt := now.Add(planCapWakeOffset)
 		wakePayload := fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, 0))
 		for _, target := range []string{"brian", "rain"} {
+			if pending, err := g.db.HasPendingWakeForTarget(target); err == nil && pending {
+				// Already a wake queued — skip duplicate.
+				continue
+			}
 			if _, err := g.db.InsertWakeSchedule(target, agentID, wakePayload, wakeAt); err != nil {
 				log.Printf("[plan-cap] schedule wake insert failed for %s: %v", target, err)
 			}

@@ -81,7 +81,17 @@ const hubSendToolPrefix = "mcp__bot-hq__hub_"
 // dedupWindow is how recent a same-key prior emit must be to suppress a
 // duplicate. Covers harness-retry + replay-debug edge cases without
 // stalling legitimate same-turn-resume scenarios.
-const dedupWindow = 60 * time.Second
+//
+// Phase J post-rebuild fix (2026-04-29): bumped from 60s to 24h. The
+// 60s was bug-shaped — once a turn was flagged, the same turnTS would
+// re-fire every poll-tick after 60s elapsed, observed in production
+// as one OUTBOUND-MISS broadcast per minute for the same stale pane
+// text. dedupKey is (transcriptPath, turnTS); turnTS only advances
+// when a NEW user message arrives, so 24h is effectively permanent
+// per-turn — once flagged, the turn is suppressed for the lifetime
+// of any plausible session window. New user message → new turnTS →
+// new dedup key → new fire (correct).
+const dedupWindow = 24 * time.Hour
 
 // agentIDEnvVar names the env var spawn-contracts must set to identify
 // which bot-hq agent the hook is running for.

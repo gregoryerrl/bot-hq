@@ -504,3 +504,39 @@ func TestDedupWindowExpiry(t *testing.T) {
 		t.Errorf("expired ledger entry should not suppress new emit")
 	}
 }
+
+// TestDedupWindowSurvives60sWindow locks the Phase J post-rebuild fix
+// (2026-04-29) for the OUTBOUND-MISS spam observed in production: the
+// 60s dedupWindow let the SAME (transcriptPath, turnTS) re-fire every
+// 60s after the original ledger entry expired. Observed symptom: one
+// OUTBOUND-MISS broadcast per minute for the same stale pane text
+// (timestamp from 8h prior) until user noticed.
+//
+// Fix: dedupWindow bumped to 24h (effectively permanent per turn).
+// Once a turnTS is flagged, further fires for the same turn suppress
+// for the remainder of any plausible session window. New user message
+// → new turnTS → new dedup key → new fire (correct).
+func TestDedupWindowSurvives60sWindow(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", dir)
+	transcriptPath := filepath.Join(dir, "x.jsonl")
+	turnTS := "2026-04-29T01:50:17.595Z"
+
+	// Record an entry "61 seconds ago" (just past the OLD 60s window).
+	pastEmit := time.Now().Add(-61 * time.Second)
+	recordDedup(transcriptPath, turnTS, pastEmit)
+	if !alreadyFlaggedRecently(transcriptPath, turnTS, time.Now()) {
+		t.Errorf("entry at -61s must STILL suppress under new 24h dedupWindow; got false (would have fired the production spam class)")
+	}
+
+	// 25h-ago entry: legitimately past — new user message should not be
+	// suppressed indefinitely. (Sanity-check of the ledger's bounded
+	// behavior even at the much larger window.)
+	dayPlusOldPath := filepath.Join(dir, "y.jsonl")
+	dayPlusOldTS := "2026-04-28T00:00:00.000Z"
+	veryOld := time.Now().Add(-25 * time.Hour)
+	recordDedup(dayPlusOldPath, dayPlusOldTS, veryOld)
+	if alreadyFlaggedRecently(dayPlusOldPath, dayPlusOldTS, time.Now()) {
+		t.Errorf("entry at -25h must NOT suppress under 24h window; got true")
+	}
+}

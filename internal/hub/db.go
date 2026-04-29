@@ -1852,3 +1852,29 @@ func (db *DB) CancelWake(id int64) (bool, error) {
 	}
 	return db.markWakeTerminal(id, WakeStatusCancelled, 0)
 }
+
+// CancelPendingWakesForTargetByPayloadPrefix cancels every pending wake for
+// the given target whose payload starts with the supplied prefix. Returns
+// the number of rows transitioned to 'cancelled'.
+//
+// Phase J post-rebuild fix (2026-04-29): Emma's emitPlanCapResume calls this
+// at auto-clear time to prevent the accumulated-wake-spam observed when
+// maxUtil oscillates around halt-threshold (each oscillation cycle scheduled
+// a +5h+1min RESUME wake; ~30min of jitter accumulated 200+ pending rows
+// that all fired at fire_at). Once Emma emits RESUME via the auto-clear
+// path, any pending future RESUME wakes for the same agents are redundant
+// belt-and-suspenders that just re-spam the agent's pane.
+func (db *DB) CancelPendingWakesForTargetByPayloadPrefix(target, prefix string) (int, error) {
+	res, err := db.conn.Exec(
+		`UPDATE wake_schedule SET fire_status = ? WHERE fire_status = ? AND target_agent = ? AND payload LIKE ?`,
+		WakeStatusCancelled, WakeStatusPending, target, prefix+"%",
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
