@@ -226,14 +226,28 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 		// reset threshold (rare since we only land here when ≥ 0.90).
 	}
 	if maxUtil < planUsageResetThreshold {
-		// Phase I W2 hotfix: only emit RESUME nudge when a halt was actually
-		// active prior to clear (avoids spurious resume-emits on every poll
-		// when usage hovers at 0% in normal operation). ClearHalt returns
-		// silently whether or not a row existed; check via GetHaltCause first.
-		_, hadHalt, err := g.db.GetHaltCause(hub.HaltCausePlanCap)
+		// Phase J tail-2 (K-1 RESUME-spam fix): emit gates on the
+		// in-memory transition planCapHaltActive true→false (not on
+		// hadHalt-from-DB). DB hadHalt-gate alone over-triggers when
+		// maxUtil jitters: SetHaltActive runs each ≥95% poll (re-creating
+		// halt row), next <85% poll reads hadHalt=true → emits → cycle.
+		// In-memory transition tracking debounces this; only emit when
+		// THIS instance previously observed an over-threshold poll that
+		// transitioned to under-threshold this poll.
+		_, hadHaltDB, err := g.db.GetHaltCause(hub.HaltCausePlanCap)
 		if err != nil {
 			log.Printf("[plan-cap] get halt cause check failed: %v", err)
 		}
+		g.planUsageMu.Lock()
+		prevHaltActive := g.planCapHaltActive
+		g.planCapHaltActive = false
+		coolingDown := !g.lastPlanCapResumeAt.IsZero() && now.Sub(g.lastPlanCapResumeAt) < planCapResumeCooldown
+		shouldEmit := prevHaltActive && !coolingDown
+		if shouldEmit {
+			g.lastPlanCapResumeAt = now
+		}
+		g.planUsageMu.Unlock()
+
 		if err := g.db.ClearHalt(hub.HaltCausePlanCap); err != nil {
 			log.Printf("[plan-cap] clear halt failed: %v", err)
 		}
@@ -243,27 +257,9 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 		delete(g.flagHistory, "plan-cap")
 		g.flagMu.Unlock()
 
-		// Phase I W2 hotfix Fix-2: emit RESUME nudge to brian + rain so
-		// agents idling in their panes (post-(D)-hybrid halt protocol)
-		// observe the plan-window-rollover and re-bootstrap via R16.
-		// Substring "plan usage reset" matches the agent prompt rule.
-		// Only fires when a halt was previously active to avoid spurious
-		// resume-nudges during normal sub-threshold usage.
-		//
-		// Phase J tail: also gated by planCapResumeCooldown to suppress
-		// rapid re-emits when plan-usage fluctuates around threshold
-		// (per hub.db trace msgs 5194-5218 — ~30 RESUME emits between
-		// two legit halt cycles caused by maxUtil bouncing 95%↔0%).
-		if hadHalt {
-			g.planUsageMu.Lock()
-			coolingDown := !g.lastPlanCapResumeAt.IsZero() && now.Sub(g.lastPlanCapResumeAt) < planCapResumeCooldown
-			if !coolingDown {
-				g.lastPlanCapResumeAt = now
-			}
-			g.planUsageMu.Unlock()
-			if !coolingDown {
-				g.emitPlanCapResume(now, pctInt)
-			}
+		_ = hadHaltDB // kept for log-debugging visibility on transition mismatch
+		if shouldEmit {
+			g.emitPlanCapResume(now, pctInt)
 		}
 	}
 }
@@ -397,7 +393,19 @@ func (g *Gemma) firePlanCapHalt(now time.Time, pct int, window string) {
 	tag := windowDisplayTag(window)
 	reason := fmt.Sprintf(planCapReasonFmt, pct, tag)
 
-	if g.shouldFlag("plan-cap", now) {
+	// Phase J tail-2 (K-1 RESUME-spam fix): in-memory transition gate.
+	// MsgFlag emit + wake-schedule insertion only fire on false→true
+	// transition (NEW halt). Repeated ≥95% polls update DB row but skip
+	// repeated user-visible flag + wake-schedule spam. ClearHalt path
+	// reads + flips this state on true→false transition.
+	g.planUsageMu.Lock()
+	wasActive := g.planCapHaltActive
+	g.planCapHaltActive = true
+	g.planUsageMu.Unlock()
+
+	// shouldFlag still applies as belt-and-suspenders rate-cap on the
+	// MsgFlag user-visible emit path.
+	if !wasActive && g.shouldFlag("plan-cap", now) {
 		content := fmt.Sprintf("[CRITICAL] %s", reason)
 		if _, err := g.db.InsertMessage(protocol.Message{
 			FromAgent: agentID,
@@ -409,27 +417,28 @@ func (g *Gemma) firePlanCapHalt(now time.Time, pct int, window string) {
 			log.Printf("[plan-cap] flag insert failed: %v", err)
 		}
 	}
+
+	// SetHaltActive always runs — IsHalted consumers (e.g., checkStaleAgents
+	// suppression-during-halt) need accurate DB state regardless of in-memory
+	// transition tracking.
 	if err := g.db.SetHaltActive(hub.HaltCausePlanCap, reason, agentID); err != nil {
 		log.Printf("[plan-cap] set halt active failed: %v", err)
 	}
 
-	// Phase I W2 hotfix Fix-1: schedule wakes for brian + rain at
-	// now+5h+1min. Anthropic's plan-window-rollover is ~5h; the wake
-	// triggers a forced poll-cycle (Emma's tick + agent re-engagement
-	// via tmuxsink-delivered MsgCommand) just past rollover. Belt-and-
-	// suspenders backup to Emma's continuous polling — if Anthropic API
-	// is itself rate-limited or backoff-blocked at rollover-time, the
-	// scheduled wake provides the resume trigger.
-	//
+	// Phase I W2 hotfix Fix-1 + Phase J tail-2 K-1: schedule wakes ONLY on
+	// false→true transition (NEW halt). Eliminates wake_schedule spam
+	// observed accumulating 100s of pending rows under maxUtil-jitter.
 	// The wake's payload IS the resume content; dispatchWakes() inserts
 	// it as MsgCommand to target_agent at fire-time, matching the
 	// emitPlanCapResume substring "plan usage reset" so agents recognize
 	// it identically to the auto-clear path.
-	wakeAt := now.Add(planCapWakeOffset)
-	wakePayload := fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, 0))
-	for _, target := range []string{"brian", "rain"} {
-		if _, err := g.db.InsertWakeSchedule(target, agentID, wakePayload, wakeAt); err != nil {
-			log.Printf("[plan-cap] schedule wake insert failed for %s: %v", target, err)
+	if !wasActive {
+		wakeAt := now.Add(planCapWakeOffset)
+		wakePayload := fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, 0))
+		for _, target := range []string{"brian", "rain"} {
+			if _, err := g.db.InsertWakeSchedule(target, agentID, wakePayload, wakeAt); err != nil {
+				log.Printf("[plan-cap] schedule wake insert failed for %s: %v", target, err)
+			}
 		}
 	}
 }

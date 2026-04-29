@@ -216,6 +216,13 @@ type Gemma struct {
 	heartbeatMu        sync.Mutex
 	lastHeartbeatMsgID int64
 
+	// Phase J tail-2 (K-1 RESUME-spam fix): in-memory transition tracking
+	// for plan-cap halt state. Side-effects (MsgFlag emit, wake-schedule
+	// insertion, RESUME emit) gate on transitions, not raw threshold-
+	// crossings. Eliminates spam when maxUtil jitters around threshold.
+	// Mu-protected via planUsageMu.
+	planCapHaltActive bool
+
 	// Slice-5 H-22-bis item 4 auditor state.
 	//
 	// deliveryFlagTracker dedupes [DELIVERY-GAP] alerts by message_queue

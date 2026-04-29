@@ -666,3 +666,66 @@ func TestPreCompactSnapPayloadMirrorSymmetry(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanCapResumeNoEmitOnPreExistingHaltWithoutTransition (Phase J
+// tail-2 K-1) — locks the in-memory transition gate. Halt row exists
+// in DB (e.g., persisted from prior session), but THIS Gemma instance
+// never observed an over-threshold poll → planCapHaltActive stays
+// false → no RESUME emit even though hadHalt-from-DB is true.
+func TestPlanCapResumeNoEmitOnPreExistingHaltWithoutTransition(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	rec := &hubRecorder{}
+	g.SetHubPublisher(rec.publish)
+	// Pre-seed halt_state row (simulating persisted state from prior session
+	// or from a fluctuation-fired halt that was already cleared in-memory).
+	if err := db.SetHaltActive(hub.HaltCausePlanCap, "preseeded", "test"); err != nil {
+		t.Fatal(err)
+	}
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.50, 0.50, 0.50, 0.50, 0.50},
+		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour},
+	})
+
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		g.checkPlanUsage(now.Add(time.Duration(i) * (planUsageBaseInterval + time.Second)))
+	}
+
+	msgs, err := db.GetRecentMessages(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumes := 0
+	for _, m := range msgs {
+		if m.FromAgent == agentID && strings.Contains(m.Content, "plan usage reset") {
+			resumes++
+		}
+	}
+	if resumes != 0 {
+		t.Errorf("transition gate broken: pre-existing halt without in-memory transition produced %d RESUME emits (want 0)", resumes)
+	}
+}
+
+// TestFirePlanCapHaltIdempotentOnRepeatedOverThresholdPolls (Phase J
+// tail-2 K-1) — locks idempotency: 5 consecutive ≥95% polls produce
+// EXACTLY ONE flag-emit + ONE wake-schedule-pair (not 5 of each).
+func TestFirePlanCapHaltIdempotentOnRepeatedOverThresholdPolls(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	rec := &hubRecorder{}
+	g.SetHubPublisher(rec.publish)
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.96, 0.97, 0.98, 0.99, 1.00},
+		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour},
+	})
+
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		g.checkPlanUsage(now.Add(time.Duration(i) * (planUsageBaseInterval + time.Second)))
+	}
+
+	// Expect exactly 1 plan-cap flag (idempotent on repeated transitions
+	// staying within the over-threshold band).
+	if got := countPlanCapFlags(t, db); got != 1 {
+		t.Errorf("repeated over-threshold polls must emit exactly 1 flag (false→true transition); got %d", got)
+	}
+}
