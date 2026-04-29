@@ -333,6 +333,14 @@ func (g *Gemma) Start() error {
 	// skip polling forever per ErrUnsupportedPlatform contract.
 	g.initPlanUsageDefault()
 
+	// Phase J tail-4 (K-1-bis-deeper Axis A): seed in-memory
+	// planCapHaltActive from hub.db halt_state so the post-restart
+	// fire-path correctly recognizes continuous halt across process
+	// restart. Closes asymmetry with clear-path (which already cross-
+	// checks GetHaltCause). See plan_usage.go seedPlanCapHaltActiveFromDB
+	// for the full rationale + cite_anchor.
+	g.seedPlanCapHaltActiveFromDB()
+
 	go g.pollLoop()
 	go g.healthLoop()
 	go g.heartbeatLoop()

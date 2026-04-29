@@ -401,6 +401,40 @@ func utilToPct(u float64) int {
 	return pctInt
 }
 
+// seedPlanCapHaltActiveFromDB seeds the in-memory planCapHaltActive bool
+// from hub.db halt_state at Gemma startup. Closes the asymmetry between
+// clear-path (~line 237 already cross-checks db.GetHaltCause via
+// hadHaltDB) and fire-path (~line 418 reads planCapHaltActive direct,
+// treating in-mem zero-value false as fresh-halt even when the DB row
+// indicates continuous halt across the restart boundary).
+//
+// Without seeding: process restart while halt was active leaves in-mem
+// at false. First post-restart over-threshold poll fires firePlanCapHalt,
+// sees wasActive=false → re-emits hub_flag + reschedules wake. The
+// 9ac82a7 Fix-A (HasPendingWakeForTarget) dedups the wake-schedule
+// reinsertion, but a fresh hub_flag still goes out. With seeding:
+// in-mem mirrors DB so the transition gate correctly sees wasActive=true
+// and the fire-path stays idempotent across restart, matching the
+// already-correct behavior of the clear-path.
+//
+// Phase J tail-4 (K-1-bis-deeper Axis A; user msg 5928 sequence-locked
+// 2026-04-29; Rain msg 5909 BRAIN-2nd-acked + Rain msg 5933 reminder
+// pre-commit). cite_anchor: plan_usage.go:237/418 asymmetry + commit
+// 9ac82a7 + ratchet K-1-bis-resolved.
+func (g *Gemma) seedPlanCapHaltActiveFromDB() {
+	_, active, err := g.db.GetHaltCause(hub.HaltCausePlanCap)
+	if err != nil {
+		log.Printf("[plan-cap] seed planCapHaltActive: GetHaltCause failed: %v", err)
+		return
+	}
+	if active {
+		g.planUsageMu.Lock()
+		g.planCapHaltActive = true
+		g.planUsageMu.Unlock()
+		log.Printf("[plan-cap] seeded planCapHaltActive=true from DB halt_state on startup (post-restart asymmetry close)")
+	}
+}
+
 // firePlanCapHalt fires hub_flag and sets the halt_state row. Wraps
 // shouldFlag for hysteresis + rate cap so a stuck-near-threshold account
 // doesn't burn through Emma's flag budget. The halt_state row is upserted

@@ -806,3 +806,79 @@ func TestEmitPlanCapResumeCancelsPendingWakes(t *testing.T) {
 		t.Errorf("emitPlanCapResume must cancel pending RESUME wakes; %d still pending", pending)
 	}
 }
+
+// TestPlanCapHaltActiveSeededFromDBOnRestart locks Phase J tail-4
+// (K-1-bis-deeper Axis A): post-restart, the in-memory planCapHaltActive
+// bool MUST be seeded from hub.db halt_state so the fire-path correctly
+// recognizes continuous halt across the restart boundary. Without
+// seeding, the first post-restart over-threshold poll sees wasActive=
+// false and re-emits hub_flag (the 9ac82a7 Fix-A dedups the wake-
+// schedule reinsertion, but the user-facing flag still goes out). With
+// seeding, fire-path sees wasActive=true → transition gate holds → no
+// duplicate flag. Closes the asymmetry with clear-path which already
+// cross-checks db.GetHaltCause via hadHaltDB.
+//
+// cite_anchor: plan_usage.go:237/418 asymmetry; commit 9ac82a7
+// (post-rebuild hotfix); ratchet K-1-bis-resolved.
+func TestPlanCapHaltActiveSeededFromDBOnRestart(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	rec := &hubRecorder{}
+	g.SetHubPublisher(rec.publish)
+
+	// Simulate prior-session halt_state row surviving across restart.
+	if err := db.SetHaltActive(hub.HaltCausePlanCap, "pre-restart halt at 96%", "emma"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: in-mem bool starts at zero-value false (fresh Gemma instance).
+	if g.planCapHaltActive {
+		t.Fatal("test setup invalid: planCapHaltActive should start false on fresh Gemma instance")
+	}
+
+	// Seed runs at startup (in production: invoked by Start() between
+	// initPlanUsageDefault and pollLoop).
+	g.seedPlanCapHaltActiveFromDB()
+
+	// Verify seed mirrored DB → in-mem.
+	if !g.planCapHaltActive {
+		t.Fatal("seedPlanCapHaltActiveFromDB() failed: planCapHaltActive=false despite active DB halt_state row")
+	}
+
+	// First over-threshold polls after restart MUST be idempotent — the
+	// transition gate sees wasActive=true (post-seed), so !wasActive is
+	// false → no flag-emit, no wake-schedule. Without the seed this loop
+	// would emit exactly 1 flag (the existing TestFirePlanCapHalt-
+	// IdempotentOnRepeatedOverThresholdPolls baseline).
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.97, 0.98, 0.99},
+		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour},
+	})
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		g.checkPlanUsage(now.Add(time.Duration(i) * (planUsageBaseInterval + time.Second)))
+	}
+
+	if got := countPlanCapFlags(t, db); got != 0 {
+		t.Errorf("post-restart fire-path with seed must be idempotent (DB halt active, in-mem seeded true); got %d new flags — asymmetry not closed", got)
+	}
+}
+
+// TestSeedPlanCapHaltActiveFromDBNoOpWhenNoActiveRow locks the seed's
+// negative path: when no halt_state row exists at startup,
+// planCapHaltActive must remain false (zero-value) so a fresh fire on
+// the first over-threshold poll correctly emits the hub_flag for a
+// genuinely new halt.
+func TestSeedPlanCapHaltActiveFromDBNoOpWhenNoActiveRow(t *testing.T) {
+	g, _ := newContextCapGemma(t)
+
+	// Sanity: no halt row, in-mem bool false.
+	if g.planCapHaltActive {
+		t.Fatal("test setup invalid")
+	}
+
+	g.seedPlanCapHaltActiveFromDB()
+
+	if g.planCapHaltActive {
+		t.Error("seed must be no-op when no halt_state row present; got planCapHaltActive=true")
+	}
+}
