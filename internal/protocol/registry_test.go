@@ -174,6 +174,12 @@ func TestRuleRegistryCoversAllConstRules(t *testing.T) {
 		// Phase J T2.3 addition
 		"HEARTBEAT-LEDGER",
 	}
+
+	// Phase J T2.1-(d) K-10: skill-pointer must be present in const so
+	// agents discover the lazy-load skill name.
+	if !strings.Contains(PhaseIv1ProtocolHardening, "/phase-rules-detail") {
+		t.Errorf("PhaseIv1ProtocolHardening must contain /phase-rules-detail skill pointer (T2.1-(d) lazy-load)")
+	}
 	for _, name := range mustHave {
 		if !phaseIRuleNames[name] {
 			t.Errorf("Rules registry missing PhaseIv1 sub-rule %q", name)
