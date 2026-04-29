@@ -101,6 +101,10 @@ const PhaseJv1HaltResumeProtocol = `- HALT-ALL-WORK (H-31, H-33): on receiving F
 //
 // Brian-only: Rain does not dispatch coders, does not relay force-push
 // tokens. The constant ships in brian.go's prompt only.
+//
+// (R24 MUTUAL-HALT-PROTOCOL appears below as a separate const after
+// H13ForcePushProtocol so the H-13 const stays adjacent to its existing
+// docblock comments.)
 const H13ForcePushProtocol = `H-13 FORCE-PUSH TOKEN PROTOCOL (when coder PMs you with ` + "`request_force_push: <branch>@<sha>`" + `):
 - hub_flag user with the request + the EXACT verbatim token they must reply with: ` + "`force-push-greenlight: <branch>@<sha>`" + `.
 - WAIT for user reply. Do NOT auto-construct or coach the token text — user must type it themselves.
@@ -108,3 +112,18 @@ const H13ForcePushProtocol = `H-13 FORCE-PUSH TOKEN PROTOCOL (when coder PMs you
 - On exact match → hub_send to coder: "force-push approved for <branch>@<sha>". Coder may then push.
 - On miss / mismatch / wrong-sha / wrong-branch → hub_send to coder: "force-push DENIED — token did not match". Coder must NOT push.
 - This gate exists to prevent destructive force-pushes in client projects (boss-safety class). Never bypass.`
+
+// R24MutualHaltProtocol is the locked text describing the bilateral
+// halt-each-other-on-drift protocol authorized by user msg 6396 at
+// Phase K open. Either trio agent (brian or rain) may emit MsgPeerHalt
+// when they observe one of the 7 enumerated drift classes in the
+// other agent's recent activity. Recipient finishes current tool call,
+// stands down, re-reads discipline-anchors.md, calls K-12
+// VerifyDisciplineAnchor, and replies with MsgPeerHaltAck carrying
+// the recovery summary.
+//
+// Phase K K-17. Pairs with K-12 (anchor-checksum drift detection,
+// commit f64ec07) and K-16 (PreToolUse class-split gate, commit
+// fc487fd). Helpers in peerhalt.go (PeerHaltPayload + PeerHaltAck
+// Payload + Build/Parse).
+const R24MutualHaltProtocol = `- MUTUAL-HALT-PROTOCOL (R24): bilateral peer-halt authority granted by user msg 6396 at Phase K open. Either brian or rain may emit MsgPeerHalt when observing drift in the other's recent activity. Recipient finishes current tool call → standdown → re-reads ~/.bot-hq/<self>/discipline-anchors.md → calls protocol.VerifyDisciplineAnchor (K-12) → replies MsgPeerHaltAck with structured recovery_summary. Trigger classes (PeerHaltTrigger constants in peerhalt.go): class-split-violation / outbound-miss-pattern / per-instance-fire-greenflag-skip / r12-brain-2nd-skip / anchor-checksum-mismatch / pm-treated-as-broadcast / force-push-without-elevated-gate. Content payload: PeerHaltPayload JSON via BuildPeerHaltContent. Cite_anchor: user msg 6396 (Phase K open authorization). Per R18 CITE-ANCHOR-REQUIRED.`

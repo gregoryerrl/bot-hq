@@ -98,6 +98,32 @@ const (
 	// MsgFlag — elevated alert. Always [HR]. Hub special-cased
 	// (hub.go:153/228) — triggers Discord notification path.
 	MsgFlag MessageType = "flag"
+
+	// MsgPeerHalt — peer-coord halt request: drift observed in target
+	// agent's recent activity (class-split fire / OUTBOUND-MISS pattern /
+	// per-instance-fire-greenflag skip / R12 BRAIN-2nd skip / anchor-
+	// checksum mismatch / pm-treated-as-broadcast / force-push-without-
+	// elevated-gate).
+	//
+	// Recipient finishes current tool call → standdown → re-reads
+	// discipline-anchors.md → calls VerifyDisciplineAnchor (K-12) →
+	// replies with MsgPeerHaltAck carrying recovery summary.
+	//
+	// Authorized by user msg 6396 (Phase K open) — bilateral
+	// halt-each-other-on-drift authority granted to brian + rain.
+	//
+	// Content payload: JSON via PeerHaltPayload struct (see peerhalt.go).
+	//
+	// Phase K K-17.
+	MsgPeerHalt MessageType = "peer-halt"
+
+	// MsgPeerHaltAck — recipient ack of MsgPeerHalt: standdown completed,
+	// discipline-anchors.md re-read, AgentState verified.
+	//
+	// Content payload: JSON via PeerHaltAckPayload struct (see peerhalt.go).
+	//
+	// Phase K K-17.
+	MsgPeerHaltAck MessageType = "peer-halt-ack"
 )
 
 // ActiveMessageTypes lists the 6 trio-recommended types per
@@ -111,6 +137,8 @@ var ActiveMessageTypes = []MessageType{
 	MsgResult,
 	MsgError,
 	MsgFlag,
+	MsgPeerHalt,    // Phase K K-17 — bilateral halt-each-other-on-drift
+	MsgPeerHaltAck, // Phase K K-17 — peer-halt recipient ack
 }
 
 // DeprecatedMessageTypes lists the 2 legacy-preserved types.
@@ -121,7 +149,8 @@ var DeprecatedMessageTypes = []MessageType{
 
 func (m MessageType) Valid() bool {
 	switch m {
-	case MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError, MsgFlag:
+	case MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError, MsgFlag,
+		MsgPeerHalt, MsgPeerHaltAck:
 		return true
 	}
 	return false

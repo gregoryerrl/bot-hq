@@ -2,26 +2,30 @@ package protocol
 
 import "testing"
 
-// TestMessageTypeTaxonomy locks the Phase J T1.7 (B7 codification) sets:
-// 6 active types + 2 deprecated types. Catches accidental drift in either
-// direction (active type removed without DEPRECATED marker; deprecated
-// type re-promoted without removing from DeprecatedMessageTypes).
+// TestMessageTypeTaxonomy locks the Phase J T1.7 (B7 codification) sets,
+// extended in Phase K K-17 to add MsgPeerHalt + MsgPeerHaltAck.
+//
+// Active types: 8 (6 from Phase J + 2 from K-17 mutual-halt protocol).
+// Deprecated types: 2 (MsgHandshake / MsgQuestion). Catches accidental
+// drift in either direction.
 func TestMessageTypeTaxonomy(t *testing.T) {
 	wantActive := map[MessageType]bool{
-		MsgResponse: true,
-		MsgCommand:  true,
-		MsgUpdate:   true,
-		MsgResult:   true,
-		MsgError:    true,
-		MsgFlag:     true,
+		MsgResponse:    true,
+		MsgCommand:     true,
+		MsgUpdate:      true,
+		MsgResult:      true,
+		MsgError:       true,
+		MsgFlag:        true,
+		MsgPeerHalt:    true, // Phase K K-17
+		MsgPeerHaltAck: true, // Phase K K-17
 	}
 	wantDeprecated := map[MessageType]bool{
 		MsgHandshake: true,
 		MsgQuestion:  true,
 	}
 
-	if len(ActiveMessageTypes) != 6 {
-		t.Errorf("ActiveMessageTypes count = %d, want 6", len(ActiveMessageTypes))
+	if len(ActiveMessageTypes) != 8 {
+		t.Errorf("ActiveMessageTypes count = %d, want 8", len(ActiveMessageTypes))
 	}
 	for _, m := range ActiveMessageTypes {
 		if !wantActive[m] {
@@ -51,7 +55,7 @@ func TestMessageTypeTaxonomy(t *testing.T) {
 	}
 
 	// Cross-check: active ∪ deprecated covers all Valid() types.
-	all := []MessageType{MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError, MsgFlag}
+	all := []MessageType{MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError, MsgFlag, MsgPeerHalt, MsgPeerHaltAck}
 	for _, m := range all {
 		if !m.Valid() {
 			t.Errorf("%q.Valid() = false; expected all enumerated types valid", m)
