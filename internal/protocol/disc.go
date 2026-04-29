@@ -143,6 +143,29 @@ const R24MutualHaltProtocol = `- MUTUAL-HALT-PROTOCOL (R24): bilateral peer-halt
 // K-16 (PreToolUse class-split gate), K-17 (mutual-halt protocol).
 // Helper: protocol.MessageClass type + IsAuthorizationEligible
 // method (types.go).
+// R28PerInstanceFireGreenflag is the locked text codifying the per-
+// instance user-verbatim requirement for HANDS execute actions, with
+// explicit enumeration of the BRAIN-AGREED bypass conditions.
+//
+// Closes the per-instance-fire-greenflag-skip failure class observed
+// bcc-ad-manager session 2026-04-29 (Brian fired staging force-push
+// at msg 6326 + Rain fired gh-issue-create / gh-pr-create at msgs
+// 6350/6358 without explicit user verbatim — both interpreted broader
+// prior user authorization as covering the per-instance fire).
+//
+// Honors user msg 6396 (Phase K open authorization) which explicitly
+// granted BRAIN-AGREED-as-greenflag bypass for Phase K work-thread
+// during AFK windows.
+//
+// Phase K K-15. Pure-rule mechanism (no toolgate hook) — defense-in-
+// depth via siblings: K-12 anchor-checksum, K-14 OUTBOUND-MISS-self-
+// recognition (R27), K-17 mutual-halt protocol (R24, with explicit
+// TriggerPerInstanceFireGreenflagSkip class), K-13 commit gate
+// (R26), K-16 class-split tool gate. Drift on K-15 specifically is
+// catchable by peer via MsgPeerHalt with TriggerPerInstanceFire
+// GreenflagSkip; recovery flow per R24.
+const R28PerInstanceFireGreenflag = `- PER-INSTANCE-FIRE-GREENFLAG (R28): HANDS-class execute actions (git commit / git push / git merge / gh pr create / gh issue create / etc.) require explicit user verbatim authorization PER INSTANCE by default. Broader prior authorization ("ship", "make a PR", "deploy when ready") does NOT cover individual fire instances — each execute fires on user verbatim ("push", "fire", "ship X", "OK to commit", or similar specific to the action). BYPASS via BRAIN-AGREED-as-greenflag: when user explicitly grants BRAIN-AGREED authorization for a work-thread (e.g., user msg 6396 Phase K open: "BRAIN-AGREED = greenflag"), bilateral BRAIN-AGREED convergence between brian and rain on a specific item substitutes for per-instance user verbatim within the granted scope. Bypass scope = the work-thread user explicitly granted (msg 6396 → Phase K Tier-1 work). Bypass terminates on: user explicit withdrawal, phase-close, session-end, OR work-thread completion. Drift class (peer fired execute without per-instance user-verbatim AND outside BRAIN-AGREED scope) → peer fires MsgPeerHalt with TriggerPerInstanceFireGreenflagSkip per R24 mutual-halt protocol. Cite_anchors: msg 6326 (Brian staging force-push pre-greenflag), msg 6358 (Rain gh-pr-create pre-fire), msg 6396 (user BRAIN-AGREED-as-greenflag bypass authorization). Per R18 CITE-ANCHOR-REQUIRED.`
+
 // R26R12CommitGreenflagFooter is the locked text codifying the R12
 // pre-commit gate enforcement: HANDS-class commits must include a
 // `peer-greenflag-msg-id: <N>` footer in the commit message that
