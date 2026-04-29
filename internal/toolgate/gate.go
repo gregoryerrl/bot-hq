@@ -103,6 +103,23 @@ var handsGhTriples = map[string]bool{
 	"gh release upload": true,
 }
 
+// IsCommitPattern returns true if the command line invokes `git commit`
+// (first-2-tokens after quote-respecting tokenization). Reserved for
+// K-13 R12-pre-commit-gate consumption: commits require a peer-greenflag-
+// msg-id footer per R26 + hub.db verification. Distinct from
+// IsHANDSExecutePattern (which catches all HANDS class) — K-13 needs
+// commit-specific detection so it can target the gate at commits only
+// (push / merge / etc. have different semantics for greenflag flow).
+//
+// Phase K K-13.
+func IsCommitPattern(command string) bool {
+	tokens := tokenize(command)
+	if len(tokens) < 2 {
+		return false
+	}
+	return tokens[0] == "git" && tokens[1] == "commit"
+}
+
 // IsForcePushPattern returns true if the command line invokes a
 // force-push operation (`git push -f` / `--force` / `--force-with-lease`
 // variants). Reserved for K-19 elevated-gate consumption: force-push has

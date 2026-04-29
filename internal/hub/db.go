@@ -1178,6 +1178,34 @@ func (db *DB) GetMessagesFromAgent(fromAgent string, sinceID int64, limit int) (
 	return msgs, rows.Err()
 }
 
+// GetMessageByID returns the hub message with the given ID. Returns
+// (zero-value, false, nil) if no message with that ID exists. Used by
+// the K-13 R12-pre-commit gate (toolgate package) to verify a
+// commit-message-cited peer-greenflag-msg-id resolves to a real peer
+// message.
+//
+// Phase K K-13.
+func (db *DB) GetMessageByID(id int64) (protocol.Message, bool, error) {
+	var m protocol.Message
+	var typ string
+	var created int64
+	err := db.conn.QueryRow(
+		`SELECT id, session_id, from_agent, to_agent, type, content, created
+		 FROM messages
+		 WHERE id = ?`,
+		id,
+	).Scan(&m.ID, &m.SessionID, &m.FromAgent, &m.ToAgent, &typ, &m.Content, &created)
+	if err == sql.ErrNoRows {
+		return protocol.Message{}, false, nil
+	}
+	if err != nil {
+		return protocol.Message{}, false, err
+	}
+	m.Type = protocol.MessageType(typ)
+	m.Created = time.UnixMilli(created)
+	return m, true, nil
+}
+
 // HasRecentMessageFrom reports whether any message from the given agent
 // has a created timestamp at or after `since`. Used by Emma's stale-coder
 // detection (Phase I I-6) as a defense-in-depth backstop against the

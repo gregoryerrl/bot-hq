@@ -73,25 +73,45 @@ func RunHook(stdin io.Reader, stderr io.Writer) int {
 		return ExitAllow
 	}
 
-	if !IsHANDSExecutePattern(cmd) {
-		return ExitAllow
+	// K-16 class-split gate: rain + HANDS execute pattern → block.
+	if agentID == "rain" && IsHANDSExecutePattern(cmd) {
+		tokens := tokenize(cmd)
+		pattern := ""
+		if len(tokens) >= 2 {
+			pattern = tokens[0] + " " + tokens[1]
+		}
+		fmt.Fprintf(stderr,
+			"K-16 class-split gate: rain (EYES) cannot fire HANDS execute pattern.\n"+
+				"Command: %s\n"+
+				"Pattern: %s\n"+
+				"Re-anchor: ~/.bot-hq/rain/discipline-anchors.md § class-split\n"+
+				"Brian (HANDS) executes; Rain drafts + surfaces + greenflags.\n"+
+				"Recovery: if user authorized this directly, brian fires; if PM-from-brian implied this, hold for user broadcast.\n",
+			cmd, pattern,
+		)
+		return ExitBlock
 	}
 
-	// rain + HANDS execute pattern → block.
-	tokens := tokenize(cmd)
-	pattern := ""
-	if len(tokens) >= 2 {
-		pattern = tokens[0] + " " + tokens[1]
+	// K-13 R12-pre-commit gate: any HANDS-class committer (typically
+	// brian, but applies to whoever fires the commit) must cite a
+	// peer-greenflag-msg-id footer that resolves to a real peer
+	// greenflag in hub.db within the recency window. Only fires on
+	// `git commit` (specifically) — push / merge / etc. have different
+	// gate semantics.
+	if IsCommitPattern(cmd) {
+		verdict := VerifyCommit(cmd, agentID)
+		if !verdict.Allow {
+			fmt.Fprintf(stderr,
+				"K-13 R12 pre-commit gate: commit blocked.\n"+
+					"Reason: %s\n"+
+					"Re-anchor: ~/.bot-hq/%s/discipline-anchors.md § R12 BRAIN-2nd pre-commit\n"+
+					"Recovery: surface diff to peer for BRAIN-2nd review; on peer greenflag (substring 'BRAIN-AGREED' or 'GREENFLAG' in their reply), add `peer-greenflag-msg-id: <N>` footer to commit message.\n"+
+					"Bypass (emergency only, logged): export BRIAN_R12_OVERRIDE=1 before commit.\n",
+				verdict.Reason, agentID,
+			)
+			return ExitBlock
+		}
 	}
 
-	fmt.Fprintf(stderr,
-		"K-16 class-split gate: rain (EYES) cannot fire HANDS execute pattern.\n"+
-			"Command: %s\n"+
-			"Pattern: %s\n"+
-			"Re-anchor: ~/.bot-hq/rain/discipline-anchors.md § class-split\n"+
-			"Brian (HANDS) executes; Rain drafts + surfaces + greenflags.\n"+
-			"Recovery: if user authorized this directly, brian fires; if PM-from-brian implied this, hold for user broadcast.\n",
-		cmd, pattern,
-	)
-	return ExitBlock
+	return ExitAllow
 }

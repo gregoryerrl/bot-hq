@@ -143,6 +143,27 @@ const R24MutualHaltProtocol = `- MUTUAL-HALT-PROTOCOL (R24): bilateral peer-halt
 // K-16 (PreToolUse class-split gate), K-17 (mutual-halt protocol).
 // Helper: protocol.MessageClass type + IsAuthorizationEligible
 // method (types.go).
+// R26R12CommitGreenflagFooter is the locked text codifying the R12
+// pre-commit gate enforcement: HANDS-class commits must include a
+// `peer-greenflag-msg-id: <N>` footer in the commit message that
+// resolves to a real peer greenflag in hub.db within the recency
+// window.
+//
+// Closes the R12 BRAIN-2nd-pre-commit gate-skip failure class
+// observed bcc-ad-manager session 2026-04-29 (Brian fired staging
+// force-push at msg 6326 + Path 3 commit at msg 6371 without
+// surfacing diff for Rain BRAIN-2nd). User msg 6391 acknowledged
+// the bilateral deviation pattern + committed to discipline-tightening
+// for tomorrow's cycle — this rule + the K-13 toolgate hook codify
+// the enforcement.
+//
+// Phase K K-13. Helper: toolgate.VerifyCommit(command, agentID)
+// R12Verdict — checks footer existence + hub.db msg-existence +
+// from-peer + within-window + greenflag-content. Recency window
+// default 60min, override via R12_GREENFLAG_WINDOW_MIN env var.
+// Bypass (emergency only, logged): BRIAN_R12_OVERRIDE=1 env var.
+const R26R12CommitGreenflagFooter = `- R12-COMMIT-GREENFLAG-FOOTER (R26): HANDS-class git commits MUST include a footer line ` + "`peer-greenflag-msg-id: <N>`" + ` referencing the hub message ID where the peer agent issued the BRAIN-2nd greenflag. The K-13 PreToolUse gate (toolgate.VerifyCommit) verifies: (1) footer present + msg-id is positive integer, (2) hub.db message <N> exists, (3) message FROM peer (not self), (4) message within recency window (default 60min, R12_GREENFLAG_WINDOW_MIN env var override), (5) message content contains greenflag-class substring (BRAIN-AGREED or GREENFLAG). All checks must pass; commit blocks otherwise. Soft-allow paths (logged via SkippedForm): editor-form / amend-form / hubdb-absent / override env var. Bypass (emergency only): export BRIAN_R12_OVERRIDE=1 before commit. Cite_anchors: msg 6326 (staging force-push pre-Rain-greenflag), msg 6371 (Path 3 commit pre-surface), msg 6391 (user acknowledged bilateral deviation + discipline-tightening commitment). Per R18 CITE-ANCHOR-REQUIRED.`
+
 // R27OutboundMissSelfRecognition is the locked text codifying the
 // recognition pattern for OUTBOUND-MISS system flags against self.
 // The OUTBOUND-MISS Stop hook (per outboundhook package) attributes
