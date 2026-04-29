@@ -186,6 +186,73 @@ const (
 	ModeChat       SessionMode = "chat"
 )
 
+// MessageClass classifies a hub message by sender+recipient axis for the
+// PM-vs-broadcast authorization-input discipline (R25). Determines
+// whether the message can authorize execute-class actions (commit /
+// push / merge / gh-pr-create / gh-issue-create / etc.) per
+// IsAuthorizationEligible.
+//
+// Phase K K-18. Closes the "no actions on pms" lost-discipline class
+// surfaced by user msg 6391 — peer PMs are coord-only, not authorization,
+// regardless of content. Only [HUB:user] broadcasts and [PM:user] direct
+// messages authorize execute actions.
+//
+// Severity tags ([FLAG:*] / [CRITICAL:*] / etc.) are orthogonal to class
+// — same MessageClass with different severity. Class itself doesn't
+// subdivide on severity.
+type MessageClass string
+
+const (
+	// MsgClassUserBroadcast — [HUB:user] hub-broadcast from user. Auth-eligible.
+	MsgClassUserBroadcast MessageClass = "user-broadcast"
+
+	// MsgClassUserPM — [PM:user] direct message from user. Auth-eligible.
+	MsgClassUserPM MessageClass = "user-pm"
+
+	// MsgClassPeerPM — [PM:<peer>] peer-coord PM (brian↔rain). NOT auth.
+	// Peer PMs are coordination-class only; receiving agent does not act
+	// on PM-implied direction without separate user broadcast/PM.
+	MsgClassPeerPM MessageClass = "peer-pm"
+
+	// MsgClassPeerBroadcast — [HUB:<peer>] peer-broadcast (visible to user
+	// + other peer). NOT auth — peer broadcasts are status/coord, not
+	// directives the receiving agent must act on.
+	MsgClassPeerBroadcast MessageClass = "peer-broadcast"
+
+	// MsgClassObservation — [HUB-OBS:<sender>→<recipient>] cross-traffic
+	// the observer sees but isn't a direct recipient of. NOT actionable
+	// regardless of from-direction.
+	MsgClassObservation MessageClass = "observation"
+
+	// MsgClassSystemFlag — emma's auto-emissions: HEARTBEAT-LEDGER /
+	// PRE-COMPACT-SNAP / STALE-CODER / RESUME / [FLAG:emma] halt-fires.
+	// System-state pulses, not directives. NOT auth.
+	MsgClassSystemFlag MessageClass = "system-flag"
+)
+
+// AllMessageClasses lists the 6 message classes per Phase K K-18
+// codification. Schema-lock test asserts the closure (catches
+// accidental class removal/rename without test update).
+var AllMessageClasses = []MessageClass{
+	MsgClassUserBroadcast,
+	MsgClassUserPM,
+	MsgClassPeerPM,
+	MsgClassPeerBroadcast,
+	MsgClassObservation,
+	MsgClassSystemFlag,
+}
+
+// IsAuthorizationEligible reports whether a message of this class can
+// authorize execute-class actions. Returns true only for user-class
+// messages ([HUB:user] broadcast or [PM:user] direct). Peer / observation
+// / system-flag classes never authorize execute actions — those agents
+// must hold for explicit user authorization on user-class messages.
+//
+// Phase K K-18.
+func (c MessageClass) IsAuthorizationEligible() bool {
+	return c == MsgClassUserBroadcast || c == MsgClassUserPM
+}
+
 func (s SessionMode) Valid() bool {
 	switch s {
 	case ModeBrainstorm, ModeImplement, ModeChat:
