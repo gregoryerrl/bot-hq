@@ -143,6 +143,24 @@ const R24MutualHaltProtocol = `- MUTUAL-HALT-PROTOCOL (R24): bilateral peer-halt
 // K-16 (PreToolUse class-split gate), K-17 (mutual-halt protocol).
 // Helper: protocol.MessageClass type + IsAuthorizationEligible
 // method (types.go).
+// R30HRTagDiscriminator is the locked text codifying when the [HR]
+// (high-relevance / must-read) prefix tag applies to hub messages vs
+// when messages should ship UNTAGGED (compact-eligible). Refines the
+// existing AUDIENCE-CLASS-DISCRIMINATOR rule with an explicit AFK-window
+// default + the use/drop class-split.
+//
+// Closes the [HR]-overhead-during-AFK class surfaced by user msg 6420
+// ("you can probably stop using HR since I'm afk... harden this on
+// phase K"). Without this rule, agents default to [HR]-tagging
+// agent-to-agent BRAIN-cycle traffic that the user doesn't read in
+// real time — wastes user-attention prefix-budget when user returns
+// and sees a flood of [HR]-tagged peer-coord messages.
+//
+// Phase K K-22. Pure-rule mechanism (no toolgate hook) — discipline-
+// anchors.md update on each agent codifies the use/drop matrix +
+// table-form lookup at message-emit time.
+const R30HRTagDiscriminator = `- HR-TAG-DISCRIMINATOR (R30): the [HR] prefix tags messages as USER-MUST-READ when user returns post-AFK or is actively observing. Default for AFK-window agent-to-agent BRAIN-cycle work = UNTAGGED (compact-eligible). Apply [HR] ONLY when content meets MUST-READ criteria. USE [HR] for: (1) hub_flag elevations awaiting user-decision; (2) direct user-PMs from agent (or content user-PM-equivalent); (3) PR / issue / comment bodies destined for GitHub (team-visible content); (4) commit messages user reviews on next-session-resume; (5) EOD content for daily report; (6) final proposals where user-direction-needed is next step; (7) substantive state changes during AFK (deliverable-shipped / Tier-1-closed / similar milestone); (8) escalation events (HALT-fire / RESUME / drift detected via R24 mutual-halt). DROP [HR] (use untagged compact form) for: (a) agent-to-agent PMs (peer-coord between brian/rain); (b) peer-acks ("." terminator / "concur"-class brief acks); (c) agent-side BRAIN-cycle exchanges within AFK work-thread; (d) trio AFK-window coordination (state-anchor pulses / heartbeat-acks / scope-clarifications between agents); (e) passive observations ([HUB-OBS:*→*] cross-traffic the observer isn't direct recipient of); (f) routine workflow updates that don't change user-decision-state. Discriminator: "must the user read this for correctness or decision?" Yes or unsure → [HR]. Confident no → no tag. Prescriptive (must read) NOT descriptive (is reading) — passive observation ≠ required reading. When unsure, tag [HR]; false-untagged costs user-comprehensibility, comprehensibility loss is worse. Cite_anchor: user msg 6420 ("you can probably stop using HR since I'm afk... harden this on phase K"). Per R18 CITE-ANCHOR-REQUIRED.`
+
 // R29ForcePushElevatedGate is the locked text codifying the elevated
 // gate for force-push operations. Force-push rewrites git history —
 // higher reversibility cost than regular push — so the gate stacks
