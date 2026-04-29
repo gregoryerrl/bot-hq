@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -47,6 +49,17 @@ type AgentState struct {
 	// (>1h delta from now()) suggests skipped writes; agent flags
 	// missing-write-discipline at bootstrap.
 	LastStateWrite time.Time `json:"last_state_write_at"`
+
+	// DisciplineAnchorSHA256 is the SHA-256 hex digest of the agent's
+	// ~/.bot-hq/<agentID>/discipline-anchors.md file at the moment of
+	// last AgentState write. R16 bootstrap recomputes the current SHA
+	// and compares — mismatch indicates the agent's loaded discipline
+	// context drifted (e.g., post-autocompact or post-anchor-edit
+	// without re-read) and triggers the K-17 mutual-halt protocol.
+	//
+	// Phase K K-12 — closes the autocompact-induced discipline-drift
+	// failure class observed bcc-ad-manager session 2026-04-29.
+	DisciplineAnchorSHA256 string `json:"discipline_anchor_sha256"`
 }
 
 // agentStateDir returns the per-agent state directory honoring
@@ -121,4 +134,76 @@ func ReadAgentState(agentID string) (AgentState, error) {
 		return AgentState{}, err
 	}
 	return state, nil
+}
+
+// disciplineAnchorPath returns the full path to the per-agent
+// discipline-anchors.md file. Lives alongside last_state.json under
+// the same per-agent directory so a single agentStateDir lookup serves
+// both R20 AgentState persistence and K-12 anchor-checksum verification.
+func disciplineAnchorPath(agentID string) (string, error) {
+	dir, err := agentStateDir(agentID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "discipline-anchors.md"), nil
+}
+
+// ComputeDisciplineAnchorSHA256 reads the agent's discipline-anchors.md
+// file and returns its SHA-256 hex digest. Returns ("", nil) if the file
+// is absent (acceptable first-write state — caller decides whether to
+// treat as drift via VerifyDisciplineAnchor's stored-vs-current logic).
+// Returns ("", err) on I/O error.
+//
+// Phase K K-12 — feeds VerifyDisciplineAnchor's drift detection during
+// R16 bootstrap.
+func ComputeDisciplineAnchorSHA256(agentID string) (string, error) {
+	path, err := disciplineAnchorPath(agentID)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// VerifyDisciplineAnchor compares the stored AgentState's
+// DisciplineAnchorSHA256 against the currently-computed SHA. Returns
+// (matches, currentSHA, err).
+//
+// matches=false signals R16 bootstrap should halt + auto-PM peer per
+// K-17 mutual-halt protocol (autocompact-induced anchor drift OR file
+// accidentally deleted between checkpoints).
+//
+// Three semantic branches:
+//  1. stored empty → matches=true (first-ever bootstrap; no drift
+//     detectable yet; caller persists currentSHA so subsequent boots
+//     can detect drift)
+//  2. stored non-empty + file absent → matches=false (drift signal:
+//     anchor file was present at last checkpoint but is now gone)
+//  3. stored non-empty + file present → match by SHA equality
+//
+// Phase K K-12.
+func VerifyDisciplineAnchor(agentID string, stored AgentState) (bool, string, error) {
+	current, err := ComputeDisciplineAnchorSHA256(agentID)
+	if err != nil {
+		return false, "", err
+	}
+	if stored.DisciplineAnchorSHA256 == "" {
+		return true, current, nil
+	}
+	if current == "" {
+		// File absent but stored non-empty — anchor file vanished
+		// between last checkpoint and this bootstrap. Drift signal.
+		return false, "", nil
+	}
+	if current != stored.DisciplineAnchorSHA256 {
+		return false, current, nil
+	}
+	return true, current, nil
 }
