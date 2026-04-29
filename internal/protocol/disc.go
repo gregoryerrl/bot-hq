@@ -143,6 +143,27 @@ const R24MutualHaltProtocol = `- MUTUAL-HALT-PROTOCOL (R24): bilateral peer-halt
 // K-16 (PreToolUse class-split gate), K-17 (mutual-halt protocol).
 // Helper: protocol.MessageClass type + IsAuthorizationEligible
 // method (types.go).
+// R27OutboundMissSelfRecognition is the locked text codifying the
+// recognition pattern for OUTBOUND-MISS system flags against self.
+// The OUTBOUND-MISS Stop hook (per outboundhook package) attributes
+// the notification to the agent whose pane-text-only emission was
+// detected — this makes the system-flag LOOK like the agent's own
+// legitimate hub message in the from_agent field.
+//
+// Closes the recognition-gap surfaced bcc-ad-manager session
+// 2026-04-29 (Rain misread msg 6071 OUTBOUND-MISS notification as
+// her own legit reply per msg 6076 "already-answered-user-via-msg-
+// 6071" claim — pattern-matched on from_agent=rain without
+// inspecting content prefix).
+//
+// Phase K K-14. Helper: protocol.IsOutboundMissNotification (msg,
+// selfAgentID) bool — discriminator on content prefix
+// [OUTBOUND-MISS] (deterministic) AND from_agent == selfAgentID.
+//
+// Pairs with K-18 MsgClassSystemFlag (the notification's class —
+// not auth-eligible per K-18 IsAuthorizationEligible).
+const R27OutboundMissSelfRecognition = `- OUTBOUND-MISS-SELF-RECOGNITION (R27): hub messages with from_agent=<self> AND content prefix ` + "`[OUTBOUND-MISS]`" + ` are SYSTEM FLAGS against this agent's missing hub_send tool call, NOT this agent's legitimate output. Discriminator: inspect content prefix (deterministic), NOT just from_agent (which makes the flag LOOK like own output). Helper: protocol.IsOutboundMissNotification(msg, selfAgentID). Recovery on detection: backfill the missed reply via explicit hub_send + log self-discipline lapse to ~/.bot-hq/<self>/discipline-anchors.md if the pattern recurs (3+ in a session = systemic; surface via MsgPeerHalt to peer per R24 mutual-halt). Cite_anchor: bcc-ad-manager session 2026-04-29 (Rain misread msg 6071 OUTBOUND-MISS notification as her own legit reply per msg 6076 "already-answered-user-via-msg-6071" claim). Per R18 CITE-ANCHOR-REQUIRED.`
+
 const R25PMVsBroadcastAuthorization = `- PM-VS-BROADCAST-AUTHORIZATION (R25): only user-class messages authorize execute actions. Map message-class → authorization eligibility:
 - [HUB:user] broadcast → MsgClassUserBroadcast → AUTH-ELIGIBLE
 - [PM:user] direct → MsgClassUserPM → AUTH-ELIGIBLE
