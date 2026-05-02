@@ -289,3 +289,37 @@ Severity tags ([FLAG:*] / [CRITICAL:*]) are orthogonal — same MessageClass wit
 //   - BRAIN-cycle msgs: 7164-7231 (Phase L kickoff through L-1+L-2 PASS-2-FINAL)
 const PhaseLv1RulebookHardening = `- STAT-CLAIM-CITE (R31): numerical claims (stat counts, line counts, msg-ids cited as anchors, recurrence counts) MUST cite verifiable command output (` + "`git diff --numstat`" + `, ` + "`hub_read since_id=<N>`" + `, file read, grep output) before emit. Peer-cross-check enforcement: drafter cites verified ground-truth pre-emit; peer verifies cite matches output. Recursive proof-of-need: amend-passes for prior stat-claim drift can themselves contain stat-claim drift; peer-cross-check at each amend-depth until L-5 toolgate gate-CHECK enforcement-conversion lands. Discriminator: any number cited from session-recall (without command-output verification) is high-risk for drift. Cite_anchor: discipline-log #10/#13/#16/#17/#19/#20/#23 (recursive instances during L-0+L-2 authoring) + 2026-04-30 cite-msg-id-precision-discipline (brian/discipline-anchors.md). Per R18 CITE-ANCHOR-REQUIRED.
 - SCOPE-FORK-CONFIRMATION (R32): when user phrasing has fork-able scope (UNTIL/INCLUDING/JUST/etc. ambiguity-keywords; or push/commit/merge/rebuild+restart interpretation forks), agent MUST surface interpretation pre-action via hub_send before firing any HANDS-execute step. Default-leans permitted only if explicit user pre-delegation OR durable feedback-memory authority covers (e.g., feedback_bot_hq_push_gate_strictness.md authority on push-class). Surface format: enumerate possible reads (a/b/c) + state lean + cite-anchor for default + invite halt-before-fire. Cost-asymmetry: surface-cost low + wrong-fire-cost high. Cite_anchor: discipline-log #12 (msg 7137-7147 "proceed UNTIL X" rebuild+restart fork) + push-fork-resolution thread (msgs 7203/7205) + #18 (msg 7215-7217 git-vs-state workflow-fork). Per R18 CITE-ANCHOR-REQUIRED.`
+
+// PhaseLv5GateProtocol bundles the Phase L L-5 commit-1 R-rule:
+// R33 PRE-EXECUTE-GATE-FILE-READ. The rule mandates HANDS-class
+// execute actions (git commit / git push / git merge / gh pr merge)
+// consult the corresponding gate-file at ~/.bot-hq/gates/ before
+// fire, with proof-of-consultation via SHA-cite (commit/push) or
+// AgentState-cite (merge — no commit-footer slot).
+//
+// L-5 commit-1 ships rule-text only (this const + agent embeds +
+// substring-lock + header-anchor + prompt-embed tests). L-5 commit-2
+// ships the toolgate gate-CHECK hook that enforces SHA-cite freshness
+// — rebuild required at halt-and-elevate-point-#2 for runtime
+// behavior load.
+//
+// Freshness metric (F4-unification across all 3 gate-files): AgentState
+// cite must be within "5 self-agent messages" of the execute-fire turn
+// (msg-count metric, harness-clock-independent, ties to R20
+// BOOTSTRAP-ON-CONVERSATION-RESUME pattern).
+//
+// Origin: Phase L L-5 BRAIN-cycle msgs 7283-7290 (Rain BRAIN-2nd
+// counter-lean 2-commit-split + Q1-4 dispositions + F1+F4 pre-commit-1
+// amends + F7+F8 residual-log + GREENFLAG msg 7290).
+//
+// Cite_anchors:
+//   - phase-l.md scope-lock: ~/.bot-hq/phase/phase-l.md (row L-5)
+//   - L-4 discipline-log: ~/.bot-hq/discipline-log.md (recursion-depth-5
+//     stat-claim drift empirical proof — PEER-CROSS-CHECK-ONLY
+//     non-terminal; toolgate gate-CHECK is the load-bearing
+//     recursion-terminator)
+//   - Gate-files (Phase 0 state-write at L-5 fire):
+//     ~/.bot-hq/gates/pre-commit-checklist.md (SHA d41e877d4b0176ba7acaa92441d2938b8b386401ad605b9a2014371661afa472)
+//     ~/.bot-hq/gates/pre-push-checklist.md (SHA b34fcd8f3e7365a43fe5174bedeff1f15359922ef6518ef23ace3c334cfbb5de)
+//     ~/.bot-hq/gates/pre-merge-checklist.md (SHA c626fd7a9a6347f66fd91d92b1414d526e2d600f993ed8c4e18ca4e533c600db)
+const PhaseLv5GateProtocol = `- PRE-EXECUTE-GATE-FILE-READ (R33): HANDS-class execute actions (` + "`git commit`" + ` / ` + "`git push`" + ` / ` + "`git merge`" + ` / ` + "`gh pr merge`" + `) MUST consult the corresponding gate-file at ~/.bot-hq/gates/ before fire: pre-commit-checklist.md (commit) / pre-push-checklist.md (push) / pre-merge-checklist.md (merge). Proof-of-consultation cite mechanism: (a) git-commit footer line ` + "`Pre-commit-checklist-SHA: <sha256>`" + ` MUST match SHA256 of current pre-commit-checklist.md; (b) git-push footer line ` + "`Pre-push-checklist-SHA: <sha256>`" + ` on most-recent-commit-being-pushed OR AgentState ` + "`pre_push_checklist_sha_seen`" + ` field current within last 5 self-agent messages of the push-fire turn (msg-count freshness metric, F4-unification); (c) merge — AgentState ` + "`pre_merge_checklist_sha_seen`" + ` field current within last 5 self-agent messages of the merge-fire turn (no commit-footer slot on merge command form). Toolgate gate-CHECK enforcement (L-5 commit-2; halt-and-elevate-#2 rebuild dependency): PreToolUse hook on git-commit/git-push/gh-pr-merge verifies SHA-cite or AgentState-cite freshness; mismatch blocks fire. Bypass scope per gate-files (source-of-truth at ~/.bot-hq/gates/ ranks above this rule-text per R18): commit-class has emergency override ` + "`BRIAN_PRE_COMMIT_GATE_OVERRIDE=1`" + ` (logged + audited at L-6 retro per pre-commit-checklist.md§Bypass); push-class has NO normal-bypass per pre-push-checklist.md§Bypass (force-push uses R29 elevated gate, separate path); merge-class is USER-ONLY ABSOLUTE per R12 GATE-PROTOCOL + pre-merge-checklist.md§Authority — no agent-side override. Cite_anchor: phase-l.md§Tier-shape L-5 + L-4 discipline-log #9-#26 chronic-class observation (recursion-depth-5 stat-claim drift empirical proof PEER-CROSS-CHECK-ONLY non-terminal; toolgate gate-CHECK is the load-bearing recursion-terminator) + R12 GATE-PROTOCOL push/merge user-only-ABSOLUTE pre-existing authority. Per R18 CITE-ANCHOR-REQUIRED.`

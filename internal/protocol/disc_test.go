@@ -102,3 +102,53 @@ func TestPhaseLv1RulebookHardeningHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- STAT-CLAIM-CITE (R31):` (prompt anchor); first 50 chars: %q", PhaseLv1RulebookHardening[:50])
 	}
 }
+
+// Phase L L-5 commit-1 ratchet: pin load-bearing recognition substrings
+// of the PRE-EXECUTE-GATE-FILE-READ (R33) rule. These tokens are what
+// the agent prompt uses to recognize gate-file consultation discipline
+// before HANDS-execute fire (commit/push/merge). Any wording change
+// that drops one of these substrings breaks the rule's substance.
+//
+// Substring-lock anchor strategy (per F6): anchor on rule-name + cite-format
+// identifiers + freshness-metric (F4) + filesystem location. NOT on body
+// example tokens (those rotate). Locked anchors:
+//   - Rule-name: "PRE-EXECUTE-GATE-FILE-READ (R33)"
+//   - Commit cite-format: "Pre-commit-checklist-SHA"
+//   - Push cite-format: "Pre-push-checklist-SHA"
+//   - Merge AgentState field: "pre_merge_checklist_sha_seen"
+//   - Freshness-metric (F4): "5 self-agent messages"
+//   - Filesystem location: "~/.bot-hq/gates/"
+//
+// Origin: Phase L L-5 commit-1; codified to enforce gate-file consultation
+// discipline at HANDS-execute boundary. L-5 commit-2 ships the toolgate
+// hook that operationalizes this rule (SHA-cite verification at
+// PreToolUse on git-commit/git-push/gh-pr-merge).
+func TestPreExecuteGateFileReadSubstringLock(t *testing.T) {
+	must := []string{
+		"PRE-EXECUTE-GATE-FILE-READ (R33)",
+		"Pre-commit-checklist-SHA",
+		"Pre-push-checklist-SHA",
+		"pre_merge_checklist_sha_seen",
+		"5 self-agent messages",
+		"~/.bot-hq/gates/",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseLv5GateProtocol, lit) {
+				t.Errorf("R33 PRE-EXECUTE-GATE-FILE-READ ratchet broken: missing literal %q in PhaseLv5GateProtocol", lit)
+			}
+		})
+	}
+}
+
+// Phase L L-5 prompt-embed verification: PhaseLv5GateProtocol
+// must be embedded in both rain.go + brian.go initialPrompt() so the
+// new R33 rule is loaded at agent-spawn time. Mirrors L-1 wiring-lock
+// pattern; catches the "const exists but isn't wired" class.
+func TestPhaseLv5GateProtocolHeaderAnchor(t *testing.T) {
+	// Verify const starts with R33 PRE-EXECUTE-GATE-FILE-READ header — slots
+	// cleanly into agent prompt at the expected anchor position.
+	if !strings.HasPrefix(PhaseLv5GateProtocol, "- PRE-EXECUTE-GATE-FILE-READ (R33):") {
+		t.Errorf("rule must start with `- PRE-EXECUTE-GATE-FILE-READ (R33):` (prompt anchor); first 60 chars: %q", PhaseLv5GateProtocol[:60])
+	}
+}

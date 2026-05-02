@@ -116,6 +116,20 @@ func TestBrianPromptEmbedsPhaseLv1RulebookHardening(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseLv5GateProtocol verifies the Phase L L-5
+// commit-1 R33 PRE-EXECUTE-GATE-FILE-READ const is wired into Brian's
+// prompt. Mirror in rain_test.go locks the rain-side wiring. The const
+// itself is locked via TestPreExecuteGateFileReadSubstringLock in
+// disc_test.go (substring lock on 6 anchors: rule-name + 3 cite-format
+// + freshness-metric + filesystem location).
+func TestBrianPromptEmbedsPhaseLv5GateProtocol(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseLv5GateProtocol) {
+		t.Errorf("initial prompt must embed protocol.PhaseLv5GateProtocol verbatim (Phase L L-5 wiring lock)")
+	}
+}
+
 // TestPhaseIv1ContentShape pins the load-bearing rule names inside the
 // Phase I const so accidental rule-deletion in future edits fails CI.
 // One assertion per rule. If a rule name needs to change, this test

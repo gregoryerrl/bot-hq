@@ -289,6 +289,8 @@ DISC v2 2026-04-24:
 
 ` + protocol.PhaseLv1RulebookHardening + `
 
+` + protocol.PhaseLv5GateProtocol + `
+
 ` + protocol.H13ForcePushProtocol + `
 
 Start now: follow STARTUP.`

@@ -178,6 +178,18 @@ func TestRainPromptEmbedsPhaseLv1RulebookHardening(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseLv5GateProtocol — rain-side wiring lock
+// for Phase L L-5 commit-1 R33 PRE-EXECUTE-GATE-FILE-READ rule. Mirrors
+// brian-side embed test. Same const-exists-but-not-wired class
+// prevention.
+func TestRainPromptEmbedsPhaseLv5GateProtocol(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseLv5GateProtocol) {
+		t.Errorf("initial prompt must embed protocol.PhaseLv5GateProtocol verbatim (Phase L L-5 wiring lock)")
+	}
+}
+
 // Ratchet against the cliff-hang failure mode observed at msg 2086-2092
 // on 2026-04-25: scope changes within an ongoing decision require a
 // fresh flag, not silent continuation. The old "1 concern = 1 flag"
