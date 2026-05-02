@@ -164,6 +164,20 @@ func TestInitialPromptEmbedsPhaseIv1ProtocolHardening(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseLv1RulebookHardening — rain-side mirror of
+// the brian_test.go variant. Wiring lock for Phase L R31/R32 rules in
+// Rain prompt. Catches the "const exists but isn't wired" class
+// observed for K-Tier-1 R24-R30 (defined in disc.go but not embedded
+// in initialPrompt()); surfaced in Phase L L-2 rule-locus-inventory
+// exercise.
+func TestRainPromptEmbedsPhaseLv1RulebookHardening(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseLv1RulebookHardening) {
+		t.Errorf("initial prompt must embed protocol.PhaseLv1RulebookHardening verbatim (Phase L wiring lock)")
+	}
+}
+
 // Ratchet against the cliff-hang failure mode observed at msg 2086-2092
 // on 2026-04-25: scope changes within an ongoing decision require a
 // fresh flag, not silent continuation. The old "1 concern = 1 flag"

@@ -99,6 +99,23 @@ func TestInitialPromptEmbedsPhaseIv1ProtocolHardening(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseLv1RulebookHardening verifies the Phase L
+// const is wired into Brian's prompt. Mirror in rain_test.go locks the
+// rain-side wiring. The const itself is locked via
+// TestStatClaimCiteSubstringLock + TestScopeForkConfirmationSubstringLock
+// in disc_test.go.
+//
+// Catches the "const exists but isn't wired" class observed for K-Tier-1
+// R24-R30 (defined in disc.go but not referenced from initialPrompt());
+// surfaced in Phase L L-2 rule-locus-inventory exercise.
+func TestBrianPromptEmbedsPhaseLv1RulebookHardening(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseLv1RulebookHardening) {
+		t.Errorf("initial prompt must embed protocol.PhaseLv1RulebookHardening verbatim (Phase L wiring lock)")
+	}
+}
+
 // TestPhaseIv1ContentShape pins the load-bearing rule names inside the
 // Phase I const so accidental rule-deletion in future edits fails CI.
 // One assertion per rule. If a rule name needs to change, this test

@@ -267,3 +267,25 @@ const R25PMVsBroadcastAuthorization = `- PM-VS-BROADCAST-AUTHORIZATION (R25): on
 - [HUB-OBS:<from>→<to>] observation → MsgClassObservation → NOT ACTIONABLE (cross-traffic; observer not a direct recipient)
 - [emma]/[FLAG:emma] emma system-flag → MsgClassSystemFlag → NOT AUTH (state pulse; not directive)
 Severity tags ([FLAG:*] / [CRITICAL:*]) are orthogonal — same MessageClass with different severity. Helper: protocol.MessageClass.IsAuthorizationEligible. Cite_anchor: user msg 6391. Per R18 CITE-ANCHOR-REQUIRED.`
+
+// PhaseLv1RulebookHardening bundles the two Tier-1 trio-self R-rules added
+// in Phase L L-1 (rulebook tier-spec + rule-locus-inventory): R31
+// STAT-CLAIM-CITE and R32 SCOPE-FORK-CONFIRMATION. Both rules ship with
+// load-bearing recognition substrings (verified via TestStatClaimCiteSubstringLock
+// + TestScopeForkConfirmationSubstringLock) and are embedded in both rain.go
+// + brian.go initialPrompt() per L-2 rule-locus-inventory placement.
+//
+// Origin: Phase L L-1 BRAIN-cycle msgs 7164-7231; codified after recursive
+// stat-claim-drift + scope-fork-drift chronic-class observation during L-0
+// + L-1+L-2 amend cycles (16 today's discipline-log entries #9-#24 + recursive
+// proof-of-need stacking #19/#20/#23/#24). L-1 rulebook-tier-spec.md +
+// L-2 rule-locus-inventory.md document the broader framework; this const
+// is the runtime rule-text for the agent prompts.
+//
+// Cite_anchors:
+//   - phase-l.md scope-lock: ~/.bot-hq/phase/phase-l.md (rows L-1)
+//   - L-0 retrospective baseline: docs/plans/2026-05-02-phase-l-L0-bcc-ad-manager-retrospective.md (commit fcae26e)
+//   - L-1+L-2 commit-1: 2dbbbcf (rulebook-tier-spec.md + rule-locus-inventory.md)
+//   - BRAIN-cycle msgs: 7164-7231 (Phase L kickoff through L-1+L-2 PASS-2-FINAL)
+const PhaseLv1RulebookHardening = `- STAT-CLAIM-CITE (R31): numerical claims (stat counts, line counts, msg-ids cited as anchors, recurrence counts) MUST cite verifiable command output (` + "`git diff --numstat`" + `, ` + "`hub_read since_id=<N>`" + `, file read, grep output) before emit. Peer-cross-check enforcement: drafter cites verified ground-truth pre-emit; peer verifies cite matches output. Recursive proof-of-need: amend-passes for prior stat-claim drift can themselves contain stat-claim drift; peer-cross-check at each amend-depth until L-5 toolgate gate-CHECK enforcement-conversion lands. Discriminator: any number cited from session-recall (without command-output verification) is high-risk for drift. Cite_anchor: discipline-log #10/#13/#16/#17/#19/#20/#23 (recursive instances during L-0+L-2 authoring) + 2026-04-30 cite-msg-id-precision-discipline (brian/discipline-anchors.md). Per R18 CITE-ANCHOR-REQUIRED.
+- SCOPE-FORK-CONFIRMATION (R32): when user phrasing has fork-able scope (UNTIL/INCLUDING/JUST/etc. ambiguity-keywords; or push/commit/merge/rebuild+restart interpretation forks), agent MUST surface interpretation pre-action via hub_send before firing any HANDS-execute step. Default-leans permitted only if explicit user pre-delegation OR durable feedback-memory authority covers (e.g., feedback_bot_hq_push_gate_strictness.md authority on push-class). Surface format: enumerate possible reads (a/b/c) + state lean + cite-anchor for default + invite halt-before-fire. Cost-asymmetry: surface-cost low + wrong-fire-cost high. Cite_anchor: discipline-log #12 (msg 7137-7147 "proceed UNTIL X" rebuild+restart fork) + push-fork-resolution thread (msgs 7203/7205) + #18 (msg 7215-7217 git-vs-state workflow-fork). Per R18 CITE-ANCHOR-REQUIRED.`

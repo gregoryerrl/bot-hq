@@ -1,10 +1,10 @@
 # Rule Locus Inventory
 
 **Authored:** 2026-05-02 (Phase L L-2)
-**Status:** v1.1 — post-Rain-BRAIN-2nd amend-pass-1; tight-feedback-loop with L-1 rulebook-tier-spec.md
+**Status:** v1.2 — post-commit-2 disc.go landing (residual #24 self-heal: R-NN → R31/R32 numbering committed)
 **Purpose:** single source-of-truth enumeration of every rule in the bot-hq rulebook system, classified per L-1 tier × scope axes. Drives L-3a prompt-shrink classification + L-4 graduation queue + staleness-detection ratchet-test.
 **Cite-anchor:** [phase-l.md§Tier-shape row L-2, NEW(BRAIN-cycle-msgs-7171-7173)+(reBRAIN-msg-7191-merge-with-classification-axis)]
-**Source-pin (per Rain BRAIN-2nd F4 staleness-detection):** disc.go last-edit SHA = **86521b6** (K-22 R30 HR-tag; pre-Phase-L). Verify via `git log -1 --format=%H -- internal/protocol/disc.go`. If SHA changes without inventory update, this doc is stale-by-source-edit and must be reconciled before next Phase L commit.
+**Source-pin (per Rain BRAIN-2nd F4 staleness-detection):** disc.go last-edit SHA pinned to current Phase L L-1 commit-2 HEAD (PhaseLv1RulebookHardening const + R31/R32 substring-lock tests). Verify via `git log -1 --format=%H -- internal/protocol/disc.go`. If SHA changes without inventory update, this doc is stale-by-source-edit and must be reconciled before next Phase L commit. Pre-commit-2 SHA was 86521b6 (K-22 R30 HR-tag).
 
 ---
 
@@ -67,8 +67,8 @@ Recurrence-count ground-truth: hub.db query (`hub_read since_id=<phase-open> fil
 
 | rule-name | locus | tests | hooks | enforcement-status | recurrence-count | graduation-target |
 | --------- | ----- | ----- | ----- | ------------------ | ---------------- | ----------------- |
-| **R-NN STAT-CLAIM-CITE** (Phase L L-1 NEW; numbering deferred to commit-2 disc.go authoring per Q1 lean (i)) | const disc.go (TBD const-name + R-NN number) — to ship in commit-2 of L-1+L-2 | `TestStatClaimCiteSubstringLock` (TBD) — assert disc.go has 4 recognition tokens + agent prompts embed | none yet (PEER-CROSS-CHECK by design pre-L-5) | RULE-TEXT-ONLY + PEER-CROSS-CHECK | 7 stat-claim drifts today (#10/#13/#16/#17/#19/#20/#23 — recursive proof-of-need during L-0+L-2 authoring) | **codify Phase L L-1**; stretch-graduate L-5 toolgate gate-CHECK on numerical claims (open question — regex-detection FP-prone per Rain msg 7202 F1) |
-| **R-NN SCOPE-FORK-CONFIRMATION** (Phase L L-1 NEW; numbering deferred to commit-2) | const disc.go (TBD const-name + R-NN number) | `TestScopeForkConfirmationSubstringLock` (TBD) | none — stays RULE-TEXT-ONLY by design | RULE-TEXT-ONLY | 3 scope-fork drifts today (#12 + push-fork + #18 git-vs-state) | codify Phase L L-1; remains RULE-TEXT-ONLY (proactive-surface discipline; toolgate detection FP-prone) |
+| **R31 STAT-CLAIM-CITE** (Phase L L-1 SHIPPED commit-2; embedded in PhaseLv1RulebookHardening) | const disc.go PhaseLv1RulebookHardening (post-R25; embedded in rain.go + brian.go initialPrompt() per Wiring-lock tests) | `TestStatClaimCiteSubstringLock` (disc_test.go) — asserts 5 load-bearing literals: "STAT-CLAIM-CITE (R31)" + "verifiable command output" + "git diff --numstat" + "hub_read since_id" + "peer-cross-check" | none yet (PEER-CROSS-CHECK by design pre-L-5) | RULE-TEXT-ONLY + PEER-CROSS-CHECK | 7 stat-claim drifts today (#10/#13/#16/#17/#19/#20/#23 — recursive proof-of-need during L-0+L-2 authoring) | **SHIPPED Phase L L-1 commit-2**; stretch-graduate L-5 toolgate gate-CHECK on numerical claims (open question — regex-detection FP-prone per Rain msg 7202 F1) |
+| **R32 SCOPE-FORK-CONFIRMATION** (Phase L L-1 SHIPPED commit-2; embedded in PhaseLv1RulebookHardening) | const disc.go PhaseLv1RulebookHardening (post-R25; embedded in rain.go + brian.go initialPrompt() per Wiring-lock tests) | `TestScopeForkConfirmationSubstringLock` (disc_test.go) — asserts 5 load-bearing literals: "SCOPE-FORK-CONFIRMATION (R32)" + "fork-able scope" + "UNTIL/INCLUDING/JUST" + "interpretation pre-action" + "hub_send before firing" | none — stays RULE-TEXT-ONLY by design | RULE-TEXT-ONLY | 3 scope-fork drifts today (#12 + push-fork + #18 git-vs-state) | **SHIPPED Phase L L-1 commit-2**; remains RULE-TEXT-ONLY (proactive-surface discipline; toolgate detection FP-prone) |
 
 ### Tier-1 always-resident — Phase L generalize-trio additions (from L-0 catalog)
 
@@ -134,12 +134,12 @@ NEW per Phase L L-1 mechanism: `~/.bot-hq/projects/bcc-ad-manager-conventions.md
 | Tier | Trio-self count | Per-project count | Total |
 | ---- | --------------- | ----------------- | ----- |
 | Tier-1 always-resident (existing) | **28** (math: R6 + R12-R30 = 20 R-rules + 8 more (R27-pane-only-sub-class + DISC v2 class-split + HALT-ALL-WORK + RESUME-FROM-HALT + H-13 force-push + HANDSHAKE-TERMINATOR + SCOPE-LOCK-BEFORE-IMPL + AUDIENCE-CLASS-DISCRIMINATOR) = 28) — corrected per Rain BRAIN-2nd A1 catch (#23 stat-claim drift recursive) | 0 (none yet) | **28 existing** |
-| Tier-1 always-resident (Phase L NEW) | 6 (R31/R32/ORIGIN-APPEND-ONLY/STAGING-TEST-DEPTH/READ-ONLY-ROLE/POST-SKILL-HUB-SEND) — net +6 (or +4 after consolidation Class 9→DISC sub-rule + Class 10→R6 sub-rule) | 8 (bcc-disguise-scaffold-scan + bcc-bot-hq-invisibility + bcc-docs-plans-LOCAL + bcc-main-json-paste-back + bcc-tableplus-sql-patterns + bcc-tom-context + bcc-prod-db-ungated + bcc-issue-staging) | **14 NEW (or 12 after consolidation)** |
+| Tier-1 always-resident (Phase L NEW) | 2 SHIPPED commit-2 (R31 STAT-CLAIM-CITE + R32 SCOPE-FORK-CONFIRMATION) + 4 deferred-to-later-Phase-L-ratchet (ORIGIN-APPEND-ONLY → likely R29-sub-rule per L-1 consolidation; STAGING-TEST-DEPTH → likely L-1 future-pass; READ-ONLY-ROLE → DISC v2 sub-rule; POST-SKILL-HUB-SEND → R6 sub-rule) — net +2 SHIPPED, +4 candidate | 8 candidates (bcc-disguise-scaffold-scan + bcc-bot-hq-invisibility + bcc-docs-plans-LOCAL + bcc-main-json-paste-back + bcc-tableplus-sql-patterns + bcc-tom-context + bcc-prod-db-ungated + bcc-issue-staging) — deferred to L-5 per-project-conventions file authoring | **2 SHIPPED + 12 candidates** |
 | Tier-2 skill-hosted | 1 (phase-rules-detail) | 0 | 1 |
 | Tier-3 pre-action gate-files (Phase L NEW) | 4 (pre-commit / pre-push / pre-merge / pre-phase-close) | candidate (bcc-prod-db-ops gate) | **4 trio + 1 per-project candidate** |
 | Tier-4 reference | 9 (anchors-files-2 + ratchets + phase + CLAUDE.md + discipline-log NEW + docs/conventions + docs/arcs + docs/plans + hub.db) | 1+ (bcc-ad-manager.md + 8 feedback memories) | **9 trio + 9+ per-project** |
 
-**Net new R-rules disc.go const additions for Phase L:** 6 (R31/R32/ORIGIN-APPEND-ONLY/STAGING-TEST-DEPTH/READ-ONLY-ROLE/POST-SKILL-HUB-SEND) — likely consolidated to 4 net new (R31/R32/ORIGIN-APPEND-ONLY/STAGING-TEST-DEPTH) with Class 9→DISC v2 sub-rule + Class 10→R6 sub-rule per L-0 lean.
+**Net new R-rules disc.go const additions for Phase L:** 2 SHIPPED in commit-2 (R31 STAT-CLAIM-CITE + R32 SCOPE-FORK-CONFIRMATION via PhaseLv1RulebookHardening const). Remaining 4 candidates (ORIGIN-APPEND-ONLY / STAGING-TEST-DEPTH / READ-ONLY-ROLE → DISC v2 sub-rule / POST-SKILL-HUB-SEND → R6 sub-rule) deferred to later Phase L ratchets (likely L-3a sub-rule audit OR L-5 toolgate codification). Phase L commit-2 ships minimum-viable R-rule set; broader codification stays scope-tight per phase-l.md ≤7-Tier-1 cap.
 
 **Net new gate-files for Phase L:** 4 trio-self (L-5 + L-6) + 1 per-project candidate (bcc-prod-db).
 
