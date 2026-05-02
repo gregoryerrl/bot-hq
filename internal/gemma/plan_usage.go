@@ -74,7 +74,11 @@ const planUsageFetchTimeout = 6 * time.Second
 // post-halt-action wording. Per docs/plans/2026-04-29-rule-loci-audit.md
 // F2. The R16 ratchet test (TestRuleNamespaceRatchet) cross-checks the
 // shared substrings between this fmt and the prompt-rule.
-const planCapReasonFmt = "plan usage at %d%%%s, halt + idle in pane"
+//
+// 2026-05-02 weekly-halt-removal: dropped the `%s` window-tag placeholder
+// — halt only fires on the five_hour window now, so no (weekly)/(opus)/
+// (extra) tags can ever surface. windowDisplayTag deleted.
+const planCapReasonFmt = "plan usage at %d%%, halt + idle in pane"
 
 // planCapResumeFmt is the literal substring brian/rain STARTUP prompts
 // match against to detect plan-window-rollover resume directives. Phase I
@@ -207,25 +211,34 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 		})
 	}
 
+	// 2026-05-02 weekly-halt-removal: halt + pre-snap + clear logic gates
+	// on the five_hour window utilization only. Weekly windows
+	// (seven_day / seven_day_opus / seven_day_sonnet) keep flowing through
+	// the strip publisher above for visibility but do not drive halt.
+	// Per-user directive: only the rolling-5h window should drive
+	// halt-system behavior; weekly quota decay is opaque-to-trio.
+	fiveHourUtil := perWindow[anthropic.WindowFiveHour].Utilization
+	fiveHourPct := utilToPct(fiveHourUtil)
+
 	// Halt + clear logic. Threshold crossing fires hub_flag; a clean drop
 	// below the reset threshold deletes the plan-cap row regardless of
 	// any prior fire (organic clear via window-rollover or quota decay).
-	if maxUtil >= planUsageThreshold {
-		g.firePlanCapHalt(now, pctInt, maxWindow)
+	if fiveHourUtil >= planUsageThreshold {
+		g.firePlanCapHalt(now, fiveHourPct)
 		return
 	}
 	// Phase J T2.2-α (B1a): proactive pre-compact-snap signal in
 	// [planUsagePreSnapThreshold, planUsageThreshold). Fires once per
-	// planCapPreSnapCooldown window. Cooldown suppresses spam when maxUtil
+	// planCapPreSnapCooldown window. Cooldown suppresses spam when 5h util
 	// hovers in the band; cooldown stamp shared with resume-emit pattern
 	// (mu-protected via planUsageMu).
-	if maxUtil >= planUsagePreSnapThreshold {
-		g.emitPreCompactSnap(now, pctInt)
+	if fiveHourUtil >= planUsagePreSnapThreshold {
+		g.emitPreCompactSnap(now, fiveHourPct)
 		// Fall through — pre-snap is informational; halt + clear logic
 		// below still applies on the same poll if state crossed back below
 		// reset threshold (rare since we only land here when ≥ 0.90).
 	}
-	if maxUtil < planUsageResetThreshold {
+	if fiveHourUtil < planUsageResetThreshold {
 		// Phase J tail-2 (K-1 RESUME-spam fix): emit gates on the
 		// in-memory transition planCapHaltActive true→false (not on
 		// hadHalt-from-DB). DB hadHalt-gate alone over-triggers when
@@ -259,7 +272,7 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 
 		_ = hadHaltDB // kept for log-debugging visibility on transition mismatch
 		if shouldEmit {
-			g.emitPlanCapResume(now, pctInt)
+			g.emitPlanCapResume(now, fiveHourPct)
 		}
 	}
 }
@@ -439,9 +452,12 @@ func (g *Gemma) seedPlanCapHaltActiveFromDB() {
 // shouldFlag for hysteresis + rate cap so a stuck-near-threshold account
 // doesn't burn through Emma's flag budget. The halt_state row is upserted
 // idempotently — repeated fires update set_at/reason without thrashing.
-func (g *Gemma) firePlanCapHalt(now time.Time, pct int, window string) {
-	tag := windowDisplayTag(window)
-	reason := fmt.Sprintf(planCapReasonFmt, pct, tag)
+//
+// 2026-05-02 weekly-halt-removal: pct is always the five_hour-window
+// utilization (caller derives from perWindow[FiveHour]); reason text no
+// longer carries a window tag since five_hour is the only halt-driver.
+func (g *Gemma) firePlanCapHalt(now time.Time, pct int) {
+	reason := fmt.Sprintf(planCapReasonFmt, pct)
 
 	// Phase J tail-2 (K-1 RESUME-spam fix): in-memory transition gate.
 	// MsgFlag emit + wake-schedule insertion only fire on false→true
@@ -506,21 +522,3 @@ func (g *Gemma) firePlanCapHalt(now time.Time, pct int, window string) {
 	}
 }
 
-// windowDisplayTag maps an oauth_usage window name to the suffix tag the
-// strip + reason text both use. Empty for five_hour (the default,
-// most-frequently-binding window — display stays compact). Other windows
-// surface as " (weekly)" / " (opus)" / " (extra)" so the fire reason text
-// makes the binding limit obvious in the hub log.
-func windowDisplayTag(window string) string {
-	switch window {
-	case anthropic.WindowFiveHour, "":
-		return ""
-	case anthropic.WindowSevenDay:
-		return " (weekly)"
-	case anthropic.WindowSevenDayOpus:
-		return " (opus)"
-	case anthropic.WindowSevenDaySonnet:
-		return " (extra)"
-	}
-	return " (" + window + ")"
-}

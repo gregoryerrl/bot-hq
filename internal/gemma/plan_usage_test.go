@@ -39,7 +39,15 @@ func (f *fakePlanUsageFetch) Fetch(_ context.Context) (float64, string, map[stri
 	if idx < len(f.err) {
 		e = f.err[idx]
 	}
-	return u, w, f.perWindow, e
+	// Auto-derive perWindow from (window, maxUtil) when not explicitly set so
+	// fixtures that script only maxUtil+window keep working under the 5h-only
+	// gate (post-2026-05-02 weekly-halt-removal). Tests that need multi-window
+	// scenarios (e.g. 5h@70% + 7d@96%) set perWindow directly to override.
+	pw := f.perWindow
+	if pw == nil && w != "" && e == nil {
+		pw = map[string]anthropic.Window{w: {Utilization: u}}
+	}
+	return u, w, pw, e
 }
 
 // recorder captures the most recent HubSnapshot publish.
@@ -241,6 +249,11 @@ func TestPlanCapResumeCooldownSuppressesRapidReEmits(t *testing.T) {
 // TestPlanCapBetweenThresholdsHoldsState — utilization in [0.85, 0.95)
 // neither fires nor clears. The HubSnapshot is updated but halt_state
 // remains in whichever state the prior tick left it.
+//
+// 2026-05-02 weekly-halt-removal: this fixture drives maxUtil=0.90 on the
+// seven_day window. Post-change halt + pre-snap gate on five_hour only,
+// so this fixture exercises a "weekly squeeze with five_hour absent"
+// path — neither halt nor pre-snap fires (which is the assertion).
 func TestPlanCapBetweenThresholdsHoldsState(t *testing.T) {
 	g, db := newContextCapGemma(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
@@ -399,14 +412,48 @@ func TestPlanCapDoesNotClearContextCap(t *testing.T) {
 	}
 }
 
-// TestPlanCapWindowTagSurfaces — fire at 96%% on a non-five_hour window
-// and verify the reason text carries the matching tag.
-func TestPlanCapWindowTagSurfaces(t *testing.T) {
+// TestPlanCapWeeklyOverThresholdNoFire — locks the 2026-05-02 weekly-halt-
+// removal: a weekly window (seven_day / seven_day_opus / seven_day_sonnet)
+// at >=95% with five_hour below threshold MUST NOT fire halt or flag.
+// Pre-change this fixture (SevenDayOpus@96%) drove maxUtil to 0.96 and
+// fired halt + tagged reason "(opus)". Post-change, halt-fire gates on
+// five_hour utilization only.
+func TestPlanCapWeeklyOverThresholdNoFire(t *testing.T) {
 	g, db := newContextCapGemma(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.96},
 		window:  []string{anthropic.WindowSevenDayOpus},
+		perWindow: map[string]anthropic.Window{
+			anthropic.WindowFiveHour:     {Utilization: 0.70},
+			anthropic.WindowSevenDayOpus: {Utilization: 0.96},
+		},
+	})
+
+	g.checkPlanUsage(time.Now())
+
+	if _, ok, _ := db.GetHaltCause(hub.HaltCausePlanCap); ok {
+		t.Errorf("weekly window at 96%% must NOT fire halt when five_hour below threshold")
+	}
+	if got := countPlanCapFlags(t, db); got != 0 {
+		t.Errorf("weekly-only over-threshold must not emit flag; got %d", got)
+	}
+}
+
+// TestPlanCapFireOnFiveHourOnly — five_hour at 96%% fires halt regardless
+// of weekly utilization. Locks the post-2026-05-02 invariant: only the
+// five_hour window drives halt. Reason text contains canonical substring
+// without any window tag (windowDisplayTag deleted as part of the change).
+func TestPlanCapFireOnFiveHourOnly(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	g.SetHubPublisher(func(panestate.HubSnapshot) {})
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.99},
+		window:  []string{anthropic.WindowSevenDay},
+		perWindow: map[string]anthropic.Window{
+			anthropic.WindowFiveHour: {Utilization: 0.96},
+			anthropic.WindowSevenDay: {Utilization: 0.99},
+		},
 	})
 
 	g.checkPlanUsage(time.Now())
@@ -416,10 +463,50 @@ func TestPlanCapWindowTagSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !ok {
-		t.Fatal("plan-cap halt must be active")
+		t.Fatal("five_hour at 96%% must fire halt regardless of weekly util")
 	}
-	if !strings.Contains(row.Reason, "(opus)") {
-		t.Errorf("seven_day_opus window must tag reason text with (opus); got %q", row.Reason)
+	if !strings.Contains(row.Reason, "plan usage at 96%, halt + idle in pane") {
+		t.Errorf("halt reason missing canonical post-removal substring; got %q", row.Reason)
+	}
+	for _, tag := range []string{"(weekly)", "(opus)", "(extra)"} {
+		if strings.Contains(row.Reason, tag) {
+			t.Errorf("halt reason must not carry %q tag post-windowDisplayTag-removal; got %q", tag, row.Reason)
+		}
+	}
+}
+
+// TestPlanCapNoFireOnWeeklyOver — five_hour at 70%% + seven_day at 96%%
+// emits zero halt + zero pre-compact-snap. Mirror of
+// TestPlanCapWeeklyOverThresholdNoFire on the standard seven_day window
+// + asserts no R22 PRE-COMPACT-SNAP MsgUpdate either.
+func TestPlanCapNoFireOnWeeklyOver(t *testing.T) {
+	g, db := newContextCapGemma(t)
+	g.SetHubPublisher(func(panestate.HubSnapshot) {})
+	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
+		maxUtil: []float64{0.96},
+		window:  []string{anthropic.WindowSevenDay},
+		perWindow: map[string]anthropic.Window{
+			anthropic.WindowFiveHour: {Utilization: 0.70},
+			anthropic.WindowSevenDay: {Utilization: 0.96},
+		},
+	})
+
+	g.checkPlanUsage(time.Now())
+
+	if _, ok, _ := db.GetHaltCause(hub.HaltCausePlanCap); ok {
+		t.Errorf("seven_day at 96%% must NOT fire halt when five_hour at 70%%")
+	}
+	if got := countPlanCapFlags(t, db); got != 0 {
+		t.Errorf("expected 0 flags on weekly-only over-threshold; got %d", got)
+	}
+	msgs, err := db.GetRecentMessages(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-COMPACT-SNAP]") {
+			t.Errorf("weekly-only over-threshold must not emit [PRE-COMPACT-SNAP]; got %+v", m)
+		}
 	}
 }
 
