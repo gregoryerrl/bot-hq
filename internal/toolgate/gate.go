@@ -120,6 +120,46 @@ func IsCommitPattern(command string) bool {
 	return tokens[0] == "git" && tokens[1] == "commit"
 }
 
+// IsPushPattern returns true if the command line invokes `git push`
+// (first-2-tokens after quote-respecting tokenization). Reserved for
+// L-5 R33 PRE-EXECUTE-GATE-FILE-READ pre-push-checklist gate-CHECK.
+// Includes ALL push variants (force-push subset detected separately by
+// IsForcePushPattern for R29 elevated-gate composition; both gates fire
+// independently — verdicts additive per F9 amend).
+//
+// Phase L L-5 commit-2.
+func IsPushPattern(command string) bool {
+	tokens := tokenize(command)
+	if len(tokens) < 2 {
+		return false
+	}
+	return tokens[0] == "git" && tokens[1] == "push"
+}
+
+// IsMergePattern returns true if the command line invokes a merge
+// operation: `git merge` (local merge) OR `gh pr merge` (GitHub PR
+// merge with --squash/--rebase/--merge variants). Reserved for L-5 R33
+// PRE-EXECUTE-GATE-FILE-READ pre-merge-checklist gate-CHECK.
+//
+// Merge is USER-ONLY ABSOLUTE per R12 GATE-PROTOCOL — gate-file
+// consultation is the pre-fire discipline mechanism, NOT a substitute
+// for user-verbatim merge-token authorization.
+//
+// Phase L L-5 commit-2.
+func IsMergePattern(command string) bool {
+	tokens := tokenize(command)
+	if len(tokens) < 2 {
+		return false
+	}
+	if tokens[0] == "git" && tokens[1] == "merge" {
+		return true
+	}
+	if len(tokens) < 3 {
+		return false
+	}
+	return tokens[0] == "gh" && tokens[1] == "pr" && tokens[2] == "merge"
+}
+
 // IsForcePushPattern returns true if the command line invokes a
 // force-push operation (`git push -f` / `--force` / `--force-with-lease`
 // variants). Reserved for K-19 elevated-gate consumption: force-push has

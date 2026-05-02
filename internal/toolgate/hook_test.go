@@ -82,8 +82,13 @@ func TestRunHook_RainAllowedReadOnly(t *testing.T) {
 }
 
 // TestRunHook_BrianExecuteAllowed locks that brian (HANDS) is NOT
-// blocked even on execute patterns — those belong to brian's class.
+// blocked by the K-16 class-split gate even on execute patterns — those
+// belong to brian's class. Isolates BOT_HQ_HOME to a tempdir so K-13 R12
+// fail-soft (hubdb-absent) AND L-5 R33 fail-soft (gatefile-absent) both
+// engage; this test is scoped to K-16 specifically. Per-gate behavior
+// is covered by dedicated tests (r12_test.go for K-13; r33_test.go for L-5).
 func TestRunHook_BrianExecuteAllowed(t *testing.T) {
+	t.Setenv("BOT_HQ_HOME", t.TempDir())
 	cases := []string{
 		"git push origin main",
 		`git commit -m "msg"`,

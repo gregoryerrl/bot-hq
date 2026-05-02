@@ -109,6 +109,85 @@ func TestIsForcePushPattern_Negative(t *testing.T) {
 	}
 }
 
+// TestIsPushPattern_Positive locks the push variants for L-5 R33
+// pre-push gate-CHECK consumption. Includes regular + force variants
+// (force subset gates additionally via R29 elevated-gate; both fire).
+func TestIsPushPattern_Positive(t *testing.T) {
+	cases := []string{
+		`git push`,
+		`git push origin main`,
+		`git push -u origin branch`,
+		`git push -f`,
+		`git push --force`,
+		`git push --force-with-lease`,
+		`git push --force-with-lease=origin/main`,
+		`git push origin main --force`,
+	}
+	for _, cmd := range cases {
+		if !IsPushPattern(cmd) {
+			t.Errorf("IsPushPattern(%q) = false, want true", cmd)
+		}
+	}
+}
+
+// TestIsPushPattern_Negative locks non-push commands as not-push.
+func TestIsPushPattern_Negative(t *testing.T) {
+	cases := []string{
+		`git commit -m "msg"`,
+		`git status`,
+		`git pull`,
+		`git fetch`,
+		`echo "git push"`,
+		`cat /tmp/git-push.log`,
+		`gh pr create`,
+		`git merge main`,
+	}
+	for _, cmd := range cases {
+		if IsPushPattern(cmd) {
+			t.Errorf("IsPushPattern(%q) = true, want false", cmd)
+		}
+	}
+}
+
+// TestIsMergePattern_Positive locks merge variants (git + gh) for L-5 R33
+// pre-merge gate-CHECK consumption.
+func TestIsMergePattern_Positive(t *testing.T) {
+	cases := []string{
+		`git merge main`,
+		`git merge --no-ff feature-branch`,
+		`git merge --squash topic`,
+		`gh pr merge`,
+		`gh pr merge 42`,
+		`gh pr merge --squash`,
+		`gh pr merge --rebase 42`,
+		`gh pr merge --merge --delete-branch`,
+	}
+	for _, cmd := range cases {
+		if !IsMergePattern(cmd) {
+			t.Errorf("IsMergePattern(%q) = false, want true", cmd)
+		}
+	}
+}
+
+// TestIsMergePattern_Negative locks non-merge commands as not-merge.
+func TestIsMergePattern_Negative(t *testing.T) {
+	cases := []string{
+		`git commit -m "msg"`,
+		`git push`,
+		`git status`,
+		`gh pr create`,
+		`gh pr view 42`,
+		`gh pr list`,
+		`echo "git merge"`,
+		`cat /tmp/git-merge.log`,
+	}
+	for _, cmd := range cases {
+		if IsMergePattern(cmd) {
+			t.Errorf("IsMergePattern(%q) = true, want false", cmd)
+		}
+	}
+}
+
 // TestTokenize_RespectsQuotes locks the quote-respect invariant: quoted
 // spans tokenize as single atomic tokens so substring matches inside
 // don't leak to the top level.
