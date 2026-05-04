@@ -238,6 +238,35 @@ func TestRainPromptEmbedsPhaseMv3ByteProjectionCite(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsDiscV2RoleAndPolicyShared — rain-side wiring lock
+// for Phase M M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared
+// bullets + header). Per audit-doc v1.1 §3.5 (b) per-agent-split: shared
+// const embeds in rain's prompt alongside RainAddendum. Same const-
+// exists-but-not-wired class prevention.
+func TestRainPromptEmbedsDiscV2RoleAndPolicyShared(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.DiscV2RoleAndPolicyShared) {
+		t.Errorf("initial prompt must embed protocol.DiscV2RoleAndPolicyShared verbatim (Phase M M-4 wiring lock)")
+	}
+}
+
+// TestRainPromptEmbedsDiscV2RoleAndPolicyRainAddendum — rain-side wiring
+// lock for Phase M M-4 commit-1 DiscV2RoleAndPolicyRainAddendum const
+// (rain-specific TRUST bullet). Per audit-doc v1.1 §3.5 (b) per-agent-
+// split: rain agent prompt embeds Shared + RainAddendum (not BrianAddendum).
+func TestRainPromptEmbedsDiscV2RoleAndPolicyRainAddendum(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.DiscV2RoleAndPolicyRainAddendum) {
+		t.Errorf("initial prompt must embed protocol.DiscV2RoleAndPolicyRainAddendum verbatim (Phase M M-4 wiring lock)")
+	}
+	// Negative-lock: rain MUST NOT embed BrianAddendum (TRUST-brian + SNAP)
+	if strings.Contains(prompt, protocol.DiscV2RoleAndPolicyBrianAddendum) {
+		t.Errorf("rain initial prompt MUST NOT embed protocol.DiscV2RoleAndPolicyBrianAddendum (per-agent-split discipline; brian-specific TRUST + SNAP belongs to brian only)")
+	}
+}
+
 // Ratchet against the cliff-hang failure mode observed at msg 2086-2092
 // on 2026-04-25: scope changes within an ongoing decision require a
 // fresh flag, not silent continuation. The old "1 concern = 1 flag"

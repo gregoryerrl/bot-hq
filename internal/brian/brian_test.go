@@ -190,6 +190,36 @@ func TestBrianPromptEmbedsPhaseMv3ByteProjectionCite(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsDiscV2RoleAndPolicyShared verifies the Phase M
+// M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared bullets +
+// header) is wired into Brian's prompt. Per audit-doc v1.1 §3.5 (b)
+// per-agent-split: shared const embeds in brian's prompt alongside
+// BrianAddendum. Mirror in rain_test.go locks rain-side.
+func TestBrianPromptEmbedsDiscV2RoleAndPolicyShared(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.DiscV2RoleAndPolicyShared) {
+		t.Errorf("initial prompt must embed protocol.DiscV2RoleAndPolicyShared verbatim (Phase M M-4 wiring lock)")
+	}
+}
+
+// TestBrianPromptEmbedsDiscV2RoleAndPolicyBrianAddendum verifies the
+// Phase M M-4 commit-1 DiscV2RoleAndPolicyBrianAddendum const (brian-
+// specific TRUST + SNAP bullets) is wired into Brian's prompt. Per
+// audit-doc v1.1 §3.5 (b) per-agent-split: brian agent prompt embeds
+// Shared + BrianAddendum (not RainAddendum).
+func TestBrianPromptEmbedsDiscV2RoleAndPolicyBrianAddendum(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.DiscV2RoleAndPolicyBrianAddendum) {
+		t.Errorf("initial prompt must embed protocol.DiscV2RoleAndPolicyBrianAddendum verbatim (Phase M M-4 wiring lock)")
+	}
+	// Negative-lock: brian MUST NOT embed RainAddendum (TRUST-rain)
+	if strings.Contains(prompt, protocol.DiscV2RoleAndPolicyRainAddendum) {
+		t.Errorf("brian initial prompt MUST NOT embed protocol.DiscV2RoleAndPolicyRainAddendum (per-agent-split discipline; rain-specific TRUST belongs to rain only)")
+	}
+}
+
 // TestPhaseIv1ContentShape pins the load-bearing rule names inside the
 // Phase I const so accidental rule-deletion in future edits fails CI.
 // One assertion per rule. If a rule name needs to change, this test

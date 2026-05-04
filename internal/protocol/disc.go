@@ -458,3 +458,82 @@ const PhaseMv2OutboundDisciplineMechanical = `- OUTBOUND-DISCIPLINE-MECHANICAL (
 //   - R18 CITE-ANCHOR-REQUIRED (governance authority)
 //   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R37 BYTE-PROJECTION-CITE
 const PhaseMv3ByteProjectionCite = `- BYTE-PROJECTION-CITE (R37): byte/LOC projections in design-spike docs (audit-doc §5 ship-list / scope-estimates / per-file LOC tables / "estimated savings X-Y bytes/agent" framings) require dual-stage cite discipline. Stage 1 (design-spike authoring): estimate may be session-recall but MUST tag explicitly as estimate (e.g., "~80-120 LOC estimate") + state per-class method (per-rule audit / fixture-density modeling / session-recall). Stage 2 (staged-time): drafter MUST cite-from-actual via ` + "`git diff --cached --numstat`" + ` BEFORE surfacing staged-diff for peer BRAIN-2nd; document drift in commit-body if actual exceeds estimate envelope by ±25%. Peer BRAIN-2nd-PASS-2 surface-format-discipline: cross-check estimate vs actual; if drift >25%, peer flags for discipline-log carry-forward at phase-close. Bidirectional drift class: over-estimate AND under-estimate both warrant carry-forward (Phase L #31 over-estimate ~50% + #33 under-estimate ~28% empirical). Recursion-terminator: mechanical-cite-from-actual at staged-time is the load-bearing terminator; audit-doc-as-stat-correction alone has residual drift (Phase L #32). Cite_anchor: discipline-log #31-#35 (Phase L 5+ instances per Joint entry 2026-05-04T07:00:00Z) + Phase M empirical 3+ instances same session 2026-05-04 (formal append at M-sweep per discipline-log Joint section append discipline). Per R18 CITE-ANCHOR-REQUIRED.`
+
+// DiscV2RoleAndPolicyShared bundles the 9 SHARED DISC v2 bullets that
+// appear identically in both rain.go and brian.go agent prompts: header
+// + HANDS + EYES + BRAIN + OUTPUT + DRAFT + HALTER-PUSHER + FLAG + PIVOT +
+// NUDGE. Per Phase M M-4 audit-doc v1.1 §3.5 (b) per-agent-split design:
+// the divergent bullets (TRUST differs between agents; SNAP is brian-only)
+// live in DiscV2RoleAndPolicyRainAddendum + DiscV2RoleAndPolicyBrianAddendum.
+//
+// Trims applied (per audit §4 conservative-preserve, all test-pinned
+// literals in rain_test.go + brian_test.go preserved verbatim):
+//   - EYES: dropped "hub_spawn_gemma analyze: queries" specific tool-call
+//     example (not test-pinned; relocated to skill).
+//   - BRAIN: dropped "Rain challenges Brian's drafts and plans. Brian
+//     challenges Rain's findings, investigations, and proposals." decorative
+//     (not test-pinned; "Neither rubber-stamps; silence = implicit approval"
+//     anchor preserved per existing rain_test.go ratchet).
+//   - OUTPUT: dropped "Speaker credits proposer inline where material"
+//     decorative (not test-pinned; OUTPUT class-split + DRAFT-alone
+//     exception clause preserved).
+//   - HALTER/PUSHER: PRESERVED VERBATIM. Audit-doc v1.1 §4 Rule 6 listed
+//     "Mutual-halt deadlock impossible by construction" as decorative-trim
+//     candidate, but trim-pre-flight test-presence check (Q6 lean) caught
+//     this as load-bearing — rain_test.go TestRainPromptContainsHalterPusher
+//     + brian_test.go TestBrianPromptContainsHalterPusher both pin the
+//     literal as H-1 halter/pusher ratchet. Conservative-preserve + audit
+//     mitigation pattern working as designed.
+//   - NUDGE: dropped "After current task: process in order" general
+//     procedural (not test-pinned; per-tag prefix discriminator preserved).
+//
+// FLAG bullet preserved verbatim (test-pinned literals "Rain owns
+// elevation" / "Brian PMs Rain on flag-worthy events" / "scope changes
+// mid-decision" / "cliff-hang" all retained per rain_test.go DISC v2.1
+// FLAG ratchet).
+//
+// Cite_anchors:
+//   - phase-m.md scope-lock: ~/.bot-hq/phase/phase-m.md (row M-4)
+//   - audit-doc: docs/plans/2026-05-04-phase-m-L-S5-disc-v2-extraction-audit.md v1.1
+//   - DISC v2 lock: msg 2147 (2026-04-24 final convergence per existing
+//     DiscV2OutboundRule comment block at line 17-20)
+//   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § DISC v2
+//     RoleAndPolicy
+const DiscV2RoleAndPolicyShared = `DISC v2 2026-04-24:
+- HANDS (brian): exec. Owns git/edits, hub_spawn real coders, merges, action/result user replies.
+- EYES (rain): info. Owns read/investigate. EYES is read-only: Rain cannot edit code — propose edits to Brian, do not execute. Cannot expand Emma's allowlist — only Brian may propose allowlist changes. Info/verify/status user replies.
+- BRAIN (both): both agents plan, critique, redirect on scope/edges/security regardless of execution role. Neither rubber-stamps; silence = implicit approval.
+- OUTPUT: user replies split by class (see HANDS/EYES). Joint planning → one speaks (whoever owns the next exec step). Exception: when user asks both for input ("what do you think", "weigh in", "push back"), both respond with DRAFT-alone discipline — drafter first, other waits, then critique. Class-split suspended.
+- DRAFT: drafter alone. Asker waits.
+- HALTER/PUSHER: on peer-arrival, Rain halts, Brian pushes through. BRAIN-cycle exempt — DRAFT-alone retains for peer-critique. Mutual-halt deadlock impossible by construction.
+- FLAG: Rain owns elevation. Brian PMs Rain on flag-worthy events; Rain calls hub_flag. Brian self-flags ONLY when (push-failure | repo-corruption | auth-failure | hub-disconnect | git-state-unexpected-on-write-path) AND Rain unreachable >60s, prefixed ` + "`[self-flag-carve-out: <reason>]`" + ` for audit. Per 2026-04-27 user delegation, Rain may pick joint defaults without flag (greenflag authority) when user is not in the loop on the specific decision. Triggers (any owner): errors, blockers, completions, rate limits, peer disagreements, pending-on-user, scope changes mid-decision. "Holding for user" without a flag = cliff-hang.
+- PIVOT: user w/o executor → Brian PMs Rain (no executor active); Rain holds 60s, then elevates via hub_flag if user still pending.
+- NUDGE: msgs prefixed [PM:<sender>] (directed to you), [HUB:<sender>] (broadcast), [HUB-OBS:<from>→<to>] (cross-traffic you observe), or FLAG variants [PM:FLAG:<sender>]/[HUB:FLAG:<sender>]. FLAG=elevated priority. PM and user msgs always handled. HUB-OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.`
+
+// DiscV2RoleAndPolicyRainAddendum carries the rain-specific TRUST bullet
+// that diverges from brian's TRUST. Rain's TRUST framing is universal-
+// applicability ("spot-check claims via git/claude_read; Snapshots=claims,
+// not truth"); brian's TRUST framing is hub_spawn-coder-flow-specific
+// (preserved separately in DiscV2RoleAndPolicyBrianAddendum).
+//
+// Per audit-doc v1.1 §3.5 (b) per-agent-split — preserves both agents'
+// existing TRUST behaviors verbatim; zero behavioral change. (a)
+// canonicalize-via-convergence reachable in Phase N if user later
+// ratifies convergence.
+const DiscV2RoleAndPolicyRainAddendum = `- TRUST: spot-check claims via git/claude_read. Snapshots=claims, not truth.`
+
+// DiscV2RoleAndPolicyBrianAddendum carries the brian-specific TRUST +
+// SNAP bullets that don't appear in rain's prompt. Brian's TRUST framing
+// is hub_spawn-coder-flow-specific ("verify via claude_read before
+// 'dispatched' claim. Prefer one-shot spawn"); SNAP is brian-only output-
+// formatting artifact (Branches/Agents/Pending/Next per multi-artifact
+// dispatch/verify pattern).
+//
+// Per audit-doc v1.1 §3.5 (b) per-agent-split — preserves brian's
+// existing TRUST + SNAP behaviors verbatim; zero behavioral change.
+const DiscV2RoleAndPolicyBrianAddendum = `- TRUST: verify via claude_read before "dispatched" claim. Prefer one-shot spawn.
+- SNAP (multi-artifact dispatch/verify):
+    Branches: repo:branch@sha(state),...
+    Agents:   brian(s), rain(s), emma(s), coder id(s),...
+    Pending:  <blocker>
+    Next:     <action>`

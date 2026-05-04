@@ -450,3 +450,129 @@ func TestPhaseMv3ByteProjectionCiteHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- BYTE-PROJECTION-CITE (R37):` (prompt anchor); first 60 chars: %q", PhaseMv3ByteProjectionCite[:60])
 	}
 }
+
+// Phase M M-4 commit-1 ratchet: pin load-bearing recognition substrings
+// of the DiscV2RoleAndPolicyShared const (9 shared bullets + header).
+// Audit-doc v1.1 §3.5 (b) per-agent-split design: shared bullets in this
+// const, divergent bullets in DiscV2RoleAndPolicyRainAddendum +
+// DiscV2RoleAndPolicyBrianAddendum.
+//
+// Substring-lock anchor strategy: pin all rule-name + load-bearing
+// terms across 9 bullets per audit-doc v1.1 §4 conservative-preserve.
+// Existing rain_test.go TestInitialPromptContainsDISCv2 +
+// TestInitialPromptContainsDISCv21FlagRule + TestRainPromptContainsHalterPusher
+// + brian_test.go mirrors all assert subset of these literals via the
+// rendered initialPrompt() — wiring-locks ensure this const reaches the
+// prompt; this substring-lock ensures the const itself contains the
+// load-bearing literals.
+//
+// Locked anchors (covering 9 shared bullets):
+//   - Header: "DISC v2 2026-04-24:"
+//   - HANDS: "HANDS (brian): exec." + "git/edits"
+//   - EYES: "EYES (rain): info." + "EYES is read-only" + "Cannot expand Emma's allowlist"
+//   - BRAIN: "BRAIN (both):" + "Neither rubber-stamps; silence = implicit approval"
+//   - OUTPUT: "OUTPUT: user replies split by class" + "Class-split suspended"
+//   - DRAFT: "DRAFT: drafter alone. Asker waits."
+//   - HALTER/PUSHER: "HALTER/PUSHER" + "Rain halts, Brian pushes through" + "Mutual-halt deadlock impossible by construction"
+//   - FLAG: "FLAG: Rain owns elevation" + "Brian PMs Rain on flag-worthy events" + "scope changes mid-decision" + "cliff-hang"
+//   - PIVOT: "PIVOT: user w/o executor"
+//   - NUDGE: "NUDGE:" + tag-prefix discriminators
+//
+// Origin: Phase M M-4 commit-1; codified to extract DISC v2 inline prose
+// to const + apply per-rule trim per audit-doc v1.1 §4. Conservative-
+// preserve all test-pinned literals from existing DISC v2 ratchet tests.
+func TestDiscV2RoleAndPolicySharedSubstringLock(t *testing.T) {
+	must := []string{
+		// Header
+		"DISC v2 2026-04-24:",
+		// HANDS
+		"HANDS (brian): exec.",
+		// EYES
+		"EYES (rain): info.",
+		"EYES is read-only",
+		"Cannot expand Emma's allowlist",
+		"Rain cannot edit code",
+		// BRAIN
+		"BRAIN (both):",
+		"Neither rubber-stamps; silence = implicit approval",
+		// OUTPUT
+		"OUTPUT: user replies split by class",
+		"Class-split suspended",
+		// DRAFT
+		"DRAFT: drafter alone. Asker waits.",
+		// HALTER/PUSHER
+		"HALTER/PUSHER",
+		"Rain halts, Brian pushes through",
+		"Mutual-halt deadlock impossible by construction",
+		// FLAG
+		"Rain owns elevation",
+		"Brian PMs Rain on flag-worthy events",
+		"scope changes mid-decision",
+		"cliff-hang",
+		// PIVOT
+		"PIVOT:",
+		// NUDGE
+		"[PM:<sender>]",
+		"[HUB:<sender>]",
+		"[HUB-OBS:<from>",
+		"FLAG=elevated priority",
+		"Never ignore FLAG or user messages",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(DiscV2RoleAndPolicyShared, lit) {
+				t.Errorf("DiscV2RoleAndPolicyShared ratchet broken: missing literal %q", lit)
+			}
+		})
+	}
+}
+
+// Phase M M-4 prompt-embed header anchor for DiscV2RoleAndPolicyShared.
+// The const is the first thing both agents embed in their DISC v2 block;
+// the header literal "DISC v2 2026-04-24:" is the recognition anchor.
+func TestDiscV2RoleAndPolicySharedHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(DiscV2RoleAndPolicyShared, "DISC v2 2026-04-24:") {
+		t.Errorf("DiscV2RoleAndPolicyShared must start with `DISC v2 2026-04-24:` (prompt anchor); first 30 chars: %q", DiscV2RoleAndPolicyShared[:30])
+	}
+}
+
+// Phase M M-4 commit-1 ratchet: pin TRUST-rain literal in
+// DiscV2RoleAndPolicyRainAddendum. Per audit-doc v1.1 §3.5 (b) per-agent-
+// split: rain's TRUST framing is universal-applicability ("Snapshots=
+// claims, not truth"). Brian's TRUST framing differs (preserved in
+// BrianAddendum).
+func TestDiscV2RoleAndPolicyRainAddendumSubstringLock(t *testing.T) {
+	must := []string{
+		"TRUST: spot-check claims via git/claude_read",
+		"Snapshots=claims, not truth",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(DiscV2RoleAndPolicyRainAddendum, lit) {
+				t.Errorf("DiscV2RoleAndPolicyRainAddendum ratchet broken: missing literal %q", lit)
+			}
+		})
+	}
+}
+
+// Phase M M-4 commit-1 ratchet: pin TRUST-brian + SNAP literals in
+// DiscV2RoleAndPolicyBrianAddendum. Per audit-doc v1.1 §3.5 (b) per-agent-
+// split: brian's TRUST framing is hub_spawn-coder-flow-specific +
+// SNAP block is brian-only output-formatting artifact.
+func TestDiscV2RoleAndPolicyBrianAddendumSubstringLock(t *testing.T) {
+	must := []string{
+		"TRUST: verify via claude_read before",
+		"Prefer one-shot spawn",
+		"SNAP (multi-artifact dispatch/verify)",
+		"Branches:",
+		"Pending:",
+		"Next:",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(DiscV2RoleAndPolicyBrianAddendum, lit) {
+				t.Errorf("DiscV2RoleAndPolicyBrianAddendum ratchet broken: missing literal %q", lit)
+			}
+		})
+	}
+}

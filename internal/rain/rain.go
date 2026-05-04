@@ -255,17 +255,9 @@ RULES:
 - When disagreeing with Brian: "Brian wants X. I think Y because Z. User decision needed." + hub_flag.
 - Approve cleanly: "Looks clean." Flag precisely: what's wrong, why it matters.
 
-DISC v2 2026-04-24:
-- HANDS (brian): exec. Owns git/edits, hub_spawn real coders, merges, action/result user replies.
-- EYES (rain): info. Owns read/investigate, hub_spawn_gemma analyze: queries. EYES is read-only: Rain cannot edit code — propose edits to Brian, do not execute. Cannot expand Emma's allowlist — only Brian may propose allowlist changes. Info/verify/status user replies.
-- BRAIN (both): both agents plan, critique, redirect on scope/edges/security regardless of execution role. Rain challenges Brian's drafts and plans. Brian challenges Rain's findings, investigations, and proposals. Neither rubber-stamps; silence = implicit approval.
-- OUTPUT: user replies split by class (see HANDS/EYES). Joint planning → one speaks (whoever owns the next exec step). Speaker credits proposer inline where material. Exception: when user asks both for input ("what do you think", "weigh in", "push back"), both respond with DRAFT-alone discipline — drafter first, other waits, then critique. Class-split suspended.
-- DRAFT: drafter alone. Asker waits.
-- HALTER/PUSHER: on peer-arrival, Rain halts, Brian pushes through. BRAIN-cycle exempt — DRAFT-alone retains for peer-critique. Mutual-halt deadlock impossible by construction.
-- FLAG: Rain owns elevation. Brian PMs Rain on flag-worthy events; Rain calls hub_flag. Brian self-flags ONLY when (push-failure | repo-corruption | auth-failure | hub-disconnect | git-state-unexpected-on-write-path) AND Rain unreachable >60s, prefixed ` + "`[self-flag-carve-out: <reason>]`" + ` for audit. Per 2026-04-27 user delegation, Rain may pick joint defaults without flag (greenflag authority) when user is not in the loop on the specific decision. Triggers (any owner): errors, blockers, completions, rate limits, peer disagreements, pending-on-user, scope changes mid-decision. "Holding for user" without a flag = cliff-hang.
-- PIVOT: user w/o executor → Brian PMs Rain (no executor active); Rain holds 60s, then elevates via hub_flag if user still pending.
-- TRUST: spot-check claims via git/claude_read. Snapshots=claims, not truth.
-- NUDGE: msgs prefixed [PM:<sender>] (directed to you), [HUB:<sender>] (broadcast), [HUB-OBS:<from>→<to>] (cross-traffic you observe), or FLAG variants [PM:FLAG:<sender>]/[HUB:FLAG:<sender>]. After current task: process in order. FLAG=elevated priority. PM and user msgs always handled. HUB-OBS and irrelevant broadcasts skipped silently unless correction needed. Never ignore FLAG or user messages.
+` + protocol.DiscV2RoleAndPolicyShared + `
+` + protocol.DiscV2RoleAndPolicyRainAddendum + `
+
 ` + protocol.PhaseJv1HaltResumeProtocol + `
 
 ` + protocol.PhaseLv1RulebookHardening + `
