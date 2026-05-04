@@ -161,6 +161,21 @@ func TestBrianPromptEmbedsPhaseMv1PreflightHookCheck(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseMv2OutboundDisciplineMechanical verifies the
+// Phase M M-2 commit-1 R36 OUTBOUND-DISCIPLINE-MECHANICAL const is
+// wired into Brian's prompt. Mirror in rain_test.go locks rain-side. The
+// const itself is locked via TestOutboundDisciplineMechanicalSubstringLock
+// in disc_test.go (10 anchors: rule-name + Stop-hook mechanism + block
+// JSON + 3 hub-write tool names + R33 precedent + skill pointer +
+// no-bypass scope).
+func TestBrianPromptEmbedsPhaseMv2OutboundDisciplineMechanical(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseMv2OutboundDisciplineMechanical) {
+		t.Errorf("initial prompt must embed protocol.PhaseMv2OutboundDisciplineMechanical verbatim (Phase M M-2 wiring lock)")
+	}
+}
+
 // TestPhaseIv1ContentShape pins the load-bearing rule names inside the
 // Phase I const so accidental rule-deletion in future edits fails CI.
 // One assertion per rule. If a rule name needs to change, this test

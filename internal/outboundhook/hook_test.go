@@ -1,7 +1,9 @@
 package outboundhook
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -183,9 +185,7 @@ func TestRunHookEmitsAlertOnPositiveFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RunHook(strings.NewReader(string(data))); err != nil {
-		t.Fatal(err)
-	}
+	RunHook(strings.NewReader(string(data)), io.Discard, io.Discard)
 
 	db2, err := hub.OpenDB(dbPath)
 	if err != nil {
@@ -233,7 +233,7 @@ func TestRunHookSkipsOnNegativeFilter(t *testing.T) {
 
 	hookInput := map[string]any{"transcript_path": transcriptPath}
 	data, _ := json.Marshal(hookInput)
-	RunHook(strings.NewReader(string(data)))
+	RunHook(strings.NewReader(string(data)), io.Discard, io.Discard)
 
 	db2, err := hub.OpenDB(dbPath)
 	if err != nil {
@@ -272,7 +272,7 @@ func TestRunHookSkipsWhenAgentIDUnset(t *testing.T) {
 
 	hookInput := map[string]any{"transcript_path": transcriptPath}
 	data, _ := json.Marshal(hookInput)
-	RunHook(strings.NewReader(string(data)))
+	RunHook(strings.NewReader(string(data)), io.Discard, io.Discard)
 
 	db2, err := hub.OpenDB(dbPath)
 	if err != nil {
@@ -309,9 +309,9 @@ func TestRunHookDedupSuppressesRepeat(t *testing.T) {
 	hookInput := map[string]any{"transcript_path": transcriptPath}
 	data, _ := json.Marshal(hookInput)
 
-	RunHook(strings.NewReader(string(data)))
-	RunHook(strings.NewReader(string(data)))
-	RunHook(strings.NewReader(string(data)))
+	RunHook(strings.NewReader(string(data)), io.Discard, io.Discard)
+	RunHook(strings.NewReader(string(data)), io.Discard, io.Discard)
+	RunHook(strings.NewReader(string(data)), io.Discard, io.Discard)
 
 	db2, err := hub.OpenDB(dbPath)
 	if err != nil {
@@ -540,3 +540,239 @@ func TestDedupWindowSurvives60sWindow(t *testing.T) {
 		t.Errorf("entry at -25h must NOT suppress under 24h window; got true")
 	}
 }
+
+// TestRunHook_BlockOnViolation locks the M-2 c1 R36 OUTBOUND-DISCIPLINE-
+// MECHANICAL load-bearing behavior: when shouldFlag returns true (text >
+// threshold OR planning-keyword + no hub_send tool call), RunHook MUST:
+//
+//  1. Return ExitBlock (=2) so Claude Code blocks the stop event
+//  2. Write {decision:"block", reason:"..."} JSON to stdout (primary
+//     signal per Claude Code hooks docs)
+//  3. Write the reason text to stderr (defense; propagated as error
+//     message on exit-code-only path)
+//
+// All three signals must fire — Claude Code may parse any of them
+// depending on version-skew, so defense-in-depth.
+func TestRunHook_BlockOnViolation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", dir)
+	t.Setenv(agentIDEnvVar, "rain")
+	dbPath := filepath.Join(dir, "test.db")
+	t.Setenv(dbPathEnvVar, dbPath)
+
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	writeTranscript(t, transcriptPath, []map[string]any{
+		userEvent("brainstorm question"),
+		assistantEvent("2026-05-04T20:00:00Z",
+			textBlock("DRAFT-alone, Rain wait. Pushback on framing — fix root cause first."),
+		),
+	})
+
+	hookInput := map[string]any{
+		"transcript_path": transcriptPath,
+		"hook_event_name": "Stop",
+	}
+	data, _ := json.Marshal(hookInput)
+
+	var stdout, stderr bytes.Buffer
+	exit := RunHook(strings.NewReader(string(data)), &stdout, &stderr)
+
+	if exit != ExitBlock {
+		t.Errorf("exit = %d, want ExitBlock=%d (block must fire on shouldFlag-true)", exit, ExitBlock)
+	}
+
+	// Verify stdout JSON shape.
+	var decision blockDecision
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &decision); err != nil {
+		t.Fatalf("stdout must be parseable JSON, got %q (err: %v)", stdout.String(), err)
+	}
+	if decision.Decision != "block" {
+		t.Errorf("stdout JSON .decision = %q, want \"block\"", decision.Decision)
+	}
+	if !strings.Contains(decision.Reason, "OUTBOUND-DISCIPLINE-MECHANICAL") {
+		t.Errorf("stdout JSON .reason missing rule-name anchor: %q", decision.Reason)
+	}
+
+	// Verify stderr defense layer.
+	if !strings.Contains(stderr.String(), "OUTBOUND-DISCIPLINE-MECHANICAL") {
+		t.Errorf("stderr must contain block reason text (defense layer); got %q", stderr.String())
+	}
+}
+
+// TestRunHook_AllowOnHubSent locks the no-FP contract: a turn that DID
+// invoke a hub-write tool (hub_send / hub_flag / hub_register / etc.)
+// must NOT block — even with planning keywords present.
+func TestRunHook_AllowOnHubSent(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", dir)
+	t.Setenv(agentIDEnvVar, "brian")
+	dbPath := filepath.Join(dir, "test.db")
+	t.Setenv(dbPathEnvVar, dbPath)
+
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	writeTranscript(t, transcriptPath, []map[string]any{
+		userEvent("question"),
+		assistantEvent("2026-05-04T20:01:00Z",
+			textBlock("DRAFT-alone — concur."),
+			toolUseBlock("mcp__bot-hq__hub_send"),
+		),
+	})
+
+	hookInput := map[string]any{"transcript_path": transcriptPath}
+	data, _ := json.Marshal(hookInput)
+
+	var stdout, stderr bytes.Buffer
+	exit := RunHook(strings.NewReader(string(data)), &stdout, &stderr)
+
+	if exit != ExitAllow {
+		t.Errorf("exit = %d, want ExitAllow=%d (hub_send present must allow stop)", exit, ExitAllow)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout must be empty on allow path; got %q", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr must be empty on allow path; got %q", stderr.String())
+	}
+}
+
+// TestRunHook_AllowOnSubthreshold locks the noise-floor contract: a turn
+// with short text (< minTextLenForFlag) AND no planning keyword must NOT
+// block — sub-threshold turns are not OUTBOUND-MISS class.
+func TestRunHook_AllowOnSubthreshold(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", dir)
+	t.Setenv(agentIDEnvVar, "brian")
+	dbPath := filepath.Join(dir, "test.db")
+	t.Setenv(dbPathEnvVar, dbPath)
+
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	writeTranscript(t, transcriptPath, []map[string]any{
+		userEvent("question"),
+		assistantEvent("2026-05-04T20:02:00Z",
+			// 50 chars < minTextLenForFlag=200, no planning keyword.
+			textBlock("ack noted continuing investigation in progress"),
+		),
+	})
+
+	hookInput := map[string]any{"transcript_path": transcriptPath}
+	data, _ := json.Marshal(hookInput)
+
+	var stdout, stderr bytes.Buffer
+	exit := RunHook(strings.NewReader(string(data)), &stdout, &stderr)
+
+	if exit != ExitAllow {
+		t.Errorf("exit = %d, want ExitAllow=%d (sub-threshold no-keyword must allow)", exit, ExitAllow)
+	}
+}
+
+// TestRunHook_BlockFiresEvenWhenAlertDeduped locks the Q5 Option (ii)
+// decoupled-block semantics: when a same-turn re-invocation hits the
+// dedupe window (alert suppressed), the BLOCK still fires. Zero bypass
+// class — agent cannot complete the stop by re-invoking after the first
+// alert deduped.
+func TestRunHook_BlockFiresEvenWhenAlertDeduped(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", dir)
+	t.Setenv(agentIDEnvVar, "rain")
+	dbPath := filepath.Join(dir, "test.db")
+	t.Setenv(dbPathEnvVar, dbPath)
+
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	transcriptPath := filepath.Join(dir, "transcript.jsonl")
+	writeTranscript(t, transcriptPath, []map[string]any{
+		userEvent("question"),
+		assistantEvent("2026-05-04T20:03:00Z",
+			textBlock("DRAFT response — should fire shouldFlag and block."),
+		),
+	})
+
+	hookInput := map[string]any{"transcript_path": transcriptPath}
+	data, _ := json.Marshal(hookInput)
+
+	// First invocation: alert fires + dedupe records + block fires.
+	var stdout1, stderr1 bytes.Buffer
+	exit1 := RunHook(strings.NewReader(string(data)), &stdout1, &stderr1)
+	if exit1 != ExitBlock {
+		t.Errorf("first invocation exit = %d, want ExitBlock", exit1)
+	}
+
+	// Second invocation (same data, within dedupWindow): alert suppressed
+	// by dedupe, but BLOCK MUST STILL FIRE per Q5 Option (ii).
+	var stdout2, stderr2 bytes.Buffer
+	exit2 := RunHook(strings.NewReader(string(data)), &stdout2, &stderr2)
+	if exit2 != ExitBlock {
+		t.Errorf("second invocation (deduped alert) exit = %d, want ExitBlock (block MUST fire even when alert deduped — zero bypass)", exit2)
+	}
+	if stdout2.Len() == 0 {
+		t.Errorf("second invocation stdout must contain block JSON even when alert deduped; got empty")
+	}
+
+	// Verify alert fired only once (dedupe semantic preserved on alert path).
+	db2, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	msgs, _ := db2.GetRecentMessages(10)
+	count := 0
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "OUTBOUND-MISS") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("alert dedupe should suppress 2nd alert; got %d alerts (expected 1)", count)
+	}
+}
+
+// TestRunHook_StderrFormatSubstringLock pins the load-bearing tokens in
+// the block-reason text. These tokens are what the agent's prompt + the
+// recovery skill section reference. Any wording change that drops one of
+// these substrings breaks the agent's ability to recover from the block.
+func TestRunHook_StderrFormatSubstringLock(t *testing.T) {
+	must := []string{
+		"OUTBOUND-DISCIPLINE-MECHANICAL",
+		"mcp__bot-hq__hub_send",
+		"hub_send",
+		"hub_flag",
+		"hub_session_close",
+		"/phase-rules-detail skill",
+		"R36",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(blockReason, lit) {
+				t.Errorf("blockReason missing load-bearing substring %q; full text: %q", lit, blockReason)
+			}
+		})
+	}
+}
+
+// Compile-time guard: io is referenced in the existing-test fixture
+// updates above (RunHook callsites pass io.Discard). This usage keeps
+// the import live even if all explicit io.Discard callers were refactored
+// away in a future edit.
+var _ = io.Discard

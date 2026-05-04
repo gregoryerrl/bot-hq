@@ -327,3 +327,62 @@ func TestPhaseMv1PreflightHookCheckHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- PRE-FLIGHT-HOOK-CHECK (R35):` (prompt anchor); first 60 chars: %q", PhaseMv1PreflightHookCheck[:60])
 	}
 }
+
+// Phase M M-2 commit-1 ratchet: pin load-bearing recognition substrings
+// of the OUTBOUND-DISCIPLINE-MECHANICAL (R36) rule. Anchors are what the
+// agent prompt + recovery skill section reference + what locks the
+// load-bearing tokens against future trim-pass drift.
+//
+// Substring-lock anchor strategy (mirrors L-5 R33 + L-6 R34 + M-1 R35
+// patterns): rule-name + Stop-hook mechanism + block JSON shape + hub-
+// write tool names (recovery primitives) + R33 precedent reference +
+// skill pointer + bypass scope. NOT body example tokens.
+//
+// Locked anchors:
+//   - Rule-name: "OUTBOUND-DISCIPLINE-MECHANICAL (R36)"
+//   - Mechanism: "Stop-hook"
+//   - Block enforcement: "BLOCKS turn completion"
+//   - Recovery primitive: "mcp__bot-hq__hub_send"
+//   - Recovery alternative: "hub_flag"
+//   - Recovery alternative: "hub_session_close"
+//   - JSON block shape: `{decision:"block"`
+//   - R33 precedent reference: "R33"
+//   - Skill pointer: "/phase-rules-detail skill"
+//   - Bypass scope: "no-bypass"
+//
+// Origin: Phase M M-2 commit-1; codified to enforce R6 OUTBOUND-DISCIPLINE
+// mechanically via Stop-hook BLOCKING enforcement-conversion. Closes the
+// 2026-05-04 bilateral OUTBOUND-DISCIPLINE violation class (~3h halt
+// USER-PINNED msgs 7476/7523) via the same recursion-terminator pattern
+// R33 introduced in Phase L L-5 c2.
+func TestOutboundDisciplineMechanicalSubstringLock(t *testing.T) {
+	must := []string{
+		"OUTBOUND-DISCIPLINE-MECHANICAL (R36)",
+		"Stop-hook",
+		"BLOCKS turn completion",
+		"mcp__bot-hq__hub_send",
+		"hub_flag",
+		"hub_session_close",
+		`{decision:"block"`,
+		"R33",
+		"/phase-rules-detail skill",
+		"no-bypass",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseMv2OutboundDisciplineMechanical, lit) {
+				t.Errorf("R36 OUTBOUND-DISCIPLINE-MECHANICAL ratchet broken: missing literal %q in PhaseMv2OutboundDisciplineMechanical", lit)
+			}
+		})
+	}
+}
+
+// Phase M M-2 prompt-embed verification: PhaseMv2OutboundDisciplineMechanical
+// must be embedded in both rain.go + brian.go initialPrompt() so the
+// new R36 rule is loaded at agent-spawn time. Mirrors L-5 + L-6 + M-1
+// wiring-lock pattern; catches the "const exists but isn't wired" class.
+func TestPhaseMv2OutboundDisciplineMechanicalHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseMv2OutboundDisciplineMechanical, "- OUTBOUND-DISCIPLINE-MECHANICAL (R36):") {
+		t.Errorf("rule must start with `- OUTBOUND-DISCIPLINE-MECHANICAL (R36):` (prompt anchor); first 60 chars: %q", PhaseMv2OutboundDisciplineMechanical[:60])
+	}
+}

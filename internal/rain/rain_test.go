@@ -214,6 +214,18 @@ func TestRainPromptEmbedsPhaseMv1PreflightHookCheck(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseMv2OutboundDisciplineMechanical — rain-side
+// wiring lock for Phase M M-2 commit-1 R36 OUTBOUND-DISCIPLINE-MECHANICAL
+// rule. Mirrors brian-side embed test. Same const-exists-but-not-wired
+// class prevention.
+func TestRainPromptEmbedsPhaseMv2OutboundDisciplineMechanical(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseMv2OutboundDisciplineMechanical) {
+		t.Errorf("initial prompt must embed protocol.PhaseMv2OutboundDisciplineMechanical verbatim (Phase M M-2 wiring lock)")
+	}
+}
+
 // Ratchet against the cliff-hang failure mode observed at msg 2086-2092
 // on 2026-04-25: scope changes within an ongoing decision require a
 // fresh flag, not silent continuation. The old "1 concern = 1 flag"

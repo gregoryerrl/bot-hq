@@ -347,11 +347,14 @@ func runAuditPaneDrift() {
 
 // runOutboundMissHook is the Claude Code Stop-hook entry. Reads the
 // hook input JSON from stdin (transcript_path et al), evaluates the
-// three-clause filter, and emits an OUTBOUND-MISS alert via the hub
-// when the agent produced pane text without a hub_send tool call.
-// All errors are silenced — a Stop hook must never block agent exit.
+// three-clause filter, emits an OUTBOUND-MISS alert via the hub when
+// the agent produced pane text without a hub_send tool call, AND blocks
+// the stop event via {decision:block} JSON stdout output + ExitBlock=2
+// + stderr propagation when shouldFlag fires. Phase M M-2 c1 R36 OUTBOUND-
+// DISCIPLINE-MECHANICAL enforcement-conversion (mirrors R33 toolgate
+// gate-CHECK exit-code propagation pattern).
 func runOutboundMissHook() {
-	outboundhook.RunHook(os.Stdin)
+	os.Exit(outboundhook.RunHook(os.Stdin, os.Stdout, os.Stderr))
 }
 
 // runInstallTrioHook installs the OUTBOUND-MISS Stop hook into the

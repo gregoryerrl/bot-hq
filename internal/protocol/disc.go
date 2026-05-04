@@ -378,3 +378,36 @@ const PhaseLv6PrePhaseCloseRetro = `- PRE-PHASE-CLOSE-RETRO (R34): phase-close e
 //   - L-F10a installer-fire confirmation (settings.json wired post-rebuild)
 //   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R35 PRE-FLIGHT-HOOK-CHECK
 const PhaseMv1PreflightHookCheck = `- PRE-FLIGHT-HOOK-CHECK (R35): at first scope-affecting turn-start (R20 BOOTSTRAP-ON-CONVERSATION-RESUME bootstrap point), agent MUST invoke ` + "`bot-hq preflight-check`" + ` via Bash AFTER hub_register and BEFORE any HANDS-class fire. Verifies (a) ~/.claude/settings.json present + parseable + PreToolUse-Bash hook command contains both substrings "bot-hq" + "tool-permission-hook" (logical AND), (b) BOT_HQ_AGENT_ID env-var present + value ∈ {brian, rain} whitelist (emma is gemma-based + WARNING-class, not CRITICAL). Surface discriminator: CRITICAL → Rain self-flag OR Brian PMs Rain → Rain hub_flags (Brian-detect + Rain reachable) OR Brian self-flag via R15 carve-out (Brian-detect + Rain unreachable >60s; R15-extension-candidate Phase M Tier-2). WARNING → hub_send broadcast (peer awareness, not full-stop). PASS → silent. Caller invariant: invoke AFTER hub_register (otherwise hub_send / hub_flag fail with "agent not registered"). Remediation per /phase-rules-detail skill § R35: rebuild bot-hq binary + ` + "`bot-hq install-toolgate-hook`" + ` + claude session-restart (settings.json not hot-reloaded mid-session per Phase L Finding-3).`
+
+// PhaseMv2OutboundDisciplineMechanical bundles the Phase M M-2 commit-1
+// R-rule: R36 OUTBOUND-DISCIPLINE-MECHANICAL. The rule explains the
+// blocking-Stop-hook enforcement-conversion of the existing OUTBOUND-MISS
+// detection layer (`internal/outboundhook/hook.go`): when shouldFlag
+// returns true (substantive pane text + no hub-write tool call),
+// RunHook now writes {decision:"block", reason:...} JSON to stdout +
+// stderr defense + returns ExitBlock=2 — Claude Code blocks the stop
+// event and the agent must invoke a hub-write tool before completing
+// the turn.
+//
+// Mirrors R33 toolgate gate-CHECK precedent (Phase L L-5 c2 e327362)
+// applied to the Stop-hook event-class. Q5 Option (ii) decoupled-block:
+// block fires on every shouldFlag-true turn (zero bypass class); only
+// the alert path is gated by dedupe.
+//
+// Empirical anchor: 2026-05-04 bilateral OUTBOUND-DISCIPLINE violation
+// (Brian post-Bash-investigation pane-output drift + Rain audience-class
+// misread on bcc-ad-manager pivot) cost ~3h halt-in-progress. USER-PINNED
+// via hub_flag msg 7486 + discipline-log Joint section persistent append
+// 2026-05-04T14:00:00Z. PEER-CROSS-CHECK demonstrably non-terminal at
+// recursion-depth-N (bilateral simultaneous failure with distinct
+// rationalization classes). Mechanical block-fire is the recursion-
+// terminator.
+//
+// Cite_anchors:
+//   - phase-m.md scope-lock: ~/.bot-hq/phase/phase-m.md (row M-2)
+//   - audit-doc: docs/plans/2026-05-04-phase-m-target-A-OUTBOUND-MISS-enforcement-design.md v1.1
+//   - User msg 7476 USER-PIN: "so nothing got done since 19:40:38 here on the hub. this is a very serious violation/issue"
+//   - User msg 7523 fix-directive: "include the serious/critical violation for today (fix that). reason is to never let that happen again (it resulted in ~3hours halt in progress)"
+//   - R33 toolgate gate-CHECK precedent: internal/toolgate/r33.go (Phase L L-5 c2)
+//   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R36 OUTBOUND-DISCIPLINE-MECHANICAL
+const PhaseMv2OutboundDisciplineMechanical = `- OUTBOUND-DISCIPLINE-MECHANICAL (R36): the Stop-hook at internal/outboundhook/hook.go now BLOCKS turn completion when shouldFlag returns true (substantive pane text emitted + no mcp__bot-hq__hub_send / hub_flag / hub_session_close tool call this turn). Block mechanism: writes ` + "`{decision:\"block\",reason:...}`" + ` JSON to stdout (primary signal per Claude Code hooks docs) + reason text to stderr (defense) + returns exit 2 (defense). Three-signal defense-in-depth. Recovery: invoke hub_send (or hub_flag for elevation, or hub_session_close for end-session SNAP) before stop event re-fires. Q5 Option (ii) decoupled-block: block fires on every shouldFlag-true turn (zero bypass class); alert-dedupe continues to suppress hub-message spam at the alert path only. This converts R6 OUTBOUND-DISCIPLINE from PEER-CROSS-CHECK + detection-only (proven non-terminal at recursion-depth-N per 2026-05-04 bilateral violation ~3h halt-in-progress USER-PIN msg 7476/7523) to mechanical recursion-terminator class (mirrors R33 PRE-EXECUTE-GATE-FILE-READ Phase L L-5 c2 precedent). See /phase-rules-detail skill § R36 for recovery + threshold semantics + bypass scope (none — same as R33 push-class no-bypass).`

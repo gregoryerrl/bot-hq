@@ -6,9 +6,19 @@
 //
 // RunHook is the Stop-hook entry point: reads Claude Code's hook input
 // from stdin, parses the transcript, applies a three-clause filter
-// (text>0 AND (keyword|len>200) AND no hub_send), checks an idempotency
-// ledger to dedupe re-invocations, and on positive emits an alert via
-// hub.DB.InsertMessage from the agent identified by BOT_HQ_AGENT_ID.
+// (text>0 AND (keyword|len>200) AND no hub_send), and on positive emits
+// an alert via hub.DB.InsertMessage from the agent identified by
+// BOT_HQ_AGENT_ID — AND blocks turn-completion via JSON {decision: block}
+// stdout output + exit code 2 + stderr (Phase M M-2 c1 R36 OUTBOUND-
+// DISCIPLINE-MECHANICAL enforcement-conversion). Bilateral 2026-05-04
+// pane-only-output drift (~3h halt-in-progress; USER-PINNED) demonstrated
+// PEER-CROSS-CHECK + detection-only is non-terminal at recursion-depth-N;
+// mechanical block-fire converts the rule to recursion-terminator class
+// mirroring R33 toolgate gate-CHECK precedent (Phase L L-5 c2).
+//
+// Block-fire decoupled from alert-dedupe (Q5 Option (ii)): block fires
+// on every shouldFlag-true turn (zero bypass class); alert-dedupe
+// continues to suppress hub-message spam within dedupWindow.
 //
 // InstallTrioHook installs the Stop hook into ~/.claude/settings.json
 // for long-lived trio agents (brian/rain) that aren't spawned via
@@ -111,45 +121,102 @@ type turnSummary struct {
 	Timestamp string
 }
 
+// ExitAllow is the exit code Claude Code interprets as "stop is allowed."
+// Mirrors internal/toolgate constants for cross-hook consistency.
+const ExitAllow = 0
+
+// ExitBlock is the exit code Claude Code interprets as "block stop +
+// propagate stderr to agent as system reminder." Per Claude Code hooks
+// docs (https://code.claude.com/docs/en/hooks.md). Defense layer alongside
+// the structured JSON {decision:block} output written to stdout (the
+// docs-recommended primary signal for Stop hooks).
+const ExitBlock = 2
+
+// blockDecision is the structured JSON Claude Code reads from a Stop
+// hook's stdout when blocking the stop event. Per Claude Code hooks
+// docs the {decision: "block", reason: "..."} shape gives the agent
+// explicit re-engagement context.
+type blockDecision struct {
+	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
+}
+
+// blockReason is the user-actionable text propagated to the agent on
+// every shouldFlag-true Stop event. References the recovery skill section
+// + names the hub-write tools the agent should invoke before stopping.
+const blockReason = "OUTBOUND-DISCIPLINE-MECHANICAL violation: substantive pane text emitted without mcp__bot-hq__hub_send. Invoke hub_send (or hub_flag for elevation, or hub_session_close for end-session) before completing this turn. See /phase-rules-detail skill § R36 for recovery."
+
 // RunHook is the Stop-hook entry point. Reads Claude Code's stdin JSON,
-// parses the transcript, applies the three-clause filter, dedupes via
-// ledger, and emits an OUTBOUND-MISS alert through hub.DB.InsertMessage.
-// Best-effort: any error path returns nil (the hook must not block the
-// agent's Stop event).
-func RunHook(stdin io.Reader) error {
+// parses the transcript, applies the three-clause filter, and on
+// shouldFlag-true:
+//
+//  1. Writes {decision: "block", reason: ...} JSON to stdout (primary
+//     signal per Claude Code hooks docs)
+//  2. Writes blockReason to stderr (defense — propagates as error message
+//     on exit-code-only path)
+//  3. Emits an OUTBOUND-MISS alert via hub.DB.InsertMessage (gated by
+//     dedupe ledger — alert spam suppression preserved)
+//  4. Returns ExitBlock (defense)
+//
+// On any error path or shouldFlag-false: returns ExitAllow (defensive —
+// don't block agent on hook-side bugs / non-trio sessions / sub-threshold
+// turns). Per Phase M M-2 c1 audit-doc v1.1 §5.1 + Q5 Option (ii)
+// decoupled-block: block fires on every shouldFlag-true turn; only the
+// alert path is gated by dedupe.
+func RunHook(stdin io.Reader, stdout, stderr io.Writer) int {
 	var input HookInput
 	if err := json.NewDecoder(stdin).Decode(&input); err != nil {
-		return nil
+		return ExitAllow
 	}
 	if input.TranscriptPath == "" {
-		return nil
+		return ExitAllow
 	}
 	agentID := os.Getenv(agentIDEnvVar)
 	if agentID == "" {
 		// Hook is installed but the env var isn't set — likely a non-bot-hq
-		// claude session. Silent no-op rather than spamming alerts for every
-		// claude pane on the system.
-		return nil
+		// claude session. Silent no-op rather than blocking every claude
+		// pane on the system.
+		return ExitAllow
 	}
 
 	summary, err := parseLastTurn(input.TranscriptPath)
 	if err != nil {
-		return nil
+		return ExitAllow
 	}
 	if !shouldFlag(summary) {
-		return nil
+		return ExitAllow
 	}
 
-	if alreadyFlaggedRecently(input.TranscriptPath, summary.Timestamp, time.Now()) {
-		return nil
+	// BLOCK fires unconditionally on shouldFlag-true (Q5 (ii) decoupled
+	// from alert-dedupe). Zero bypass class — the gate fires every time
+	// substantive pane text exits without a hub-write tool call.
+	emitBlock(stdout, stderr)
+
+	// ALERT path: dedupe-gated to prevent hub-message spam within
+	// dedupWindow. Same-turn re-fires are suppressed at the alert layer
+	// only; the block above still fires (Claude Code re-invokes the hook
+	// when the agent attempts to stop again, and the block must persist
+	// until the agent invokes a hub-write tool).
+	if !alreadyFlaggedRecently(input.TranscriptPath, summary.Timestamp, time.Now()) {
+		if err := emitAlert(agentID, summary.Timestamp, summary.TextSnip); err == nil {
+			recordDedup(input.TranscriptPath, summary.Timestamp, time.Now())
+		}
 	}
 
-	if err := emitAlert(agentID, summary.Timestamp, summary.TextSnip); err != nil {
-		return nil
-	}
+	return ExitBlock
+}
 
-	recordDedup(input.TranscriptPath, summary.Timestamp, time.Now())
-	return nil
+// emitBlock writes the structured JSON block decision to stdout (primary
+// signal per Claude Code hooks docs) and the reason text to stderr
+// (defense). Errors on either writer are silently ignored — the exit
+// code from RunHook is the third defense layer.
+func emitBlock(stdout, stderr io.Writer) {
+	decision := blockDecision{Decision: "block", Reason: blockReason}
+	if data, err := json.Marshal(decision); err == nil {
+		stdout.Write(data)
+		stdout.Write([]byte("\n"))
+	}
+	fmt.Fprintln(stderr, blockReason)
 }
 
 // shouldFlag applies the three-clause filter:
