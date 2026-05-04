@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/gregoryerrl/bot-hq/internal/autoinstall"
 	"github.com/gregoryerrl/bot-hq/internal/brian"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
@@ -211,6 +212,19 @@ func runMCP() {
 		// Config errors are fatal — no way to find the DB without config
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Phase M M-1 c2 — auto-install trio Stop-hook + PreToolUse-Bash hook
+	// at MCP server startup (idempotent + non-clobbering + best-effort).
+	// Closes Phase L Finding-1 (installer-not-run on this machine; cost
+	// detection-time of ~1 day on Phase L close) by removing the manual
+	// `bot-hq install-trio-hook` + `bot-hq install-toolgate-hook`
+	// invocation gap. Subcommands remain available for explicit re-install.
+	if home != "" {
+		if botHQPath, execErr := os.Executable(); execErr == nil && botHQPath != "" {
+			settingsPath := filepath.Join(home, ".claude", "settings.json")
+			autoinstall.Run(settingsPath, botHQPath, os.Stderr)
+		}
 	}
 
 	db, err := hub.OpenDB(cfg.Hub.DBPath)
