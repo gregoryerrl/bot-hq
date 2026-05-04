@@ -210,3 +210,61 @@ func TestPhaseLv6PrePhaseCloseRetroHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- PRE-PHASE-CLOSE-RETRO (R34):` (prompt anchor); first 60 chars: %q", PhaseLv6PrePhaseCloseRetro[:60])
 	}
 }
+
+// Phase L L-3b commit-1 ratchet: pin all R1-R23 rule-name substrings
+// + the skill-pointer header in PhaseIv1ProtocolHardening. After the
+// L-3b commit-1 trim (~1,180-1,650 bytes removed via 14 rule-specific
+// edits per L-3a v1.1 audit-doc §5.1), the recognition layer for each
+// rule must remain inline + the skill-pointer header anchoring
+// agents to /phase-rules-detail must survive any future trim-pass.
+//
+// Substring-lock anchor strategy (per L-3a v1.1 §5.3 + Brian Q4
+// disposition with 24th-anchor enhancement): assert all 23 rule-name
+// recognition substrings + the "PHASE-I PROTOCOL HARDENING" skill-pointer
+// header. Substring.Contains is presence-not-uniqueness (mirrors L-5/L-6
+// pattern); failure-localization via t.Run sub-tests.
+//
+// The 24th anchor ("PHASE-I PROTOCOL HARDENING") is load-bearing as the
+// skill-pointer to ~/.claude/skills/phase-rules-detail/SKILL.md — without
+// it, agents lose the explicit cue that prose-detail lives in the skill
+// + the relocation pattern itself decays. Per Rain L-3a v1.1 BRAIN-2nd-PASS
+// strong-ack on 24th-anchor.
+//
+// Origin: Phase L L-3b commit-1; codified post-prompt-shrink to ratchet
+// recognition-layer survival across future trims. Catches accidental
+// rule-deletion-during-trim class at compile-test time.
+func TestPhaseIv1RuleNamesPresent(t *testing.T) {
+	must := []string{
+		"PHASE-I PROTOCOL HARDENING",
+		"HANDSHAKE-TERMINATOR",
+		"CROSS-TIMING-DEDUP",
+		"QUOTE-TRIM",
+		"SNAP-GATING",
+		"BRAIN-CYCLE-RESPONSE-SHAPE",
+		"TOOL-RESULT-DISCIPLINE",
+		"SUBAGENT-DISPATCH",
+		"COMPACT-COMMIT-FORMAT",
+		"AUDIENCE-CLASS-DISCRIMINATOR",
+		"SCOPE-LOCK-BEFORE-IMPL",
+		"HALT-DISCIPLINE",
+		"GATE-PROTOCOL",
+		"SCOPE-VERIFY-PRE-DRAFT",
+		"HALT-95%-SNAP",
+		"AGENT-AUTHORITY-MATRIX",
+		"CROSS-RESTART-RESUME-OPERATIONAL",
+		"SOURCE-OF-TRUTH-HIERARCHY",
+		"CITE-ANCHOR-REQUIRED",
+		"CYCLE-CLOSE-USER-BLOCKING",
+		"BOOTSTRAP-ON-CONVERSATION-RESUME",
+		"PRE-COMPACT-SNAP",
+		"HEARTBEAT-LEDGER",
+		"MSG-TYPE-TAXONOMY",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseIv1ProtocolHardening, lit) {
+				t.Errorf("PhaseIv1 rule-name ratchet broken: missing substring %q in PhaseIv1ProtocolHardening (24-anchor lock; survival across trims)", lit)
+			}
+		})
+	}
+}
