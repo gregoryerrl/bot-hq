@@ -386,3 +386,67 @@ func TestPhaseMv2OutboundDisciplineMechanicalHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- OUTBOUND-DISCIPLINE-MECHANICAL (R36):` (prompt anchor); first 60 chars: %q", PhaseMv2OutboundDisciplineMechanical[:60])
 	}
 }
+
+// Phase M M-3 commit-1 ratchet: pin load-bearing recognition substrings
+// of the BYTE-PROJECTION-CITE (R37) rule. Anchors are what the agent
+// prompt + recovery skill section reference for dual-stage cite
+// discipline (Stage 1 design-spike estimate + Stage 2 staged-time
+// cite-from-actual + drift-tolerance threshold + escalation).
+//
+// Substring-lock anchor strategy (mirrors L-5 R33 + L-6 R34 + M-1 R35
+// + M-2 R36 patterns): rule-name + class scope + dual-stage anchors +
+// command-cite-from-actual + timing constraint + drift-tolerance +
+// escalation path + bidirectional drift framing + recursion-terminator
+// framing + R18 governance.
+//
+// Locked anchors (per audit-doc v1.1 §5):
+//   - Rule-name: "BYTE-PROJECTION-CITE (R37)"
+//   - Class scope: "byte/LOC projections"
+//   - Artifact type: "design-spike docs"
+//   - Audit-doc anchor: "audit-doc §5 ship-list"
+//   - Stage-1 + Stage-2 dual-stage discipline: "Stage 1" + "Stage 2"
+//   - Cite-from-actual command: "git diff --cached --numstat"
+//   - Timing constraint: "BEFORE surfacing staged-diff"
+//   - Drift-tolerance: "±25%"
+//   - Escalation path: "discipline-log carry-forward"
+//   - Recursion-terminator framing: "mechanical-cite-from-actual at staged-time"
+//
+// Origin: Phase M M-3 commit-1; codified to convert design-spike-doc
+// byte-projection drift class from session-recall pre-author estimates
+// (Phase L L-4 cluster-graduation candidate Target C; 5+ Phase L
+// instances + 3+ Phase M same-session instances) to mechanical-cite-
+// from-actual at staged-time discipline. Bidirectional drift class —
+// over-estimate AND under-estimate both observed empirically.
+func TestByteProjectionCiteSubstringLock(t *testing.T) {
+	must := []string{
+		"BYTE-PROJECTION-CITE (R37)",
+		"byte/LOC projections",
+		"design-spike docs",
+		"audit-doc §5 ship-list",
+		"Stage 1",
+		"Stage 2",
+		"git diff --cached --numstat",
+		"BEFORE surfacing staged-diff",
+		"±25%",
+		"discipline-log carry-forward",
+		"mechanical-cite-from-actual at staged-time",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseMv3ByteProjectionCite, lit) {
+				t.Errorf("R37 BYTE-PROJECTION-CITE ratchet broken: missing literal %q in PhaseMv3ByteProjectionCite", lit)
+			}
+		})
+	}
+}
+
+// Phase M M-3 prompt-embed verification: PhaseMv3ByteProjectionCite
+// must be embedded in both rain.go + brian.go initialPrompt() so the
+// new R37 rule is loaded at agent-spawn time. Mirrors L-5 + L-6 + M-1
+// + M-2 wiring-lock pattern; catches the "const exists but isn't
+// wired" class.
+func TestPhaseMv3ByteProjectionCiteHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseMv3ByteProjectionCite, "- BYTE-PROJECTION-CITE (R37):") {
+		t.Errorf("rule must start with `- BYTE-PROJECTION-CITE (R37):` (prompt anchor); first 60 chars: %q", PhaseMv3ByteProjectionCite[:60])
+	}
+}

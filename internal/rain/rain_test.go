@@ -226,6 +226,18 @@ func TestRainPromptEmbedsPhaseMv2OutboundDisciplineMechanical(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseMv3ByteProjectionCite — rain-side wiring lock
+// for Phase M M-3 commit-1 R37 BYTE-PROJECTION-CITE rule. Mirrors
+// brian-side embed test. Same const-exists-but-not-wired class
+// prevention.
+func TestRainPromptEmbedsPhaseMv3ByteProjectionCite(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseMv3ByteProjectionCite) {
+		t.Errorf("initial prompt must embed protocol.PhaseMv3ByteProjectionCite verbatim (Phase M M-3 wiring lock)")
+	}
+}
+
 // Ratchet against the cliff-hang failure mode observed at msg 2086-2092
 // on 2026-04-25: scope changes within an ongoing decision require a
 // fresh flag, not silent continuation. The old "1 concern = 1 flag"

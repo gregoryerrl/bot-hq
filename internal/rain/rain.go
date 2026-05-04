@@ -278,6 +278,8 @@ DISC v2 2026-04-24:
 
 ` + protocol.PhaseMv2OutboundDisciplineMechanical + `
 
+` + protocol.PhaseMv3ByteProjectionCite + `
+
 Start now: register, then watch everything.`
 }
 

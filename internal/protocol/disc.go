@@ -411,3 +411,50 @@ const PhaseMv1PreflightHookCheck = `- PRE-FLIGHT-HOOK-CHECK (R35): at first scop
 //   - R33 toolgate gate-CHECK precedent: internal/toolgate/r33.go (Phase L L-5 c2)
 //   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R36 OUTBOUND-DISCIPLINE-MECHANICAL
 const PhaseMv2OutboundDisciplineMechanical = `- OUTBOUND-DISCIPLINE-MECHANICAL (R36): the Stop-hook at internal/outboundhook/hook.go now BLOCKS turn completion when shouldFlag returns true (substantive pane text emitted + no mcp__bot-hq__hub_send / hub_flag / hub_session_close tool call this turn). Block mechanism: writes ` + "`{decision:\"block\",reason:...}`" + ` JSON to stdout (primary signal per Claude Code hooks docs) + reason text to stderr (defense) + returns exit 2 (defense). Three-signal defense-in-depth. Recovery: invoke hub_send (or hub_flag for elevation, or hub_session_close for end-session SNAP) before stop event re-fires. Q5 Option (ii) decoupled-block: block fires on every shouldFlag-true turn (zero bypass class); alert-dedupe continues to suppress hub-message spam at the alert path only. This converts R6 OUTBOUND-DISCIPLINE from PEER-CROSS-CHECK + detection-only (proven non-terminal at recursion-depth-N per 2026-05-04 bilateral violation ~3h halt-in-progress USER-PIN msg 7476/7523) to mechanical recursion-terminator class (mirrors R33 PRE-EXECUTE-GATE-FILE-READ Phase L L-5 c2 precedent). See /phase-rules-detail skill § R36 for recovery + threshold semantics + bypass scope (none — same as R33 push-class no-bypass).`
+
+// PhaseMv3ByteProjectionCite bundles the Phase M M-3 commit-1 R-rule:
+// R37 BYTE-PROJECTION-CITE. The rule mandates dual-stage cite discipline
+// for byte/LOC projections in design-spike docs — Stage 1 estimate at
+// design-spike authoring (must be explicitly tagged as estimate + state
+// per-class method) + Stage 2 cite-from-actual via `git diff --cached
+// --numstat` BEFORE surfacing staged-diff for peer BRAIN-2nd. Drift
+// document-in-commit-body if actual exceeds estimate envelope ±25%; if
+// peer BRAIN-2nd flags drift >25% peer routes to discipline-log
+// carry-forward at phase-close.
+//
+// Mechanism class: rule-text-only ratchet (no toolgate gate-CHECK).
+// Smaller scope than M-1 c1 / M-2 c1 toolgate-class commits.
+//
+// Empirical anchor (bidirectional drift class — over-estimate AND
+// under-estimate both empirically observed):
+//   - Phase L #31-#35: 5+ instances per discipline-log Joint entry
+//     2026-05-04T07:00:00Z
+//   - Phase M empirical 2026-05-04 same session: 3+ instances #38-#40
+//     (M-1 c1 +216% LOC over upper-bound / M-4 audit-pass -49% under
+//     L-3a v1 estimate / M-2 c1 +49% LOC over upper-bound). Formal
+//     append at M-sweep per discipline-log Joint section append
+//     discipline (per Q10 forward-reference disposition v1.1 lean (B);
+//     M-sweep ratchet preservation rationale per Rain msg 7561).
+//
+// Mechanism distinct from R31 STAT-CLAIM-CITE: R31 covers numerical
+// claims cited from command output at fire-time (single-stage cite);
+// R37 covers design-spike pre-author estimates that need staged-time
+// follow-up cite-from-actual (dual-stage cite). Phase L L-1 R31/R32
+// standalone-R-rule precedent applied — separate rule for substring-
+// lock-clarity per Q1 (b) lean.
+//
+// Recursive proof-of-need: Brian-HANDS at M-3 c1 impl-time MUST
+// cite-from-actual at staged-time per the rule being added. If M-3 c1
+// itself drifts ±25%+ from this design-spike's estimate (~120-160 LOC
+// code + ~30-50L skill), document as Phase M empirical instance #41 —
+// strengthens R37 case empirically.
+//
+// Cite_anchors:
+//   - phase-m.md scope-lock: ~/.bot-hq/phase/phase-m.md (row M-3)
+//   - design-spike: docs/plans/2026-05-05-phase-m-target-C-byte-projection-cite-design-spike.md v1.1
+//   - Phase L L-4 cluster-graduation Joint entry 2026-05-04T07:00:00Z
+//   - R31 STAT-CLAIM-CITE (companion runtime-stat-claim rule; R37 covers
+//     design-spike-projection class distinctly)
+//   - R18 CITE-ANCHOR-REQUIRED (governance authority)
+//   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R37 BYTE-PROJECTION-CITE
+const PhaseMv3ByteProjectionCite = `- BYTE-PROJECTION-CITE (R37): byte/LOC projections in design-spike docs (audit-doc §5 ship-list / scope-estimates / per-file LOC tables / "estimated savings X-Y bytes/agent" framings) require dual-stage cite discipline. Stage 1 (design-spike authoring): estimate may be session-recall but MUST tag explicitly as estimate (e.g., "~80-120 LOC estimate") + state per-class method (per-rule audit / fixture-density modeling / session-recall). Stage 2 (staged-time): drafter MUST cite-from-actual via ` + "`git diff --cached --numstat`" + ` BEFORE surfacing staged-diff for peer BRAIN-2nd; document drift in commit-body if actual exceeds estimate envelope by ±25%. Peer BRAIN-2nd-PASS-2 surface-format-discipline: cross-check estimate vs actual; if drift >25%, peer flags for discipline-log carry-forward at phase-close. Bidirectional drift class: over-estimate AND under-estimate both warrant carry-forward (Phase L #31 over-estimate ~50% + #33 under-estimate ~28% empirical). Recursion-terminator: mechanical-cite-from-actual at staged-time is the load-bearing terminator; audit-doc-as-stat-correction alone has residual drift (Phase L #32). Cite_anchor: discipline-log #31-#35 (Phase L 5+ instances per Joint entry 2026-05-04T07:00:00Z) + Phase M empirical 3+ instances same session 2026-05-04 (formal append at M-sweep per discipline-log Joint section append discipline). Per R18 CITE-ANCHOR-REQUIRED.`

@@ -297,6 +297,8 @@ DISC v2 2026-04-24:
 
 ` + protocol.PhaseMv2OutboundDisciplineMechanical + `
 
+` + protocol.PhaseMv3ByteProjectionCite + `
+
 ` + protocol.H13ForcePushProtocol + `
 
 Start now: follow STARTUP.`

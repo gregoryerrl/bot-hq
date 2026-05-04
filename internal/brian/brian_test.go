@@ -176,6 +176,20 @@ func TestBrianPromptEmbedsPhaseMv2OutboundDisciplineMechanical(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseMv3ByteProjectionCite verifies the Phase M
+// M-3 commit-1 R37 BYTE-PROJECTION-CITE const is wired into Brian's
+// prompt. Mirror in rain_test.go locks rain-side. The const itself is
+// locked via TestByteProjectionCiteSubstringLock in disc_test.go (10
+// anchors: rule-name + class scope + dual-stage + cite-from-actual +
+// timing + drift-tolerance + escalation + recursion-terminator framing).
+func TestBrianPromptEmbedsPhaseMv3ByteProjectionCite(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseMv3ByteProjectionCite) {
+		t.Errorf("initial prompt must embed protocol.PhaseMv3ByteProjectionCite verbatim (Phase M M-3 wiring lock)")
+	}
+}
+
 // TestPhaseIv1ContentShape pins the load-bearing rule names inside the
 // Phase I const so accidental rule-deletion in future edits fails CI.
 // One assertion per rule. If a rule name needs to change, this test
