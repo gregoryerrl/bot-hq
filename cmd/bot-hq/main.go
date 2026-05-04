@@ -49,6 +49,9 @@ func main() {
 		case "install-toolgate-hook":
 			runInstallToolgateHook()
 			return
+		case "preflight-check":
+			runPreflightCheck()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -56,7 +59,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -425,9 +428,66 @@ func runInstallToolgateHook() {
 		fmt.Fprintf(os.Stderr, "install: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("K-16 toolgate hook installed in %s\n", settingsPath)
+	fmt.Printf("Toolgate PreToolUse-Bash hook installed in %s\n", settingsPath)
 	fmt.Printf("Hook command: %s\n", toolgate.SettingsHookCommand(botHQPath))
-	fmt.Printf("Reminder: gate is rain-only (BOT_HQ_AGENT_ID=rain). Brian agent calls pass through unblocked.\n")
+	fmt.Printf("Gates active per BOT_HQ_AGENT_ID:\n")
+	fmt.Printf("  rain → K-16 class-split (HANDS-execute blocked) + K-13 R12 commit-gate\n")
+	fmt.Printf("  brian (or non-rain trio member) → L-5 R33 pre-commit + pre-push + pre-merge gate-CHECK\n")
+	fmt.Printf("Hook activation requires Claude session-restart (settings.json not hot-reloaded mid-session).\n")
+}
+
+// runPreflightCheck is the standalone CLI entry point for the M-1 (i)
+// preflight self-check primitives. Reads ~/.claude/settings.json (or
+// custom path via arg), runs RunPreflight, prints human-readable Verdict
+// to stdout, exits with status 0/1/2 (PASS/WARNING/CRITICAL).
+//
+// Usage:
+//
+//	bot-hq preflight-check            # checks ~/.claude/settings.json
+//	bot-hq preflight-check <path>     # checks custom settings path
+//
+// Phase M M-1 (i) — preflight self-check Layer-5 CLI subcommand per
+// design-spike v1.1 §3 L5.
+func runPreflightCheck() {
+	settingsPath := ""
+	if len(os.Args) > 2 {
+		settingsPath = os.Args[2]
+	}
+	if settingsPath == "" {
+		p, err := toolgate.DefaultSettingsPath()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "resolve settings path: %v\n", err)
+			os.Exit(2)
+		}
+		settingsPath = p
+	}
+
+	v := toolgate.RunPreflight(settingsPath)
+
+	fmt.Printf("preflight: %s\n", v.Status)
+	if v.AgentID != "" {
+		fmt.Printf("agent-id: %s\n", v.AgentID)
+	} else {
+		fmt.Printf("agent-id: (BOT_HQ_AGENT_ID absent)\n")
+	}
+	for _, f := range v.Findings {
+		fmt.Printf("  - %s\n", f)
+	}
+	if v.Status != toolgate.StatusPass {
+		fmt.Printf("remediation: bot-hq install-toolgate-hook && export BOT_HQ_AGENT_ID=<brian|rain> && claude session-restart\n")
+		fmt.Printf("skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R-NN PRE-FLIGHT-HOOK-CHECK\n")
+	}
+
+	switch v.Status {
+	case toolgate.StatusPass:
+		os.Exit(0)
+	case toolgate.StatusWarning:
+		os.Exit(1)
+	case toolgate.StatusCritical:
+		os.Exit(2)
+	default:
+		os.Exit(2)
+	}
 }
 
 func statusDot(s protocol.AgentStatus) string {

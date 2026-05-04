@@ -145,6 +145,22 @@ func TestBrianPromptEmbedsPhaseLv6PrePhaseCloseRetro(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseMv1PreflightHookCheck verifies the Phase M
+// M-1 commit-1 R35 PRE-FLIGHT-HOOK-CHECK const is wired into Brian's
+// prompt. Mirror in rain_test.go locks the rain-side wiring. The const
+// itself is locked via TestPreFlightHookCheckSubstringLock in
+// disc_test.go (substring lock on 10 anchors: rule-name + invocation
+// primitive + bootstrap point + env-var + hook target + substring
+// expectation + caller invariant + brian carve-out + Finding-3
+// remediation invariant + skill pointer).
+func TestBrianPromptEmbedsPhaseMv1PreflightHookCheck(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseMv1PreflightHookCheck) {
+		t.Errorf("initial prompt must embed protocol.PhaseMv1PreflightHookCheck verbatim (Phase M M-1 wiring lock)")
+	}
+}
+
 // TestPhaseIv1ContentShape pins the load-bearing rule names inside the
 // Phase I const so accidental rule-deletion in future edits fails CI.
 // One assertion per rule. If a rule name needs to change, this test

@@ -343,3 +343,38 @@ const PhaseLv5GateProtocol = `- PRE-EXECUTE-GATE-FILE-READ (R33): HANDS-class ex
 //   - Gate-file: ~/.bot-hq/gates/pre-phase-close-checklist.md
 //     (SHA e17abd0acf9d5ebaaa6c77efb9a664ad8ff93217ccf398dd4625f7022dad3e56)
 const PhaseLv6PrePhaseCloseRetro = `- PRE-PHASE-CLOSE-RETRO (R34): phase-close events MUST consult ` + "`~/.bot-hq/gates/pre-phase-close-checklist.md`" + ` before crystallizing phase work into the public main-line. Phase-close is a composite event (multiple commits + state-writes + push-batch + arc-snapshot + ratchet-ledger update), not a single Bash invocation. Required dispositions (full detail in checklist + /phase-rules-detail skill): discipline-log sweep (graduate-or-deprecate per maturity-criterion) / Tier-2 holds re-eval / baseline-vs-final event-count comparison / ratchet-ledger update / arc-snapshot to docs/arcs/phase-<N>.md / push-batch greenflag / AgentState refresh. Proof-of-consultation: AgentState ` + "`pre_phase_close_checklist_sha_seen`" + ` field set to SHA256 of pre-phase-close-checklist.md + companion ` + "`pre_phase_close_checklist_sha_seen_at_msg_id`" + ` field set to current self-msg-id, both within last 5 self-agent messages of phase-close-fire turn. Bypass: none. Toolgate gate-CHECK enforcement deferred to Phase M.`
+
+// PhaseMv1PreflightHookCheck bundles the Phase M M-1 commit-1 R-rule:
+// R35 PRE-FLIGHT-HOOK-CHECK. The rule mandates an agent-side preflight
+// self-check at first scope-affecting turn-start (R20 BOOTSTRAP-ON-
+// CONVERSATION-RESUME bootstrap point) verifying:
+//   - ~/.claude/settings.json present + parseable
+//   - PreToolUse-Bash hook command contains all expected substrings
+//     ("bot-hq" + "tool-permission-hook", logical AND)
+//   - BOT_HQ_AGENT_ID env-var present + value in {brian, rain} whitelist
+//
+// Surface discriminator (Layer-2 per design-spike v1.1 §3 L2):
+//   - CRITICAL → hub_flag (Rain self-flag) OR brian-PMs-Rain → Rain hub_flags
+//     (brian-detect + Rain reachable) OR brian-self-flag-via-R15-carve-out
+//     (brian-detect + Rain unreachable >60s; R15-extension-candidate
+//     Phase M Tier-2)
+//   - WARNING → hub_send broadcast (peer awareness)
+//   - PASS    → silent (no hub emission)
+//
+// Implementation: agent invokes ` + "`bot-hq preflight-check`" + ` via Bash
+// post-hub_register. Go primitives in internal/toolgate/preflight.go
+// (VerifyHookInstallation + VerifyAgentEnv + RunPreflight). Stand-alone
+// CLI subcommand for manual debugging.
+//
+// Closes the Phase L Finding-1 (installer-not-run) + Finding-3
+// (settings.json hot-reload-unsupported activation lag) recurrence
+// class. Pre-empts the "agent ran HANDS-class fire under stale-runtime
+// settings" failure mode.
+//
+// Cite_anchors:
+//   - phase-m.md scope-lock: ~/.bot-hq/phase/phase-m.md (row M-1)
+//   - design-spike: docs/plans/2026-05-04-phase-m-M-1-i-preflight-design-spike.md
+//   - Phase L Finding-1 + Finding-3 (msg 7412)
+//   - L-F10a installer-fire confirmation (settings.json wired post-rebuild)
+//   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R35 PRE-FLIGHT-HOOK-CHECK
+const PhaseMv1PreflightHookCheck = `- PRE-FLIGHT-HOOK-CHECK (R35): at first scope-affecting turn-start (R20 BOOTSTRAP-ON-CONVERSATION-RESUME bootstrap point), agent MUST invoke ` + "`bot-hq preflight-check`" + ` via Bash AFTER hub_register and BEFORE any HANDS-class fire. Verifies (a) ~/.claude/settings.json present + parseable + PreToolUse-Bash hook command contains both substrings "bot-hq" + "tool-permission-hook" (logical AND), (b) BOT_HQ_AGENT_ID env-var present + value ∈ {brian, rain} whitelist (emma is gemma-based + WARNING-class, not CRITICAL). Surface discriminator: CRITICAL → Rain self-flag OR Brian PMs Rain → Rain hub_flags (Brian-detect + Rain reachable) OR Brian self-flag via R15 carve-out (Brian-detect + Rain unreachable >60s; R15-extension-candidate Phase M Tier-2). WARNING → hub_send broadcast (peer awareness, not full-stop). PASS → silent. Caller invariant: invoke AFTER hub_register (otherwise hub_send / hub_flag fail with "agent not registered"). Remediation per /phase-rules-detail skill § R35: rebuild bot-hq binary + ` + "`bot-hq install-toolgate-hook`" + ` + claude session-restart (settings.json not hot-reloaded mid-session per Phase L Finding-3).`

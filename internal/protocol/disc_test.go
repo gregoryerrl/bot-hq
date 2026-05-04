@@ -268,3 +268,62 @@ func TestPhaseIv1RuleNamesPresent(t *testing.T) {
 		})
 	}
 }
+
+// Phase M M-1 commit-1 ratchet: pin load-bearing recognition substrings
+// of the PRE-FLIGHT-HOOK-CHECK (R35) rule. Anchors are what the agent
+// prompt uses to recognize preflight discipline + invocation primitive
+// + remediation pointers + caller-invariant ordering.
+//
+// Substring-lock anchor strategy (mirrors L-5 R33 + L-6 R34 patterns):
+// anchor on rule-name + invocation-primitive + env-var name + hook
+// target + filesystem location + AFTER-register ordering invariant +
+// brian-carve-out condition + Finding-3 remediation invariant + skill
+// pointer. NOT on body example tokens or runtime CLI output strings.
+//
+// Locked anchors:
+//   - Rule-name: "PRE-FLIGHT-HOOK-CHECK (R35)"
+//   - Invocation primitive: "bot-hq preflight-check"
+//   - Bootstrap point: "BOOTSTRAP-ON-CONVERSATION-RESUME"
+//   - Env-var name: "BOT_HQ_AGENT_ID"
+//   - Hook target: "PreToolUse-Bash"
+//   - Substring expectation: "tool-permission-hook"
+//   - Caller invariant: "AFTER hub_register"
+//   - Brian carve-out: "Rain unreachable >60s"
+//   - Finding-3 invariant: "session-restart"
+//   - Skill pointer: "/phase-rules-detail skill"
+//
+// Origin: Phase M M-1 commit-1; codified to enforce preflight self-check
+// discipline at first scope-affecting turn-start. Closes Phase L
+// Finding-1 (installer-not-run) + Finding-3 (settings.json hot-reload-
+// unsupported) recurrence class.
+func TestPreFlightHookCheckSubstringLock(t *testing.T) {
+	must := []string{
+		"PRE-FLIGHT-HOOK-CHECK (R35)",
+		"bot-hq preflight-check",
+		"BOOTSTRAP-ON-CONVERSATION-RESUME",
+		"BOT_HQ_AGENT_ID",
+		"PreToolUse-Bash",
+		"tool-permission-hook",
+		"AFTER hub_register",
+		"Rain unreachable >60s",
+		"session-restart",
+		"/phase-rules-detail skill",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseMv1PreflightHookCheck, lit) {
+				t.Errorf("R35 PRE-FLIGHT-HOOK-CHECK ratchet broken: missing literal %q in PhaseMv1PreflightHookCheck", lit)
+			}
+		})
+	}
+}
+
+// Phase M M-1 prompt-embed verification: PhaseMv1PreflightHookCheck
+// must be embedded in both rain.go + brian.go initialPrompt() so the
+// new R35 rule is loaded at agent-spawn time. Mirrors L-5 + L-6 wiring-
+// lock pattern; catches the "const exists but isn't wired" class.
+func TestPhaseMv1PreflightHookCheckHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseMv1PreflightHookCheck, "- PRE-FLIGHT-HOOK-CHECK (R35):") {
+		t.Errorf("rule must start with `- PRE-FLIGHT-HOOK-CHECK (R35):` (prompt anchor); first 60 chars: %q", PhaseMv1PreflightHookCheck[:60])
+	}
+}

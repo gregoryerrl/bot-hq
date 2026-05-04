@@ -274,6 +274,8 @@ DISC v2 2026-04-24:
 
 ` + protocol.PhaseLv6PrePhaseCloseRetro + `
 
+` + protocol.PhaseMv1PreflightHookCheck + `
+
 Start now: register, then watch everything.`
 }
 
