@@ -152,3 +152,61 @@ func TestPhaseLv5GateProtocolHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- PRE-EXECUTE-GATE-FILE-READ (R33):` (prompt anchor); first 60 chars: %q", PhaseLv5GateProtocol[:60])
 	}
 }
+
+// Phase L L-6 commit-1 ratchet: pin load-bearing recognition substrings
+// of the PRE-PHASE-CLOSE-RETRO (R34) rule. These tokens are what the
+// agent prompt uses to recognize phase-close consultation discipline +
+// the AgentState-cite proof mechanism. Any wording change that drops
+// one of these substrings breaks the rule's substance.
+//
+// Substring-lock anchor strategy (mirrors L-5 R33 pattern, per F6):
+// anchor on rule-name + AgentState-cite-format identifier +
+// graduation-criterion semantic anchor + baseline-vs-final semantic
+// anchor + filesystem location + freshness-metric (F4-unified with
+// R33). NOT on body example tokens. Locked anchors:
+//   - Rule-name: "PRE-PHASE-CLOSE-RETRO (R34)"
+//   - AgentState cite-format: "pre_phase_close_checklist_sha_seen"
+//   - Graduation-criterion semantic: "graduate-or-deprecate"
+//   - Baseline-comparison semantic: "baseline-vs-final"
+//   - Filesystem location: "~/.bot-hq/gates/"
+//   - Freshness-metric (F4 shared with R33): "5 self-agent messages"
+//
+// Origin: Phase L L-6 commit-1; codified to enforce phase-close
+// consultation discipline at the per-phase boundary. Toolgate
+// gate-CHECK deferred to Phase M (low-cadence event; PEER-CROSS-CHECK
+// + prompt-rule sufficient for L-6).
+//
+// NB: anchor "5 self-agent messages" + "~/.bot-hq/gates/" are shared
+// with R33 PhaseLv5GateProtocol substring-lock — substrings.Contains
+// only checks presence not uniqueness, so the shared anchors are
+// independently asserted in PhaseLv6PrePhaseCloseRetro (per Rain
+// BRAIN-2nd NB1).
+func TestPrePhaseCloseRetroSubstringLock(t *testing.T) {
+	must := []string{
+		"PRE-PHASE-CLOSE-RETRO (R34)",
+		"pre_phase_close_checklist_sha_seen",
+		"graduate-or-deprecate",
+		"baseline-vs-final",
+		"~/.bot-hq/gates/",
+		"5 self-agent messages",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseLv6PrePhaseCloseRetro, lit) {
+				t.Errorf("R34 PRE-PHASE-CLOSE-RETRO ratchet broken: missing literal %q in PhaseLv6PrePhaseCloseRetro", lit)
+			}
+		})
+	}
+}
+
+// Phase L L-6 prompt-embed verification: PhaseLv6PrePhaseCloseRetro
+// must be embedded in both rain.go + brian.go initialPrompt() so the
+// new R34 rule is loaded at agent-spawn time. Mirrors L-5 wiring-lock
+// pattern; catches the "const exists but isn't wired" class.
+func TestPhaseLv6PrePhaseCloseRetroHeaderAnchor(t *testing.T) {
+	// Verify const starts with R34 PRE-PHASE-CLOSE-RETRO header — slots
+	// cleanly into agent prompt at the expected anchor position.
+	if !strings.HasPrefix(PhaseLv6PrePhaseCloseRetro, "- PRE-PHASE-CLOSE-RETRO (R34):") {
+		t.Errorf("rule must start with `- PRE-PHASE-CLOSE-RETRO (R34):` (prompt anchor); first 60 chars: %q", PhaseLv6PrePhaseCloseRetro[:60])
+	}
+}

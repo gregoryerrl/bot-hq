@@ -130,6 +130,21 @@ func TestBrianPromptEmbedsPhaseLv5GateProtocol(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseLv6PrePhaseCloseRetro verifies the Phase L
+// L-6 commit-1 R34 PRE-PHASE-CLOSE-RETRO const is wired into Brian's
+// prompt. Mirror in rain_test.go locks the rain-side wiring. The const
+// itself is locked via TestPrePhaseCloseRetroSubstringLock in
+// disc_test.go (substring lock on 6 anchors: rule-name + AgentState
+// cite-format + graduation-criterion + baseline-comparison + filesystem
+// location + freshness-metric).
+func TestBrianPromptEmbedsPhaseLv6PrePhaseCloseRetro(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseLv6PrePhaseCloseRetro) {
+		t.Errorf("initial prompt must embed protocol.PhaseLv6PrePhaseCloseRetro verbatim (Phase L L-6 wiring lock)")
+	}
+}
+
 // TestPhaseIv1ContentShape pins the load-bearing rule names inside the
 // Phase I const so accidental rule-deletion in future edits fails CI.
 // One assertion per rule. If a rule name needs to change, this test

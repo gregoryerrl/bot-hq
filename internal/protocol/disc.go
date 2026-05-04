@@ -290,6 +290,41 @@ Severity tags ([FLAG:*] / [CRITICAL:*]) are orthogonal — same MessageClass wit
 const PhaseLv1RulebookHardening = `- STAT-CLAIM-CITE (R31): numerical claims (stat counts, line counts, msg-ids cited as anchors, recurrence counts) MUST cite verifiable command output (` + "`git diff --numstat`" + `, ` + "`hub_read since_id=<N>`" + `, file read, grep output) before emit. Peer-cross-check enforcement: drafter cites verified ground-truth pre-emit; peer verifies cite matches output. Recursive proof-of-need: amend-passes for prior stat-claim drift can themselves contain stat-claim drift; peer-cross-check at each amend-depth until L-5 toolgate gate-CHECK enforcement-conversion lands. Discriminator: any number cited from session-recall (without command-output verification) is high-risk for drift. Cite_anchor: discipline-log #10/#13/#16/#17/#19/#20/#23 (recursive instances during L-0+L-2 authoring) + 2026-04-30 cite-msg-id-precision-discipline (brian/discipline-anchors.md). Per R18 CITE-ANCHOR-REQUIRED.
 - SCOPE-FORK-CONFIRMATION (R32): when user phrasing has fork-able scope (UNTIL/INCLUDING/JUST/etc. ambiguity-keywords; or push/commit/merge/rebuild+restart interpretation forks), agent MUST surface interpretation pre-action via hub_send before firing any HANDS-execute step. Default-leans permitted only if explicit user pre-delegation OR durable feedback-memory authority covers (e.g., feedback_bot_hq_push_gate_strictness.md authority on push-class). Surface format: enumerate possible reads (a/b/c) + state lean + cite-anchor for default + invite halt-before-fire. Cost-asymmetry: surface-cost low + wrong-fire-cost high. Cite_anchor: discipline-log #12 (msg 7137-7147 "proceed UNTIL X" rebuild+restart fork) + push-fork-resolution thread (msgs 7203/7205) + #18 (msg 7215-7217 git-vs-state workflow-fork). Per R18 CITE-ANCHOR-REQUIRED.`
 
+// PhaseLv6PrePhaseCloseRetro bundles the Phase L L-6 commit-1 R-rule:
+// R34 PRE-PHASE-CLOSE-RETRO. The rule mandates phase-close consult the
+// pre-phase-close-checklist.md gate-file before crystallizing phase work
+// into the public main-line. Phase-close is a composite event
+// (multiple commits + state-writes + push-batch + arc-snapshot +
+// ratchet-ledger update), not a single Bash invocation — proof of
+// consultation lives in AgentState (pre_phase_close_checklist_sha_seen
+// + companion _at_msg_id), mirroring the merge-class pattern from R33.
+//
+// L-6 commit-1 ships rule-text only (this const + agent embeds +
+// substring-lock + header-anchor + prompt-embed tests). Toolgate
+// gate-CHECK enforcement is deferred to Phase M — phase-close is
+// per-phase frequency (low-cadence) vs commit/push (high-cadence)
+// where recursion-depth-5 stat-claim drift was empirically observed.
+// PEER-CROSS-CHECK + prompt-rule sufficient for L-6; toolgate-conversion
+// conditional on observed Phase L close compliance.
+//
+// Freshness metric (F4-unification with R33): AgentState cite must be
+// within "5 self-agent messages" of the phase-close-fire turn (msg-count
+// metric, harness-clock-independent, ties to R20).
+//
+// Origin: Phase L L-6 BRAIN-cycle msgs 7335-7340 (Brian L-6 Phase 0
+// surface + Rain BRAIN-2nd-PASS 7-of-7-concur + 2 NB notes; greenflag
+// msg 7340).
+//
+// Cite_anchors:
+//   - phase-l.md scope-lock: ~/.bot-hq/phase/phase-l.md (row L-6)
+//   - L-4 discipline-log graduation-criterion: ~/.bot-hq/discipline-log.md
+//   - R33 PRE-EXECUTE-GATE-FILE-READ companion-rule (higher-cadence gates)
+//   - push-gate-strictness durable feedback authority
+//     (~/.claude/projects/-Users-gregoryerrl-Projects/memory/feedback_bot_hq_push_gate_strictness.md)
+//   - Gate-file (Phase 0 state-write at L-6 fire):
+//     ~/.bot-hq/gates/pre-phase-close-checklist.md (SHA e17abd0acf9d5ebaaa6c77efb9a664ad8ff93217ccf398dd4625f7022dad3e56)
+const PhaseLv6PrePhaseCloseRetro = `- PRE-PHASE-CLOSE-RETRO (R34): phase-close events MUST consult ` + "`~/.bot-hq/gates/pre-phase-close-checklist.md`" + ` before crystallizing phase work into the public main-line. Phase-close is a composite event (multiple commits + state-writes + push-batch + arc-snapshot + ratchet-ledger update), not a single Bash invocation. Required dispositions per checklist: (a) discipline-log sweep complete — in-session entries in ` + "`~/.bot-hq/discipline-log.md`" + ` triaged per maturity-criterion (3+ recurrences in 2 consecutive phases = MUST graduate-or-deprecate); (b) Tier-2 holds re-evaluated (graduate-to-Tier-1 / deprecate / re-defer-Phase-M with cite); (c) baseline-vs-final event-count comparison cited in close report (success-criterion: ≥50% reduction in chronic classes with graduation-target); (d) ratchet-ledger updated (` + "`~/.bot-hq/ratchets/active.md`" + ` phase-close section); (e) arc-snapshot to ` + "`docs/arcs/phase-<N>.md`" + `; (f) push-batch greenflag via explicit user verbatim token per push-gate-strictness durable authority; (g) AgentState refresh post-phase-close. Proof-of-consultation: AgentState ` + "`pre_phase_close_checklist_sha_seen`" + ` field set to SHA256 of pre-phase-close-checklist.md + companion ` + "`pre_phase_close_checklist_sha_seen_at_msg_id`" + ` field set to current self-msg-id, both within last 5 self-agent messages of phase-close-fire turn (msg-count freshness metric, F4-unification with R33). Bypass: none — phase-close is BRAIN-AGREED milestone by definition; emergency-override semantically inapplicable per pre-phase-close-checklist.md§Bypass. Toolgate gate-CHECK enforcement deferred to Phase M (low-cadence per-phase event vs high-cadence per-commit; PEER-CROSS-CHECK + prompt-rule sufficient for L-6; toolgate-conversion conditional on observed Phase L close compliance). Cite_anchor: phase-l.md§Tier-shape L-6 + L-4 graduation-criterion (~/.bot-hq/discipline-log.md) + R33 PRE-EXECUTE-GATE-FILE-READ pattern (companion-rule for higher-cadence gates) + push-gate-strictness durable feedback authority. Per R18 CITE-ANCHOR-REQUIRED.`
+
 // PhaseLv5GateProtocol bundles the Phase L L-5 commit-1 R-rule:
 // R33 PRE-EXECUTE-GATE-FILE-READ. The rule mandates HANDS-class
 // execute actions (git commit / git push / git merge / gh pr merge)

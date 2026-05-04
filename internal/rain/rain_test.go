@@ -190,6 +190,18 @@ func TestRainPromptEmbedsPhaseLv5GateProtocol(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseLv6PrePhaseCloseRetro — rain-side wiring lock
+// for Phase L L-6 commit-1 R34 PRE-PHASE-CLOSE-RETRO rule. Mirrors
+// brian-side embed test. Same const-exists-but-not-wired class
+// prevention.
+func TestRainPromptEmbedsPhaseLv6PrePhaseCloseRetro(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseLv6PrePhaseCloseRetro) {
+		t.Errorf("initial prompt must embed protocol.PhaseLv6PrePhaseCloseRetro verbatim (Phase L L-6 wiring lock)")
+	}
+}
+
 // Ratchet against the cliff-hang failure mode observed at msg 2086-2092
 // on 2026-04-25: scope changes within an ongoing decision require a
 // fresh flag, not silent continuation. The old "1 concern = 1 flag"
