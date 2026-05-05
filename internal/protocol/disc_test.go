@@ -611,3 +611,40 @@ func TestPhaseNv1LogTheFailingSideHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- LOG-THE-FAILING-SIDE (R38):` (prompt anchor); first 60 chars: %q", PhaseNv1LogTheFailingSide[:60])
 	}
 }
+
+// Phase N N-4 commit-2 ratchet: pin load-bearing recognition substrings
+// of the PhaseNv2OverClaimDiscipline const. R31 sub-clause for
+// verification-mechanism-citation discipline. Generalizes today's
+// (2026-05-05) "all 6 flows verified" conflation user trust-shaking
+// moment in the bcc-ad-manager session.
+func TestOverClaimDisciplineSubstringLock(t *testing.T) {
+	must := []string{
+		"OVER-CLAIM-DISCIPLINE (R31 sub-clause)",
+		"quantifier-claims about test/verification scope",
+		"all flows verified",
+		"verification mechanisms explicitly per-class",
+		"PHPUnit feature-test",
+		"browser-driven QA",
+		"tinker-simulation",
+		"Conflation across mechanism classes = drift",
+		"all 6 flows verified",
+		"per-mechanism counts",
+		"user msg 7919",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseNv2OverClaimDiscipline, lit) {
+				t.Errorf("R31 OVER-CLAIM-DISCIPLINE sub-clause ratchet broken: missing literal %q in PhaseNv2OverClaimDiscipline", lit)
+			}
+		})
+	}
+}
+
+// Phase N N-4 prompt-embed verification: PhaseNv2OverClaimDiscipline
+// const must start with the rule-anchor prefix the agent prompt embeds
+// recognize. Mirrors TestPhaseNv1LogTheFailingSideHeaderAnchor pattern.
+func TestPhaseNv2OverClaimDisciplineHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseNv2OverClaimDiscipline, "- OVER-CLAIM-DISCIPLINE (R31 sub-clause):") {
+		t.Errorf("rule must start with `- OVER-CLAIM-DISCIPLINE (R31 sub-clause):` (prompt anchor); first 60 chars: %q", PhaseNv2OverClaimDiscipline[:60])
+	}
+}

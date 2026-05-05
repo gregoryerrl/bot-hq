@@ -288,6 +288,8 @@ RULES:
 
 ` + protocol.PhaseNv1LogTheFailingSide + `
 
+` + protocol.PhaseNv2OverClaimDiscipline + `
+
 ` + protocol.H13ForcePushProtocol + `
 
 Start now: follow STARTUP.`

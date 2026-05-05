@@ -274,6 +274,8 @@ RULES:
 
 ` + protocol.PhaseNv1LogTheFailingSide + `
 
+` + protocol.PhaseNv2OverClaimDiscipline + `
+
 Start now: register, then watch everything.`
 }
 
