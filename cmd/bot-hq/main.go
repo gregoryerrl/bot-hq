@@ -58,6 +58,9 @@ func main() {
 		case "voice-mirror-hook":
 			runVoiceMirrorHook()
 			return
+		case "install-voice-mirror-hook":
+			runInstallVoiceMirrorHook()
+			return
 		case "session-load":
 			runSessionLoad()
 			return
@@ -429,6 +432,49 @@ func runToolPermissionHook() {
 // which is alert-only (NOT blocking) — always exits 0.
 func runVoiceMirrorHook() {
 	os.Exit(voicemirror.RunHook(os.Stdin, os.Stderr))
+}
+
+// runInstallVoiceMirrorHook installs the Phase N v2 #3 N-2 PreToolUse-
+// Write hook into the trio agent's Claude settings.json per R40 VOICE-
+// MIRROR-DISCIPLINE. Idempotent + non-clobbering, mirroring
+// runInstallToolgateHook + runInstallTrioHook patterns.
+//
+// Usage:
+//
+//	bot-hq install-voice-mirror-hook            # writes ~/.claude/settings.json
+//	bot-hq install-voice-mirror-hook <path>     # writes a custom path
+//
+// Phase N v2 #8 close-composite — folds install subcommand per Rain
+// Q2 lean (b1) at #3 N-2 PASS-2.
+func runInstallVoiceMirrorHook() {
+	settingsPath := ""
+	if len(os.Args) > 2 {
+		settingsPath = os.Args[2]
+	}
+	if settingsPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "resolve home dir: %v\n", err)
+			os.Exit(1)
+		}
+		settingsPath = filepath.Join(home, ".claude", "settings.json")
+	}
+	botHQPath, err := os.Executable()
+	if err != nil || botHQPath == "" {
+		fmt.Fprintf(os.Stderr, "resolve bot-hq binary path: %v\n", err)
+		os.Exit(1)
+	}
+	if err := voicemirror.InstallTrioHook(settingsPath, botHQPath); err != nil {
+		fmt.Fprintf(os.Stderr, "install: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Voice-mirror PreToolUse-Write hook installed in %s\n", settingsPath)
+	fmt.Printf("Hook command: %s\n", voicemirror.SettingsHookCommand(botHQPath))
+	fmt.Printf("Hook fires on Write tool calls against user-artifact paths per R40 VOICE-MIRROR-DISCIPLINE (alert-only, NOT blocking).\n")
+	fmt.Printf("INCLUDE patterns: ~/Documents/*, ~/Desktop/*, ~/.bot-hq/projects/<project>/{plans,eod,clips}/*, CLAUDE.md, README.md\n")
+	fmt.Printf("SKIP patterns: **/memory/**, .git/, .cache/, node_modules/\n")
+	fmt.Printf("Log: ~/.bot-hq/voice-mirror-log.md (override via BOT_HQ_VOICE_MIRROR_LOG_PATH env).\n")
+	fmt.Printf("Hook activation requires Claude session-restart (settings.json not hot-reloaded mid-session per Phase L Finding-3).\n")
 }
 
 // runSessionLoad is the Phase N v2 #5 N-1(b)-B CLI surface that mirrors
