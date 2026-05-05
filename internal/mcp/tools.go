@@ -228,12 +228,28 @@ func hubRegister(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("register failed: %v", err)), nil
 		}
 
-		return mcp.NewToolResultText(toJSON(map[string]any{
+		response := map[string]any{
 			"status":             "registered",
 			"agent_id":           id,
 			"current_max_msg_id": watermark,
 			"last_session_snap":  lastSnap,
-		})), nil
+		}
+
+		// Phase N v2 #6 N-1(b)-C: auto-load most-recent session for
+		// project per Q-V (s) RATIFIED auto-load-most-recent + on-
+		// demand-load (s). When register supplies a project key,
+		// surface the most-recent session-id matching that project so
+		// the agent can hub_session_load <id> on the next turn for
+		// cross-session context-retention forward-loop. Empty when no
+		// matching session exists; absent when project unset.
+		if project := agent.Project; project != "" {
+			recent, lookupErr := sessions.MostRecentForProject(project)
+			if lookupErr == nil && recent != "" {
+				response["most_recent_session_id"] = recent
+			}
+		}
+
+		return mcp.NewToolResultText(toJSON(response)), nil
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}

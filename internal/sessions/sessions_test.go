@@ -433,6 +433,130 @@ func TestMostRecentForProjectNoMatch(t *testing.T) {
 	}
 }
 
+func TestIndexPath(t *testing.T) {
+	dir := setSessionsDir(t)
+	want := filepath.Join(dir, "index.md")
+	if got := IndexPath(); got != want {
+		t.Errorf("IndexPath = %q; want %q", got, want)
+	}
+}
+
+func TestWriteIndexEmpty(t *testing.T) {
+	setSessionsDir(t)
+	if err := WriteIndex(); err != nil {
+		t.Fatalf("WriteIndex on empty: %v", err)
+	}
+	body, err := os.ReadFile(IndexPath())
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	got := string(body)
+	if !strings.Contains(got, "# Bot-HQ Sessions Index") {
+		t.Errorf("missing header in: %s", got)
+	}
+}
+
+func TestWriteIndexGroupsByProjectSortedDesc(t *testing.T) {
+	setSessionsDir(t)
+	manifests := []Manifest{
+		{ID: "2026-05-03-bot-hq", Project: "bot-hq", StartTS: time.Date(2026, 5, 3, 9, 0, 0, 0, time.UTC), EndTS: time.Date(2026, 5, 3, 18, 0, 0, 0, time.UTC), Agents: []string{"brian", "rain"}},
+		{ID: "2026-05-05-bot-hq", Project: "bot-hq", StartTS: time.Date(2026, 5, 5, 9, 0, 0, 0, time.UTC), Agents: []string{"brian", "rain", "emma"}},
+		{ID: "2026-05-04-bot-hq", Project: "bot-hq", StartTS: time.Date(2026, 5, 4, 9, 0, 0, 0, time.UTC), EndTS: time.Date(2026, 5, 4, 20, 0, 0, 0, time.UTC), Agents: []string{"brian", "rain"}},
+		{ID: "2026-05-05-bcc-ad-manager", Project: "bcc-ad-manager", StartTS: time.Date(2026, 5, 5, 10, 0, 0, 0, time.UTC), EndTS: time.Date(2026, 5, 5, 17, 30, 0, 0, time.UTC), Agents: []string{"brian", "rain"}},
+	}
+	for _, m := range manifests {
+		if err := WriteManifest(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := WriteIndex(); err != nil {
+		t.Fatalf("WriteIndex: %v", err)
+	}
+	body, _ := os.ReadFile(IndexPath())
+	got := string(body)
+
+	// Project sections (alphabetical: bcc-ad-manager before bot-hq)
+	bccIdx := strings.Index(got, "## bcc-ad-manager")
+	botIdx := strings.Index(got, "## bot-hq")
+	if bccIdx < 0 || botIdx < 0 || bccIdx >= botIdx {
+		t.Errorf("project sections out of order or missing; bccIdx=%d botIdx=%d; got:\n%s", bccIdx, botIdx, got)
+	}
+
+	// Within bot-hq section, most-recent (2026-05-05) comes before older
+	id5 := strings.Index(got, "- 2026-05-05-bot-hq")
+	id4 := strings.Index(got, "- 2026-05-05-bot-hq")
+	id3 := strings.Index(got, "- 2026-05-03-bot-hq")
+	id4_actual := strings.Index(got, "- 2026-05-04-bot-hq")
+	if id5 < 0 || id4_actual < 0 || id3 < 0 {
+		t.Fatalf("missing session-id rows: id5=%d id4=%d id3=%d in:\n%s", id5, id4_actual, id3, got)
+	}
+	if !(id5 < id4_actual && id4_actual < id3) {
+		t.Errorf("session-ids not sorted DESC: id5=%d id4=%d id3=%d (want id5 < id4 < id3)", id5, id4_actual, id3)
+	}
+	_ = id4
+}
+
+func TestWriteIndexEntryFormat(t *testing.T) {
+	setSessionsDir(t)
+	m := Manifest{
+		ID:      "2026-05-05-foo",
+		Project: "foo",
+		StartTS: time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC),
+		EndTS:   time.Date(2026, 5, 5, 18, 30, 0, 0, time.UTC),
+		Agents:  []string{"brian", "rain"},
+	}
+	if err := WriteManifest(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteIndex(); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(IndexPath())
+	want := "- 2026-05-05-foo | 2026-05-05T12:00:00Z | 2026-05-05T18:30:00Z | brian,rain | foo\n"
+	if !strings.Contains(string(body), want) {
+		t.Errorf("entry format mismatch; want substring %q; got:\n%s", want, body)
+	}
+}
+
+func TestWriteIndexActiveSession(t *testing.T) {
+	setSessionsDir(t)
+	m := Manifest{
+		ID:      "2026-05-05-active",
+		Project: "active",
+		StartTS: time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC),
+		Agents:  []string{"brian"},
+	}
+	if err := WriteManifest(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteIndex(); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(IndexPath())
+	if !strings.Contains(string(body), "| active |") || !strings.Contains(string(body), "active") {
+		t.Errorf("expected 'active' marker for missing end_ts; got: %s", body)
+	}
+}
+
+func TestWriteIndexIdempotent(t *testing.T) {
+	setSessionsDir(t)
+	m := Manifest{ID: "2026-05-05-foo", Project: "foo", StartTS: time.Date(2026, 5, 5, 0, 0, 0, 0, time.UTC), Agents: []string{"brian"}}
+	if err := WriteManifest(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteIndex(); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := os.ReadFile(IndexPath())
+	if err := WriteIndex(); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := os.ReadFile(IndexPath())
+	if string(first) != string(second) {
+		t.Errorf("WriteIndex not idempotent")
+	}
+}
+
 func TestExplicitPhraseRegexCaseInsensitive(t *testing.T) {
 	cases := []string{
 		"LET'S SWITCH TO project",

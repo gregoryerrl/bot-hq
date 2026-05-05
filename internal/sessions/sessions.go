@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -198,6 +199,84 @@ func ReadManifest(id string) (Manifest, error) {
 		return Manifest{}, err
 	}
 	return parseManifest(string(data))
+}
+
+// IndexPath returns the canonical rolling index path
+// SessionsDir/index.md per N-1 (a) §4 storage shape.
+func IndexPath() string {
+	return filepath.Join(SessionsDir(), "index.md")
+}
+
+// indexEntry is the per-row payload for WriteIndex; held as a named
+// type so sort.Slice can index without anonymous-struct boilerplate.
+type indexEntry struct {
+	id       string
+	manifest Manifest
+}
+
+// WriteIndex rebuilds the rolling sessions index at IndexPath() by
+// scanning all session-id directories under SessionsDir and grouping
+// entries by project. Greppable single-line per-session format:
+//
+//	- <id> | <start_ts> | <end_ts-or-active> | <agents-csv> | <project>
+//
+// Sections grouped by project (## <project>); within each section,
+// entries sorted by id descending (most-recent first per Q-V auto-
+// load semantics).
+//
+// Idempotent — safe to call repeatedly. Per N-1 (a) §6 step 4
+// "session-create/close updates index.md rolling list".
+func WriteIndex() error {
+	ids, err := ListSessionIDs()
+	if err != nil {
+		return fmt.Errorf("list sessions: %w", err)
+	}
+	byProject := map[string][]indexEntry{}
+	for _, id := range ids {
+		m, err := ReadManifest(id)
+		if err != nil {
+			continue
+		}
+		byProject[m.Project] = append(byProject[m.Project], indexEntry{id, m})
+	}
+
+	var b strings.Builder
+	b.WriteString("# Bot-HQ Sessions Index\n\n")
+	b.WriteString("Rolling list of session-clusters per N-1 (a) §4 storage shape. Sorted most-recent-first within each project section.\n\n")
+
+	projects := make([]string, 0, len(byProject))
+	for p := range byProject {
+		projects = append(projects, p)
+	}
+	sort.Strings(projects)
+
+	for _, project := range projects {
+		entries := byProject[project]
+		sort.Slice(entries, func(i, j int) bool { return entries[i].id > entries[j].id })
+		title := project
+		if title == "" {
+			title = "(no project)"
+		}
+		fmt.Fprintf(&b, "## %s\n\n", title)
+		for _, e := range entries {
+			startTS := "active"
+			if !e.manifest.StartTS.IsZero() {
+				startTS = e.manifest.StartTS.UTC().Format(time.RFC3339)
+			}
+			endTS := "active"
+			if !e.manifest.EndTS.IsZero() {
+				endTS = e.manifest.EndTS.UTC().Format(time.RFC3339)
+			}
+			agents := strings.Join(e.manifest.Agents, ",")
+			fmt.Fprintf(&b, "- %s | %s | %s | %s | %s\n", e.id, startTS, endTS, agents, project)
+		}
+		b.WriteString("\n")
+	}
+
+	if err := os.MkdirAll(SessionsDir(), 0o755); err != nil {
+		return fmt.Errorf("ensure sessions dir: %w", err)
+	}
+	return os.WriteFile(IndexPath(), []byte(b.String()), 0o644)
 }
 
 // LoadManifestContent reads the raw manifest.md content for a session-id.
