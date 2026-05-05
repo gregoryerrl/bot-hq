@@ -305,6 +305,19 @@ func TestRainPromptEmbedsPhaseNv6VoiceMirrorDiscipline(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsIdSessionsSkillPointer — rain-side wiring lock
+// for Phase N v2 #7 /id-sessions skill-pointer (per Rain msg 8146
+// PASS-1 push-back). Without active-prompt-cite, agents have skill-
+// on-disk + auto-discovery surface but no runtime-active rule-text
+// awareness for session-event handling.
+func TestRainPromptEmbedsIdSessionsSkillPointer(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.IdSessionsSkillPointer) {
+		t.Errorf("initial prompt must embed protocol.IdSessionsSkillPointer verbatim (Phase N v2 #7 wiring lock)")
+	}
+}
+
 // TestRainPromptEmbedsDiscV2RoleAndPolicyShared — rain-side wiring lock
 // for Phase M M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared
 // bullets + header). Per audit-doc v1.1 §3.5 (b) per-agent-split: shared

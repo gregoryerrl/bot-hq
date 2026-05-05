@@ -259,6 +259,17 @@ func TestBrianPromptEmbedsPhaseNv6VoiceMirrorDiscipline(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsIdSessionsSkillPointer — brian-side wiring lock
+// for Phase N v2 #7 /id-sessions skill-pointer per Rain msg 8146
+// PASS-1 push-back. Mirror in rain_test.go locks rain-side.
+func TestBrianPromptEmbedsIdSessionsSkillPointer(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.IdSessionsSkillPointer) {
+		t.Errorf("initial prompt must embed protocol.IdSessionsSkillPointer verbatim (Phase N v2 #7 wiring lock)")
+	}
+}
+
 // TestBrianPromptEmbedsDiscV2RoleAndPolicyShared verifies the Phase M
 // M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared bullets +
 // header) is wired into Brian's prompt. Per audit-doc v1.1 §3.5 (b)

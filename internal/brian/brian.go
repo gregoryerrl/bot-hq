@@ -298,6 +298,8 @@ RULES:
 
 ` + protocol.PhaseNv6VoiceMirrorDiscipline + `
 
+` + protocol.IdSessionsSkillPointer + `
+
 ` + protocol.H13ForcePushProtocol + `
 
 Start now: follow STARTUP.`

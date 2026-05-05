@@ -569,6 +569,19 @@ const PhaseNv4FilesystemSignalCite = `- FILESYSTEM-SIGNAL-CITE (R31 sub-clause):
 //   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R39 TEST-ISOLATION
 const PhaseNv5TestIsolation = `- TEST-ISOLATION (R39): test runs MUST use an isolated test environment — separate test DB / env-overrides / temp-dir scratch space — that NEVER touches local-dev shared state (running app DB / config files / shared caches / running services). Antipattern: phpunit.xml without ` + "`<server name=\"DB_DATABASE\" value=\"testing\"/>`" + ` override, where test runs hit the same DB the local dev app uses; test setup/teardown wipes the dev DB; user mid-development loses session/work. Discriminator at test-config-author time: any test-config that connects to a database / writes to a file / hits an external service — verify the test environment is provably isolated from local-dev shared state (separate DB name / separate config file / separate temp dir / separate port). Common isolation mechanisms: (a) environment-variable overrides scoped to test command (DB_DATABASE=testing / REDIS_DB=15); (b) in-memory DB (sqlite::memory:) for fast tests; (c) Docker/container-based test isolation; (d) RefreshDatabase trait + dedicated test DB; (e) for go test: t.TempDir() for filesystem + table-driven sub-test isolation; (f) read-only access to shared resources (assertions only, no mutations). Cite_anchor: 2026-05-05 bcc-ad-manager phpunit-against-local-app-DB cross-test contamination — ` + "`composer test`" + ` runs against bcc_local (local app DB) instead of bcc_local_test, RefreshDatabase wiped local user state mid-browser-QA, role mappings lost; user msg 7919 ("now i doubt your tests") trust-shaking moment partially traced to this contamination class; bilateral self-acknowledgment Brian msg 7920 + Rain msg 7926. Per R18 CITE-ANCHOR-REQUIRED.`
 
+// IdSessionsSkillPointer references the /id-sessions skill at
+// ~/.claude/skills/id-sessions/SKILL.md (Phase N v2 #7 deliverable).
+// Skill carries full prose for session boundary semantics + manifest
+// schema + load semantics + invocation patterns. Lazy-load via Skill
+// tool — invoke when session-event handling needs more than the rule-
+// embedded summary.
+//
+// Mirrors PhaseIv1ProtocolHardening /phase-rules-detail skill-pointer
+// pattern (skill exists on-disk + agent-prompt-cite makes it actively
+// consultable at runtime per Phase L Finding-3 / Rain msg 8146 PASS-1
+// push-back).
+const IdSessionsSkillPointer = `Session-cluster operations (boundary detection / manifest author / load / index): see /id-sessions skill (~/.claude/skills/id-sessions/SKILL.md, disable-model-invocation:true; invoke via ` + "`Skill`" + ` tool when session-event handling needs full prose — e.g., scheduling hub_session_create at boundary-trigger fire-decision, finalizing manifest at session-close, hub_session_load consumer-side semantics).`
+
 // PhaseNv6VoiceMirrorDiscipline bundles the Phase N v2 #3 N-2 commit
 // R40 rule: VOICE-MIRROR-DISCIPLINE. Carry-forward from Phase L Tier-2
 // hold + Phase M arc-snapshot §8 + durable feedback_eod_style.md

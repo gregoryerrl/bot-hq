@@ -284,6 +284,8 @@ RULES:
 
 ` + protocol.PhaseNv6VoiceMirrorDiscipline + `
 
+` + protocol.IdSessionsSkillPointer + `
+
 Start now: register, then watch everything.`
 }
 

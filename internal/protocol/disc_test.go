@@ -791,3 +791,26 @@ func TestPhaseNv6VoiceMirrorDisciplineHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- VOICE-MIRROR-DISCIPLINE (R40):` (prompt anchor); first 60 chars: %q", PhaseNv6VoiceMirrorDiscipline[:60])
 	}
 }
+
+// Phase N v2 #7 commit ratchet: pin /id-sessions skill-pointer
+// recognition substrings on IdSessionsSkillPointer const. Mirrors
+// the /phase-rules-detail skill-pointer pattern (Phase I T2.1-(d)
+// lazy-load) — without this anchor, future trim might silently
+// remove the runtime consultability cite per Rain msg 8146 PASS-1
+// push-back.
+func TestIdSessionsSkillPointerSubstringLock(t *testing.T) {
+	must := []string{
+		"/id-sessions skill",
+		"~/.claude/skills/id-sessions/SKILL.md",
+		"disable-model-invocation:true",
+		"hub_session_create",
+		"hub_session_load",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(IdSessionsSkillPointer, lit) {
+				t.Errorf("/id-sessions skill-pointer ratchet broken: missing literal %q in IdSessionsSkillPointer", lit)
+			}
+		})
+	}
+}
