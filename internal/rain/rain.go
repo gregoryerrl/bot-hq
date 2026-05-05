@@ -282,6 +282,8 @@ RULES:
 
 ` + protocol.PhaseNv5TestIsolation + `
 
+` + protocol.PhaseNv6VoiceMirrorDiscipline + `
+
 Start now: register, then watch everything.`
 }
 

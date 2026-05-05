@@ -24,6 +24,7 @@ import (
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/gregoryerrl/bot-hq/internal/toolgate"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
+	"github.com/gregoryerrl/bot-hq/internal/voicemirror"
 )
 
 func main() {
@@ -53,6 +54,9 @@ func main() {
 		case "preflight-check":
 			runPreflightCheck()
 			return
+		case "voice-mirror-hook":
+			runVoiceMirrorHook()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -60,7 +64,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -413,6 +417,14 @@ func runInstallTrioHook() {
 // gate, exits with 0 (allow) or 2 (block).
 func runToolPermissionHook() {
 	os.Exit(toolgate.RunHook(os.Stdin, os.Stderr))
+}
+
+// runVoiceMirrorHook is the Phase N v2 #3 N-2 PreToolUse hook entry
+// point per R40 VOICE-MIRROR-DISCIPLINE. Reads JSON from stdin (Claude
+// Code PreToolUse Write event payload), invokes voicemirror.RunHook
+// which is alert-only (NOT blocking) — always exits 0.
+func runVoiceMirrorHook() {
+	os.Exit(voicemirror.RunHook(os.Stdin, os.Stderr))
 }
 
 // runInstallToolgateHook installs the K-16 PreToolUse class-split gate

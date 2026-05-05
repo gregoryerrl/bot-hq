@@ -296,6 +296,8 @@ RULES:
 
 ` + protocol.PhaseNv5TestIsolation + `
 
+` + protocol.PhaseNv6VoiceMirrorDiscipline + `
+
 ` + protocol.H13ForcePushProtocol + `
 
 Start now: follow STARTUP.`

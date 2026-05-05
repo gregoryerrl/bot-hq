@@ -248,6 +248,17 @@ func TestBrianPromptEmbedsPhaseNv5TestIsolation(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseNv6VoiceMirrorDiscipline verifies the Phase
+// N v2 #3 commit R40 VOICE-MIRROR-DISCIPLINE const is wired into
+// Brian's prompt. Mirror in rain_test.go locks rain-side.
+func TestBrianPromptEmbedsPhaseNv6VoiceMirrorDiscipline(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseNv6VoiceMirrorDiscipline) {
+		t.Errorf("initial prompt must embed protocol.PhaseNv6VoiceMirrorDiscipline verbatim (Phase N v2 #3 wiring lock)")
+	}
+}
+
 // TestBrianPromptEmbedsDiscV2RoleAndPolicyShared verifies the Phase M
 // M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared bullets +
 // header) is wired into Brian's prompt. Per audit-doc v1.1 §3.5 (b)

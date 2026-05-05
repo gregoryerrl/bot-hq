@@ -754,3 +754,40 @@ func TestPhaseNv5TestIsolationHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- TEST-ISOLATION (R39):` (prompt anchor); first 60 chars: %q", PhaseNv5TestIsolation[:60])
 	}
 }
+
+// Phase N v2 #3 commit ratchet: pin load-bearing recognition substrings
+// of the PhaseNv6VoiceMirrorDiscipline const. R40 covers the voice-
+// mirror discipline class for Write-to-user-artifact paths.
+func TestVoiceMirrorDisciplineSubstringLock(t *testing.T) {
+	must := []string{
+		"VOICE-MIRROR-DISCIPLINE (R40)",
+		"user-facing artifact",
+		"user's voice",
+		"trio operational voice",
+		"Antipattern",
+		"EOD report",
+		"trio-operational-jargon",
+		"Discriminator at Write-tool-fire time",
+		"PreToolUse-hook (alert-only, NOT blocking)",
+		"internal/voicemirror/hook.go",
+		"voice-mirror-log.md",
+		"Skip-list",
+		"`**/memory/**`",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseNv6VoiceMirrorDiscipline, lit) {
+				t.Errorf("R40 VOICE-MIRROR-DISCIPLINE ratchet broken: missing literal %q in PhaseNv6VoiceMirrorDiscipline", lit)
+			}
+		})
+	}
+}
+
+// Phase N v2 #3 commit prompt-embed verification:
+// PhaseNv6VoiceMirrorDiscipline const must start with the rule-anchor
+// prefix the agent prompt embeds recognize.
+func TestPhaseNv6VoiceMirrorDisciplineHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseNv6VoiceMirrorDiscipline, "- VOICE-MIRROR-DISCIPLINE (R40):") {
+		t.Errorf("rule must start with `- VOICE-MIRROR-DISCIPLINE (R40):` (prompt anchor); first 60 chars: %q", PhaseNv6VoiceMirrorDiscipline[:60])
+	}
+}
