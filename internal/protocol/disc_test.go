@@ -718,3 +718,39 @@ func TestPhaseNv4FilesystemSignalCiteHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- FILESYSTEM-SIGNAL-CITE (R31 sub-clause):` (prompt anchor); first 60 chars: %q", PhaseNv4FilesystemSignalCite[:60])
 	}
 }
+
+// Phase N v2 #2 commit ratchet: pin load-bearing recognition substrings
+// of the PhaseNv5TestIsolation const. R39 TEST-ISOLATION rule
+// generalizes 2026-05-05 bcc-ad-manager phpunit-against-local-app-DB
+// cross-test contamination empirical (composer test RefreshDatabase
+// wiped local dev DB mid-browser-QA per user msg 7919 anchor).
+func TestTestIsolationSubstringLock(t *testing.T) {
+	must := []string{
+		"TEST-ISOLATION (R39)",
+		"isolated test environment",
+		"NEVER touches local-dev shared state",
+		"Antipattern",
+		"phpunit.xml",
+		"test setup/teardown wipes the dev DB",
+		"Discriminator at test-config-author time",
+		"provably isolated from local-dev shared state",
+		"2026-05-05 bcc-ad-manager",
+		"phpunit-against-local-app-DB",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseNv5TestIsolation, lit) {
+				t.Errorf("R39 TEST-ISOLATION ratchet broken: missing literal %q in PhaseNv5TestIsolation", lit)
+			}
+		})
+	}
+}
+
+// Phase N v2 #2 commit prompt-embed verification: PhaseNv5TestIsolation
+// const must start with the rule-anchor prefix the agent prompt embeds
+// recognize.
+func TestPhaseNv5TestIsolationHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseNv5TestIsolation, "- TEST-ISOLATION (R39):") {
+		t.Errorf("rule must start with `- TEST-ISOLATION (R39):` (prompt anchor); first 60 chars: %q", PhaseNv5TestIsolation[:60])
+	}
+}

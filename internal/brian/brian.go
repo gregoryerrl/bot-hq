@@ -294,6 +294,8 @@ RULES:
 
 ` + protocol.PhaseNv4FilesystemSignalCite + `
 
+` + protocol.PhaseNv5TestIsolation + `
+
 ` + protocol.H13ForcePushProtocol + `
 
 Start now: follow STARTUP.`

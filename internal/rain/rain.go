@@ -280,6 +280,8 @@ RULES:
 
 ` + protocol.PhaseNv4FilesystemSignalCite + `
 
+` + protocol.PhaseNv5TestIsolation + `
+
 Start now: register, then watch everything.`
 }
 
