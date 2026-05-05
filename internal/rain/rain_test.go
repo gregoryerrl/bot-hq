@@ -261,6 +261,28 @@ func TestRainPromptEmbedsPhaseNv2OverClaimDiscipline(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseNv3HandshakeAckBlindSpot — rain-side wiring
+// lock for Phase N v2 N-T2-bundle commit-1 R36 sub-clause HANDSHAKE-ACK-
+// BLIND-SPOT. Mirrors brian-side embed test.
+func TestRainPromptEmbedsPhaseNv3HandshakeAckBlindSpot(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseNv3HandshakeAckBlindSpot) {
+		t.Errorf("initial prompt must embed protocol.PhaseNv3HandshakeAckBlindSpot verbatim (Phase N v2 N-T2-bundle wiring lock)")
+	}
+}
+
+// TestRainPromptEmbedsPhaseNv4FilesystemSignalCite — rain-side wiring
+// lock for Phase N v2 N-T2-bundle commit-1 R31 sub-clause FILESYSTEM-
+// SIGNAL-CITE. Mirrors brian-side embed test.
+func TestRainPromptEmbedsPhaseNv4FilesystemSignalCite(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseNv4FilesystemSignalCite) {
+		t.Errorf("initial prompt must embed protocol.PhaseNv4FilesystemSignalCite verbatim (Phase N v2 N-T2-bundle wiring lock)")
+	}
+}
+
 // TestRainPromptEmbedsDiscV2RoleAndPolicyShared — rain-side wiring lock
 // for Phase M M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared
 // bullets + header). Per audit-doc v1.1 §3.5 (b) per-agent-split: shared

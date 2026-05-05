@@ -648,3 +648,73 @@ func TestPhaseNv2OverClaimDisciplineHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- OVER-CLAIM-DISCIPLINE (R31 sub-clause):` (prompt anchor); first 60 chars: %q", PhaseNv2OverClaimDiscipline[:60])
 	}
 }
+
+// Phase N v2 N-T2-bundle commit-1 ratchet: pin load-bearing recognition
+// substrings of the PhaseNv3HandshakeAckBlindSpot const. R36 sub-clause
+// covers the handshake-terminator-blind-spot class (peer cross-in-flight
+// substantive content unaddressed in reflexive "." ack).
+func TestHandshakeAckBlindSpotSubstringLock(t *testing.T) {
+	must := []string{
+		"HANDSHAKE-ACK-BLIND-SPOT (R36 sub-clause)",
+		"handshake-terminator",
+		"blind-spot",
+		"crossed-in-flight",
+		"Antipattern",
+		"reflexively",
+		"crossed in flight — see msg N",
+		"CROSS-TIMING-DEDUP",
+		"peer-cross-check",
+		"R36 OUTBOUND-DISCIPLINE-MECHANICAL parent rule",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseNv3HandshakeAckBlindSpot, lit) {
+				t.Errorf("R36 HANDSHAKE-ACK-BLIND-SPOT sub-clause ratchet broken: missing literal %q in PhaseNv3HandshakeAckBlindSpot", lit)
+			}
+		})
+	}
+}
+
+// Phase N v2 N-T2-bundle commit-1 prompt-embed verification:
+// PhaseNv3HandshakeAckBlindSpot const must start with the rule-anchor
+// prefix the agent prompt embeds recognize.
+func TestPhaseNv3HandshakeAckBlindSpotHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseNv3HandshakeAckBlindSpot, "- HANDSHAKE-ACK-BLIND-SPOT (R36 sub-clause):") {
+		t.Errorf("rule must start with `- HANDSHAKE-ACK-BLIND-SPOT (R36 sub-clause):` (prompt anchor); first 60 chars: %q", PhaseNv3HandshakeAckBlindSpot[:60])
+	}
+}
+
+// Phase N v2 N-T2-bundle commit-1 ratchet: pin load-bearing recognition
+// substrings of the PhaseNv4FilesystemSignalCite const. R31 sub-clause
+// covers the filesystem-signal interpretive-extrapolation class (semantic
+// claims derived from git/filesystem inspection without signal cite).
+func TestFilesystemSignalCiteSubstringLock(t *testing.T) {
+	must := []string{
+		"FILESYSTEM-SIGNAL-CITE (R31 sub-clause)",
+		"filesystem-state signals",
+		"interpretation-limitations",
+		"Antipattern",
+		"empty `git diff` ≠ no work",
+		"clean `git status` ≠ all-clean",
+		"Discriminator at claim-author time",
+		"name the signal command",
+		"interpretive-extrapolation from filesystem signals",
+		"R31 STAT-CLAIM-CITE parent rule",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseNv4FilesystemSignalCite, lit) {
+				t.Errorf("R31 FILESYSTEM-SIGNAL-CITE sub-clause ratchet broken: missing literal %q in PhaseNv4FilesystemSignalCite", lit)
+			}
+		})
+	}
+}
+
+// Phase N v2 N-T2-bundle commit-1 prompt-embed verification:
+// PhaseNv4FilesystemSignalCite const must start with the rule-anchor
+// prefix the agent prompt embeds recognize.
+func TestPhaseNv4FilesystemSignalCiteHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseNv4FilesystemSignalCite, "- FILESYSTEM-SIGNAL-CITE (R31 sub-clause):") {
+		t.Errorf("rule must start with `- FILESYSTEM-SIGNAL-CITE (R31 sub-clause):` (prompt anchor); first 60 chars: %q", PhaseNv4FilesystemSignalCite[:60])
+	}
+}

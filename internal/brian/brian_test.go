@@ -213,6 +213,30 @@ func TestBrianPromptEmbedsPhaseNv2OverClaimDiscipline(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseNv3HandshakeAckBlindSpot verifies the Phase
+// N v2 N-T2-bundle commit-1 R36 sub-clause HANDSHAKE-ACK-BLIND-SPOT
+// const is wired into Brian's prompt. Mirror in rain_test.go locks
+// rain-side.
+func TestBrianPromptEmbedsPhaseNv3HandshakeAckBlindSpot(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseNv3HandshakeAckBlindSpot) {
+		t.Errorf("initial prompt must embed protocol.PhaseNv3HandshakeAckBlindSpot verbatim (Phase N v2 N-T2-bundle wiring lock)")
+	}
+}
+
+// TestBrianPromptEmbedsPhaseNv4FilesystemSignalCite verifies the Phase
+// N v2 N-T2-bundle commit-1 R31 sub-clause FILESYSTEM-SIGNAL-CITE
+// const is wired into Brian's prompt. Mirror in rain_test.go locks
+// rain-side.
+func TestBrianPromptEmbedsPhaseNv4FilesystemSignalCite(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseNv4FilesystemSignalCite) {
+		t.Errorf("initial prompt must embed protocol.PhaseNv4FilesystemSignalCite verbatim (Phase N v2 N-T2-bundle wiring lock)")
+	}
+}
+
 // TestBrianPromptEmbedsDiscV2RoleAndPolicyShared verifies the Phase M
 // M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared bullets +
 // header) is wired into Brian's prompt. Per audit-doc v1.1 §3.5 (b)

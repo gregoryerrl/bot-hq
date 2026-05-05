@@ -290,6 +290,10 @@ RULES:
 
 ` + protocol.PhaseNv2OverClaimDiscipline + `
 
+` + protocol.PhaseNv3HandshakeAckBlindSpot + `
+
+` + protocol.PhaseNv4FilesystemSignalCite + `
+
 ` + protocol.H13ForcePushProtocol + `
 
 Start now: follow STARTUP.`

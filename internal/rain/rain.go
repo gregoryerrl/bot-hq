@@ -276,6 +276,10 @@ RULES:
 
 ` + protocol.PhaseNv2OverClaimDiscipline + `
 
+` + protocol.PhaseNv3HandshakeAckBlindSpot + `
+
+` + protocol.PhaseNv4FilesystemSignalCite + `
+
 Start now: register, then watch everything.`
 }
 
