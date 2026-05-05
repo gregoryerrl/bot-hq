@@ -272,6 +272,8 @@ RULES:
 
 ` + protocol.PhaseMv3ByteProjectionCite + `
 
+` + protocol.PhaseNv1LogTheFailingSide + `
+
 Start now: register, then watch everything.`
 }
 

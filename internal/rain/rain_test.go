@@ -238,6 +238,18 @@ func TestRainPromptEmbedsPhaseMv3ByteProjectionCite(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseNv1LogTheFailingSide — rain-side wiring lock
+// for Phase N N-5 commit-1 R38 LOG-THE-FAILING-SIDE rule. Mirrors
+// brian-side embed test. Same const-exists-but-not-wired class
+// prevention.
+func TestRainPromptEmbedsPhaseNv1LogTheFailingSide(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseNv1LogTheFailingSide) {
+		t.Errorf("initial prompt must embed protocol.PhaseNv1LogTheFailingSide verbatim (Phase N N-5 wiring lock)")
+	}
+}
+
 // TestRainPromptEmbedsDiscV2RoleAndPolicyShared — rain-side wiring lock
 // for Phase M M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared
 // bullets + header). Per audit-doc v1.1 §3.5 (b) per-agent-split: shared

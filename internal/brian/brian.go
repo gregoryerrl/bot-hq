@@ -286,6 +286,8 @@ RULES:
 
 ` + protocol.PhaseMv3ByteProjectionCite + `
 
+` + protocol.PhaseNv1LogTheFailingSide + `
+
 ` + protocol.H13ForcePushProtocol + `
 
 Start now: follow STARTUP.`

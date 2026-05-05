@@ -537,3 +537,7 @@ const DiscV2RoleAndPolicyBrianAddendum = `- TRUST: verify via claude_read before
     Agents:   brian(s), rain(s), emma(s), coder id(s),...
     Pending:  <blocker>
     Next:     <action>`
+
+// PhaseNv1LogTheFailingSide bundles the Phase N N-5 commit-1 rule:
+//   - Skill: ~/.claude/skills/phase-rules-detail/SKILL.md § R38 LOG-THE-FAILING-SIDE
+const PhaseNv1LogTheFailingSide = `- LOG-THE-FAILING-SIDE (R38): error log entries that report a failure MUST distinguish the actual failing side (DB query result / IO / config lookup / external response) from the input-side state cited as evidence (request payload / JWT claim / arg). Antipattern: log message implies the input is at fault while logging the input verbatim — but the input contains the data the message says is missing, because the failure is on the lookup/query side. Discriminator at log-author time: any error log carrying both an input-side payload AND a failure-cause framing — name explicitly which side actually failed (or both, if ambiguous). Cite_anchor: 2026-05-05 bcc-ad-manager auth-callback ` + "`MicrosoftAzureController::callback`" + ` "Login failed: No roles assigned to the user" log fired when JWT roles claim was present but ` + "`RoleMapping::whereIn(code, jwt.roles)->pluck('id')`" + ` returned empty (DB wiped by phpunit-against-local-app-DB cross-test runs); user reading log saw JWT-with-roles + empty-roles-collection — message implied JWT-side issue while failure was on DB-query-side. Per R18 CITE-ANCHOR-REQUIRED.`

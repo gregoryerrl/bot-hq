@@ -190,6 +190,18 @@ func TestBrianPromptEmbedsPhaseMv3ByteProjectionCite(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseNv1LogTheFailingSide verifies the Phase N
+// N-5 commit-1 R38 LOG-THE-FAILING-SIDE const is wired into Brian's
+// prompt. Mirror in rain_test.go locks rain-side. The const itself is
+// locked via TestLogTheFailingSideSubstringLock in disc_test.go.
+func TestBrianPromptEmbedsPhaseNv1LogTheFailingSide(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseNv1LogTheFailingSide) {
+		t.Errorf("initial prompt must embed protocol.PhaseNv1LogTheFailingSide verbatim (Phase N N-5 wiring lock)")
+	}
+}
+
 // TestBrianPromptEmbedsDiscV2RoleAndPolicyShared verifies the Phase M
 // M-4 commit-1 DiscV2RoleAndPolicyShared const (9 shared bullets +
 // header) is wired into Brian's prompt. Per audit-doc v1.1 §3.5 (b)

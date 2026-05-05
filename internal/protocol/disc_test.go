@@ -576,3 +576,38 @@ func TestDiscV2RoleAndPolicyBrianAddendumSubstringLock(t *testing.T) {
 		})
 	}
 }
+
+// Phase N N-5 commit-1 ratchet: pin load-bearing recognition substrings
+// of the PhaseNv1LogTheFailingSide const. R38 LOG-THE-FAILING-SIDE rule
+// generalizes the bcc-ad-manager auth-callback "no roles" misframing
+// observed 2026-05-05.
+func TestLogTheFailingSideSubstringLock(t *testing.T) {
+	must := []string{
+		"LOG-THE-FAILING-SIDE (R38)",
+		"actual failing side",
+		"input-side state cited as evidence",
+		"Antipattern",
+		"input contains the data the message says is missing",
+		"failure is on the lookup/query side",
+		"name explicitly which side actually failed",
+		"2026-05-05 bcc-ad-manager",
+		"MicrosoftAzureController::callback",
+		"No roles assigned to the user",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseNv1LogTheFailingSide, lit) {
+				t.Errorf("R38 LOG-THE-FAILING-SIDE ratchet broken: missing literal %q in PhaseNv1LogTheFailingSide", lit)
+			}
+		})
+	}
+}
+
+// Phase N N-5 prompt-embed verification: PhaseNv1LogTheFailingSide
+// const must start with the rule-anchor prefix the agent prompt embeds
+// recognize. Mirrors TestPhaseMv3ByteProjectionCiteHeaderAnchor pattern.
+func TestPhaseNv1LogTheFailingSideHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseNv1LogTheFailingSide, "- LOG-THE-FAILING-SIDE (R38):") {
+		t.Errorf("rule must start with `- LOG-THE-FAILING-SIDE (R38):` (prompt anchor); first 60 chars: %q", PhaseNv1LogTheFailingSide[:60])
+	}
+}
