@@ -21,6 +21,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
 	"github.com/gregoryerrl/bot-hq/internal/projects"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	"github.com/gregoryerrl/bot-hq/internal/sessions"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -110,6 +111,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSessions(db),
 		hubSessionCreate(db),
 		hubSessionJoin(db),
+		hubSessionLoad(),
 		hubStatus(db),
 		hubSpawn(db),
 		hubCheckpoint(db),
@@ -578,6 +580,55 @@ func hubSessionCreate(db *hub.DB) ToolDef {
 		return mcp.NewToolResultText(toJSON(map[string]string{
 			"status":     "created",
 			"session_id": sess.ID,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubSessionLoad implements the Phase N v2 #5 N-1(b)-B MCP tool that
+// reads the session-cluster manifest at ~/.bot-hq/sessions/<id>/
+// manifest.md and returns its raw content + path. Per N-1 (a) Q-IV
+// RATIFIED lean (iii) CLI + file: this is the MCP-side surface paired
+// with the bot-hq session-load CLI subcommand.
+//
+// Optional `project` param: when supplied (and `session_id` omitted),
+// returns the most-recent session-id matching that project key per
+// Q-V RATIFIED auto-load-most-recent semantics.
+func hubSessionLoad() ToolDef {
+	tool := mcp.NewTool("hub_session_load",
+		mcp.WithDescription("Load a session-cluster manifest by ID, or look up the most-recent session for a project. Returns the manifest.md content + path."),
+		mcp.WithString("session_id", mcp.Description("Session ID (e.g., 2026-05-05-bot-hq). When omitted, project must be provided.")),
+		mcp.WithString("project", mcp.Description("Project key (e.g., bot-hq). When session_id is omitted, returns the most-recent session for this project.")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id := req.GetString("session_id", "")
+		project := req.GetString("project", "")
+		if id == "" && project == "" {
+			return mcp.NewToolResultError("hub_session_load: session_id or project required"), nil
+		}
+		if id == "" {
+			recent, err := sessions.MostRecentForProject(project)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("most-recent lookup failed: %v", err)), nil
+			}
+			if recent == "" {
+				return mcp.NewToolResultError(fmt.Sprintf("no sessions found for project %q", project)), nil
+			}
+			id = recent
+		}
+		content, err := sessions.LoadManifestContent(id)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return mcp.NewToolResultError(fmt.Sprintf("session manifest not found: %s", id)), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("load manifest failed: %v", err)), nil
+		}
+		return mcp.NewToolResultText(toJSON(map[string]string{
+			"session_id": id,
+			"path":       sessions.ManifestPath(id),
+			"content":    content,
 		})), nil
 	}
 

@@ -200,6 +200,69 @@ func ReadManifest(id string) (Manifest, error) {
 	return parseManifest(string(data))
 }
 
+// LoadManifestContent reads the raw manifest.md content for a session-id.
+// Helper for hub_session_load MCP tool + CLI surface — returns the
+// frontmatter+body bytes verbatim (consumer can re-parse via
+// ReadManifest if structured access is needed).
+func LoadManifestContent(id string) (string, error) {
+	data, err := os.ReadFile(ManifestPath(id))
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// ListSessionIDs returns the session-ids present under SessionsDir.
+// Per N-1 (a) §4 storage shape: each <id>/ is a session directory.
+// Skips files (only dirs counted) + skips index.md (Phase N v2 #6
+// scope). Returns empty slice (not error) when SessionsDir does not
+// exist yet.
+func ListSessionIDs() ([]string, error) {
+	dir := SessionsDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ids []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		ids = append(ids, e.Name())
+	}
+	return ids, nil
+}
+
+// MostRecentForProject returns the most-recent session-id matching the
+// given project key. Lexicographic sort on session-id (which begins
+// with YYYY-MM-DD) ensures most-recent = max id.
+//
+// Returns empty string + nil error when no matching session exists.
+// Caller distinguishes empty-result vs error.
+//
+// Used by retention auto-load on hub_register (Phase N v2 follow-up;
+// MVP exposes the helper, integration deferred per Q1 scope-trim).
+func MostRecentForProject(project string) (string, error) {
+	ids, err := ListSessionIDs()
+	if err != nil {
+		return "", err
+	}
+	suffix := "-" + strings.ToLower(project)
+	var best string
+	for _, id := range ids {
+		if !strings.HasSuffix(id, suffix) {
+			continue
+		}
+		if id > best {
+			best = id
+		}
+	}
+	return best, nil
+}
+
 func parseManifest(content string) (Manifest, error) {
 	var m Manifest
 	if !strings.HasPrefix(content, "---\n") {

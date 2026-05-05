@@ -313,6 +313,11 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		"hub_session_create": "creates a session; caller not bound to an agent yet",
 		"hub_issue_create":   "creates an issue; caller anonymous in current schema",
 
+		// Phase N v2 #5: read-only manifest lookup; consults filesystem
+		// at ~/.bot-hq/sessions/<id>/manifest.md — no agent-bound state
+		// access, so caller's identity is incidental.
+		"hub_session_load": "read-only manifest lookup by id-or-project; caller anonymous",
+
 		// Phase H slice 4 C6 (H-31): explicit operator-invocable halt clear.
 		// No caller-context — the tool dismisses a global halt-state machine.
 		"hub_clear_halt": "manually clears global halt_state; no per-caller context",

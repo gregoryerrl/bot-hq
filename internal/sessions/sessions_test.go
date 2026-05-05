@@ -294,6 +294,145 @@ func TestReadManifestMalformedNoCloseMarker(t *testing.T) {
 	}
 }
 
+func TestLoadManifestContent(t *testing.T) {
+	setSessionsDir(t)
+	m := Manifest{
+		ID:      "2026-05-05-loadtest",
+		Project: "test",
+		StartTS: time.Date(2026, 5, 5, 12, 0, 0, 0, time.UTC),
+		Body:    "## Body\nhello\n",
+	}
+	if err := WriteManifest(m); err != nil {
+		t.Fatal(err)
+	}
+	content, err := LoadManifestContent(m.ID)
+	if err != nil {
+		t.Fatalf("LoadManifestContent: %v", err)
+	}
+	if !strings.Contains(content, "id: 2026-05-05-loadtest") {
+		t.Errorf("missing id in content; got: %s", content)
+	}
+	if !strings.Contains(content, "## Body") {
+		t.Errorf("missing body in content; got: %s", content)
+	}
+}
+
+func TestLoadManifestContentMissing(t *testing.T) {
+	setSessionsDir(t)
+	_, err := LoadManifestContent("nonexistent")
+	if err == nil {
+		t.Fatalf("expected error for missing manifest")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("expected os.IsNotExist; got: %v", err)
+	}
+}
+
+func TestListSessionIDsEmpty(t *testing.T) {
+	setSessionsDir(t)
+	ids, err := ListSessionIDs()
+	if err != nil {
+		t.Fatalf("ListSessionIDs on empty dir: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty list; got: %v", ids)
+	}
+}
+
+func TestListSessionIDsMissingDir(t *testing.T) {
+	t.Setenv(sessionsDirEnvVar, filepath.Join(t.TempDir(), "does-not-exist"))
+	ids, err := ListSessionIDs()
+	if err != nil {
+		t.Fatalf("ListSessionIDs on missing dir should not error; got: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty list; got: %v", ids)
+	}
+}
+
+func TestListSessionIDsSkipsFiles(t *testing.T) {
+	dir := setSessionsDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, "2026-05-05-foo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "2026-05-04-bar"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.md"), []byte("placeholder"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := ListSessionIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 {
+		t.Errorf("expected 2 session-id dirs; got %d: %v", len(ids), ids)
+	}
+	for _, id := range ids {
+		if id == "index.md" {
+			t.Errorf("index.md (file) should be skipped; got it in: %v", ids)
+		}
+	}
+}
+
+func TestMostRecentForProject(t *testing.T) {
+	dir := setSessionsDir(t)
+	mkdir := func(name string) {
+		if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mkdir("2026-05-03-bot-hq")
+	mkdir("2026-05-04-bot-hq")
+	mkdir("2026-05-05-bot-hq")
+	mkdir("2026-05-04-bcc-ad-manager")
+	mkdir("2026-05-05-bcc-ad-manager")
+
+	id, err := MostRecentForProject("bot-hq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "2026-05-05-bot-hq" {
+		t.Errorf("MostRecentForProject(bot-hq) = %q; want 2026-05-05-bot-hq", id)
+	}
+
+	id, err = MostRecentForProject("bcc-ad-manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "2026-05-05-bcc-ad-manager" {
+		t.Errorf("MostRecentForProject(bcc-ad-manager) = %q; want 2026-05-05-bcc-ad-manager", id)
+	}
+}
+
+func TestMostRecentForProjectCaseInsensitive(t *testing.T) {
+	dir := setSessionsDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, "2026-05-05-bot-hq"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id, err := MostRecentForProject("BOT-HQ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "2026-05-05-bot-hq" {
+		t.Errorf("MostRecentForProject(BOT-HQ) = %q; want 2026-05-05-bot-hq", id)
+	}
+}
+
+func TestMostRecentForProjectNoMatch(t *testing.T) {
+	dir := setSessionsDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, "2026-05-05-foo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id, err := MostRecentForProject("bar")
+	if err != nil {
+		t.Fatalf("expected nil error on no-match; got: %v", err)
+	}
+	if id != "" {
+		t.Errorf("expected empty string on no-match; got: %q", id)
+	}
+}
+
 func TestExplicitPhraseRegexCaseInsensitive(t *testing.T) {
 	cases := []string{
 		"LET'S SWITCH TO project",

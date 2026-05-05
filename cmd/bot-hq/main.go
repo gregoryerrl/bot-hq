@@ -21,6 +21,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
+	"github.com/gregoryerrl/bot-hq/internal/sessions"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/gregoryerrl/bot-hq/internal/toolgate"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
@@ -57,6 +58,9 @@ func main() {
 		case "voice-mirror-hook":
 			runVoiceMirrorHook()
 			return
+		case "session-load":
+			runSessionLoad()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -64,7 +68,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|session-load|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -425,6 +429,51 @@ func runToolPermissionHook() {
 // which is alert-only (NOT blocking) — always exits 0.
 func runVoiceMirrorHook() {
 	os.Exit(voicemirror.RunHook(os.Stdin, os.Stderr))
+}
+
+// runSessionLoad is the Phase N v2 #5 N-1(b)-B CLI surface that mirrors
+// the hub_session_load MCP tool per N-1 (a) Q-IV RATIFIED lean (iii)
+// CLI + file. Prints the manifest content to stdout.
+//
+// Usage:
+//
+//	bot-hq session-load <session-id>            # load by id
+//	bot-hq session-load --project <project>     # load most-recent for project
+func runSessionLoad() {
+	if len(os.Args) < 3 {
+		fmt.Fprintf(os.Stderr, "Usage: bot-hq session-load <session-id>\n       bot-hq session-load --project <project>\n")
+		os.Exit(1)
+	}
+	var id string
+	if os.Args[2] == "--project" {
+		if len(os.Args) < 4 {
+			fmt.Fprintf(os.Stderr, "session-load --project: project key required\n")
+			os.Exit(1)
+		}
+		project := os.Args[3]
+		recent, err := sessions.MostRecentForProject(project)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "most-recent lookup failed: %v\n", err)
+			os.Exit(1)
+		}
+		if recent == "" {
+			fmt.Fprintf(os.Stderr, "no sessions found for project %q\n", project)
+			os.Exit(1)
+		}
+		id = recent
+	} else {
+		id = os.Args[2]
+	}
+	content, err := sessions.LoadManifestContent(id)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "session manifest not found: %s\n", id)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "load manifest failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Print(content)
 }
 
 // runInstallToolgateHook installs the K-16 PreToolUse class-split gate
