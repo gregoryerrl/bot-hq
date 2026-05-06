@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
@@ -43,14 +44,17 @@ const portEnvVar = "BOT_HQ_WEBUI_PORT"
 //go:embed static/*
 var staticFS embed.FS
 
-// Server is the Phase N v3b Clive workspace HTTP server. Constructed via
-// NewServer; lifecycle managed by Start + Shutdown. Handlers in handlers.go.
+// Server is the Phase N v3b/v3c Clive workspace HTTP server. Constructed
+// via NewServer; lifecycle managed by Start + Shutdown. Handlers in
+// handlers.go (read) + write_handlers.go (write).
 type Server struct {
 	httpServer *http.Server
 	db         *hub.DB
 
 	canonicalRoot string // ~/.bot-hq/ (configurable via WithRoot for tests)
 	port          int
+
+	proposals *proposalStore // Clive draft-author proposals awaiting user approval (v3c)
 }
 
 // Option mutates Server config at construction. Pattern mirrors
@@ -80,6 +84,7 @@ func NewServer(db *hub.DB, opts ...Option) (*Server, error) {
 		db:            db,
 		canonicalRoot: home + "/.bot-hq",
 		port:          envPort(),
+		proposals:     newProposalStore(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -168,13 +173,39 @@ func staticHandler() http.Handler {
 	return http.FileServer(http.FS(sub))
 }
 
-// registerRoutes wires the HTTP mux. Read endpoints only in v3b; write
-// endpoints land in v3c.
+// registerRoutes wires the HTTP mux. Read endpoints (handlers.go) +
+// write endpoints (write_handlers.go).
 func (s *Server) registerRoutes(mux *http.ServeMux) {
+	// Files endpoint: GET → tree (no path); GET → content; POST → save.
+	// /api/files/{path}/clive  → Clive propose-or-approve
+	// /api/files/{path}/revert → revert to prior commit
 	mux.HandleFunc("/api/files", s.handleFilesTree)
-	mux.HandleFunc("/api/files/", s.handleFileContent)
+	mux.HandleFunc("/api/files/", s.dispatchFilesPath)
 	mux.HandleFunc("/api/rules", s.handleRules)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/clive/activity", s.handleCliveActivity)
 	mux.Handle("/", staticHandler())
+}
+
+// dispatchFilesPath routes /api/files/{path} variants by URL suffix +
+// HTTP method. GET on a file path → handleFileContent; POST on a file
+// path (no special suffix) → handleFileWrite; POST .../clive[/approve|
+// /cancel] → handleCliveProposeOrApprove; POST .../revert →
+// handleFileRevert.
+func (s *Server) dispatchFilesPath(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	switch {
+	case strings.HasSuffix(path, "/clive"),
+		strings.HasSuffix(path, "/clive/approve"),
+		strings.HasSuffix(path, "/clive/cancel"):
+		s.handleCliveProposeOrApprove(w, r)
+	case strings.HasSuffix(path, "/revert"):
+		s.handleFileRevert(w, r)
+	default:
+		if r.Method == http.MethodPost {
+			s.handleFileWrite(w, r)
+		} else {
+			s.handleFileContent(w, r)
+		}
+	}
 }

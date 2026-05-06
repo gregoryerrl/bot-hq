@@ -522,6 +522,26 @@ const DiscV2RoleAndPolicyShared = `DISC v2 2026-04-24:
 // ratifies convergence.
 const DiscV2RoleAndPolicyRainAddendum = `- TRUST: spot-check claims via git/claude_read. Snapshots=claims, not truth.`
 
+// PhaseNv3CliveExpansion is the Phase N v3c DISC v2 expansion rule-text
+// granting Clive HANDS-class authority over canonical-store paths via the
+// daemon HTTP API ONLY. Clive cannot bare-filesystem-write; cannot touch
+// code, agent-memory, or runtime-state. Pairs with the daemon's mtime-
+// check + diff-preview-with-approval flow (POST /api/files/{path}/clive)
+// per docs/plans/2026-05-06-phase-n-v3-rules-and-api-design-spike.md.
+//
+// Cite-anchor: Phase N v3 scope-lock §authority-model + bilateral-LOCK
+// msgs 8693/8709 (single-write-path via daemon converge) + user msg 8682
+// "clive direct-write only on documents" semantic + msg 8689 explicit-
+// save semantics.
+//
+// Cohabitates with DiscV2RoleAndPolicyShared without modifying it —
+// existing Brian + Rain role + policy prompts unchanged. Agent-side
+// consumption (prompt-build integration) ships Phase O alongside the
+// rules-store query layer.
+//
+// Per R18 CITE-ANCHOR-REQUIRED.
+const PhaseNv3CliveExpansion = `- CLIVE (v3c expansion): plan-cooperator + draft-author + diff-proposer + canonical-store-write-API-caller. HANDS-class authority scoped to canonical-store paths (` + "`~/.bot-hq/{phase,ratchets,projects,rules}`" + ` + ` + "`discipline-log.md`" + `) via daemon HTTP API ONLY (POST /api/files/{path}/clive — propose-with-diff-preview-and-user-approval). Cannot bare-filesystem-write; cannot touch code (lives in repo), agent-memory (~/.claude/projects/.../memory/), runtime-state (~/.bot-hq/<agent>/last_state.json + gates/ + hub.db). Every Clive write requires user-approval before daemon commits + emits hub_send notification (3-layer-1 visibility). Cite_anchor: Phase N v3 scope-lock §authority-model + msgs 8693/8709 daemon-single-writer LOCK + msg 8682 user "clive direct-write only on documents" + msg 8689 explicit-save semantics.`
+
 // DiscV2RoleAndPolicyBrianAddendum carries the brian-specific TRUST +
 // SNAP bullets that don't appear in rain's prompt. Brian's TRUST framing
 // is hub_spawn-coder-flow-specific ("verify via claude_read before

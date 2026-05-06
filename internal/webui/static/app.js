@@ -1,7 +1,6 @@
-// bot-hq Clive workspace — Phase N v3b read MVP frontend.
-// Vanilla JS + fetch; no framework dependencies. Manual F5 to refresh
-// (no auto-refresh per Q4 LOCKED). Write capability + Clive integration
-// + raw-YAML rules editor land in v3c.
+// bot-hq Clive workspace — Phase N v3b/v3c frontend.
+// Vanilla JS + fetch. Read MVP shipped v3b; v3c adds editor + Save +
+// 409-conflict UX + Clive proposal flow (proposal acceptance UI deferred).
 
 (function () {
   'use strict';
@@ -10,11 +9,30 @@
   const docPath = document.getElementById('doc-path');
   const docMtime = document.getElementById('doc-mtime');
   const docContent = document.getElementById('doc-content');
+  const docDirty = document.getElementById('doc-dirty');
+  const docSave = document.getElementById('doc-save');
+  const docStatus = document.getElementById('doc-status');
   const rulesPre = document.getElementById('rules');
   const clive = document.getElementById('clive');
+  const conflictModal = document.getElementById('conflict-modal');
+  const conflictServer = document.getElementById('conflict-server-content');
 
+  // Editor state
+  const state = {
+    currentPath: null,
+    currentMtime: null,
+    pristine: '',
+    pendingConflict: null, // { current_mtime, current_content }
+  };
+
+  document.getElementById('tree-refresh').addEventListener('click', loadTree);
   document.getElementById('rules-refresh').addEventListener('click', loadRules);
   document.getElementById('clive-refresh').addEventListener('click', loadClive);
+  docContent.addEventListener('input', onEdit);
+  docSave.addEventListener('click', saveFile);
+  document.getElementById('conflict-overwrite').addEventListener('click', resolveConflict.bind(null, 'overwrite'));
+  document.getElementById('conflict-discard').addEventListener('click', resolveConflict.bind(null, 'discard'));
+  document.getElementById('conflict-keep').addEventListener('click', resolveConflict.bind(null, 'keep'));
 
   loadTree();
   loadClive();
@@ -49,6 +67,9 @@
         a.title = (node.size != null ? node.size + ' B' : '') + ' · ' + (node.mtime || '');
         a.addEventListener('click', (ev) => {
           ev.preventDefault();
+          if (state.currentPath && isDirty()) {
+            if (!confirm('You have unsaved changes. Discard and load new file?')) return;
+          }
           loadFile(node.path);
         });
         li.appendChild(a);
@@ -61,21 +82,112 @@
   async function loadFile(path) {
     docPath.textContent = path;
     docMtime.textContent = 'loading…';
-    docContent.textContent = '';
+    docContent.value = '';
+    docContent.disabled = true;
+    docSave.disabled = true;
+    docDirty.classList.add('hidden');
+    docStatus.textContent = '';
     try {
       const res = await fetch('/api/files/' + path + '?format=json');
       if (!res.ok) {
-        docContent.textContent = 'Error: ' + res.status + ' ' + res.statusText;
+        docContent.value = 'Error: ' + res.status + ' ' + res.statusText;
         docMtime.textContent = '';
         return;
       }
       const data = await res.json();
+      state.currentPath = path;
+      state.currentMtime = data.mtime || '';
+      state.pristine = data.content || '';
+      docContent.value = state.pristine;
+      docContent.disabled = false;
       docMtime.textContent = data.mtime || '';
-      docContent.textContent = data.content || '';
+      updateDirtyState();
     } catch (err) {
-      docContent.textContent = 'Fetch error: ' + err.message;
+      docContent.value = 'Fetch error: ' + err.message;
       docMtime.textContent = '';
     }
+  }
+
+  function onEdit() {
+    updateDirtyState();
+  }
+
+  function isDirty() {
+    return state.currentPath != null && docContent.value !== state.pristine;
+  }
+
+  function updateDirtyState() {
+    const dirty = isDirty();
+    docDirty.classList.toggle('hidden', !dirty);
+    docSave.disabled = !dirty;
+  }
+
+  async function saveFile() {
+    if (!state.currentPath) return;
+    docStatus.textContent = 'Saving…';
+    docSave.disabled = true;
+    try {
+      const res = await fetch('/api/files/' + state.currentPath, {
+        method: 'POST',
+        headers: {
+          'If-Match': state.currentMtime || '',
+          'Content-Type': 'text/plain; charset=utf-8',
+        },
+        body: docContent.value,
+      });
+      if (res.status === 409) {
+        const payload = await res.json();
+        state.pendingConflict = payload;
+        conflictServer.textContent = payload.current_content || '';
+        conflictModal.classList.remove('hidden');
+        docStatus.textContent = '';
+        return;
+      }
+      if (!res.ok) {
+        const text = await res.text();
+        docStatus.textContent = 'Save failed: ' + text;
+        updateDirtyState();
+        return;
+      }
+      const data = await res.json();
+      state.currentMtime = data.mtime || '';
+      state.pristine = docContent.value;
+      docMtime.textContent = data.mtime || '';
+      const sha = data.commit ? ' · commit ' + data.commit.slice(0, 7) : '';
+      const warns = (data.warnings && data.warnings.length) ? ' · ' + data.warnings.length + ' warning(s)' : '';
+      docStatus.textContent = 'Saved ' + (data.mtime || '') + sha + warns;
+      updateDirtyState();
+      // Refresh tree mtimes (fire-and-forget).
+      loadTree();
+    } catch (err) {
+      docStatus.textContent = 'Save error: ' + err.message;
+      updateDirtyState();
+    }
+  }
+
+  async function resolveConflict(action) {
+    const conflict = state.pendingConflict;
+    conflictModal.classList.add('hidden');
+    if (!conflict) return;
+    if (action === 'discard') {
+      // Replace local edits with server's current content.
+      state.pristine = conflict.current_content || '';
+      state.currentMtime = conflict.current_mtime || '';
+      docContent.value = state.pristine;
+      docMtime.textContent = state.currentMtime;
+      docStatus.textContent = 'Discarded local edits; loaded server version.';
+      updateDirtyState();
+    } else if (action === 'overwrite') {
+      // Force overwrite by retrying with the server's current mtime.
+      state.currentMtime = conflict.current_mtime || '';
+      state.pendingConflict = null;
+      await saveFile();
+    } else {
+      // 'keep' — leave editor alone with local edits + new server mtime
+      // hidden so user can manually reconcile.
+      docStatus.textContent = 'Keeping local edits; server has newer version (' + (conflict.current_mtime || '') + ').';
+    }
+    state.pendingConflict = null;
   }
 
   async function loadRules() {
