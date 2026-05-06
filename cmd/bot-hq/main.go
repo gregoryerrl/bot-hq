@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +30,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/toolgate"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
 	"github.com/gregoryerrl/bot-hq/internal/voicemirror"
+	"github.com/gregoryerrl/bot-hq/internal/webui"
 )
 
 func main() {
@@ -64,6 +69,9 @@ func main() {
 		case "session-load":
 			runSessionLoad()
 			return
+		case "webui":
+			runWebUI()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -71,7 +79,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|session-load|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|session-load|webui|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -622,5 +630,69 @@ func statusDot(s protocol.AgentStatus) string {
 		return "\033[33m●\033[0m" // yellow
 	default:
 		return "\033[90m●\033[0m" // gray
+	}
+}
+
+// runWebUI starts the Phase N v3 Clive workspace HTTP server on
+// 127.0.0.1:<port> (default :3849; override via BOT_HQ_WEBUI_PORT env or
+// --port flag). Reads from the canonical-store at ~/.bot-hq/. v3b read-
+// only MVP — write capability + Clive integration land in v3c.
+//
+// Usage:
+//
+//	bot-hq webui                       # default port :3849
+//	bot-hq webui --port 8080           # override port
+//	BOT_HQ_WEBUI_PORT=8080 bot-hq webui
+func runWebUI() {
+	args := os.Args[2:]
+	port := 0 // 0 = use NewServer default (env or DefaultPort)
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--port":
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "webui: --port requires a value\n")
+				os.Exit(1)
+			}
+			p, err := strconv.Atoi(args[i+1])
+			if err != nil || p < 0 || p > 65535 {
+				fmt.Fprintf(os.Stderr, "webui: invalid port %q\n", args[i+1])
+				os.Exit(1)
+			}
+			port = p
+			i++
+		default:
+			fmt.Fprintf(os.Stderr, "webui: unknown flag %q\nUsage: bot-hq webui [--port N]\n", args[i])
+			os.Exit(1)
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "webui: home dir: %v\n", err)
+		os.Exit(1)
+	}
+	dbPath := filepath.Join(home, ".bot-hq", "hub.db")
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "webui: open hub.db: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	var opts []webui.Option
+	if port > 0 {
+		opts = append(opts, webui.WithPort(port))
+	}
+	srv, err := webui.NewServer(db, opts...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "webui: construct: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+	if err := srv.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintf(os.Stderr, "webui: serve: %v\n", err)
+		os.Exit(1)
 	}
 }

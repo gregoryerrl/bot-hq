@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>bot-hq Clive workspace</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>bot-hq Clive workspace</h1>
+    <span class="subtitle">Phase N v3 — read MVP (manual F5 to refresh)</span>
+  </header>
+
+  <main>
+    <aside class="sidebar">
+      <section>
+        <h2>Projects + canonical-store</h2>
+        <div id="tree"><em>Loading…</em></div>
+      </section>
+
+      <section>
+        <h2>Resolved rules</h2>
+        <label>Project: <input type="text" id="rules-project" placeholder="bot-hq" value=""></label>
+        <label>Agent: <input type="text" id="rules-agent" placeholder="brian" value=""></label>
+        <button id="rules-refresh" type="button">Refresh</button>
+        <pre id="rules"><em>Set project/agent and refresh.</em></pre>
+      </section>
+
+      <section>
+        <h2>Clive activity</h2>
+        <button id="clive-refresh" type="button">Refresh</button>
+        <div id="clive"><em>No Clive activity yet.</em></div>
+      </section>
+    </aside>
+
+    <section class="doc">
+      <header class="doc-header">
+        <span id="doc-path">Pick a file from the tree.</span>
+        <span id="doc-mtime" class="muted"></span>
+      </header>
+      <pre id="doc-content"></pre>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
