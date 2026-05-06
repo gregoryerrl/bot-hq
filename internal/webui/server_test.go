@@ -225,7 +225,7 @@ func TestStaticHandler_ServesIndex(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", status, body)
 	}
-	if !strings.Contains(body, "bot-hq Clive workspace") {
+	if !strings.Contains(body, "bot-hq workspace") {
 		t.Errorf("expected index.html title in body, got first 200 chars: %s", body[:min(200, len(body))])
 	}
 }

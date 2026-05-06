@@ -181,6 +181,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// /api/files/{path}/revert → revert to prior commit
 	mux.HandleFunc("/api/files", s.handleFilesTree)
 	mux.HandleFunc("/api/files/", s.dispatchFilesPath)
+	mux.HandleFunc("/api/projects", s.handleProjects)
+	mux.HandleFunc("/api/destinations", s.handleDestinations)
 	mux.HandleFunc("/api/rules", s.handleRules)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/clive/activity", s.handleCliveActivity)

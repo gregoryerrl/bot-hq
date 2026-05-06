@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -126,6 +127,32 @@ func runHub() {
 	// 5. Start Live web server
 	liveServer := live.NewServer(h, cfg.Hub.LivePort)
 	liveServer.Start()
+
+	// 5b. Phase N v3.x-1 auto-start ride-along: workspace webui on :3849.
+	// Goroutine-isolated so a webui error never crashes the hub.
+	// Opt-out: BOT_HQ_WEBUI_DISABLE=1. Port-conflict graceful-skip:
+	// if :3849 is already bound (manual `bot-hq webui` running), the
+	// inner Start() returns the bind error; we log + continue.
+	webuiCtx, webuiCancel := context.WithCancel(context.Background())
+	defer webuiCancel()
+	if os.Getenv("BOT_HQ_WEBUI_DISABLE") != "1" {
+		webuiSrv, werr := webui.NewServer(h.DB)
+		if werr != nil {
+			log.Printf("[autostart] webui FAILED to construct: %v", werr)
+		} else {
+			go func() {
+				if err := webuiSrv.Start(webuiCtx); err != nil &&
+					!errors.Is(err, context.Canceled) &&
+					!errors.Is(err, http.ErrServerClosed) {
+					// Bind-conflict / runtime error — log + continue without crashing daemon.
+					log.Printf("[autostart] webui serve error (continuing): %v", err)
+				}
+			}()
+			log.Printf("[autostart] webui OK")
+		}
+	} else {
+		log.Printf("[autostart] webui DISABLED via BOT_HQ_WEBUI_DISABLE=1")
+	}
 
 	// 6. Start Discord bot if configured
 	if cfg.Discord.Token != "" && cfg.Discord.ChannelID != "" {

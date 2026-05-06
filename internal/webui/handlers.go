@@ -12,6 +12,47 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// handleProjects responds to GET /api/projects with the registered
+// project list (bot-hq always first; others discovered from
+// projects/*.yaml). Phase N v3.x-1 curation surface.
+func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	projects, err := ListProjects(s.canonicalRoot)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("list projects: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
+}
+
+// handleDestinations responds to GET /api/destinations?project=<p> with
+// the curated destination-allowlist nav per scope-lock-v4.2: 8 global
+// destinations + 4 per-project destinations, each with TreeNode children
+// resolved live. The project query param is required (the per-project
+// section is project-scoped); pass "bot-hq" for the default project.
+func (s *Server) handleDestinations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	project := strings.TrimSpace(r.URL.Query().Get("project"))
+	if project == "" {
+		project = "bot-hq"
+	}
+	dests, err := ResolveDestinations(s.canonicalRoot, project)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("resolve destinations: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"project":      project,
+		"destinations": dests,
+	})
+}
+
 // handleFilesTree responds to GET /api/files with the canonical-store
 // tree (excluding runtime state per shouldSkip rules).
 func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {

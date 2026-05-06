@@ -1,4 +1,5 @@
-/* bot-hq Clive workspace — Phase N v3b read MVP styling. Minimal. */
+/* bot-hq workspace — Phase N v3.x-1 curation styling. Two-section nav +
+   header strip + rendered/raw doc pane. Minimal but legible. */
 
 * { box-sizing: border-box; }
 
@@ -10,29 +11,83 @@ body {
   font-size: 14px;
 }
 
-header {
+.topbar {
   background: #2c3e50;
   color: white;
-  padding: 0.75rem 1.25rem;
+  padding: 0.6rem 1.25rem;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 1rem;
 }
 
-header h1 {
+.topbar h1 {
   font-size: 1.05rem;
   margin: 0;
   font-weight: 600;
 }
 
-.subtitle {
+.topbar .spacer { flex: 1; }
+
+.agent-state {
+  background: rgba(255,255,255,0.08);
+  padding: 0.2rem 0.6rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
   color: #b0c4d4;
+  font-family: ui-monospace, 'SFMono-Regular', monospace;
+}
+
+.picker {
   font-size: 0.85rem;
+  color: #b0c4d4;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.picker select {
+  background: #1e2b38;
+  color: white;
+  border: 1px solid #3a4a5a;
+  border-radius: 3px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.85rem;
+}
+
+.active-project-chip {
+  background: #2563eb;
+  color: white;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.nav-search {
+  appearance: none;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+  width: 14rem;
+  background: white;
+}
+
+.nav-search:focus {
+  outline: 2px solid #2563eb;
+  outline-offset: 1px;
+}
+
+li.no-match {
+  color: #9ca3af;
+  font-style: italic;
+  font-size: 0.85rem;
+  padding-left: 0.5rem;
 }
 
 main {
   display: grid;
-  grid-template-columns: minmax(280px, 360px) 1fr;
+  grid-template-columns: minmax(260px, 320px) 1fr;
   gap: 1rem;
   padding: 1rem;
   height: calc(100vh - 48px);
@@ -47,10 +102,10 @@ main {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1.25rem;
 }
 
-.sidebar h2 {
+.nav-section h2 {
   font-size: 0.75rem;
   margin: 0 0 0.5rem 0;
   text-transform: uppercase;
@@ -58,109 +113,48 @@ main {
   color: #666;
 }
 
-.sidebar section {
-  display: flex;
-  flex-direction: column;
+.dest {
+  margin-bottom: 0.6rem;
 }
 
-.sidebar label {
-  display: block;
+.dest-head {
   font-size: 0.85rem;
-  margin-bottom: 0.25rem;
-}
-
-.sidebar input {
-  width: 60%;
-  padding: 0.2rem;
-  border: 1px solid #ccc;
-  border-radius: 3px;
-  font-family: inherit;
-  font-size: 0.85rem;
-  margin-left: 0.25rem;
-}
-
-.sidebar button {
-  align-self: start;
-  margin-top: 0.25rem;
-  padding: 0.25rem 0.6rem;
-  font-size: 0.85rem;
-  border: 1px solid #aaa;
-  background: #efefef;
-  border-radius: 3px;
-  cursor: pointer;
-}
-
-.sidebar button:hover {
-  background: #e2e2e2;
-}
-
-#tree ul {
-  list-style: none;
-  padding-left: 0.75rem;
-  margin: 0;
-}
-
-#tree > ul {
-  padding-left: 0;
-}
-
-#tree li.file > a {
-  text-decoration: none;
-  color: #2563eb;
-  font-family: ui-monospace, 'SFMono-Regular', monospace;
-  font-size: 0.85rem;
-}
-
-#tree li.file > a:hover {
-  text-decoration: underline;
-}
-
-#tree li.dir > .dir-name {
   font-weight: 600;
-  font-family: ui-monospace, 'SFMono-Regular', monospace;
-  font-size: 0.85rem;
-  color: #555;
+  color: #2563eb;
+  margin: 0.4rem 0 0.2rem 0;
 }
 
-#rules,
-#doc-content {
-  background: #f4f4f4;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  padding: 0.6rem;
-  font-family: ui-monospace, 'SFMono-Regular', monospace;
-  font-size: 0.8rem;
-  white-space: pre-wrap;
-  overflow: auto;
-}
-
-#rules {
-  max-height: 240px;
-  margin: 0.5rem 0 0 0;
-}
-
-.clive-list {
+.dest-list {
   list-style: none;
-  padding-left: 0;
+  padding-left: 0.6rem;
   margin: 0;
-  font-size: 0.8rem;
 }
 
-.clive-list li {
-  border-bottom: 1px solid #eee;
-  padding: 0.3rem 0;
-}
-
-.clive-list .ts {
-  display: block;
-  color: #888;
+.dest-list li {
+  font-size: 0.82rem;
+  margin: 0.1rem 0;
   font-family: ui-monospace, 'SFMono-Regular', monospace;
-  font-size: 0.7rem;
 }
 
-.clive-list .body {
-  display: block;
-  font-family: ui-monospace, 'SFMono-Regular', monospace;
+.dest-list li.empty {
+  color: #aaa;
+  font-style: italic;
+  font-family: inherit;
+}
+
+.dest-list li.missing {
+  color: #b88;
+  font-style: italic;
+  font-family: inherit;
+}
+
+.dest-list li a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.dest-list li a:hover {
+  text-decoration: underline;
 }
 
 .doc {
@@ -175,12 +169,14 @@ main {
 
 .doc-header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
   margin-bottom: 0.5rem;
   padding-bottom: 0.5rem;
   border-bottom: 1px solid #eee;
 }
+
+.doc-header .spacer { flex: 1; }
 
 #doc-path {
   font-family: ui-monospace, 'SFMono-Regular', monospace;
@@ -193,19 +189,77 @@ main {
   font-size: 0.8rem;
 }
 
+.dirty-indicator { color: #d97706; font-size: 0.8rem; font-weight: 600; }
+.dirty-indicator.hidden { display: none; }
+.hidden { display: none !important; }
+
+#doc-mode, #doc-save {
+  padding: 0.3rem 0.7rem;
+  border-radius: 3px;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+#doc-mode {
+  border: 1px solid #aaa;
+  background: #efefef;
+  color: #333;
+}
+
+#doc-mode:hover { background: #e2e2e2; }
+
+#doc-save {
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: white;
+  font-weight: 500;
+}
+
+#doc-save:disabled {
+  background: #c0c8d4;
+  border-color: #c0c8d4;
+  cursor: not-allowed;
+}
+
+#doc-save:hover:not(:disabled) { background: #1e40af; }
+
+.doc-rendered {
+  flex: 1;
+  overflow: auto;
+  padding: 0.6rem 0.4rem;
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
+
+.doc-rendered h1, .doc-rendered h2, .doc-rendered h3 {
+  margin-top: 1rem;
+  margin-bottom: 0.4rem;
+}
+.doc-rendered code {
+  background: #f4f4f4;
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  font-family: ui-monospace, 'SFMono-Regular', monospace;
+  font-size: 0.85em;
+}
+.doc-rendered pre {
+  background: #f4f4f4;
+  padding: 0.6rem;
+  overflow-x: auto;
+  border-radius: 4px;
+}
+.doc-rendered table {
+  border-collapse: collapse;
+  margin: 0.6rem 0;
+}
+.doc-rendered table th, .doc-rendered table td {
+  border: 1px solid #ddd;
+  padding: 0.3rem 0.6rem;
+}
+
 #doc-content {
   flex: 1;
   margin: 0;
-  max-height: none;
-}
-
-.error {
-  color: #b71c1c;
-}
-
-/* Editor surface (v3c) */
-
-#doc-content {
   background: white;
   border: 1px solid #ddd;
   border-radius: 4px;
@@ -216,8 +270,6 @@ main {
   white-space: pre;
   overflow: auto;
   resize: none;
-  flex: 1;
-  margin: 0;
   width: 100%;
   outline: none;
 }
@@ -232,50 +284,6 @@ main {
   color: #888;
 }
 
-.doc-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.5rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid #eee;
-}
-
-.doc-header .spacer {
-  flex: 1;
-}
-
-.dirty-indicator {
-  color: #d97706;
-  font-size: 0.8rem;
-  font-weight: 600;
-}
-
-.dirty-indicator.hidden {
-  display: none;
-}
-
-#doc-save {
-  padding: 0.3rem 0.9rem;
-  border: 1px solid #2563eb;
-  background: #2563eb;
-  color: white;
-  border-radius: 3px;
-  cursor: pointer;
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-
-#doc-save:disabled {
-  background: #c0c8d4;
-  border-color: #c0c8d4;
-  cursor: not-allowed;
-}
-
-#doc-save:hover:not(:disabled) {
-  background: #1e40af;
-}
-
 #doc-status {
   padding-top: 0.3rem;
   font-size: 0.78rem;
@@ -283,17 +291,9 @@ main {
   min-height: 1.2em;
 }
 
-#tree-refresh {
-  margin-bottom: 0.5rem;
-  font-size: 0.8rem;
-  padding: 0.15rem 0.5rem;
-  border: 1px solid #aaa;
-  background: #efefef;
-  border-radius: 3px;
-  cursor: pointer;
-}
+.error { color: #b71c1c; }
 
-/* Conflict modal */
+/* Conflict modal — preserved from v3c */
 
 .modal {
   position: fixed;
@@ -305,9 +305,7 @@ main {
   z-index: 100;
 }
 
-.modal.hidden {
-  display: none;
-}
+.modal.hidden { display: none; }
 
 .modal-card {
   background: white;
@@ -347,9 +345,7 @@ main {
   cursor: pointer;
 }
 
-.conflict-actions button:hover {
-  background: #e2e2e2;
-}
+.conflict-actions button:hover { background: #e2e2e2; }
 
 .modal-card details summary {
   cursor: pointer;

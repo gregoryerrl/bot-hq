@@ -1,88 +1,181 @@
-// bot-hq Clive workspace — Phase N v3b/v3c frontend.
-// Vanilla JS + fetch. Read MVP shipped v3b; v3c adds editor + Save +
-// 409-conflict UX + Clive proposal flow (proposal acceptance UI deferred).
+// bot-hq workspace — Phase N v3.x-1 curation frontend.
+// Replaces v3b file-tree-as-nav with destination-allowlist nav per
+// scope-lock-v4.2 (Form Y). Vanilla JS + fetch. marked.js (CDN) for
+// .md render; raw textarea for .yaml + non-md content.
+//
+// State machine: project-picker drives /api/destinations?project=<p>;
+// click on a destination's file loads /api/files/<path>?format=json into
+// the doc pane. Edit + Save + 409 conflict resolution preserved from v3c.
 
 (function () {
   'use strict';
 
-  const tree = document.getElementById('tree');
+  const projectPicker = document.getElementById('project-picker');
+  const activeChip = document.getElementById('active-project-chip');
+  const navSearch = document.getElementById('nav-search');
+  const navGlobal = document.getElementById('nav-global-list');
+  const navProject = document.getElementById('nav-project-list');
   const docPath = document.getElementById('doc-path');
   const docMtime = document.getElementById('doc-mtime');
   const docContent = document.getElementById('doc-content');
+  const docRendered = document.getElementById('doc-rendered');
   const docDirty = document.getElementById('doc-dirty');
   const docSave = document.getElementById('doc-save');
+  const docMode = document.getElementById('doc-mode');
   const docStatus = document.getElementById('doc-status');
-  const rulesPre = document.getElementById('rules');
-  const clive = document.getElementById('clive');
   const conflictModal = document.getElementById('conflict-modal');
   const conflictServer = document.getElementById('conflict-server-content');
 
-  // Editor state
   const state = {
+    project: 'bot-hq',
     currentPath: null,
     currentMtime: null,
     pristine: '',
-    pendingConflict: null, // { current_mtime, current_content }
+    pendingConflict: null,
+    viewMode: 'rendered', // 'rendered' or 'raw'
+    searchQuery: '', // project-scoped filename filter (lowercase)
   };
 
-  document.getElementById('tree-refresh').addEventListener('click', loadTree);
-  document.getElementById('rules-refresh').addEventListener('click', loadRules);
-  document.getElementById('clive-refresh').addEventListener('click', loadClive);
+  projectPicker.addEventListener('change', () => {
+    state.project = projectPicker.value;
+    activeChip.textContent = state.project;
+    loadDestinations();
+  });
+  navSearch.addEventListener('input', () => {
+    state.searchQuery = navSearch.value.trim().toLowerCase();
+    applyNavFilter();
+  });
   docContent.addEventListener('input', onEdit);
   docSave.addEventListener('click', saveFile);
+  docMode.addEventListener('click', toggleViewMode);
   document.getElementById('conflict-overwrite').addEventListener('click', resolveConflict.bind(null, 'overwrite'));
   document.getElementById('conflict-discard').addEventListener('click', resolveConflict.bind(null, 'discard'));
   document.getElementById('conflict-keep').addEventListener('click', resolveConflict.bind(null, 'keep'));
 
-  loadTree();
-  loadClive();
+  loadProjects().then(loadDestinations);
 
-  async function loadTree() {
-    tree.innerHTML = '<em>Loading…</em>';
+  async function loadProjects() {
     try {
-      const res = await fetch('/api/files');
+      const res = await fetch('/api/projects');
       const data = await res.json();
-      tree.innerHTML = '';
-      tree.appendChild(renderTree(data.tree || []));
+      projectPicker.innerHTML = '';
+      for (const p of data.projects || []) {
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.textContent = p.name;
+        projectPicker.appendChild(opt);
+      }
+      if (projectPicker.options.length) {
+        projectPicker.value = state.project;
+        activeChip.textContent = state.project;
+      }
     } catch (err) {
-      tree.innerHTML = '<em class="error">Failed to load tree: ' + escapeHtml(err.message) + '</em>';
+      navGlobal.innerHTML = '<em class="error">Failed to load projects: ' + escapeHtml(err.message) + '</em>';
     }
   }
 
-  function renderTree(nodes) {
-    const ul = document.createElement('ul');
-    for (const node of nodes) {
-      const li = document.createElement('li');
-      li.classList.add(node.type);
-      if (node.type === 'dir') {
-        const span = document.createElement('span');
-        span.classList.add('dir-name');
-        span.textContent = node.name + '/';
-        li.appendChild(span);
-        li.appendChild(renderTree(node.children || []));
-      } else {
-        const a = document.createElement('a');
-        a.href = '#' + node.path;
-        a.textContent = node.name;
-        a.title = (node.size != null ? node.size + ' B' : '') + ' · ' + (node.mtime || '');
-        a.addEventListener('click', (ev) => {
-          ev.preventDefault();
-          if (state.currentPath && isDirty()) {
-            if (!confirm('You have unsaved changes. Discard and load new file?')) return;
-          }
-          loadFile(node.path);
-        });
-        li.appendChild(a);
+  async function loadDestinations() {
+    navGlobal.innerHTML = '<em>Loading…</em>';
+    navProject.innerHTML = '<em>Loading…</em>';
+    try {
+      const res = await fetch('/api/destinations?project=' + encodeURIComponent(state.project));
+      const data = await res.json();
+      const dests = data.destinations || [];
+      navGlobal.innerHTML = '';
+      navProject.innerHTML = '';
+      for (const d of dests) {
+        const target = d.section === 'global' ? navGlobal : navProject;
+        target.appendChild(renderDestination(d));
       }
-      ul.appendChild(li);
+      applyNavFilter();
+    } catch (err) {
+      navGlobal.innerHTML = '<em class="error">Failed to load destinations: ' + escapeHtml(err.message) + '</em>';
     }
-    return ul;
+  }
+
+  // applyNavFilter hides nav <li> entries whose file name doesn't match
+  // state.searchQuery (substring, case-insensitive). Empty query restores
+  // full visibility. Per-destination "(no matches)" hint shows when a
+  // destination's items all filter out so the destination header still
+  // surfaces context. Project-scoped per scope-lock-v4.2 affordance #2.
+  function applyNavFilter() {
+    const q = state.searchQuery;
+    const dests = document.querySelectorAll('.dest');
+    dests.forEach((dest) => {
+      const items = dest.querySelectorAll('.dest-list li');
+      let visibleCount = 0;
+      items.forEach((li) => {
+        if (li.classList.contains('empty') || li.classList.contains('no-match')) return;
+        const a = li.querySelector('a');
+        const name = a ? a.textContent.toLowerCase() : (li.textContent || '').toLowerCase();
+        const match = !q || name.includes(q);
+        li.classList.toggle('hidden', !match);
+        if (match) visibleCount++;
+      });
+      // Manage the dynamic "(no matches)" indicator.
+      let indicator = dest.querySelector('li.no-match');
+      const baseEmpty = dest.querySelector('li.empty');
+      if (q && visibleCount === 0 && !baseEmpty) {
+        if (!indicator) {
+          indicator = document.createElement('li');
+          indicator.classList.add('no-match');
+          indicator.textContent = '(no matches)';
+          dest.querySelector('.dest-list').appendChild(indicator);
+        }
+        indicator.classList.remove('hidden');
+      } else if (indicator) {
+        indicator.classList.add('hidden');
+      }
+    });
+  }
+
+  function renderDestination(dest) {
+    const wrap = document.createElement('div');
+    wrap.classList.add('dest');
+    const head = document.createElement('div');
+    head.classList.add('dest-head');
+    head.textContent = dest.name;
+    wrap.appendChild(head);
+    const ul = document.createElement('ul');
+    ul.classList.add('dest-list');
+    const nodes = dest.nodes || [];
+    if (!nodes.length) {
+      const li = document.createElement('li');
+      li.classList.add('empty');
+      li.textContent = '(empty)';
+      ul.appendChild(li);
+    } else {
+      for (const n of nodes) {
+        const li = document.createElement('li');
+        if (n.missing) {
+          li.classList.add('missing');
+          li.textContent = n.name + ' (not yet authored)';
+        } else {
+          const a = document.createElement('a');
+          a.href = '#' + n.path;
+          a.textContent = n.name;
+          a.title = (n.size != null ? n.size + ' B · ' : '') + (n.mtime || '');
+          a.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            if (state.currentPath && isDirty()) {
+              if (!confirm('You have unsaved changes. Discard and load new file?')) return;
+            }
+            loadFile(n.path);
+          });
+          li.appendChild(a);
+        }
+        ul.appendChild(li);
+      }
+    }
+    wrap.appendChild(ul);
+    return wrap;
   }
 
   async function loadFile(path) {
     docPath.textContent = path;
     docMtime.textContent = 'loading…';
     docContent.value = '';
+    docRendered.innerHTML = '';
     docContent.disabled = true;
     docSave.disabled = true;
     docDirty.classList.add('hidden');
@@ -92,6 +185,7 @@
       if (!res.ok) {
         docContent.value = 'Error: ' + res.status + ' ' + res.statusText;
         docMtime.textContent = '';
+        showRawView();
         return;
       }
       const data = await res.json();
@@ -101,15 +195,62 @@
       docContent.value = state.pristine;
       docContent.disabled = false;
       docMtime.textContent = data.mtime || '';
+      if (isMarkdown(path) && state.viewMode === 'rendered') {
+        showRenderedView();
+      } else {
+        // Non-md always raw; md follows current viewMode.
+        if (!isMarkdown(path)) state.viewMode = 'raw';
+        showRawView();
+      }
       updateDirtyState();
     } catch (err) {
       docContent.value = 'Fetch error: ' + err.message;
       docMtime.textContent = '';
+      showRawView();
+    }
+  }
+
+  function isMarkdown(path) {
+    return path && path.toLowerCase().endsWith('.md');
+  }
+
+  function showRenderedView() {
+    state.viewMode = 'rendered';
+    docMode.textContent = 'View: rendered';
+    docContent.classList.add('hidden');
+    docRendered.classList.remove('hidden');
+    if (window.marked && state.pristine) {
+      docRendered.innerHTML = window.marked.parse(docContent.value);
+    } else {
+      docRendered.textContent = docContent.value;
+    }
+  }
+
+  function showRawView() {
+    state.viewMode = 'raw';
+    docMode.textContent = 'View: raw';
+    docRendered.classList.add('hidden');
+    docContent.classList.remove('hidden');
+  }
+
+  function toggleViewMode() {
+    if (!state.currentPath) return;
+    if (!isMarkdown(state.currentPath)) {
+      // Non-md only has raw view.
+      showRawView();
+      return;
+    }
+    if (state.viewMode === 'rendered') {
+      showRawView();
+    } else {
+      showRenderedView();
     }
   }
 
   function onEdit() {
     updateDirtyState();
+    // If currently rendered, leave rendered alone — render refreshes on
+    // next view-toggle / save.
   }
 
   function isDirty() {
@@ -157,8 +298,12 @@
       const warns = (data.warnings && data.warnings.length) ? ' · ' + data.warnings.length + ' warning(s)' : '';
       docStatus.textContent = 'Saved ' + (data.mtime || '') + sha + warns;
       updateDirtyState();
-      // Refresh tree mtimes (fire-and-forget).
-      loadTree();
+      // Refresh nav to pick up new mtimes.
+      loadDestinations();
+      // If rendered view active, refresh render with new content.
+      if (state.viewMode === 'rendered' && isMarkdown(state.currentPath)) {
+        showRenderedView();
+      }
     } catch (err) {
       docStatus.textContent = 'Save error: ' + err.message;
       updateDirtyState();
@@ -170,71 +315,21 @@
     conflictModal.classList.add('hidden');
     if (!conflict) return;
     if (action === 'discard') {
-      // Replace local edits with server's current content.
       state.pristine = conflict.current_content || '';
       state.currentMtime = conflict.current_mtime || '';
       docContent.value = state.pristine;
       docMtime.textContent = state.currentMtime;
       docStatus.textContent = 'Discarded local edits; loaded server version.';
+      if (state.viewMode === 'rendered' && isMarkdown(state.currentPath)) showRenderedView();
       updateDirtyState();
     } else if (action === 'overwrite') {
-      // Force overwrite by retrying with the server's current mtime.
       state.currentMtime = conflict.current_mtime || '';
       state.pendingConflict = null;
       await saveFile();
     } else {
-      // 'keep' — leave editor alone with local edits + new server mtime
-      // hidden so user can manually reconcile.
       docStatus.textContent = 'Keeping local edits; server has newer version (' + (conflict.current_mtime || '') + ').';
     }
     state.pendingConflict = null;
-  }
-
-  async function loadRules() {
-    const project = document.getElementById('rules-project').value.trim();
-    const agent = document.getElementById('rules-agent').value.trim();
-    const params = new URLSearchParams();
-    if (project) params.set('project', project);
-    if (agent) params.set('agent', agent);
-    rulesPre.textContent = 'loading…';
-    try {
-      const res = await fetch('/api/rules?' + params.toString());
-      const data = await res.json();
-      rulesPre.textContent = JSON.stringify(data, null, 2);
-    } catch (err) {
-      rulesPre.textContent = 'Failed: ' + err.message;
-    }
-  }
-
-  async function loadClive() {
-    clive.innerHTML = '<em>loading…</em>';
-    try {
-      const res = await fetch('/api/clive/activity');
-      const data = await res.json();
-      const messages = data.messages || [];
-      if (!messages.length) {
-        clive.innerHTML = '<em>No Clive messages yet.</em>';
-        return;
-      }
-      const ul = document.createElement('ul');
-      ul.classList.add('clive-list');
-      for (const m of messages) {
-        const li = document.createElement('li');
-        const ts = document.createElement('span');
-        ts.classList.add('ts');
-        ts.textContent = m.created || '';
-        const body = document.createElement('span');
-        body.classList.add('body');
-        body.textContent = '[' + m.type + ' → ' + (m.to_agent || 'broadcast') + '] ' + m.content;
-        li.appendChild(ts);
-        li.appendChild(body);
-        ul.appendChild(li);
-      }
-      clive.innerHTML = '';
-      clive.appendChild(ul);
-    } catch (err) {
-      clive.innerHTML = '<em class="error">Failed: ' + escapeHtml(err.message) + '</em>';
-    }
   }
 
   function escapeHtml(s) {

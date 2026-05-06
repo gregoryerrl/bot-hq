@@ -10,7 +10,9 @@ import (
 )
 
 // TreeNode is a single entry in the canonical-store tree response. Either
-// File (with Mtime + Size) or Dir (with Children).
+// File (with Mtime + Size) or Dir (with Children). For destination
+// resolvers, Missing=true marks a blank-state placeholder (e.g., a
+// project's overview.md not yet authored).
 type TreeNode struct {
 	Path     string     `json:"path"` // canonical-store-relative
 	Name     string     `json:"name"` // basename
@@ -18,33 +20,76 @@ type TreeNode struct {
 	Mtime    string     `json:"mtime,omitempty"`
 	Size     int64      `json:"size,omitempty"`
 	Children []TreeNode `json:"children,omitempty"`
+	Missing  bool       `json:"missing,omitempty"`
 }
 
-// canonicalSkipList is the set of relative paths excluded from the tree
-// per Q7 LOCKED + scope-lock §v3a.5 §3.2 read-endpoint exclusions:
+// canonicalSkipList is the set of top-level entries excluded from the
+// legacy tree-walk endpoint. Phase N v3.x-1 retires the tree-walk in
+// favor of destination-allowlist nav (destinations.go); the list is kept
+// for backward-compatible /api/files behaviour during the v3.x-1 cutover.
 //
-//   - <agent>/ — runtime state, not canonical-store
-//   - gates/ — bot-hq runtime config
-//   - hub.db, live.log — runtime state
-//   - sessions/ — surfaced via /api/sessions, not /api/files
-//
-// Project-specific runtime state (e.g., projects/<p>/.git/) is also
-// skipped via dotfile-skip below.
+//   - hub.db / webui-index.db — sqlite runtime
+//   - live.log / debug.log — runtime logs
+//   - gates/ — surfaced via per-project Rules destination, not raw walk
+//   - sessions/ — surfaced via /api/sessions + Sessions destination
 var canonicalSkipList = map[string]struct{}{
 	"hub.db":         {},
+	"hub.db-shm":     {},
+	"hub.db-wal":     {},
+	"bot-hq.db":      {},
 	"live.log":       {},
+	"debug.log":      {},
 	"gates":          {},
 	"sessions":       {},
 	"webui-index.db": {},
 }
 
-// canonicalSkipAgentDirs lists per-agent dirs to skip (each agent has a
-// dir at top level e.g. brian/, rain/, emma/, clive/).
+// canonicalSkipAgentDirs lists per-agent dirs whose contents are mostly
+// runtime (last_state.json) but contain selected allowlisted files
+// (discipline-anchors.md). The walk-skip leaves it to per-destination
+// resolvers to surface allowlisted paths; resolveCanonicalPath whitelists
+// specific subpaths (see allowlistedAgentSubpaths).
 var canonicalSkipAgentDirs = map[string]struct{}{
 	"brian": {},
 	"rain":  {},
 	"emma":  {},
 	"clive": {},
+}
+
+// allowlistedAgentSubpaths lists the only files under <agent>/ that the
+// file-content endpoint will serve. Per scope-lock-v4.2 HIDE list:
+// last_state.json (per-agent runtime) is hidden; discipline-anchors.md
+// (Agent Notes destination) is allowed.
+var allowlistedAgentSubpaths = map[string]struct{}{
+	"discipline-anchors.md": {},
+}
+
+// hideListExtensions are file extensions whose content-class is HIDE per
+// scope-lock-v4.2 (binary / runtime / log / source-code).
+var hideListExtensions = map[string]struct{}{
+	".db":    {},
+	".log":   {},
+	".jsonl": {},
+	".json":  {}, // runtime JSON; allowlist exceptions go via specific paths
+	".ts":    {}, // plugins/github source
+	".js":    {}, // plugins/github source
+}
+
+// hideListBasenames are specific filenames that fail S3 (audit/hook trail).
+var hideListBasenames = map[string]struct{}{
+	"voice-mirror-log.md": {},
+	"last_state.json":     {},
+}
+
+// hideListTopDirs are top-level directories whose entire contents are HIDE
+// (non-md/yaml runtime + source). Note: contents may contain md files
+// (e.g., plugins/github/README.md) but per scope-lock §3.2 these are
+// internal-code-class and excluded.
+var hideListTopDirs = map[string]struct{}{
+	"diag":      {},
+	"sentinels": {},
+	"bridge":    {},
+	"plugins":   {}, // plugins/github source
 }
 
 // shouldSkip returns true for entries that aren't canonical-store class.
@@ -58,6 +103,9 @@ func shouldSkip(name string, isDir bool) bool {
 	}
 	if isDir {
 		if _, ok := canonicalSkipAgentDirs[name]; ok {
+			return true
+		}
+		if _, ok := hideListTopDirs[name]; ok {
 			return true
 		}
 	}
@@ -154,9 +202,33 @@ func resolveCanonicalPath(root, relPath string) (string, error) {
 			return "", errors.New("dotfile path forbidden")
 		}
 		isDirHint := len(parts) > 1
-		if shouldSkip(topName, isDirHint) {
-			return "", errors.New("path outside canonical-store class")
+
+		// Allowlist exceptions for paths that shouldSkip would reject but
+		// destinations legitimately surface:
+		//   - sessions/<id>/manifest.md (Sessions destination)
+		//   - gates/*.md (per-project Rules for bot-hq)
+		//   - <agent>/discipline-anchors.md (Agent Notes destination)
+		_, isAgentDir := canonicalSkipAgentDirs[topName]
+		_, isAllowedAgentSub := allowlistedAgentSubpaths[parts[len(parts)-1]]
+		isAllowedAgentPath := isAgentDir && len(parts) >= 2 && isAllowedAgentSub
+		isAllowedSession := topName == "sessions" && len(parts) >= 3 && parts[len(parts)-1] == "manifest.md"
+		isAllowedGate := topName == "gates" && len(parts) == 2 && strings.HasSuffix(parts[1], ".md")
+
+		if !isAllowedAgentPath && !isAllowedSession && !isAllowedGate {
+			if shouldSkip(topName, isDirHint) {
+				return "", errors.New("path outside canonical-store class")
+			}
 		}
+	}
+
+	// Apply HIDE-list filters by basename + extension regardless of dir.
+	base := filepath.Base(clean)
+	if _, ok := hideListBasenames[base]; ok {
+		return "", errors.New("path is HIDE-list basename")
+	}
+	ext := filepath.Ext(base)
+	if _, ok := hideListExtensions[ext]; ok {
+		return "", errors.New("path has HIDE-list extension")
 	}
 	abs := filepath.Join(root, clean)
 	// Defense-in-depth: verify the joined path is still inside root.

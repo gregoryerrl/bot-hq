@@ -3,47 +3,45 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>bot-hq Clive workspace</title>
+  <title>bot-hq workspace</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <header>
-    <h1>bot-hq Clive workspace</h1>
-    <span class="subtitle">Phase N v3 — read + write (manual F5 to refresh tree)</span>
+  <header class="topbar">
+    <h1>bot-hq workspace</h1>
+    <span class="agent-state" id="agent-state" title="Live agent state — Phase N v3.x-2 fills">trio: idle</span>
+    <span class="spacer"></span>
+    <label class="picker">
+      Project
+      <select id="project-picker"></select>
+    </label>
+    <span class="active-project-chip" id="active-project-chip">bot-hq</span>
+    <input type="search" id="nav-search" class="nav-search" placeholder="Search files…" autocomplete="off" />
   </header>
 
   <main>
     <aside class="sidebar">
-      <section>
-        <h2>Projects + canonical-store</h2>
-        <button id="tree-refresh" type="button">↻ Refresh</button>
-        <div id="tree"><em>Loading…</em></div>
+      <section class="nav-section" id="nav-global">
+        <h2>Global</h2>
+        <div class="nav-list" id="nav-global-list"><em>Loading…</em></div>
       </section>
-
-      <section>
-        <h2>Resolved rules</h2>
-        <label>Project: <input type="text" id="rules-project" placeholder="bot-hq" value=""></label>
-        <label>Agent: <input type="text" id="rules-agent" placeholder="brian" value=""></label>
-        <button id="rules-refresh" type="button">Refresh</button>
-        <pre id="rules"><em>Set project/agent and refresh.</em></pre>
-      </section>
-
-      <section>
-        <h2>Clive activity</h2>
-        <button id="clive-refresh" type="button">Refresh</button>
-        <div id="clive"><em>No Clive activity yet.</em></div>
+      <section class="nav-section" id="nav-project">
+        <h2>Projects</h2>
+        <div class="nav-list" id="nav-project-list"><em>Loading…</em></div>
       </section>
     </aside>
 
     <section class="doc">
       <header class="doc-header">
-        <span id="doc-path">Pick a file from the tree.</span>
+        <span id="doc-path">Pick a destination on the left.</span>
         <span id="doc-mtime" class="muted"></span>
         <span class="spacer"></span>
         <span id="doc-dirty" class="dirty-indicator hidden">● Unsaved</span>
+        <button id="doc-mode" type="button" title="Toggle rendered/raw view">View: rendered</button>
         <button id="doc-save" type="button" disabled>Save</button>
       </header>
-      <textarea id="doc-content" spellcheck="false" placeholder="Pick a file from the tree to edit."></textarea>
+      <div id="doc-rendered" class="doc-rendered"></div>
+      <textarea id="doc-content" spellcheck="false" placeholder="Pick a file from a destination to edit." class="hidden"></textarea>
       <div id="doc-status" class="muted"></div>
     </section>
   </main>
@@ -65,6 +63,7 @@
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
