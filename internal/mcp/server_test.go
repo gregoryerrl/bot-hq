@@ -3,12 +3,14 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	"github.com/gregoryerrl/bot-hq/internal/sessions"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -936,5 +938,166 @@ func TestSessionCloseOverwritesPrior(t *testing.T) {
 	out := decodeResultMap(t, result)
 	if got := out["last_session_snap"]; got != "second" {
 		t.Errorf("last_session_snap = %q, want %q (upsert second-write-wins)", got, "second")
+	}
+}
+
+// TestHubSessionCreate_WritesManifestWhenProjectProvided locks the Phase N
+// v3a writer-flow wiring contract: hub_session_create with a project param
+// writes a session-cluster manifest at SessionsDir()/<YYYY-MM-DD-project>/
+// manifest.md alongside the in-db session record, and refreshes the rolling
+// index. Without this test, a future refactor could "simplify" the handler
+// back to in-db-only and silently re-introduce the writer-flow gap that
+// motivated v3a (per discipline-log §2026-05-06T(post-v2-close-pre-v3-open)
+// joint entry R31 OVER-CLAIM phase-close-arc-snapshot-class anchor).
+func TestHubSessionCreate_WritesManifestWhenProjectProvided(t *testing.T) {
+	t.Setenv("BOT_HQ_SESSIONS_DIR", t.TempDir())
+	db := setupTestDB(t)
+
+	handler := findHandler(BuildTools(db), "hub_session_create")
+	if handler == nil {
+		t.Fatal("hub_session_create not found")
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"mode":    "implement",
+		"purpose": "Phase N v3a writer-flow wiring",
+		"agents":  "brian,rain",
+		"project": "bot-hq",
+	}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	out := decodeResultMap(t, result)
+	if out["status"] != "created" {
+		t.Errorf("status = %v, want created", out["status"])
+	}
+	clusterID, ok := out["session_cluster_id"].(string)
+	if !ok || clusterID == "" {
+		t.Fatalf("session_cluster_id missing or non-string: %v", out["session_cluster_id"])
+	}
+	if !strings.HasSuffix(clusterID, "-bot-hq") {
+		t.Errorf("session_cluster_id = %q, want suffix '-bot-hq'", clusterID)
+	}
+
+	// Verify manifest file actually exists at the expected path.
+	manifestPath := sessions.ManifestPath(clusterID)
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("manifest not written at %s: %v", manifestPath, err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "id: "+clusterID) {
+		t.Errorf("manifest body missing id field: %s", body)
+	}
+	if !strings.Contains(body, "project: bot-hq") {
+		t.Errorf("manifest body missing project field: %s", body)
+	}
+	if !strings.Contains(body, "Phase N v3a writer-flow wiring") {
+		t.Errorf("manifest body missing purpose: %s", body)
+	}
+}
+
+// TestHubSessionCreate_NoManifestWhenProjectMissing locks the regression-
+// preventer contract: hub_session_create without a project param keeps the
+// pre-v3a behavior (in-db-only, no manifest file). Defends against
+// accidental writes when a caller omits project.
+func TestHubSessionCreate_NoManifestWhenProjectMissing(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("BOT_HQ_SESSIONS_DIR", dir)
+	db := setupTestDB(t)
+
+	handler := findHandler(BuildTools(db), "hub_session_create")
+	if handler == nil {
+		t.Fatal("hub_session_create not found")
+	}
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"mode":    "implement",
+		"purpose": "no-project test",
+	}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected error: %v", result.Content)
+	}
+
+	out := decodeResultMap(t, result)
+	if _, has := out["session_cluster_id"]; has {
+		t.Errorf("session_cluster_id should be absent when project missing, got %v", out["session_cluster_id"])
+	}
+
+	// Verify no manifest dirs were created in the sessions root.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.IsDir() {
+			t.Errorf("unexpected session dir created: %s", e.Name())
+		}
+	}
+}
+
+// TestHubRegister_WritesIdempotentManifest locks the Phase N v3a writer-flow
+// wiring on the hub_register path: registering an agent with a project param
+// writes (or refreshes) the today-session-cluster manifest, idempotently
+// merging the agent into the agents list across repeated registrations.
+func TestHubRegister_WritesIdempotentManifest(t *testing.T) {
+	t.Setenv("BOT_HQ_SESSIONS_DIR", t.TempDir())
+	db := setupTestDB(t)
+
+	handler := findHandler(BuildTools(db), "hub_register")
+	if handler == nil {
+		t.Fatal("hub_register not found")
+	}
+
+	// Register agent A
+	req1 := mcp.CallToolRequest{}
+	req1.Params.Arguments = map[string]any{
+		"id":      "agent-a",
+		"name":    "Agent A",
+		"type":    "coder",
+		"project": "phase-n-v3-test",
+	}
+	result1, err := handler(context.Background(), req1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out1 := decodeResultMap(t, result1)
+	clusterID, ok := out1["session_cluster_id"].(string)
+	if !ok || clusterID == "" {
+		t.Fatalf("first register: session_cluster_id missing: %v", out1["session_cluster_id"])
+	}
+
+	// Register agent B for same project — should merge into same cluster
+	req2 := mcp.CallToolRequest{}
+	req2.Params.Arguments = map[string]any{
+		"id":      "agent-b",
+		"name":    "Agent B",
+		"type":    "coder",
+		"project": "phase-n-v3-test",
+	}
+	result2, err := handler(context.Background(), req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out2 := decodeResultMap(t, result2)
+	if got := out2["session_cluster_id"]; got != clusterID {
+		t.Errorf("second register cluster_id = %v, want %s (same-day merge)", got, clusterID)
+	}
+
+	// Verify both agents are in the manifest.
+	m, err := sessions.ReadManifest(clusterID)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if len(m.Agents) != 2 {
+		t.Errorf("manifest agents = %v, want 2 (agent-a + agent-b)", m.Agents)
 	}
 }

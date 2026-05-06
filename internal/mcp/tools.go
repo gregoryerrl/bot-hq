@@ -247,12 +247,57 @@ func hubRegister(db *hub.DB) ToolDef {
 			if lookupErr == nil && recent != "" {
 				response["most_recent_session_id"] = recent
 			}
+
+			// Phase N v3 v3a writer-flow wiring: idempotently ensure
+			// today's session-cluster manifest exists for this project,
+			// adding the registering agent to its agents list. Per Q-III
+			// hybrid lean — minimal-create at session-open. WriteManifest
+			// is idempotent; safe to call repeatedly.
+			//
+			// Read-merge-write to preserve prior agents list when the
+			// manifest already exists for today (other agents may have
+			// registered earlier in the same UTC day).
+			clusterID := sessions.MakeSessionID(time.Now(), project)
+			existing, _ := sessions.ReadManifest(clusterID) // ignore err — empty on miss
+			merged := mergeAgentList(existing.Agents, id)
+			startTS := existing.StartTS
+			if startTS.IsZero() {
+				startTS = time.Now()
+			}
+			body := existing.Body
+			if body == "" {
+				body = fmt.Sprintf("Project: %s\nFirst register: agent=%s at %s\n", project, id, startTS.UTC().Format(time.RFC3339))
+			}
+			manifest := sessions.Manifest{
+				ID:      clusterID,
+				Project: project,
+				StartTS: startTS,
+				EndTS:   existing.EndTS,
+				Agents:  merged,
+				Body:    body,
+			}
+			if werr := sessions.WriteManifest(manifest); werr == nil {
+				response["session_cluster_id"] = clusterID
+				_ = sessions.WriteIndex() // best-effort index refresh
+			}
 		}
 
 		return mcp.NewToolResultText(toJSON(response)), nil
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// mergeAgentList appends id to existing if not already present, preserving
+// order. Used by hubRegister to maintain per-cluster agent rosters across
+// repeated registrations within the same UTC day.
+func mergeAgentList(existing []string, id string) []string {
+	for _, a := range existing {
+		if a == id {
+			return existing
+		}
+	}
+	return append(existing, id)
 }
 
 // hubSessionClose stores the calling agent's final SNAP into session_ledger.
@@ -563,6 +608,7 @@ func hubSessionCreate(db *hub.DB) ToolDef {
 		mcp.WithString("mode", mcp.Required(), mcp.Description("Session mode: brainstorm, implement, chat")),
 		mcp.WithString("purpose", mcp.Required(), mcp.Description("What the session is for")),
 		mcp.WithString("agents", mcp.Description("Comma-separated agent IDs to include")),
+		mcp.WithString("project", mcp.Description("Project key (e.g., bot-hq, bcc-ad-manager). When set, writes a session-cluster manifest at ~/.bot-hq/sessions/<YYYY-MM-DD-project>/manifest.md alongside the in-db session record.")),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -580,11 +626,12 @@ func hubSessionCreate(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid session mode: %s", mode)), nil
 		}
 
+		agentList := splitComma(req.GetString("agents", ""))
 		sess := protocol.Session{
 			ID:      uuid.New().String(),
 			Mode:    sm,
 			Purpose: purpose,
-			Agents:  splitComma(req.GetString("agents", "")),
+			Agents:  agentList,
 			Status:  protocol.SessionActive,
 			Created: time.Now(),
 		}
@@ -593,10 +640,40 @@ func hubSessionCreate(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("create session failed: %v", err)), nil
 		}
 
-		return mcp.NewToolResultText(toJSON(map[string]string{
+		// Phase N v3 v3a writer-flow wiring: when project is supplied,
+		// also write a session-cluster manifest at SessionsDir()/<id>/
+		// manifest.md alongside the in-db session record. The session-
+		// cluster id format is YYYY-MM-DD-<project> per Q-I RATIFIED;
+		// distinct from the in-db UUID. WriteManifest is idempotent so
+		// repeat calls within the same UTC day no-op or refresh fields.
+		// WriteIndex rebuilds the rolling index post-write.
+		response := map[string]string{
 			"status":     "created",
 			"session_id": sess.ID,
-		})), nil
+		}
+		if project := strings.TrimSpace(req.GetString("project", "")); project != "" {
+			clusterID := sessions.MakeSessionID(time.Now(), project)
+			manifest := sessions.Manifest{
+				ID:      clusterID,
+				Project: project,
+				StartTS: sess.Created,
+				Agents:  agentList,
+				Body:    fmt.Sprintf("Session purpose: %s\nMode: %s\nIn-db session UUID: %s\n", purpose, mode, sess.ID),
+			}
+			if werr := sessions.WriteManifest(manifest); werr != nil {
+				// Don't fail the in-db session create on manifest-write
+				// error — log via response and let caller decide. Per
+				// Phase N v2 §3 graceful-degradation lean.
+				response["manifest_write_error"] = werr.Error()
+			} else {
+				response["session_cluster_id"] = clusterID
+				if ierr := sessions.WriteIndex(); ierr != nil {
+					response["index_write_error"] = ierr.Error()
+				}
+			}
+		}
+
+		return mcp.NewToolResultText(toJSON(response)), nil
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}

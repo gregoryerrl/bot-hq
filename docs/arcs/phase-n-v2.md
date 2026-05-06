@@ -45,8 +45,8 @@ User absolute-greenlight at msg 8075 ("absolute-greenlight (everything including
 | Discipline-log carry-forward instances pending | 6 from v1 close + carry | 14 net (3 graduated to v2 ratchets; 14 new instances + Tier-2 carry surfaced this cycle) | +8 net | Includes pendulum-class 8-reversal trace (#11/#12) + minimal-hub_send-not-free (#14) — strongest empirical for R36-sub load-bearing-ness |
 | Bilateral cross-check correction instances | ~3-5 expected | 5-7 during Phase N v2 (Rain Q2 OQ-1 split push-back + D2-split converge + bilateral pendulum settle + cite-precision msg-id-self-cite drift) | similar rate | Discipline holding |
 | Test-claim overstatement instances post-N-4 | 0 expected | 0 observed | 0 | Confirms N-4 R31-sub-clause efficacy (Phase N v1 commit 1fe7baa) |
-| ID-based-session creation events | 0 pre-#4 deploy | non-zero post-#5 deploy expected post-rebuild | n/a until trio post-rebuild test sweep | Validation deferred to post-rebuild (`hub_session_load` + auto-load semantics fire on next register cycle) |
-| session_id=NULL ratio | 100% pre-#4 | <50% expected post-#5 deploy | TBD | Measurement at next-session-cluster opening per N-1 (a) §6 step 5 design |
+| ID-based-session creation events | 0 pre-#4 deploy | non-zero post-#5 deploy expected post-rebuild | n/a until trio post-rebuild test sweep | **Phase N v3a amendment (post-fire):** v2 close-composite framing of "non-zero post-#5 deploy expected" referred to LOAD-side delivery (`hub_session_load` MCP tool + `hub_register` auto-load via `MostRecentForProject` — wired in v2 #5/#6/#7). WRITER-side runtime integration was carry-forward to v3a (`hub_session_create` + `hub_register` calling `WriteManifest` + `WriteIndex` idempotently). See discipline-log §2026-05-06T(post-v2-close-pre-v3-open) joint entry R31 OVER-CLAIM phase-close-arc-snapshot-class sub-class anchor for the framing-class drift this amendment addresses. |
+| session_id=NULL ratio | 100% pre-#4 | <50% expected post-#5 deploy | TBD | Measurement at next-session-cluster opening per N-1 (a) §6 step 5 design. **Phase N v3a amendment:** writer-side wired in v3a — measurement now empirically possible. |
 
 ## 5. Retrospective
 
@@ -64,6 +64,10 @@ User absolute-greenlight at msg 8075 ("absolute-greenlight (everything including
 
 ## 6. Phase N v3 carry-forward scope
 
+**v3a amendment (post-fire):** id-sessions writer-flow runtime wiring (the (α) bilateral-locked carry from v2 close — `hub_session_create` + `hub_register` calling `sessions.WriteManifest` + `sessions.WriteIndex` idempotently with project param) **NOW DONE** in v3a. See `internal/mcp/tools.go` `hubSessionCreate` + `hubRegister` handlers post-v3a commit + `~/.bot-hq/discipline-log.md` §2026-05-06T(post-v2-close-pre-v3-open) joint entry for the framing-class anchor that prompted this amendment. The other v3 scope below (web UI + Clive + rules) is the bigger Phase N v3 cluster per `~/.bot-hq/phase/phase-n.md§v3`; remaining productionize items moved to Phase O.
+
+**Deferred to Phase O (post-v3 amendment):**
+
 - **OQ-5 retention policy + age-based pruning** — productionize-class for ID-sessions (`~/.bot-hq/sessions/` cleanup over time)
 - **OQ-6 privacy + secrets-scan-on-manifest-author** — productionize-class
 - **OQ-7 cross-session-search indexed lookup** — productionize-class (extends N-1(b)-C index.md prep)
@@ -71,6 +75,7 @@ User absolute-greenlight at msg 8075 ("absolute-greenlight (everything including
 - **N-T2-b Toolgate-class estimate-band refinement** (R37 sub-clause OR fixture-density modeling)
 - **N-T2-i Audit-doc-presence-check** (Phase L Tier-2 hold extension)
 - **Phase N v2 15-item discipline-log carry-forward queue** (per §discipline-log Joint entry; #55 added post-staged-diff via Rain msg post-8286 R36-mechanical-block empirical)
+- **Recursion-terminator candidate** — Brian-side post-bootstrap self-id verification (tmux session-name vs `BOT_HQ_AGENT_ID` env match) per discipline-log Phase N v3 cycle-open self-confabulation root-cause analysis
 
 ## 7. Cross-references
 
