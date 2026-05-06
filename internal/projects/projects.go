@@ -23,6 +23,13 @@ import (
 )
 
 // Rules describes how bot-hq must behave inside a given project.
+//
+// Schema-canonical-form (Phase N v3.x-2): nested categories under gates/branch/
+// commit per `2026-05-07-phase-n-v3.x-1.5-agent-consumption-design-spike.md`
+// §2.1. Identity scalars (project_name + remote_url) remain flat top-level.
+// Back-compat: pre-migration YAMLs using flat keys (push_requires_approval
+// etc.) still parse correctly via the custom UnmarshalYAML below — nested
+// values win where both are present.
 type Rules struct {
 	RemoteURL                   string   `yaml:"remote_url"`
 	ProjectName                 string   `yaml:"project_name"`
@@ -36,6 +43,117 @@ type Rules struct {
 	CoderToolsPerActionApproval []string `yaml:"coder_tools_per_action_approval"`
 	CommitStyle                 string   `yaml:"commit_style"`
 	RequireIssueLink            bool     `yaml:"require_issue_link"`
+}
+
+// nestedGates / nestedBranch / nestedCommit are the canonical nested-form
+// schema introduced in Phase N v3.x-2. Used by the dual-form unmarshaler
+// to accept either flat or nested per-project YAMLs.
+type nestedGates struct {
+	Push *struct {
+		RequiresApproval bool `yaml:"requiresApproval"`
+	} `yaml:"push,omitempty"`
+	ForcePush *struct {
+		Blocked     bool   `yaml:"blocked"`
+		TokenFormat string `yaml:"tokenFormat"`
+	} `yaml:"forcePush,omitempty"`
+	Coder *struct {
+		ToolsBlocked       []string `yaml:"toolsBlocked"`
+		PerActionApproval  []string `yaml:"perActionApproval"`
+	} `yaml:"coder,omitempty"`
+}
+
+type nestedBranch struct {
+	Pattern     string   `yaml:"pattern"`
+	Examples    []string `yaml:"examples"`
+	PatternHelp string   `yaml:"patternHelp"`
+}
+
+type nestedCommit struct {
+	Style            string `yaml:"style"`
+	RequireIssueLink bool   `yaml:"requireIssueLink"`
+}
+
+// rulesAux is the dual-form layout. Both flat fields (back-compat) and
+// nested categories (canonical) are accepted; nested wins on conflict.
+type rulesAux struct {
+	// Identity scalars (always flat top-level).
+	RemoteURL   string `yaml:"remote_url"`
+	ProjectName string `yaml:"project_name"`
+
+	// Nested canonical categories (Phase N v3.x-2 form).
+	Gates  *nestedGates  `yaml:"gates,omitempty"`
+	Branch *nestedBranch `yaml:"branch,omitempty"`
+	Commit *nestedCommit `yaml:"commit,omitempty"`
+
+	// Flat back-compat fields (legacy form).
+	BranchPattern               string   `yaml:"branch_pattern"`
+	BranchExamples              []string `yaml:"branch_examples"`
+	BranchPatternHelp           string   `yaml:"branch_pattern_help"`
+	PushRequiresApproval        bool     `yaml:"push_requires_approval"`
+	ForcePushBlocked            bool     `yaml:"force_push_blocked"`
+	ForcePushTokenFormat        string   `yaml:"force_push_token_format"`
+	CoderToolsBlocked           []string `yaml:"coder_tools_blocked"`
+	CoderToolsPerActionApproval []string `yaml:"coder_tools_per_action_approval"`
+	CommitStyle                 string   `yaml:"commit_style"`
+	RequireIssueLink            bool     `yaml:"require_issue_link"`
+}
+
+// UnmarshalYAML accepts both the canonical nested form (gates/branch/commit
+// keys) and the legacy flat form (push_requires_approval etc.). Where a
+// field is set in BOTH forms, nested wins (canonical-form is authoritative
+// going forward).
+func (r *Rules) UnmarshalYAML(value *yaml.Node) error {
+	var a rulesAux
+	if err := value.Decode(&a); err != nil {
+		return err
+	}
+	// Identity
+	r.RemoteURL = a.RemoteURL
+	r.ProjectName = a.ProjectName
+
+	// Branch — nested wins, flat is fallback.
+	if a.Branch != nil {
+		r.BranchPattern = a.Branch.Pattern
+		r.BranchExamples = a.Branch.Examples
+		r.BranchPatternHelp = a.Branch.PatternHelp
+	} else {
+		r.BranchPattern = a.BranchPattern
+		r.BranchExamples = a.BranchExamples
+		r.BranchPatternHelp = a.BranchPatternHelp
+	}
+
+	// Commit — nested wins, flat is fallback.
+	if a.Commit != nil {
+		r.CommitStyle = a.Commit.Style
+		r.RequireIssueLink = a.Commit.RequireIssueLink
+	} else {
+		r.CommitStyle = a.CommitStyle
+		r.RequireIssueLink = a.RequireIssueLink
+	}
+
+	// Gates — sub-categories merged independently so a nested gates: { push: ... }
+	// without forcePush still falls back to flat force_push_blocked. Each leaf
+	// is "nested if present else flat".
+	if a.Gates != nil && a.Gates.Push != nil {
+		r.PushRequiresApproval = a.Gates.Push.RequiresApproval
+	} else {
+		r.PushRequiresApproval = a.PushRequiresApproval
+	}
+	if a.Gates != nil && a.Gates.ForcePush != nil {
+		r.ForcePushBlocked = a.Gates.ForcePush.Blocked
+		r.ForcePushTokenFormat = a.Gates.ForcePush.TokenFormat
+	} else {
+		r.ForcePushBlocked = a.ForcePushBlocked
+		r.ForcePushTokenFormat = a.ForcePushTokenFormat
+	}
+	if a.Gates != nil && a.Gates.Coder != nil {
+		r.CoderToolsBlocked = a.Gates.Coder.ToolsBlocked
+		r.CoderToolsPerActionApproval = a.Gates.Coder.PerActionApproval
+	} else {
+		r.CoderToolsBlocked = a.CoderToolsBlocked
+		r.CoderToolsPerActionApproval = a.CoderToolsPerActionApproval
+	}
+	return nil
 }
 
 // Errors surfaced by LoadForProject.

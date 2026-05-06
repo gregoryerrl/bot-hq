@@ -73,6 +73,12 @@ func main() {
 		case "webui":
 			runWebUI()
 			return
+		case "context-switch":
+			runContextSwitch()
+			return
+		case "session-open":
+			runSessionOpen()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -80,7 +86,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|session-load|webui|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|session-load|webui|context-switch|session-open|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -152,6 +158,15 @@ func runHub() {
 		}
 	} else {
 		log.Printf("[autostart] webui DISABLED via BOT_HQ_WEBUI_DISABLE=1")
+	}
+
+	// 5c. Phase N v3.x-2 bootstrap auto-write defensive snapshot loop.
+	// Per design-spike §2.3: every 25 hub-msgs OR every 10 minutes (whichever
+	// first), write the current AgentState snapshot to projects/<p>/bootstrap.md
+	// for crash-recovery. Atomic via temp+rename. Opt-out: BOT_HQ_BOOTSTRAP_DISABLE=1.
+	if os.Getenv("BOT_HQ_BOOTSTRAP_DISABLE") != "1" {
+		go runBootstrapDefensiveLoop(webuiCtx, h, home)
+		log.Printf("[autostart] bootstrap-defensive-loop OK")
 	}
 
 	// 6. Start Discord bot if configured

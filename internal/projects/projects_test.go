@@ -392,3 +392,97 @@ func TestIsCoderToolBlocked(t *testing.T) {
 		}
 	})
 }
+
+// TestLoadForProject_nestedForm verifies the Phase N v3.x-2 nested schema
+// (gates/branch/commit) parses correctly. Per design-spike §2.1 the
+// canonical-form is nested; legacy flat form remains parseable via the
+// dual-form unmarshaler.
+func TestLoadForProject_nestedForm(t *testing.T) {
+	repo := initGitRepo(t, "git@github.com:gregoryerrl/nested-test.git")
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+
+	if err := os.MkdirAll(filepath.Join(home, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `remote_url: "git@github.com:gregoryerrl/nested-test.git"
+project_name: "nested-test"
+branch:
+  pattern: "^[0-9]+-[a-z0-9-]+$"
+  examples:
+    - "346-foo"
+  patternHelp: "use [issue]-[title]"
+gates:
+  push:
+    requiresApproval: true
+  forcePush:
+    blocked: true
+    tokenFormat: "force-push: {sha}"
+  coder:
+    toolsBlocked:
+      - "git push"
+      - "rm -rf"
+    perActionApproval:
+      - "git commit"
+commit:
+  style: "imperative-mood"
+  requireIssueLink: true
+`
+	if err := os.WriteFile(filepath.Join(home, "projects", "nested-test.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := LoadForProject(repo)
+	if err != nil {
+		t.Fatalf("nested form should parse: %v", err)
+	}
+	if !rules.PushRequiresApproval {
+		t.Error("nested gates.push.requiresApproval lost")
+	}
+	if !rules.ForcePushBlocked {
+		t.Error("nested gates.forcePush.blocked lost")
+	}
+	if rules.ForcePushTokenFormat != "force-push: {sha}" {
+		t.Errorf("nested forcePush.tokenFormat lost: %q", rules.ForcePushTokenFormat)
+	}
+	if len(rules.CoderToolsBlocked) != 2 {
+		t.Errorf("nested coder.toolsBlocked: got %d items", len(rules.CoderToolsBlocked))
+	}
+	if len(rules.CoderToolsPerActionApproval) != 1 {
+		t.Errorf("nested coder.perActionApproval lost")
+	}
+	if rules.BranchPattern != "^[0-9]+-[a-z0-9-]+$" {
+		t.Errorf("nested branch.pattern lost: %q", rules.BranchPattern)
+	}
+	if !rules.RequireIssueLink {
+		t.Error("nested commit.requireIssueLink lost")
+	}
+}
+
+// TestLoadForProject_nestedWinsOverFlat verifies the dual-form unmarshaler
+// rule: when both nested and flat forms are present for a category, nested
+// wins (canonical going forward).
+func TestLoadForProject_nestedWinsOverFlat(t *testing.T) {
+	repo := initGitRepo(t, "git@github.com:gregoryerrl/dual-test.git")
+	home := t.TempDir()
+	t.Setenv("BOT_HQ_HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, "projects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yaml := `remote_url: "git@github.com:gregoryerrl/dual-test.git"
+project_name: "dual-test"
+push_requires_approval: false
+gates:
+  push:
+    requiresApproval: true
+`
+	if err := os.WriteFile(filepath.Join(home, "projects", "dual-test.yaml"), []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := LoadForProject(repo)
+	if err != nil {
+		t.Fatalf("dual form should parse: %v", err)
+	}
+	if !rules.PushRequiresApproval {
+		t.Error("nested gates.push.requiresApproval should win over flat push_requires_approval")
+	}
+}
