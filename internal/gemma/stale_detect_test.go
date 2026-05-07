@@ -252,8 +252,7 @@ func TestStaleFlagFiresWhenLastSeenAdvances(t *testing.T) {
 	if err := db.UpdateAgentLastSeen("coder-recovered"); err != nil {
 		t.Fatal(err)
 	}
-	recovered, err := db.GetAgent("coder-recovered")
-	if err != nil {
+	if _, err := db.GetAgent("coder-recovered"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -263,7 +262,13 @@ func TestStaleFlagFiresWhenLastSeenAdvances(t *testing.T) {
 	// (silent again) → fall through to flagStaleAgent. Tracker has
 	// LastSeen=T_register from first flag; current LastSeen=T_recover →
 	// not equal → second flag fires.
-	secondNow := recovered.LastSeen.Add(staleThreshold + time.Minute)
+	//
+	// Per Phase Q post-close smoke, staleEmitWindow is 4h with max 1
+	// per window, so secondNow must advance past firstNow + staleEmitWindow
+	// or the rate-cap (not the advance-check) would block the second fire.
+	// Using firstNow as the anchor verifies the LastSeen-advance semantic
+	// without conflating it with the rate-cap window.
+	secondNow := firstNow.Add(staleEmitWindow + time.Minute)
 	g.checkStaleAgentsAt(secondNow)
 	g.checkStaleAgentsAt(secondNow.Add(30 * time.Second))
 

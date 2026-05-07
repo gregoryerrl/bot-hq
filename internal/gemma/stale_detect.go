@@ -170,8 +170,18 @@ func (g *Gemma) checkStaleAgentsAt(now time.Time) {
 // heartbeat but agent remains effectively idle. Per-agent rate-cap:
 // at most staleEmitMaxPerWindow stale-coder PMs in any rolling
 // staleEmitWindow. Cleaner than relying solely on LastSeen-advance gate.
-const staleEmitWindow = 1 * time.Hour
-const staleEmitMaxPerWindow = 3
+//
+// 2026-05-07 (Phase Q post-close smoke): rate-cap loosened from
+// 3-per-hour to 1-per-4h after observing stale-coder PMs fire during
+// intentional silent-commitment cycles (heartbeat-loop antipattern
+// terminator) on Brian + Rain. Genuine fault still surfaces (one PM per
+// 4h is sufficient signal for human review); ~12x noise floor reduction
+// on intentional-idle class. Full distinguishing of intentional-idle vs
+// fault is deferred-research-class (needs per-agent in-flight-task
+// signal on AgentRecord) — see ratchets/active.md Phase Q post-close
+// smoke section.
+const staleEmitWindow = 4 * time.Hour
+const staleEmitMaxPerWindow = 1
 
 // flagStaleAgent emits the [STALE-CODER] PM to Rain, gated by:
 //  1. LastSeen-advance check (lean (b), Phase H slice 4 C7) — suppress
