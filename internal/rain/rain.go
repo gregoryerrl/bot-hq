@@ -249,7 +249,7 @@ REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cut
 RULES:
 ` + protocol.DiscV2OutboundRule + `
 ` + protocol.PhaseIv1ProtocolHardening + `
-- FLAG ownership: Rain owns hub_flag elevation. Brian PMs Rain on flag-worthy events; Rain decides whether to elevate, peer-coordinate, or wait. Per 2026-04-27 user delegation, Rain may greenflag joint defaults without flagging when user is not in the loop on the specific decision. Self-flag carve-out: see DISC v2.
+- FLAG ownership: Rain owns hub_flag elevation. Brian uses @rain mention on flag-worthy events (Phase S S-4: PM removed); Rain decides whether to elevate, peer-coordinate, or wait. Per 2026-04-27 user delegation, Rain may greenflag joint defaults without flagging when user is not in the loop on the specific decision. Self-flag carve-out: see DISC v2.
 - ROUTE responses to sender's channel: discord→discord, brian→brian. User routing handled by OUTBOUND.
 - Review coder output with claude_read. Look for bugs, missing tests, incomplete work.
 - When disagreeing with Brian: "Brian wants X. I think Y because Z. User decision needed." + hub_flag.
@@ -300,6 +300,8 @@ RULES:
 
 ` + protocol.PhaseRv5MechanicalCiteFromHubRead + `
 
+` + protocol.PhaseSv1AudienceClassLoadBearing + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 Start now: register, then watch everything.`
@@ -322,10 +324,17 @@ func (r *Rain) pollLoop() {
 // formatRainNudge builds the compact tag that Rain's session reads.
 // Contract is declared in Rain's initial prompt NUDGE block.
 //
-//	[PM:<sender>]                     — directed to Rain (ToAgent == "rain").
+//	[PM:<sender>]                     — historical-render only (Phase
+//	                                    S S-4 removed PM; new messages
+//	                                    always broadcast with empty
+//	                                    ToAgent). Pre-S-4 messages with
+//	                                    non-empty ToAgent kept for
+//	                                    forensics-trail render fidelity.
 //	[HUB:<sender>]                    — broadcast worth forwarding.
-//	[HUB-OBS:<from>→<to>]             — observation of inter-agent traffic Rain is not the target of.
-//	[PM:FLAG:<sender>]                — directed MsgFlag.
+//	[HUB-OBS:<from>→<to>]             — historical observation of cross-
+//	                                    traffic PM. Same historical-
+//	                                    render-only post-S-4.
+//	[PM:FLAG:<sender>]                — historical directed MsgFlag.
 //	[HUB:FLAG:<sender>]               — broadcast MsgFlag.
 //
 // Phase R R5 (R42 AUTO-BOUNDARY-DISCIPLINE): when sessionPrefix is non-
@@ -391,11 +400,15 @@ func (r *Rain) activeSessionPrefix() string {
 // shouldForwardToRain decides whether a message polled from the hub should
 // be nudged into Rain's tmux pane. Extracted as a pure function for testing.
 //
-// Rain sees: to="rain", any user/discord traffic regardless of target,
-// results/errors/commands/flags from any peer (QA coverage), any broadcast
-// (to="") from Brian regardless of Type, and broadcasts whose content
-// mentions hub_flag/hub_spawn (catches non-Brian agents like Emma calling
-// out elevation events).
+// Rain sees: broadcasts (ToAgent==""), historical PMs to="rain" (pre-
+// Phase S S-4 messages — DB column preserved for forensics), any
+// user/discord traffic regardless of target, results/errors/commands/
+// flags from any peer (QA coverage), any broadcast from Brian
+// regardless of Type, and broadcasts whose content mentions
+// hub_flag/hub_spawn (catches non-Brian agents like Emma calling out
+// elevation events). Post-S-4 PM is removed; Rain self-filters via
+// @rain mention-detection in content (LLM-side rule-text guidance,
+// not Go-side helper) per Phase S S-4 mention-based targeting.
 // Rain skips: own messages, inter-agent chatter between coders, non-Brian
 // MsgUpdate broadcasts without flag/spawn substrings (handshakes, acks,
 // "standing by" — coder-broadcast-flood protection).

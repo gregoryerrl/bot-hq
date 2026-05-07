@@ -278,11 +278,11 @@ REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cut
 RULES:
 ` + protocol.DiscV2OutboundRule + `
 ` + protocol.PhaseIv1ProtocolHardening + `
-- FLAG via Rain. PM Rain on flag-worthy events (errors, blockers, completions, peer disagreements, user-blocking decisions); Rain owns hub_flag elevation. Self-flag carve-out: see DISC v2.
+- FLAG via Rain. Use @rain mention on flag-worthy events (errors, blockers, completions, peer disagreements, user-blocking decisions); Rain owns hub_flag elevation. Self-flag carve-out: see DISC v2.
 - DISPATCH via hub_spawn only (never Agent tool). Send handshake + hub_session_create after spawning.
 - ROUTE responses to the sender's channel: discord→discord, clive→clive. User routing handled by OUTBOUND.
 - Messages arrive automatically. Don't poll hub_read in a loop.
-- Questions: hub_send response. Tasks: hub_spawn a coder. Routing: hub_send to target agent.
+- Questions: hub_send response. Tasks: hub_spawn a coder. Routing: hub_send broadcast with @<agent> mention in content (Phase S S-4: PM 'to:' parameter removed; mention-based targeting only).
 
 ` + protocol.DiscV2RoleAndPolicyShared + `
 ` + protocol.DiscV2RoleAndPolicyBrianAddendum + `
@@ -329,6 +329,8 @@ RULES:
 
 ` + protocol.PhaseRv5MechanicalCiteFromHubRead + `
 
+` + protocol.PhaseSv1AudienceClassLoadBearing + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 ` + protocol.H13ForcePushProtocol + `
@@ -355,10 +357,16 @@ func (b *Brian) pollLoop() {
 // formatNudge builds the compact tag that Brian's session reads.
 // Contract is declared in Brian's initial prompt NUDGE block.
 //
-//	[PM:<sender>]             — directed to Brian (ToAgent == "brian").
+//	[PM:<sender>]             — historical-render only (Phase S S-4
+//	                            removed PM; new messages always
+//	                            broadcast with empty ToAgent). Pre-S-4
+//	                            messages with non-empty ToAgent kept
+//	                            for forensics-trail render fidelity.
 //	[HUB:<sender>]             — broadcast (ToAgent == "").
-//	[HUB-OBS:<from>→<to>]      — observation of cross-traffic (ToAgent set but not Brian).
-//	[PM:FLAG:<sender>]         — directed MsgFlag.
+//	[HUB-OBS:<from>→<to>]      — historical observation of cross-traffic
+//	                            PM (ToAgent set but not self). Same
+//	                            historical-render-only post-S-4.
+//	[PM:FLAG:<sender>]         — historical directed MsgFlag.
 //	[HUB:FLAG:<sender>]        — broadcast MsgFlag.
 //
 // Phase R R5 (R42 AUTO-BOUNDARY-DISCIPLINE): when sessionPrefix is non-
@@ -424,9 +432,12 @@ func (b *Brian) activeSessionPrefix() string {
 // shouldForwardToBrian decides whether a message polled from the hub should
 // be nudged into Brian's tmux pane. Extracted as a pure function for testing.
 //
-// Brian sees: to="brian", to="" (broadcasts), and any user/discord traffic
-// regardless of target — so Brian observes Rain's to="user" replies and the
-// mirror case for Rain (see rain.go:319-325).
+// Brian sees: broadcasts (ToAgent==""), historical PMs to="brian"
+// (pre-Phase S S-4 messages — DB column preserved for forensics),
+// and any user/discord traffic regardless of target. Post-S-4 PM is
+// removed; new messages broadcast always. Brian self-filters via
+// @brian mention-detection in content (LLM-side rule-text guidance,
+// not Go-side helper) per Phase S S-4 mention-based targeting.
 // Brian skips: own messages, inter-agent chatter not involving user/discord.
 func shouldForwardToBrian(msg protocol.Message) bool {
 	if msg.FromAgent == agentID {

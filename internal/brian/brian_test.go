@@ -314,6 +314,17 @@ func TestBrianPromptEmbedsPhaseRv5MechanicalCiteFromHubRead(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseSv1AudienceClassLoadBearing verifies the
+// Phase S S-4-followup R6 hardening const documenting that audience-
+// class-discriminator becomes load-bearing post-PM-removal.
+func TestBrianPromptEmbedsPhaseSv1AudienceClassLoadBearing(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseSv1AudienceClassLoadBearing) {
+		t.Errorf("initial prompt must embed protocol.PhaseSv1AudienceClassLoadBearing verbatim (Phase S S-4-followup wiring lock)")
+	}
+}
+
 // TestFormatNudgeWithSessionPrefix verifies Phase R R5 (d-1)
 // `[SESSION:<8>] ` pane-header prepend behavior.
 func TestFormatNudgeWithSessionPrefix(t *testing.T) {
@@ -459,7 +470,8 @@ func TestInitialPromptContainsDISCv21FlagRule(t *testing.T) {
 	// rewritten in C1.
 	want := []string{
 		"Rain owns elevation",
-		"Brian PMs Rain on flag-worthy events",
+		// Phase S S-4 rewrite: "Brian PMs Rain" → "Brian uses @rain mention"
+		"Brian uses @rain mention on flag-worthy events",
 		"scope changes mid-decision",
 		"cliff-hang",
 	}
@@ -537,7 +549,8 @@ func TestBrianPromptContainsAsymmetricPivot(t *testing.T) {
 	prompt := b.initialPrompt()
 	want := []string{
 		"PIVOT: user w/o executor",
-		"Brian PMs Rain",
+		// Phase S S-4 rewrite: "Brian PMs Rain" → "Brian uses @rain mention"
+		"Brian uses @rain mention",
 		"Rain holds 60s",
 		"elevates via hub_flag",
 	}

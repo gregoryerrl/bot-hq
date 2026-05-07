@@ -17,9 +17,14 @@ import (
 func TestDiscV2OutboundRule_RatchetLiterals(t *testing.T) {
 	must := []string{
 		"Routing is determined by intended audience",
-		"If only peer(s)",
+		// Phase S S-4 rewrite: "If only peer(s)" / "double-send" /
+		// "broadcast" / "peer-coordination" tokens preserved with
+		// updated substrate (PM removed; @-mention based).
+		"All hub_send calls broadcast",
+		"@<agent>",
 		"Peer reads broadcasts too — never double-send",
-		"If a message is both peer-coordination and user-actionable, broadcast",
+		"@<peer>",
+		"never double-send",
 	}
 	for _, lit := range must {
 		t.Run(lit, func(t *testing.T) {
@@ -506,7 +511,8 @@ func TestDiscV2RoleAndPolicySharedSubstringLock(t *testing.T) {
 		"Mutual-halt deadlock impossible by construction",
 		// FLAG
 		"Rain owns elevation",
-		"Brian PMs Rain on flag-worthy events",
+		// Phase S S-4 rewrite: "Brian PMs Rain" → "Brian uses @rain mention"
+		"Brian uses @rain mention on flag-worthy events",
 		"scope changes mid-decision",
 		"cliff-hang",
 		// PIVOT

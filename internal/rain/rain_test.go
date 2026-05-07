@@ -355,6 +355,17 @@ func TestRainPromptEmbedsPhaseRv5MechanicalCiteFromHubRead(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseSv1AudienceClassLoadBearing — rain-side
+// wiring lock for Phase S S-4-followup R6 hardening const. Mirrors
+// brian-side.
+func TestRainPromptEmbedsPhaseSv1AudienceClassLoadBearing(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseSv1AudienceClassLoadBearing) {
+		t.Errorf("initial prompt must embed protocol.PhaseSv1AudienceClassLoadBearing verbatim (Phase S S-4-followup wiring lock)")
+	}
+}
+
 // TestFormatRainNudgeWithSessionPrefix verifies Phase R R5 (d-1)
 // `[SESSION:<8>] ` pane-header prepend behavior on rain side.
 func TestFormatRainNudgeWithSessionPrefix(t *testing.T) {
@@ -457,7 +468,8 @@ func TestInitialPromptContainsDISCv21FlagRule(t *testing.T) {
 	// asymmetric (Rain owns elevation). Mirrors Brian's ratchet.
 	want := []string{
 		"Rain owns elevation",
-		"Brian PMs Rain on flag-worthy events",
+		// Phase S S-4 rewrite: "Brian PMs Rain" → "Brian uses @rain mention"
+		"Brian uses @rain mention on flag-worthy events",
 		"scope changes mid-decision",
 		"cliff-hang",
 	}
@@ -606,7 +618,8 @@ func TestRainPromptContainsAsymmetricPivot(t *testing.T) {
 	prompt := r.initialPrompt()
 	want := []string{
 		"PIVOT: user w/o executor",
-		"Brian PMs Rain",
+		// Phase S S-4 rewrite: "Brian PMs Rain" → "Brian uses @rain mention"
+		"Brian uses @rain mention",
 		"Rain holds 60s",
 		"elevates via hub_flag",
 	}
