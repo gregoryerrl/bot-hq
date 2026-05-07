@@ -15,6 +15,7 @@
       Project
       <select id="project-picker"></select>
     </label>
+    <button id="register-project-open" type="button" title="Register a new project">+</button>
     <span class="active-project-chip" id="active-project-chip">bot-hq</span>
     <input type="search" id="nav-search" class="nav-search" placeholder="Search files…" autocomplete="off" />
   </header>
@@ -45,6 +46,28 @@
       <div id="doc-status" class="muted"></div>
     </section>
   </main>
+
+  <!-- Register-project modal: Phase O drain per phase-n.md:826 formal flow. -->
+  <div id="register-project-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Register new project</h3>
+      <p>Creates <code>~/.bot-hq/projects/&lt;name&gt;.yaml</code> from a starter template.</p>
+      <label>
+        Name
+        <input id="register-project-name" type="text" placeholder="e.g. my-project" autocomplete="off" />
+        <span class="muted">lowercase + digits + hyphens; 2-64 chars; must start with a letter</span>
+      </label>
+      <label>
+        Remote URL <span class="muted">(optional)</span>
+        <input id="register-project-remote" type="text" placeholder="https://github.com/you/repo.git" autocomplete="off" />
+      </label>
+      <div class="conflict-actions">
+        <button id="register-project-submit" type="button">Register</button>
+        <button id="register-project-cancel" type="button">Cancel</button>
+      </div>
+      <div id="register-project-status" class="muted"></div>
+    </div>
+  </div>
 
   <!-- Conflict modal: surfaces when a 409 is returned (mtime mismatch). -->
   <div id="conflict-modal" class="modal hidden">

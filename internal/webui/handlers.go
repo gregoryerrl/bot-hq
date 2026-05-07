@@ -7,25 +7,108 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// handleProjects responds to GET /api/projects with the registered
-// project list (bot-hq always first; others discovered from
-// projects/*.yaml). Phase N v3.x-1 curation surface.
+// handleProjects dispatches GET /api/projects → list registered projects,
+// POST /api/projects → register a new project (Phase O drain per
+// phase-n.md:826 register-project formal flow). bot-hq always first in
+// list; others discovered from projects/*.yaml.
 func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		projects, err := ListProjects(s.canonicalRoot)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("list projects: %v", err), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
+	case http.MethodPost:
+		s.handleProjectRegister(w, r)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// projectNameRegex enforces a conservative slug format for new project
+// names: lowercase ASCII alpha first, then 1-63 lowercase ASCII alpha /
+// digits / hyphens. Mirrors common repo-name conventions and avoids
+// filesystem collision risks (no dots, slashes, uppercase, unicode).
+var projectNameRegex = regexp.MustCompile(`^[a-z][a-z0-9-]{1,63}$`)
+
+// handleProjectRegister creates a new ~/.bot-hq/projects/<name>.yaml
+// from a starter template per phase-n.md:826 register-project formal
+// flow. Body shape: {"name": "<slug>", "remote_url": "<optional>"}.
+// Validation: name matches projectNameRegex; "bot-hq" reserved; no
+// overwrite of existing yaml. Returns 201 + {name, path} on success,
+// 400 on invalid input, 409 on collision.
+func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name      string `json:"name"`
+		RemoteURL string `json:"remote_url,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, fmt.Sprintf("decode body: %v", err), http.StatusBadRequest)
 		return
 	}
-	projects, err := ListProjects(s.canonicalRoot)
+	name := strings.TrimSpace(req.Name)
+	if !projectNameRegex.MatchString(name) {
+		http.Error(w, "name must match ^[a-z][a-z0-9-]{1,63}$", http.StatusBadRequest)
+		return
+	}
+	if name == "bot-hq" {
+		http.Error(w, "name 'bot-hq' is reserved", http.StatusBadRequest)
+		return
+	}
+	dir := filepath.Join(s.canonicalRoot, "projects")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		http.Error(w, "mkdir failed", http.StatusInternalServerError)
+		return
+	}
+	path := filepath.Join(dir, name+".yaml")
+	body := buildProjectStarterYAML(name, strings.TrimSpace(req.RemoteURL))
+	// O_CREATE|O_EXCL is atomic create-if-absent — race-free vs the
+	// double-click / concurrent-POST class (Rain msg 14785 flag #2).
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("list projects: %v", err), http.StatusInternalServerError)
+		if errors.Is(err, os.ErrExist) {
+			http.Error(w, fmt.Sprintf("project %q already registered", name), http.StatusConflict)
+			return
+		}
+		http.Error(w, "open failed", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"projects": projects})
+	defer f.Close()
+	if _, err := f.Write([]byte(body)); err != nil {
+		http.Error(w, "write failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"name": name,
+		"path": filepath.Join("projects", name+".yaml"),
+	})
+}
+
+// buildProjectStarterYAML emits the canonical-form starter content for
+// a newly-registered project. Comments cite the registration source +
+// schema-canonical reference. Identity scalars (project_name +
+// remote_url) at top level per Phase N v3.x-2 §2.1.
+func buildProjectStarterYAML(name, remoteURL string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s project rules — registered via webui /api/projects\n", name)
+	fmt.Fprintf(&b, "# Schema-canonical-form: nested (Phase N v3.x-2 §2.1)\n")
+	fmt.Fprintf(&b, "# Edit gates / tone / greenlight / push policy below.\n")
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "project_name: %q\n", name)
+	if remoteURL != "" {
+		fmt.Fprintf(&b, "remote_url: %q\n", remoteURL)
+	} else {
+		b.WriteString("remote_url: \"\"\n")
+	}
+	return b.String()
 }
 
 // handleDestinations responds to GET /api/destinations?project=<p> with

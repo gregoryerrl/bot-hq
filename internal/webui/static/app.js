@@ -51,6 +51,9 @@
   document.getElementById('conflict-overwrite').addEventListener('click', resolveConflict.bind(null, 'overwrite'));
   document.getElementById('conflict-discard').addEventListener('click', resolveConflict.bind(null, 'discard'));
   document.getElementById('conflict-keep').addEventListener('click', resolveConflict.bind(null, 'keep'));
+  document.getElementById('register-project-open').addEventListener('click', openRegisterModal);
+  document.getElementById('register-project-submit').addEventListener('click', submitRegisterProject);
+  document.getElementById('register-project-cancel').addEventListener('click', closeRegisterModal);
 
   loadProjects().then(loadDestinations);
 
@@ -473,6 +476,53 @@
       docStatus.textContent = 'Keeping local edits; server has newer version (' + (conflict.current_mtime || '') + ').';
     }
     state.pendingConflict = null;
+  }
+
+  // Register-project formal flow per phase-n.md:826. POST /api/projects
+  // creates ~/.bot-hq/projects/<name>.yaml from a starter template; on
+  // success the project list is refreshed and the new project is selected.
+  function openRegisterModal() {
+    document.getElementById('register-project-name').value = '';
+    document.getElementById('register-project-remote').value = '';
+    document.getElementById('register-project-status').textContent = '';
+    document.getElementById('register-project-modal').classList.remove('hidden');
+    document.getElementById('register-project-name').focus();
+  }
+
+  function closeRegisterModal() {
+    document.getElementById('register-project-modal').classList.add('hidden');
+  }
+
+  async function submitRegisterProject() {
+    const name = document.getElementById('register-project-name').value.trim();
+    const remote = document.getElementById('register-project-remote').value.trim();
+    const statusEl = document.getElementById('register-project-status');
+    if (!/^[a-z][a-z0-9-]{1,63}$/.test(name)) {
+      statusEl.textContent = 'Invalid name. Use lowercase letters/digits/hyphens, 2-64 chars, starting with a letter.';
+      return;
+    }
+    statusEl.textContent = 'Registering…';
+    try {
+      const res = await fetch('/api/projects', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, remote_url: remote }),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        statusEl.textContent = 'Failed: ' + text;
+        return;
+      }
+      statusEl.textContent = 'Registered. Switching to ' + name + '…';
+      await loadProjects();
+      projectPicker.value = name;
+      state.project = name;
+      activeChip.textContent = name;
+      await loadDestinations();
+      closeRegisterModal();
+    } catch (err) {
+      statusEl.textContent = 'Network error: ' + err.message;
+    }
   }
 
   function escapeHtml(s) {
