@@ -95,17 +95,26 @@ var explicitPhraseRegex = regexp.MustCompile(`(?i)\b(let'?s\s+(switch|pivot|move
 // package's scope.
 var rebuildRestartRegex = regexp.MustCompile(`(?i)\b(rebuild\s*\+\s*restart|rebuild\s+restart|restart\s+session)\b`)
 
+// capitalKeywordRegex implements Phase S S-3 capital-keyword
+// boundary triggers per user msg 15734 item-3 + msg 15753 OQ-S5
+// (formal session-close on `DONE` / `PIVOT`). Case-sensitive
+// uppercase-only to distinguish from prose use of "done" / "pivot"
+// (e.g., "I'm done now" / "let's pivot the strategy"). Folded into
+// TriggerExplicitPhrase semantic alongside the existing T-3 set.
+var capitalKeywordRegex = regexp.MustCompile(`\b(DONE|PIVOT)\b`)
+
 // DetectBoundaryFromUserMsg returns a candidate boundary trigger if the
-// user msg matches T-3 (explicit phrase) or T-6 (rebuild+restart)
-// patterns. T-6 takes precedence over T-3 when both match (rebuild is
-// the more specific event).
+// user msg matches T-3 (explicit phrase, including Phase S capital-
+// keyword DONE/PIVOT extension) or T-6 (rebuild+restart) patterns.
+// T-6 takes precedence over T-3 when both match (rebuild is the more
+// specific event).
 //
 // Returns TriggerNone if no pattern matches.
 func DetectBoundaryFromUserMsg(msg string) BoundaryTrigger {
 	if rebuildRestartRegex.MatchString(msg) {
 		return TriggerRebuildRestart
 	}
-	if explicitPhraseRegex.MatchString(msg) {
+	if explicitPhraseRegex.MatchString(msg) || capitalKeywordRegex.MatchString(msg) {
 		return TriggerExplicitPhrase
 	}
 	return TriggerNone

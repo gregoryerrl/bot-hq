@@ -51,6 +51,16 @@ func TestDetectBoundaryFromUserMsg(t *testing.T) {
 		{"wrap up", "let's wrap-up here", TriggerExplicitPhrase},
 		{"done for today", "done for today, see you tomorrow", TriggerExplicitPhrase},
 		{"signing off", "signing off now", TriggerExplicitPhrase},
+		// Phase S S-3 capital-keyword positive cases (DONE/PIVOT)
+		{"DONE alone", "DONE", TriggerExplicitPhrase},
+		{"DONE with surrounding prose", "ok we are DONE here", TriggerExplicitPhrase},
+		{"PIVOT alone", "PIVOT", TriggerExplicitPhrase},
+		{"PIVOT with surrounding prose", "PIVOT to next phase", TriggerExplicitPhrase},
+		// Phase S S-3 case-sensitive: lowercase prose must NOT trigger
+		{"lowercase done in prose", "I'm done now", TriggerNone},
+		{"lowercase pivot in prose", "let me pivot the approach", TriggerNone},
+		{"mixed-case Done", "Done with that task", TriggerNone},
+		{"lowercase done sandwich", "we are done with the work", TriggerNone},
 		// T-6 rebuild-restart positive cases
 		{"rebuild+restart with plus", "rebuild+restart in flight", TriggerRebuildRestart},
 		{"rebuild restart with space", "do a rebuild restart please", TriggerRebuildRestart},
