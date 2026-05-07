@@ -260,33 +260,138 @@ func (b *Bot) forwardToDiscord(ch <-chan protocol.Message) {
 			lastContent = msg.Content
 			lastSent = time.Now()
 
-			// Format and send to Discord. Phase R R2: [HR]-tagged content +
-			// MsgFlag class display-strip the sender attribution per Rain
-			// msg 15510 BRAIN-final + msg 15545 Refine. DB preserves
-			// from_agent for forensics per `from_agent` column.
-			var text string
-			if msg.Type == protocol.MsgFlag {
-				text = fmt.Sprintf("🚨 **ATTENTION NEEDED**:\n%s", msg.Content)
-			} else if strings.HasPrefix(msg.Content, "[HR] ") || strings.HasPrefix(msg.Content, "[HR]\n") {
-				text = msg.Content
-			} else {
-				text = fmt.Sprintf("**[%s]** %s", msg.FromAgent, msg.Content)
-			}
-
 			// Phase R R4: route to per-class channel. Pre-R4 single-channel
 			// deployments still route to channelID via channelForMessage's
 			// fallback chain.
 			dest := b.channelForMessage(msg)
 
-			// Discord has a 2000 character limit; split if needed
-			chunks := splitMessage(text, 2000)
-			for _, chunk := range chunks {
-				if _, err := b.session.ChannelMessageSend(dest, chunk); err != nil {
-					log.Printf("[discord] failed to send message: %v", err)
+			// Phase-R-followup: render via Discord embed (boxed message)
+			// per user msg post-R4b. buildEmbedChunks returns 1+ embeds
+			// covering content >4096 chars (embed description limit).
+			// First embed carries title/author/footer; continuation embeds
+			// are description-only with the same color sidebar.
+			embeds := buildEmbedChunks(msg)
+			for _, embed := range embeds {
+				if _, err := b.session.ChannelMessageSendEmbed(dest, embed); err != nil {
+					log.Printf("[discord] failed to send embed: %v", err)
 				}
 			}
 		}
 	}
+}
+
+// Phase-R-followup embed-mode color palette (Discord brand colors).
+// Red shared between Flag + Error per Refine-4 — title text + emoji
+// disambiguates for color-blind accessibility.
+const (
+	colorFlagRed         = 0xed4245 // Discord danger
+	colorErrorRed        = 0xed4245 // same as flag; disambiguated by title
+	colorHRPink          = 0xeb459e // high-relevance trio-consensus
+	colorResultGreen     = 0x57f287 // Discord success
+	colorCommandYellow   = 0xfee75c // Discord warning
+	colorResponseBlurple = 0x5865f2 // Discord brand
+	colorUpdateGray      = 0x99aab5 // Discord muted
+)
+
+// embedDescriptionLimit is the Discord embed description char limit.
+// Content longer than this is split into multiple embeds per
+// buildEmbedChunks; first embed carries title/author/footer while
+// continuation embeds are description-only with same color sidebar.
+const embedDescriptionLimit = 4096
+
+// buildEmbed returns a single Discord embed for a hub message, applying
+// per-class color + title + author + footer per Phase-R-followup
+// design. Class-precedence (first-match-wins) per Rain msg 15589
+// Refine-1: MsgFlag → MsgError → [HR] prefix → MsgResult → MsgCommand
+// → MsgResponse → MsgUpdate (default).
+//
+// Author=nil on Flag and [HR] classes per Phase R R2 authorless-display
+// continuity (sender stripped at render; DB from_agent preserved for
+// forensics).
+//
+// PM-class (msg.ToAgent != "") → author renders as `<from> → <to>` per
+// Refine-2 unified format; broadcast → author renders as `<from>` only.
+//
+// Description carries content unchunked here; buildEmbedChunks handles
+// >4096-char splits. Caller pairs with ChannelMessageSendEmbed.
+func buildEmbed(msg protocol.Message) *discordgo.MessageEmbed {
+	hasHR := strings.HasPrefix(msg.Content, "[HR] ") || strings.HasPrefix(msg.Content, "[HR]\n")
+	embed := &discordgo.MessageEmbed{
+		Description: msg.Content,
+	}
+	if !msg.Created.IsZero() {
+		embed.Timestamp = msg.Created.Format(time.RFC3339)
+	}
+	if msg.ID > 0 {
+		embed.Footer = &discordgo.MessageEmbedFooter{Text: fmt.Sprintf("msg %d", msg.ID)}
+	}
+
+	switch {
+	case msg.Type == protocol.MsgFlag:
+		embed.Color = colorFlagRed
+		embed.Title = "🚨 ATTENTION NEEDED"
+		// Author intentionally nil per R2 authorless-display.
+	case msg.Type == protocol.MsgError:
+		embed.Color = colorErrorRed
+		embed.Title = "Error"
+		embed.Author = authorFor(msg)
+	case hasHR:
+		embed.Color = colorHRPink
+		embed.Title = "[HR]"
+		// Author intentionally nil per R2 authorless-display.
+	case msg.Type == protocol.MsgResult:
+		embed.Color = colorResultGreen
+		embed.Title = "Result"
+		embed.Author = authorFor(msg)
+	case msg.Type == protocol.MsgCommand:
+		embed.Color = colorCommandYellow
+		embed.Title = "Command"
+		embed.Author = authorFor(msg)
+	case msg.Type == protocol.MsgResponse:
+		embed.Color = colorResponseBlurple
+		embed.Author = authorFor(msg)
+	default: // MsgUpdate or unrecognized type
+		embed.Color = colorUpdateGray
+		embed.Author = authorFor(msg)
+	}
+	return embed
+}
+
+// authorFor returns the embed Author per Phase-R-followup Refine-2
+// unified format: PM-class (ToAgent != "") → `<from> → <to>`;
+// broadcast (ToAgent == "") → `<from>` only. Pure helper.
+func authorFor(msg protocol.Message) *discordgo.MessageEmbedAuthor {
+	name := msg.FromAgent
+	if msg.ToAgent != "" {
+		name = msg.FromAgent + " → " + msg.ToAgent
+	}
+	return &discordgo.MessageEmbedAuthor{Name: name}
+}
+
+// buildEmbedChunks returns 1+ embeds covering content longer than
+// embedDescriptionLimit (4096). First embed carries title/author/footer
+// with first chunk; continuation embeds are description-only with the
+// same color sidebar (visual continuity).
+//
+// 99% of hub messages fit in a single embed; chunking is the safety
+// path for unusually long content (verbose BRAIN-cycle drafts /
+// long status reports).
+func buildEmbedChunks(msg protocol.Message) []*discordgo.MessageEmbed {
+	full := buildEmbed(msg)
+	if len(msg.Content) <= embedDescriptionLimit {
+		return []*discordgo.MessageEmbed{full}
+	}
+	chunks := splitMessage(msg.Content, embedDescriptionLimit)
+	embeds := make([]*discordgo.MessageEmbed, 0, len(chunks))
+	full.Description = chunks[0]
+	embeds = append(embeds, full)
+	for _, c := range chunks[1:] {
+		embeds = append(embeds, &discordgo.MessageEmbed{
+			Description: c,
+			Color:       full.Color,
+		})
+	}
+	return embeds
 }
 
 // splitMessage splits a message into chunks that fit within Discord's
