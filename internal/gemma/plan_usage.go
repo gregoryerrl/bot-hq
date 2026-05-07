@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/anthropic"
+	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
@@ -294,6 +295,23 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 // hits. Observed root cause: 200+ accumulated wakes fired at 1/min today
 // because oscillating maxUtil scheduled one wake per oscillation cycle.
 func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
+	// Phase S S-1a-3: when daemoncron is online, delegate emit + halt-
+	// state-clear to daemoncron's package-scoped helpers (interpretation
+	// (ii) per Rain msg 15796 PUSH-BACK A). Cancel-pending-wakes path
+	// stays gemma-side since it depends on gemma's wake-schedule
+	// machinery (DB-bound but gemma-owned API).
+	if g.isDaemoncronOnline() {
+		daemoncron.EmitPlanCapResume(g.db, now, pct)
+		daemoncron.ClearPlanCapHaltActive()
+		for _, target := range []string{"brian", "rain"} {
+			if n, err := g.db.CancelPendingWakesForTargetByPayloadPrefix(target, "[RESUME]"); err != nil {
+				log.Printf("[plan-cap] cancel pending RESUME wakes for %s failed: %v", target, err)
+			} else if n > 0 {
+				log.Printf("[plan-cap] cancelled %d pending RESUME wakes for %s (auto-clear path emitted via daemoncron)", n, target)
+			}
+		}
+		return
+	}
 	content := fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, pct))
 	for _, target := range []string{"brian", "rain"} {
 		if _, err := g.db.InsertMessage(protocol.Message{
@@ -324,6 +342,13 @@ func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
 // hovers in [0.90, 0.95) band. Cooldown stamp is per-Gemma-instance
 // (lastPreCompactSnapAt field, mu-protected via planUsageMu).
 func (g *Gemma) emitPreCompactSnap(now time.Time, pct int) {
+	// Phase S S-1a-3: delegate to daemoncron when online (interpretation
+	// (ii) dual-emit-prevention). Daemoncron tracks its own cooldown
+	// state; gemma's cooldown is bypassed in delegate path.
+	if g.isDaemoncronOnline() {
+		daemoncron.EmitPreCompactSnap(g.db, now, pct)
+		return
+	}
 	g.planUsageMu.Lock()
 	coolingDown := !g.lastPreCompactSnapAt.IsZero() && now.Sub(g.lastPreCompactSnapAt) < planCapPreSnapCooldown
 	if !coolingDown {
