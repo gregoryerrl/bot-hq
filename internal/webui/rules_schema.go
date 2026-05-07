@@ -37,8 +37,10 @@ type RulesRatchets struct {
 }
 
 type RulesHubDiscipline struct {
-	HandshakeTerminator string `yaml:"handshakeTerminator,omitempty"`
-	CrossInFlight       string `yaml:"crossInFlight,omitempty"`
+	HandshakeTerminator       string `yaml:"handshakeTerminator,omitempty"`
+	CrossInFlight             string `yaml:"crossInFlight,omitempty"`
+	CompactFormat             string `yaml:"compactFormat,omitempty"`
+	AudienceClassDiscriminator string `yaml:"audienceClassDiscriminator,omitempty"`
 }
 
 // RulesProject is the schema for ~/.bot-hq/rules/projects/<project>.yaml.

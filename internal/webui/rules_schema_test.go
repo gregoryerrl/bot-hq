@@ -1,0 +1,141 @@
+package webui
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestValidateRulesYAML_GeneralAllKnownKeys: well-formed general.yaml
+// with all schema-recognized keys (incl. Phase O drain #2a hubDiscipline
+// gap-1 fill-in) parses with zero errors + zero warnings.
+func TestValidateRulesYAML_GeneralAllKnownKeys(t *testing.T) {
+	yaml := []byte(`
+tone:
+  reply: "concise + cite-anchors"
+  eod: "compact pipe-format"
+  implementation: "TDD discipline"
+
+greenlight:
+  push: "explicit user verbatim"
+  forcePush: "R29 elevated gate"
+  merge: "user-only ABSOLUTE"
+
+ratchets:
+  locusFile: "~/.bot-hq/ratchets/active.md"
+  cadence: "per-phase"
+
+hubDiscipline:
+  handshakeTerminator: "single '.' on no-content + no-action"
+  crossInFlight: "emit '[crossed in flight - see msg N]' instead of full repost"
+  compactFormat: "agent-to-agent: pipe-separated sender|event:value|key:value"
+  audienceClassDiscriminator: "[HR] prefix marks must-read; default untagged compact"
+`)
+	res := validateRulesYAML("general", yaml)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %v", res.Errors)
+	}
+	if len(res.Warnings) > 0 {
+		t.Errorf("unexpected warnings: %v", res.Warnings)
+	}
+}
+
+// TestValidateRulesYAML_HubDisciplineGap1Keys: the two Phase O drain #2a
+// keys (compactFormat + audienceClassDiscriminator) round-trip through
+// the schema struct without data loss.
+func TestValidateRulesYAML_HubDisciplineGap1Keys(t *testing.T) {
+	yaml := []byte(`
+hubDiscipline:
+  compactFormat: "compact pipe-separated for peer-coord"
+  audienceClassDiscriminator: "[HR] for must-read"
+`)
+	res := validateRulesYAML("general", yaml)
+	if res.HasErrors() {
+		t.Fatalf("errors on gap-1 keys: %v", res.Errors)
+	}
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "compactFormat") || strings.Contains(w, "audienceClassDiscriminator") {
+			t.Errorf("gap-1 key flagged as unknown: %q", w)
+		}
+	}
+}
+
+// TestValidateRulesYAML_LegacyHubDisciplineKeysStillWork: pre-#2a keys
+// (handshakeTerminator + crossInFlight) continue to parse cleanly. Guards
+// against accidental schema regression in the gap-1 fill-in.
+func TestValidateRulesYAML_LegacyHubDisciplineKeysStillWork(t *testing.T) {
+	yaml := []byte(`
+hubDiscipline:
+  handshakeTerminator: "single dot"
+  crossInFlight: "see msg N gloss"
+`)
+	res := validateRulesYAML("general", yaml)
+	if res.HasErrors() {
+		t.Fatalf("regression on legacy keys: %v", res.Errors)
+	}
+	if len(res.Warnings) > 0 {
+		t.Errorf("unexpected warnings on legacy keys: %v", res.Warnings)
+	}
+}
+
+// TestValidateRulesYAML_UnknownTopLevelStillWarns: forward-compat Q-rules-6
+// behavior preserved — unknown top-level keys produce warning, not error.
+func TestValidateRulesYAML_UnknownTopLevelStillWarns(t *testing.T) {
+	yaml := []byte(`
+tone:
+  reply: ok
+futureTopLevelKey: "not-yet-schemafied"
+`)
+	res := validateRulesYAML("general", yaml)
+	if res.HasErrors() {
+		t.Fatalf("unknown key should warn not error: %v", res.Errors)
+	}
+	if len(res.Warnings) == 0 {
+		t.Errorf("expected warning for unknown key, got none")
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "futureTopLevelKey") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warning didn't mention futureTopLevelKey: %v", res.Warnings)
+	}
+}
+
+// TestValidateRulesYAML_ProjectInheritsHubDisciplineGap1: per-project
+// rules.yaml can use the same hubDiscipline keys as general (RulesProject
+// embeds RulesGeneral). Confirms gap-1 fill-in is inherited.
+func TestValidateRulesYAML_ProjectInheritsHubDisciplineGap1(t *testing.T) {
+	yaml := []byte(`
+hubDiscipline:
+  compactFormat: "project-specific override"
+  audienceClassDiscriminator: "project-specific [HR] policy"
+push: "explicit user verbatim 'push X'"
+`)
+	res := validateRulesYAML("project", yaml)
+	if res.HasErrors() {
+		t.Fatalf("project-layer gap-1 keys errored: %v", res.Errors)
+	}
+	if len(res.Warnings) > 0 {
+		t.Errorf("project-layer gap-1 keys warned: %v", res.Warnings)
+	}
+}
+
+// TestValidateRulesYAML_BadYAML: malformed input → error, blocks write.
+func TestValidateRulesYAML_BadYAML(t *testing.T) {
+	yaml := []byte("not valid yaml: : :")
+	res := validateRulesYAML("general", yaml)
+	if !res.HasErrors() {
+		t.Errorf("expected errors on malformed yaml, got none")
+	}
+}
+
+// TestValidateRulesYAML_UnknownLayer: caller-side guard — unsupported
+// layer name → error.
+func TestValidateRulesYAML_UnknownLayer(t *testing.T) {
+	res := validateRulesYAML("nonsense", []byte("tone: {reply: x}"))
+	if !res.HasErrors() {
+		t.Errorf("expected errors for unknown layer, got none")
+	}
+}
