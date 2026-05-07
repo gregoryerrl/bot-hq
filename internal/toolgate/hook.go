@@ -54,6 +54,18 @@ func RunHook(stdin io.Reader, stderr io.Writer) int {
 		return ExitAllow
 	}
 
+	// Phase R R2 hub_broadcast Rain-gate (literal tool-name match per
+	// Refine-5; agent-id env-var check). Fires BEFORE Bash early-return
+	// so non-Bash MCP tool invocation reaches the gate.
+	if input.ToolName == HubBroadcastToolName {
+		agentID := os.Getenv("BOT_HQ_AGENT_ID")
+		if allow, reason := VerifyHubBroadcastRainGate(agentID); !allow {
+			fmt.Fprint(stderr, reason)
+			return ExitBlock
+		}
+		return ExitAllow
+	}
+
 	if input.ToolName != "Bash" {
 		return ExitAllow
 	}

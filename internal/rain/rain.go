@@ -327,14 +327,28 @@ func (r *Rain) pollLoop() {
 // Phase R R5 (R42 AUTO-BOUNDARY-DISCIPLINE): when sessionPrefix is non-
 // empty, prepend it to the formatted nudge. Format: `[SESSION:<8>] `.
 // Empty sessionPrefix → unchanged (zero-open → no prefix per Refine-A).
+//
+// Phase R R2 (authorless [HR]/FLAG): MsgFlag class + content with
+// `[HR]` prefix display-strip the sender attribution per Rain msg
+// 15510 + 15545 + 15561 BRAIN-final. DB preserves FromAgent for
+// forensics; render-layer hides it from the user-facing nudge.
 func formatRainNudge(msg protocol.Message, sessionPrefix string) string {
 	directed := msg.ToAgent == agentID
+	hasHR := strings.HasPrefix(msg.Content, "[HR] ") || strings.HasPrefix(msg.Content, "[HR]\n")
 	var base string
 	if msg.Type == protocol.MsgFlag {
+		// Phase R R2 FLAG class strip — render without sender.
 		if directed {
-			base = fmt.Sprintf("[PM:FLAG:%s] %s", msg.FromAgent, msg.Content)
+			base = fmt.Sprintf("[PM:FLAG] %s", msg.Content)
 		} else {
-			base = fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
+			base = fmt.Sprintf("[HUB:FLAG] %s", msg.Content)
+		}
+	} else if hasHR {
+		// Phase R R2 [HR] tag strip — render without sender.
+		if directed {
+			base = fmt.Sprintf("[PM] %s", msg.Content)
+		} else {
+			base = fmt.Sprintf("[HUB] %s", msg.Content)
 		}
 	} else if directed {
 		base = fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)

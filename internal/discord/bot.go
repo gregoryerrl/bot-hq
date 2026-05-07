@@ -260,10 +260,15 @@ func (b *Bot) forwardToDiscord(ch <-chan protocol.Message) {
 			lastContent = msg.Content
 			lastSent = time.Now()
 
-			// Format and send to Discord
+			// Format and send to Discord. Phase R R2: [HR]-tagged content +
+			// MsgFlag class display-strip the sender attribution per Rain
+			// msg 15510 BRAIN-final + msg 15545 Refine. DB preserves
+			// from_agent for forensics per `from_agent` column.
 			var text string
 			if msg.Type == protocol.MsgFlag {
-				text = fmt.Sprintf("🚨 **ATTENTION NEEDED** — from **%s**:\n%s", msg.FromAgent, msg.Content)
+				text = fmt.Sprintf("🚨 **ATTENTION NEEDED**:\n%s", msg.Content)
+			} else if strings.HasPrefix(msg.Content, "[HR] ") || strings.HasPrefix(msg.Content, "[HR]\n") {
+				text = msg.Content
 			} else {
 				text = fmt.Sprintf("**[%s]** %s", msg.FromAgent, msg.Content)
 			}

@@ -627,12 +627,13 @@ func TestInitialPromptContainsDISCv2(t *testing.T) {
 	}
 }
 
-// 8b. TestFormatRainNudge_FlagVariant — MsgFlag elevates to [HUB:FLAG:<sender>].
+// 8b. TestFormatRainNudge_FlagVariant — MsgFlag elevates to [HUB:FLAG]
+// per Phase R R2 authorless display-strip (sender hidden at render).
 func TestFormatRainNudge_FlagVariant(t *testing.T) {
 	result := formatRainNudge(protocol.Message{FromAgent: "brian", Type: protocol.MsgFlag, Content: "scope disagreement"}, "")
 
-	if result != "[HUB:FLAG:brian] scope disagreement" {
-		t.Errorf("expected FLAG-prefixed tag, got %q", result)
+	if result != "[HUB:FLAG] scope disagreement" {
+		t.Errorf("expected FLAG-prefixed tag (Phase R R2 authorless), got %q", result)
 	}
 }
 
@@ -658,10 +659,10 @@ func TestFormatRainNudgePMAndHubVariants(t *testing.T) {
 		{"PM from user", protocol.Message{FromAgent: "user", ToAgent: "rain", Type: protocol.MsgCommand, Content: "do x"}, "[PM:user] do x"},
 		{"PM from discord", protocol.Message{FromAgent: "discord", ToAgent: "rain", Type: protocol.MsgResponse, Content: "hi"}, "[PM:discord] hi"},
 		{"PM from coder", protocol.Message{FromAgent: "7a776ee2", ToAgent: "rain", Type: protocol.MsgResult, Content: "done"}, "[PM:7a776ee2] done"},
-		{"PM FLAG from brian", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgFlag, Content: "stop"}, "[PM:FLAG:brian] stop"},
+		{"PM FLAG from brian", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgFlag, Content: "stop"}, "[PM:FLAG] stop"},
 		{"HUB broadcast from brian", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgResponse, Content: "broad"}, "[HUB:brian] broad"},
 		{"HUB broadcast from user", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgCommand, Content: "all"}, "[HUB:user] all"},
-		{"HUB FLAG broadcast", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgFlag, Content: "bug"}, "[HUB:FLAG:brian] bug"},
+		{"HUB FLAG broadcast", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgFlag, Content: "bug"}, "[HUB:FLAG] bug"},
 		{"HUB-OBS cross-traffic", protocol.Message{FromAgent: "brian", ToAgent: "user", Type: protocol.MsgResponse, Content: "reply"}, "[HUB-OBS:brian→user] reply"},
 		{"HUB-OBS to discord", protocol.Message{FromAgent: "brian", ToAgent: "discord", Type: protocol.MsgResponse, Content: "post"}, "[HUB-OBS:brian→discord] post"},
 	}
@@ -963,5 +964,26 @@ func TestSendCommandRoutesThroughSink(t *testing.T) {
 		if !strings.Contains(src, want) {
 			t.Errorf("rain.go must contain %q — Phase I W2 Layer-2 (c) sink wiring", want)
 		}
+	}
+}
+
+// TestFormatRainNudge_PhaseR_R2_AuthorlessHR — Phase R R2 authorless [HR]
+// display-strip mirror on rain side.
+func TestFormatRainNudge_PhaseR_R2_AuthorlessHR(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  protocol.Message
+		want string
+	}{
+		{"HR broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "[HR] final draft"}, "[HUB] [HR] final draft"},
+		{"HR PM directed to rain", protocol.Message{FromAgent: "user", ToAgent: "rain", Content: "[HR] direct"}, "[PM] [HR] direct"},
+		{"non-HR broadcast unchanged", protocol.Message{FromAgent: "brian", ToAgent: "", Content: "regular"}, "[HUB:brian] regular"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatRainNudge(tc.msg, ""); got != tc.want {
+				t.Errorf("formatRainNudge = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

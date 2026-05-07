@@ -114,6 +114,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSessionLoad(),
 		hubSessionCheckpoint(),
 		hubSessionArchive(),
+		hubBroadcast(db),
 		hubStatus(db),
 		hubSpawn(db),
 		hubCheckpoint(db),
@@ -775,6 +776,77 @@ func hubSessionCheckpoint() ToolDef {
 			"status":       "checkpointed",
 			"session_id":   id,
 			"manifest_path": sessions.ManifestPath(id),
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubBroadcast implements Phase R R2 trio-consensus authorless [HR]
+// broadcast. Wraps hub_send-equivalent emit with two key behaviors:
+//
+//   - Auto-prefix `[HR] ` to content (idempotent via HasPrefix guard
+//     per Rain msg 15561 Refine-1). Caller may pre-prefix; double-
+//     prefix is suppressed.
+//   - DB `from_agent` column preserves caller for audit-trail forensics
+//     (R31 STAT-CLAIM-CITE downstream; bot-hq-query inspectability per
+//     Refine-6). Display-layer (tmux pane formatNudge / Discord
+//     bridge / webui) strips sender at render time per R2 authorless
+//     semantic.
+//
+// Rain-gated via PreToolUse toolgate-hook (BOT_HQ_AGENT_ID=rain check
+// per Refine-5). Brian invocation hard-blocks at hook-layer; this
+// handler executes only on Rain-authorized fire.
+//
+// Per phase-r.md R2 cluster + Rain msg 15561 BRAIN-2nd 6 refinements.
+func hubBroadcast(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_broadcast",
+		mcp.WithDescription("Phase R R2 — emit a trio-consensus [HR]-tagged broadcast. Auto-prefixes [HR] to content (idempotent). DB preserves from_agent for forensics; display layer strips sender at render time. Rain-gated via PreToolUse toolgate-hook (BOT_HQ_AGENT_ID=rain check); Brian invocation blocked. Use for BRAIN-cycle final drafts where authorless trio-voice rendering is intended."),
+		mcp.WithString("from", mcp.Required(), mcp.Description("Sender agent ID (preserved in DB for forensics; stripped at display)")),
+		mcp.WithString("content", mcp.Required(), mcp.Description("Message content. Auto-prefixed with `[HR] ` if not already; double-prefix suppressed.")),
+		mcp.WithString("type", mcp.Description("Message type: response | update | result. Default: response. Excludes flag (use hub_flag) and command/error.")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		from, err := req.RequireString("from")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		content, err := req.RequireString("content")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		// Refine-1 idempotency: don't double-prefix if caller already
+		// included [HR] prefix.
+		if !strings.HasPrefix(content, "[HR] ") && !strings.HasPrefix(content, "[HR]\n") {
+			content = "[HR] " + content
+		}
+
+		typeStr := req.GetString("type", "response")
+		mt := protocol.MessageType(typeStr)
+		// Restrict to non-elevation, non-error message types. Flag uses
+		// existing hub_flag tool; command/error are agent-class restricted.
+		switch mt {
+		case protocol.MsgResponse, protocol.MsgUpdate, protocol.MsgResult:
+			// allowed
+		default:
+			return mcp.NewToolResultError(fmt.Sprintf("hub_broadcast: type %q not supported (use response | update | result; flag → hub_flag; command/error not for broadcast class)", typeStr)), nil
+		}
+
+		msgID, err := db.InsertMessage(protocol.Message{
+			FromAgent: from,
+			ToAgent:   "", // broadcast
+			Type:      mt,
+			Content:   content,
+			Created:   time.Now(),
+		})
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("hub_broadcast insert: %v", err)), nil
+		}
+		return mcp.NewToolResultText(toJSON(map[string]any{
+			"status":     "broadcast",
+			"message_id": msgID,
+			"from":       from,
 		})), nil
 	}
 

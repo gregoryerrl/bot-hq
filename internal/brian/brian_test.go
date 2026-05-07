@@ -692,9 +692,10 @@ func TestFormatNudgeCompactTagAndNoTrailer(t *testing.T) {
 }
 
 func TestFormatNudgeFlagVariant(t *testing.T) {
+	// Phase R R2 authorless: FLAG class display-strips sender at render.
 	nudge := formatNudge(protocol.Message{FromAgent: "rain", Type: protocol.MsgFlag, Content: "disagree on scope"}, "")
-	if nudge != "[HUB:FLAG:rain] disagree on scope" {
-		t.Errorf("expected broadcast FLAG tag, got %q", nudge)
+	if nudge != "[HUB:FLAG] disagree on scope" {
+		t.Errorf("expected broadcast FLAG tag (Phase R R2 authorless), got %q", nudge)
 	}
 }
 
@@ -712,10 +713,10 @@ func TestFormatNudgePMAndHubVariants(t *testing.T) {
 		{"PM from user", protocol.Message{FromAgent: "user", ToAgent: "brian", Type: protocol.MsgCommand, Content: "do x"}, "[PM:user] do x"},
 		{"PM from discord", protocol.Message{FromAgent: "discord", ToAgent: "brian", Type: protocol.MsgResponse, Content: "hi"}, "[PM:discord] hi"},
 		{"PM from coder", protocol.Message{FromAgent: "7a776ee2", ToAgent: "brian", Type: protocol.MsgResult, Content: "done"}, "[PM:7a776ee2] done"},
-		{"PM FLAG from rain", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgFlag, Content: "stop"}, "[PM:FLAG:rain] stop"},
+		{"PM FLAG from rain", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgFlag, Content: "stop"}, "[PM:FLAG] stop"},
 		{"HUB broadcast from rain", protocol.Message{FromAgent: "rain", ToAgent: "", Type: protocol.MsgResponse, Content: "broad"}, "[HUB:rain] broad"},
 		{"HUB broadcast from user", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgCommand, Content: "all"}, "[HUB:user] all"},
-		{"HUB FLAG broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Type: protocol.MsgFlag, Content: "bug"}, "[HUB:FLAG:rain] bug"},
+		{"HUB FLAG broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Type: protocol.MsgFlag, Content: "bug"}, "[HUB:FLAG] bug"},
 		{"HUB-OBS cross-traffic", protocol.Message{FromAgent: "rain", ToAgent: "user", Type: protocol.MsgResponse, Content: "reply"}, "[HUB-OBS:rain→user] reply"},
 		{"HUB-OBS to discord", protocol.Message{FromAgent: "rain", ToAgent: "discord", Type: protocol.MsgResponse, Content: "post"}, "[HUB-OBS:rain→discord] post"},
 	}
@@ -904,5 +905,29 @@ func TestSendCommandRoutesThroughSink(t *testing.T) {
 		if !strings.Contains(src, want) {
 			t.Errorf("brian.go must contain %q — Phase I W2 Layer-2 (c) sink wiring", want)
 		}
+	}
+}
+
+// TestFormatNudge_PhaseR_R2_AuthorlessHR — Phase R R2 authorless [HR]
+// display-strip: content with `[HR] ` prefix renders without sender
+// attribution. DB preserves FromAgent for forensics; render-layer hides.
+func TestFormatNudge_PhaseR_R2_AuthorlessHR(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  protocol.Message
+		want string
+	}{
+		{"HR broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "[HR] final draft"}, "[HUB] [HR] final draft"},
+		{"HR PM directed to brian", protocol.Message{FromAgent: "rain", ToAgent: "brian", Content: "[HR] direct"}, "[PM] [HR] direct"},
+		{"HR with newline-prefix", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "[HR]\nmulti-line"}, "[HUB] [HR]\nmulti-line"},
+		{"non-HR broadcast unchanged", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "regular"}, "[HUB:rain] regular"},
+		{"HR-like-but-not-prefix unchanged", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "see [HR] mention"}, "[HUB:rain] see [HR] mention"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatNudge(tc.msg, ""); got != tc.want {
+				t.Errorf("formatNudge = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
