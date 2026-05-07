@@ -162,35 +162,54 @@ func (s *Server) CanonicalRoot() string {
 	return s.canonicalRoot
 }
 
-// Start binds the server to the configured port and serves until ctx is
-// canceled or Shutdown is called. Blocks. Returns http.ErrServerClosed
-// on graceful shutdown; other errors are bind/runtime failures.
+// Start binds the server to the configured port on both IPv4 and IPv6
+// loopback (127.0.0.1 + ::1) so browsers resolve "localhost" to either
+// stack without NetworkError. Both listeners share the same handler.
+// Blocks until ctx is canceled or Shutdown is called. Returns
+// http.ErrServerClosed on graceful shutdown; other errors are bind/runtime
+// failures.
 func (s *Server) Start(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.httpServer.Addr)
+	// Bind IPv4 first to resolve the port (matters when port=0 ephemeral),
+	// then bind IPv6 to the same resolved port.
+	ln4, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", s.port))
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", s.httpServer.Addr, err)
+		return fmt.Errorf("listen 127.0.0.1:%d: %w", s.port, err)
 	}
-	// Update port if 0 was supplied (ephemeral binding for tests)
-	if tcpAddr, ok := ln.Addr().(*net.TCPAddr); ok {
+	if tcpAddr, ok := ln4.Addr().(*net.TCPAddr); ok {
 		s.port = tcpAddr.Port
 		s.httpServer.Addr = tcpAddr.String()
 	}
-	log.Printf("[webui] serving on http://%s/ (canonical root: %s)", s.httpServer.Addr, s.canonicalRoot)
+	ln6, err := net.Listen("tcp", fmt.Sprintf("[::1]:%d", s.port))
+	if err != nil {
+		// IPv6 loopback unavailable — log and continue on IPv4 only rather
+		// than failing startup. Some constrained envs disable ::1.
+		log.Printf("[webui] IPv6 loopback bind failed (continuing IPv4-only): %v", err)
+		ln6 = nil
+	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-		close(errCh)
-	}()
+	listeners := []net.Listener{ln4}
+	if ln6 != nil {
+		listeners = append(listeners, ln6)
+		log.Printf("[webui] serving on http://127.0.0.1:%d/ + http://[::1]:%d/ (canonical root: %s)", s.port, s.port, s.canonicalRoot)
+	} else {
+		log.Printf("[webui] serving on http://127.0.0.1:%d/ (canonical root: %s)", s.port, s.canonicalRoot)
+	}
+
+	errCh := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		ln := ln
+		go func() {
+			if err := s.httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.httpServer.Shutdown(shutdownCtx)
-		<-errCh
 		return ctx.Err()
 	case err := <-errCh:
 		return err
