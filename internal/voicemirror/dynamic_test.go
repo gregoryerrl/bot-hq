@@ -147,6 +147,117 @@ func TestExtractPathsFromContent_BareAndQuotedDedupe(t *testing.T) {
 	}
 }
 
+func TestExtractPathsFromContent_LiteralMakefile(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	got := extractPathsFromContent("update ~/project/Makefile please")
+	want := filepath.Join(home, "project/Makefile")
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected literal-allowlist Makefile to match, got %v", got)
+	}
+}
+
+func TestExtractPathsFromContent_LiteralDockerfile(t *testing.T) {
+	got := extractPathsFromContent("rebuild /srv/app/Dockerfile in CI")
+	want := "/srv/app/Dockerfile"
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected literal-allowlist Dockerfile to match, got %v", got)
+	}
+}
+
+func TestExtractPathsFromContent_LiteralRootLevel(t *testing.T) {
+	got := extractPathsFromContent("the file at /Makefile is root-level")
+	want := "/Makefile"
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected root-level /Makefile to match, got %v", got)
+	}
+}
+
+func TestExtractPathsFromContent_LiteralProseFalsePositiveSuppressed(t *testing.T) {
+	// "the Makefile" mentioned generically (no leading `/` or `~/`)
+	// must not trigger — allowlist anchors require path-shape.
+	got := extractPathsFromContent("the Makefile in this project is broken")
+	for _, p := range got {
+		if strings.HasSuffix(p, "Makefile") {
+			t.Errorf("prose mention should not false-positive, got %v", got)
+		}
+	}
+}
+
+func TestExtractPathsFromContent_LiteralCMakeListsTxt(t *testing.T) {
+	got := extractPathsFromContent("regenerate /build/CMakeLists.txt now")
+	want := "/build/CMakeLists.txt"
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected CMakeLists.txt to match, got %v", got)
+	}
+}
+
+func TestExtractPathsFromContent_LiteralDotEnv(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	got := extractPathsFromContent("update ~/app/.env config")
+	want := filepath.Join(home, "app/.env")
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected .env to match, got %v", got)
+	}
+}
+
+func TestExtractPathsFromContent_LiteralAllowlistFull(t *testing.T) {
+	// Every allowlist entry should match in path-tail position.
+	cases := []struct {
+		content string
+		want    string
+	}{
+		{"see /a/Makefile", "/a/Makefile"},
+		{"see /a/Dockerfile", "/a/Dockerfile"},
+		{"see /a/Procfile", "/a/Procfile"},
+		{"see /a/Rakefile", "/a/Rakefile"},
+		{"see /a/Gemfile", "/a/Gemfile"},
+		{"see /a/CMakeLists.txt", "/a/CMakeLists.txt"},
+		{"see /a/.env", "/a/.env"},
+	}
+	for _, tc := range cases {
+		got := extractPathsFromContent(tc.content)
+		found := false
+		for _, p := range got {
+			if p == tc.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("content=%q want=%s got=%v", tc.content, tc.want, got)
+		}
+	}
+}
+
 func TestExtractPathsFromContent_Dedupes(t *testing.T) {
 	got := extractPathsFromContent("edit /tmp/a.md and also /tmp/a.md again")
 	if len(got) != 1 {

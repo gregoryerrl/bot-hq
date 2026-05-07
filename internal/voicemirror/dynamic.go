@@ -8,8 +8,12 @@
 // BRAIN-2nd Refine R1).
 //
 // Documented limitations:
-//   - extension-less files (Makefile/Dockerfile) miss; regex requires
-//     `.\w{1,8}` extension to suppress prose false-positives.
+//   - extension-less files miss the bare-token regex (which requires
+//     `.\w{1,8}`) UNLESS they appear in the literal-name allowlist
+//     (Makefile / Dockerfile / Procfile / Rakefile / Gemfile /
+//     CMakeLists.txt / .env) — Phase-R-followup-2 (c). Allowlist
+//     entries match only as path-tail tokens after `/` or `~/` to
+//     suppress prose false-positives ("Makefile" in a sentence).
 //   - paths with spaces miss UNLESS quoted with `"..."` or `'...'`
 //     (Phase-R-followup-2 (b)). Backslash-escaped spaces (e.g.,
 //     `~/My\ Folder/x.md`) still miss; rare in user prose.
@@ -43,6 +47,13 @@ var regexpUserPaths = regexp.MustCompile(`(?:\$HOME|~|/)[\w./_+-]+\.\w{1,8}\b`)
 var regexpQuotedDoubleUserPaths = regexp.MustCompile(`"((?:\$HOME|~|/)[^"]+?\.\w{1,8})"`)
 var regexpQuotedSingleUserPaths = regexp.MustCompile(`'((?:\$HOME|~|/)[^']+?\.\w{1,8})'`)
 
+// regexpLiteralNamePaths captures extension-less filenames from a
+// fixed allowlist when they appear as the path-tail token after
+// `/`, `~/`, or `$HOME/`. The leading separator is required so a
+// generic prose mention ("the Makefile") never false-positives;
+// only path-shaped tokens trigger. Phase-R-followup-2 (c).
+var regexpLiteralNamePaths = regexp.MustCompile(`(?:\$HOME/|~/|/)(?:[\w._+-]+/)*(?:Makefile|Dockerfile|Procfile|Rakefile|Gemfile|CMakeLists\.txt|\.env)\b`)
+
 // extractPathsFromContent runs the user-path regexes over a single
 // content string and returns normalized absolute paths. Filters:
 // reject relative-after-normalize; expand `~` / `$HOME` to user home.
@@ -51,6 +62,7 @@ var regexpQuotedSingleUserPaths = regexp.MustCompile(`'((?:\$HOME|~|/)[^']+?\.\w
 func extractPathsFromContent(content string) []string {
 	var matches []string
 	matches = append(matches, regexpUserPaths.FindAllString(content, -1)...)
+	matches = append(matches, regexpLiteralNamePaths.FindAllString(content, -1)...)
 	for _, m := range regexpQuotedDoubleUserPaths.FindAllStringSubmatch(content, -1) {
 		if len(m) > 1 {
 			matches = append(matches, m[1])
