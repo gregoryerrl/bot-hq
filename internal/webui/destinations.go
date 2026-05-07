@@ -216,11 +216,17 @@ func dirFiles(root, relDir string, exts ...string) ([]TreeNode, error) {
 // --- global resolvers --------------------------------------------------
 
 func resolveDocuments(root, _ string) ([]TreeNode, error) {
-	n, err := fileNode(root, "README.md", false)
-	if err != nil || n == nil {
-		return nil, err
+	var out []TreeNode
+	for _, rel := range []string{"README.md", "tasks.md"} {
+		n, err := fileNode(root, rel, false)
+		if err != nil {
+			return nil, err
+		}
+		if n != nil {
+			out = append(out, *n)
+		}
 	}
-	return []TreeNode{*n}, nil
+	return out, nil
 }
 
 func resolveSessions(root, _ string) ([]TreeNode, error) {

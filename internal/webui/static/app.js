@@ -289,7 +289,7 @@
     docDirty.classList.add('hidden');
     docStatus.textContent = '';
     try {
-      const res = await fetch('/api/files/' + path + '?format=json');
+      const res = await fetch('/api/files/' + encodeFilePath(path) + '?format=json');
       if (!res.ok) {
         editor.setValue('Error: ' + res.status + ' ' + res.statusText);
         docMtime.textContent = '';
@@ -318,7 +318,8 @@
       }
       updateDirtyState();
     } catch (err) {
-      editor.setValue('Fetch error: ' + err.message);
+      console.error('loadFile fetch failure', { path, name: err.name, message: err.message });
+      editor.setValue('Fetch error: ' + err.name + ': ' + err.message + '\n(path: ' + path + ')');
       docMtime.textContent = '';
       showRawView();
     }
@@ -326,6 +327,10 @@
 
   function isMarkdown(path) {
     return path && path.toLowerCase().endsWith('.md');
+  }
+
+  function encodeFilePath(p) {
+    return String(p || '').split('/').map(encodeURIComponent).join('/');
   }
 
   function isYAML(path) {
@@ -614,7 +619,7 @@
     docStatus.textContent = 'Saving…';
     docSave.disabled = true;
     try {
-      const res = await fetch('/api/files/' + state.currentPath, {
+      const res = await fetch('/api/files/' + encodeFilePath(state.currentPath), {
         method: 'POST',
         headers: {
           'If-Match': state.currentMtime || '',
@@ -823,7 +828,7 @@
     revertStatus.textContent = '';
     revertModal.classList.remove('hidden');
     try {
-      const res = await fetch('/api/files/' + state.currentPath + '/history?limit=50');
+      const res = await fetch('/api/files/' + encodeFilePath(state.currentPath) + '/history?limit=50');
       if (!res.ok) {
         revertList.innerHTML = '<em class="error">Failed to load history: ' + res.status + '</em>';
         return;
@@ -878,7 +883,7 @@
     revertStatus.textContent = 'Reverting…';
     revertList.querySelectorAll('.revert-pick').forEach((b) => { b.disabled = true; });
     try {
-      const res = await fetch('/api/files/' + state.currentPath + '/revert', {
+      const res = await fetch('/api/files/' + encodeFilePath(state.currentPath) + '/revert', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ to_commit: sha }),

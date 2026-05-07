@@ -15,6 +15,7 @@ import (
 func fillCanonicalLayout(t *testing.T, root string) {
 	t.Helper()
 	mustWrite(t, filepath.Join(root, "README.md"), "# bot-hq\n")
+	mustWrite(t, filepath.Join(root, "tasks.md"), "---\ntasks: []\n---\n\n# Global tasks\n")
 	mustWrite(t, filepath.Join(root, "discipline-log.md"), "# Discipline log\n")
 
 	mustMkdir(t, filepath.Join(root, "phase"))
@@ -119,8 +120,8 @@ func TestResolveDestinations_GlobalSection_BotHQProject(t *testing.T) {
 	}
 
 	// Global:
-	if got := byName["Documents"].Nodes; len(got) != 1 || got[0].Name != "README.md" {
-		t.Errorf("Documents nodes = %+v, want 1 README.md", got)
+	if got := byName["Documents"].Nodes; len(got) != 2 || got[0].Name != "README.md" || got[1].Name != "tasks.md" {
+		t.Errorf("Documents nodes = %+v, want [README.md tasks.md]", got)
 	}
 	if got := byName["Disciplines"].Nodes; len(got) != 1 || got[0].Name != "discipline-log.md" {
 		t.Errorf("Disciplines nodes = %+v, want 1 discipline-log.md", got)
