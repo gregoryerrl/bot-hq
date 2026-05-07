@@ -11,7 +11,7 @@ import (
 
 type Config struct {
 	Hub     HubConfig     `toml:"hub"`
-	Live    LiveConfig    `toml:"live"`
+	Clive   CliveConfig   `toml:"clive"`
 	Discord DiscordConfig `toml:"discord"`
 	Brian   BrianConfig   `toml:"brian"`
 	Rain    RainConfig    `toml:"rain"`
@@ -19,11 +19,11 @@ type Config struct {
 }
 
 type HubConfig struct {
-	DBPath   string `toml:"db_path"`
-	LivePort int    `toml:"live_port"`
+	DBPath    string `toml:"db_path"`
+	ClivePort int    `toml:"clive_port"`
 }
 
-type LiveConfig struct {
+type CliveConfig struct {
 	Voice        string `toml:"voice"`
 	GeminiAPIKey string `toml:"gemini_api_key"`
 }
@@ -64,10 +64,10 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		Hub: HubConfig{
-			DBPath:   filepath.Join(home, ".bot-hq", "hub.db"),
-			LivePort: 3847,
+			DBPath:    filepath.Join(home, ".bot-hq", "hub.db"),
+			ClivePort: 3847,
 		},
-		Live: LiveConfig{
+		Clive: CliveConfig{
 			Voice: "Iapetus",
 		},
 	}
@@ -101,7 +101,7 @@ func LoadConfig(path string) (Config, error) {
 
 	// Override with env vars if set
 	if key := os.Getenv("BOT_HQ_GEMINI_KEY"); key != "" {
-		cfg.Live.GeminiAPIKey = key
+		cfg.Clive.GeminiAPIKey = key
 	}
 	if token := os.Getenv("BOT_HQ_DISCORD_TOKEN"); token != "" {
 		cfg.Discord.Token = token
@@ -125,9 +125,9 @@ var EditableSettings = []SettingKey{
 	{Key: "discord.hub_channel_id", Label: "Hub Channel ID", Section: "DISCORD"},
 	{Key: "discord.flags_channel_id", Label: "Flags Channel ID", Section: "DISCORD"},
 	{Key: "discord.sessions_channel_id", Label: "Sessions Channel ID", Section: "DISCORD"},
-	{Key: "live.gemini_api_key", Label: "Gemini Key", Section: "CLIVE", IsSecret: true},
-	{Key: "live.voice", Label: "Voice", Section: "CLIVE"},
-	{Key: "hub.live_port", Label: "Clive Port", Section: "HUB"},
+	{Key: "clive.gemini_api_key", Label: "Gemini Key", Section: "CLIVE", IsSecret: true},
+	{Key: "clive.voice", Label: "Voice", Section: "CLIVE"},
+	{Key: "hub.clive_port", Label: "Clive Port", Section: "HUB"},
 	{Key: "brian.auto_start", Label: "Auto-start", Section: "BRIAN"},
 	{Key: "brian.work_dir", Label: "Work Dir", Section: "BRIAN"},
 	{Key: "rain.auto_start", Label: "Auto-start", Section: "RAIN"},
@@ -159,13 +159,13 @@ func (cfg *Config) ApplyDBSettings(db *DB) {
 			cfg.Discord.FlagsChannelID = v
 		case "discord.sessions_channel_id":
 			cfg.Discord.SessionsChannelID = v
-		case "live.gemini_api_key":
-			cfg.Live.GeminiAPIKey = v
-		case "live.voice":
-			cfg.Live.Voice = v
-		case "hub.live_port":
+		case "clive.gemini_api_key":
+			cfg.Clive.GeminiAPIKey = v
+		case "clive.voice":
+			cfg.Clive.Voice = v
+		case "hub.clive_port":
 			if port, err := strconv.Atoi(v); err == nil && port > 0 {
-				cfg.Hub.LivePort = port
+				cfg.Hub.ClivePort = port
 			}
 		case "brian.auto_start":
 			cfg.Brian.AutoStart = v == "true"
@@ -198,12 +198,12 @@ func (cfg *Config) GetSettingValue(key string) string {
 		return cfg.Discord.FlagsChannelID
 	case "discord.sessions_channel_id":
 		return cfg.Discord.SessionsChannelID
-	case "live.gemini_api_key":
-		return cfg.Live.GeminiAPIKey
-	case "live.voice":
-		return cfg.Live.Voice
-	case "hub.live_port":
-		return fmt.Sprintf("%d", cfg.Hub.LivePort)
+	case "clive.gemini_api_key":
+		return cfg.Clive.GeminiAPIKey
+	case "clive.voice":
+		return cfg.Clive.Voice
+	case "hub.clive_port":
+		return fmt.Sprintf("%d", cfg.Hub.ClivePort)
 	case "brian.auto_start":
 		if cfg.Brian.AutoStart {
 			return "true"

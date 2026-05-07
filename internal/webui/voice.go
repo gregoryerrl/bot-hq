@@ -33,9 +33,8 @@ var voiceUpgrader = websocket.Upgrader{
 }
 
 // voiceAgentID is the canonical hub-agent identifier for the voice
-// surface. Mirrors internal/live's "live" agent for backward-compat
-// with existing hub messages addressed to it.
-const voiceAgentID = "live"
+// surface — registers as "clive" matching internal/clive AgentID.
+const voiceAgentID = "clive"
 
 // browserMessage is the JSON envelope from the browser to the voice
 // WebSocket. Type discriminates audio / text / hub-message intents.
@@ -144,7 +143,7 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Subscribe to hub messages via OnMessage; debounce-batched
-	// injection into Gemini for messages addressed to "live".
+	// injection into Gemini for messages addressed to "clive".
 	hubCh := make(chan protocol.Message, 64)
 	hubSub := func(m protocol.Message) {
 		select {

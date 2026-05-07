@@ -741,7 +741,6 @@ func TestAgentImbalanceExcludesCoders(t *testing.T) {
 		{ID: "emma", Type: protocol.AgentGemma, Status: protocol.StatusOnline},
 		{ID: "discord", Type: protocol.AgentDiscord, Status: protocol.StatusOnline},
 		{ID: "clive", Type: protocol.AgentVoice, Status: protocol.StatusOnline},
-		{ID: "live", Type: protocol.AgentVoice, Status: protocol.StatusOnline},
 	}
 	for i := 0; i < 20; i++ {
 		agents = append(agents, protocol.Agent{

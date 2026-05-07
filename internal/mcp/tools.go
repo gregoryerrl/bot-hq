@@ -415,7 +415,7 @@ func hubDeleteAgent(db *hub.DB) ToolDef {
 
 		// Protect core agents
 		switch id {
-		case "brian", "live", "discord", "rain", "emma":
+		case "brian", "clive", "discord", "rain", "emma":
 			return mcp.NewToolResultError(fmt.Sprintf("cannot delete core agent: %s", id)), nil
 		}
 

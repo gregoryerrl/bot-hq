@@ -117,12 +117,12 @@ func (s *SettingsTab) applySettingToConfig(key, val string) {
 		s.config.Discord.Token = val
 	case "discord.channel_id":
 		s.config.Discord.ChannelID = val
-	case "live.gemini_api_key":
-		s.config.Live.GeminiAPIKey = val
-	case "live.voice":
-		s.config.Live.Voice = val
-	case "hub.live_port":
-		fmt.Sscanf(val, "%d", &s.config.Hub.LivePort)
+	case "clive.gemini_api_key":
+		s.config.Clive.GeminiAPIKey = val
+	case "clive.voice":
+		s.config.Clive.Voice = val
+	case "hub.clive_port":
+		fmt.Sscanf(val, "%d", &s.config.Hub.ClivePort)
 	case "brian.auto_start":
 		s.config.Brian.AutoStart = val == "true"
 	case "brian.work_dir":

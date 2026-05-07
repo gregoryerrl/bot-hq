@@ -370,7 +370,7 @@ func agentColor(name string) lipgloss.Color {
 		return ColorSystem
 	case lower == "brian":
 		return ColorBrian
-	case lower == "live":
+	case lower == "clive":
 		return ColorClive
 	case lower == "rain":
 		return ColorRain

@@ -41,7 +41,7 @@ func TestHubStartIncrementsRebuildGen(t *testing.T) {
 func TestHubDispatchToTmux(t *testing.T) {
 	h := &Hub{}
 	cmd := h.FormatTmuxMessage("claude-abc", protocol.Message{
-		FromAgent: "live",
+		FromAgent: "clive",
 		Type:      protocol.MsgResponse,
 		Content:   "JWT with refresh tokens",
 	})
@@ -60,7 +60,7 @@ func TestHubWSClientRegistration(t *testing.T) {
 	}
 	defer h.Stop()
 
-	ch := h.RegisterWSClient("live")
+	ch := h.RegisterWSClient("clive")
 	if ch == nil {
 		t.Fatal("expected non-nil channel")
 	}
@@ -69,7 +69,7 @@ func TestHubWSClientRegistration(t *testing.T) {
 	go func() {
 		h.dispatch(protocol.Message{
 			FromAgent: "claude-abc",
-			ToAgent:   "live",
+			ToAgent:   "clive",
 			Type:      protocol.MsgResponse,
 			Content:   "test message",
 		})
@@ -84,7 +84,7 @@ func TestHubWSClientRegistration(t *testing.T) {
 		t.Error("timed out waiting for WS dispatch")
 	}
 
-	h.UnregisterWSClient("live")
+	h.UnregisterWSClient("clive")
 }
 
 func TestHubBroadcast(t *testing.T) {

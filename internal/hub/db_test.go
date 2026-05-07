@@ -625,7 +625,7 @@ func TestCreateAndGetSession(t *testing.T) {
 		ID:      "sess-1",
 		Mode:    protocol.ModeBrainstorm,
 		Purpose: "fix login bug",
-		Agents:  []string{"claude-abc", "live"},
+		Agents:  []string{"claude-abc", "clive"},
 		Status:  protocol.SessionActive,
 	}
 

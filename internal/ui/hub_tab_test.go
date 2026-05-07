@@ -49,7 +49,7 @@ func TestParseCommand(t *testing.T) {
 	}{
 		{"@brian hello", "brian", "hello"},
 		{"@claude-abc stop", "claude-abc", "stop"},
-		{"@live check status", "live", "check status"},
+		{"@clive check status", "clive", "check status"},
 		{"hello world", "", "hello world"},
 		{"spawn bcc-ad-manager", "", "spawn bcc-ad-manager"},
 		{"@brian", "brian", ""},
