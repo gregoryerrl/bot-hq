@@ -21,11 +21,19 @@ import (
 // tool calls (BRAIN-cycle reasoning chains, peer-message reading + drafting
 // in compact format). 5min was tuned for prose-cadence; compact-mode
 // routinely exceeded it, generating FP stale-fires while agents were
-// actively reasoning. 10min comfortably accommodates compact-mode thinking
-// while still flagging genuinely-silent agents within the next tick window
-// (real-incident detection latency now ~10min vs prior ~5min — acceptable
-// trade for the FP-rate reduction).
-const staleThreshold = 10 * time.Minute
+// actively reasoning.
+//
+// Bumped from 10min → 30min 2026-05-07 (Phase Q post-close smoke). Driver:
+// heartbeat-loop antipattern intentional-idle stretches (silent-commitment
+// cycles waiting on user-side trigger) routinely span 10-20min between
+// hub_send. With staleThreshold=10min, the HasRecentMessageFrom backstop
+// window was too narrow to suppress FP fires on intentional idle. 30min
+// covers ~10x typical active-cadence (~2-3min) so the backstop suppresses
+// during intentional idle while genuine fault (silent for >30min) still
+// surfaces within the next tick window. Cite anchor: Rain msg 15431 trace
+// of 13:34:39 stale-fire on 13:24:18 last hub_send (10:21 gap, just past
+// the prior 10min threshold).
+const staleThreshold = 30 * time.Minute
 
 // userHaltPatternRe matches the canonical user-HALT directive shape in
 // hub message content. Used by checkStaleAgentsAt (Phase I W1b I-6 C1) to
