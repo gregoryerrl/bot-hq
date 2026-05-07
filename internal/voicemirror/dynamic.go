@@ -10,8 +10,9 @@
 // Documented limitations:
 //   - extension-less files (Makefile/Dockerfile) miss; regex requires
 //     `.\w{1,8}` extension to suppress prose false-positives.
-//   - paths with spaces miss (e.g., `~/Documents/My Folder/x.md`);
-//     quoted-path detection is scope-creep. Accepted miss-rate.
+//   - paths with spaces miss UNLESS quoted with `"..."` or `'...'`
+//     (Phase-R-followup-2 (b)). Backslash-escaped spaces (e.g.,
+//     `~/My\ Folder/x.md`) still miss; rare in user prose.
 //   - relative paths reject post-normalize; only absolute paths after
 //     `~` expansion are user-voice-class.
 package voicemirror
@@ -35,11 +36,31 @@ const (
 // extension `.\w{1,8}\b`. Anchored to `~` / `/` / `$HOME` start.
 var regexpUserPaths = regexp.MustCompile(`(?:\$HOME|~|/)[\w./_+-]+\.\w{1,8}\b`)
 
-// extractPathsFromContent runs the user-path regex over a single
+// regexpQuotedDoubleUserPaths + regexpQuotedSingleUserPaths capture
+// space-bearing paths inside `"..."` / `'...'` enclosures. Lazy match
+// stops at first valid `.<ext>` followed by closing quote — handles
+// `"~/My Folder/x.md"` etc. Phase-R-followup-2 (b).
+var regexpQuotedDoubleUserPaths = regexp.MustCompile(`"((?:\$HOME|~|/)[^"]+?\.\w{1,8})"`)
+var regexpQuotedSingleUserPaths = regexp.MustCompile(`'((?:\$HOME|~|/)[^']+?\.\w{1,8})'`)
+
+// extractPathsFromContent runs the user-path regexes over a single
 // content string and returns normalized absolute paths. Filters:
 // reject relative-after-normalize; expand `~` / `$HOME` to user home.
+// Sources: bare-token regex (rejects spaces) + quoted variants
+// (admit spaces inside `"..."` / `'...'`).
 func extractPathsFromContent(content string) []string {
-	matches := regexpUserPaths.FindAllString(content, -1)
+	var matches []string
+	matches = append(matches, regexpUserPaths.FindAllString(content, -1)...)
+	for _, m := range regexpQuotedDoubleUserPaths.FindAllStringSubmatch(content, -1) {
+		if len(m) > 1 {
+			matches = append(matches, m[1])
+		}
+	}
+	for _, m := range regexpQuotedSingleUserPaths.FindAllStringSubmatch(content, -1) {
+		if len(m) > 1 {
+			matches = append(matches, m[1])
+		}
+	}
 	if len(matches) == 0 {
 		return nil
 	}

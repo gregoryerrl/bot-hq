@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -47,12 +48,103 @@ func TestExtractPathsFromContent_SpaceInPathMisses(t *testing.T) {
 	wantFull := filepath.Join(home, "My Folder/x.md")
 	for _, p := range got {
 		if p == wantFull {
-			t.Errorf("space-in-path should not match full path (documented limitation): got %v", got)
+			t.Errorf("unquoted space-in-path should not match full path (documented limitation): got %v", got)
 		}
 	}
-	// Documented behavior: regex may extract partial sub-path
-	// after the space (e.g., "/x.md"); we accept this and log
-	// as known limitation rather than over-engineering the regex.
+	// Documented behavior: bare regex may extract partial sub-path
+	// after the space (e.g., "/x.md"); accepted limitation. Quoted
+	// variants `"..."` / `'...'` admit spaces — see
+	// TestExtractPathsFromContent_DoubleQuotedSpaceInPath.
+}
+
+func TestExtractPathsFromContent_DoubleQuotedSpaceInPath(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	got := extractPathsFromContent(`edit "~/My Folder/x.md" please`)
+	want := filepath.Join(home, "My Folder/x.md")
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected double-quoted space-in-path to match %s, got %v", want, got)
+	}
+}
+
+func TestExtractPathsFromContent_SingleQuotedSpaceInPath(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	got := extractPathsFromContent("edit '~/My Folder/x.md' please")
+	want := filepath.Join(home, "My Folder/x.md")
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected single-quoted space-in-path to match %s, got %v", want, got)
+	}
+}
+
+func TestExtractPathsFromContent_QuotedAbsolutePathWithSpace(t *testing.T) {
+	got := extractPathsFromContent(`use "/srv/My Site/index.html" today`)
+	want := "/srv/My Site/index.html"
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected double-quoted absolute path with space to match %s, got %v", want, got)
+	}
+}
+
+func TestExtractPathsFromContent_QuotedHOMEExpansion(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	got := extractPathsFromContent(`open "$HOME/My Folder/file.md"`)
+	want := filepath.Join(home, "My Folder/file.md")
+	found := false
+	for _, p := range got {
+		if p == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected $HOME-prefixed quoted path to match %s, got %v", want, got)
+	}
+}
+
+func TestExtractPathsFromContent_BackslashEscapedSpaceMisses(t *testing.T) {
+	// Documented residual limitation: backslash-escaped spaces are
+	// rare in user prose and not handled. Regex token rejects backslash
+	// in path body via `[\w./_+-]+`.
+	home, _ := os.UserHomeDir()
+	got := extractPathsFromContent(`edit ~/My\ Folder/x.md please`)
+	wantFull := filepath.Join(home, "My Folder/x.md")
+	for _, p := range got {
+		if p == wantFull {
+			t.Errorf("backslash-escaped space should not match (documented limit): got %v", got)
+		}
+	}
+}
+
+func TestExtractPathsFromContent_UnclosedQuoteRejects(t *testing.T) {
+	// Unclosed quote: regex requires closing quote, so no match.
+	got := extractPathsFromContent(`edit "~/My Folder/x.md please`)
+	for _, p := range got {
+		if strings.Contains(p, "My Folder") {
+			t.Errorf("unclosed-quote path should not match, got %v", got)
+		}
+	}
+}
+
+func TestExtractPathsFromContent_BareAndQuotedDedupe(t *testing.T) {
+	got := extractPathsFromContent(`edit /tmp/a.md and "/tmp/a.md" again`)
+	if len(got) != 1 || got[0] != "/tmp/a.md" {
+		t.Errorf("expected single deduped /tmp/a.md, got %v", got)
+	}
 }
 
 func TestExtractPathsFromContent_Dedupes(t *testing.T) {
