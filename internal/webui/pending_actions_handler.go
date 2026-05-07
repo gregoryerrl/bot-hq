@@ -48,9 +48,12 @@ func (s *Server) wireUserPendingActions() {
 	})
 }
 
-// shouldQueueAsPending applies the auto-create policy: [HR]-tagged +
-// broadcast-or-user-targeted + not-from-user (don't queue user's own
-// messages). Tunable in one place to ease policy iteration.
+// shouldQueueAsPending applies the auto-create policy: [HR]-tagged
+// OR MsgFlag-typed + broadcast-or-user-targeted + not-from-user
+// (don't queue user's own messages). Tunable in one place to ease
+// policy iteration. Phase-R-followup-2 (a): MsgFlag is implicitly
+// elevated by type — queue regardless of [HR] prefix presence so
+// FLAG-class never falls through the render-side R2 strip gap.
 func shouldQueueAsPending(m protocol.Message) bool {
 	if m.FromAgent == "" || m.FromAgent == "user" {
 		return false
@@ -59,6 +62,9 @@ func shouldQueueAsPending(m protocol.Message) bool {
 		// PMs to other agents (e.g., brian → rain) are peer-coord, not
 		// user-actionable. Skip.
 		return false
+	}
+	if m.Type == protocol.MsgFlag {
+		return true
 	}
 	return strings.HasPrefix(strings.TrimLeft(m.Content, " \t"), hrTagPrefix)
 }

@@ -29,6 +29,12 @@ func TestShouldQueueAsPending(t *testing.T) {
 		{"from-user-skip", protocol.Message{FromAgent: "user", ToAgent: "", Content: "[HR] my own"}, false},
 		{"from-empty-skip", protocol.Message{FromAgent: "", ToAgent: "", Content: "[HR] anon"}, false},
 		{"hr-with-leading-space", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "  [HR] indented"}, true},
+		// Phase-R-followup-2 (a): MsgFlag-typed messages queue
+		// regardless of [HR] prefix — FLAG-class is implicitly elevated.
+		{"flag-without-hr-broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Type: protocol.MsgFlag, Content: "agent stuck on push-failure"}, true},
+		{"flag-without-hr-targeted-user", protocol.Message{FromAgent: "brian", ToAgent: "user", Type: protocol.MsgFlag, Content: "auth failure"}, true},
+		{"flag-pm-other-agent-still-skipped", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgFlag, Content: "peer-coord flag"}, false},
+		{"flag-from-user-still-skipped", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgFlag, Content: "user flag"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
