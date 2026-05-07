@@ -572,3 +572,133 @@ func TestExplicitPhraseRegexCaseInsensitive(t *testing.T) {
 		})
 	}
 }
+
+// Phase R R5 (d-2) tests for Manifest checkpoint fields + WriteCheckpoint helper.
+
+func TestReadManifestBackwardsCompat_PreR5(t *testing.T) {
+	setSessionsDir(t)
+	// Pre-R5 manifest content without any checkpoint fields.
+	id := "2026-05-08-precompat"
+	dir := filepath.Join(SessionsDir(), id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	preR5 := "---\nid: " + id + "\nproject: test\n---\n\nbody content\n"
+	if err := os.WriteFile(filepath.Join(dir, "manifest.md"), []byte(preR5), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadManifest(id)
+	if err != nil {
+		t.Fatalf("ReadManifest pre-R5: %v", err)
+	}
+	if got.ID != id || got.Project != "test" {
+		t.Errorf("base fields lost: %+v", got)
+	}
+	// New fields must be zero-valued (Refine-B backwards-compat).
+	if got.ActiveWorkstream != "" || got.LastCommitSHA != "" || got.Phase != "" || got.Posture != "" {
+		t.Errorf("new fields should be zero-value, got: ActiveWorkstream=%q LastCommitSHA=%q Phase=%q Posture=%q",
+			got.ActiveWorkstream, got.LastCommitSHA, got.Phase, got.Posture)
+	}
+	if !got.CheckpointTS.IsZero() {
+		t.Errorf("CheckpointTS should be zero-value, got %v", got.CheckpointTS)
+	}
+}
+
+func TestWriteManifestCheckpointFieldsRoundtrip(t *testing.T) {
+	setSessionsDir(t)
+	original := Manifest{
+		ID:               "2026-05-08-checkpoint",
+		Project:          "bot-hq",
+		StartTS:          time.Date(2026, 5, 8, 0, 0, 0, 0, time.UTC),
+		ActiveWorkstream: "Phase R R5 sessions",
+		LastCommitSHA:    "26e1117",
+		Phase:            "Phase-R-OPEN",
+		Posture:          "HANDS",
+		CheckpointTS:     time.Date(2026, 5, 8, 1, 23, 45, 0, time.UTC),
+	}
+	if err := WriteManifest(original); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadManifest(original.ID)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+	if got.ActiveWorkstream != original.ActiveWorkstream {
+		t.Errorf("ActiveWorkstream: got %q want %q", got.ActiveWorkstream, original.ActiveWorkstream)
+	}
+	if got.LastCommitSHA != original.LastCommitSHA {
+		t.Errorf("LastCommitSHA: got %q want %q", got.LastCommitSHA, original.LastCommitSHA)
+	}
+	if got.Phase != original.Phase {
+		t.Errorf("Phase: got %q want %q", got.Phase, original.Phase)
+	}
+	if got.Posture != original.Posture {
+		t.Errorf("Posture: got %q want %q", got.Posture, original.Posture)
+	}
+	if !got.CheckpointTS.Equal(original.CheckpointTS) {
+		t.Errorf("CheckpointTS: got %v want %v", got.CheckpointTS, original.CheckpointTS)
+	}
+}
+
+func TestWriteCheckpoint_MergesNonEmpty(t *testing.T) {
+	setSessionsDir(t)
+	id := "2026-05-08-merge"
+	if err := WriteManifest(Manifest{ID: id, Project: "test", ActiveWorkstream: "initial"}); err != nil {
+		t.Fatal(err)
+	}
+	// Update only LastCommitSHA + Phase; ActiveWorkstream should preserve.
+	if err := WriteCheckpoint(id, CheckpointFields{LastCommitSHA: "abc1234", Phase: "Phase-R"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadManifest(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActiveWorkstream != "initial" {
+		t.Errorf("ActiveWorkstream should preserve, got %q", got.ActiveWorkstream)
+	}
+	if got.LastCommitSHA != "abc1234" {
+		t.Errorf("LastCommitSHA: got %q want abc1234", got.LastCommitSHA)
+	}
+	if got.Phase != "Phase-R" {
+		t.Errorf("Phase: got %q want Phase-R", got.Phase)
+	}
+	if got.CheckpointTS.IsZero() {
+		t.Error("CheckpointTS should be refreshed by WriteCheckpoint")
+	}
+}
+
+func TestWriteCheckpoint_BodyAppend(t *testing.T) {
+	setSessionsDir(t)
+	id := "2026-05-08-append"
+	if err := WriteManifest(Manifest{ID: id, Project: "test", Body: "initial body\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCheckpoint(id, CheckpointFields{BodyAppend: "appended chunk"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadManifest(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.Body, "initial body") {
+		t.Errorf("original body lost: %q", got.Body)
+	}
+	if !strings.Contains(got.Body, "appended chunk") {
+		t.Errorf("appended chunk missing: %q", got.Body)
+	}
+	if !strings.Contains(got.Body, "## Checkpoint") {
+		t.Errorf("checkpoint header missing: %q", got.Body)
+	}
+}
+
+func TestWriteCheckpoint_NotExistError(t *testing.T) {
+	setSessionsDir(t)
+	err := WriteCheckpoint("nonexistent-session", CheckpointFields{Phase: "X"})
+	if err == nil {
+		t.Fatal("expected error for non-existent session")
+	}
+	if !os.IsNotExist(err) {
+		t.Errorf("expected os.IsNotExist err, got %v", err)
+	}
+}

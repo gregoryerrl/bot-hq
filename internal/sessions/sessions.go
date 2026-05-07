@@ -40,6 +40,14 @@ import (
 //
 // Optional fields use zero values (empty string / zero time / 0 int);
 // renderManifest omits zero-valued optionals from frontmatter output.
+//
+// Phase R R5 (d-2) extension — checkpoint fields:
+// ActiveWorkstream / LastCommitSHA / Phase / Posture / CheckpointTS.
+// Written via hub_session_checkpoint MCP tool + WriteCheckpoint helper
+// at boundary moments (phase-open / commit-land / pivot / etc.).
+// Backwards-compat per Refine-B: zero-valued checkpoint fields omit
+// from frontmatter output; existing pre-R5 manifests round-trip
+// cleanly (parseManifest skips missing-field lines).
 type Manifest struct {
 	ID              string
 	Project         string
@@ -51,7 +59,13 @@ type Manifest struct {
 	PivotInMsgID    int
 	PivotOutMsgID   int
 	ParentSessionID string
-	Body            string
+	// Phase R R5 (d-2) checkpoint fields
+	ActiveWorkstream string
+	LastCommitSHA    string
+	Phase            string
+	Posture          string
+	CheckpointTS     time.Time
+	Body             string
 }
 
 // BoundaryTrigger classifies why a session boundary was detected from
@@ -148,8 +162,17 @@ func WriteManifest(m Manifest) error {
 			return fmt.Errorf("manifest %s: %d secret-pattern hit(s) detected (BOT_HQ_SECRETS_STRICT=1; redact + retry)", m.ID, len(findings))
 		}
 	}
-	if err := os.WriteFile(ManifestPath(m.ID), []byte(out), 0o644); err != nil {
-		return fmt.Errorf("write manifest: %w", err)
+	// Atomic write per Phase R R5 (d-2) Refine-C correctness: write to
+	// temp file in same dir, then os.Rename — atomic on POSIX same-fs.
+	// Prevents partial-write corruption on crash mid-checkpoint.
+	target := ManifestPath(m.ID)
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, []byte(out), 0o644); err != nil {
+		return fmt.Errorf("write manifest tmp: %w", err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename manifest: %w", err)
 	}
 	return nil
 }
@@ -187,6 +210,23 @@ func renderManifest(m Manifest) string {
 	}
 	if m.ParentSessionID != "" {
 		b.WriteString("parent_session_id: " + m.ParentSessionID + "\n")
+	}
+	// Phase R R5 (d-2) checkpoint fields (omit zero-values per Refine-B
+	// backwards-compat).
+	if m.ActiveWorkstream != "" {
+		b.WriteString("active_workstream: " + m.ActiveWorkstream + "\n")
+	}
+	if m.LastCommitSHA != "" {
+		b.WriteString("last_commit_sha: " + m.LastCommitSHA + "\n")
+	}
+	if m.Phase != "" {
+		b.WriteString("phase: " + m.Phase + "\n")
+	}
+	if m.Posture != "" {
+		b.WriteString("posture: " + m.Posture + "\n")
+	}
+	if !m.CheckpointTS.IsZero() {
+		b.WriteString("checkpoint_ts: " + m.CheckpointTS.UTC().Format(time.RFC3339) + "\n")
 	}
 	b.WriteString("---\n\n")
 	if m.Body != "" {
@@ -494,7 +534,70 @@ func parseManifest(content string) (Manifest, error) {
 			fmt.Sscanf(strings.TrimPrefix(line, "pivot_out_msg_id: "), "%d", &m.PivotOutMsgID)
 		case strings.HasPrefix(line, "parent_session_id: "):
 			m.ParentSessionID = strings.TrimPrefix(line, "parent_session_id: ")
+		// Phase R R5 (d-2) checkpoint fields. Pre-R5 manifests don't
+		// have these lines and skip silently per Refine-B backwards-compat.
+		case strings.HasPrefix(line, "active_workstream: "):
+			m.ActiveWorkstream = strings.TrimPrefix(line, "active_workstream: ")
+		case strings.HasPrefix(line, "last_commit_sha: "):
+			m.LastCommitSHA = strings.TrimPrefix(line, "last_commit_sha: ")
+		case strings.HasPrefix(line, "phase: "):
+			m.Phase = strings.TrimPrefix(line, "phase: ")
+		case strings.HasPrefix(line, "posture: "):
+			m.Posture = strings.TrimPrefix(line, "posture: ")
+		case strings.HasPrefix(line, "checkpoint_ts: "):
+			m.CheckpointTS, _ = time.Parse(time.RFC3339, strings.TrimPrefix(line, "checkpoint_ts: "))
 		}
 	}
 	return m, nil
+}
+
+// CheckpointFields carries the fields written by hub_session_checkpoint.
+// Empty fields signal "leave existing value unchanged" — WriteCheckpoint
+// reads the current manifest and only overwrites non-empty fields, so
+// callers can update a single field without supplying the rest.
+//
+// Phase R R5 (d-2) per phase-r.md R5 cluster + msg 15504 lean (iii).
+type CheckpointFields struct {
+	ActiveWorkstream string
+	LastCommitSHA    string
+	Phase            string
+	Posture          string
+	BodyAppend       string // optional: appended to manifest body if set
+}
+
+// WriteCheckpoint reads the manifest at SessionsDir/<id>/manifest.md,
+// merges non-empty checkpoint fields into it, refreshes CheckpointTS,
+// optionally appends BodyAppend to the body with a timestamped header,
+// and writes back. Idempotent across no-op checkpoint calls.
+//
+// Returns os.ErrNotExist if the manifest doesn't exist (caller can
+// distinguish via os.IsNotExist).
+//
+// Phase R R5 (d-2) per phase-r.md R5 cluster.
+func WriteCheckpoint(id string, cp CheckpointFields) error {
+	m, err := ReadManifest(id)
+	if err != nil {
+		return err
+	}
+	if cp.ActiveWorkstream != "" {
+		m.ActiveWorkstream = cp.ActiveWorkstream
+	}
+	if cp.LastCommitSHA != "" {
+		m.LastCommitSHA = cp.LastCommitSHA
+	}
+	if cp.Phase != "" {
+		m.Phase = cp.Phase
+	}
+	if cp.Posture != "" {
+		m.Posture = cp.Posture
+	}
+	m.CheckpointTS = time.Now().UTC()
+	if cp.BodyAppend != "" {
+		header := fmt.Sprintf("\n## Checkpoint %s\n\n", m.CheckpointTS.Format(time.RFC3339))
+		m.Body = m.Body + header + cp.BodyAppend
+		if !strings.HasSuffix(m.Body, "\n") {
+			m.Body = m.Body + "\n"
+		}
+	}
+	return WriteManifest(m)
 }

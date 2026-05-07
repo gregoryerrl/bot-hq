@@ -318,6 +318,11 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// access, so caller's identity is incidental.
 		"hub_session_load": "read-only manifest lookup by id-or-project; caller anonymous",
 
+		// Phase R R5 (d-2): writes structured checkpoint state into a
+		// session manifest at ~/.bot-hq/sessions/<id>/manifest.md by
+		// session_id. Operates on session_id, not on per-agent state.
+		"hub_session_checkpoint": "writes session-scoped checkpoint by session_id; caller's identity is incidental",
+
 		// Phase H slice 4 C6 (H-31): explicit operator-invocable halt clear.
 		// No caller-context — the tool dismisses a global halt-state machine.
 		"hub_clear_halt": "manually clears global halt_state; no per-caller context",

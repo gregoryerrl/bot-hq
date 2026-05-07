@@ -112,6 +112,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSessionCreate(db),
 		hubSessionJoin(db),
 		hubSessionLoad(),
+		hubSessionCheckpoint(),
 		hubStatus(db),
 		hubSpawn(db),
 		hubCheckpoint(db),
@@ -722,6 +723,57 @@ func hubSessionLoad() ToolDef {
 			"session_id": id,
 			"path":       sessions.ManifestPath(id),
 			"content":    content,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubSessionCheckpoint implements Phase R R5 (d-2) checkpoint MCP tool.
+// Writes structured state (active_workstream / last_commit_sha / phase /
+// posture) to the session manifest at fire-time, refreshes
+// checkpoint_ts, and optionally appends a free-form body chunk.
+//
+// Idempotent: empty fields skip-update; only non-empty fields overwrite.
+// Returns os.ErrNotExist if the session_id has no manifest yet (caller
+// must hub_session_create first).
+//
+// Per phase-r.md R5 cluster + Rain msg 15545 BRAIN-2nd Refine-B
+// backwards-compat shim. Ratchet: substring locks on tool name + each
+// optional field name.
+func hubSessionCheckpoint() ToolDef {
+	tool := mcp.NewTool("hub_session_checkpoint",
+		mcp.WithDescription("Write structured checkpoint state into a session manifest. Idempotent — empty fields preserve existing values; non-empty fields overwrite. Use at boundary moments (phase-open / commit-land / pivot / etc.) to capture active workstream + last commit + phase + posture."),
+		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session-cluster ID (e.g., 2026-05-08-bot-hq)")),
+		mcp.WithString("active_workstream", mcp.Description("Brief label of the in-flight work-cluster (e.g., 'Phase R R5 sessions')")),
+		mcp.WithString("last_commit_sha", mcp.Description("HEAD SHA at checkpoint time")),
+		mcp.WithString("phase", mcp.Description("Active phase identifier (e.g., 'Phase-R-OPEN')")),
+		mcp.WithString("posture", mcp.Description("EYES/HANDS/BRAIN-class posture")),
+		mcp.WithString("body_append", mcp.Description("Optional free-form markdown chunk appended to manifest body with timestamp header")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id, err := req.RequireString("session_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		cp := sessions.CheckpointFields{
+			ActiveWorkstream: req.GetString("active_workstream", ""),
+			LastCommitSHA:    req.GetString("last_commit_sha", ""),
+			Phase:            req.GetString("phase", ""),
+			Posture:          req.GetString("posture", ""),
+			BodyAppend:       req.GetString("body_append", ""),
+		}
+		if err := sessions.WriteCheckpoint(id, cp); err != nil {
+			if os.IsNotExist(err) {
+				return mcp.NewToolResultError(fmt.Sprintf("session manifest not found: %s — call hub_session_create first", id)), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("write checkpoint failed: %v", err)), nil
+		}
+		return mcp.NewToolResultText(toJSON(map[string]string{
+			"status":       "checkpointed",
+			"session_id":   id,
+			"manifest_path": sessions.ManifestPath(id),
 		})), nil
 	}
 
