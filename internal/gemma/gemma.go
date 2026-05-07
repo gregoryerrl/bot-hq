@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
@@ -369,11 +370,18 @@ func (g *Gemma) Start() error {
 	// MCP-routed inserts arrive via sentinelPollLoop's tick.
 	g.replayThroughSentinel()
 
-	g.db.InsertMessage(protocol.Message{
-		FromAgent: agentID,
-		Type:      protocol.MsgUpdate,
-		Content:   fmt.Sprintf("Emma online. Model: %s", g.model),
-	})
+	// Phase S S-1a-4: lifecycle online emit — delegate to daemoncron
+	// when online (interpretation (ii) dual-emit-prevention). Pre-S-1a
+	// path emits gemma-side directly.
+	if g.isDaemoncronOnline() {
+		daemoncron.EmitOnline(g.db, g.model)
+	} else {
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			Type:      protocol.MsgUpdate,
+			Content:   fmt.Sprintf("Emma online. Model: %s", g.model),
+		})
+	}
 
 	return nil
 }
@@ -580,11 +588,17 @@ func (g *Gemma) healthLoop() {
 			healthy := g.client.IsHealthy(ctx)
 			cancel()
 			if !healthy {
-				g.db.InsertMessage(protocol.Message{
-					FromAgent: agentID,
-					Type:      protocol.MsgError,
-					Content:   "Ollama health check failed. Attempting restart...",
-				})
+				// Phase S S-1a-4: delegate health-check-fail emit to
+				// daemoncron when online (interpretation (ii)).
+				if g.isDaemoncronOnline() {
+					daemoncron.EmitOllamaHealthCheckFail(g.db)
+				} else {
+					g.db.InsertMessage(protocol.Message{
+						FromAgent: agentID,
+						Type:      protocol.MsgError,
+						Content:   "Ollama health check failed. Attempting restart...",
+					})
+				}
 				g.restartOllama()
 			}
 			// Phase H slice 3 C4: piggyback stale-coder detection on the
@@ -706,12 +720,18 @@ func (g *Gemma) runRosterPrune() {
 	if len(ids) == 0 {
 		return
 	}
-	g.db.InsertMessage(protocol.Message{
-		FromAgent: agentID,
-		ToAgent:   "rain",
-		Type:      protocol.MsgUpdate,
-		Content:   fmt.Sprintf("[ROSTER-PRUNE] Removed %d stale-offline agent rows (last_seen >24h): %s", len(ids), strings.Join(ids, ", ")),
-	})
+	// Phase S S-1a-4: delegate roster-prune emit to daemoncron when
+	// online (interpretation (ii) dual-emit-prevention).
+	if g.isDaemoncronOnline() {
+		daemoncron.EmitRosterPrune(g.db, ids)
+	} else {
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			ToAgent:   "rain",
+			Type:      protocol.MsgUpdate,
+			Content:   fmt.Sprintf("[ROSTER-PRUNE] Removed %d stale-offline agent rows (last_seen >24h): %s", len(ids), strings.Join(ids, ", ")),
+		})
+	}
 }
 
 // replayBacklog is the number of recent hub messages Emma re-classifies
@@ -1418,11 +1438,16 @@ func (g *Gemma) restartOllama() {
 	g.ollamaCmd.Stdout = nil
 	g.ollamaCmd.Stderr = nil
 	if err := g.ollamaCmd.Start(); err != nil {
-		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			Type:      protocol.MsgError,
-			Content:   fmt.Sprintf("Ollama restart failed: %v", err),
-		})
+		// Phase S S-1a-4: delegate restart-fail emit to daemoncron.
+		if g.isDaemoncronOnline() {
+			daemoncron.EmitOllamaRestartFail(g.db, err)
+		} else {
+			g.db.InsertMessage(protocol.Message{
+				FromAgent: agentID,
+				Type:      protocol.MsgError,
+				Content:   fmt.Sprintf("Ollama restart failed: %v", err),
+			})
+		}
 		return
 	}
 
@@ -1430,16 +1455,26 @@ func (g *Gemma) restartOllama() {
 	defer cancel()
 	if g.waitForHealth(ctx) {
 		g.db.UpdateAgentStatus(agentID, protocol.StatusOnline, "")
-		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			Type:      protocol.MsgUpdate,
-			Content:   "Ollama restarted successfully.",
-		})
+		// Phase S S-1a-4: delegate restart-success emit.
+		if g.isDaemoncronOnline() {
+			daemoncron.EmitOllamaRestartSuccess(g.db)
+		} else {
+			g.db.InsertMessage(protocol.Message{
+				FromAgent: agentID,
+				Type:      protocol.MsgUpdate,
+				Content:   "Ollama restarted successfully.",
+			})
+		}
 	} else {
-		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			Type:      protocol.MsgError,
-			Content:   "Ollama restart: health check timed out.",
-		})
+		// Phase S S-1a-4: delegate restart-timeout emit.
+		if g.isDaemoncronOnline() {
+			daemoncron.EmitOllamaRestartTimeout(g.db)
+		} else {
+			g.db.InsertMessage(protocol.Message{
+				FromAgent: agentID,
+				Type:      protocol.MsgError,
+				Content:   "Ollama restart: health check timed out.",
+			})
+		}
 	}
 }
