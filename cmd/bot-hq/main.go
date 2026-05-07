@@ -72,6 +72,9 @@ func main() {
 		case "session-prune":
 			runSessionPrune()
 			return
+		case "session-search":
+			runSessionSearch()
+			return
 		case "session-load":
 			runSessionLoad()
 			return
@@ -97,7 +100,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|webui|context-switch|session-open|install-session-start-hook|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|session-search|webui|context-switch|session-open|install-session-start-hook|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -753,6 +756,59 @@ func runSessionPrune() {
 	for _, id := range pruned {
 		fmt.Println("  " + id)
 	}
+}
+
+// runSessionSearch performs a cross-session manifest substring search
+// per phase-p.md §P-7 (OQ-7 productionize-class). Grep-style output
+// for editor / fzf / xargs piping.
+//
+// Usage:
+//
+//	bot-hq session-search <query>             # default 50 results
+//	bot-hq session-search --limit <N> <query> # custom cap
+//
+// Exits 0 on success regardless of hit-count (so empty result is a
+// normal completion); exits non-zero only on filesystem errors.
+func runSessionSearch() {
+	limit := 50
+	args := os.Args[2:]
+	var query string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--limit":
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "session-search --limit: value required\n")
+				os.Exit(1)
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n <= 0 {
+				fmt.Fprintf(os.Stderr, "session-search --limit: positive integer required, got %q\n", args[i+1])
+				os.Exit(1)
+			}
+			limit = n
+			i++
+		default:
+			if query != "" {
+				fmt.Fprintf(os.Stderr, "session-search: unexpected positional arg %q (query already set to %q)\n", args[i], query)
+				os.Exit(1)
+			}
+			query = args[i]
+		}
+	}
+	if query == "" {
+		fmt.Fprintf(os.Stderr, "Usage: bot-hq session-search [--limit <N>] <query>\n")
+		os.Exit(1)
+	}
+	hits, err := sessions.SearchSessions(query, limit)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "search failed: %v\n", err)
+		os.Exit(1)
+	}
+	if len(hits) == 0 {
+		fmt.Fprintf(os.Stderr, "no matches for %q\n", query)
+		return
+	}
+	fmt.Print(sessions.FormatSearchResults(hits))
 }
 
 // runInstallToolgateHook installs the K-16 PreToolUse class-split gate
