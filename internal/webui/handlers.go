@@ -407,6 +407,48 @@ func (s *Server) handleCliveActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"messages": out})
 }
 
+// handleFileHistory responds to GET /api/files/{path}/history with the
+// per-dir-git commit history for the file. Empty list when the file's
+// top-dir has no .git/ initialized yet (graceful — frontend renders a
+// "no history" placeholder rather than erroring).
+//
+// Query params: ?limit=<n> caps the returned commits (default 50, hard
+// max 200 to bound response size + git-log time).
+func (s *Server) handleFileHistory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	relPath := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/files/"), "/history")
+	if relPath == "" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	if _, err := resolveCanonicalPath(s.canonicalRoot, relPath); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		var n int
+		if _, err := fmt.Sscanf(raw, "%d", &n); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	commits, err := fileHistory(s.canonicalRoot, relPath, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("history: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if commits == nil {
+		commits = []CommitInfo{} // ensure JSON [] not null
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"commits": commits})
+}
+
 // writeJSON encodes v to w with the given status code + JSON content type.
 // Best-effort — error in encoding logs but doesn't double-write headers.
 func writeJSON(w http.ResponseWriter, status int, v any) {

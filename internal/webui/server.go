@@ -214,6 +214,8 @@ func (s *Server) dispatchFilesPath(w http.ResponseWriter, r *http.Request) {
 		s.handleCliveProposeOrApprove(w, r)
 	case strings.HasSuffix(path, "/revert"):
 		s.handleFileRevert(w, r)
+	case strings.HasSuffix(path, "/history"):
+		s.handleFileHistory(w, r)
 	default:
 		if r.Method == http.MethodPost {
 			s.handleFileWrite(w, r)

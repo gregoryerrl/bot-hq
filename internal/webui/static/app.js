@@ -24,7 +24,12 @@
   const docDirty = document.getElementById('doc-dirty');
   const docSave = document.getElementById('doc-save');
   const docMode = document.getElementById('doc-mode');
+  const docRevert = document.getElementById('doc-revert');
   const docStatus = document.getElementById('doc-status');
+  const revertModal = document.getElementById('revert-modal');
+  const revertList = document.getElementById('revert-history-list');
+  const revertModalPath = document.getElementById('revert-modal-path');
+  const revertStatus = document.getElementById('revert-status');
   const conflictModal = document.getElementById('conflict-modal');
   const conflictServer = document.getElementById('conflict-server-content');
 
@@ -97,6 +102,8 @@
   if (!editor.hasCM()) docContent.addEventListener('input', onEdit);
   docSave.addEventListener('click', saveFile);
   docMode.addEventListener('click', toggleViewMode);
+  docRevert.addEventListener('click', openRevertModal);
+  document.getElementById('revert-close').addEventListener('click', closeRevertModal);
   document.getElementById('conflict-overwrite').addEventListener('click', resolveConflict.bind(null, 'overwrite'));
   document.getElementById('conflict-discard').addEventListener('click', resolveConflict.bind(null, 'discard'));
   document.getElementById('conflict-keep').addEventListener('click', resolveConflict.bind(null, 'keep'));
@@ -243,6 +250,7 @@
     editor.setValue('');
     docRendered.innerHTML = '';
     editor.setDisabled(true);
+    docRevert.disabled = true;
     docSave.disabled = true;
     docDirty.classList.add('hidden');
     docStatus.textContent = '';
@@ -261,6 +269,7 @@
       editor.setValue(state.pristine);
       editor.setModeForPath(path);
       editor.setDisabled(false);
+      docRevert.disabled = false;
       docMtime.textContent = data.mtime || '';
       if (hasRenderedMode(path) && state.viewMode === 'rendered') {
         showRenderedView();
@@ -609,6 +618,95 @@
     } catch (err) {
       docStatus.textContent = 'Save error: ' + err.message;
       updateDirtyState();
+    }
+  }
+
+  // Revert UI (P-3 / phase-n.md:544): show file commit history + offer
+  // one-click revert. Backend POST /api/files/{path}/revert already
+  // exists per ratchet-ledger §14; this surfaces the affordance.
+  async function openRevertModal() {
+    if (!state.currentPath) return;
+    revertModalPath.textContent = state.currentPath;
+    revertList.innerHTML = '<em class="muted">Loading history…</em>';
+    revertStatus.textContent = '';
+    revertModal.classList.remove('hidden');
+    try {
+      const res = await fetch('/api/files/' + state.currentPath + '/history?limit=50');
+      if (!res.ok) {
+        revertList.innerHTML = '<em class="error">Failed to load history: ' + res.status + '</em>';
+        return;
+      }
+      const data = await res.json();
+      const commits = data.commits || [];
+      if (commits.length === 0) {
+        revertList.innerHTML = '<em class="muted">No commit history yet for this file.</em>';
+        return;
+      }
+      // Skip the most-recent commit (HEAD = current state; reverting
+      // to it is a no-op). Show all older commits as revert targets.
+      const targets = commits.slice(1);
+      if (targets.length === 0) {
+        revertList.innerHTML = '<em class="muted">Only one commit on file — nothing to revert to.</em>';
+        return;
+      }
+      revertList.innerHTML = targets.map((c, i) => {
+        const sha = escapeHtml(c.sha.slice(0, 7));
+        const subj = escapeHtml(c.subject || '');
+        const author = escapeHtml(c.author || '');
+        const rel = formatRelativeTime(new Date(c.time * 1000).toISOString());
+        return '<div class="revert-row">'
+          + '<button type="button" class="revert-pick" data-sha="' + escapeHtml(c.sha) + '">Revert to this</button> '
+          + '<code>' + sha + '</code> '
+          + '<span class="revert-subject">' + subj + '</span> '
+          + '<span class="muted">· ' + author + ' · ' + rel + '</span>'
+          + '</div>';
+      }).join('');
+      revertList.querySelectorAll('.revert-pick').forEach((btn) => {
+        btn.addEventListener('click', () => performRevert(btn.dataset.sha));
+      });
+    } catch (err) {
+      revertList.innerHTML = '<em class="error">Fetch error: ' + escapeHtml(err.message) + '</em>';
+    }
+  }
+
+  function closeRevertModal() {
+    revertModal.classList.add('hidden');
+  }
+
+  async function performRevert(sha) {
+    if (!state.currentPath || !sha) return;
+    // Guard against double-click double-fire (per Rain BRAIN-2nd msg
+    // non-blocking #1): without this, a second click before the first
+    // POST settles produces a duplicate revert + empty-commit ledger noise.
+    if (state.revertInFlight) return;
+    if (!confirm('Revert ' + state.currentPath + ' to commit ' + sha.slice(0, 7) + '? A new revert-commit will be created.')) {
+      return;
+    }
+    state.revertInFlight = true;
+    revertStatus.textContent = 'Reverting…';
+    revertList.querySelectorAll('.revert-pick').forEach((b) => { b.disabled = true; });
+    try {
+      const res = await fetch('/api/files/' + state.currentPath + '/revert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to_commit: sha }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        revertStatus.textContent = 'Revert failed: ' + text;
+        return;
+      }
+      const data = await res.json();
+      revertStatus.textContent = 'Reverted (commit ' + (data.commit || '').slice(0, 7) + ')';
+      // Re-load file content + close modal after brief pause.
+      await loadFile(state.currentPath);
+      setTimeout(closeRevertModal, 800);
+      loadRecentEdits();
+    } catch (err) {
+      revertStatus.textContent = 'Revert error: ' + err.message;
+    } finally {
+      state.revertInFlight = false;
+      revertList.querySelectorAll('.revert-pick').forEach((b) => { b.disabled = false; });
     }
   }
 

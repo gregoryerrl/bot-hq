@@ -129,6 +129,69 @@ func commitCanonicalChange(root, relPath, author, message string) (string, error
 	return strings.TrimSpace(string(sha)), nil
 }
 
+// CommitInfo describes one commit in a file's per-dir-git history.
+type CommitInfo struct {
+	SHA     string `json:"sha"`
+	Author  string `json:"author"`
+	Subject string `json:"subject"`
+	Time    int64  `json:"time"` // unix seconds
+}
+
+// fileHistory returns up to `limit` commits touching relPath in
+// reverse-chronological order, sourced from the per-dir git repo.
+// Returns (nil, nil) when the file's top-dir has no .git/ — caller
+// should treat as "no history available".
+//
+// Output format `%H|%an|%at|%s` is single-line per commit; pipe is
+// not git-meaningful for these fields and subjects can't contain
+// newlines so the pipe-split parse is safe.
+func fileHistory(root, relPath string, limit int) ([]CommitInfo, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	topDir := canonicalTopDir(relPath)
+	if topDir == "" {
+		return nil, nil
+	}
+	repoDir := filepath.Join(root, topDir)
+	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+		return nil, nil
+	}
+	repoRel := strings.TrimPrefix(relPath, topDir+"/")
+	cmd := exec.Command("git", "-C", repoDir,
+		"log", fmt.Sprintf("-%d", limit),
+		"--pretty=format:%H|%an|%at|%s",
+		"--", repoRel,
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		// `git log` on a path with no commits yet exits 0 with empty
+		// stdout; a non-zero exit indicates a real error (bad SHA, repo
+		// corruption). Surface as an error rather than silent-empty.
+		return nil, fmt.Errorf("git log: %w", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	commits := make([]CommitInfo, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) != 4 {
+			continue
+		}
+		var t int64
+		fmt.Sscanf(parts[2], "%d", &t)
+		commits = append(commits, CommitInfo{
+			SHA:     parts[0],
+			Author:  parts[1],
+			Time:    t,
+			Subject: parts[3],
+		})
+	}
+	return commits, nil
+}
+
 // revertCanonicalFile checks out the file's content from the supplied
 // commit SHA into the working tree, then commits the revert as a new
 // commit with the daemon as author. Returns the new revert-commit SHA.

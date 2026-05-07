@@ -54,6 +54,7 @@
         <span class="spacer"></span>
         <span id="doc-dirty" class="dirty-indicator hidden">● Unsaved</span>
         <button id="doc-mode" type="button" title="Toggle rendered/raw view">View: rendered</button>
+        <button id="doc-revert" type="button" title="Revert to a previous commit" disabled>Revert…</button>
         <button id="doc-save" type="button" disabled>Save</button>
       </header>
       <div id="doc-rendered" class="doc-rendered"></div>
@@ -93,6 +94,20 @@
         <button id="register-project-cancel" type="button">Cancel</button>
       </div>
       <div id="register-project-status" class="muted"></div>
+    </div>
+  </div>
+
+  <!-- Revert modal: shows file's commit history (P-3 / phase-n.md:544);
+       click a commit to revert the file to that content. -->
+  <div id="revert-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Revert file</h3>
+      <p class="muted" id="revert-modal-path"></p>
+      <div id="revert-history-list" class="search-results"><em class="muted">Loading history…</em></div>
+      <div class="conflict-actions">
+        <button id="revert-close" type="button">Close</button>
+      </div>
+      <div id="revert-status" class="muted"></div>
     </div>
   </div>
 
