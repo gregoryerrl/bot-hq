@@ -483,6 +483,72 @@ main {
 .transcript-entry.user .transcript-role { color: #16a34a; }
 .transcript-text { color: #333; }
 
+/* Landing dashboard (empty-state replacement). Shown when no file is
+   open in the doc viewer; replaces the previous "Pick a destination
+   on the left" placeholder with a curated organized home view. */
+.doc-landing {
+  flex: 1;
+  padding: 1rem;
+  overflow: auto;
+}
+.doc-landing.hidden { display: none; }
+.landing-title {
+  font-size: 1.4rem;
+  margin: 0 0 0.3rem;
+}
+.landing-subtitle {
+  color: #555;
+  font-size: 0.85rem;
+  margin: 0 0 1.2rem;
+}
+.landing-subtitle code {
+  background: #f4f4f4;
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.78rem;
+}
+.landing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 1rem;
+}
+.landing-tile {
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+}
+.landing-tile h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.5rem;
+  color: #2563eb;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 0.3rem;
+}
+.landing-list {
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.landing-list .landing-row {
+  padding: 0.2rem 0;
+  border-bottom: 1px dotted #eee;
+}
+.landing-list .landing-row:last-child { border-bottom: none; }
+.landing-list a {
+  color: #2563eb;
+  text-decoration: none;
+}
+.landing-list a:hover { text-decoration: underline; }
+.landing-quicklinks {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.7;
+}
+.landing-quicklinks a { color: #2563eb; text-decoration: none; }
+.landing-quicklinks a:hover { text-decoration: underline; }
+
 #doc-status {
   padding-top: 0.3rem;
   font-size: 0.78rem;

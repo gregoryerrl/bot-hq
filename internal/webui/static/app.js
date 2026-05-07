@@ -128,6 +128,16 @@
   loadRecentEdits();
   refreshPendingActionsBadge();
   setInterval(refreshPendingActionsBadge, 30 * 1000);
+  // Landing dashboard initial population (curated organized home view).
+  loadLandingDashboard();
+  // Quick-links in dashboard navigate to the named canonical files.
+  document.querySelectorAll('.landing-quicklinks a').forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      var p = a.getAttribute('data-path');
+      if (p) loadFile(p);
+    });
+  });
 
   async function loadProjects() {
     try {
@@ -274,6 +284,7 @@
       editor.setModeForPath(path);
       editor.setDisabled(false);
       docRevert.disabled = false;
+      hideLanding();
       docMtime.textContent = data.mtime || '';
       if (hasRenderedMode(path) && state.viewMode === 'rendered') {
         showRenderedView();
@@ -623,6 +634,88 @@
       docStatus.textContent = 'Save error: ' + err.message;
       updateDirtyState();
     }
+  }
+
+  // Landing dashboard (organized home view; replaces the old "Pick a
+   // destination" placeholder). Populates 4 tiles: Recent edits,
+   // Pending actions, Recent sessions, Quick links. Hides itself when
+   // a file is opened; shows again when state.currentPath is null.
+  async function loadLandingDashboard() {
+    var landingEl = document.getElementById('doc-landing');
+    if (!landingEl) return;
+    // Recent edits — reuse /api/recent-edits endpoint.
+    try {
+      var r = await fetch('/api/recent-edits?limit=8');
+      var data = await r.json();
+      var entries = (data.entries || []);
+      var recentList = document.getElementById('landing-recent-list');
+      if (entries.length === 0) {
+        recentList.innerHTML = '<em class="muted">No recent edits.</em>';
+      } else {
+        recentList.innerHTML = entries.map(function (e) {
+          return '<div class="landing-row"><a href="#" data-path="'
+            + escapeHtml(e.path) + '">' + escapeHtml(e.path) + '</a> '
+            + '<span class="muted">' + formatRelativeTime(e.mtime) + '</span></div>';
+        }).join('');
+        recentList.querySelectorAll('a').forEach(function (a) {
+          a.addEventListener('click', function (ev) {
+            ev.preventDefault();
+            loadFile(a.getAttribute('data-path'));
+          });
+        });
+      }
+    } catch (err) {
+      document.getElementById('landing-recent-list').innerHTML =
+        '<em class="error">Failed to load recent edits</em>';
+    }
+    // Pending actions — preview top 5.
+    try {
+      var r2 = await fetch('/api/pending-actions?limit=5');
+      var d2 = await r2.json();
+      var actions = d2.actions || [];
+      var pendList = document.getElementById('landing-pending-list');
+      if (actions.length === 0) {
+        pendList.innerHTML = '<em class="muted">No pending actions.</em>';
+      } else {
+        pendList.innerHTML = actions.map(function (a) {
+          return '<div class="landing-row"><span class="muted">'
+            + escapeHtml(a.agent_id) + ' · '
+            + escapeHtml(a.kind) + '</span><br>'
+            + escapeHtml(a.summary) + '</div>';
+        }).join('');
+      }
+    } catch (err) {
+      document.getElementById('landing-pending-list').innerHTML =
+        '<em class="error">Failed to load pending actions</em>';
+    }
+    // Recent sessions — pull from /api/sessions.
+    try {
+      var r3 = await fetch('/api/sessions');
+      var d3 = await r3.json();
+      var idx = (d3.index || '').trim();
+      var sessList = document.getElementById('landing-sessions-list');
+      if (!idx) {
+        sessList.innerHTML = '<em class="muted">No sessions logged yet.</em>';
+      } else {
+        // Index is markdown; show first 6 lines as preview.
+        var lines = idx.split('\n').filter(function (l) { return l.trim(); }).slice(0, 6);
+        sessList.innerHTML = lines.map(function (l) {
+          return '<div class="landing-row">' + escapeHtml(l) + '</div>';
+        }).join('');
+      }
+    } catch (err) {
+      document.getElementById('landing-sessions-list').innerHTML =
+        '<em class="error">Failed to load sessions</em>';
+    }
+  }
+
+  function showLanding() {
+    var l = document.getElementById('doc-landing');
+    if (l) l.classList.remove('hidden');
+  }
+  function hideLanding() {
+    var l = document.getElementById('doc-landing');
+    if (l) l.classList.add('hidden');
   }
 
   // Pending-actions queue (P-9 / phase-n.md:818): sidebar badge +

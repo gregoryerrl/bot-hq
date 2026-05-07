@@ -36,7 +36,8 @@ import (
 )
 
 // DefaultPort is the loopback bind port when BOT_HQ_WEBUI_PORT is unset.
-// Chosen to avoid collision with the existing hub live-log :3847.
+// Single canonical webui port post Phase P P-10 unification (voice
+// surface migrated INTO this server; no separate :3847 process).
 const DefaultPort = 3849
 
 // portEnvVar overrides DefaultPort. Per scope-lock OQ-2 LOCKED.

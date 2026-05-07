@@ -67,6 +67,37 @@
         <button id="doc-save" type="button" disabled>Save</button>
       </header>
       <div id="doc-rendered" class="doc-rendered"></div>
+      <!-- Landing dashboard shown when no file is open. Curated organized
+           view (recent edits + pending actions + sessions + quick links)
+           rather than just a directory-finder empty state. -->
+      <div id="doc-landing" class="doc-landing">
+        <h2 class="landing-title">bot-hq workspace</h2>
+        <p class="landing-subtitle">Single source of truth — agents and webui read+write the same canonical-store at <code>~/.bot-hq/</code>.</p>
+        <div class="landing-grid">
+          <section class="landing-tile" id="landing-recent">
+            <h3>Recent edits</h3>
+            <div class="landing-list" id="landing-recent-list"><em class="muted">Loading…</em></div>
+          </section>
+          <section class="landing-tile" id="landing-pending">
+            <h3>Pending actions</h3>
+            <div class="landing-list" id="landing-pending-list"><em class="muted">Loading…</em></div>
+          </section>
+          <section class="landing-tile" id="landing-sessions">
+            <h3>Recent sessions</h3>
+            <div class="landing-list" id="landing-sessions-list"><em class="muted">Loading…</em></div>
+          </section>
+          <section class="landing-tile" id="landing-quicklinks">
+            <h3>Quick links</h3>
+            <ul class="landing-quicklinks">
+              <li><a href="#" data-path="discipline-log.md">Discipline log</a></li>
+              <li><a href="#" data-path="ratchets/active.md">Active ratchets</a></li>
+              <li><a href="#" data-path="phase/phase-n.md">Phase N scope</a></li>
+              <li><a href="#" data-path="rules/general.yaml">Global rules</a></li>
+              <li><a href="#" data-path="README.md">Canonical-store layout</a></li>
+            </ul>
+          </section>
+        </div>
+      </div>
       <textarea id="doc-content" spellcheck="false" placeholder="Pick a file from a destination to edit." class="hidden"></textarea>
       <div id="doc-status" class="muted"></div>
     </section>

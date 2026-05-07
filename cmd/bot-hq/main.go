@@ -143,11 +143,11 @@ func runHub() {
 		log.SetOutput(io.Discard)
 	}
 
-	// 5. Workspace webui on :3849 (single unified web UI; voice surface
-	// migrated INTO webui per Phase P P-10 user msg 15068 — no separate
-	// :3847 process; mic + Gemini audio chat live alongside file browser
-	// + rules editor + pending-actions queue).
-	// Opt-out: BOT_HQ_WEBUI_DISABLE=1. Port-conflict graceful-skip:
+	// 5. Workspace webui on :3849 — the single unified web UI. Voice +
+	// workspace + Clive activity + pending-actions all served from this
+	// one HTTP server. Goroutine-isolated so a webui error never crashes
+	// the hub. Opt-out: BOT_HQ_WEBUI_DISABLE=1. Port-conflict graceful-
+	// skip:
 	// Goroutine-isolated so a webui error never crashes the hub.
 	// Opt-out: BOT_HQ_WEBUI_DISABLE=1. Port-conflict graceful-skip:
 	// if :3849 is already bound (manual `bot-hq webui` running), the
