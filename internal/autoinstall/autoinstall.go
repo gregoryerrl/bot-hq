@@ -24,7 +24,9 @@ import (
 	"io"
 
 	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
+	"github.com/gregoryerrl/bot-hq/internal/sessionstarthook"
 	"github.com/gregoryerrl/bot-hq/internal/toolgate"
+	"github.com/gregoryerrl/bot-hq/internal/voicemirror"
 )
 
 // Run installs both the OUTBOUND-MISS Stop hook and the K-16/L-5
@@ -53,5 +55,23 @@ func Run(settingsPath, botHQPath string, warn io.Writer) {
 
 	if err := toolgate.InstallTrioHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(warn, "autoinstall: toolgate PreToolUse hook install failed (best-effort): %v\n", err)
+	}
+
+	// Phase P P-11 follow-up (per user msg 15080 "usable in 1 rebuild+restart"):
+	// auto-install SessionStart hook so /api/session-open delivers
+	// rules-resolved + bootstrap + tasks to every Claude session at boot.
+	// Without this hook, the v3.x USER-EXERCISE point #2 (edit-rule →
+	// fresh-session abides) cannot close-loop. Best-effort + idempotent
+	// per existing installer pattern.
+	if err := sessionstarthook.InstallTrioHook(settingsPath, botHQPath); err != nil {
+		fmt.Fprintf(warn, "autoinstall: session-start hook install failed (best-effort): %v\n", err)
+	}
+
+	// Phase N v2 R40 voice-mirror discipline hook — also auto-install per
+	// the same "user shouldn't need to run separate install commands"
+	// principle. Hooks fire alert-only; no behavior break if missing but
+	// user-artifact write-discipline has reduced enforcement.
+	if err := voicemirror.InstallTrioHook(settingsPath, botHQPath); err != nil {
+		fmt.Fprintf(warn, "autoinstall: voice-mirror hook install failed (best-effort): %v\n", err)
 	}
 }

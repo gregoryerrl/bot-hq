@@ -39,6 +39,16 @@ func TestRun_FreshSettingsInstallsBothHooks(t *testing.T) {
 	if len(preArr) == 0 {
 		t.Errorf("PreToolUse hook (toolgate) not installed; got %v", hooks)
 	}
+
+	// Phase P P-11 follow-up: SessionStart hook (sessionopen) + voicemirror PreToolUse hook now also installed.
+	startArr, _ := hooks["SessionStart"].([]any)
+	if len(startArr) == 0 {
+		t.Errorf("SessionStart hook (sessionopen) not installed; got %v", hooks)
+	}
+	if len(preArr) < 2 {
+		t.Errorf("PreToolUse should include both toolgate + voicemirror (≥2 entries); got %d", len(preArr))
+	}
+	_ = strings.Contains // appease linter (kept import for other tests)
 }
 
 // TestRun_Idempotent verifies calling Run twice with identical inputs
@@ -66,8 +76,9 @@ func TestRun_Idempotent(t *testing.T) {
 	if len(stopArr) != 1 {
 		t.Errorf("Stop array should have exactly 1 entry after 2 Run() calls; got %d entries", len(stopArr))
 	}
-	if len(preArr) != 1 {
-		t.Errorf("PreToolUse array should have exactly 1 entry after 2 Run() calls; got %d entries", len(preArr))
+	// PreToolUse expects 2 after Phase P P-11 follow-up (toolgate Bash + voicemirror Write).
+	if len(preArr) != 2 {
+		t.Errorf("PreToolUse array should have exactly 2 entries (toolgate + voicemirror) after 2 Run() calls; got %d entries", len(preArr))
 	}
 }
 
@@ -108,9 +119,10 @@ func TestRun_PreservesUnrelatedHooks(t *testing.T) {
 	hooks, _ := settings["hooks"].(map[string]any)
 	preArr, _ := hooks["PreToolUse"].([]any)
 
-	// Should now have 2 entries: original Edit-matcher + new Bash-matcher.
-	if len(preArr) != 2 {
-		t.Errorf("PreToolUse should have 2 entries (preserved + added); got %d: %v", len(preArr), preArr)
+	// Should now have 3 entries: preserved Edit-matcher + new Bash-matcher (toolgate)
+	// + new Write-matcher (voicemirror).
+	if len(preArr) != 3 {
+		t.Errorf("PreToolUse should have 3 entries (preserved + toolgate + voicemirror); got %d: %v", len(preArr), preArr)
 	}
 
 	// Stop hook should also be installed.
