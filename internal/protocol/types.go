@@ -124,6 +124,24 @@ const (
 	//
 	// Phase K K-17.
 	MsgPeerHaltAck MessageType = "peer-halt-ack"
+
+	// MsgCompactNotice — agent is about to autocompact (Claude Code
+	// PreCompact hook signal). Peer agents use this to halt-or-wait on
+	// in-flight cross-coord since the compacting agent's in-context
+	// memory is about to fragment. Discriminator-broadcast: [HR]-tagged
+	// when peer has active fire-in-flight (current_task non-empty);
+	// untagged when both peers idle.
+	//
+	// Phase S S-2.
+	MsgCompactNotice MessageType = "compact-notice"
+
+	// MsgResume — symmetric pair to MsgCompactNotice: agent has
+	// completed autocompact + reloaded context, signaling peers can
+	// resume cross-talk safely. Always-untagged compact-class
+	// (informational; resume is not user-attention-warranting).
+	//
+	// Phase S S-2.
+	MsgResume MessageType = "resume"
 )
 
 // ActiveMessageTypes lists the 6 trio-recommended types per
@@ -137,8 +155,10 @@ var ActiveMessageTypes = []MessageType{
 	MsgResult,
 	MsgError,
 	MsgFlag,
-	MsgPeerHalt,    // Phase K K-17 — bilateral halt-each-other-on-drift
-	MsgPeerHaltAck, // Phase K K-17 — peer-halt recipient ack
+	MsgPeerHalt,      // Phase K K-17 — bilateral halt-each-other-on-drift
+	MsgPeerHaltAck,   // Phase K K-17 — peer-halt recipient ack
+	MsgCompactNotice, // Phase S S-2 — autocompact PreCompact hook signal
+	MsgResume,        // Phase S S-2 — post-compact context-reloaded signal
 }
 
 // DeprecatedMessageTypes lists the 2 legacy-preserved types.
@@ -150,7 +170,7 @@ var DeprecatedMessageTypes = []MessageType{
 func (m MessageType) Valid() bool {
 	switch m {
 	case MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError, MsgFlag,
-		MsgPeerHalt, MsgPeerHaltAck:
+		MsgPeerHalt, MsgPeerHaltAck, MsgCompactNotice, MsgResume:
 		return true
 	}
 	return false

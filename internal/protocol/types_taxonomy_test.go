@@ -3,29 +3,33 @@ package protocol
 import "testing"
 
 // TestMessageTypeTaxonomy locks the Phase J T1.7 (B7 codification) sets,
-// extended in Phase K K-17 to add MsgPeerHalt + MsgPeerHaltAck.
+// extended in Phase K K-17 to add MsgPeerHalt + MsgPeerHaltAck, and
+// in Phase S S-2 to add MsgCompactNotice + MsgResume.
 //
-// Active types: 8 (6 from Phase J + 2 from K-17 mutual-halt protocol).
-// Deprecated types: 2 (MsgHandshake / MsgQuestion). Catches accidental
-// drift in either direction.
+// Active types: 10 (6 from Phase J + 2 from K-17 mutual-halt protocol +
+// 2 from S-2 autocompact-detect+broadcast). Deprecated types: 2
+// (MsgHandshake / MsgQuestion). Catches accidental drift in either
+// direction.
 func TestMessageTypeTaxonomy(t *testing.T) {
 	wantActive := map[MessageType]bool{
-		MsgResponse:    true,
-		MsgCommand:     true,
-		MsgUpdate:      true,
-		MsgResult:      true,
-		MsgError:       true,
-		MsgFlag:        true,
-		MsgPeerHalt:    true, // Phase K K-17
-		MsgPeerHaltAck: true, // Phase K K-17
+		MsgResponse:      true,
+		MsgCommand:       true,
+		MsgUpdate:        true,
+		MsgResult:        true,
+		MsgError:         true,
+		MsgFlag:          true,
+		MsgPeerHalt:      true, // Phase K K-17
+		MsgPeerHaltAck:   true, // Phase K K-17
+		MsgCompactNotice: true, // Phase S S-2
+		MsgResume:        true, // Phase S S-2
 	}
 	wantDeprecated := map[MessageType]bool{
 		MsgHandshake: true,
 		MsgQuestion:  true,
 	}
 
-	if len(ActiveMessageTypes) != 8 {
-		t.Errorf("ActiveMessageTypes count = %d, want 8", len(ActiveMessageTypes))
+	if len(ActiveMessageTypes) != 10 {
+		t.Errorf("ActiveMessageTypes count = %d, want 10", len(ActiveMessageTypes))
 	}
 	for _, m := range ActiveMessageTypes {
 		if !wantActive[m] {
@@ -55,7 +59,7 @@ func TestMessageTypeTaxonomy(t *testing.T) {
 	}
 
 	// Cross-check: active ∪ deprecated covers all Valid() types.
-	all := []MessageType{MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError, MsgFlag, MsgPeerHalt, MsgPeerHaltAck}
+	all := []MessageType{MsgHandshake, MsgQuestion, MsgResponse, MsgCommand, MsgUpdate, MsgResult, MsgError, MsgFlag, MsgPeerHalt, MsgPeerHaltAck, MsgCompactNotice, MsgResume}
 	for _, m := range all {
 		if !m.Valid() {
 			t.Errorf("%q.Valid() = false; expected all enumerated types valid", m)
