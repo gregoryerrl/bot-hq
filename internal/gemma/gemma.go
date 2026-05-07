@@ -242,6 +242,15 @@ type Gemma struct {
 	egressBaseline     map[string]egressBaselineEntry
 	egressFlagTracker  map[string]struct{}
 	egressPaneCapture  egressPaneCaptureFn
+
+	// Phase S S-1a-1 dual-emit-prevention flag. Set true via
+	// SetDaemoncronOnline once internal/daemoncron Cron has Started;
+	// gemma emit-call-sites short-circuit when true so daemoncron is
+	// the sole fire-path for migrated surfaces. Per Rain msg 15796
+	// PUSH-BACK A interpretation (ii). Per-surface migration is staged;
+	// gemma emit fns check this flag at the top of their fire path.
+	daemoncronMu     sync.RWMutex
+	daemoncronOnline bool
 }
 
 // New creates a Gemma instance from config.
@@ -610,13 +619,40 @@ func (g *Gemma) healthLoop() {
 // sessions don't generate gratuitous heartbeats.
 const heartbeatMsgInterval = 25
 
+// SetDaemoncronOnline toggles the Phase S S-1a-1 dual-emit-prevention
+// flag. main.go calls this true once internal/daemoncron has Started;
+// affected gemma emit-call-sites (currently runHeartbeatLedger; future
+// commits expand) short-circuit when true so daemoncron owns the fire
+// path. Per Rain msg 15796 PUSH-BACK A interpretation (ii).
+func (g *Gemma) SetDaemoncronOnline(online bool) {
+	g.daemoncronMu.Lock()
+	defer g.daemoncronMu.Unlock()
+	g.daemoncronOnline = online
+}
+
+// isDaemoncronOnline reads the dual-emit-prevention flag under the
+// RWMutex. Used at the top of migrated emit-call-sites.
+func (g *Gemma) isDaemoncronOnline() bool {
+	g.daemoncronMu.RLock()
+	defer g.daemoncronMu.RUnlock()
+	return g.daemoncronOnline
+}
+
 // runHeartbeatLedger emits a [HEARTBEAT-LEDGER] update to brian + rain
 // at heartbeatMsgInterval cadence. Content: state anchors (latest
 // commit SHA placeholder, active phase-doc path, ratchet-ledger path).
 // Same defense-in-depth role as B1(v) CLAUDE.md Compact Instructions
 // (static) and R20 BOOTSTRAP-ON-CONVERSATION-RESUME (reactive) — this
 // is regular-cadence reinforcement.
+//
+// Phase S S-1a-1: when daemoncron is online, this fn short-circuits
+// — daemoncron's heartbeat-ledger surface owns the fire path so
+// dual-emit is prevented. Pre-daemoncron / daemoncron-disabled paths
+// keep gemma as the sole emitter (back-compat).
 func (g *Gemma) runHeartbeatLedger() {
+	if g.isDaemoncronOnline() {
+		return
+	}
 	recent, err := g.db.GetRecentMessages(1)
 	if err != nil || len(recent) == 0 {
 		return

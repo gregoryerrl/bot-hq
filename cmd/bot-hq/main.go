@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/gregoryerrl/bot-hq/internal/autoinstall"
 	"github.com/gregoryerrl/bot-hq/internal/brian"
+	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
@@ -133,6 +134,21 @@ func runHub() {
 		os.Exit(1)
 	}
 	defer h.Stop()
+
+	// Phase S S-1a-1: daemoncron — daemon-side cadence-driven hub
+	// emits replicating gemma surfaces (heartbeat-ledger this commit;
+	// stale-coder / plan-usage / context-cap / delivery-gap / egress-
+	// audit / lifecycle / sentinel in subsequent S-1a-N sub-commits).
+	// Per Rain msg 15796 PUSH-BACK A interpretation (ii) dual-emit-
+	// prevention: gemma emit-call-sites short-circuit when daemoncron
+	// is online (wired below post-emma-Start via SetDaemoncronOnline).
+	dc := daemoncron.NewWithDefaults(h.DB)
+	if err := dc.Start(); err != nil {
+		log.Printf("[autostart] daemoncron FAILED: %v", err)
+	} else {
+		log.Printf("[autostart] daemoncron OK (heartbeat-ledger)")
+		defer dc.Stop()
+	}
 
 	// 4. Redirect log output to file — TUI owns the terminal
 	logFile, logErr := os.OpenFile(filepath.Join(home, ".bot-hq", "live.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
@@ -275,6 +291,12 @@ func runHub() {
 			// to Emma via her own boot-time replay + the live tick path is
 			// not needed (sentinel is purely event-driven).
 			h.DB.OnMessage(emmaAgent.OnHubMessage)
+			// Phase S S-1a-1: signal emma-side that daemoncron is online
+			// so gemma's heartbeat-ledger emit-call-site short-circuits
+			// (interpretation (ii) dual-emit-prevention per Rain msg 15796).
+			if dc != nil && dc.IsRunning() {
+				emmaAgent.SetDaemoncronOnline(true)
+			}
 			defer emmaAgent.Stop()
 		}
 	}
