@@ -1,6 +1,6 @@
 # Phase Q — per-project library of knowledge (single source of truth)
 
-Cycle: 2026-05-07 single-session (continuation post Phase P drain close-composite + 3 hotfix commits 1f3a92c/7faf2ee/0d6b6a0).
+Cycle: 2026-05-07 single-session (continuation post Phase P drain close-composite + 3 hotfix commits 1f3a92c/7faf2ee/0d6b6a0). Phase Q close-composite originally landed Q-8a 7d3740c at user lightweight-pause checkpoint pre-BCC-pivot; amended at Q-8b close-composite to add Q-9 IPv6 hotfix + Phase R carry-forwards from BCC pivot session.
 
 ## §1 Scope-lock recap
 
@@ -22,9 +22,11 @@ Driver: user msg 15171 ("i don't see the tasks.md on global documents") + 15182 
 | Q-5 | state-edit | per-project library scaffold (5 new subdirs × 3 projects + 6 .md files + 988 dir created) | NON-REPO | PASS msg 15227 |
 | Q-6 | `38d6a83` | webui Phase Q library destinations + dual-root external-file surface | +482/-50 | PASS msg 15231 |
 | Q-7 | state-edit | agent-rule update — README + 3 yaml library blocks + Phase Q section | NON-REPO | PASS msg 15235 |
-| Q-8 | (this) | Phase Q close-composite (arc-snapshot + ratchet-ledger + discipline-log) | composite | at-stage-call |
+| Q-8a | `7d3740c` | Phase Q arc-snapshot author at this file | initial 76 lines | at-stage PASS |
+| Q-9 | `5d66f65` | webui dual loopback bind (127.0.0.1 + ::1) — IPv6 NetworkError hotfix on user-reported recurrence post-BCC-pivot | +35/-16 | at-stage PASS msg 15348 (b)-fire-now CONCUR re-affirmed at fire) |
+| Q-8b | (this) | Phase Q close-composite (arc-snapshot amend + ratchet-ledger close-row + active-phase-q-closed snapshot + discipline-log Joint entry) | composite | at-stage-call |
 
-Cumulative repo-side: 3 Q git commits (Q-1/Q-2/Q-6) + 1 close-composite = 4 commits. ~+763/-61 net LOC. State-edits across Q-3/Q-4/Q-5/Q-7 are canonical-store-only (no bot-hq repo touch).
+Cumulative repo-side: 5 Q git commits (Q-1/Q-2/Q-6/Q-8a/Q-9) + 1 close-composite = 6 commits. ~+798/-77 net LOC. State-edits across Q-3/Q-4/Q-5/Q-7 are canonical-store-only (no bot-hq repo touch).
 
 ## §3 Phase Q state-edits (non-repo)
 
@@ -65,6 +67,12 @@ Cumulative repo-side: 3 Q git commits (Q-1/Q-2/Q-6) + 1 close-composite = 4 comm
 - **R31-sub amend-pass cite-drift** (Phase Q discipline-log new entry): per Rain msg 15218; preventative = post-amend global-grep for old IDs. Recurrence-validated within this very arc-snapshot (Rain msg 15237 caught additional cite-drift in §1+§2; ironic empirical of §5 item 1's exact pattern).
 - **doc-after-impl tolerance pattern** (Phase Q discipline-log new entry): user PROCEED-NOW absolute-greenlight substantively satisfies R10 even when doc lands after first commits, provided post-doc commits cite the doc.
 - **USER-EXERCISE-PRE-PHASE-CLOSE deferred** (R34 item 9): user offline pending rebuild+restart; phase-close formal declaration awaits user-side validation that the library + dual-root + Clive edit + tasks.md all work end-to-end. Q-8 ships prep artifacts; phase-close-fire happens on user return.
+- **R32 SCOPE-FORK miss bilateral on issue 355 BCC pivot** (Q-8b cycle empirical): both Brian + Rain branched off main without checking `git branch -a | grep 355` first. Existing remote branch had 3 commits already covering all 3 design-doc paths. User caught the miss. Recovery clean (orphan branch discarded, work moved to existing branch + rebased + polished + force-pushed). Phase R rule-text refinement candidate: pre-branch-off discovery step belongs in any new-branch flow.
+- **R36 vs HEARTBEAT-LOOP-ANTIPATTERN bilateral OUTBOUND-MISS** (Q-8b cycle empirical): both agents emitted "Idle." pane text without hub_send during halt-handoff symmetric silent-commitment cycle, tripping R36 hook. Resolution candidate: zero-pane-output (no text at all) OR canonical hub_send-wrap exit pattern at handshake-close.
+- **Bilateral R31 stat-drift recursive on doc-migration audit** (msg 15343/15344/15347/15348): Brian +2 plans / Rain -1 plan / actual 34 — both agents drifted, both self-corrected within 2 round-trips. R31-sub recursion-terminator continues to validate at meta-level.
+- **emma-stale-coder detection doesn't distinguish intentional-idle vs fault**: hub-side classification refinement candidate.
+- **R34 user-directive override of USER-EXERCISE item-9** (msg 15454): user explicit "finish all and then i will rebuild+restart" overrides item-9-blocking. Authority-class disambiguation candidate (user-directive vs agent-bypass).
+- **Q-9 IPv6 hotfix bundle-into-close-composite pattern**: hotfix discovered mid-pivot-return, fired as final pre-close commit, bundled into Phase Q close rather than spawning Phase R cycle. Pattern empirically appropriate for single-line/single-file class.
 
 ## §7 Cross-references
 
@@ -72,4 +80,6 @@ Cumulative repo-side: 3 Q git commits (Q-1/Q-2/Q-6) + 1 close-composite = 4 comm
 - **Phase Q scope-lock:** `~/.bot-hq/phase/phase-q.md` v1 + 4 amends
 - **Ratchet-ledger Phase Q close-row:** `~/.bot-hq/ratchets/active.md` § "Phase Q library — Tier-1 close"
 - **Phase Q library schema reference:** `~/.bot-hq/README.md` § "Phase Q — bot-hq is the owner of per-project knowledge"
-- **R34 8th self-application:** this close-composite (after L-3a + Phase M close + Phase N v1/v2/v3 close + Phase O drain close + Phase P drain close + Phase Q library close)
+- **R34 9th self-application:** this close-composite (after L-3a + Phase M close + Phase N v1/v2/v3 close + Phase O drain close + Phase P drain close + Phase Q library Q-8a + Phase Q close-composite Q-8b)
+- **Phase Q closed snapshot:** `~/.bot-hq/ratchets/active-phase-q-closed-2026-05-07.md`
+- **Phase Q discipline-log Joint entry:** `~/.bot-hq/discipline-log.md§2026-05-07T(Phase-Q-close-composite)`
