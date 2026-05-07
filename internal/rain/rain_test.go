@@ -305,6 +305,16 @@ func TestRainPromptEmbedsPhaseNv6VoiceMirrorDiscipline(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseRv1ContextLibraryTerminology — rain-side
+// wiring lock for Phase R R3-b CL terminology. Mirrors brian-side.
+func TestRainPromptEmbedsPhaseRv1ContextLibraryTerminology(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv1ContextLibraryTerminology) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv1ContextLibraryTerminology verbatim (Phase R R3-b wiring lock)")
+	}
+}
+
 // TestRainPromptEmbedsIdSessionsSkillPointer — rain-side wiring lock
 // for Phase N v2 #7 /id-sessions skill-pointer (per Rain msg 8146
 // PASS-1 push-back). Without active-prompt-cite, agents have skill-

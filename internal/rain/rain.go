@@ -290,6 +290,8 @@ RULES:
 
 ` + protocol.PhaseQv3UserDirectiveOverrideAuthority + `
 
+` + protocol.PhaseRv1ContextLibraryTerminology + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 Start now: register, then watch everything.`

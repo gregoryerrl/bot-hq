@@ -814,3 +814,36 @@ func TestIdSessionsSkillPointerSubstringLock(t *testing.T) {
 		})
 	}
 }
+
+// Phase R R3-b commit ratchet: pin Context Library terminology
+// recognition substrings on PhaseRv1ContextLibraryTerminology const.
+// Mirrors the Phase N v6 substring-lock pattern. Without this anchor,
+// future trim might silently remove the user-facing CL ↔ canonical-store
+// equivalence cite per Phase R R3 SURFACE-rename scope.
+func TestPhaseRv1ContextLibraryTerminologySubstringLock(t *testing.T) {
+	must := []string{
+		"CONTEXT-LIBRARY-TERMINOLOGY (R3)",
+		"Context Library (CL)",
+		"canonical-store",
+		"~/.bot-hq/README.md",
+		"glossary.md",
+		"rulebook.md",
+		"agent-onboarding.md",
+		"feedback-memory-index.md",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseRv1ContextLibraryTerminology, lit) {
+				t.Errorf("R3 CONTEXT-LIBRARY-TERMINOLOGY ratchet broken: missing literal %q in PhaseRv1ContextLibraryTerminology", lit)
+			}
+		})
+	}
+}
+
+// PhaseRv1ContextLibraryTerminology const must start with the rule-anchor
+// prefix the agent prompt embeds recognize. Mirrors PhaseNv6 pattern.
+func TestPhaseRv1ContextLibraryTerminologyHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseRv1ContextLibraryTerminology, "- CONTEXT-LIBRARY-TERMINOLOGY (R3):") {
+		t.Errorf("rule must start with `- CONTEXT-LIBRARY-TERMINOLOGY (R3):` (prompt anchor); first 60 chars: %q", PhaseRv1ContextLibraryTerminology[:60])
+	}
+}
