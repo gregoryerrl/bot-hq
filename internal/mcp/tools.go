@@ -479,9 +479,8 @@ func hubFlag(db *hub.DB) ToolDef {
 
 func hubSend(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_send",
-		mcp.WithDescription("Send a message through the hub"),
+		mcp.WithDescription("Send a message through the hub. Phase S S-4: PM `to:` parameter REMOVED — all messages broadcast. To target a specific agent, use @<agent> mention in content (e.g., `@brian please review` / `@rain BRAIN-2nd needed` / `@emma rule-violation observed`). The agent recognizes its own name and self-filters relevance via DB-side audience-class-discriminator (R6) load-bearing post-PM-removal. Historical to_agent column preserved for forensics-trail; new messages always broadcast."),
 		mcp.WithString("from", mcp.Required(), mcp.Description("Sender agent ID")),
-		mcp.WithString("to", mcp.Description("Recipient agent ID (empty for broadcast)")),
 		mcp.WithString("session_id", mcp.Description("Session ID if part of a session")),
 		mcp.WithString("type", mcp.Required(), mcp.Description("Message type: handshake, question, response, command, update, result, error")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Message content")),
@@ -511,7 +510,11 @@ func hubSend(db *hub.DB) ToolDef {
 
 		msg := protocol.Message{
 			FromAgent: from,
-			ToAgent:   req.GetString("to", ""),
+			// Phase S S-4: ToAgent always empty; PM removed in favor of
+			// @<agent> mention-detection in content. Historical
+			// messages with non-empty to_agent preserved at DB layer
+			// for forensics-trail per R2 authorless-display pattern.
+			ToAgent:   "",
 			SessionID: req.GetString("session_id", ""),
 			Type:      mt,
 			Content:   content,
@@ -1986,14 +1989,14 @@ func buildCoderPreamble(sessionID, worktreeNote string, rules *projects.Rules) s
 			policy.WriteString(`
 PUSH POLICY: This project requires explicit user approval before any git push.
 - Do NOT run ` + "`git push`" + ` or ` + "`git push --set-upstream`" + ` without approval.
-- When push is needed, hub_send to brian: "ready to push branch <name>, awaiting approval".
+- When push is needed, hub_send broadcast with @brian mention: "@brian ready to push branch <name>, awaiting approval".
 - Wait for explicit approval before pushing.
 `)
 		}
 		if rules.ForcePushBlocked {
 			policy.WriteString(`
 FORCE-PUSH POLICY: Force-pushes are HARD-BLOCKED in this project. This includes ` + "`--force`" + ` AND ` + "`--force-with-lease`" + ` variants.
-- If a force-push is unavoidable, hub_send to brian (PM): "request_force_push: <branch>@<sha>".
+- If a force-push is unavoidable, hub_send broadcast with @brian mention: "@brian request_force_push: <branch>@<sha>".
 - WAIT for brian to relay an approved greenlight back to you. Do NOT push until approval arrives.
 - Brian will only relay approval after the user types the exact verbatim token. No partial matches accepted.
 - Do NOT attempt to construct or guess the token yourself. The user must type it.
@@ -2028,8 +2031,9 @@ If asked to run one of these, refuse and PM brian explaining the block.
 	return fmt.Sprintf(`You are a coder agent (ID: %s) in the bot-hq system. You have bot-hq MCP tools available.
 
 IMPORTANT: Communicate your progress on the hub so other agents can see what you're doing.
-- When you START work: hub_send(from="%s", to="brian", type="update", content="Starting: <brief description>")
-- When you FINISH or hit a blocker: hub_send(from="%s", to="brian", type="result", content="<what you did or what's blocking>")
+Phase S S-4: PM 'to:' removed — use @<agent> mention in content for targeting.
+- When you START work: hub_send(from="%s", type="update", content="@brian Starting: <brief description>")
+- When you FINISH or hit a blocker: hub_send(from="%s", type="result", content="@brian <what you did or what's blocking>")
 - Keep hub messages short — one or two sentences max.
 %s%s
 Your task:

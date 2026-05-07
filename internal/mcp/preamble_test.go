@@ -13,7 +13,8 @@ func TestBuildCoderPreamble_BaselineAlwaysIncluded(t *testing.T) {
 	must := []string{
 		"coder agent (ID: abc123)",
 		"bot-hq MCP tools available",
-		`hub_send(from="abc123", to="brian"`,
+		// Phase S S-4: PM `to:` removed; mention-based targeting via @brian.
+		`hub_send(from="abc123", type="update", content="@brian Starting:`,
 		"Your task:",
 	}
 	for _, s := range must {

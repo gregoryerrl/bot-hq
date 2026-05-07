@@ -338,6 +338,98 @@ func TestHubSendAndReadTools(t *testing.T) {
 	if msgs[0].FromAgent != "alice" {
 		t.Errorf("expected from 'alice', got %q", msgs[0].FromAgent)
 	}
+	// Phase S S-4: even when `to: "bob"` parameter is passed, the
+	// handler ignores it and sets ToAgent="" (broadcast). Bob still
+	// receives via hub_read since broadcasts (to_agent='') match the
+	// `WHERE to_agent=? OR to_agent=''` clause.
+	if msgs[0].ToAgent != "" {
+		t.Errorf("Phase S S-4: hub_send must force ToAgent=\"\" (PM removed); got %q", msgs[0].ToAgent)
+	}
+}
+
+// TestHubSend_S4_PMRemoved locks the Phase S S-4 contract: hub_send
+// MCP tool no longer routes via `to:` parameter — all messages
+// broadcast (ToAgent always empty). Mention-detection via @<agent>
+// in content replaces PM semantic.
+func TestHubSend_S4_PMRemoved(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	handlers := make(map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error))
+	for _, td := range tools {
+		handlers[td.Tool.Name] = td.Handler
+	}
+	ctx := context.Background()
+
+	cases := []struct {
+		name    string
+		toParam any // "to" param value (or nil to skip key)
+	}{
+		{"no-to-param", nil},
+		{"to-param-empty", ""},
+		{"to-param-passed-back-compat-ignored", "rain"},
+		{"to-param-passed-self-ignored", "brian"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{
+				"from":    "brian",
+				"type":    "update",
+				"content": "@rain test mention-routing post-PM-removal",
+			}
+			if tc.toParam != nil {
+				args["to"] = tc.toParam
+			}
+			req := mcp.CallToolRequest{}
+			req.Params.Arguments = args
+			result, err := handlers["hub_send"](ctx, req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.IsError {
+				t.Fatalf("hub_send failed: %v", result.Content)
+			}
+		})
+	}
+
+	// Verify all sent messages have ToAgent="" regardless of input.
+	msgs, err := db.GetRecentMessages(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if m.FromAgent != "brian" {
+			continue
+		}
+		if m.ToAgent != "" {
+			t.Errorf("Phase S S-4: msg %d ToAgent=%q, want empty (PM removed)", m.ID, m.ToAgent)
+		}
+	}
+}
+
+// TestHubSend_S4_SchemaDropsToParam locks that the MCP tool schema
+// for hub_send no longer declares a `to:` parameter. MCP clients
+// reading the schema see only from / session_id / type / content.
+func TestHubSend_S4_SchemaDropsToParam(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	for _, td := range tools {
+		if td.Tool.Name != "hub_send" {
+			continue
+		}
+		schemaJSON, err := json.Marshal(td.Tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(schemaJSON)
+		if strings.Contains(s, `"to"`) {
+			t.Errorf("Phase S S-4: hub_send schema must not declare `to:` parameter; got %s", s)
+		}
+		if !strings.Contains(s, `"from"`) || !strings.Contains(s, `"content"`) || !strings.Contains(s, `"type"`) {
+			t.Errorf("hub_send schema missing required from/type/content; got %s", s)
+		}
+		return
+	}
+	t.Error("hub_send tool not found in BuildTools()")
 }
 
 func findHandler(tools []ToolDef, name string) func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error) {
