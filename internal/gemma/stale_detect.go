@@ -101,7 +101,16 @@ func (g *Gemma) checkStaleAgents() {
 // checkStaleAgentsAt is the testable variant: callers inject a virtual now
 // so tests can advance simulated time past staleThreshold without sleeping
 // or backdating database rows.
+//
+// Phase S S-1a-2: when daemoncron is online, this fn short-circuits —
+// daemoncron's stale-coder surface owns the fire path so dual-emit is
+// prevented. Pane-activity tmux check temporarily disabled until
+// pane-checker migration (S-1a-followup); rate-cap (1/4h) bounds
+// pane-active-but-LastSeen-stale noise.
 func (g *Gemma) checkStaleAgentsAt(now time.Time) {
+	if g.isDaemoncronOnline() {
+		return
+	}
 	// Phase H slice 4 C6 (H-31): halt-state suppresses ALL H-3a stale-fires
 	// during an active halt. Halt = all-hands-idle by convention; agents
 	// finishing their final tool call before posting close-SNAP would
