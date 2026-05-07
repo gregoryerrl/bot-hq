@@ -113,6 +113,8 @@
   document.getElementById('search-open').addEventListener('click', openSearchModal);
   document.getElementById('search-close').addEventListener('click', closeSearchModal);
   document.getElementById('search-input').addEventListener('input', onSearchInput);
+  document.getElementById('pending-actions-badge').addEventListener('click', openPendingActionsModal);
+  document.getElementById('pending-actions-close').addEventListener('click', closePendingActionsModal);
   document.addEventListener('keydown', (ev) => {
     if ((ev.ctrlKey || ev.metaKey) && ev.key === 'k') {
       ev.preventDefault();
@@ -124,6 +126,8 @@
 
   loadProjects().then(loadDestinations);
   loadRecentEdits();
+  refreshPendingActionsBadge();
+  setInterval(refreshPendingActionsBadge, 30 * 1000);
 
   async function loadProjects() {
     try {
@@ -618,6 +622,80 @@
     } catch (err) {
       docStatus.textContent = 'Save error: ' + err.message;
       updateDirtyState();
+    }
+  }
+
+  // Pending-actions queue (P-9 / phase-n.md:818): sidebar badge +
+  // popover modal. Polls /api/pending-actions?count=1 every 30s for
+  // the badge; opens full list on click + per-row ack handler.
+  async function refreshPendingActionsBadge() {
+    try {
+      const res = await fetch('/api/pending-actions?count=1');
+      if (!res.ok) return;
+      const data = await res.json();
+      const badge = document.getElementById('pending-actions-badge');
+      const count = document.getElementById('pending-actions-count');
+      count.textContent = data.count || 0;
+      badge.classList.toggle('has-pending', (data.count || 0) > 0);
+    } catch (err) {
+      // Best-effort; transient fetch errors don't disrupt UI.
+    }
+  }
+
+  async function openPendingActionsModal() {
+    const modal = document.getElementById('pending-actions-modal');
+    const list = document.getElementById('pending-actions-list');
+    list.innerHTML = '<em class="muted">Loading…</em>';
+    modal.classList.remove('hidden');
+    try {
+      const res = await fetch('/api/pending-actions?limit=100');
+      if (!res.ok) {
+        list.innerHTML = '<em class="error">Failed to load pending actions: ' + res.status + '</em>';
+        return;
+      }
+      const data = await res.json();
+      const actions = data.actions || [];
+      if (actions.length === 0) {
+        list.innerHTML = '<em class="muted">No pending actions. All caught up.</em>';
+        return;
+      }
+      list.innerHTML = actions.map((a) => {
+        const ts = new Date(a.created).toISOString().slice(0, 16).replace('T', ' ');
+        return '<div class="pending-row" data-id="' + a.id + '">'
+          + '<button type="button" class="pending-ack" data-id="' + a.id + '">Ack</button>'
+          + '<span class="pending-kind">' + escapeHtml(a.kind) + '</span> '
+          + '<span class="muted">· ' + escapeHtml(a.agent_id) + ' · ' + ts + 'Z</span><br>'
+          + '<span class="pending-summary">' + escapeHtml(a.summary) + '</span>'
+          + '</div>';
+      }).join('');
+      list.querySelectorAll('.pending-ack').forEach((btn) => {
+        btn.addEventListener('click', () => ackPendingAction(btn.dataset.id, btn));
+      });
+    } catch (err) {
+      list.innerHTML = '<em class="error">Fetch error: ' + escapeHtml(err.message) + '</em>';
+    }
+  }
+
+  function closePendingActionsModal() {
+    document.getElementById('pending-actions-modal').classList.add('hidden');
+  }
+
+  async function ackPendingAction(id, btn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/pending-actions/' + encodeURIComponent(id) + '/ack', {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        btn.disabled = false;
+        return;
+      }
+      const row = btn.closest('.pending-row');
+      if (row) row.remove();
+      refreshPendingActionsBadge();
+    } catch (err) {
+      btn.disabled = false;
     }
   }
 

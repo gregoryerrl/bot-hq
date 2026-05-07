@@ -345,6 +345,58 @@ main {
   flex-shrink: 1;
 }
 
+/* Pending-actions widget (P-9 / phase-n.md:818). Topbar badge + modal
+   list with per-row Ack button. */
+.pending-actions-badge {
+  border: 1px solid #ddd;
+  background: white;
+  color: #555;
+  padding: 0.25rem 0.6rem;
+  border-radius: 12px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.pending-actions-badge.has-pending {
+  background: #fef3c7;
+  border-color: #f59e0b;
+  color: #92400e;
+  font-weight: 600;
+}
+.pending-actions-badge:hover { background: #f4f4f4; }
+.pending-actions-badge.has-pending:hover { background: #fde68a; }
+.pending-row {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #eee;
+  font-size: 0.85rem;
+}
+.pending-row:last-child { border-bottom: none; }
+.pending-kind {
+  display: inline-block;
+  background: #e0e7ff;
+  color: #3730a3;
+  padding: 0.05rem 0.4rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+.pending-ack {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid #16a34a;
+  background: white;
+  color: #16a34a;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-right: 0.5rem;
+}
+.pending-ack:hover { background: #16a34a; color: white; }
+.pending-ack:disabled { opacity: 0.5; cursor: wait; }
+.pending-summary {
+  display: inline-block;
+  margin-top: 0.25rem;
+  color: #333;
+}
+
 #doc-status {
   padding-top: 0.3rem;
   font-size: 0.78rem;

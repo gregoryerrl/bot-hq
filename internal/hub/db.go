@@ -265,6 +265,22 @@ func (db *DB) migrate() error {
 		set_by  TEXT NOT NULL,
 		reason  TEXT NOT NULL
 	);
+
+	-- Phase P P-9 / phase-n.md:818: pending-actions queue. Tracks
+	-- user-actionable items derived from [HR]-tagged hub messages so
+	-- the webui can surface a sidebar badge + popover list. Schema:
+	-- one row per pending action; status enum {pending, ack, dismissed}.
+	CREATE TABLE IF NOT EXISTS pending_actions (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		agent_id    TEXT NOT NULL,
+		kind        TEXT NOT NULL,
+		summary     TEXT NOT NULL,
+		msg_id      INTEGER DEFAULT 0,
+		status      TEXT NOT NULL DEFAULT 'pending',
+		created     INTEGER NOT NULL,
+		updated     INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status, created DESC);
 	`
 	if _, err := db.conn.Exec(schema); err != nil {
 		return err

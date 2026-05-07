@@ -96,6 +96,7 @@ func NewServer(db *hub.DB, opts ...Option) (*Server, error) {
 	}
 	s.initSSE()
 	s.wireCliveBroadcast()
+	s.wireUserPendingActions()
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	s.httpServer = &http.Server{
@@ -197,6 +198,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/clive/activity", s.handleCliveActivity)
 	mux.HandleFunc("/api/session-open", s.handleSessionOpen)
 	mux.HandleFunc("/api/hub-pivot", s.handleHubPivot)
+	mux.HandleFunc("/api/pending-actions", s.handlePendingActions)
+	mux.HandleFunc("/api/pending-actions/", s.handlePendingActionAck)
 	mux.Handle("/", staticHandler())
 }
 

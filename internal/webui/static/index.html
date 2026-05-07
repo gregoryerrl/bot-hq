@@ -19,7 +19,9 @@
 <body>
   <header class="topbar">
     <h1>bot-hq workspace</h1>
-    <span class="agent-state" id="agent-state" title="Live agent state — Phase N v3.x-2 fills">trio: idle</span>
+    <button class="pending-actions-badge" id="pending-actions-badge" type="button" title="Pending agent actions awaiting your attention">
+      <span id="pending-actions-count">0</span> pending
+    </button>
     <span class="spacer"></span>
     <label class="picker">
       Project
@@ -62,6 +64,19 @@
       <div id="doc-status" class="muted"></div>
     </section>
   </main>
+
+  <!-- Pending-actions popover: Phase P P-9 / phase-n.md:818. Sidebar
+       widget surfacing user-actionable items derived from [HR]-tagged
+       hub messages; click an item's "Ack" to clear it from the queue. -->
+  <div id="pending-actions-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Pending actions</h3>
+      <div id="pending-actions-list" class="search-results"><em class="muted">Loading…</em></div>
+      <div class="conflict-actions">
+        <button id="pending-actions-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Cross-search modal: Phase O drain per phase-n.md:819 dashboard. -->
   <div id="search-modal" class="modal hidden">

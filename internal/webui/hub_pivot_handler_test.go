@@ -29,6 +29,8 @@ func newTestServerWithDB(t *testing.T) *Server {
 		db:            db,
 		canonicalRoot: t.TempDir(),
 	}
+	s.initSSE()
+	s.wireUserPendingActions()
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	s.httpServer = &http.Server{Handler: mux}
