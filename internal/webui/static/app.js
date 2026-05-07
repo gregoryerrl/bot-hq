@@ -94,7 +94,26 @@
     state.project = projectPicker.value;
     activeChip.textContent = state.project;
     loadDestinations();
+    postWebuiContext();
   });
+
+  // postWebuiContext sends the user's current focus (project / file /
+  // view-mode) to /api/webui-context so the voice handler can inject it
+  // into Clive's Gemini systemInstruction. Fire-and-forget: failure is
+  // non-fatal (Clive simply lacks ambient context).
+  function postWebuiContext() {
+    try {
+      fetch('/api/webui-context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project: state.project || '',
+          currentPath: state.currentPath || '',
+          viewMode: state.viewMode || '',
+        }),
+      }).catch(() => {});
+    } catch (_) { /* ignore */ }
+  }
   navSearch.addEventListener('input', () => {
     state.searchQuery = navSearch.value.trim().toLowerCase();
     applyNavFilter();
@@ -127,6 +146,7 @@
   loadProjects().then(loadDestinations);
   loadRecentEdits();
   refreshPendingActionsBadge();
+  postWebuiContext();
   setInterval(refreshPendingActionsBadge, 30 * 1000);
   // Landing dashboard initial population (curated organized home view).
   loadLandingDashboard();
@@ -285,6 +305,7 @@
       editor.setDisabled(false);
       docRevert.disabled = false;
       hideLanding();
+      postWebuiContext();
       docMtime.textContent = data.mtime || '';
       if (hasRenderedMode(path) && state.viewMode === 'rendered') {
         showRenderedView();

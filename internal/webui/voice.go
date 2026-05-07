@@ -89,7 +89,11 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 	if apiKey != "" {
 		voice := s.db.GetSetting("live.voice", "Iapetus")
 		gemini = NewGeminiProxy(apiKey, voice)
-		if err := gemini.Connect(""); err != nil {
+		// Inject ambient webui-focus context into systemInstruction so Clive
+		// knows what the user is currently looking at without being told.
+		// Per user msg 15117 ("i want clive to see what i am looking at on
+		// the web ui so i don't have to mention fileName, filePath, etc").
+		if err := gemini.Connect(s.buildVoiceSystemInstruction()); err != nil {
 			log.Printf("Gemini connect error: %v", err)
 			writeBrowser(map[string]string{
 				"type":  "error",

@@ -61,6 +61,27 @@ type Server struct {
 	// SSE subscriber state for /api/clive/activity live feed (P-1).
 	sseMu           sync.Mutex
 	sseSubsByOrigin map[string][]*cliveSubscriber
+
+	// Ambient webui-focus state. Frontend POSTs to /api/webui-context on
+	// file-open / project-pick / tab-switch; voice handler reads pre-
+	// Gemini.Connect to inject "[USER VIEWING: ...]" into systemInstruction
+	// so Clive sees what the user is looking at without the user having
+	// to spell out filenames. In-memory only — single-user local-only
+	// webui; same-process Clive-after-P-10 needs no IPC. Per user msg
+	// 15117 "i want clive to see what i am looking at on the web ui".
+	ctxMu    sync.RWMutex
+	webuiCtx WebuiContext
+}
+
+// WebuiContext describes what the user is currently looking at in the
+// webui. Read by the voice handler before connecting to Gemini so Clive
+// has ambient awareness of the focus file/project. Written via POST
+// /api/webui-context from the frontend on every focus change.
+type WebuiContext struct {
+	Project     string    `json:"project"`
+	CurrentPath string    `json:"currentPath"`
+	ViewMode    string    `json:"viewMode"` // "rendered" | "raw" | "split"
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 // Option mutates Server config at construction. Pattern mirrors
@@ -202,6 +223,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/pending-actions", s.handlePendingActions)
 	mux.HandleFunc("/api/pending-actions/", s.handlePendingActionAck)
 	mux.HandleFunc("/api/voice/ws", s.handleVoiceWS)
+	mux.HandleFunc("/api/webui-context", s.handleWebuiContext)
 	mux.Handle("/", staticHandler())
 }
 
