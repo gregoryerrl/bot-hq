@@ -292,6 +292,8 @@ RULES:
 
 ` + protocol.PhaseRv1ContextLibraryTerminology + `
 
+` + protocol.PhaseRv2BrainCycleHardening + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 Start now: register, then watch everything.`

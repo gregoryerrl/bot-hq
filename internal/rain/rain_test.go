@@ -315,6 +315,16 @@ func TestRainPromptEmbedsPhaseRv1ContextLibraryTerminology(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseRv2BrainCycleHardening — rain-side wiring
+// lock for Phase R R1 BRAIN-cycle hardening. Mirrors brian-side.
+func TestRainPromptEmbedsPhaseRv2BrainCycleHardening(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv2BrainCycleHardening) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv2BrainCycleHardening verbatim (Phase R R1 wiring lock)")
+	}
+}
+
 // TestRainPromptEmbedsIdSessionsSkillPointer — rain-side wiring lock
 // for Phase N v2 #7 /id-sessions skill-pointer (per Rain msg 8146
 // PASS-1 push-back). Without active-prompt-cite, agents have skill-

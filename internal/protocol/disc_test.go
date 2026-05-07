@@ -847,3 +847,44 @@ func TestPhaseRv1ContextLibraryTerminologyHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- CONTEXT-LIBRARY-TERMINOLOGY (R3):` (prompt anchor); first 60 chars: %q", PhaseRv1ContextLibraryTerminology[:60])
 	}
 }
+
+// Phase R R1 (b-2) commit ratchet: pin BRAIN-cycle hardening
+// recognition substrings on PhaseRv2BrainCycleHardening const. Locks
+// the canonical literals user msg 15497 ratified verbatim + the
+// EYES-FACTUAL-REPORT carve-out + Brian-unreachable + direct-PM-exempt
+// + FLAG-class display-strip clauses. Without this anchor, future
+// trim might silently remove load-bearing content from this rule
+// per the dual-edit drift surface (mirrors PhaseNv6 ratchet pattern).
+func TestPhaseRv2BrainCycleHardeningSubstringLock(t *testing.T) {
+	must := []string{
+		"BRAIN-CYCLE-HARDENING (R41 — Phase R R1)",
+		"Brian proposes first",
+		"Rain BRAIN-2nds",
+		"Rain seals with final draft",
+		"Rain alone emits",
+		"Brian NEVER emits",
+		"EYES-FACTUAL-REPORT carve-out",
+		"Drift-observation sub-clause",
+		"Brian-unreachable 60s carve-out",
+		"[brian-unreachable-rain-drafting]",
+		"Direct-PM exempt",
+		"FLAG-class display-strip",
+		"Supersedes",
+		"R30HRTagDiscriminator",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseRv2BrainCycleHardening, lit) {
+				t.Errorf("R41 BRAIN-CYCLE-HARDENING ratchet broken: missing literal %q in PhaseRv2BrainCycleHardening", lit)
+			}
+		})
+	}
+}
+
+// PhaseRv2BrainCycleHardening const must start with the rule-anchor
+// prefix the agent prompt embeds recognize. Mirrors PhaseNv6 + R3 pattern.
+func TestPhaseRv2BrainCycleHardeningHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseRv2BrainCycleHardening, "- BRAIN-CYCLE-HARDENING (R41 — Phase R R1):") {
+		t.Errorf("rule must start with `- BRAIN-CYCLE-HARDENING (R41 — Phase R R1):` (prompt anchor); first 80 chars: %q", PhaseRv2BrainCycleHardening[:80])
+	}
+}

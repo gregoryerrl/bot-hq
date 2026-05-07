@@ -306,6 +306,8 @@ RULES:
 
 ` + protocol.PhaseRv1ContextLibraryTerminology + `
 
+` + protocol.PhaseRv2BrainCycleHardening + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 ` + protocol.H13ForcePushProtocol + `

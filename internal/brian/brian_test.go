@@ -270,6 +270,17 @@ func TestBrianPromptEmbedsPhaseRv1ContextLibraryTerminology(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseRv2BrainCycleHardening verifies the
+// Phase R R1 BRAIN-cycle hardening const is wired into Brian's prompt.
+// Mirror in rain_test.go locks rain-side.
+func TestBrianPromptEmbedsPhaseRv2BrainCycleHardening(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv2BrainCycleHardening) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv2BrainCycleHardening verbatim (Phase R R1 wiring lock)")
+	}
+}
+
 // TestBrianPromptEmbedsIdSessionsSkillPointer — brian-side wiring lock
 // for Phase N v2 #7 /id-sessions skill-pointer per Rain msg 8146
 // PASS-1 push-back. Mirror in rain_test.go locks rain-side.
