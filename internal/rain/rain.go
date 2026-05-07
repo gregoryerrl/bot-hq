@@ -284,6 +284,12 @@ RULES:
 
 ` + protocol.PhaseNv6VoiceMirrorDiscipline + `
 
+` + protocol.PhaseQv1PreBranchOffDiscovery + `
+
+` + protocol.PhaseQv2SilentCommitmentExitPattern + `
+
+` + protocol.PhaseQv3UserDirectiveOverrideAuthority + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 Start now: register, then watch everything.`
