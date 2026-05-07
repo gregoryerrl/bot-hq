@@ -4,7 +4,7 @@
     "use strict";
 
     // ── Constants ──────────────────────────────────────────────────────
-    var WS_URL = "ws://" + window.location.host + "/ws";
+    var WS_URL = "ws://" + window.location.host + "/api/voice/ws";
     var CAPTURE_SAMPLE_RATE = 16000;
     var PLAYBACK_SAMPLE_RATE = 24000;
 
@@ -23,14 +23,24 @@
     var playbackSources = [];
     var isSpeaking = false;
 
-    // DOM
-    var statusEl = document.getElementById("status");
+    // DOM (workspace-integrated topbar mic + transcript drawer).
+    var statusEl = document.getElementById("voice-status");
     var micBtn = document.getElementById("mic-btn");
-    var transcriptEl = document.getElementById("transcript");
+    var transcriptEl = document.getElementById("voice-transcript");
+    var drawerEl = document.getElementById("voice-drawer");
+    var drawerCloseBtn = document.getElementById("voice-drawer-close");
+    if (drawerCloseBtn) {
+        drawerCloseBtn.addEventListener("click", function () {
+            if (drawerEl) drawerEl.classList.add("hidden");
+        });
+    }
+
+    function openDrawer() { if (drawerEl) drawerEl.classList.remove("hidden"); }
 
     // ── Status ──────────────────────────────────────────────────────────
     function updateStatus(cls, text) {
-        statusEl.className = "status " + cls;
+        if (!statusEl) return;
+        statusEl.className = "voice-status voice-status-" + cls;
         statusEl.textContent = text;
     }
 
@@ -112,6 +122,9 @@
 
     function addTranscript(role, text) {
         if (!text) return;
+
+        // First transcript activity opens the drawer (workspace integration).
+        openDrawer();
 
         // Append to existing turn if same role
         if (currentTurnEl && currentTurnRole === role) {

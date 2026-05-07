@@ -200,6 +200,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/hub-pivot", s.handleHubPivot)
 	mux.HandleFunc("/api/pending-actions", s.handlePendingActions)
 	mux.HandleFunc("/api/pending-actions/", s.handlePendingActionAck)
+	mux.HandleFunc("/api/voice/ws", s.handleVoiceWS)
 	mux.Handle("/", staticHandler())
 }
 

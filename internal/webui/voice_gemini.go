@@ -1,4 +1,4 @@
-package live
+package webui
 
 import (
 	"encoding/json"

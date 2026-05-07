@@ -21,7 +21,6 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
-	"github.com/gregoryerrl/bot-hq/internal/live"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
 	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
 	"github.com/gregoryerrl/bot-hq/internal/projects"
@@ -144,11 +143,11 @@ func runHub() {
 		log.SetOutput(io.Discard)
 	}
 
-	// 5. Start Live web server
-	liveServer := live.NewServer(h, cfg.Hub.LivePort)
-	liveServer.Start()
-
-	// 5b. Phase N v3.x-1 auto-start ride-along: workspace webui on :3849.
+	// 5. Workspace webui on :3849 (single unified web UI; voice surface
+	// migrated INTO webui per Phase P P-10 user msg 15068 — no separate
+	// :3847 process; mic + Gemini audio chat live alongside file browser
+	// + rules editor + pending-actions queue).
+	// Opt-out: BOT_HQ_WEBUI_DISABLE=1. Port-conflict graceful-skip:
 	// Goroutine-isolated so a webui error never crashes the hub.
 	// Opt-out: BOT_HQ_WEBUI_DISABLE=1. Port-conflict graceful-skip:
 	// if :3849 is already bound (manual `bot-hq webui` running), the

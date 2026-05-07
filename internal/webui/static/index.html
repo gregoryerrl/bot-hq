@@ -29,6 +29,13 @@
     </label>
     <button id="register-project-open" type="button" title="Register a new project">+</button>
     <button id="search-open" type="button" title="Search canonical-store contents (Ctrl+K)">🔍</button>
+    <button id="mic-btn" class="mic-btn" type="button" disabled title="Click to talk with Clive (voice)">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+        <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+      </svg>
+    </button>
+    <span id="voice-status" class="voice-status"></span>
     <span class="active-project-chip" id="active-project-chip">bot-hq</span>
     <input type="search" id="nav-search" class="nav-search" placeholder="Search files…" autocomplete="off" />
   </header>
@@ -64,6 +71,17 @@
       <div id="doc-status" class="muted"></div>
     </section>
   </main>
+
+  <!-- Voice transcript drawer: shows the live Gemini conversation. Hidden
+       by default; opens when user starts a voice session. Migrated from
+       internal/live/web/index.html into the unified workspace. -->
+  <aside id="voice-drawer" class="voice-drawer hidden">
+    <header class="voice-drawer-header">
+      <strong>Clive voice</strong>
+      <button id="voice-drawer-close" type="button" class="voice-drawer-close">×</button>
+    </header>
+    <div id="voice-transcript" class="voice-transcript"></div>
+  </aside>
 
   <!-- Pending-actions popover: Phase P P-9 / phase-n.md:818. Sidebar
        widget surfacing user-actionable items derived from [HR]-tagged
@@ -145,5 +163,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="/app.js"></script>
+  <script src="/voice.js"></script>
 </body>
 </html>
