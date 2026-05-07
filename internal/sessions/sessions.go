@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -600,4 +601,186 @@ func WriteCheckpoint(id string, cp CheckpointFields) error {
 		}
 	}
 	return WriteManifest(m)
+}
+
+// citedMsgIDPattern matches `msg <N>` and `msg-<N>` patterns used as
+// cite-anchors throughout discipline-log / phase / arc / ratchet docs.
+// Phase R R5 (d-3) cite-anchor preservation per Rain msg 15545
+// Refine-C 7-path-classes scope.
+//
+// Pattern: word "msg" (case-insensitive) followed by optional space/dash
+// then 4+ decimal digits. Captures: full match + msg-id integer.
+//
+// Hyphen-list "msg 5194-5218" matches "msg 5194" once; the second
+// number is treated as a follow-up endpoint via a separate extraction
+// path inside ScanCitedMsgIDs.
+var citedMsgIDPattern = regexp.MustCompile(`(?i)\bmsg[\s-]+(\d{3,})(?:[-/](\d{3,}))?`)
+
+// CiteAnchorScanRoots returns the canonical 7 path-classes scanned for
+// `msg <N>` cite-anchors per Phase R R5 (d-3) Refine-C. Resolves at
+// call-time to ${HOME}-relative paths; tests can override by passing
+// canonRoot + repoRoot directly into ScanCitedMsgIDs.
+func CiteAnchorScanRoots(canonRoot, repoRoot string) []string {
+	return []string{
+		filepath.Join(canonRoot, "discipline-log.md"),
+		filepath.Join(canonRoot, "phase"),
+		filepath.Join(canonRoot, "ratchets"),
+		filepath.Join(canonRoot, "projects"),
+		filepath.Join(canonRoot, "brian", "discipline-anchors.md"),
+		filepath.Join(canonRoot, "rain", "discipline-anchors.md"),
+		filepath.Join(repoRoot, "docs", "arcs"),
+	}
+}
+
+// ScanCitedMsgIDs scans the canonical 7 path-classes for `msg <N>`
+// cite-anchor references and returns the de-duplicated set of msg-IDs
+// found. Phase R R5 (d-3) cite-anchor preservation per Rain msg 15545
+// Refine-C scope expansion.
+//
+// canonRoot is typically ~/.bot-hq/; repoRoot is typically
+// ~/Projects/bot-hq/. Both must be absolute paths.
+//
+// Returns empty map (not nil) on success with zero matches; non-nil
+// error only on fatal IO failure during walk.
+func ScanCitedMsgIDs(canonRoot, repoRoot string) (map[int]bool, error) {
+	cited := map[int]bool{}
+	roots := CiteAnchorScanRoots(canonRoot, repoRoot)
+
+	for _, root := range roots {
+		info, err := os.Stat(root)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return cited, fmt.Errorf("stat %s: %w", root, err)
+		}
+		if !info.IsDir() {
+			if err := scanFileForMsgIDs(root, cited); err != nil {
+				return cited, err
+			}
+			continue
+		}
+		err = filepath.Walk(root, func(path string, fi os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if fi.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(path, ".md") {
+				return nil
+			}
+			return scanFileForMsgIDs(path, cited)
+		})
+		if err != nil {
+			return cited, fmt.Errorf("walk %s: %w", root, err)
+		}
+	}
+	return cited, nil
+}
+
+func scanFileForMsgIDs(path string, cited map[int]bool) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	for _, m := range citedMsgIDPattern.FindAllStringSubmatch(string(data), -1) {
+		if id, err := strconv.Atoi(m[1]); err == nil {
+			cited[id] = true
+		}
+		if len(m) >= 3 && m[2] != "" {
+			if id, err := strconv.Atoi(m[2]); err == nil {
+				cited[id] = true
+			}
+		}
+	}
+	return nil
+}
+
+// SessionRangeOverlapsCited returns true when the session manifest's
+// [StartMsgID, EndMsgID] range contains any cited msg-id. Used by
+// PruneOlderThanWithCitePreservation to exempt cited sessions from
+// retention purge.
+//
+// When EndMsgID is zero (session opened but never closed → no
+// upper bound), only StartMsgID is checked. When StartMsgID is also
+// zero (no msg-id range recorded), no overlap can be determined →
+// returns false (session is purgeable per retention window).
+func SessionRangeOverlapsCited(m Manifest, cited map[int]bool) bool {
+	if len(cited) == 0 {
+		return false
+	}
+	if m.StartMsgID == 0 {
+		return false
+	}
+	end := m.EndMsgID
+	if end == 0 {
+		end = m.StartMsgID
+	}
+	for id := range cited {
+		if id >= m.StartMsgID && id <= end {
+			return true
+		}
+	}
+	return false
+}
+
+// PruneOlderThanWithCitePreservation extends PruneOlderThan with
+// cite-anchor preservation per Phase R R5 (d-3). Sessions whose
+// msg-id range overlaps any cited msg-id (from the 7 scan roots
+// resolved via canonRoot+repoRoot) are EXEMPTED from purge regardless
+// of age. All other PruneOlderThan semantics preserved.
+//
+// canonRoot/repoRoot empty strings → resolves from $HOME defaults
+// (~/.bot-hq/ + ~/Projects/bot-hq/).
+//
+// Returns (prunedIDs, exemptedCitedIDs, error).
+func PruneOlderThanWithCitePreservation(retentionDays int, now time.Time, canonRoot, repoRoot string) ([]string, []string, error) {
+	if retentionDays <= 0 {
+		return nil, nil, nil
+	}
+	if canonRoot == "" {
+		home, _ := os.UserHomeDir()
+		canonRoot = filepath.Join(home, ".bot-hq")
+	}
+	if repoRoot == "" {
+		home, _ := os.UserHomeDir()
+		repoRoot = filepath.Join(home, "Projects", "bot-hq")
+	}
+	cited, err := ScanCitedMsgIDs(canonRoot, repoRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("scan cited msg-ids: %w", err)
+	}
+	ids, err := ListSessionIDs()
+	if err != nil {
+		return nil, nil, err
+	}
+	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	var pruned, exempted []string
+	dir := SessionsDir()
+	for _, id := range ids {
+		m, err := ReadManifest(id)
+		if err != nil {
+			continue
+		}
+		age := pickAge(m)
+		if age.IsZero() {
+			continue
+		}
+		if !age.Before(cutoff) {
+			continue
+		}
+		if SessionRangeOverlapsCited(m, cited) {
+			exempted = append(exempted, id)
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, id)); err != nil {
+			return pruned, exempted, fmt.Errorf("remove %s: %w", id, err)
+		}
+		pruned = append(pruned, id)
+	}
+	return pruned, exempted, nil
 }

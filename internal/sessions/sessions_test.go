@@ -702,3 +702,154 @@ func TestWriteCheckpoint_NotExistError(t *testing.T) {
 		t.Errorf("expected os.IsNotExist err, got %v", err)
 	}
 }
+
+// Phase R R5 (d-3) tests for cite-anchor preservation.
+
+func TestScanCitedMsgIDs_BasicExtraction(t *testing.T) {
+	tmpdir := t.TempDir()
+	canonRoot := filepath.Join(tmpdir, ".bot-hq")
+	repoRoot := filepath.Join(tmpdir, "Projects", "bot-hq")
+	if err := os.MkdirAll(canonRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	disciplineLog := filepath.Join(canonRoot, "discipline-log.md")
+	if err := os.WriteFile(disciplineLog, []byte("event at msg 15497 referenced; range msg 5194-5218 cited; user msg-7919 trust-shaking"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cited, err := ScanCitedMsgIDs(canonRoot, repoRoot)
+	if err != nil {
+		t.Fatalf("ScanCitedMsgIDs: %v", err)
+	}
+	for _, want := range []int{15497, 5194, 5218, 7919} {
+		if !cited[want] {
+			t.Errorf("expected cited msg-id %d, got map %v", want, cited)
+		}
+	}
+}
+
+func TestScanCitedMsgIDs_DigitsBelow3SkipsLowConfidence(t *testing.T) {
+	tmpdir := t.TempDir()
+	canonRoot := filepath.Join(tmpdir, ".bot-hq")
+	repoRoot := filepath.Join(tmpdir, "Projects", "bot-hq")
+	if err := os.MkdirAll(canonRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonRoot, "discipline-log.md"), []byte("msg 12 (too short, skipped); msg 999 (kept)"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cited, err := ScanCitedMsgIDs(canonRoot, repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cited[12] {
+		t.Error("3-digit minimum should skip msg 12")
+	}
+	if !cited[999] {
+		t.Error("msg 999 should be cited (3-digit threshold)")
+	}
+}
+
+func TestSessionRangeOverlapsCited(t *testing.T) {
+	cited := map[int]bool{5000: true, 7919: true, 15497: true}
+	cases := []struct {
+		name string
+		m    Manifest
+		want bool
+	}{
+		{"range contains cited", Manifest{StartMsgID: 4000, EndMsgID: 6000}, true},
+		{"range above cited", Manifest{StartMsgID: 8000, EndMsgID: 9000}, false},
+		{"range below cited", Manifest{StartMsgID: 100, EndMsgID: 500}, false},
+		{"range matches cited single point", Manifest{StartMsgID: 7919, EndMsgID: 7919}, true},
+		{"end_msg_id zero (open session) matches start", Manifest{StartMsgID: 7919, EndMsgID: 0}, true},
+		{"start_msg_id zero → no overlap detectable", Manifest{StartMsgID: 0, EndMsgID: 9000}, false},
+		{"empty cited set → false", Manifest{StartMsgID: 5000, EndMsgID: 5000}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			set := cited
+			if c.name == "empty cited set → false" {
+				set = map[int]bool{}
+			}
+			if got := SessionRangeOverlapsCited(c.m, set); got != c.want {
+				t.Errorf("SessionRangeOverlapsCited(%+v) = %v, want %v", c.m, got, c.want)
+			}
+		})
+	}
+}
+
+func TestPruneOlderThanWithCitePreservation_ExemptsCitedSession(t *testing.T) {
+	setSessionsDir(t)
+	tmpdir := t.TempDir()
+	canonRoot := filepath.Join(tmpdir, ".bot-hq")
+	repoRoot := filepath.Join(tmpdir, "Projects", "bot-hq")
+	if err := os.MkdirAll(canonRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Cite-anchor doc references msg 5000.
+	if err := os.WriteFile(filepath.Join(canonRoot, "discipline-log.md"), []byte("seen at msg 5000"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.AddDate(0, 0, -60)
+	// Cited session — old but range covers msg 5000.
+	if err := WriteManifest(Manifest{ID: "2026-cited", StartTS: old, EndTS: old, StartMsgID: 4900, EndMsgID: 5100}); err != nil {
+		t.Fatal(err)
+	}
+	// Uncited old session — should prune.
+	if err := WriteManifest(Manifest{ID: "2026-uncited", StartTS: old, EndTS: old, StartMsgID: 9000, EndMsgID: 9100}); err != nil {
+		t.Fatal(err)
+	}
+	pruned, exempted, err := PruneOlderThanWithCitePreservation(30, now, canonRoot, repoRoot)
+	if err != nil {
+		t.Fatalf("PruneOlderThanWithCitePreservation: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != "2026-uncited" {
+		t.Errorf("expected pruned=[2026-uncited], got %v", pruned)
+	}
+	if len(exempted) != 1 || exempted[0] != "2026-cited" {
+		t.Errorf("expected exempted=[2026-cited], got %v", exempted)
+	}
+	// Cited session still readable
+	if _, err := ReadManifest("2026-cited"); err != nil {
+		t.Errorf("cited session should still exist: %v", err)
+	}
+	// Uncited session removed
+	if _, err := ReadManifest("2026-uncited"); !os.IsNotExist(err) {
+		t.Errorf("uncited session should be removed; ReadManifest err: %v", err)
+	}
+}
+
+func TestPruneOlderThanWithCitePreservation_ZeroDaysNoOp(t *testing.T) {
+	setSessionsDir(t)
+	tmpdir := t.TempDir()
+	canonRoot := filepath.Join(tmpdir, ".bot-hq")
+	repoRoot := filepath.Join(tmpdir, "Projects", "bot-hq")
+	pruned, exempted, err := PruneOlderThanWithCitePreservation(0, time.Now(), canonRoot, repoRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned != nil || exempted != nil {
+		t.Errorf("retention_days=0 should be no-op, got pruned=%v exempted=%v", pruned, exempted)
+	}
+}
+
+func TestCiteAnchorScanRoots_7Paths(t *testing.T) {
+	roots := CiteAnchorScanRoots("/canon", "/repo")
+	want := []string{
+		"/canon/discipline-log.md",
+		"/canon/phase",
+		"/canon/ratchets",
+		"/canon/projects",
+		"/canon/brian/discipline-anchors.md",
+		"/canon/rain/discipline-anchors.md",
+		"/repo/docs/arcs",
+	}
+	if len(roots) != len(want) {
+		t.Fatalf("expected %d roots, got %d: %v", len(want), len(roots), roots)
+	}
+	for i, w := range want {
+		if roots[i] != w {
+			t.Errorf("root[%d] = %q, want %q", i, roots[i], w)
+		}
+	}
+}

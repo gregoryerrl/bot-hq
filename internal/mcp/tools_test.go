@@ -323,6 +323,11 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// session_id. Operates on session_id, not on per-agent state.
 		"hub_session_checkpoint": "writes session-scoped checkpoint by session_id; caller's identity is incidental",
 
+		// Phase R R5 (d-3): operator-invocable retention prune with
+		// cite-anchor preservation. Operates globally on the sessions/
+		// directory; no per-caller agent context needed.
+		"hub_session_archive": "operator retention prune with cite-anchor preservation; caller anonymous",
+
 		// Phase H slice 4 C6 (H-31): explicit operator-invocable halt clear.
 		// No caller-context — the tool dismisses a global halt-state machine.
 		"hub_clear_halt": "manually clears global halt_state; no per-caller context",

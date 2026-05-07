@@ -42,6 +42,7 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_session_join",
 		"hub_session_load",
 		"hub_session_checkpoint",
+		"hub_session_archive",
 		"hub_status",
 		"hub_spawn",
 		"hub_spawn_gemma",

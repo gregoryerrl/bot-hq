@@ -113,6 +113,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSessionJoin(db),
 		hubSessionLoad(),
 		hubSessionCheckpoint(),
+		hubSessionArchive(),
 		hubStatus(db),
 		hubSpawn(db),
 		hubCheckpoint(db),
@@ -778,6 +779,98 @@ func hubSessionCheckpoint() ToolDef {
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubSessionArchive implements Phase R R5 (d-3) cite-anchor-preserving
+// retention archive. Wraps sessions.PruneOlderThanWithCitePreservation
+// — purges session manifests older than retention_days but preserves
+// any session whose msg-id range is cited in the canonical 7-path-class
+// scan-set (discipline-log.md / phase/*.md / docs/arcs/*.md / ratchets/
+// active.md + closed snapshots / projects/<p>/*.md / per-agent/
+// discipline-anchors.md).
+//
+// Optional dry_run param: returns the would-prune + would-exempt lists
+// without deleting anything. Default retention_days = 30 per
+// sessions.DefaultRetentionDays.
+//
+// Per phase-r.md R5 cluster + Rain msg 15545 BRAIN-2nd Refine-C
+// (7-path-class scan + cache + mtime-invalidation lean) + msg 15553
+// (dry-run flag + tool-surface-schema BRAIN-2nd).
+func hubSessionArchive() ToolDef {
+	tool := mcp.NewTool("hub_session_archive",
+		mcp.WithDescription("Archive (delete) session manifests older than retention_days, exempting any session whose msg-id range is cited in canonical-store cite-anchor docs (discipline-log / phase / arcs / ratchets / projects / per-agent discipline-anchors). Default retention 30 days. Set dry_run=true to preview without deleting."),
+		mcp.WithNumber("retention_days", mcp.Description("Retention window in days. Default: 30. <=0 disables (no-op).")),
+		mcp.WithBoolean("dry_run", mcp.Description("When true, return would-prune + would-exempt lists without deleting. Default false.")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		retentionDays := int(req.GetFloat("retention_days", float64(sessions.DefaultRetentionDays)))
+		dryRun := req.GetBool("dry_run", false)
+
+		home, _ := os.UserHomeDir()
+		canonRoot := filepath.Join(home, ".bot-hq")
+		repoRoot := filepath.Join(home, "Projects", "bot-hq")
+
+		if dryRun {
+			cited, err := sessions.ScanCitedMsgIDs(canonRoot, repoRoot)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("scan cited msg-ids: %v", err)), nil
+			}
+			ids, err := sessions.ListSessionIDs()
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("list sessions: %v", err)), nil
+			}
+			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+			var wouldPrune, wouldExempt []string
+			for _, id := range ids {
+				m, err := sessions.ReadManifest(id)
+				if err != nil {
+					continue
+				}
+				age := pickAgePublic(m)
+				if age.IsZero() || !age.Before(cutoff) {
+					continue
+				}
+				if sessions.SessionRangeOverlapsCited(m, cited) {
+					wouldExempt = append(wouldExempt, id)
+				} else {
+					wouldPrune = append(wouldPrune, id)
+				}
+			}
+			result := map[string]any{
+				"status":          "dry_run",
+				"retention_days":  retentionDays,
+				"cited_msg_count": len(cited),
+				"would_prune":     wouldPrune,
+				"would_exempt":    wouldExempt,
+			}
+			return mcp.NewToolResultText(toJSON(result)), nil
+		}
+
+		pruned, exempted, err := sessions.PruneOlderThanWithCitePreservation(retentionDays, time.Now(), canonRoot, repoRoot)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("archive failed: %v", err)), nil
+		}
+		result := map[string]any{
+			"status":         "archived",
+			"retention_days": retentionDays,
+			"pruned":         pruned,
+			"exempted":       exempted,
+		}
+		return mcp.NewToolResultText(toJSON(result)), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// pickAgePublic mirrors sessions.pickAge for dry-run path (the
+// non-exported helper isn't reachable from this package). Returns the
+// most-recent timestamp from a manifest for retention-window comparison.
+func pickAgePublic(m sessions.Manifest) time.Time {
+	if !m.EndTS.IsZero() {
+		return m.EndTS
+	}
+	return m.StartTS
 }
 
 func hubSessionJoin(db *hub.DB) ToolDef {
