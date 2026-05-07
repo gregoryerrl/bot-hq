@@ -18,9 +18,10 @@
 //     Rain push-back c — not user-voice mirroring class)
 //   - **/.git/**, **/.cache/**, **/node_modules/**
 //
-// DEFER (Phase N v3 / Tier-2 per Rain push-back a): dynamic path
-// extraction from user-message regex (impl-heavy + fuzzy semantics +
-// DB-dependency at hook-time; MVP discipline = static set only).
+// Dynamic path extraction (Phase-R-followup graduation of Phase N v2
+// OQ-1b): when static-include misses, recent user-msgs in hub.db are
+// scanned for path-shape tokens and matched against the candidate
+// path. See dynamic.go for regex + fail-open semantics.
 package voicemirror
 
 import (
@@ -72,7 +73,14 @@ func RunHook(stdin io.Reader, _ io.Writer) int {
 		return ExitAllow
 	}
 	if !MatchesUserArtifactPath(filePath) {
-		return ExitAllow
+		// Static miss → consult dynamic-include from recent user
+		// msgs in hub.db. Fail-open: any DB error returns nil
+		// dynamic-paths and we fall through to ExitAllow with no
+		// log entry.
+		dynamicPaths := collectDynamicPaths()
+		if !MatchesDynamicInclude(filePath, dynamicPaths) {
+			return ExitAllow
+		}
 	}
 
 	agentID := os.Getenv(agentIDEnvVar)
@@ -93,13 +101,26 @@ func RunHook(stdin io.Reader, _ io.Writer) int {
 }
 
 // MatchesUserArtifactPath returns true if the given path matches any
-// INCLUDE pattern AND no SKIP pattern. Exported for hook-external
-// path-set audits.
+// static INCLUDE pattern AND no SKIP pattern. Exported for hook-
+// external path-set audits.
 func MatchesUserArtifactPath(path string) bool {
 	if matchesSkip(path) {
 		return false
 	}
 	return matchesInclude(path)
+}
+
+// MatchesUserArtifactPathWithDynamic combines static + dynamic
+// include layers. SKIP precedence dominates both. Used by RunHook
+// after static-include miss to consult recent-user-msg path mentions.
+func MatchesUserArtifactPathWithDynamic(path string, dynamicPaths []string) bool {
+	if matchesSkip(path) {
+		return false
+	}
+	if matchesInclude(path) {
+		return true
+	}
+	return MatchesDynamicInclude(path, dynamicPaths)
 }
 
 func matchesSkip(path string) bool {
