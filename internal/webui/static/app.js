@@ -195,11 +195,11 @@
       docContent.value = state.pristine;
       docContent.disabled = false;
       docMtime.textContent = data.mtime || '';
-      if (isMarkdown(path) && state.viewMode === 'rendered') {
+      if (hasRenderedMode(path) && state.viewMode === 'rendered') {
         showRenderedView();
       } else {
-        // Non-md always raw; md follows current viewMode.
-        if (!isMarkdown(path)) state.viewMode = 'raw';
+        // Non-renderable always raw; renderable follows current viewMode.
+        if (!hasRenderedMode(path)) state.viewMode = 'raw';
         showRawView();
       }
       updateDirtyState();
@@ -214,16 +214,71 @@
     return path && path.toLowerCase().endsWith('.md');
   }
 
+  function isYAML(path) {
+    if (!path) return false;
+    const lower = path.toLowerCase();
+    return lower.endsWith('.yaml') || lower.endsWith('.yml');
+  }
+
+  function hasRenderedMode(path) {
+    return isMarkdown(path) || isYAML(path);
+  }
+
   function showRenderedView() {
     state.viewMode = 'rendered';
     docMode.textContent = 'View: rendered';
     docContent.classList.add('hidden');
     docRendered.classList.remove('hidden');
-    if (window.marked && state.pristine) {
+    if (isYAML(state.currentPath)) {
+      docRendered.innerHTML = renderYAML(docContent.value);
+    } else if (window.marked && state.pristine) {
       docRendered.innerHTML = window.marked.parse(docContent.value);
     } else {
       docRendered.textContent = docContent.value;
     }
+  }
+
+  // renderYAML produces a syntax-highlighted read-only HTML view of YAML
+  // content using a regex-based per-line tokenizer. No external library —
+  // covers the common YAML constructs (keys, quoted strings, comments,
+  // bool/null literals, numbers, list markers, block-scalar markers).
+  // Multi-line edge cases (anchors, aliases, complex flow mappings) fall
+  // back to plain escaped text — future polish if a use case surfaces.
+  function renderYAML(content) {
+    const html = String(content)
+      .split('\n')
+      .map(highlightYAMLLine)
+      .join('\n');
+    return '<pre class="yaml-rendered">' + html + '</pre>';
+  }
+
+  function highlightYAMLLine(rawLine) {
+    // Step 1: scan for first unquoted '#' to split body from comment.
+    let inSingle = false, inDouble = false, commentStart = -1;
+    for (let i = 0; i < rawLine.length; i++) {
+      const c = rawLine[i];
+      if (inSingle) { if (c === "'") inSingle = false; }
+      else if (inDouble) { if (c === '"' && rawLine[i - 1] !== '\\') inDouble = false; }
+      else if (c === "'") inSingle = true;
+      else if (c === '"') inDouble = true;
+      else if (c === '#' && (i === 0 || /\s/.test(rawLine[i - 1]))) { commentStart = i; break; }
+    }
+    const body = commentStart >= 0 ? rawLine.substring(0, commentStart) : rawLine;
+    const comment = commentStart >= 0 ? rawLine.substring(commentStart) : '';
+    let out = escapeHtml(body)
+      .replace(/^(\s*)(-\s+)?([A-Za-z_][\w.-]*)(\s*:)/,
+        (m, indent, dash, key, colon) =>
+          indent + (dash ? '<span class="yaml-marker">' + dash + '</span>' : '') +
+          '<span class="yaml-key">' + key + '</span><span class="yaml-colon">' + colon + '</span>')
+      .replace(/("[^"]*"|'[^']*')/g, '<span class="yaml-string">$1</span>')
+      .replace(/(:\s)(true|false|null|yes|no)(\s|$)/g,
+        '$1<span class="yaml-bool">$2</span>$3')
+      .replace(/(:\s)(-?\d+(?:\.\d+)?)(\s|$)/g,
+        '$1<span class="yaml-number">$2</span>$3')
+      .replace(/(:\s)([|]|&gt;)([-+]?)(\s|$)/g,
+        '$1<span class="yaml-scalar-marker">$2$3</span>$4');
+    if (comment) out += '<span class="yaml-comment">' + escapeHtml(comment) + '</span>';
+    return out;
   }
 
   function showRawView() {
@@ -235,8 +290,8 @@
 
   function toggleViewMode() {
     if (!state.currentPath) return;
-    if (!isMarkdown(state.currentPath)) {
-      // Non-md only has raw view.
+    if (!hasRenderedMode(state.currentPath)) {
+      // No rendered mode for this file type; raw only.
       showRawView();
       return;
     }

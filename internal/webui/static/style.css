@@ -364,3 +364,26 @@ main {
   overflow: auto;
   margin-top: 0.5rem;
 }
+
+/* YAML syntax-highlight token classes — applied by renderYAML() in app.js
+   to produce a read-only highlighted view of .yaml/.yml files. Toggle to
+   raw textarea for editing. Phase O drain per phase-n.md:821. */
+.yaml-rendered {
+  background: #fafafa;
+  border: 1px solid #e2e2e2;
+  padding: 0.8rem 1rem;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow: auto;
+}
+.yaml-rendered .yaml-key { color: #1a4480; font-weight: 600; }
+.yaml-rendered .yaml-colon { color: #888; }
+.yaml-rendered .yaml-string { color: #2a6f3a; }
+.yaml-rendered .yaml-bool { color: #a23b00; font-weight: 600; }
+.yaml-rendered .yaml-number { color: #a23b00; }
+.yaml-rendered .yaml-comment { color: #888; font-style: italic; }
+.yaml-rendered .yaml-marker { color: #a23b00; font-weight: 600; }
+.yaml-rendered .yaml-scalar-marker { color: #6a3aa2; font-weight: 600; }
