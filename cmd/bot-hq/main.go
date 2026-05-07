@@ -20,6 +20,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/brian"
 	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
+	"github.com/gregoryerrl/bot-hq/internal/emma"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
@@ -285,18 +286,37 @@ func runHub() {
 				Content:   fmt.Sprintf("Emma auto-start failed: %v", err),
 			})
 		} else {
-			log.Printf("[autostart] emma OK")
-			// Wire Emma's hub-reactive sentinel subscriber. OnMessage fires
+			log.Printf("[autostart] gemma OK")
+			// Wire Gemma's hub-reactive sentinel subscriber. OnMessage fires
 			// for every in-process insert; cross-process MCP inserts surface
-			// to Emma via her own boot-time replay + the live tick path is
+			// to Gemma via her own boot-time replay + the live tick path is
 			// not needed (sentinel is purely event-driven).
 			h.DB.OnMessage(emmaAgent.OnHubMessage)
-			// Phase S S-1a-1: signal emma-side that daemoncron is online
-			// so gemma's heartbeat-ledger emit-call-site short-circuits
-			// (interpretation (ii) dual-emit-prevention per Rain msg 15796).
+			// Phase S S-1a-1: signal gemma-side that daemoncron is online
+			// so gemma's emit-call-sites short-circuit (interpretation
+			// (ii) dual-emit-prevention per Rain msg 15796).
 			if dc != nil && dc.IsRunning() {
 				emmaAgent.SetDaemoncronOnline(true)
 			}
+			defer emmaAgent.Stop()
+		}
+	}
+
+	// 9d. Phase S S-1b: emma-Claude rule-enforcer (Claude-class peer
+	// to brian/rain). Spawns alongside brian/rain when they autostart.
+	// EYES-class read-only enforcer per user msg 15734; tool-restrictions
+	// via system-prompt + per-agent settings.json deny block.
+	if cfg.Brian.AutoStart {
+		emmaAgent := emma.New(h.DB, cfg.Brian.WorkDir)
+		if err := emmaAgent.Start(); err != nil {
+			log.Printf("[autostart] emma-Claude FAILED: %v", err)
+			h.DB.InsertMessage(protocol.Message{
+				FromAgent: "system",
+				Type:      protocol.MsgError,
+				Content:   fmt.Sprintf("Emma-Claude auto-start failed: %v", err),
+			})
+		} else {
+			log.Printf("[autostart] emma-Claude OK")
 			defer emmaAgent.Stop()
 		}
 	}

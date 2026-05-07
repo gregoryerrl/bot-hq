@@ -77,7 +77,7 @@ func TestWakeScheduleEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		for i := range msgs {
-			if msgs[i].FromAgent == "emma" && msgs[i].Content == "wake-up: re-test 3" {
+			if msgs[i].FromAgent == "gemma" && msgs[i].Content == "wake-up: re-test 3" {
 				dispatched = &msgs[i]
 				break
 			}
@@ -157,7 +157,7 @@ func TestWakeCancelBeforeFireBlocksDispatch(t *testing.T) {
 	time.Sleep(4 * time.Second)
 	msgs, _ := db.ReadMessages("brian", 0, 50)
 	for _, m := range msgs {
-		if m.FromAgent == "emma" && m.Content == "should-not-fire" {
+		if m.FromAgent == "gemma" && m.Content == "should-not-fire" {
 			t.Fatalf("cancelled wake fired anyway: %+v", m)
 		}
 	}

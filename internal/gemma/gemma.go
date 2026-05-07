@@ -18,8 +18,15 @@ import (
 )
 
 const (
-	agentID   = "emma"
-	agentName = "Emma"
+	// Phase S S-1b OQ-S1b-5 fork (a) per Rain msg 15835: gemma re-IDs
+	// from "emma" to "gemma" (its actual technology — gemma4:e4b LLM
+	// process). The "emma" identity is now owned by the new emma-Claude
+	// rule-enforcer agent (internal/emma/) per user msg 15734. Daemoncron
+	// emits keep FromAgent="emma" (the role; daemoncron is cron-mechanism
+	// contributing to emma's role-identity); gemma's non-daemoncron
+	// emits show FromAgent="gemma" post-rename.
+	agentID   = "gemma"
+	agentName = "Gemma"
 
 	pollInterval           = 3 * time.Second
 	healthInterval         = 30 * time.Second
