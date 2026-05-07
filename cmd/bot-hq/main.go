@@ -24,6 +24,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/live"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
 	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
+	"github.com/gregoryerrl/bot-hq/internal/projects"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
 	"github.com/gregoryerrl/bot-hq/internal/sessions"
@@ -83,6 +84,9 @@ func main() {
 		case "install-session-start-hook":
 			runInstallSessionStartHook()
 			return
+		case "audit-rules-canonical":
+			runAuditRulesCanonical()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -90,7 +94,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|webui|context-switch|session-open|install-session-start-hook|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|webui|context-switch|session-open|install-session-start-hook|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -578,6 +582,58 @@ func runInstallSessionStartHook() {
 	fmt.Printf("Project context: $BOT_HQ_PROJECT env var (authoritative); falls back to cwd-inference / 'bot-hq' default.\n")
 	fmt.Printf("Agent context: $BOT_HQ_AGENT env var; falls back to 'brian'.\n")
 	fmt.Printf("Hook activation requires Claude session-restart (settings.json not hot-reloaded mid-session per Phase L Finding-3).\n")
+}
+
+// runAuditRulesCanonical is the Phase O CLI subcommand that audits all
+// per-project YAMLs under ~/.bot-hq/projects/ for canonical nested form
+// compliance. Read-only — does not modify any files. Reports each file's
+// status (CANONICAL | DRIFT | ERROR) + summary. Exits 0 if all CANONICAL,
+// 1 if any DRIFT, 2 if any ERROR.
+//
+// Usage:
+//
+//	bot-hq audit-rules-canonical            # audits ~/.bot-hq/projects/
+//	bot-hq audit-rules-canonical <dir>      # audits custom dir
+//
+// Phase O drain — provides the runtime-audit primitive deferred from #6
+// (msg 14663 R39 pushback: literal-on-disk verify-tests violate test-
+// isolation; runtime-audit-via-CLI is the correct mechanism class).
+func runAuditRulesCanonical() {
+	dir := ""
+	if len(os.Args) > 2 {
+		dir = os.Args[2]
+	}
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "resolve home dir: %v\n", err)
+			os.Exit(2)
+		}
+		dir = filepath.Join(home, ".bot-hq", "projects")
+	}
+
+	results, err := projects.AuditCanonical(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit-rules-canonical: %v\n", err)
+		os.Exit(2)
+	}
+
+	fmt.Print(projects.FormatAuditResults(results))
+
+	exit := 0
+	for _, r := range results {
+		switch r.Status {
+		case projects.StatusError:
+			if exit < 2 {
+				exit = 2
+			}
+		case projects.StatusDrift:
+			if exit < 1 {
+				exit = 1
+			}
+		}
+	}
+	os.Exit(exit)
 }
 
 // runSessionLoad is the Phase N v2 #5 N-1(b)-B CLI surface that mirrors
