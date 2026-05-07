@@ -186,6 +186,47 @@ gates:
 	}
 }
 
+// TestValidateRulesYAML_GreenlightAbsoluteCoversPush: Phase O drain
+// codifies absolute-greenlight-covers-push semantics per phase-n.md:810
+// + user msg 8772. Field is a bool with omitempty — accepts true/false
+// + omission. Validates parse-clean across all 3 forms.
+func TestValidateRulesYAML_GreenlightAbsoluteCoversPush(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml []byte
+	}{
+		{"true-own-repo", []byte("greenlight:\n  absoluteCoversPush: true\n")},
+		{"false-client-repo", []byte("greenlight:\n  absoluteCoversPush: false\n")},
+		{"omitted-defaults-strict", []byte("greenlight:\n  push: \"explicit verbatim\"\n")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := validateRulesYAML("general", tc.yaml)
+			if res.HasErrors() {
+				t.Fatalf("unexpected errors: %v", res.Errors)
+			}
+			for _, w := range res.Warnings {
+				if strings.Contains(w, "absoluteCoversPush") {
+					t.Errorf("absoluteCoversPush flagged unknown: %q", w)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateRulesYAML_GreenlightAbsoluteCoversPushTypeMismatch: bool
+// field rejects string value — schema enforces type.
+func TestValidateRulesYAML_GreenlightAbsoluteCoversPushTypeMismatch(t *testing.T) {
+	yaml := []byte(`
+greenlight:
+  absoluteCoversPush: "not-a-bool"
+`)
+	res := validateRulesYAML("general", yaml)
+	if !res.HasErrors() {
+		t.Errorf("expected schema error on non-bool absoluteCoversPush, got none")
+	}
+}
+
 // TestValidateRulesYAML_BadYAML: malformed input → error, blocks write.
 func TestValidateRulesYAML_BadYAML(t *testing.T) {
 	yaml := []byte("not valid yaml: : :")

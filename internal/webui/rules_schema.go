@@ -30,6 +30,16 @@ type RulesGreenlight struct {
 	Push      string `yaml:"push,omitempty"`
 	ForcePush string `yaml:"forcePush,omitempty"`
 	Merge     string `yaml:"merge,omitempty"`
+	// AbsoluteCoversPush codifies the rule tension between absolute-
+	// greenlight pre-delegation and per-project push-strictness. Per
+	// user msg 8772 + Rain msg 14721 R32 narrow-read: own-main repos
+	// (e.g., bot-hq self-hosted) treat absolute-greenlight as covering
+	// push class; client repos (e.g., bcc-ad-manager with disguise-
+	// compliance) preserve push-strictness regardless of absolute-
+	// greenlight scope. Default at general layer is conservative
+	// ("false" / strict); per-project overrides set true on own-repos.
+	// Phase O drain item per phase-n.md:810.
+	AbsoluteCoversPush bool `yaml:"absoluteCoversPush,omitempty"`
 }
 
 type RulesRatchets struct {
