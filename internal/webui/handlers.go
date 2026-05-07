@@ -112,6 +112,34 @@ func buildProjectStarterYAML(name, remoteURL string) string {
 	return b.String()
 }
 
+// handleSearch responds to GET /api/search?q=<query>&limit=N with up
+// to N substring matches across canonical-store files. Phase O drain
+// per phase-n.md:819 cross-search dashboard. Query must be >=2 chars
+// (avoids trivial-match floods); limit defaults to 30, clamped [1,100].
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len(q) < 2 {
+		http.Error(w, "query must be at least 2 characters", http.StatusBadRequest)
+		return
+	}
+	limit := 30
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+	results, err := SearchCanonicalStore(s.canonicalRoot, q, limit)
+	if err != nil {
+		http.Error(w, "search failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
 // handleRecentEdits responds to GET /api/recent-edits?limit=N with the
 // top-N most-recently-modified canonical-store files (mtime descending).
 // limit defaults to 20, clamped [1, 100]. Phase O drain per phase-n.md

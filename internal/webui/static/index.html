@@ -16,6 +16,7 @@
       <select id="project-picker"></select>
     </label>
     <button id="register-project-open" type="button" title="Register a new project">+</button>
+    <button id="search-open" type="button" title="Search canonical-store contents (Ctrl+K)">🔍</button>
     <span class="active-project-chip" id="active-project-chip">bot-hq</span>
     <input type="search" id="nav-search" class="nav-search" placeholder="Search files…" autocomplete="off" />
   </header>
@@ -50,6 +51,18 @@
       <div id="doc-status" class="muted"></div>
     </section>
   </main>
+
+  <!-- Cross-search modal: Phase O drain per phase-n.md:819 dashboard. -->
+  <div id="search-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Search canonical-store</h3>
+      <input id="search-input" type="search" placeholder="Type 2+ chars to search…" autocomplete="off" />
+      <div id="search-results" class="search-results"><em class="muted">Type to search.</em></div>
+      <div class="conflict-actions">
+        <button id="search-close" type="button">Close</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Register-project modal: Phase O drain per phase-n.md:826 formal flow. -->
   <div id="register-project-modal" class="modal hidden">

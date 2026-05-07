@@ -183,6 +183,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/files/", s.dispatchFilesPath)
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/recent-edits", s.handleRecentEdits)
+	mux.HandleFunc("/api/search", s.handleSearch)
 	mux.HandleFunc("/api/destinations", s.handleDestinations)
 	mux.HandleFunc("/api/rules", s.handleRules)
 	mux.HandleFunc("/api/sessions", s.handleSessions)

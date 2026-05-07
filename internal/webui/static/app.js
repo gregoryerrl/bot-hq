@@ -55,6 +55,17 @@
   document.getElementById('register-project-open').addEventListener('click', openRegisterModal);
   document.getElementById('register-project-submit').addEventListener('click', submitRegisterProject);
   document.getElementById('register-project-cancel').addEventListener('click', closeRegisterModal);
+  document.getElementById('search-open').addEventListener('click', openSearchModal);
+  document.getElementById('search-close').addEventListener('click', closeSearchModal);
+  document.getElementById('search-input').addEventListener('input', onSearchInput);
+  document.addEventListener('keydown', (ev) => {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'k') {
+      ev.preventDefault();
+      openSearchModal();
+    } else if (ev.key === 'Escape') {
+      closeSearchModal();
+    }
+  });
 
   loadProjects().then(loadDestinations);
   loadRecentEdits();
@@ -568,6 +579,82 @@
       docStatus.textContent = 'Keeping local edits; server has newer version (' + (conflict.current_mtime || '') + ').';
     }
     state.pendingConflict = null;
+  }
+
+  // Cross-search dashboard per phase-n.md:819. Modal-based content
+  // search across the canonical-store. Debounced 200ms input → GET
+  // /api/search?q=...&limit=30 → renders results list with path +
+  // line + snippet; click loads the matching file. Ctrl+K (Cmd+K on
+  // mac) opens modal; Escape closes. XSS-clean: snippet rendered via
+  // textContent (server-side never escapes, client-side never
+  // innerHTMLs user content).
+  let searchDebounce = null;
+
+  function openSearchModal() {
+    document.getElementById('search-modal').classList.remove('hidden');
+    const input = document.getElementById('search-input');
+    input.focus();
+    input.select();
+  }
+
+  function closeSearchModal() {
+    document.getElementById('search-modal').classList.add('hidden');
+  }
+
+  function onSearchInput() {
+    if (searchDebounce !== null) clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(runSearch, 200);
+  }
+
+  async function runSearch() {
+    const q = document.getElementById('search-input').value.trim();
+    const out = document.getElementById('search-results');
+    if (q.length < 2) {
+      out.innerHTML = '<em class="muted">Type 2+ chars to search.</em>';
+      return;
+    }
+    out.innerHTML = '<em class="muted">Searching…</em>';
+    try {
+      const res = await fetch('/api/search?q=' + encodeURIComponent(q) + '&limit=30');
+      if (!res.ok) {
+        out.innerHTML = '<em class="error">Search failed.</em>';
+        return;
+      }
+      const data = await res.json();
+      const results = data.results || [];
+      if (results.length === 0) {
+        out.innerHTML = '<em class="muted">No matches.</em>';
+        return;
+      }
+      out.innerHTML = '';
+      const ul = document.createElement('ul');
+      ul.className = 'search-list';
+      for (const r of results) {
+        const li = document.createElement('li');
+        const head = document.createElement('div');
+        head.className = 'search-head';
+        const a = document.createElement('a');
+        a.href = '#';
+        a.className = 'search-path';
+        a.textContent = r.path + ':' + r.line;
+        a.title = r.path;
+        a.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          closeSearchModal();
+          loadFile(r.path);
+        });
+        head.appendChild(a);
+        li.appendChild(head);
+        const snip = document.createElement('div');
+        snip.className = 'search-snippet';
+        snip.textContent = r.snippet || '';
+        li.appendChild(snip);
+        ul.appendChild(li);
+      }
+      out.appendChild(ul);
+    } catch (err) {
+      out.innerHTML = '<em class="error">Network error.</em>';
+    }
   }
 
   // Recent-edits feed widget per phase-n.md:816. Renders the top-10
