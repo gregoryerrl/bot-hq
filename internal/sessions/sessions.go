@@ -127,6 +127,12 @@ func ManifestPath(id string) string {
 // with frontmatter (strict) + body (free-form). Idempotent on same
 // content; replaces on different content. Per Q-III hybrid lean: safe
 // to call at session-open (minimal-create) + session-close (finalize).
+//
+// Per phase-p.md §P-6 (OQ-6 secrets-scan-on-manifest-author): rendered
+// content is scanned via ScanForSecrets; findings are appended to the
+// manifest-secrets log (best-effort; log failures do NOT fail the write).
+// When BOT_HQ_SECRETS_STRICT=1 is set, findings return an error instead
+// of logging — caller decides retry/redact policy.
 func WriteManifest(m Manifest) error {
 	if m.ID == "" {
 		return fmt.Errorf("manifest ID required")
@@ -136,6 +142,12 @@ func WriteManifest(m Manifest) error {
 		return fmt.Errorf("create session dir: %w", err)
 	}
 	out := renderManifest(m)
+	if findings := ScanForSecrets(out); len(findings) > 0 {
+		LogSecretFindings(m.ID, findings)
+		if secretsStrictMode() {
+			return fmt.Errorf("manifest %s: %d secret-pattern hit(s) detected (BOT_HQ_SECRETS_STRICT=1; redact + retry)", m.ID, len(findings))
+		}
+	}
 	if err := os.WriteFile(ManifestPath(m.ID), []byte(out), 0o644); err != nil {
 		return fmt.Errorf("write manifest: %w", err)
 	}
