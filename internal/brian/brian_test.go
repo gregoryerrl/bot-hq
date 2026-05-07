@@ -292,6 +292,28 @@ func TestBrianPromptEmbedsPhaseRv3AutoBoundaryDiscipline(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseRv4EstimateShapeDisclosure verifies the
+// Phase-R-followup (c) R37 sub-clause estimate-shape-disclosure const
+// is wired into Brian's prompt.
+func TestBrianPromptEmbedsPhaseRv4EstimateShapeDisclosure(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv4EstimateShapeDisclosure) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv4EstimateShapeDisclosure verbatim (Phase-R-followup (c) wiring lock)")
+	}
+}
+
+// TestBrianPromptEmbedsPhaseRv5MechanicalCiteFromHubRead verifies the
+// Phase-R-followup (d) R31 sub-clause mechanical-cite-from-hub_read
+// const is wired into Brian's prompt.
+func TestBrianPromptEmbedsPhaseRv5MechanicalCiteFromHubRead(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv5MechanicalCiteFromHubRead) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv5MechanicalCiteFromHubRead verbatim (Phase-R-followup (d) wiring lock)")
+	}
+}
+
 // TestFormatNudgeWithSessionPrefix verifies Phase R R5 (d-1)
 // `[SESSION:<8>] ` pane-header prepend behavior.
 func TestFormatNudgeWithSessionPrefix(t *testing.T) {

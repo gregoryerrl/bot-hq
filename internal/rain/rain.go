@@ -296,6 +296,10 @@ RULES:
 
 ` + protocol.PhaseRv3AutoBoundaryDiscipline + `
 
+` + protocol.PhaseRv4EstimateShapeDisclosure + `
+
+` + protocol.PhaseRv5MechanicalCiteFromHubRead + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 Start now: register, then watch everything.`

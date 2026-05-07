@@ -335,6 +335,26 @@ func TestRainPromptEmbedsPhaseRv3AutoBoundaryDiscipline(t *testing.T) {
 	}
 }
 
+// TestRainPromptEmbedsPhaseRv4EstimateShapeDisclosure — rain-side wiring
+// lock for Phase-R-followup (c) R37 sub-clause. Mirrors brian-side.
+func TestRainPromptEmbedsPhaseRv4EstimateShapeDisclosure(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv4EstimateShapeDisclosure) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv4EstimateShapeDisclosure verbatim (Phase-R-followup (c) wiring lock)")
+	}
+}
+
+// TestRainPromptEmbedsPhaseRv5MechanicalCiteFromHubRead — rain-side wiring
+// lock for Phase-R-followup (d) R31 sub-clause. Mirrors brian-side.
+func TestRainPromptEmbedsPhaseRv5MechanicalCiteFromHubRead(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv5MechanicalCiteFromHubRead) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv5MechanicalCiteFromHubRead verbatim (Phase-R-followup (d) wiring lock)")
+	}
+}
+
 // TestFormatRainNudgeWithSessionPrefix verifies Phase R R5 (d-1)
 // `[SESSION:<8>] ` pane-header prepend behavior on rain side.
 func TestFormatRainNudgeWithSessionPrefix(t *testing.T) {
