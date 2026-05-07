@@ -718,9 +718,13 @@
       if (actions.length === 0) {
         pendList.innerHTML = '<em class="muted">No pending actions.</em>';
       } else {
+        // Phase-R-followup R2 authorless-display: shouldQueueAsPending
+        // admits only [HR]-class messages, so every row is class-flagged
+        // — drop agent_id from render to focus on content per R2 strip
+        // contract. Forensic-trail preserved via /api/pending-actions
+        // JSON which still carries agent_id for direct queries.
         pendList.innerHTML = actions.map(function (a) {
           return '<div class="landing-row"><span class="muted">'
-            + escapeHtml(a.agent_id) + ' · '
             + escapeHtml(a.kind) + '</span><br>'
             + escapeHtml(a.summary) + '</div>';
         }).join('');
@@ -793,12 +797,17 @@
         list.innerHTML = '<em class="muted">No pending actions. All caught up.</em>';
         return;
       }
+      // Phase-R-followup R2 authorless-display: shouldQueueAsPending
+      // admits only [HR]-class messages, so every row is class-flagged
+      // — drop agent_id from render to focus on content per R2 strip
+      // contract. Forensic-trail preserved via JSON payload which still
+      // carries agent_id for direct queries.
       list.innerHTML = actions.map((a) => {
         const ts = new Date(a.created).toISOString().slice(0, 16).replace('T', ' ');
         return '<div class="pending-row" data-id="' + a.id + '">'
           + '<button type="button" class="pending-ack" data-id="' + a.id + '">Ack</button>'
           + '<span class="pending-kind">' + escapeHtml(a.kind) + '</span> '
-          + '<span class="muted">· ' + escapeHtml(a.agent_id) + ' · ' + ts + 'Z</span><br>'
+          + '<span class="muted">· ' + ts + 'Z</span><br>'
           + '<span class="pending-summary">' + escapeHtml(a.summary) + '</span>'
           + '</div>';
       }).join('');

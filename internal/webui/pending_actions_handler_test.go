@@ -93,6 +93,27 @@ func TestHandlePendingActions_EmptyList(t *testing.T) {
 	}
 }
 
+// TestHandlePendingActions_PreservesAgentIDInJSON locks the Phase-R-
+// followup R2 webui display-strip contract: frontend hides agent_id in
+// pending-action rendering for authorless-display, but JSON payload
+// MUST retain agent_id for forensic-trail / direct-API queries. This
+// test guards against accidental backend-side stripping that would
+// break audit queries.
+func TestHandlePendingActions_PreservesAgentIDInJSON(t *testing.T) {
+	s := newTestServerWithDB(t)
+	_, _ = s.db.InsertPendingAction("rain", "hr-broadcast", "test summary", 0)
+	status, body := callRoute(t, s, "GET", "/api/pending-actions")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", status, body)
+	}
+	if !strings.Contains(body, `"agent_id"`) {
+		t.Errorf("JSON payload must retain agent_id field for forensic-trail (R2 backend-side preservation contract); body=%s", body)
+	}
+	if !strings.Contains(body, `"rain"`) {
+		t.Errorf("JSON payload must surface the actual agent_id value; body=%s", body)
+	}
+}
+
 // TestHandlePendingActions_CountQueryParam returns count-only.
 func TestHandlePendingActions_CountQueryParam(t *testing.T) {
 	s := newTestServerWithDB(t)
