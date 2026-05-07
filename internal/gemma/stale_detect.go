@@ -201,6 +201,15 @@ const staleEmitMaxPerWindow = 1
 //
 // Caller (checkStaleAgentsAt) holds g.staleMu, so direct map access is safe.
 func (g *Gemma) flagStaleAgent(a protocol.Agent, now time.Time) {
+	// Phase-R-followup (f): intentional-idle filter (policy-tier; runs
+	// before LastSeen-advance + HasRecentMessageFrom DB query). When
+	// agent declares an active multi-step work-thread via
+	// hub_set_current_task, LastSeen ageing is intentional and the
+	// stale-coder PM would be noise. Empty string = no declaration =
+	// fall through to the mechanism-tier rate-cap + recent-msg checks.
+	if a.CurrentTask != "" {
+		return
+	}
 	if g.staleFlagTracker == nil {
 		g.staleFlagTracker = make(map[string]time.Time)
 	}

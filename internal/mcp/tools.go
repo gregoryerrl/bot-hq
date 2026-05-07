@@ -115,6 +115,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSessionCheckpoint(),
 		hubSessionArchive(),
 		hubBroadcast(db),
+		hubSetCurrentTask(db),
 		hubStatus(db),
 		hubSpawn(db),
 		hubCheckpoint(db),
@@ -847,6 +848,44 @@ func hubBroadcast(db *hub.DB) ToolDef {
 			"status":     "broadcast",
 			"message_id": msgID,
 			"from":       from,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubSetCurrentTask implements Phase-R-followup (f) emma-stale current_task
+// data-model. Agents call this at multi-step work-thread boundaries to
+// declare intentional-idle periods (e.g., long brainstorm cycles, batch
+// smoke directives, mid-fire compositions). Empty-string `task` clears
+// the declaration. emma-stale checker treats non-empty current_task as
+// intentional-idle and short-circuits stale-coder PMs in flagStaleAgent
+// at policy-tier (before LastSeen-advance + HasRecentMessageFrom checks).
+//
+// Per phase-r.md (f) carry-forward graduation + Rain msg 15654 BRAIN-2nd.
+func hubSetCurrentTask(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_set_current_task",
+		mcp.WithDescription("Phase-R-followup (f) — declare or clear an active multi-step work-thread to suppress emma-stale PMs during intentional-idle periods. Pass non-empty `task` at work-start (short summary like 'Phase-R-followup (f) impl'); pass empty string at work-end to clear. emma-stale flagStaleAgent short-circuits when current_task != \"\". Forensic-trail preserved via agents.current_task DB column."),
+		mcp.WithString("from", mcp.Required(), mcp.Description("Agent ID whose current_task is being set (self-write).")),
+		mcp.WithString("task", mcp.Required(), mcp.Description("Task summary (non-empty = active multi-step work-thread; empty string = clear declaration).")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		from, err := req.RequireString("from")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		task, err := req.RequireString("task")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		if err := db.SetAgentCurrentTask(from, task); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("hub_set_current_task: %v", err)), nil
+		}
+		return mcp.NewToolResultText(toJSON(map[string]any{
+			"status":   "set",
+			"agent_id": from,
+			"task":     task,
 		})), nil
 	}
 

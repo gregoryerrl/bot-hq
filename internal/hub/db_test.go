@@ -806,6 +806,99 @@ func TestUpdateAgentLastSeenUnknownID(t *testing.T) {
 	}
 }
 
+// TestSetAgentCurrentTask_Roundtrip locks the Phase-R-followup (f)
+// current_task data-model: SetAgentCurrentTask writes the field; a
+// subsequent GetAgent surfaces the value; an empty-string write
+// clears the declaration; re-set works after clear.
+func TestSetAgentCurrentTask_Roundtrip(t *testing.T) {
+	db := setupTestDB(t)
+	agent := protocol.Agent{
+		ID:     "current-task-test",
+		Name:   "Current Task Test",
+		Type:   protocol.AgentBrian,
+		Status: protocol.StatusOnline,
+	}
+	if err := db.RegisterAgent(agent); err != nil {
+		t.Fatal(err)
+	}
+	// Initial state: empty current_task.
+	a0, err := db.GetAgent(agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a0.CurrentTask != "" {
+		t.Errorf("fresh agent CurrentTask = %q, want empty", a0.CurrentTask)
+	}
+	// Set non-empty task.
+	if err := db.SetAgentCurrentTask(agent.ID, "Phase-R-followup (f) impl"); err != nil {
+		t.Fatal(err)
+	}
+	a1, err := db.GetAgent(agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a1.CurrentTask != "Phase-R-followup (f) impl" {
+		t.Errorf("CurrentTask = %q, want %q", a1.CurrentTask, "Phase-R-followup (f) impl")
+	}
+	// Clear via empty string.
+	if err := db.SetAgentCurrentTask(agent.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	a2, err := db.GetAgent(agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a2.CurrentTask != "" {
+		t.Errorf("post-clear CurrentTask = %q, want empty", a2.CurrentTask)
+	}
+	// Re-set works.
+	if err := db.SetAgentCurrentTask(agent.ID, "second task"); err != nil {
+		t.Fatal(err)
+	}
+	a3, err := db.GetAgent(agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a3.CurrentTask != "second task" {
+		t.Errorf("post-re-set CurrentTask = %q, want %q", a3.CurrentTask, "second task")
+	}
+}
+
+// TestSetAgentCurrentTask_ListAgentsSurfaces locks that ListAgents
+// surfaces the CurrentTask field on returned rows (not just GetAgent).
+func TestSetAgentCurrentTask_ListAgentsSurfaces(t *testing.T) {
+	db := setupTestDB(t)
+	agent := protocol.Agent{
+		ID:     "list-current-task",
+		Name:   "List Test",
+		Type:   protocol.AgentBrian,
+		Status: protocol.StatusOnline,
+	}
+	if err := db.RegisterAgent(agent); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetAgentCurrentTask(agent.ID, "smoke-batch"); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := db.ListAgents("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *protocol.Agent
+	for i := range agents {
+		if agents[i].ID == agent.ID {
+			found = &agents[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("agent %q not in ListAgents result", agent.ID)
+	}
+	if found.CurrentTask != "smoke-batch" {
+		t.Errorf("ListAgents CurrentTask = %q, want %q", found.CurrentTask, "smoke-batch")
+	}
+}
+
 // Bug #4 cleanup: ReconcileCoderGhosts must flip ONLY coder agents, ONLY
 // when status=online, ONLY when their paired session is stopped. Three
 // conjoined predicates — easy to break one in a refactor without noticing.

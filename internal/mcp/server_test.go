@@ -44,6 +44,7 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_session_checkpoint",
 		"hub_session_archive",
 		"hub_broadcast",
+		"hub_set_current_task",
 		"hub_status",
 		"hub_spawn",
 		"hub_spawn_gemma",

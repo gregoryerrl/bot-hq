@@ -291,6 +291,13 @@ type Agent struct {
 	// to detect pre-rebuild stale registrations leaking into post-rebuild
 	// state. Zero on legacy rows that predate the column.
 	RebuildGen int64 `json:"rebuild_gen,omitempty"`
+	// CurrentTask declares an active multi-step work-thread (Phase-R-
+	// followup (f)). Empty string = no current task. Non-empty value
+	// signals intentional-idle to emma-stale checker, which suppresses
+	// stale-coder PMs for this agent until cleared. Agent-side write
+	// via hub_set_current_task MCP tool at work-start; clear via empty
+	// string at work-end.
+	CurrentTask string `json:"current_task,omitempty"`
 }
 
 type Session struct {

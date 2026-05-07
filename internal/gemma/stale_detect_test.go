@@ -131,6 +131,55 @@ func TestStaleDetectionSuppressedByPaneActivity(t *testing.T) {
 	}
 }
 
+// TestStaleDetectionSuppressedByCurrentTask locks the Phase-R-followup
+// (f) intentional-idle filter: when an agent declares an active multi-
+// step work-thread via SetAgentCurrentTask, flagStaleAgent short-
+// circuits at the policy-tier (before LastSeen-advance + recent-msg
+// checks) and emits NO stale-coder PM regardless of pane silence.
+// Clearing current_task (empty string) re-enables stale detection.
+func TestStaleDetectionSuppressedByCurrentTask(t *testing.T) {
+	g, db := newTestGemma(t)
+
+	target := "test:0.5"
+	if err := db.RegisterAgent(protocol.Agent{
+		ID:     "coder-with-task",
+		Name:   "Working",
+		Type:   protocol.AgentCoder,
+		Status: protocol.StatusOnline,
+		Meta:   `{"tmux_target":"` + target + `"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetAgentCurrentTask("coder-with-task", "Phase-R-followup smoke batch"); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := newFakePaneActivity()
+	fake.queue(target, 1000, 1000) // silent — would normally flag at tick 2
+	g.paneActivity = fake.check
+
+	virtualNow := time.Now().Add(staleThreshold + time.Minute)
+	g.checkStaleAgentsAt(virtualNow)
+	g.checkStaleAgentsAt(virtualNow.Add(30 * time.Second))
+
+	if got := countStaleCoderMsgs(t, db); got != 0 {
+		t.Errorf("intentional-idle agent (current_task non-empty) must not be flagged stale; got %d PMs", got)
+	}
+
+	// Clear current_task and re-tick: stale detection re-enabled.
+	if err := db.SetAgentCurrentTask("coder-with-task", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Reset baseline + flag tracker so cleared agent flags clean.
+	g.paneBaseline = nil
+	g.staleFlagTracker = nil
+	g.checkStaleAgentsAt(virtualNow.Add(60 * time.Second))
+	g.checkStaleAgentsAt(virtualNow.Add(90 * time.Second))
+	if got := countStaleCoderMsgs(t, db); got != 1 {
+		t.Errorf("after clearing current_task, stale detection should re-fire (1 PM expected); got %d", got)
+	}
+}
+
 // TestStaleDetectionFallbackForNoTmuxTarget locks the Shape α fallback path:
 // agents without tmux_target Meta (future webhook/voice agents) get flagged
 // purely on last_seen staleness — no pane backup signal available.

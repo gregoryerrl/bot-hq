@@ -321,6 +321,13 @@ func (db *DB) migrate() error {
 	if err := db.addColumnIfMissing("agents", "last_seen_msg_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// Phase-R-followup (f): current_task column on agents. Agent-side write
+	// declares an active multi-step work-thread; emma-stale checker treats
+	// non-empty current_task as intentional-idle and suppresses
+	// stale-coder PMs for the agent until cleared.
+	if err := db.addColumnIfMissing("agents", "current_task", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -835,8 +842,8 @@ func (db *DB) GetAgent(id string) (protocol.Agent, error) {
 	var typ, status string
 	var registered, lastSeen int64
 	err := db.conn.QueryRow(
-		`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen FROM agents WHERE id = ?`, id,
-	).Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen)
+		`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen, current_task FROM agents WHERE id = ?`, id,
+	).Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen, &a.CurrentTask)
 	if err != nil {
 		return a, err
 	}
@@ -845,6 +852,18 @@ func (db *DB) GetAgent(id string) (protocol.Agent, error) {
 	a.Registered = time.UnixMilli(registered)
 	a.LastSeen = time.UnixMilli(lastSeen)
 	return a, nil
+}
+
+// SetAgentCurrentTask writes the agent's current_task field. Empty
+// string clears the field (intentional-idle declaration ends).
+// Phase-R-followup (f): emma-stale checker treats non-empty
+// current_task as intentional-idle and suppresses stale-coder PMs.
+func (db *DB) SetAgentCurrentTask(agentID, task string) error {
+	_, err := db.conn.Exec(
+		`UPDATE agents SET current_task = ? WHERE id = ?`,
+		task, agentID,
+	)
+	return err
 }
 
 func (db *DB) UpdateAgentStatus(id string, status protocol.AgentStatus, project ...string) error {
@@ -983,11 +1002,11 @@ func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
 	var err error
 	if statusFilter != "" {
 		rows, err = db.conn.Query(
-			`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen FROM agents WHERE status = ? ORDER BY last_seen DESC`, statusFilter,
+			`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen, current_task FROM agents WHERE status = ? ORDER BY last_seen DESC`, statusFilter,
 		)
 	} else {
 		rows, err = db.conn.Query(
-			`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen FROM agents ORDER BY last_seen DESC`,
+			`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen, current_task FROM agents ORDER BY last_seen DESC`,
 		)
 	}
 	if err != nil {
@@ -1000,7 +1019,7 @@ func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
 		var a protocol.Agent
 		var typ, status string
 		var registered, lastSeen int64
-		if err := rows.Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen, &a.CurrentTask); err != nil {
 			return nil, err
 		}
 		a.Type = protocol.AgentType(typ)
