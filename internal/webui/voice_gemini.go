@@ -91,6 +91,41 @@ func hubToolDeclarations() []map[string]interface{} {
 				"properties": map[string]interface{}{},
 			},
 		},
+		{
+			"name":        "read_file",
+			"description": "Read the current text content of a file under the bot-hq canonical store (~/.bot-hq/). If path is omitted, reads the file the user is currently viewing in the web UI.",
+			"parameters": map[string]interface{}{
+				"type": "OBJECT",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "STRING",
+						"description": "Path relative to ~/.bot-hq/ (e.g. 'tasks.md' or 'projects/bcc-ad-manager/plans/2026-05-07-foo.md'). Optional; defaults to the user's current focus file.",
+					},
+				},
+			},
+		},
+		{
+			"name":        "propose_file_edit",
+			"description": "Propose a full-content replacement for a file under the bot-hq canonical store. Pops a diff in the user's web UI for explicit approval — does NOT apply automatically. Use this for any planning, note-taking, decisions, or content the user asks you to capture. If path is omitted, proposes against the user's current focus file.",
+			"parameters": map[string]interface{}{
+				"type": "OBJECT",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "STRING",
+						"description": "Path relative to ~/.bot-hq/ (e.g. 'tasks.md', 'projects/<p>/plans/<file>.md'). Optional; defaults to the user's current focus file.",
+					},
+					"content": map[string]interface{}{
+						"type":        "STRING",
+						"description": "Full new content of the file (not a diff — the entire post-edit text).",
+					},
+					"purpose": map[string]interface{}{
+						"type":        "STRING",
+						"description": "One-line description of why this edit is being proposed. Surfaced in the diff UI.",
+					},
+				},
+				"required": []string{"content", "purpose"},
+			},
+		},
 	}
 }
 

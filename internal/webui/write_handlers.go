@@ -382,6 +382,26 @@ func (s *Server) notifyWrite(relPath, actor, purpose string) {
 	_, _ = s.db.InsertMessage(msg)
 }
 
+// notifyProposal emits a hub_send broadcast announcing a Clive-proposed
+// edit awaiting user approval. The voice tool path doesn't go through
+// the browser-side Clive (which would emit hub_send itself), so the
+// dispatcher posts the notification on its behalf so the pending-
+// actions UI surfaces the diff.
+func (s *Server) notifyProposal(relPath, purpose, proposalID string) {
+	if s.db == nil {
+		return
+	}
+	content := fmt.Sprintf("[clive] proposed edit to %s — %s (proposal_id=%s)", relPath, purpose, proposalID)
+	msg := protocol.Message{
+		FromAgent: "clive",
+		ToAgent:   "",
+		Type:      protocol.MsgUpdate,
+		Content:   content,
+		Created:   time.Now(),
+	}
+	_, _ = s.db.InsertMessage(msg)
+}
+
 // atomicWrite writes data to abs via os.WriteFile to a temp + Rename.
 // Ensures partial-write isn't visible to readers.
 func atomicWrite(abs string, data []byte) error {

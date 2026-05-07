@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -414,6 +415,54 @@ func (s *Server) executeVoiceHubTool(name string, args map[string]interface{}) m
 			})
 		}
 		return map[string]interface{}{"sessions": result}
+	case "read_file":
+		path, _ := args["path"].(string)
+		if path == "" {
+			path = s.GetWebuiContext().CurrentPath
+		}
+		if path == "" {
+			return map[string]interface{}{"error": "no path provided and no file currently in focus"}
+		}
+		abs, err := resolveCanonicalPath(s.canonicalRoot, path)
+		if err != nil {
+			return map[string]interface{}{"error": err.Error()}
+		}
+		data, err := os.ReadFile(abs)
+		if err != nil {
+			return map[string]interface{}{"error": err.Error()}
+		}
+		return map[string]interface{}{"path": path, "content": string(data)}
+	case "propose_file_edit":
+		path, _ := args["path"].(string)
+		if path == "" {
+			path = s.GetWebuiContext().CurrentPath
+		}
+		content, _ := args["content"].(string)
+		purpose, _ := args["purpose"].(string)
+		if path == "" {
+			return map[string]interface{}{"error": "no path provided and no file currently in focus"}
+		}
+		if content == "" {
+			return map[string]interface{}{"error": "content is required"}
+		}
+		if purpose == "" {
+			return map[string]interface{}{"error": "purpose is required"}
+		}
+		if _, err := resolveCanonicalPath(s.canonicalRoot, path); err != nil {
+			return map[string]interface{}{"error": err.Error()}
+		}
+		id := newProposalID()
+		s.proposals.add(&cliveProposal{
+			id:        id,
+			relPath:   path,
+			content:   content,
+			purpose:   purpose,
+			expiresAt: time.Now().Add(10 * time.Minute),
+		})
+		// Notify user-side: mirror the HTTP propose handler's behavior so
+		// the diff lands in the webui pending-actions UI for approval.
+		s.notifyProposal(path, purpose, id)
+		return map[string]interface{}{"status": "proposed", "proposal_id": id, "path": path}
 	default:
 		return map[string]interface{}{"error": fmt.Sprintf("unknown tool: %s", name)}
 	}
