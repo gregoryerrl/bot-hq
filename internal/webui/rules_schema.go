@@ -17,6 +17,7 @@ type RulesGeneral struct {
 	Greenlight *RulesGreenlight `yaml:"greenlight,omitempty"`
 	Ratchets   *RulesRatchets   `yaml:"ratchets,omitempty"`
 	HubDiscipline *RulesHubDiscipline `yaml:"hubDiscipline,omitempty"`
+	Gates      *RulesGates      `yaml:"gates,omitempty"`
 }
 
 type RulesTone struct {
@@ -41,6 +42,23 @@ type RulesHubDiscipline struct {
 	CrossInFlight             string `yaml:"crossInFlight,omitempty"`
 	CompactFormat             string `yaml:"compactFormat,omitempty"`
 	AudienceClassDiscriminator string `yaml:"audienceClassDiscriminator,omitempty"`
+}
+
+// RulesGates is the schema for the gates: top-level section of
+// general.yaml. Each field holds the full markdown body of the
+// corresponding ~/.bot-hq/gates/<file>.md gate-checklist as a YAML
+// block scalar. R33 PRE-EXECUTE-GATE-FILE-READ toolgate enforcement
+// continues to consume the on-disk files at ~/.bot-hq/gates/ — this
+// schema-field is the parallel webui-readable surface (Phase O drain
+// item per phase-n.md:808). Future Phase O sub-item migrates the R33
+// source-of-truth to read from this field; until then disk-files
+// remain authoritative for SHA-cite computation (R33 SHA-cite
+// discipline preserved as required).
+type RulesGates struct {
+	PreCommitChecklist     string `yaml:"preCommitChecklist,omitempty"`
+	PrePushChecklist       string `yaml:"prePushChecklist,omitempty"`
+	PreMergeChecklist      string `yaml:"preMergeChecklist,omitempty"`
+	PrePhaseCloseChecklist string `yaml:"prePhaseCloseChecklist,omitempty"`
 }
 
 // RulesProject is the schema for ~/.bot-hq/rules/projects/<project>.yaml.
@@ -138,7 +156,7 @@ func validateRulesYAML(layer string, data []byte) ValidationResult {
 
 func generalKnown(k string) bool {
 	switch k {
-	case "tone", "greenlight", "ratchets", "hubDiscipline":
+	case "tone", "greenlight", "ratchets", "hubDiscipline", "gates":
 		return true
 	}
 	return false

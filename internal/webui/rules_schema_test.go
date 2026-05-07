@@ -122,6 +122,70 @@ push: "explicit user verbatim 'push X'"
 	}
 }
 
+// TestValidateRulesYAML_GatesSchemaField: Phase O drain #3 gates schema-
+// field accepts block-scalar markdown content for all 4 known gate files.
+// R33 source-of-truth still on-disk; this field is the webui-readable
+// surface only. No errors, no warnings.
+func TestValidateRulesYAML_GatesSchemaField(t *testing.T) {
+	yaml := []byte(`
+gates:
+  preCommitChecklist: |
+    # Pre-commit checklist
+    - item 1
+    - item 2
+  prePushChecklist: |
+    # Pre-push checklist
+    - item 1
+  preMergeChecklist: |
+    # Pre-merge checklist (USER-ONLY ABSOLUTE)
+    - item 1
+  prePhaseCloseChecklist: |
+    # Pre-phase-close checklist
+    - item 1
+`)
+	res := validateRulesYAML("general", yaml)
+	if res.HasErrors() {
+		t.Fatalf("unexpected errors: %v", res.Errors)
+	}
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "gates") {
+			t.Errorf("gates flagged as unknown: %q", w)
+		}
+	}
+}
+
+// TestValidateRulesYAML_GatesPartialPopulation: gates field is optional
+// per-key — populating only preCommitChecklist (other 3 omitted) still
+// validates clean. Models incremental migration paths.
+func TestValidateRulesYAML_GatesPartialPopulation(t *testing.T) {
+	yaml := []byte(`
+gates:
+  preCommitChecklist: "single-key population test"
+`)
+	res := validateRulesYAML("general", yaml)
+	if res.HasErrors() {
+		t.Fatalf("partial population errored: %v", res.Errors)
+	}
+	if len(res.Warnings) > 0 {
+		t.Errorf("partial population warned: %v", res.Warnings)
+	}
+}
+
+// TestValidateRulesYAML_GatesUnknownSubkeyTypeError: subkey type
+// mismatch (map instead of string) errors out — schema enforces string-
+// only block-scalar shape.
+func TestValidateRulesYAML_GatesUnknownSubkeyTypeError(t *testing.T) {
+	yaml := []byte(`
+gates:
+  preCommitChecklist:
+    nested: "should-not-parse"
+`)
+	res := validateRulesYAML("general", yaml)
+	if !res.HasErrors() {
+		t.Errorf("expected schema error on map-instead-of-string, got none")
+	}
+}
+
 // TestValidateRulesYAML_BadYAML: malformed input → error, blocks write.
 func TestValidateRulesYAML_BadYAML(t *testing.T) {
 	yaml := []byte("not valid yaml: : :")
