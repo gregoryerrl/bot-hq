@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/agents/projectctx"
 	"github.com/gregoryerrl/bot-hq/internal/agents/sessionopen"
@@ -33,6 +35,7 @@ func runContextSwitch() {
 	project := args[0]
 	agent := "brian"
 	printExport := false
+	noPivot := false
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--agent":
@@ -44,8 +47,11 @@ func runContextSwitch() {
 			i++
 		case "--print-export":
 			printExport = true
+		case "--no-pivot":
+			noPivot = true
 		}
 	}
+	prevProject := strings.TrimSpace(os.Getenv(projectctx.EnvVar))
 
 	if printExport {
 		fmt.Printf("export %s=%s\n", projectctx.EnvVar, project)
@@ -77,6 +83,45 @@ func runContextSwitch() {
 	}
 
 	fmt.Fprintf(os.Stderr, "\n# To make the switch sticky for this shell:\n# export %s=%s\n", projectctx.EnvVar, project)
+
+	if !noPivot {
+		postHubPivot(agent, project, prevProject)
+	}
+}
+
+// postHubPivot announces the context-switch to the hub via POST
+// /api/hub-pivot per design-spike 157ea7f §2.4 + Phase O drain #4.
+// Best-effort: daemon unreachable / non-200 → warn to stderr, don't
+// block the local pivot. Caller's context-switch already succeeded
+// before this fires; hub notification is informational only.
+func postHubPivot(agent, project, prevProject string) {
+	url := fmt.Sprintf("http://127.0.0.1:%d/api/hub-pivot", webui.DefaultPort)
+	body, err := json.Marshal(map[string]string{
+		"agent":        agent,
+		"project":      project,
+		"prev_project": prevProject,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: hub-pivot marshal failed: %v\n", err)
+		return
+	}
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: hub-pivot request build failed: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: hub-pivot post failed (daemon down?): %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "warning: hub-pivot returned %d: %s\n", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
 }
 
 // runSessionOpen implements `bot-hq session-open` — invoked by the

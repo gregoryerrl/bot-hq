@@ -187,6 +187,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/clive/activity", s.handleCliveActivity)
 	mux.HandleFunc("/api/session-open", s.handleSessionOpen)
+	mux.HandleFunc("/api/hub-pivot", s.handleHubPivot)
 	mux.Handle("/", staticHandler())
 }
 
