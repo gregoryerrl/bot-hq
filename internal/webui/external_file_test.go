@@ -140,6 +140,31 @@ func TestHandleExternalFile_EndToEnd(t *testing.T) {
 			t.Errorf("status = %d, want 400", rr.Code)
 		}
 	})
+
+	t.Run("symlink-escape rejected post-resolution", func(t *testing.T) {
+		// Plant a target file outside docsRoot and a symlink under docs/
+		// pointing to it. The path-traversal guard sees a clean rel
+		// path; only EvalSymlinks + post-resolution Rel re-check catches
+		// the escape.
+		secret := filepath.Join(homeTmp, "Projects", "myproj", "secret.md")
+		mustWrite(t, secret, "secret\n")
+		linkPath := filepath.Join(docsDir, "leak.md")
+		if err := os.Symlink(secret, linkPath); err != nil {
+			t.Fatalf("symlink: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/external-file/myproj/leak.md", nil)
+		rr := httptest.NewRecorder()
+		s.handleExternalFile(rr, req)
+		// Must NOT serve the secret content. Either 400 (rejected) or
+		// 404 (resolved-not-found) is acceptable; 200 with content
+		// would be the bug.
+		if rr.Code == http.StatusOK {
+			body := rr.Body.String()
+			if len(body) >= 6 && body[:6] == "secret" {
+				t.Errorf("symlink escape served secret: body = %q", body)
+			}
+		}
+	})
 }
 
 // TestResolveProjectExternalDocs_PicksUpDocsDir verifies the destination

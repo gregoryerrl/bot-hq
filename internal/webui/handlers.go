@@ -258,7 +258,13 @@ func (s *Server) handleExternalFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "path escapes docs root", http.StatusBadRequest)
 		return
 	}
-	data, err := os.ReadFile(abs)
+	// Resolve symlinks and re-check containment so a symlink under docsRoot
+	// pointing outside the tree (e.g., docs/leak → /etc/passwd) can't bypass
+	// the Rel guard. Both sides must resolve through the same lens — on
+	// macOS, /tmp is itself a symlink to /private/tmp, so docsRoot needs
+	// EvalSymlinks too or every Rel comparison would surface as escape.
+	// EvalSymlinks fails on non-existent paths; surface 404 before read.
+	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			http.NotFound(w, r)
@@ -267,7 +273,26 @@ func (s *Server) handleExternalFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	info, err := os.Stat(abs)
+	resolvedRoot, err := filepath.EvalSymlinks(docsRoot)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	relAfter, err := filepath.Rel(resolvedRoot, resolved)
+	if err != nil || relAfter == ".." || strings.HasPrefix(relAfter, ".."+string(filepath.Separator)) || filepath.IsAbs(relAfter) {
+		http.Error(w, "path escapes docs root after symlink resolution", http.StatusBadRequest)
+		return
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	info, err := os.Stat(resolved)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
