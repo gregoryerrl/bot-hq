@@ -364,15 +364,20 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"index": string(data)})
 }
 
-// handleCliveActivity responds to GET /api/clive/activity with recent
-// hub messages from agent_id=clive. MVP returns a snapshot (last N=50);
-// SSE streaming wired in v3c per OQ-2 LOCKED.
+// handleCliveActivity responds to GET /api/clive/activity. When the
+// request carries Accept: text/event-stream, dispatches to the SSE
+// live-feed branch (P-1, sse.go); otherwise returns the JSON snapshot
+// of the last N=50 clive-authored hub messages.
 //
 // Returns 503 when hub.DB unavailable (CI / test config) so the frontend
 // can render a graceful "no Clive activity" placeholder.
 func (s *Server) handleCliveActivity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		s.handleCliveActivitySSE(w, r)
 		return
 	}
 	if s.db == nil {

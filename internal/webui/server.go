@@ -29,6 +29,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/hub"
@@ -55,6 +56,10 @@ type Server struct {
 	port          int
 
 	proposals *proposalStore // Clive draft-author proposals awaiting user approval (v3c)
+
+	// SSE subscriber state for /api/clive/activity live feed (P-1).
+	sseMu           sync.Mutex
+	sseSubsByOrigin map[string][]*cliveSubscriber
 }
 
 // Option mutates Server config at construction. Pattern mirrors
@@ -89,6 +94,8 @@ func NewServer(db *hub.DB, opts ...Option) (*Server, error) {
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.initSSE()
+	s.wireCliveBroadcast()
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	s.httpServer = &http.Server{

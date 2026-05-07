@@ -19,6 +19,7 @@ func newTestServer(t *testing.T, root string) *Server {
 	s := &Server{
 		canonicalRoot: root,
 	}
+	s.initSSE()
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	s.httpServer = &http.Server{Handler: mux}
