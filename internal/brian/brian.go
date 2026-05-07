@@ -21,8 +21,16 @@ const (
 	agentName = "Brian"
 	agentType = protocol.AgentBrian
 
-	pollInterval   = 3 * time.Second
+	pollInterval   = 1 * time.Second
 	healthInterval = 30 * time.Second
+
+	// bufferQuietWindow is the debounce window for Phase S S-5 brian-
+	// 3s message-buffer hotfix. New non-bypass-class messages append to
+	// pendingBatch + (re)set lastArrivalTime; emit fires only after
+	// bufferQuietWindow of no new appends. User-msgs and FLAG-class
+	// MsgFlag bypass the buffer (urgency-class) and flush any pending
+	// batch alongside.
+	bufferQuietWindow = 3 * time.Second
 )
 
 // Brian manages a Claude Code session that acts as the master orchestrator.
@@ -42,6 +50,13 @@ type Brian struct {
 	mu      sync.Mutex
 	running bool
 	stopCh  chan struct{}
+
+	// Phase S S-5 brian-3s message-buffer state. pendingBatch holds
+	// formatted-nudge strings awaiting debounce-quiet emit. Guarded by
+	// `mu`. lastArrivalTime resets on each non-bypass-class append;
+	// emit fires when (now - lastArrivalTime) >= bufferQuietWindow.
+	pendingBatch    []string
+	lastArrivalTime time.Time
 }
 
 // New creates a Brian instance. workDir is where the Claude Code session runs.
@@ -427,7 +442,60 @@ func shouldForwardToBrian(msg protocol.Message) bool {
 	return true
 }
 
+// isBufferBypassClass returns true for messages that should bypass the
+// Phase S S-5 brian-3s message-buffer and deliver immediately. Bypass
+// classes: user-msgs (FromAgent="user", urgency-class) + discord-relay
+// (FromAgent="discord", currently user-relay channel only — saltegge
+// bridge per Rain BRAIN-2nd msg 15771 cite-from-actual user msg
+// 15753/15760 arrived via discord) + MsgFlag-typed messages (urgency-
+// class). Bypass arrival also flushes any pending batch alongside
+// (avoids stranding queued msgs behind a high-priority arrival).
+func isBufferBypassClass(msg protocol.Message) bool {
+	if msg.FromAgent == "user" {
+		return true
+	}
+	if msg.FromAgent == "discord" {
+		return true
+	}
+	if msg.Type == protocol.MsgFlag {
+		return true
+	}
+	return false
+}
+
+// formatBatch wraps a slice of nudge-formatted strings for tmux delivery.
+// Single-message batches deliver as-is (no [BATCH:N] wrapper); 2+
+// messages get the [BATCH:N] header prefix per Phase S S-5 contract.
+func formatBatch(pending []string) string {
+	if len(pending) == 0 {
+		return ""
+	}
+	if len(pending) == 1 {
+		return pending[0]
+	}
+	return fmt.Sprintf("[BATCH:%d]\n%s", len(pending), strings.Join(pending, "\n"))
+}
+
+// FlushPendingBatch drains any held messages immediately. Called from
+// PreCompact hook integration (Phase S S-2 dependency) so context-
+// preserve includes pending msgs pre-compact; otherwise un-flushed
+// batch context-loss on compact-resume. Safe to call when batch is
+// empty.
+func (b *Brian) FlushPendingBatch() {
+	b.mu.Lock()
+	if len(b.pendingBatch) == 0 {
+		b.mu.Unlock()
+		return
+	}
+	nudge := formatBatch(b.pendingBatch)
+	b.pendingBatch = nil
+	b.mu.Unlock()
+	b.SendCommand(nudge)
+}
+
 // processNewMessages checks for new messages and nudges Brian via tmux.
+// Phase S S-5: applies a 3s debounce-on-quiet buffer for non-bypass-
+// class messages; user-msgs + MsgFlag bypass and flush pending alongside.
 func (b *Brian) processNewMessages() {
 	msgs, err := b.db.ReadMessages("", b.lastMsgID, 50)
 	if err != nil {
@@ -435,25 +503,53 @@ func (b *Brian) processNewMessages() {
 	}
 
 	sessionPrefix := b.activeSessionPrefix()
-	var pending []string
+	var bypassNudges []string
+	bufferAppended := false
+
+	b.mu.Lock()
 	for _, msg := range msgs {
 		if msg.ID > b.lastMsgID {
 			b.lastMsgID = msg.ID
 		}
-		if shouldForwardToBrian(msg) {
-			pending = append(pending, formatNudge(msg, sessionPrefix))
+		if !shouldForwardToBrian(msg) {
+			continue
+		}
+		nudge := formatNudge(msg, sessionPrefix)
+		if isBufferBypassClass(msg) {
+			bypassNudges = append(bypassNudges, nudge)
+		} else {
+			b.pendingBatch = append(b.pendingBatch, nudge)
+			bufferAppended = true
 		}
 	}
+	if bufferAppended {
+		b.lastArrivalTime = time.Now()
+	}
 
-	if len(pending) == 0 {
+	// Bypass-class arrival flushes any pending batch alongside (avoids
+	// stranding queued msgs behind high-priority arrival).
+	if len(bypassNudges) > 0 {
+		var combined []string
+		if len(b.pendingBatch) > 0 {
+			combined = append(combined, formatBatch(b.pendingBatch))
+			b.pendingBatch = nil
+		}
+		combined = append(combined, bypassNudges...)
+		b.mu.Unlock()
+		b.SendCommand(strings.Join(combined, "\n"))
 		return
 	}
 
-	// Batch all messages into a single nudge. Each line carries its own
-	// [HUB:<sender>] tag; the NUDGE contract in the initial prompt covers
-	// "process in order after current task", so no trailing IMPORTANT block.
-	nudge := strings.Join(pending, "\n")
-	b.SendCommand(nudge)
+	// Debounce check: emit only after bufferQuietWindow of no new
+	// non-bypass-class appends. Skip when batch is empty.
+	if len(b.pendingBatch) > 0 && time.Since(b.lastArrivalTime) >= bufferQuietWindow {
+		nudge := formatBatch(b.pendingBatch)
+		b.pendingBatch = nil
+		b.mu.Unlock()
+		b.SendCommand(nudge)
+		return
+	}
+	b.mu.Unlock()
 }
 
 // healthLoop periodically checks if the tmux session is still alive.

@@ -953,3 +953,69 @@ func TestFormatNudge_PhaseR_R2_AuthorlessHR(t *testing.T) {
 		})
 	}
 }
+
+// Phase S S-5 brian-3s message-buffer tests.
+
+func TestIsBufferBypassClass_UserMsg(t *testing.T) {
+	if !isBufferBypassClass(protocol.Message{FromAgent: "user", Content: "hi"}) {
+		t.Error("user-msg should bypass buffer (urgency-class)")
+	}
+}
+
+func TestIsBufferBypassClass_FlagType(t *testing.T) {
+	if !isBufferBypassClass(protocol.Message{FromAgent: "rain", Type: protocol.MsgFlag, Content: "alert"}) {
+		t.Error("MsgFlag-typed should bypass buffer (urgency-class)")
+	}
+}
+
+func TestIsBufferBypassClass_PeerUpdate(t *testing.T) {
+	if isBufferBypassClass(protocol.Message{FromAgent: "rain", Type: protocol.MsgUpdate, Content: "peer-coord"}) {
+		t.Error("peer MsgUpdate should NOT bypass buffer (default-class)")
+	}
+}
+
+func TestIsBufferBypassClass_PeerResponse(t *testing.T) {
+	if isBufferBypassClass(protocol.Message{FromAgent: "rain", Type: protocol.MsgResponse, Content: "BRAIN-2nd"}) {
+		t.Error("peer MsgResponse should NOT bypass buffer (default-class)")
+	}
+}
+
+func TestIsBufferBypassClass_DiscordRelay(t *testing.T) {
+	// Phase S S-5 Rain BRAIN-2nd push-back msg 15771: discord channel
+	// is currently user-relay only (saltegge bridge per msg 15753/15760
+	// cite-from-actual). Treat FromAgent="discord" as bypass-class so
+	// user-via-discord msgs don't sit 3s in buffer.
+	if !isBufferBypassClass(protocol.Message{FromAgent: "discord", Type: protocol.MsgResponse, Content: "via discord"}) {
+		t.Error("discord-relay should bypass buffer (user-relay channel)")
+	}
+}
+
+func TestFormatBatch_Empty(t *testing.T) {
+	if got := formatBatch(nil); got != "" {
+		t.Errorf("formatBatch(nil) = %q, want empty", got)
+	}
+}
+
+func TestFormatBatch_Single(t *testing.T) {
+	got := formatBatch([]string{"[HUB:rain] hello"})
+	if got != "[HUB:rain] hello" {
+		t.Errorf("single-msg should not get [BATCH:N] wrapper; got %q", got)
+	}
+}
+
+func TestFormatBatch_Multiple(t *testing.T) {
+	got := formatBatch([]string{"[HUB:rain] one", "[HUB:rain] two", "[HUB:rain] three"})
+	if !strings.HasPrefix(got, "[BATCH:3]\n") {
+		t.Errorf("3-msg batch should start with [BATCH:3]\\n; got %q", got)
+	}
+	if !strings.Contains(got, "[HUB:rain] one") || !strings.Contains(got, "[HUB:rain] two") || !strings.Contains(got, "[HUB:rain] three") {
+		t.Errorf("batch should contain all msgs; got %q", got)
+	}
+}
+
+func TestFormatBatch_TwoMessagesGetBatchPrefix(t *testing.T) {
+	got := formatBatch([]string{"[HUB:rain] a", "[HUB:user] b"})
+	if !strings.HasPrefix(got, "[BATCH:2]\n") {
+		t.Errorf("2-msg batch should start with [BATCH:2]\\n; got %q", got)
+	}
+}
