@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -109,6 +110,29 @@ func buildProjectStarterYAML(name, remoteURL string) string {
 		b.WriteString("remote_url: \"\"\n")
 	}
 	return b.String()
+}
+
+// handleRecentEdits responds to GET /api/recent-edits?limit=N with the
+// top-N most-recently-modified canonical-store files (mtime descending).
+// limit defaults to 20, clamped [1, 100]. Phase O drain per phase-n.md
+// :816 Recent-edits feed widget.
+func (s *Server) handleRecentEdits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	limit := 20
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+	edits, err := ListRecentEdits(s.canonicalRoot, limit)
+	if err != nil {
+		http.Error(w, "list recent-edits failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"edits": edits})
 }
 
 // handleDestinations responds to GET /api/destinations?project=<p> with

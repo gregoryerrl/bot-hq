@@ -491,3 +491,36 @@ main {
   border-left: 3px solid #999;
   font-size: 0.8rem;
 }
+
+/* Recent-edits feed widget — Phase O drain per phase-n.md:816.
+   Sidebar nav-section showing top-N most-recently-modified canonical-
+   store files with relative-time labels. Click loads the file. */
+.recent-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.recent-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.85rem;
+  border-radius: 3px;
+}
+.recent-list li:hover { background: #f0f0f0; }
+.recent-link {
+  color: #1a4480;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.recent-link:hover { text-decoration: underline; }
+.recent-time {
+  font-size: 0.75rem;
+  flex-shrink: 0;
+}

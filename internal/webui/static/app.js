@@ -15,6 +15,7 @@
   const navSearch = document.getElementById('nav-search');
   const navGlobal = document.getElementById('nav-global-list');
   const navProject = document.getElementById('nav-project-list');
+  const navRecent = document.getElementById('nav-recent-list');
   const docPath = document.getElementById('doc-path');
   const docMtime = document.getElementById('doc-mtime');
   const docContent = document.getElementById('doc-content');
@@ -56,6 +57,7 @@
   document.getElementById('register-project-cancel').addEventListener('click', closeRegisterModal);
 
   loadProjects().then(loadDestinations);
+  loadRecentEdits();
 
   async function loadProjects() {
     try {
@@ -444,8 +446,9 @@
       const warns = (data.warnings && data.warnings.length) ? ' · ' + data.warnings.length + ' warning(s)' : '';
       docStatus.textContent = 'Saved ' + (data.mtime || '') + sha + warns;
       updateDirtyState();
-      // Refresh nav to pick up new mtimes.
+      // Refresh nav + recent-edits feed to pick up new mtimes.
       loadDestinations();
+      loadRecentEdits();
       // If rendered view active, refresh render with new content.
       if (state.viewMode === 'rendered' && isMarkdown(state.currentPath)) {
         showRenderedView();
@@ -476,6 +479,63 @@
       docStatus.textContent = 'Keeping local edits; server has newer version (' + (conflict.current_mtime || '') + ').';
     }
     state.pendingConflict = null;
+  }
+
+  // Recent-edits feed widget per phase-n.md:816. Renders the top-10
+  // most-recently-modified canonical-store files in the sidebar with
+  // relative-time labels. Click loads the file via the existing loadFile
+  // dispatch. Refreshed on init + after every successful save.
+  async function loadRecentEdits() {
+    if (!navRecent) return;
+    try {
+      const res = await fetch('/api/recent-edits?limit=10');
+      const data = await res.json();
+      const edits = data.edits || [];
+      if (edits.length === 0) {
+        navRecent.innerHTML = '<em class="muted">No edits yet.</em>';
+        return;
+      }
+      navRecent.innerHTML = '';
+      const ul = document.createElement('ul');
+      ul.className = 'recent-list';
+      for (const e of edits) {
+        const li = document.createElement('li');
+        const a = document.createElement('a');
+        a.href = '#';
+        a.className = 'recent-link';
+        a.dataset.path = e.path;
+        a.textContent = e.name;
+        a.title = e.path;
+        a.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          loadFile(e.path);
+        });
+        const ts = document.createElement('span');
+        ts.className = 'recent-time muted';
+        ts.textContent = formatRelativeTime(e.mtime);
+        li.appendChild(a);
+        li.appendChild(ts);
+        ul.appendChild(li);
+      }
+      navRecent.appendChild(ul);
+    } catch (err) {
+      navRecent.innerHTML = '<em class="error">Failed to load recent edits.</em>';
+    }
+  }
+
+  // formatRelativeTime returns a short "3m ago" / "2h ago" / "1d ago"
+  // / "Mar 5" label given an ISO 8601 UTC timestamp string. Falls back
+  // to the raw string on parse failure.
+  function formatRelativeTime(iso) {
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return iso;
+    const diff = (Date.now() - t) / 1000;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    if (diff < 7 * 86400) return Math.floor(diff / 86400) + 'd ago';
+    const d = new Date(t);
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
 
   // Register-project formal flow per phase-n.md:826. POST /api/projects

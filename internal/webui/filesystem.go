@@ -118,6 +118,57 @@ func walkCanonicalTree(root string) ([]TreeNode, error) {
 	return walkDir(root, "")
 }
 
+// RecentEdit is a flattened view of a single canonical-store file
+// suitable for the recent-edits feed widget (Phase O drain per
+// phase-n.md:816). Same fields as the file-typed TreeNode but flat
+// (no nesting; path includes the directory prefix).
+type RecentEdit struct {
+	Path  string `json:"path"`
+	Name  string `json:"name"`
+	Mtime string `json:"mtime"`
+	Size  int64  `json:"size"`
+}
+
+// ListRecentEdits walks the canonical-store tree, flattens to file
+// entries only, sorts by mtime descending (most-recent first), and
+// returns the top N. Reuses walkCanonicalTree skip-list discipline so
+// runtime-state files (hub.db, agent dirs, .git, etc.) never surface.
+// limit is clamped to [1, 100] by the caller; 0 or negative → 20 default
+// is the caller's responsibility (handler enforces).
+func ListRecentEdits(root string, limit int) ([]RecentEdit, error) {
+	tree, err := walkCanonicalTree(root)
+	if err != nil {
+		return nil, err
+	}
+	var flat []RecentEdit
+	flattenForRecent(tree, &flat)
+	sort.SliceStable(flat, func(i, j int) bool {
+		return flat[i].Mtime > flat[j].Mtime
+	})
+	if len(flat) > limit {
+		flat = flat[:limit]
+	}
+	return flat, nil
+}
+
+// flattenForRecent depth-first appends file entries to out, descending
+// into dir children. dir nodes themselves are not added (only files).
+func flattenForRecent(nodes []TreeNode, out *[]RecentEdit) {
+	for _, n := range nodes {
+		switch n.Type {
+		case "file":
+			*out = append(*out, RecentEdit{
+				Path:  n.Path,
+				Name:  n.Name,
+				Mtime: n.Mtime,
+				Size:  n.Size,
+			})
+		case "dir":
+			flattenForRecent(n.Children, out)
+		}
+	}
+}
+
 // walkDir recursively builds tree nodes for entries under absDir; relPath
 // is the canonical-store-relative path-prefix for emitted nodes.
 func walkDir(absDir, relPath string) ([]TreeNode, error) {
