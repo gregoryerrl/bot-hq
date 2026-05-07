@@ -91,7 +91,7 @@ func TestStop_NotRunning_NoOp(t *testing.T) {
 
 // 6. TestFormatRainNudge_BasicFormat — compact [HUB:<sender>] tag, no IMPORTANT trailer.
 func TestFormatRainNudge_BasicFormat(t *testing.T) {
-	result := formatRainNudge(protocol.Message{FromAgent: "brian", Content: "Please review the code"})
+	result := formatRainNudge(protocol.Message{FromAgent: "brian", Content: "Please review the code"}, "")
 
 	if result != "[HUB:brian] Please review the code" {
 		t.Errorf("expected compact tag, got %q", result)
@@ -103,7 +103,7 @@ func TestFormatRainNudge_BasicFormat(t *testing.T) {
 
 // 7. TestFormatRainNudge_EmptyContent — handles empty content without dropping the tag.
 func TestFormatRainNudge_EmptyContent(t *testing.T) {
-	result := formatRainNudge(protocol.Message{FromAgent: "brian", Content: ""})
+	result := formatRainNudge(protocol.Message{FromAgent: "brian", Content: ""}, "")
 
 	if !strings.HasPrefix(result, "[HUB:brian]") {
 		t.Errorf("expected nudge to start with [HUB:brian], got %q", result)
@@ -113,7 +113,7 @@ func TestFormatRainNudge_EmptyContent(t *testing.T) {
 // 8. TestFormatRainNudge_SpecialChars — quotes, newlines, tabs survive compression.
 func TestFormatRainNudge_SpecialChars(t *testing.T) {
 	content := "He said \"hello\"\nand then\ttabs"
-	result := formatRainNudge(protocol.Message{FromAgent: "user", Content: content})
+	result := formatRainNudge(protocol.Message{FromAgent: "user", Content: content}, "")
 
 	if !strings.Contains(result, `"hello"`) {
 		t.Errorf("expected nudge to preserve quotes, got %q", result)
@@ -322,6 +322,61 @@ func TestRainPromptEmbedsPhaseRv2BrainCycleHardening(t *testing.T) {
 	prompt := r.initialPrompt()
 	if !strings.Contains(prompt, protocol.PhaseRv2BrainCycleHardening) {
 		t.Errorf("initial prompt must embed protocol.PhaseRv2BrainCycleHardening verbatim (Phase R R1 wiring lock)")
+	}
+}
+
+// TestRainPromptEmbedsPhaseRv3AutoBoundaryDiscipline — rain-side wiring
+// lock for Phase R R5 (d-1) auto-boundary-discipline. Mirrors brian-side.
+func TestRainPromptEmbedsPhaseRv3AutoBoundaryDiscipline(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv3AutoBoundaryDiscipline) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv3AutoBoundaryDiscipline verbatim (Phase R R5 (d-1) wiring lock)")
+	}
+}
+
+// TestFormatRainNudgeWithSessionPrefix verifies Phase R R5 (d-1)
+// `[SESSION:<8>] ` pane-header prepend behavior on rain side.
+func TestFormatRainNudgeWithSessionPrefix(t *testing.T) {
+	msg := protocol.Message{FromAgent: "brian", Content: "concur"}
+	withPrefix := formatRainNudge(msg, "[SESSION:abcd1234] ")
+	if !strings.HasPrefix(withPrefix, "[SESSION:abcd1234] ") {
+		t.Errorf("expected SESSION prefix, got %q", withPrefix)
+	}
+	if !strings.Contains(withPrefix, "[HUB:brian] concur") {
+		t.Errorf("expected base nudge tag preserved, got %q", withPrefix)
+	}
+	withoutPrefix := formatRainNudge(msg, "")
+	if strings.Contains(withoutPrefix, "[SESSION:") {
+		t.Errorf("empty prefix should not produce SESSION tag, got %q", withoutPrefix)
+	}
+}
+
+// TestRainActiveSessionPrefix_NoActiveSessions verifies zero-open → empty
+// prefix per Refine-A.
+func TestRainActiveSessionPrefix_NoActiveSessions(t *testing.T) {
+	db := setupTestDB(t)
+	r := &Rain{db: db}
+	if got := r.activeSessionPrefix(); got != "" {
+		t.Errorf("expected empty prefix when no active sessions, got %q", got)
+	}
+}
+
+// TestRainActiveSessionPrefix_WithActiveSession verifies first-row 8-char
+// prefix selection on rain side.
+func TestRainActiveSessionPrefix_WithActiveSession(t *testing.T) {
+	db := setupTestDB(t)
+	if err := db.CreateSession(protocol.Session{
+		ID: "abcdef12-3456-7890-abcd-ef1234567890", Mode: protocol.SessionMode("implement"),
+		Purpose: "test", Status: protocol.SessionActive,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	r := &Rain{db: db}
+	got := r.activeSessionPrefix()
+	want := "[SESSION:abcdef12] "
+	if got != want {
+		t.Errorf("expected prefix %q, got %q", want, got)
 	}
 }
 
@@ -574,7 +629,7 @@ func TestInitialPromptContainsDISCv2(t *testing.T) {
 
 // 8b. TestFormatRainNudge_FlagVariant — MsgFlag elevates to [HUB:FLAG:<sender>].
 func TestFormatRainNudge_FlagVariant(t *testing.T) {
-	result := formatRainNudge(protocol.Message{FromAgent: "brian", Type: protocol.MsgFlag, Content: "scope disagreement"})
+	result := formatRainNudge(protocol.Message{FromAgent: "brian", Type: protocol.MsgFlag, Content: "scope disagreement"}, "")
 
 	if result != "[HUB:FLAG:brian] scope disagreement" {
 		t.Errorf("expected FLAG-prefixed tag, got %q", result)
@@ -583,7 +638,7 @@ func TestFormatRainNudge_FlagVariant(t *testing.T) {
 
 // 8c. TestFormatRainNudge_ObserveVariant — directed-to-other-agent becomes [HUB-OBS:<from>→<to>].
 func TestFormatRainNudge_ObserveVariant(t *testing.T) {
-	result := formatRainNudge(protocol.Message{FromAgent: "brian", ToAgent: "discord", Content: "posting update"})
+	result := formatRainNudge(protocol.Message{FromAgent: "brian", ToAgent: "discord", Content: "posting update"}, "")
 
 	if result != "[HUB-OBS:brian→discord] posting update" {
 		t.Errorf("expected HUB-OBS variant for inter-agent traffic, got %q", result)
@@ -612,7 +667,7 @@ func TestFormatRainNudgePMAndHubVariants(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatRainNudge(tc.msg); got != tc.want {
+			if got := formatRainNudge(tc.msg, ""); got != tc.want {
 				t.Errorf("formatRainNudge = %q, want %q", got, tc.want)
 			}
 		})

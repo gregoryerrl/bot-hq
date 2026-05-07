@@ -294,6 +294,8 @@ RULES:
 
 ` + protocol.PhaseRv2BrainCycleHardening + `
 
+` + protocol.PhaseRv3AutoBoundaryDiscipline + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 Start now: register, then watch everything.`
@@ -321,21 +323,51 @@ func (r *Rain) pollLoop() {
 //	[HUB-OBS:<from>→<to>]             — observation of inter-agent traffic Rain is not the target of.
 //	[PM:FLAG:<sender>]                — directed MsgFlag.
 //	[HUB:FLAG:<sender>]               — broadcast MsgFlag.
-func formatRainNudge(msg protocol.Message) string {
+//
+// Phase R R5 (R42 AUTO-BOUNDARY-DISCIPLINE): when sessionPrefix is non-
+// empty, prepend it to the formatted nudge. Format: `[SESSION:<8>] `.
+// Empty sessionPrefix → unchanged (zero-open → no prefix per Refine-A).
+func formatRainNudge(msg protocol.Message, sessionPrefix string) string {
 	directed := msg.ToAgent == agentID
+	var base string
 	if msg.Type == protocol.MsgFlag {
 		if directed {
-			return fmt.Sprintf("[PM:FLAG:%s] %s", msg.FromAgent, msg.Content)
+			base = fmt.Sprintf("[PM:FLAG:%s] %s", msg.FromAgent, msg.Content)
+		} else {
+			base = fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
 		}
-		return fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
+	} else if directed {
+		base = fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)
+	} else if msg.ToAgent != "" && msg.ToAgent != agentID {
+		base = fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)
+	} else {
+		base = fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 	}
-	if directed {
-		return fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)
+	if sessionPrefix != "" {
+		return sessionPrefix + base
 	}
-	if msg.ToAgent != "" && msg.ToAgent != agentID {
-		return fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)
+	return base
+}
+
+// activeSessionPrefix returns the `[SESSION:<8>] ` prefix for Rain's
+// nudges when an active session exists, or "" otherwise. Per Phase R
+// R5 (R42 AUTO-BOUNDARY-DISCIPLINE) Refine-A: source-of-truth is
+// db.ListSessions("active") ordered by updated DESC; first row =
+// current session; multiple OPEN sessions → most-recently-updated
+// wins; zero open → no prefix.
+func (r *Rain) activeSessionPrefix() string {
+	if r.db == nil {
+		return ""
 	}
-	return fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
+	sessions, err := r.db.ListSessions(string(protocol.SessionActive))
+	if err != nil || len(sessions) == 0 {
+		return ""
+	}
+	id := sessions[0].ID
+	if len(id) >= 8 {
+		id = id[:8]
+	}
+	return fmt.Sprintf("[SESSION:%s] ", id)
 }
 
 // shouldForwardToRain decides whether a message polled from the hub should
@@ -400,6 +432,7 @@ func (r *Rain) processNewMessages() {
 		return
 	}
 
+	sessionPrefix := r.activeSessionPrefix()
 	for _, msg := range msgs {
 		if msg.ID > r.lastMsgID {
 			r.lastMsgID = msg.ID
@@ -411,7 +444,7 @@ func (r *Rain) processNewMessages() {
 			log.Printf("rain: filter-drop msg %d type=%s from=%s to=%s", msg.ID, msg.Type, msg.FromAgent, msg.ToAgent)
 			continue
 		}
-		nudge := formatRainNudge(msg)
+		nudge := formatRainNudge(msg, sessionPrefix)
 		if err := r.SendCommand(nudge); err != nil {
 			log.Printf("rain: SendCommand error for msg %d from %s: %v", msg.ID, msg.FromAgent, err)
 		}

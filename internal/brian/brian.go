@@ -308,6 +308,8 @@ RULES:
 
 ` + protocol.PhaseRv2BrainCycleHardening + `
 
+` + protocol.PhaseRv3AutoBoundaryDiscipline + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 ` + protocol.H13ForcePushProtocol + `
@@ -339,21 +341,51 @@ func (b *Brian) pollLoop() {
 //	[HUB-OBS:<from>→<to>]      — observation of cross-traffic (ToAgent set but not Brian).
 //	[PM:FLAG:<sender>]         — directed MsgFlag.
 //	[HUB:FLAG:<sender>]        — broadcast MsgFlag.
-func formatNudge(msg protocol.Message) string {
+//
+// Phase R R5 (R42 AUTO-BOUNDARY-DISCIPLINE): when sessionPrefix is non-
+// empty, prepend it to the formatted nudge. Format: `[SESSION:<8>] `.
+// Empty sessionPrefix → unchanged (zero-open → no prefix per Refine-A).
+func formatNudge(msg protocol.Message, sessionPrefix string) string {
 	directed := msg.ToAgent == agentID
+	var base string
 	if msg.Type == protocol.MsgFlag {
 		if directed {
-			return fmt.Sprintf("[PM:FLAG:%s] %s", msg.FromAgent, msg.Content)
+			base = fmt.Sprintf("[PM:FLAG:%s] %s", msg.FromAgent, msg.Content)
+		} else {
+			base = fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
 		}
-		return fmt.Sprintf("[HUB:FLAG:%s] %s", msg.FromAgent, msg.Content)
+	} else if directed {
+		base = fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)
+	} else if msg.ToAgent != "" && msg.ToAgent != agentID {
+		base = fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)
+	} else {
+		base = fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 	}
-	if directed {
-		return fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)
+	if sessionPrefix != "" {
+		return sessionPrefix + base
 	}
-	if msg.ToAgent != "" && msg.ToAgent != agentID {
-		return fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)
+	return base
+}
+
+// activeSessionPrefix returns the `[SESSION:<8>] ` prefix for Brian's
+// nudges when an active session exists, or "" otherwise. Per Phase R
+// R5 (R42 AUTO-BOUNDARY-DISCIPLINE) Refine-A: source-of-truth is
+// db.ListSessions("active") ordered by updated DESC; first row =
+// current session; multiple OPEN sessions → most-recently-updated
+// wins; zero open → no prefix.
+func (b *Brian) activeSessionPrefix() string {
+	if b.db == nil {
+		return ""
 	}
-	return fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
+	sessions, err := b.db.ListSessions(string(protocol.SessionActive))
+	if err != nil || len(sessions) == 0 {
+		return ""
+	}
+	id := sessions[0].ID
+	if len(id) >= 8 {
+		id = id[:8]
+	}
+	return fmt.Sprintf("[SESSION:%s] ", id)
 }
 
 // shouldForwardToBrian decides whether a message polled from the hub should
@@ -384,13 +416,14 @@ func (b *Brian) processNewMessages() {
 		return
 	}
 
+	sessionPrefix := b.activeSessionPrefix()
 	var pending []string
 	for _, msg := range msgs {
 		if msg.ID > b.lastMsgID {
 			b.lastMsgID = msg.ID
 		}
 		if shouldForwardToBrian(msg) {
-			pending = append(pending, formatNudge(msg))
+			pending = append(pending, formatNudge(msg, sessionPrefix))
 		}
 	}
 

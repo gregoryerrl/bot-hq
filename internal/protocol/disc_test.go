@@ -888,3 +888,40 @@ func TestPhaseRv2BrainCycleHardeningHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- BRAIN-CYCLE-HARDENING (R41 — Phase R R1):` (prompt anchor); first 80 chars: %q", PhaseRv2BrainCycleHardening[:80])
 	}
 }
+
+// Phase R R5 (d-1) commit ratchet: pin auto-boundary-discipline
+// recognition substrings on PhaseRv3AutoBoundaryDiscipline const.
+// Mirrors PhaseNv6 + Phase R R3/R1 pattern.
+func TestPhaseRv3AutoBoundaryDisciplineSubstringLock(t *testing.T) {
+	must := []string{
+		"AUTO-BOUNDARY-DISCIPLINE (R42 — Phase R R5)",
+		"hub_session_create",
+		"phase-open keyword",
+		"topic-pivot",
+		"user-cluster-greenlight",
+		"do all",
+		"smoke",
+		"continuously",
+		"hub_session_close",
+		"DetectBoundaryFromUserMsg",
+		"[SESSION:<8>]",
+		"db.ListSessions",
+		"updated DESC",
+		"Zero open → no prefix",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseRv3AutoBoundaryDiscipline, lit) {
+				t.Errorf("R42 AUTO-BOUNDARY-DISCIPLINE ratchet broken: missing literal %q in PhaseRv3AutoBoundaryDiscipline", lit)
+			}
+		})
+	}
+}
+
+// PhaseRv3AutoBoundaryDiscipline const must start with the rule-anchor
+// prefix the agent prompt embeds recognize.
+func TestPhaseRv3AutoBoundaryDisciplineHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseRv3AutoBoundaryDiscipline, "- AUTO-BOUNDARY-DISCIPLINE (R42 — Phase R R5):") {
+		t.Errorf("rule must start with `- AUTO-BOUNDARY-DISCIPLINE (R42 — Phase R R5):` (prompt anchor); first 80 chars: %q", PhaseRv3AutoBoundaryDiscipline[:80])
+	}
+}

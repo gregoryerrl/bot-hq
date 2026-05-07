@@ -23,7 +23,7 @@ func setupTestDB(t *testing.T) *hub.DB {
 
 func TestNudgeContainsMessageContent(t *testing.T) {
 	content := "fix the login bug"
-	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: content})
+	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: content}, "")
 
 	if !strings.Contains(nudge, content) {
 		t.Errorf("nudge should contain message content %q, got: %s", content, nudge)
@@ -34,7 +34,7 @@ func TestNudgeContainsMessageContent(t *testing.T) {
 }
 
 func TestFormatNudgeIsNotEmpty(t *testing.T) {
-	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"})
+	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"}, "")
 	if nudge == "" {
 		t.Error("formatNudge should return non-empty string")
 	}
@@ -278,6 +278,62 @@ func TestBrianPromptEmbedsPhaseRv2BrainCycleHardening(t *testing.T) {
 	prompt := b.initialPrompt()
 	if !strings.Contains(prompt, protocol.PhaseRv2BrainCycleHardening) {
 		t.Errorf("initial prompt must embed protocol.PhaseRv2BrainCycleHardening verbatim (Phase R R1 wiring lock)")
+	}
+}
+
+// TestBrianPromptEmbedsPhaseRv3AutoBoundaryDiscipline verifies the
+// Phase R R5 auto-boundary-discipline const is wired into Brian's prompt.
+// Mirror in rain_test.go locks rain-side.
+func TestBrianPromptEmbedsPhaseRv3AutoBoundaryDiscipline(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseRv3AutoBoundaryDiscipline) {
+		t.Errorf("initial prompt must embed protocol.PhaseRv3AutoBoundaryDiscipline verbatim (Phase R R5 (d-1) wiring lock)")
+	}
+}
+
+// TestFormatNudgeWithSessionPrefix verifies Phase R R5 (d-1)
+// `[SESSION:<8>] ` pane-header prepend behavior.
+func TestFormatNudgeWithSessionPrefix(t *testing.T) {
+	msg := protocol.Message{FromAgent: "user", Content: "hello"}
+	withPrefix := formatNudge(msg, "[SESSION:abcd1234] ")
+	if !strings.HasPrefix(withPrefix, "[SESSION:abcd1234] ") {
+		t.Errorf("expected SESSION prefix, got %q", withPrefix)
+	}
+	if !strings.Contains(withPrefix, "[HUB:user] hello") {
+		t.Errorf("expected base nudge tag preserved, got %q", withPrefix)
+	}
+	withoutPrefix := formatNudge(msg, "")
+	if strings.Contains(withoutPrefix, "[SESSION:") {
+		t.Errorf("empty prefix should not produce SESSION tag, got %q", withoutPrefix)
+	}
+}
+
+// TestActiveSessionPrefix_NoActiveSessions verifies zero-open → empty
+// prefix per Refine-A.
+func TestActiveSessionPrefix_NoActiveSessions(t *testing.T) {
+	db := setupTestDB(t)
+	b := &Brian{db: db}
+	if got := b.activeSessionPrefix(); got != "" {
+		t.Errorf("expected empty prefix when no active sessions, got %q", got)
+	}
+}
+
+// TestActiveSessionPrefix_WithActiveSession verifies first-row 8-char
+// prefix selection.
+func TestActiveSessionPrefix_WithActiveSession(t *testing.T) {
+	db := setupTestDB(t)
+	if err := db.CreateSession(protocol.Session{
+		ID: "abcdef12-3456-7890-abcd-ef1234567890", Mode: protocol.SessionMode("implement"),
+		Purpose: "test", Status: protocol.SessionActive,
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	b := &Brian{db: db}
+	got := b.activeSessionPrefix()
+	want := "[SESSION:abcdef12] "
+	if got != want {
+		t.Errorf("expected prefix %q, got %q", want, got)
 	}
 }
 
@@ -621,7 +677,7 @@ func TestInitialPromptContainsH13ForcePushProtocol(t *testing.T) {
 }
 
 func TestFormatNudgeCompactTagAndNoTrailer(t *testing.T) {
-	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"})
+	nudge := formatNudge(protocol.Message{FromAgent: "user", Content: "hello"}, "")
 	if nudge != "[HUB:user] hello" {
 		t.Errorf("expected compact tag, got %q", nudge)
 	}
@@ -636,7 +692,7 @@ func TestFormatNudgeCompactTagAndNoTrailer(t *testing.T) {
 }
 
 func TestFormatNudgeFlagVariant(t *testing.T) {
-	nudge := formatNudge(protocol.Message{FromAgent: "rain", Type: protocol.MsgFlag, Content: "disagree on scope"})
+	nudge := formatNudge(protocol.Message{FromAgent: "rain", Type: protocol.MsgFlag, Content: "disagree on scope"}, "")
 	if nudge != "[HUB:FLAG:rain] disagree on scope" {
 		t.Errorf("expected broadcast FLAG tag, got %q", nudge)
 	}
@@ -665,7 +721,7 @@ func TestFormatNudgePMAndHubVariants(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := formatNudge(tc.msg); got != tc.want {
+			if got := formatNudge(tc.msg, ""); got != tc.want {
 				t.Errorf("formatNudge = %q, want %q", got, tc.want)
 			}
 		})
