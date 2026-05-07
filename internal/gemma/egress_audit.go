@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 )
@@ -142,11 +143,16 @@ func (g *Gemma) auditEgressGapAt(now time.Time) {
 				if len(snippet) > 120 {
 					snippet = snippet[:120] + "…"
 				}
-				g.db.InsertMessage(protocol.Message{
-					FromAgent: agentID,
-					Type:      protocol.MsgUpdate,
-					Content:   fmt.Sprintf("[EGRESS-GAP] agent %s pane advanced over %d ticks but no hub_send. Last line: %q", a.ID, gapTicks, snippet),
-				})
+				// Phase S S-1a-5: delegate egress-audit emit to daemoncron.
+				if g.isDaemoncronOnline() {
+					daemoncron.EmitEgressAudit(g.db, a.ID, gapTicks, snippet)
+				} else {
+					g.db.InsertMessage(protocol.Message{
+						FromAgent: agentID,
+						Type:      protocol.MsgUpdate,
+						Content:   fmt.Sprintf("[EGRESS-GAP] agent %s pane advanced over %d ticks but no hub_send. Last line: %q", a.ID, gapTicks, snippet),
+					})
+				}
 			}
 		}
 

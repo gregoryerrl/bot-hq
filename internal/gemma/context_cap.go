@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
@@ -95,16 +96,24 @@ func (g *Gemma) checkContextCap(now time.Time) {
 			continue
 		}
 		reason := fmt.Sprintf(haltReasonPrefix, s.ID, s.ContextPct)
-		content := fmt.Sprintf("[CRITICAL] %s", reason)
-		if _, err := g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			ToAgent:   "user",
-			Type:      protocol.MsgFlag,
-			Content:   content,
-			Created:   now,
-		}); err != nil {
-			log.Printf("[context-cap] flag insert failed for %s: %v", s.ID, err)
-			continue
+		// Phase S S-1a-5: delegate context-cap critical emit to
+		// daemoncron when online (interpretation (ii) dual-emit-
+		// prevention). SetHaltActive side-effect stays gemma-side
+		// since it manages halt-state that other gemma paths consume.
+		if g.isDaemoncronOnline() {
+			daemoncron.EmitContextCapCritical(g.db, now, s.ID, s.ContextPct)
+		} else {
+			content := fmt.Sprintf("[CRITICAL] %s", reason)
+			if _, err := g.db.InsertMessage(protocol.Message{
+				FromAgent: agentID,
+				ToAgent:   "user",
+				Type:      protocol.MsgFlag,
+				Content:   content,
+				Created:   now,
+			}); err != nil {
+				log.Printf("[context-cap] flag insert failed for %s: %v", s.ID, err)
+				continue
+			}
 		}
 		if err := g.db.SetHaltActive(hub.HaltCauseContextCap, reason, agentID); err != nil {
 			log.Printf("[context-cap] set halt active failed: %v", err)

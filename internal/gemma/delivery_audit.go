@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
@@ -61,11 +62,16 @@ func (g *Gemma) auditDeliveryGapAt(now time.Time) {
 		}
 		g.deliveryFlagTracker[qm.ID] = struct{}{}
 		age := now.Sub(qm.Created).Round(time.Second)
-		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			Type:      protocol.MsgUpdate,
-			Content:   fmt.Sprintf("[DELIVERY-GAP] msg %d to %s pending for %s (queue-id %d, %d attempts)", qm.MessageID, qm.TargetAgent, age, qm.ID, qm.Attempts),
-		})
+		// Phase S S-1a-5: delegate delivery-gap emit to daemoncron.
+		if g.isDaemoncronOnline() {
+			daemoncron.EmitDeliveryGap(g.db, qm.MessageID, qm.TargetAgent, age, qm.ID, qm.Attempts)
+		} else {
+			g.db.InsertMessage(protocol.Message{
+				FromAgent: agentID,
+				Type:      protocol.MsgUpdate,
+				Content:   fmt.Sprintf("[DELIVERY-GAP] msg %d to %s pending for %s (queue-id %d, %d attempts)", qm.MessageID, qm.TargetAgent, age, qm.ID, qm.Attempts),
+			})
+		}
 	}
 
 	// Prune flag-tracker entries whose underlying queue rows are no
