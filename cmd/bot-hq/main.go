@@ -27,6 +27,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
 	"github.com/gregoryerrl/bot-hq/internal/sessions"
+	"github.com/gregoryerrl/bot-hq/internal/sessionstarthook"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/gregoryerrl/bot-hq/internal/toolgate"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
@@ -79,6 +80,9 @@ func main() {
 		case "session-open":
 			runSessionOpen()
 			return
+		case "install-session-start-hook":
+			runInstallSessionStartHook()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -86,7 +90,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|session-load|webui|context-switch|session-open|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|webui|context-switch|session-open|install-session-start-hook|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -524,6 +528,55 @@ func runInstallVoiceMirrorHook() {
 	fmt.Printf("INCLUDE patterns: ~/Documents/*, ~/Desktop/*, ~/.bot-hq/projects/<project>/{plans,eod,clips}/*, CLAUDE.md, README.md\n")
 	fmt.Printf("SKIP patterns: **/memory/**, .git/, .cache/, node_modules/\n")
 	fmt.Printf("Log: ~/.bot-hq/voice-mirror-log.md (override via BOT_HQ_VOICE_MIRROR_LOG_PATH env).\n")
+	fmt.Printf("Hook activation requires Claude session-restart (settings.json not hot-reloaded mid-session per Phase L Finding-3).\n")
+}
+
+// runInstallSessionStartHook installs the Phase N v3.x-1.5 SessionStart
+// hook into the trio agent's Claude settings.json. The installed hook
+// command invokes `bot-hq session-open` at session-start, which fetches
+// the daemon's /api/session-open and prints markdown the harness
+// prepends as system-prompt context (overview + bootstrap + resolved
+// rules + tasks). Idempotent + non-clobbering, mirroring
+// runInstallTrioHook + runInstallToolgateHook + runInstallVoiceMirrorHook.
+//
+// Usage:
+//
+//	bot-hq install-session-start-hook            # writes ~/.claude/settings.json
+//	bot-hq install-session-start-hook <path>     # writes a custom path
+//
+// Phase N v3.x-1.5 design-spike (157ea7f) §2.2 specifies the hook
+// invocation surface. v3.x-2 implementation landed the session-open
+// subcommand (cmd/bot-hq/context_switch.go runSessionOpen); this
+// subcommand wires it into Claude settings.json so the hook fires
+// automatically at SessionStart instead of requiring manual
+// settings.json editing.
+func runInstallSessionStartHook() {
+	settingsPath := ""
+	if len(os.Args) > 2 {
+		settingsPath = os.Args[2]
+	}
+	if settingsPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "resolve home dir: %v\n", err)
+			os.Exit(1)
+		}
+		settingsPath = filepath.Join(home, ".claude", "settings.json")
+	}
+	botHQPath, err := os.Executable()
+	if err != nil || botHQPath == "" {
+		fmt.Fprintf(os.Stderr, "resolve bot-hq binary path: %v\n", err)
+		os.Exit(1)
+	}
+	if err := sessionstarthook.InstallTrioHook(settingsPath, botHQPath); err != nil {
+		fmt.Fprintf(os.Stderr, "install: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("SessionStart hook installed in %s\n", settingsPath)
+	fmt.Printf("Hook command: %s\n", sessionstarthook.SettingsHookCommand(botHQPath))
+	fmt.Printf("Hook fires at Claude SessionStart and prepends bot-hq session-open output (overview + bootstrap + resolved rules + tasks) as system-prompt context.\n")
+	fmt.Printf("Project context: $BOT_HQ_PROJECT env var (authoritative); falls back to cwd-inference / 'bot-hq' default.\n")
+	fmt.Printf("Agent context: $BOT_HQ_AGENT env var; falls back to 'brian'.\n")
 	fmt.Printf("Hook activation requires Claude session-restart (settings.json not hot-reloaded mid-session per Phase L Finding-3).\n")
 }
 
