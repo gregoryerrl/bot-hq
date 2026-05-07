@@ -48,14 +48,22 @@ func fillCanonicalLayout(t *testing.T, root string) {
 	mustMkdir(t, filepath.Join(root, "projects"))
 	mustWrite(t, filepath.Join(root, "projects", "bot-hq.yaml"), "project_name: bot-hq\n")
 	mustWrite(t, filepath.Join(root, "projects", "myproj.yaml"), "project_name: myproj\n")
+	// Phase Q library schema fixture for myproj. README.md + INDEX.md are
+	// the new Overview surface (replaces v3.x-1 overview.md). Each library
+	// subdir gets 1 fixture file so destination resolvers have content to
+	// report.
 	mustMkdir(t, filepath.Join(root, "projects", "myproj"))
-	mustWrite(t, filepath.Join(root, "projects", "myproj", "overview.md"), "# myproj\n")
-	mustMkdir(t, filepath.Join(root, "projects", "myproj", "plans"))
-	mustWrite(t, filepath.Join(root, "projects", "myproj", "plans", "plan-a.md"), "plan a\n")
-	mustMkdir(t, filepath.Join(root, "projects", "myproj", "clips"))
-	mustWrite(t, filepath.Join(root, "projects", "myproj", "clips", "clip-1.md"), "clip\n")
-	mustMkdir(t, filepath.Join(root, "projects", "myproj", "eod"))
-	mustWrite(t, filepath.Join(root, "projects", "myproj", "eod", "eod-1.md"), "eod\n")
+	mustWrite(t, filepath.Join(root, "projects", "myproj", "README.md"), "# myproj\n")
+	mustWrite(t, filepath.Join(root, "projects", "myproj", "INDEX.md"), "# myproj index\n")
+	for _, sub := range []string{"plans", "clips", "eod", "architecture", "decisions", "conventions", "glossary", "audit-notes"} {
+		mustMkdir(t, filepath.Join(root, "projects", "myproj", sub))
+		mustWrite(t, filepath.Join(root, "projects", "myproj", sub, sub+"-1.md"), sub+"\n")
+	}
+	// bot-hq library README/INDEX — Phase Q convention applies
+	// symmetrically (bot-hq is just-another-project).
+	mustMkdir(t, filepath.Join(root, "projects", "bot-hq"))
+	mustWrite(t, filepath.Join(root, "projects", "bot-hq", "README.md"), "# bot-hq library\n")
+	mustWrite(t, filepath.Join(root, "projects", "bot-hq", "INDEX.md"), "# bot-hq index\n")
 
 	// HIDE-list noise that should never surface.
 	mustWrite(t, filepath.Join(root, "hub.db"), "binary")
@@ -163,9 +171,9 @@ func TestResolveDestinations_BotHQProjectSection(t *testing.T) {
 		}
 	}
 
-	// Overview = README.md special-case for bot-hq.
-	if got := proj["Overview"].Nodes; len(got) != 1 || got[0].Name != "README.md" {
-		t.Errorf("bot-hq Overview = %+v, want README.md", got)
+	// Overview = projects/bot-hq/README.md + INDEX.md (Phase Q schema).
+	if got := proj["Overview"].Nodes; len(got) != 2 || got[0].Name != "README.md" || got[1].Name != "INDEX.md" {
+		t.Errorf("bot-hq Overview = %+v, want [README.md, INDEX.md]", got)
 	}
 	// Rules = projects/bot-hq.yaml + gates/*.md (2 gates in fixture).
 	rules := proj["Rules"].Nodes
@@ -191,9 +199,13 @@ func TestResolveDestinations_BotHQProjectSection(t *testing.T) {
 		t.Errorf("bot-hq Plans nodes = %d, want 2 phase files; got %+v", len(got), got)
 	}
 
-	// Etc = empty for bot-hq.
-	if got := proj["Etc"].Nodes; len(got) != 0 {
-		t.Errorf("bot-hq Etc nodes = %d, want 0; got %+v", len(got), got)
+	// Phase Q library subdirs are not seeded for bot-hq in fixture (bot-hq
+	// uses canonical-store top-level for its load-bearing artifacts), so
+	// these destinations report empty.
+	for _, name := range []string{"Architecture", "Decisions", "Conventions", "Glossary", "Audit notes", "EOD", "Clips"} {
+		if got := proj[name].Nodes; len(got) != 0 {
+			t.Errorf("bot-hq %s nodes = %d, want 0; got %+v", name, len(got), got)
+		}
 	}
 }
 
@@ -212,9 +224,9 @@ func TestResolveDestinations_NonBotHQProjectSection(t *testing.T) {
 		}
 	}
 
-	// Overview from projects/myproj/overview.md.
-	if got := proj["Overview"].Nodes; len(got) != 1 || got[0].Path != "projects/myproj/overview.md" {
-		t.Errorf("myproj Overview = %+v", got)
+	// Overview from projects/myproj/{README.md,INDEX.md} (Phase Q schema).
+	if got := proj["Overview"].Nodes; len(got) != 2 || got[0].Name != "README.md" || got[1].Name != "INDEX.md" {
+		t.Errorf("myproj Overview = %+v, want [README.md, INDEX.md]", got)
 	}
 	// Rules = projects/myproj.yaml; gates do NOT surface for non-bot-hq.
 	rules := proj["Rules"].Nodes
@@ -227,12 +239,30 @@ func TestResolveDestinations_NonBotHQProjectSection(t *testing.T) {
 		}
 	}
 	// Plans from projects/myproj/plans/*.md.
-	if got := proj["Plans"].Nodes; len(got) != 1 || got[0].Path != "projects/myproj/plans/plan-a.md" {
+	if got := proj["Plans"].Nodes; len(got) != 1 || got[0].Path != "projects/myproj/plans/plans-1.md" {
 		t.Errorf("myproj Plans = %+v", got)
 	}
-	// Etc = clips + eod (1 each in fixture).
-	if got := proj["Etc"].Nodes; len(got) != 2 {
-		t.Errorf("myproj Etc nodes = %d, want 2 (1 clip + 1 eod); got %+v", len(got), got)
+	// Phase Q library subdir destinations each have 1 fixture file.
+	for _, want := range []struct {
+		name, path string
+	}{
+		{"Architecture", "projects/myproj/architecture/architecture-1.md"},
+		{"Decisions", "projects/myproj/decisions/decisions-1.md"},
+		{"Conventions", "projects/myproj/conventions/conventions-1.md"},
+		{"Glossary", "projects/myproj/glossary/glossary-1.md"},
+		{"Audit notes", "projects/myproj/audit-notes/audit-notes-1.md"},
+		{"EOD", "projects/myproj/eod/eod-1.md"},
+		{"Clips", "projects/myproj/clips/clips-1.md"},
+	} {
+		got := proj[want.name].Nodes
+		if len(got) != 1 || got[0].Path != want.path {
+			t.Errorf("myproj %s = %+v, want 1 node at %s", want.name, got, want.path)
+		}
+	}
+	// Project docs is the dual-root destination — empty in test (no
+	// ~/Projects/myproj/docs/ on disk during test).
+	if got := proj["Project docs"].Nodes; len(got) != 0 {
+		t.Errorf("myproj Project docs = %d nodes, want 0 (no external dir in test); got %+v", len(got), got)
 	}
 }
 
@@ -240,7 +270,8 @@ func TestResolveDestinations_OverviewBlankState(t *testing.T) {
 	root := t.TempDir()
 	mustMkdir(t, filepath.Join(root, "projects"))
 	mustWrite(t, filepath.Join(root, "projects", "newproj.yaml"), "project_name: newproj\n")
-	// projects/newproj/overview.md NOT created — should yield Missing marker.
+	// projects/newproj/README.md and INDEX.md NOT created — should yield
+	// a Missing marker for README.md (Phase Q blank-state).
 
 	dests, err := ResolveDestinations(root, "newproj")
 	if err != nil {
@@ -296,9 +327,11 @@ func TestHandleDestinationsEndpoint(t *testing.T) {
 	if p.Project != "bot-hq" {
 		t.Errorf("project = %q, want bot-hq", p.Project)
 	}
-	// Expect 8 global + 4 project = 12 destinations.
-	if len(p.Destinations) != 12 {
-		t.Errorf("destinations count = %d, want 12; got %+v", len(p.Destinations), p.Destinations)
+	// Expect 8 global + 11 project = 19 destinations (Phase Q library
+	// schema: Overview + Rules + Plans + Architecture + Decisions +
+	// Conventions + Glossary + Audit notes + EOD + Clips + Project docs).
+	if len(p.Destinations) != 19 {
+		t.Errorf("destinations count = %d, want 19; got %+v", len(p.Destinations), p.Destinations)
 	}
 }
 
@@ -432,8 +465,8 @@ func TestResolveDestinations_EmptyCanonicalStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	if len(dests) != 12 {
-		t.Errorf("expected 12 destinations, got %d", len(dests))
+	if len(dests) != 19 {
+		t.Errorf("expected 19 destinations, got %d", len(dests))
 	}
 	// Most/all should be empty Nodes — no panic.
 	for _, d := range dests {

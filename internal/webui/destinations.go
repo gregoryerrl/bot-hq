@@ -97,19 +97,30 @@ func GlobalDestinations() []Destination {
 	}
 }
 
-// ProjectDestinations returns the 4 per-project destinations for project.
+// ProjectDestinations returns the per-project destinations for project.
+// Phase Q library schema: Overview/Rules/Plans + Architecture/Decisions/
+// Conventions/Glossary/Audit notes (the per-project library subdirs)
+// + EOD/Clips (split out from the v3.x-1 Etc catch-all) + Project docs
+// (dual-root: project's own ~/Projects/<p>/docs/, read-only).
 func ProjectDestinations() []Destination {
 	return []Destination{
 		{Name: "Overview", Section: "project", Resolver: resolveProjectOverview},
 		{Name: "Rules", Section: "project", Resolver: resolveProjectRules},
 		{Name: "Plans", Section: "project", Resolver: resolveProjectPlans},
-		{Name: "Etc", Section: "project", Resolver: resolveProjectEtc},
+		{Name: "Architecture", Section: "project", Resolver: resolveProjectArchitecture},
+		{Name: "Decisions", Section: "project", Resolver: resolveProjectDecisions},
+		{Name: "Conventions", Section: "project", Resolver: resolveProjectConventions},
+		{Name: "Glossary", Section: "project", Resolver: resolveProjectGlossary},
+		{Name: "Audit notes", Section: "project", Resolver: resolveProjectAuditNotes},
+		{Name: "EOD", Section: "project", Resolver: resolveProjectEOD},
+		{Name: "Clips", Section: "project", Resolver: resolveProjectClips},
+		{Name: "Project docs", Section: "project", Resolver: resolveProjectExternalDocs},
 	}
 }
 
 // ResolveDestinations runs every Resolver for the given project (project
 // is ignored by global resolvers). Returns the populated destination list
-// in the canonical order: 8 global, then 4 project. Errors from any
+// in the canonical order: 8 global, then per-project. Errors from any
 // individual resolver are surfaced; missing files yield empty Nodes
 // (with a Missing TreeNode marker for the Overview blank-state case).
 func ResolveDestinations(canonRoot, project string) ([]Destination, error) {
@@ -317,19 +328,27 @@ func resolveProjectOverview(root, project string) ([]TreeNode, error) {
 	if project == "" {
 		return nil, nil
 	}
-	if project == "bot-hq" {
-		// Bot-hq overview is the top-level README.md (already surfaced by
-		// Documents in the global section, but also belongs as Overview).
-		n, err := fileNode(root, "README.md", false)
-		if err != nil || n == nil {
+	// Phase Q library schema: README.md + INDEX.md at projects/<p>/.
+	// All registered projects (incl. bot-hq) get the same shape.
+	var out []TreeNode
+	for _, rel := range []string{
+		"projects/" + project + "/README.md",
+		"projects/" + project + "/INDEX.md",
+	} {
+		n, err := fileNode(root, rel, false)
+		if err != nil {
 			return nil, err
 		}
-		return []TreeNode{*n}, nil
+		if n != nil {
+			out = append(out, *n)
+		}
 	}
-	rel := "projects/" + project + "/overview.md"
-	// Blank-state when missing: surface a Missing-marker so the frontend
-	// can offer "create overview" affordance per scope-lock S1 stub.
-	n, err := fileNode(root, rel, true)
+	if len(out) > 0 {
+		return out, nil
+	}
+	// Blank-state when both missing: surface a Missing-marker for the
+	// README so the frontend offers the "create overview" affordance.
+	n, err := fileNode(root, "projects/"+project+"/README.md", true)
 	if err != nil || n == nil {
 		return nil, err
 	}
@@ -370,19 +389,123 @@ func resolveProjectPlans(root, project string) ([]TreeNode, error) {
 	return dirFiles(root, "projects/"+project+"/plans", ".md")
 }
 
-func resolveProjectEtc(root, project string) ([]TreeNode, error) {
-	if project == "" || project == "bot-hq" {
-		// bot-hq: empty-today (future-extensible).
+// Phase Q library schema resolvers — each surfaces a single subdir under
+// projects/<p>/. dirFiles returns empty (no error) when the dir doesn't
+// exist, so unscaffolded projects show "(empty)" rather than failing.
+
+func resolveProjectArchitecture(root, project string) ([]TreeNode, error) {
+	if project == "" {
 		return nil, nil
 	}
+	return dirFiles(root, "projects/"+project+"/architecture", ".md")
+}
+
+func resolveProjectDecisions(root, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	return dirFiles(root, "projects/"+project+"/decisions", ".md")
+}
+
+func resolveProjectConventions(root, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	return dirFiles(root, "projects/"+project+"/conventions", ".md")
+}
+
+func resolveProjectGlossary(root, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	return dirFiles(root, "projects/"+project+"/glossary", ".md")
+}
+
+func resolveProjectAuditNotes(root, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	return dirFiles(root, "projects/"+project+"/audit-notes", ".md")
+}
+
+func resolveProjectEOD(root, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	return dirFiles(root, "projects/"+project+"/eod", ".md")
+}
+
+func resolveProjectClips(root, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	return dirFiles(root, "projects/"+project+"/clips", ".md")
+}
+
+// resolveProjectExternalDocs implements the dual-root surface — read-only
+// view of the project's own docs/ subdir at ~/Projects/<project>/docs/.
+// Out-of-tree (not under canonical root); the frontend treats these as
+// non-editable. Empty for projects without a docs/ dir at the expected
+// path.
+func resolveProjectExternalDocs(_, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	docsRoot := filepath.Join(home, "Projects", project, "docs")
+	return externalDirFiles(docsRoot, project, ".md")
+}
+
+// externalDirFiles emits read-only TreeNodes for every immediate-child
+// file under absDir matching exts. Path is set to "external/<project>/
+// <basename>" so frontend can route to the /api/external-file endpoint.
+// Missing dir returns empty (no error).
+func externalDirFiles(absDir, project string, exts ...string) ([]TreeNode, error) {
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
 	var out []TreeNode
-	for _, sub := range []string{"clips", "eod"} {
-		rel := "projects/" + project + "/" + sub
-		nodes, err := dirFiles(root, rel, ".md")
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if e.IsDir() {
+			continue
+		}
+		if len(exts) > 0 {
+			ok := false
+			ext := filepath.Ext(name)
+			for _, want := range exts {
+				if ext == want {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				continue
+			}
+		}
+		info, err := e.Info()
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, nodes...)
+		out = append(out, TreeNode{
+			Path:     "external/" + project + "/" + name,
+			Name:     name,
+			Type:     "file",
+			Mtime:    info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+			Size:     info.Size(),
+			External: true,
+		})
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }

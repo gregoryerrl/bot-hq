@@ -203,6 +203,90 @@ func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"tree": tree})
 }
 
+// handleExternalFile responds to GET /api/external-file/{project}/{relpath}
+// — Phase Q dual-root surface for read-only reads of a registered
+// project's own ~/Projects/<project>/docs/{relpath}. The project must be
+// registered (have a projects/<p>.yaml) and the relpath must resolve
+// strictly under the project's docs/ subdir (no traversal). Read-only —
+// returns 405 on POST.
+func (s *Server) handleExternalFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/external-file/")
+	if rest == "" {
+		http.Error(w, "project + path required", http.StatusBadRequest)
+		return
+	}
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		http.Error(w, "project + path required", http.StatusBadRequest)
+		return
+	}
+	project, relpath := parts[0], parts[1]
+	// Project must be registered (yaml present) — bounds the read scope
+	// to known projects only.
+	registered, err := ListProjects(s.canonicalRoot)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	known := false
+	for _, p := range registered {
+		if p.Name == project {
+			known = true
+			break
+		}
+	}
+	if !known {
+		http.Error(w, "unknown project", http.StatusNotFound)
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	docsRoot := filepath.Join(home, "Projects", project, "docs")
+	// Strict containment: relpath must not escape docsRoot via "..".
+	// filepath.Rel returns a path like "../foo" or "..\foo" for traversals;
+	// reject any rel starting with ".." or absolute.
+	abs := filepath.Clean(filepath.Join(docsRoot, relpath))
+	rel, err := filepath.Rel(docsRoot, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		http.Error(w, "path escapes docs root", http.StatusBadRequest)
+		return
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	mtime := info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+	if r.URL.Query().Get("format") == "json" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"path":     "external/" + project + "/" + relpath,
+			"mtime":    mtime,
+			"content":  string(data),
+			"external": true,
+		})
+		return
+	}
+	w.Header().Set("X-File-Mtime", mtime)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(data)
+}
+
 // handleFileContent responds to GET /api/files/{path} with file content +
 // mtime. Path must resolve inside the canonical-store; dotfiles and
 // skip-list entries return 404.

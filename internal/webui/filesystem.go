@@ -14,13 +14,18 @@ import (
 // resolvers, Missing=true marks a blank-state placeholder (e.g., a
 // project's overview.md not yet authored).
 type TreeNode struct {
-	Path     string     `json:"path"` // canonical-store-relative
+	Path     string     `json:"path"` // canonical-store-relative; "external/<project>/<rel>" for dual-root project-docs entries
 	Name     string     `json:"name"` // basename
 	Type     string     `json:"type"` // "file" or "dir"
 	Mtime    string     `json:"mtime,omitempty"`
 	Size     int64      `json:"size,omitempty"`
 	Children []TreeNode `json:"children,omitempty"`
 	Missing  bool       `json:"missing,omitempty"`
+	// External marks a Phase Q dual-root entry — the file lives outside
+	// the canonical store (under ~/Projects/<project>/docs/) and is
+	// surfaced read-only via /api/external-file. Frontend disables save
+	// + revert affordances when External=true.
+	External bool `json:"external,omitempty"`
 }
 
 // canonicalSkipList is the set of top-level entries excluded from the

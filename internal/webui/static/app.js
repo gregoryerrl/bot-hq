@@ -288,8 +288,14 @@
     docSave.disabled = true;
     docDirty.classList.add('hidden');
     docStatus.textContent = '';
+    // Phase Q dual-root: paths starting with "external/" route to the
+    // /api/external-file endpoint and are read-only (no save/revert).
+    const isExternal = path.startsWith('external/');
+    const fetchUrl = isExternal
+      ? '/api/external-file/' + encodeFilePath(path.slice('external/'.length)) + '?format=json'
+      : '/api/files/' + encodeFilePath(path) + '?format=json';
     try {
-      const res = await fetch('/api/files/' + encodeFilePath(path) + '?format=json');
+      const res = await fetch(fetchUrl);
       if (!res.ok) {
         editor.setValue('Error: ' + res.status + ' ' + res.statusText);
         docMtime.textContent = '';
@@ -302,8 +308,17 @@
       state.pristine = data.content || '';
       editor.setValue(state.pristine);
       editor.setModeForPath(path);
-      editor.setDisabled(false);
-      docRevert.disabled = false;
+      // External (dual-root project-docs) entries are read-only — keep
+      // the editor disabled + leave revert disabled. Canonical-store
+      // entries get the normal edit affordances.
+      if (isExternal) {
+        editor.setDisabled(true);
+        docRevert.disabled = true;
+        docStatus.textContent = '(read-only — external project docs)';
+      } else {
+        editor.setDisabled(false);
+        docRevert.disabled = false;
+      }
       hideLanding();
       postWebuiContext();
       docMtime.textContent = data.mtime || '';
