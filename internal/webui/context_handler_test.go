@@ -114,3 +114,92 @@ func TestBuildVoiceSystemInstruction_PartialFocus(t *testing.T) {
 		t.Errorf("project-only context should not include file=")
 	}
 }
+
+func TestSubscribeWebuiContext_FiresOnRealChange(t *testing.T) {
+	s := newTestServer(t, t.TempDir())
+	ch, unsub := s.SubscribeWebuiContext()
+	defer unsub()
+	s.SetWebuiContext(WebuiContext{Project: "bot-hq", CurrentPath: "phase/phase-p.md"})
+	select {
+	case got := <-ch:
+		if got.CurrentPath != "phase/phase-p.md" {
+			t.Errorf("got path %q want phase/phase-p.md", got.CurrentPath)
+		}
+	default:
+		t.Fatal("expected ctx update on subscriber chan")
+	}
+}
+
+func TestSubscribeWebuiContext_SilentOnNoop(t *testing.T) {
+	s := newTestServer(t, t.TempDir())
+	s.SetWebuiContext(WebuiContext{Project: "bot-hq", CurrentPath: "x.md"})
+	ch, unsub := s.SubscribeWebuiContext()
+	defer unsub()
+	// Re-set with same project/path/viewMode (UpdatedAt differs but is
+	// excluded from the diff). Should NOT fan out — Clive doesn't need
+	// a context-update message every time the frontend re-POSTs the
+	// same focus on a stale-resync.
+	s.SetWebuiContext(WebuiContext{Project: "bot-hq", CurrentPath: "x.md"})
+	select {
+	case got := <-ch:
+		t.Fatalf("unexpected ctx update on no-op write: %+v", got)
+	default:
+	}
+}
+
+func TestSubscribeWebuiContext_MultipleSubsAllReceive(t *testing.T) {
+	s := newTestServer(t, t.TempDir())
+	ch1, unsub1 := s.SubscribeWebuiContext()
+	defer unsub1()
+	ch2, unsub2 := s.SubscribeWebuiContext()
+	defer unsub2()
+	s.SetWebuiContext(WebuiContext{Project: "p", CurrentPath: "f.md"})
+	for i, ch := range []<-chan WebuiContext{ch1, ch2} {
+		select {
+		case got := <-ch:
+			if got.CurrentPath != "f.md" {
+				t.Errorf("sub %d: got %q want f.md", i, got.CurrentPath)
+			}
+		default:
+			t.Errorf("sub %d: expected ctx update", i)
+		}
+	}
+}
+
+func TestSubscribeWebuiContext_UnsubStopsDelivery(t *testing.T) {
+	s := newTestServer(t, t.TempDir())
+	ch, unsub := s.SubscribeWebuiContext()
+	unsub()
+	// chan should be closed after unsub.
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("chan should be closed after unsub")
+		}
+	default:
+		t.Fatal("expected chan to be closed (recv-ready)")
+	}
+	// SetWebuiContext should not panic even with no subscribers.
+	s.SetWebuiContext(WebuiContext{Project: "p", CurrentPath: "f.md"})
+}
+
+func TestFormatFocusContext_EmptyReturnsEmpty(t *testing.T) {
+	if got := formatFocusContext(WebuiContext{}); got != "" {
+		t.Errorf("empty ctx should return empty, got %q", got)
+	}
+}
+
+func TestFormatFocusContext_AuthoritativeFraming(t *testing.T) {
+	got := formatFocusContext(WebuiContext{Project: "bot-hq", CurrentPath: "phase/phase-p.md"})
+	for _, want := range []string{
+		"USER VIEWING IN WEBUI",
+		"project=bot-hq",
+		"file=phase/phase-p.md",
+		"authoritative",
+		"do not say you can't see",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

@@ -71,6 +71,16 @@ type Server struct {
 	// 15117 "i want clive to see what i am looking at on the web ui".
 	ctxMu    sync.RWMutex
 	webuiCtx WebuiContext
+	// ctxSubs receive WebuiContext updates whenever SetWebuiContext
+	// observes a real change to project/path/viewMode (not on every
+	// POST). Voice handlers subscribe so they can SendText a context-
+	// update into already-connected Gemini sessions — connect-time
+	// systemInstruction injection alone misses focus changes that
+	// happen after the voice WS opens (page-load → connect with empty
+	// focus → user opens file → Gemini never sees it). Per user follow-
+	// up 2026-05-07 "clive can't see the file that i'm looking at".
+	ctxSubsMu sync.Mutex
+	ctxSubs   map[chan WebuiContext]struct{}
 }
 
 // WebuiContext describes what the user is currently looking at in the
@@ -112,6 +122,7 @@ func NewServer(db *hub.DB, opts ...Option) (*Server, error) {
 		canonicalRoot: home + "/.bot-hq",
 		port:          envPort(),
 		proposals:     newProposalStore(),
+		ctxSubs:       make(map[chan WebuiContext]struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)

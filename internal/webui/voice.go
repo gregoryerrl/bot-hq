@@ -103,6 +103,36 @@ func (s *Server) handleVoiceWS(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeBrowser(map[string]string{"type": "connected"})
 			go s.voiceGeminiReadLoop(gemini, writeBrowser, done, &gemini)
+			// Subscribe to mid-session webui-focus changes; SendText each
+			// new focus into the live Gemini conversation. Connect-time
+			// systemInstruction alone misses changes that happen after
+			// the voice WS opens (page-load → empty focus → user opens
+			// file → Gemini blind). Per user msg "clive can't see the
+			// file that i'm looking at" 2026-05-07.
+			ctxCh, unsubCtx := s.SubscribeWebuiContext()
+			go func() {
+				defer unsubCtx()
+				for {
+					select {
+					case <-done:
+						return
+					case ctx, ok := <-ctxCh:
+						if !ok {
+							return
+						}
+						if gemini == nil {
+							continue
+						}
+						focus := formatFocusContext(ctx)
+						if focus == "" {
+							continue
+						}
+						if err := gemini.SendText("[CONTEXT UPDATE]\n" + focus); err != nil {
+							log.Printf("voice ctx-update inject error: %v", err)
+						}
+					}
+				}
+			}()
 		}
 	} else {
 		log.Printf("voice: no Gemini API key configured — audio chat disabled")

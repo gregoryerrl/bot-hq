@@ -15,12 +15,80 @@ func (s *Server) GetWebuiContext() WebuiContext {
 }
 
 // SetWebuiContext overwrites the ambient focus state. UpdatedAt is set
-// to time.Now(). Used by tests + the POST handler.
+// to time.Now(). If project/path/viewMode actually changed (vs prior
+// state), fan out non-blocking to all subscribers so live voice
+// sessions can re-inject the focus context into Gemini.
 func (s *Server) SetWebuiContext(ctx WebuiContext) {
 	s.ctxMu.Lock()
-	defer s.ctxMu.Unlock()
+	prev := s.webuiCtx
 	ctx.UpdatedAt = time.Now()
 	s.webuiCtx = ctx
+	s.ctxMu.Unlock()
+	if prev.Project == ctx.Project && prev.CurrentPath == ctx.CurrentPath && prev.ViewMode == ctx.ViewMode {
+		return
+	}
+	s.ctxSubsMu.Lock()
+	subs := make([]chan WebuiContext, 0, len(s.ctxSubs))
+	for ch := range s.ctxSubs {
+		subs = append(subs, ch)
+	}
+	s.ctxSubsMu.Unlock()
+	for _, ch := range subs {
+		select {
+		case ch <- ctx:
+		default:
+			// drop on overflow rather than block setter
+		}
+	}
+}
+
+// SubscribeWebuiContext registers a channel that receives WebuiContext
+// updates whenever the focus state actually changes. Returned func
+// unsubscribes + closes the channel; safe to call once on disconnect.
+// Buffered to absorb rapid focus changes without blocking SetWebuiContext.
+func (s *Server) SubscribeWebuiContext() (<-chan WebuiContext, func()) {
+	ch := make(chan WebuiContext, 4)
+	s.ctxSubsMu.Lock()
+	if s.ctxSubs == nil {
+		s.ctxSubs = make(map[chan WebuiContext]struct{})
+	}
+	s.ctxSubs[ch] = struct{}{}
+	s.ctxSubsMu.Unlock()
+	unsub := func() {
+		s.ctxSubsMu.Lock()
+		if _, ok := s.ctxSubs[ch]; ok {
+			delete(s.ctxSubs, ch)
+			close(ch)
+		}
+		s.ctxSubsMu.Unlock()
+	}
+	return ch, unsub
+}
+
+// formatFocusContext renders the "[USER VIEWING IN WEBUI ...]" line
+// shared by buildVoiceSystemInstruction (connect-time) and the live
+// voice-handler re-injection path (SendText on subsequent changes).
+// Returns "" when no focus is set.
+func formatFocusContext(ctx WebuiContext) string {
+	if ctx.CurrentPath == "" && ctx.Project == "" {
+		return ""
+	}
+	out := "[USER VIEWING IN WEBUI"
+	if ctx.Project != "" {
+		out += " · project=" + ctx.Project
+	}
+	if ctx.CurrentPath != "" {
+		out += " · file=" + ctx.CurrentPath
+	}
+	if ctx.ViewMode != "" {
+		out += " · view=" + ctx.ViewMode
+	}
+	out += "]\n\nThe file above is what the user is currently looking at. " +
+		"When they say \"this file\", \"this rule\", \"what I'm looking at\", " +
+		"or refer to a document without naming it, assume they mean that file. " +
+		"You don't need them to repeat the path. Treat this as authoritative " +
+		"focus state — do not say you can't see what they're looking at."
+	return out
 }
 
 // handleWebuiContext serves GET (read current ambient focus) + POST
@@ -47,22 +115,9 @@ func (s *Server) handleWebuiContext(w http.ResponseWriter, r *http.Request) {
 // a voice session, augmented with current ambient webui-focus context.
 // If no focus state is set, returns the default unchanged.
 func (s *Server) buildVoiceSystemInstruction() string {
-	ctx := s.GetWebuiContext()
-	if ctx.CurrentPath == "" && ctx.Project == "" {
+	focus := formatFocusContext(s.GetWebuiContext())
+	if focus == "" {
 		return defaultSystemInstruction
 	}
-	suffix := "\n\n[USER VIEWING IN WEBUI"
-	if ctx.Project != "" {
-		suffix += " · project=" + ctx.Project
-	}
-	if ctx.CurrentPath != "" {
-		suffix += " · file=" + ctx.CurrentPath
-	}
-	if ctx.ViewMode != "" {
-		suffix += " · view=" + ctx.ViewMode
-	}
-	suffix += "]\n\nWhen the user asks about \"this file\", \"this rule\", \"what I'm looking at\", " +
-		"or refers to a document without naming it, assume they mean the file above. " +
-		"You don't need them to repeat the path."
-	return defaultSystemInstruction + suffix
+	return defaultSystemInstruction + "\n\n" + focus
 }
