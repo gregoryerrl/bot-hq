@@ -342,6 +342,97 @@ func MostRecentForProject(project string) (string, error) {
 	return best, nil
 }
 
+// DefaultRetentionDays is the default retention window applied by Prune
+// when no caller-specific override is supplied. 30 days reflects a
+// conservative "long enough for retro context, short enough that disk
+// growth stays bounded" trade-off per phase-p.md §P-5 acceptance.
+const DefaultRetentionDays = 30
+
+// pickAge returns the most-recent timestamp from a manifest for the
+// retention-window comparison. Prefers EndTS (canonical close-time);
+// falls back to StartTS when EndTS is zero (manifest authored at open
+// but never closed — orphaned session).
+func pickAge(m Manifest) time.Time {
+	if !m.EndTS.IsZero() {
+		return m.EndTS
+	}
+	return m.StartTS
+}
+
+// IsWithinRetention reports whether the given session-id is younger
+// than retentionDays as of `now`. Returns (false, nil) when the
+// session manifest can't be parsed or has no usable timestamps —
+// caller treats unknown-age as out-of-window for safety.
+//
+// retentionDays <= 0 disables the window check (always within).
+//
+// Used by hub_session_load auto-load decisions per Phase N v2 #5
+// follow-up: retention auto-load should only fire if last session
+// is recent enough to be useful resume context.
+func IsWithinRetention(id string, retentionDays int, now time.Time) (bool, error) {
+	if retentionDays <= 0 {
+		return true, nil
+	}
+	m, err := ReadManifest(id)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	age := pickAge(m)
+	if age.IsZero() {
+		return false, nil
+	}
+	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	return age.After(cutoff), nil
+}
+
+// PruneOlderThan deletes session directories whose latest manifest
+// timestamp is older than retentionDays as of `now`. Returns the slice
+// of pruned session-ids in deletion order. Sessions with unparseable
+// manifests are skipped (logged via the returned error chain only on
+// fatal-class issues; missing-manifest sessions are skipped silently).
+//
+// retentionDays <= 0 is a safety no-op (never prune; returns nil).
+//
+// Per phase-p.md §P-5 acceptance: configurable retention window +
+// nightly/on-demand prune. CLI subcommand `bot-hq session-prune` wraps
+// this for operator-driven invocations; future cron / scheduled-task
+// integration can call this directly in-process.
+func PruneOlderThan(retentionDays int, now time.Time) ([]string, error) {
+	if retentionDays <= 0 {
+		return nil, nil
+	}
+	ids, err := ListSessionIDs()
+	if err != nil {
+		return nil, err
+	}
+	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	var pruned []string
+	dir := SessionsDir()
+	for _, id := range ids {
+		m, err := ReadManifest(id)
+		if err != nil {
+			// Manifest unreadable / unparseable: skip rather than
+			// remove — operator can investigate manually before any
+			// cleanup. Conservative-by-default per data-loss-class.
+			continue
+		}
+		age := pickAge(m)
+		if age.IsZero() {
+			continue
+		}
+		if age.Before(cutoff) {
+			if err := os.RemoveAll(filepath.Join(dir, id)); err != nil {
+				return pruned, fmt.Errorf("remove %s: %w", id, err)
+			}
+			pruned = append(pruned, id)
+		}
+	}
+	return pruned, nil
+}
+
 func parseManifest(content string) (Manifest, error) {
 	var m Manifest
 	if !strings.HasPrefix(content, "---\n") {

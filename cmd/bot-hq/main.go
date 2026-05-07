@@ -69,6 +69,9 @@ func main() {
 		case "install-voice-mirror-hook":
 			runInstallVoiceMirrorHook()
 			return
+		case "session-prune":
+			runSessionPrune()
+			return
 		case "session-load":
 			runSessionLoad()
 			return
@@ -94,7 +97,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|webui|context-switch|session-open|install-session-start-hook|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|webui|context-switch|session-open|install-session-start-hook|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -679,6 +682,77 @@ func runSessionLoad() {
 		os.Exit(1)
 	}
 	fmt.Print(content)
+}
+
+// runSessionPrune deletes session directories older than the supplied
+// retention window. Drives the OQ-5 productionize-class deferral per
+// phase-p.md §P-5: configurable retention + on-demand prune subcommand.
+//
+// Usage:
+//
+//	bot-hq session-prune                # uses sessions.DefaultRetentionDays
+//	bot-hq session-prune --days <N>     # custom retention window in days
+//	bot-hq session-prune --dry-run      # report what would be pruned, no delete
+//
+// Exits 0 on success (zero-or-more pruned), non-zero on error.
+func runSessionPrune() {
+	days := sessions.DefaultRetentionDays
+	dryRun := false
+	args := os.Args[2:]
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--days":
+			if i+1 >= len(args) {
+				fmt.Fprintf(os.Stderr, "session-prune --days: value required\n")
+				os.Exit(1)
+			}
+			n, err := strconv.Atoi(args[i+1])
+			if err != nil || n < 0 {
+				fmt.Fprintf(os.Stderr, "session-prune --days: positive integer required, got %q\n", args[i+1])
+				os.Exit(1)
+			}
+			days = n
+			i++
+		case "--dry-run":
+			dryRun = true
+		default:
+			fmt.Fprintf(os.Stderr, "session-prune: unknown arg %q\n", args[i])
+			os.Exit(1)
+		}
+	}
+	now := time.Now()
+	if dryRun {
+		// Dry-run reports what would be pruned without deleting.
+		ids, err := sessions.ListSessionIDs()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "list sessions: %v\n", err)
+			os.Exit(1)
+		}
+		var wouldPrune []string
+		for _, id := range ids {
+			ok, err := sessions.IsWithinRetention(id, days, now)
+			if err != nil {
+				continue
+			}
+			if !ok {
+				wouldPrune = append(wouldPrune, id)
+			}
+		}
+		fmt.Printf("session-prune --dry-run --days=%d: would prune %d session(s)\n", days, len(wouldPrune))
+		for _, id := range wouldPrune {
+			fmt.Println("  " + id)
+		}
+		return
+	}
+	pruned, err := sessions.PruneOlderThan(days, now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "prune failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("session-prune --days=%d: pruned %d session(s)\n", days, len(pruned))
+	for _, id := range pruned {
+		fmt.Println("  " + id)
+	}
 }
 
 // runInstallToolgateHook installs the K-16 PreToolUse class-split gate
