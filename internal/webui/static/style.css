@@ -284,6 +284,32 @@ main {
   color: #888;
 }
 
+/* CodeMirror 5 (P-2 / phase-n.md:541) — matches the legacy #doc-content
+   look so the editor shape stays stable when CM replaces the textarea.
+   CM's own theme handles the syntax-highlight tokens. */
+.doc .CodeMirror {
+  flex: 1;
+  margin: 0;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-family: ui-monospace, 'SFMono-Regular', monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  height: auto;
+  min-height: 200px;
+  width: 100%;
+}
+.doc .CodeMirror.cm-s-default { background: white; }
+.doc .CodeMirror-focused {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
+}
+.doc.split-mode .CodeMirror {
+  grid-column: 2;
+  min-height: 400px;
+}
+
 #doc-status {
   padding-top: 0.3rem;
   font-size: 0.78rem;

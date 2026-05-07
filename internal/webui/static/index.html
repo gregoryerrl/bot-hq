@@ -5,6 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>bot-hq workspace</title>
   <link rel="stylesheet" href="/style.css">
+  <!-- CodeMirror 5 (P-2 / phase-n.md:541): syntax-highlighting for the
+       doc editor. CDN is cache-friendly + zero-build; yaml mode loaded
+       for rules.yaml etc. Falls back to the bare textarea if scripts
+       fail to load (offline / CDN block). -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css"
+        integrity="sha384-phfEUVAmRZV1Pzn/Xgxc3NH6zPMDuer0wHU9jRQKhNBBLyV4MP1gaBY1sxfxxPRT" crossorigin="anonymous">
+  <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"
+          integrity="sha384-CtBuRlcKITyrd+aBeTPNFB1/T8+kvtNQiWMCLtiGvD6NpLOJAdt8e8PpJJ2Gn1D0" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/yaml/yaml.min.js"
+          integrity="sha384-HRBFuRK5pnT+zuVLgmFtik3vkTVj3S73thA1O2D6YKrrUrx1jNd+g3smGmpkP09E" crossorigin="anonymous"></script>
 </head>
 <body>
   <header class="topbar">

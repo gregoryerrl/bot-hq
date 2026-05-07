@@ -1,7 +1,8 @@
 // bot-hq workspace — Phase N v3.x-1 curation frontend.
 // Replaces v3b file-tree-as-nav with destination-allowlist nav per
 // scope-lock-v4.2 (Form Y). Vanilla JS + fetch. marked.js (CDN) for
-// .md render; raw textarea for .yaml + non-md content.
+// .md render. CodeMirror 5 (P-2 / phase-n.md:541) for raw editor with
+// yaml syntax-highlighting; falls back to plain textarea if CM unloaded.
 //
 // State machine: project-picker drives /api/destinations?project=<p>;
 // click on a destination's file loads /api/files/<path>?format=json into
@@ -37,6 +38,53 @@
     searchQuery: '', // project-scoped filename filter (lowercase)
   };
 
+  // editor: CodeMirror-or-textarea wrapper so the rest of the app stays
+  // unaware of which implementation backs the doc editor. CM5 is loaded
+  // via CDN (index.html); if absent (offline / CDN block) we fall back
+  // to the bare textarea — all behaviors continue to function (no syntax
+  // highlight, but edit/save/dirty/split-view still work).
+  const editor = (function () {
+    let cm = null;
+    if (window.CodeMirror) {
+      cm = window.CodeMirror.fromTextArea(docContent, {
+        lineNumbers: true,
+        lineWrapping: true,
+        mode: 'null',
+        viewportMargin: Infinity, // render all lines (canonical-store files small)
+        indentUnit: 2,
+        tabSize: 2,
+        extraKeys: { Tab: (c) => c.replaceSelection('  ', 'end') },
+      });
+      cm.on('change', () => onEdit());
+    }
+    function modeForPath(path) {
+      if (!path) return 'null';
+      const lower = path.toLowerCase();
+      if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'yaml';
+      return 'null';
+    }
+    function wrapperEl() {
+      return cm ? cm.getWrapperElement() : docContent;
+    }
+    return {
+      getValue: () => cm ? cm.getValue() : docContent.value,
+      setValue: (v) => {
+        if (cm) cm.setValue(v != null ? v : '');
+        else docContent.value = v != null ? v : '';
+      },
+      setDisabled: (b) => {
+        if (cm) cm.setOption('readOnly', b);
+        else docContent.disabled = b;
+      },
+      setModeForPath: (path) => {
+        if (cm) cm.setOption('mode', modeForPath(path));
+      },
+      setHidden: (b) => wrapperEl().classList.toggle('hidden', b),
+      refresh: () => { if (cm) cm.refresh(); },
+      hasCM: () => cm != null,
+    };
+  })();
+
   projectPicker.addEventListener('change', () => {
     state.project = projectPicker.value;
     activeChip.textContent = state.project;
@@ -46,7 +94,7 @@
     state.searchQuery = navSearch.value.trim().toLowerCase();
     applyNavFilter();
   });
-  docContent.addEventListener('input', onEdit);
+  if (!editor.hasCM()) docContent.addEventListener('input', onEdit);
   docSave.addEventListener('click', saveFile);
   docMode.addEventListener('click', toggleViewMode);
   document.getElementById('conflict-overwrite').addEventListener('click', resolveConflict.bind(null, 'overwrite'));
@@ -192,16 +240,16 @@
   async function loadFile(path) {
     docPath.textContent = path;
     docMtime.textContent = 'loading…';
-    docContent.value = '';
+    editor.setValue('');
     docRendered.innerHTML = '';
-    docContent.disabled = true;
+    editor.setDisabled(true);
     docSave.disabled = true;
     docDirty.classList.add('hidden');
     docStatus.textContent = '';
     try {
       const res = await fetch('/api/files/' + path + '?format=json');
       if (!res.ok) {
-        docContent.value = 'Error: ' + res.status + ' ' + res.statusText;
+        editor.setValue('Error: ' + res.status + ' ' + res.statusText);
         docMtime.textContent = '';
         showRawView();
         return;
@@ -210,8 +258,9 @@
       state.currentPath = path;
       state.currentMtime = data.mtime || '';
       state.pristine = data.content || '';
-      docContent.value = state.pristine;
-      docContent.disabled = false;
+      editor.setValue(state.pristine);
+      editor.setModeForPath(path);
+      editor.setDisabled(false);
       docMtime.textContent = data.mtime || '';
       if (hasRenderedMode(path) && state.viewMode === 'rendered') {
         showRenderedView();
@@ -224,7 +273,7 @@
       }
       updateDirtyState();
     } catch (err) {
-      docContent.value = 'Fetch error: ' + err.message;
+      editor.setValue('Fetch error: ' + err.message);
       docMtime.textContent = '';
       showRawView();
     }
@@ -248,7 +297,7 @@
     state.viewMode = 'rendered';
     docMode.textContent = 'View: rendered';
     setSplitClass(false);
-    docContent.classList.add('hidden');
+    editor.setHidden(true);
     docRendered.classList.remove('hidden');
     refreshRenderedFromContent();
   }
@@ -257,8 +306,11 @@
     state.viewMode = 'split';
     docMode.textContent = 'View: split';
     setSplitClass(true);
-    docContent.classList.remove('hidden');
+    editor.setHidden(false);
     docRendered.classList.remove('hidden');
+    // CM editors need a refresh after un-hiding so internal layout
+    // (gutter widths, line measurement) recalculates correctly.
+    editor.refresh();
     refreshRenderedFromContent();
   }
 
@@ -270,11 +322,11 @@
   // across YAML and markdown for consistent mid-edit behavior.
   function refreshRenderedFromContent() {
     if (isYAML(state.currentPath)) {
-      docRendered.innerHTML = renderYAML(docContent.value);
+      docRendered.innerHTML = renderYAML(editor.getValue());
     } else if (window.marked) {
-      docRendered.innerHTML = renderMarkdownWithTOC(docContent.value);
+      docRendered.innerHTML = renderMarkdownWithTOC(editor.getValue());
     } else {
-      docRendered.textContent = docContent.value;
+      docRendered.textContent = editor.getValue();
     }
   }
 
@@ -475,7 +527,8 @@
     docMode.textContent = 'View: raw';
     setSplitClass(false);
     docRendered.classList.add('hidden');
-    docContent.classList.remove('hidden');
+    editor.setHidden(false);
+    editor.refresh();
   }
 
   function toggleViewMode() {
@@ -502,7 +555,7 @@
   }
 
   function isDirty() {
-    return state.currentPath != null && docContent.value !== state.pristine;
+    return state.currentPath != null && editor.getValue() !== state.pristine;
   }
 
   function updateDirtyState() {
@@ -522,7 +575,7 @@
           'If-Match': state.currentMtime || '',
           'Content-Type': 'text/plain; charset=utf-8',
         },
-        body: docContent.value,
+        body: editor.getValue(),
       });
       if (res.status === 409) {
         const payload = await res.json();
@@ -540,7 +593,7 @@
       }
       const data = await res.json();
       state.currentMtime = data.mtime || '';
-      state.pristine = docContent.value;
+      state.pristine = editor.getValue();
       docMtime.textContent = data.mtime || '';
       const sha = data.commit ? ' · commit ' + data.commit.slice(0, 7) : '';
       const warns = (data.warnings && data.warnings.length) ? ' · ' + data.warnings.length + ' warning(s)' : '';
@@ -566,7 +619,7 @@
     if (action === 'discard') {
       state.pristine = conflict.current_content || '';
       state.currentMtime = conflict.current_mtime || '';
-      docContent.value = state.pristine;
+      editor.setValue(state.pristine);
       docMtime.textContent = state.currentMtime;
       docStatus.textContent = 'Discarded local edits; loaded server version.';
       if (state.viewMode === 'rendered' && isMarkdown(state.currentPath)) showRenderedView();
