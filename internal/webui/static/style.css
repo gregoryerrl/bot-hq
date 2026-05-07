@@ -387,3 +387,42 @@ main {
 .yaml-rendered .yaml-comment { color: #888; font-style: italic; }
 .yaml-rendered .yaml-marker { color: #a23b00; font-weight: 600; }
 .yaml-rendered .yaml-scalar-marker { color: #6a3aa2; font-weight: 600; }
+
+/* Markdown rendered-view scrollable TOC — emitted by renderMarkdownWithTOC()
+   for documents with >=4 headings. Inline-at-top placement (no separate
+   sidebar — keeps layout simple). Phase O drain per phase-n.md:820. */
+.md-toc {
+  background: #f6f6f6;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 0.7rem 1rem;
+  margin: 0 0 1rem 0;
+  font-size: 0.85rem;
+  max-height: 280px;
+  overflow: auto;
+}
+.md-toc-title {
+  font-weight: 600;
+  color: #444;
+  margin-bottom: 0.3rem;
+}
+.md-toc ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.md-toc li {
+  margin: 0.15rem 0;
+  line-height: 1.35;
+}
+.md-toc a {
+  color: #1a4480;
+  text-decoration: none;
+}
+.md-toc a:hover { text-decoration: underline; }
+.md-toc .toc-l1 { padding-left: 0; font-weight: 600; }
+.md-toc .toc-l2 { padding-left: 1rem; }
+.md-toc .toc-l3 { padding-left: 2rem; }
+.md-toc .toc-l4 { padding-left: 3rem; font-size: 0.8rem; }
+.md-toc .toc-l5 { padding-left: 4rem; font-size: 0.8rem; color: #666; }
+.md-toc .toc-l6 { padding-left: 5rem; font-size: 0.8rem; color: #666; }

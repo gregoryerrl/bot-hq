@@ -232,10 +232,66 @@
     if (isYAML(state.currentPath)) {
       docRendered.innerHTML = renderYAML(docContent.value);
     } else if (window.marked && state.pristine) {
-      docRendered.innerHTML = window.marked.parse(docContent.value);
+      docRendered.innerHTML = renderMarkdownWithTOC(docContent.value);
     } else {
       docRendered.textContent = docContent.value;
     }
+  }
+
+  // renderMarkdownWithTOC renders markdown via marked.js and prepends a
+  // scrollable Table of Contents nav for documents with ≥4 headings (h1-h6).
+  // Headings get slug IDs derived from their text content; TOC items link
+  // to those anchors. Phase O drain per phase-n.md:820 — addresses the
+  // single-big-file navigability gap (e.g., discipline-log.md, phase-n.md).
+  //
+  // XSS-safe: heading text extracted via textContent (DOM-derived plaintext,
+  // no HTML), then escapeHtml'd before injection into TOC anchor labels.
+  // Slug derivation uses only \w + hyphens — no HTML-significant chars.
+  function renderMarkdownWithTOC(content) {
+    const html = window.marked.parse(content);
+    const parser = new DOMParser();
+    const doc = parser.parseFromString('<div>' + html + '</div>', 'text/html');
+    const wrapper = doc.body.firstChild;
+    const headings = wrapper.querySelectorAll('h1, h2, h3, h4, h5, h6');
+    if (headings.length < 4) return html;
+    const items = [];
+    const used = Object.create(null);
+    headings.forEach((h) => {
+      const text = h.textContent.trim();
+      let slug = slugifyHeading(text) || 'section';
+      if (used[slug]) {
+        const n = used[slug]++;
+        slug = slug + '-' + n;
+        used[slug] = 1;
+      } else {
+        used[slug] = 1;
+      }
+      h.id = slug;
+      items.push({ level: parseInt(h.tagName.substring(1), 10), text, slug });
+    });
+    return buildTOCHtml(items) + wrapper.innerHTML;
+  }
+
+  function slugifyHeading(text) {
+    return String(text)
+      .toLowerCase()
+      .replace(/[^\w\s-]+/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+  }
+
+  function buildTOCHtml(items) {
+    const parts = ['<nav class="md-toc"><div class="md-toc-title">Table of contents</div><ul>'];
+    for (const it of items) {
+      parts.push(
+        '<li class="toc-l' + it.level + '"><a href="#' + it.slug + '">' +
+        escapeHtml(it.text) + '</a></li>'
+      );
+    }
+    parts.push('</ul></nav>');
+    return parts.join('');
   }
 
   // renderYAML produces a syntax-highlighted read-only HTML view of YAML
