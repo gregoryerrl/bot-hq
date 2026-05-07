@@ -426,3 +426,27 @@ main {
 .md-toc .toc-l4 { padding-left: 3rem; font-size: 0.8rem; }
 .md-toc .toc-l5 { padding-left: 4rem; font-size: 0.8rem; color: #666; }
 .md-toc .toc-l6 { padding-left: 5rem; font-size: 0.8rem; color: #666; }
+
+/* Split-mode: side-by-side rendered preview + raw textarea editor.
+   Toggle cycles rendered → split → raw on hasRenderedMode files
+   (.md/.yaml/.yml). Live re-render on textarea input via onEdit.
+   Phase O drain per phase-n.md:818. */
+.doc.split-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto 1fr auto;
+  gap: 0.5rem;
+}
+.doc.split-mode .doc-header { grid-column: 1 / 3; }
+.doc.split-mode #doc-rendered {
+  grid-column: 1;
+  min-height: 400px;
+  overflow: auto;
+  border-right: 1px solid #eee;
+  padding-right: 0.5rem;
+}
+.doc.split-mode #doc-content {
+  grid-column: 2;
+  min-height: 400px;
+}
+.doc.split-mode #doc-status { grid-column: 1 / 3; }

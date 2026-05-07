@@ -197,6 +197,8 @@
       docMtime.textContent = data.mtime || '';
       if (hasRenderedMode(path) && state.viewMode === 'rendered') {
         showRenderedView();
+      } else if (hasRenderedMode(path) && state.viewMode === 'split') {
+        showSplitView();
       } else {
         // Non-renderable always raw; renderable follows current viewMode.
         if (!hasRenderedMode(path)) state.viewMode = 'raw';
@@ -227,15 +229,41 @@
   function showRenderedView() {
     state.viewMode = 'rendered';
     docMode.textContent = 'View: rendered';
+    setSplitClass(false);
     docContent.classList.add('hidden');
     docRendered.classList.remove('hidden');
+    refreshRenderedFromContent();
+  }
+
+  function showSplitView() {
+    state.viewMode = 'split';
+    docMode.textContent = 'View: split';
+    setSplitClass(true);
+    docContent.classList.remove('hidden');
+    docRendered.classList.remove('hidden');
+    refreshRenderedFromContent();
+  }
+
+  // refreshRenderedFromContent re-emits the rendered HTML from the current
+  // textarea value. Used by both rendered-mode and split-mode (split re-
+  // renders on every input event so typing updates the preview live).
+  // Per Rain msg 14744 carry-forward: drops the pristine-gate previously
+  // applied only to markdown — render uses live docContent.value uniformly
+  // across YAML and markdown for consistent mid-edit behavior.
+  function refreshRenderedFromContent() {
     if (isYAML(state.currentPath)) {
       docRendered.innerHTML = renderYAML(docContent.value);
-    } else if (window.marked && state.pristine) {
+    } else if (window.marked) {
       docRendered.innerHTML = renderMarkdownWithTOC(docContent.value);
     } else {
       docRendered.textContent = docContent.value;
     }
+  }
+
+  function setSplitClass(on) {
+    const docSection = document.querySelector('section.doc');
+    if (!docSection) return;
+    docSection.classList.toggle('split-mode', !!on);
   }
 
   // renderMarkdownWithTOC renders markdown via marked.js and prepends a
@@ -340,6 +368,7 @@
   function showRawView() {
     state.viewMode = 'raw';
     docMode.textContent = 'View: raw';
+    setSplitClass(false);
     docRendered.classList.add('hidden');
     docContent.classList.remove('hidden');
   }
@@ -351,17 +380,20 @@
       showRawView();
       return;
     }
-    if (state.viewMode === 'rendered') {
-      showRawView();
-    } else {
-      showRenderedView();
-    }
+    // Three-mode cycle for renderable files: rendered → split → raw → rendered.
+    if (state.viewMode === 'rendered') showSplitView();
+    else if (state.viewMode === 'split') showRawView();
+    else showRenderedView();
   }
 
   function onEdit() {
     updateDirtyState();
-    // If currently rendered, leave rendered alone — render refreshes on
-    // next view-toggle / save.
+    // Split-mode renders live: typing updates preview pane on every input.
+    // Rendered-mode (preview-only) leaves rendered HTML alone — refreshes
+    // on next view-toggle / save (typing isn't visible in rendered-only).
+    if (state.viewMode === 'split') {
+      refreshRenderedFromContent();
+    }
   }
 
   function isDirty() {
