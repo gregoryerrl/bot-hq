@@ -158,6 +158,8 @@
         } else {
           const a = document.createElement('a');
           a.href = '#' + n.path;
+          a.classList.add('file-link');
+          a.dataset.path = n.path;
           a.textContent = n.name;
           a.title = (n.size != null ? n.size + ' B · ' : '') + (n.mtime || '');
           a.addEventListener('click', (ev) => {
@@ -285,8 +287,9 @@
     const parser = new DOMParser();
     const doc = parser.parseFromString('<div>' + html + '</div>', 'text/html');
     const wrapper = doc.body.firstChild;
+    linkifyCiteAnchors(wrapper);
     const headings = wrapper.querySelectorAll('h1, h2, h3, h4, h5, h6');
-    if (headings.length < 4) return html;
+    if (headings.length < 4) return wrapper.innerHTML;
     const items = [];
     const used = Object.create(null);
     headings.forEach((h) => {
@@ -303,6 +306,92 @@
       items.push({ level: parseInt(h.tagName.substring(1), 10), text, slug });
     });
     return buildTOCHtml(items) + wrapper.innerHTML;
+  }
+
+  // linkifyCiteAnchors walks the rendered DOM and wraps cite-anchor
+  // patterns in <a class="cite-link"> elements that dispatch loadFile()
+  // on click. Phase O drain per phase-n.md:817 — addresses the cite-
+  // anchor + format-aware link-resolution gap (markdown links already
+  // work via marked.js; this layer adds prose-cite navigation:
+  // "phase-n.md:820" → click loads phase-n.md). Patterns supported:
+  //   <basename>.{md|yaml|yml|json}[:<line>]   → file at canonical-store
+  //   <basename>.{md|yaml|yml|json}            → file at canonical-store
+  // Skips text inside <code>, <pre>, and existing <a> tags so code blocks
+  // and already-linked text aren't re-processed. XSS-safe: text-node
+  // matches only; replacement uses createElement + textContent (no
+  // innerHTML on user-content paths).
+  function linkifyCiteAnchors(root) {
+    const skipTags = new Set(['CODE', 'PRE', 'A']);
+    const re = /\b([A-Za-z][\w.-]*\.(?:md|yaml|yml|json))(?::(\d+))?\b/g;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    const targets = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      let p = n.parentNode;
+      let skip = false;
+      while (p && p !== root) {
+        if (skipTags.has(p.tagName)) { skip = true; break; }
+        p = p.parentNode;
+      }
+      if (skip) continue;
+      if (re.test(n.nodeValue)) {
+        re.lastIndex = 0;
+        targets.push(n);
+      }
+    }
+    for (const node of targets) {
+      const text = node.nodeValue;
+      const frag = document.createDocumentFragment();
+      let lastIdx = 0;
+      let match;
+      re.lastIndex = 0;
+      while ((match = re.exec(text)) !== null) {
+        if (match.index > lastIdx) {
+          frag.appendChild(document.createTextNode(text.substring(lastIdx, match.index)));
+        }
+        const a = document.createElement('a');
+        a.className = 'cite-link';
+        a.href = '#';
+        a.dataset.citePath = match[1];
+        if (match[2]) a.dataset.citeLine = match[2];
+        a.textContent = match[0];
+        a.title = 'Open ' + match[1] + (match[2] ? ' (line ' + match[2] + ')' : '');
+        a.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          resolveCiteLink(a.dataset.citePath);
+        });
+        frag.appendChild(a);
+        lastIdx = re.lastIndex;
+      }
+      if (lastIdx < text.length) {
+        frag.appendChild(document.createTextNode(text.substring(lastIdx)));
+      }
+      node.parentNode.replaceChild(frag, node);
+    }
+  }
+
+  // resolveCiteLink dispatches a cite-anchor click. For an unqualified
+  // basename, we look up the canonical-store path via the destinations
+  // already loaded for the active project + global. If a unique match is
+  // found, loadFile fires; on ambiguity or miss, status surfaces inline.
+  // Phase O scope: best-effort lookup using cached destination tree; no
+  // backend resolver call — keeps this client-side simple.
+  function resolveCiteLink(basename) {
+    const candidates = [];
+    document.querySelectorAll('.nav-list .file-link[data-path]').forEach((el) => {
+      const p = el.dataset.path || '';
+      const tail = p.split('/').pop();
+      if (tail === basename) candidates.push(p);
+    });
+    if (candidates.length === 1) {
+      loadFile(candidates[0]);
+      return;
+    }
+    if (candidates.length > 1) {
+      docStatus.textContent = 'Cite "' + basename + '" matches ' + candidates.length + ' files; pick from nav.';
+      return;
+    }
+    docStatus.textContent = 'Cite "' + basename + '" not found in current nav (load destinations first).';
   }
 
   function slugifyHeading(text) {

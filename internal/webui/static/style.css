@@ -524,3 +524,17 @@ main {
   font-size: 0.75rem;
   flex-shrink: 0;
 }
+
+/* Cross-link semantic nav cite-anchor links — Phase O drain per
+   phase-n.md:817. Linkified by linkifyCiteAnchors() in app.js for
+   patterns like "phase-n.md:820" embedded in rendered markdown. */
+.cite-link {
+  color: #1a4480;
+  text-decoration: underline dotted #aaa;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.cite-link:hover {
+  text-decoration: underline solid #1a4480;
+  background: #f0f4fa;
+}
