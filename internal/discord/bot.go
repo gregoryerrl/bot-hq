@@ -3,6 +3,7 @@ package discord
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,26 +13,38 @@ import (
 )
 
 // Bot bridges Discord messages to and from the hub.
-// It listens on a single configured channel, forwarding incoming
-// Discord messages into the hub and sending hub messages addressed
-// to the "discord" agent back to the Discord channel.
+//
+// Phase R R4 multi-channel routing: when hubChannelID is populated,
+// hub messages route by class — MsgFlag → flagsChannelID; session-event
+// class (content prefix `[SESSION:` per R5 forward-compat) → sessionsChannelID;
+// everything else → hubChannelID. Empty class-specific IDs fall back to
+// hubChannelID. Empty hubChannelID falls back to legacy channelID.
 type Bot struct {
 	session   *discordgo.Session
 	hub       *hub.Hub
-	channelID string
-	botUserID string
-	mu        sync.Mutex
-	stopCh    chan struct{}
+	channelID string // legacy single-channel (back-compat fallback)
+	// Phase R R4 multi-channel routing
+	hubChannelID      string // primary post-R4 channel for hub messages
+	flagsChannelID    string // MsgFlag class destination
+	sessionsChannelID string // session-event class destination ([SESSION: prefix)
+	botUserID         string
+	mu                sync.Mutex
+	stopCh            chan struct{}
 }
 
-// NewBot creates a new Discord bot. It validates the token and channelID
-// but does not open the Discord session until Start is called.
-func NewBot(token, channelID string, h *hub.Hub) (*Bot, error) {
+// NewBot creates a new Discord bot. It validates the token and channel
+// configuration but does not open the Discord session until Start is called.
+//
+// Phase R R4 multi-channel: at least one of channelID OR hubChannelID
+// must be populated (legacy single-channel OR R4 multi-channel mode).
+// flagsChannelID + sessionsChannelID are optional — empty values fall
+// back to hubChannelID per partial-migration semantics.
+func NewBot(token, channelID, hubChannelID, flagsChannelID, sessionsChannelID string, h *hub.Hub) (*Bot, error) {
 	if token == "" {
 		return nil, fmt.Errorf("discord bot token is required")
 	}
-	if channelID == "" {
-		return nil, fmt.Errorf("discord channel ID is required")
+	if channelID == "" && hubChannelID == "" {
+		return nil, fmt.Errorf("discord channel_id (legacy) OR hub_channel_id (Phase R R4) is required")
 	}
 	if h == nil {
 		return nil, fmt.Errorf("hub is required")
@@ -46,11 +59,80 @@ func NewBot(token, channelID string, h *hub.Hub) (*Bot, error) {
 	sess.Identify.Intents = discordgo.IntentsGuildMessages
 
 	return &Bot{
-		session:   sess,
-		hub:       h,
-		channelID: channelID,
-		stopCh:    make(chan struct{}),
+		session:           sess,
+		hub:               h,
+		channelID:         channelID,
+		hubChannelID:      hubChannelID,
+		flagsChannelID:    flagsChannelID,
+		sessionsChannelID: sessionsChannelID,
+		stopCh:            make(chan struct{}),
 	}, nil
+}
+
+// resolveHubChannel returns the effective primary channel for hub-class
+// messages. Prefers hubChannelID (Phase R R4); falls back to legacy
+// channelID. Pure helper — no I/O.
+func (b *Bot) resolveHubChannel() string {
+	if b.hubChannelID != "" {
+		return b.hubChannelID
+	}
+	return b.channelID
+}
+
+// channelForMessage returns the destination channel ID for a hub message
+// per Phase R R4 routing discriminator.
+//
+// Routing matrix:
+//   - MsgFlag → flagsChannelID; falls back to hub-channel if empty (partial-migration)
+//   - content prefix "[SESSION:" → sessionsChannelID; falls back to hub-channel if empty
+//   - everything else → hub-channel (hubChannelID OR legacy channelID)
+//
+// Pre-R4 single-channel deployments (legacy channelID set, R4 fields empty)
+// route everything to channelID.
+func (b *Bot) channelForMessage(msg protocol.Message) string {
+	hub := b.resolveHubChannel()
+	if msg.Type == protocol.MsgFlag {
+		if b.flagsChannelID != "" {
+			return b.flagsChannelID
+		}
+		return hub
+	}
+	// Session-event detection via [SESSION:<8>] content prefix per Phase R R5
+	// forward-compat. Phase R R5 will codify the prefix on session-create /
+	// session-close emits; until then this branch matches no current emits
+	// (defensive forward-compat — no behavior change pre-R5).
+	if strings.HasPrefix(msg.Content, "[SESSION:") {
+		if b.sessionsChannelID != "" {
+			return b.sessionsChannelID
+		}
+		return hub
+	}
+	return hub
+}
+
+// listensOnChannel reports whether the bot's incoming-message filter
+// should accept messages from the given channel ID. Phase R R4 expands
+// from single-channel to {channelID, hubChannelID, flagsChannelID,
+// sessionsChannelID} — any non-empty channel-ID value the bot is
+// configured for. Pre-R4 single-channel deployments accept only
+// channelID. Pure helper — no I/O.
+func (b *Bot) listensOnChannel(id string) bool {
+	if id == "" {
+		return false
+	}
+	if id == b.channelID && b.channelID != "" {
+		return true
+	}
+	if id == b.hubChannelID && b.hubChannelID != "" {
+		return true
+	}
+	if id == b.flagsChannelID && b.flagsChannelID != "" {
+		return true
+	}
+	if id == b.sessionsChannelID && b.sessionsChannelID != "" {
+		return true
+	}
+	return false
 }
 
 // Start opens the Discord websocket connection, registers the bot as
@@ -113,8 +195,9 @@ func (b *Bot) Stop() error {
 // It filters to the configured channel, ignores its own messages, and
 // inserts the message into the hub DB.
 func (b *Bot) handleDiscordMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	// Ignore messages from other channels
-	if m.ChannelID != b.channelID {
+	// Ignore messages from channels outside our configured set.
+	// Phase R R4: filter against {channelID, hub/flags/sessions IDs}.
+	if !b.listensOnChannel(m.ChannelID) {
 		return
 	}
 
@@ -185,10 +268,15 @@ func (b *Bot) forwardToDiscord(ch <-chan protocol.Message) {
 				text = fmt.Sprintf("**[%s]** %s", msg.FromAgent, msg.Content)
 			}
 
+			// Phase R R4: route to per-class channel. Pre-R4 single-channel
+			// deployments still route to channelID via channelForMessage's
+			// fallback chain.
+			dest := b.channelForMessage(msg)
+
 			// Discord has a 2000 character limit; split if needed
 			chunks := splitMessage(text, 2000)
 			for _, chunk := range chunks {
-				if _, err := b.session.ChannelMessageSend(b.channelID, chunk); err != nil {
+				if _, err := b.session.ChannelMessageSend(dest, chunk); err != nil {
 					log.Printf("[discord] failed to send message: %v", err)
 				}
 			}

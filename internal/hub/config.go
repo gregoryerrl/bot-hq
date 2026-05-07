@@ -31,6 +31,16 @@ type LiveConfig struct {
 type DiscordConfig struct {
 	Token     string `toml:"token"`
 	ChannelID string `toml:"channel_id"`
+	// Phase R R4 multi-channel routing — when populated, hub messages
+	// route by class: MsgFlag → FlagsChannelID; session-event class
+	// (content prefix `[SESSION:`) → SessionsChannelID; everything else
+	// → HubChannelID. Empty class-specific IDs fall back to
+	// HubChannelID. HubChannelID empty falls back to legacy ChannelID
+	// for backwards-compat with pre-R4 single-channel deployments.
+	// User-fire path documented at ~/.bot-hq/tasks.md T-001.
+	HubChannelID      string `toml:"hub_channel_id"`
+	FlagsChannelID    string `toml:"flags_channel_id"`
+	SessionsChannelID string `toml:"sessions_channel_id"`
 }
 
 type BrianConfig struct {
@@ -111,7 +121,10 @@ type SettingKey struct {
 // EditableSettings defines which settings can be configured via the UI.
 var EditableSettings = []SettingKey{
 	{Key: "discord.token", Label: "Token", Section: "DISCORD", IsSecret: true},
-	{Key: "discord.channel_id", Label: "Channel ID", Section: "DISCORD"},
+	{Key: "discord.channel_id", Label: "Channel ID (legacy)", Section: "DISCORD"},
+	{Key: "discord.hub_channel_id", Label: "Hub Channel ID", Section: "DISCORD"},
+	{Key: "discord.flags_channel_id", Label: "Flags Channel ID", Section: "DISCORD"},
+	{Key: "discord.sessions_channel_id", Label: "Sessions Channel ID", Section: "DISCORD"},
 	{Key: "live.gemini_api_key", Label: "Gemini Key", Section: "CLIVE", IsSecret: true},
 	{Key: "live.voice", Label: "Voice", Section: "CLIVE"},
 	{Key: "hub.live_port", Label: "Clive Port", Section: "HUB"},
@@ -140,6 +153,12 @@ func (cfg *Config) ApplyDBSettings(db *DB) {
 			cfg.Discord.Token = v
 		case "discord.channel_id":
 			cfg.Discord.ChannelID = v
+		case "discord.hub_channel_id":
+			cfg.Discord.HubChannelID = v
+		case "discord.flags_channel_id":
+			cfg.Discord.FlagsChannelID = v
+		case "discord.sessions_channel_id":
+			cfg.Discord.SessionsChannelID = v
 		case "live.gemini_api_key":
 			cfg.Live.GeminiAPIKey = v
 		case "live.voice":
@@ -173,6 +192,12 @@ func (cfg *Config) GetSettingValue(key string) string {
 		return cfg.Discord.Token
 	case "discord.channel_id":
 		return cfg.Discord.ChannelID
+	case "discord.hub_channel_id":
+		return cfg.Discord.HubChannelID
+	case "discord.flags_channel_id":
+		return cfg.Discord.FlagsChannelID
+	case "discord.sessions_channel_id":
+		return cfg.Discord.SessionsChannelID
 	case "live.gemini_api_key":
 		return cfg.Live.GeminiAPIKey
 	case "live.voice":

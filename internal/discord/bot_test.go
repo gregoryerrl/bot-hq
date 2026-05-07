@@ -57,23 +57,182 @@ func TestShouldForwardToDiscord_AudienceCases(t *testing.T) {
 }
 
 func TestNewBotRequiresToken(t *testing.T) {
-	_, err := NewBot("", "channel-id", nil)
+	_, err := NewBot("", "channel-id", "", "", "", nil)
 	if err == nil {
 		t.Error("expected error for empty token")
 	}
 }
 
 func TestNewBotRequiresChannel(t *testing.T) {
-	_, err := NewBot("token", "", nil)
+	// Phase R R4: legacy channelID OR new hubChannelID must be set
+	_, err := NewBot("token", "", "", "", "", nil)
 	if err == nil {
-		t.Error("expected error for empty channel")
+		t.Error("expected error when both channel_id and hub_channel_id empty")
 	}
 }
 
 func TestNewBotRequiresHub(t *testing.T) {
-	_, err := NewBot("token", "channel-id", nil)
+	_, err := NewBot("token", "channel-id", "", "", "", nil)
 	if err == nil {
 		t.Error("expected error for nil hub")
+	}
+}
+
+// Phase R R4 — 5-state multi-channel routing matrix per Rain msg 15538
+// Refine-2/3 BRAIN-2nd. Covers (i) legacy single-channel / (ii) partial-
+// migration hub-only / (iii) partial-migration hub+flags / (iv) partial-
+// migration hub+sessions / (v) fully-migrated.
+func TestChannelForMessage_RoutingMatrix(t *testing.T) {
+	cases := []struct {
+		name              string
+		channelID         string
+		hubChannelID      string
+		flagsChannelID    string
+		sessionsChannelID string
+		msg               protocol.Message
+		want              string
+	}{
+		// (i) legacy single-channel: pre-R4 deployments
+		{
+			name:      "legacy: hub-class routes to channelID",
+			channelID: "legacy",
+			msg:       protocol.Message{Type: protocol.MsgUpdate, Content: "hello"},
+			want:      "legacy",
+		},
+		{
+			name:      "legacy: flag-class routes to channelID (no flags-channel)",
+			channelID: "legacy",
+			msg:       protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
+			want:      "legacy",
+		},
+		{
+			name:      "legacy: session-event routes to channelID (no sessions-channel)",
+			channelID: "legacy",
+			msg:       protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345] opened"},
+			want:      "legacy",
+		},
+		// (ii) partial-migration hub-only
+		{
+			name:         "hub-only: all classes route to hubChannelID",
+			hubChannelID: "hub",
+			msg:          protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
+			want:         "hub",
+		},
+		{
+			name:         "hub-only: session-event also routes to hubChannelID",
+			hubChannelID: "hub",
+			msg:          protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345]"},
+			want:         "hub",
+		},
+		// (iii) partial-migration hub+flags
+		{
+			name:           "hub+flags: flag routes to flagsChannelID",
+			hubChannelID:   "hub",
+			flagsChannelID: "flags",
+			msg:            protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
+			want:           "flags",
+		},
+		{
+			name:           "hub+flags: session-event falls back to hub (no sessions-channel)",
+			hubChannelID:   "hub",
+			flagsChannelID: "flags",
+			msg:            protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345]"},
+			want:           "hub",
+		},
+		// (iv) partial-migration hub+sessions
+		{
+			name:              "hub+sessions: session-event routes to sessionsChannelID",
+			hubChannelID:      "hub",
+			sessionsChannelID: "sessions",
+			msg:               protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345]"},
+			want:              "sessions",
+		},
+		{
+			name:              "hub+sessions: flag falls back to hub (no flags-channel)",
+			hubChannelID:      "hub",
+			sessionsChannelID: "sessions",
+			msg:               protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
+			want:               "hub",
+		},
+		// (v) fully-migrated R4
+		{
+			name:              "fully-migrated: hub-class → hub",
+			hubChannelID:      "hub",
+			flagsChannelID:    "flags",
+			sessionsChannelID: "sessions",
+			msg:               protocol.Message{Type: protocol.MsgUpdate, Content: "regular update"},
+			want:              "hub",
+		},
+		{
+			name:              "fully-migrated: flag-class → flags",
+			hubChannelID:      "hub",
+			flagsChannelID:    "flags",
+			sessionsChannelID: "sessions",
+			msg:               protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
+			want:              "flags",
+		},
+		{
+			name:              "fully-migrated: session-event → sessions",
+			hubChannelID:      "hub",
+			flagsChannelID:    "flags",
+			sessionsChannelID: "sessions",
+			msg:               protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345] opened"},
+			want:              "sessions",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := &Bot{
+				channelID:         tc.channelID,
+				hubChannelID:      tc.hubChannelID,
+				flagsChannelID:    tc.flagsChannelID,
+				sessionsChannelID: tc.sessionsChannelID,
+			}
+			if got := b.channelForMessage(tc.msg); got != tc.want {
+				t.Errorf("channelForMessage(%q, type=%q) = %q, want %q", tc.msg.Content, tc.msg.Type, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestListensOnChannel — Phase R R4 incoming-message filter expanded to
+// {channelID, hubChannelID, flagsChannelID, sessionsChannelID}.
+func TestListensOnChannel(t *testing.T) {
+	b := &Bot{
+		channelID:         "legacy",
+		hubChannelID:      "hub",
+		flagsChannelID:    "flags",
+		sessionsChannelID: "sessions",
+	}
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{"legacy", true},
+		{"hub", true},
+		{"flags", true},
+		{"sessions", true},
+		{"unknown", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		t.Run(c.id, func(t *testing.T) {
+			if got := b.listensOnChannel(c.id); got != c.want {
+				t.Errorf("listensOnChannel(%q) = %v, want %v", c.id, got, c.want)
+			}
+		})
+	}
+}
+
+// TestListensOnChannel_LegacyOnly — pre-R4 single-channel deployments
+// only listen on channelID.
+func TestListensOnChannel_LegacyOnly(t *testing.T) {
+	b := &Bot{channelID: "legacy"}
+	if !b.listensOnChannel("legacy") {
+		t.Error("legacy single-channel: should listen on channelID")
+	}
+	if b.listensOnChannel("other") {
+		t.Error("legacy single-channel: should NOT listen on other channels")
 	}
 }
 

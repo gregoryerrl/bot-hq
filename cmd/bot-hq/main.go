@@ -182,9 +182,17 @@ func runHub() {
 		log.Printf("[autostart] bootstrap-defensive-loop OK")
 	}
 
-	// 6. Start Discord bot if configured
-	if cfg.Discord.Token != "" && cfg.Discord.ChannelID != "" {
-		discordBot, err := discord.NewBot(cfg.Discord.Token, cfg.Discord.ChannelID, h)
+	// 6. Start Discord bot if configured (Phase R R4 multi-channel support;
+	// either legacy ChannelID OR Phase R HubChannelID populated suffices).
+	if cfg.Discord.Token != "" && (cfg.Discord.ChannelID != "" || cfg.Discord.HubChannelID != "") {
+		discordBot, err := discord.NewBot(
+			cfg.Discord.Token,
+			cfg.Discord.ChannelID,
+			cfg.Discord.HubChannelID,
+			cfg.Discord.FlagsChannelID,
+			cfg.Discord.SessionsChannelID,
+			h,
+		)
 		if err == nil {
 			if err := discordBot.Start(); err == nil {
 				defer discordBot.Stop()
