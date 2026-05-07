@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/projects"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
@@ -153,6 +154,19 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase O drain #6: normalize per-project YAMLs to canonical nested
+	// form on write so legacy flat-form edits persist as canonical. Read-
+	// side dual-form unmarshaler handles either; write-side enforces
+	// canonical to close the structural-normalization loop.
+	if isProjectsYAMLPath(relPath) {
+		normalized, err := projects.Normalize(body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("normalize: %v", err), http.StatusBadRequest)
+			return
+		}
+		body = normalized
+	}
+
 	if err := atomicWrite(abs, body); err != nil {
 		http.Error(w, fmt.Sprintf("write: %v", err), http.StatusInternalServerError)
 		return
@@ -164,6 +178,15 @@ func (s *Server) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		"mtime":  newMtime,
 		"commit": sha,
 	})
+}
+
+// isProjectsYAMLPath returns true for canonical-store paths under
+// projects/ that end in .yaml — the scope where Phase N v3.x-2 schema-
+// canonical-form (nested gates/branch/commit) applies. Other YAMLs
+// (rules/general.yaml, rules/agents/*.yaml) are already nested by
+// authoring convention and don't need write-side normalization.
+func isProjectsYAMLPath(relPath string) bool {
+	return strings.HasPrefix(relPath, "projects/") && strings.HasSuffix(relPath, ".yaml")
 }
 
 // handleCliveProposeOrApprove routes:
