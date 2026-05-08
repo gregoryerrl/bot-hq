@@ -331,6 +331,8 @@ RULES:
 
 ` + protocol.PhaseSv1AudienceClassLoadBearing + `
 
+` + protocol.PhaseSv2IgnoreNoiseDiscipline + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 ` + protocol.H13ForcePushProtocol + `

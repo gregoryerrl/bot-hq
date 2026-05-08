@@ -302,6 +302,8 @@ RULES:
 
 ` + protocol.PhaseSv1AudienceClassLoadBearing + `
 
+` + protocol.PhaseSv2IgnoreNoiseDiscipline + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 Start now: register, then watch everything.`

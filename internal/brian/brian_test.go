@@ -325,6 +325,17 @@ func TestBrianPromptEmbedsPhaseSv1AudienceClassLoadBearing(t *testing.T) {
 	}
 }
 
+// TestBrianPromptEmbedsPhaseSv2IgnoreNoiseDiscipline verifies the
+// Phase-S-followup-1 F1-7 §117 ignore-noise discipline const is
+// embedded verbatim in brian's initial prompt.
+func TestBrianPromptEmbedsPhaseSv2IgnoreNoiseDiscipline(t *testing.T) {
+	b := &Brian{}
+	prompt := b.initialPrompt()
+	if !strings.Contains(prompt, protocol.PhaseSv2IgnoreNoiseDiscipline) {
+		t.Errorf("initial prompt must embed protocol.PhaseSv2IgnoreNoiseDiscipline verbatim (Phase-S-followup-1 F1-7 wiring lock)")
+	}
+}
+
 // TestFormatNudgeWithSessionPrefix verifies Phase R R5 (d-1)
 // `[SESSION:<8>] ` pane-header prepend behavior.
 func TestFormatNudgeWithSessionPrefix(t *testing.T) {
