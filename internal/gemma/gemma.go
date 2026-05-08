@@ -330,6 +330,17 @@ func (g *Gemma) Start() error {
 		g.lastMsgID = msgs[0].ID
 	}
 
+	// Phase-S-followup-1 F1-3: R20 BOOTSTRAP-ON-CONVERSATION-RESUME parity
+	// per phase-s.md S-1b §171 (post-fork-(a) revert; emma role lives on
+	// gemma4:e4b model, gemma writes own AgentState mirroring brian/rain).
+	// Best-effort write — failure logs but does not abort startup.
+	bootstrapState := protocol.AgentState{
+		LastSelfMsgID: g.lastMsgID,
+	}
+	if err := protocol.WriteAgentState(agentID, bootstrapState); err != nil {
+		log.Printf("emma: WriteAgentState bootstrap failed: %v", err)
+	}
+
 	g.running = true
 
 	// Phase H slice 4 C6 (H-31): wire the panestate snapshot source if a
