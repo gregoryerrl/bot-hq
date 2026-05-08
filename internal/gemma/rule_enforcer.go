@@ -286,7 +286,11 @@ func (re *RuleEnforcer) detectInterpretiveViolations(msgs []protocol.Message) {
 			m.ID, m.FromAgent, m.Type, content)
 	}
 
-	prompt := fmt.Sprintf(ruleEnforcerLLMPrompt, sb.String())
+	// Phase-S-followup-2 F2-3: append user-custom rules from
+	// ~/.bot-hq/emma/custom-rules.md if any. Decoupled ack-immediate
+	// (handleMentionDirective) vs apply-at-next-tick (here) per
+	// scope-lock-doc M6 design.
+	prompt := fmt.Sprintf(ruleEnforcerLLMPrompt, sb.String()) + CustomRulesPromptSection()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

@@ -657,20 +657,50 @@ func (g *Gemma) handleMentionDirective(msg protocol.Message, content string) {
 
 	// Detect explicit purge-command
 	if isClearCommand(directive) {
-		log.Printf("emma: rule: clear directive received from %s (F2-3 will purge custom-rules.md)", msg.FromAgent)
+		removed, err := ClearCustomRules()
+		if err != nil {
+			log.Printf("emma: ClearCustomRules failed for %s: %v", msg.FromAgent, err)
+			g.db.InsertMessage(protocol.Message{
+				FromAgent: agentID,
+				Type:      protocol.MsgError,
+				Content:   fmt.Sprintf("emma|custom-rules-clear-failed|from:%s|err:%v", msg.FromAgent, err),
+			})
+			return
+		}
+		log.Printf("emma: cleared %d custom rules at request of %s", removed, msg.FromAgent)
 		g.db.InsertMessage(protocol.Message{
 			FromAgent: agentID,
 			Type:      protocol.MsgResult,
-			Content:   fmt.Sprintf("emma|custom-rules-clear-acked|from:%s|F2-3-impl-pending", msg.FromAgent),
+			Content:   fmt.Sprintf("emma|custom-rules-cleared|from:%s|removed:%d", msg.FromAgent, removed),
 		})
 		return
 	}
 
-	log.Printf("emma: directive received from %s: %s (F2-3 will persist to custom-rules.md)", msg.FromAgent, summary)
+	rules, rejected, err := AppendCustomRule(directive)
+	if err != nil {
+		log.Printf("emma: AppendCustomRule failed for %s: %v", msg.FromAgent, err)
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			Type:      protocol.MsgError,
+			Content:   fmt.Sprintf("emma|custom-rule-add-failed|from:%s|err:%v", msg.FromAgent, err),
+		})
+		return
+	}
+	if rejected != "" {
+		log.Printf("emma: rejected directive from %s: %s", msg.FromAgent, rejected)
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			Type:      protocol.MsgError,
+			Content:   fmt.Sprintf("emma|custom-rule-rejected|from:%s|reason:%s", msg.FromAgent, rejected),
+		})
+		return
+	}
+
+	log.Printf("emma: custom rule added from %s (now %d active): %s", msg.FromAgent, len(rules), summary)
 	g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
 		Type:      protocol.MsgResult,
-		Content:   fmt.Sprintf("emma|custom-rule-added-acked|from:%s|directive:%s|F2-3-impl-pending", msg.FromAgent, summary),
+		Content:   fmt.Sprintf("emma|custom-rule-added|from:%s|active-count:%d|directive:%s|apply-at:next-enforcement-tick", msg.FromAgent, len(rules), summary),
 	})
 }
 
