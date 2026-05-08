@@ -545,20 +545,39 @@ func (g *Gemma) processNewMessages() {
 			continue
 		}
 
-		// Only process messages directed at us
-		if msg.ToAgent != agentID {
+		// Phase-S-followup-2 F2-2: accept legacy directed (ToAgent==
+		// agentID) OR broadcast-mention (ToAgent=="" + @emma in
+		// content). Mention-based routing replaces PM-class targeting
+		// post-S-4 PM-removal. Per protocol/mention.go regex.
+		directed := msg.ToAgent == agentID
+		mentioned := msg.ToAgent == "" && protocol.MentionsAgent(msg.Content, agentID)
+		if !directed && !mentioned {
 			continue
 		}
 
 		// Parse task from message content
-		go g.handleMessage(msg)
+		go g.handleMessage(msg, mentioned)
 	}
 }
 
-// handleMessage processes a single hub message as a task request.
-// Expected format: "exec: <command>" or "analyze: <command>"
-func (g *Gemma) handleMessage(msg protocol.Message) {
+// handleMessage processes a single hub message. Routing:
+//   - broadcast-mention class (mentioned=true) → directive-class
+//     (custom-rule input) per Phase-S-followup-2 M6
+//   - legacy directed class (mentioned=false) + "exec:"/"analyze:"
+//     prefix → existing task-executor path
+//   - else → drop with log
+//
+// MsgCommand type-discriminator: per types.go "directive requiring
+// action by recipient" — broadcast-mention class with MsgCommand
+// type signals user-rule-directive. F2-3 implements custom-rules.md
+// persistence; F2-2 stubs the route + ack.
+func (g *Gemma) handleMessage(msg protocol.Message, mentioned bool) {
 	content := strings.TrimSpace(msg.Content)
+
+	if mentioned {
+		g.handleMentionDirective(msg, content)
+		return
+	}
 
 	var taskType TaskType
 	var command string
@@ -607,6 +626,80 @@ func (g *Gemma) handleMessage(msg protocol.Message) {
 		Type:      protocol.MsgResult,
 		Content:   result,
 	})
+}
+
+// handleMentionDirective processes broadcast-mention class messages
+// per Phase-S-followup-2 M6 user-custom-rule channel design.
+//
+// Routing:
+//   - "@emma rule: clear" → custom-rules.md purge (F2-3 impl)
+//   - "@emma <directive>" (default-class) → append to custom-rules.md
+//     (F2-3 impl) for next 5-min enforcement-loop tick application
+//   - MsgCommand type-discriminator preferred for explicit-directive
+//     class; MsgUpdate/other types still routed (default-directive)
+//     unless content is empty after @emma strip
+//
+// F2-2 wires the route + emits ack stub; F2-3 fills custom-rules.md
+// persistence + LLM-prompt dynamic-append + 10-rule cap + 500-char-
+// per-rule + 5000-char-section-cap.
+func (g *Gemma) handleMentionDirective(msg protocol.Message, content string) {
+	directive := stripEmmaMention(content)
+	if directive == "" {
+		log.Printf("emma: mention-directive from %s had empty body after @emma strip; dropping", msg.FromAgent)
+		return
+	}
+
+	// Truncate for log + ack readability
+	summary := directive
+	if len(summary) > 80 {
+		summary = summary[:80] + "..."
+	}
+
+	// Detect explicit purge-command
+	if isClearCommand(directive) {
+		log.Printf("emma: rule: clear directive received from %s (F2-3 will purge custom-rules.md)", msg.FromAgent)
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			Type:      protocol.MsgResult,
+			Content:   fmt.Sprintf("emma|custom-rules-clear-acked|from:%s|F2-3-impl-pending", msg.FromAgent),
+		})
+		return
+	}
+
+	log.Printf("emma: directive received from %s: %s (F2-3 will persist to custom-rules.md)", msg.FromAgent, summary)
+	g.db.InsertMessage(protocol.Message{
+		FromAgent: agentID,
+		Type:      protocol.MsgResult,
+		Content:   fmt.Sprintf("emma|custom-rule-added-acked|from:%s|directive:%s|F2-3-impl-pending", msg.FromAgent, summary),
+	})
+}
+
+// stripEmmaMention removes the leading @emma token from content
+// (case-insensitive) and trims surrounding whitespace, returning the
+// directive body. Helper for handleMentionDirective.
+func stripEmmaMention(content string) string {
+	trimmed := strings.TrimSpace(content)
+	// Find @emma (case-insensitive) anywhere — typically prefix.
+	lower := strings.ToLower(trimmed)
+	idx := strings.Index(lower, "@emma")
+	if idx == -1 {
+		return trimmed
+	}
+	// Skip past @emma + any trailing whitespace/punctuation.
+	rest := trimmed[idx+len("@emma"):]
+	// Allow common separators after @emma (space, colon, comma).
+	for len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t' || rest[0] == ':' || rest[0] == ',') {
+		rest = rest[1:]
+	}
+	return strings.TrimSpace(rest)
+}
+
+// isClearCommand reports whether directive is the explicit purge-
+// command "rule: clear" (case-insensitive, with optional whitespace).
+func isClearCommand(directive string) bool {
+	lower := strings.ToLower(strings.TrimSpace(directive))
+	return lower == "rule: clear" || lower == "rule:clear" ||
+		lower == "clear rules" || lower == "clear custom rules"
 }
 
 // healthLoop periodically checks if Ollama is still running.
