@@ -755,16 +755,18 @@ func TestFormatNudgePMAndHubVariants(t *testing.T) {
 		msg  protocol.Message
 		want string
 	}{
-		{"PM from rain", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgResponse, Content: "private"}, "[PM:rain] private"},
-		{"PM from user", protocol.Message{FromAgent: "user", ToAgent: "brian", Type: protocol.MsgCommand, Content: "do x"}, "[PM:user] do x"},
-		{"PM from discord", protocol.Message{FromAgent: "discord", ToAgent: "brian", Type: protocol.MsgResponse, Content: "hi"}, "[PM:discord] hi"},
-		{"PM from coder", protocol.Message{FromAgent: "7a776ee2", ToAgent: "brian", Type: protocol.MsgResult, Content: "done"}, "[PM:7a776ee2] done"},
-		{"PM FLAG from rain", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgFlag, Content: "stop"}, "[PM:FLAG] stop"},
+		// Phase-S-followup-2 F2-4: [PM:*] + [HUB-OBS:*] purged. All
+		// messages collapse to [HUB:*] regardless of ToAgent value.
+		{"directed from rain (was PM)", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgResponse, Content: "private"}, "[HUB:rain] private"},
+		{"directed from user (was PM)", protocol.Message{FromAgent: "user", ToAgent: "brian", Type: protocol.MsgCommand, Content: "do x"}, "[HUB:user] do x"},
+		{"directed from discord (was PM)", protocol.Message{FromAgent: "discord", ToAgent: "brian", Type: protocol.MsgResponse, Content: "hi"}, "[HUB:discord] hi"},
+		{"directed from coder (was PM)", protocol.Message{FromAgent: "7a776ee2", ToAgent: "brian", Type: protocol.MsgResult, Content: "done"}, "[HUB:7a776ee2] done"},
+		{"directed FLAG (was PM:FLAG)", protocol.Message{FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgFlag, Content: "stop"}, "[HUB:FLAG] stop"},
 		{"HUB broadcast from rain", protocol.Message{FromAgent: "rain", ToAgent: "", Type: protocol.MsgResponse, Content: "broad"}, "[HUB:rain] broad"},
 		{"HUB broadcast from user", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgCommand, Content: "all"}, "[HUB:user] all"},
 		{"HUB FLAG broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Type: protocol.MsgFlag, Content: "bug"}, "[HUB:FLAG] bug"},
-		{"HUB-OBS cross-traffic", protocol.Message{FromAgent: "rain", ToAgent: "user", Type: protocol.MsgResponse, Content: "reply"}, "[HUB-OBS:rain→user] reply"},
-		{"HUB-OBS to discord", protocol.Message{FromAgent: "rain", ToAgent: "discord", Type: protocol.MsgResponse, Content: "post"}, "[HUB-OBS:rain→discord] post"},
+		{"cross-traffic (was HUB-OBS)", protocol.Message{FromAgent: "rain", ToAgent: "user", Type: protocol.MsgResponse, Content: "reply"}, "[HUB:rain] reply"},
+		{"cross-traffic to discord (was HUB-OBS)", protocol.Message{FromAgent: "rain", ToAgent: "discord", Type: protocol.MsgResponse, Content: "post"}, "[HUB:rain] post"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -775,12 +777,13 @@ func TestFormatNudgePMAndHubVariants(t *testing.T) {
 	}
 }
 
-// Ratchet against regression: initial prompt must document the PM/HUB/HUB-OBS
-// tag split so the agent knows which tag means which routing.
+// Phase-S-followup-2 F2-4: only the [HUB:<sender>] + [HUB:FLAG:<sender>]
+// tags are runtime-rendered now. [PM:*] + [HUB-OBS:*] purged. Initial
+// prompt must document the surviving HUB tag set.
 func TestInitialPromptDocumentsPMTag(t *testing.T) {
 	b := &Brian{}
 	prompt := b.initialPrompt()
-	for _, literal := range []string{"[PM:<sender>]", "[HUB:<sender>]", "[HUB-OBS:<from>→<to>]"} {
+	for _, literal := range []string{"[HUB:<sender>]", "[HUB:FLAG:<sender>]"} {
 		if !strings.Contains(prompt, literal) {
 			t.Errorf("initial prompt must document tag %q", literal)
 		}
@@ -964,7 +967,8 @@ func TestFormatNudge_PhaseR_R2_AuthorlessHR(t *testing.T) {
 		want string
 	}{
 		{"HR broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "[HR] final draft"}, "[HUB] [HR] final draft"},
-		{"HR PM directed to brian", protocol.Message{FromAgent: "rain", ToAgent: "brian", Content: "[HR] direct"}, "[PM] [HR] direct"},
+		// Phase-S-followup-2 F2-4: directed-class collapses to broadcast-class render.
+		{"HR directed to brian (was [PM])", protocol.Message{FromAgent: "rain", ToAgent: "brian", Content: "[HR] direct"}, "[HUB] [HR] direct"},
 		{"HR with newline-prefix", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "[HR]\nmulti-line"}, "[HUB] [HR]\nmulti-line"},
 		{"non-HR broadcast unchanged", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "regular"}, "[HUB:rain] regular"},
 		{"HR-like-but-not-prefix unchanged", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "see [HR] mention"}, "[HUB:rain] see [HR] mention"},

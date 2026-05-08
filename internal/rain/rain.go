@@ -326,18 +326,15 @@ func (r *Rain) pollLoop() {
 // formatRainNudge builds the compact tag that Rain's session reads.
 // Contract is declared in Rain's initial prompt NUDGE block.
 //
-//	[PM:<sender>]                     — historical-render only (Phase
-//	                                    S S-4 removed PM; new messages
-//	                                    always broadcast with empty
-//	                                    ToAgent). Pre-S-4 messages with
-//	                                    non-empty ToAgent kept for
-//	                                    forensics-trail render fidelity.
-//	[HUB:<sender>]                    — broadcast worth forwarding.
-//	[HUB-OBS:<from>→<to>]             — historical observation of cross-
-//	                                    traffic PM. Same historical-
-//	                                    render-only post-S-4.
-//	[PM:FLAG:<sender>]                — historical directed MsgFlag.
-//	[HUB:FLAG:<sender>]               — broadcast MsgFlag.
+// Phase-S-followup-2 F2-4 (M1+M1-bis): [PM:*] + [HUB-OBS:*] runtime-
+// render branches PURGED. All messages render as [HUB:*] regardless
+// of ToAgent value. See brian.go:formatNudge for full rationale.
+// Post-purge tags:
+//
+//	[HUB:<sender>]                    — regular message
+//	[HUB:FLAG:<sender>]               — MsgFlag class
+//	[HUB] <content>                   — [HR]-prefixed (sender-stripped)
+//	[HUB:FLAG] <content>              — MsgFlag (sender-stripped)
 //
 // Phase R R5 (R42 AUTO-BOUNDARY-DISCIPLINE): when sessionPrefix is non-
 // empty, prepend it to the formatted nudge. Format: `[SESSION:<8>] `.
@@ -348,28 +345,16 @@ func (r *Rain) pollLoop() {
 // 15510 + 15545 + 15561 BRAIN-final. DB preserves FromAgent for
 // forensics; render-layer hides it from the user-facing nudge.
 func formatRainNudge(msg protocol.Message, sessionPrefix string) string {
-	directed := msg.ToAgent == agentID
 	hasHR := strings.HasPrefix(msg.Content, "[HR] ") || strings.HasPrefix(msg.Content, "[HR]\n")
 	var base string
-	if msg.Type == protocol.MsgFlag {
+	switch {
+	case msg.Type == protocol.MsgFlag:
 		// Phase R R2 FLAG class strip — render without sender.
-		if directed {
-			base = fmt.Sprintf("[PM:FLAG] %s", msg.Content)
-		} else {
-			base = fmt.Sprintf("[HUB:FLAG] %s", msg.Content)
-		}
-	} else if hasHR {
+		base = fmt.Sprintf("[HUB:FLAG] %s", msg.Content)
+	case hasHR:
 		// Phase R R2 [HR] tag strip — render without sender.
-		if directed {
-			base = fmt.Sprintf("[PM] %s", msg.Content)
-		} else {
-			base = fmt.Sprintf("[HUB] %s", msg.Content)
-		}
-	} else if directed {
-		base = fmt.Sprintf("[PM:%s] %s", msg.FromAgent, msg.Content)
-	} else if msg.ToAgent != "" && msg.ToAgent != agentID {
-		base = fmt.Sprintf("[HUB-OBS:%s→%s] %s", msg.FromAgent, msg.ToAgent, msg.Content)
-	} else {
+		base = fmt.Sprintf("[HUB] %s", msg.Content)
+	default:
 		base = fmt.Sprintf("[HUB:%s] %s", msg.FromAgent, msg.Content)
 	}
 	if sessionPrefix != "" {

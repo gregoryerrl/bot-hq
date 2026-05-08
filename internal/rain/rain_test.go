@@ -681,12 +681,13 @@ func TestFormatRainNudge_FlagVariant(t *testing.T) {
 	}
 }
 
-// 8c. TestFormatRainNudge_ObserveVariant — directed-to-other-agent becomes [HUB-OBS:<from>→<to>].
+// Phase-S-followup-2 F2-4: directed-to-other-agent collapses to [HUB:<sender>]
+// (was [HUB-OBS:<from>→<to>] pre-purge). DB ToAgent preserved for forensics.
 func TestFormatRainNudge_ObserveVariant(t *testing.T) {
 	result := formatRainNudge(protocol.Message{FromAgent: "brian", ToAgent: "discord", Content: "posting update"}, "")
 
-	if result != "[HUB-OBS:brian→discord] posting update" {
-		t.Errorf("expected HUB-OBS variant for inter-agent traffic, got %q", result)
+	if result != "[HUB:brian] posting update" {
+		t.Errorf("expected post-purge [HUB:<sender>] for cross-traffic, got %q", result)
 	}
 }
 
@@ -699,16 +700,18 @@ func TestFormatRainNudgePMAndHubVariants(t *testing.T) {
 		msg  protocol.Message
 		want string
 	}{
-		{"PM from brian", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgResponse, Content: "private"}, "[PM:brian] private"},
-		{"PM from user", protocol.Message{FromAgent: "user", ToAgent: "rain", Type: protocol.MsgCommand, Content: "do x"}, "[PM:user] do x"},
-		{"PM from discord", protocol.Message{FromAgent: "discord", ToAgent: "rain", Type: protocol.MsgResponse, Content: "hi"}, "[PM:discord] hi"},
-		{"PM from coder", protocol.Message{FromAgent: "7a776ee2", ToAgent: "rain", Type: protocol.MsgResult, Content: "done"}, "[PM:7a776ee2] done"},
-		{"PM FLAG from brian", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgFlag, Content: "stop"}, "[PM:FLAG] stop"},
+		// Phase-S-followup-2 F2-4: [PM:*] + [HUB-OBS:*] purged. All
+		// messages collapse to [HUB:*] regardless of ToAgent value.
+		{"directed from brian (was PM)", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgResponse, Content: "private"}, "[HUB:brian] private"},
+		{"directed from user (was PM)", protocol.Message{FromAgent: "user", ToAgent: "rain", Type: protocol.MsgCommand, Content: "do x"}, "[HUB:user] do x"},
+		{"directed from discord (was PM)", protocol.Message{FromAgent: "discord", ToAgent: "rain", Type: protocol.MsgResponse, Content: "hi"}, "[HUB:discord] hi"},
+		{"directed from coder (was PM)", protocol.Message{FromAgent: "7a776ee2", ToAgent: "rain", Type: protocol.MsgResult, Content: "done"}, "[HUB:7a776ee2] done"},
+		{"directed FLAG (was PM:FLAG)", protocol.Message{FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgFlag, Content: "stop"}, "[HUB:FLAG] stop"},
 		{"HUB broadcast from brian", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgResponse, Content: "broad"}, "[HUB:brian] broad"},
 		{"HUB broadcast from user", protocol.Message{FromAgent: "user", ToAgent: "", Type: protocol.MsgCommand, Content: "all"}, "[HUB:user] all"},
 		{"HUB FLAG broadcast", protocol.Message{FromAgent: "brian", ToAgent: "", Type: protocol.MsgFlag, Content: "bug"}, "[HUB:FLAG] bug"},
-		{"HUB-OBS cross-traffic", protocol.Message{FromAgent: "brian", ToAgent: "user", Type: protocol.MsgResponse, Content: "reply"}, "[HUB-OBS:brian→user] reply"},
-		{"HUB-OBS to discord", protocol.Message{FromAgent: "brian", ToAgent: "discord", Type: protocol.MsgResponse, Content: "post"}, "[HUB-OBS:brian→discord] post"},
+		{"cross-traffic (was HUB-OBS)", protocol.Message{FromAgent: "brian", ToAgent: "user", Type: protocol.MsgResponse, Content: "reply"}, "[HUB:brian] reply"},
+		{"cross-traffic to discord (was HUB-OBS)", protocol.Message{FromAgent: "brian", ToAgent: "discord", Type: protocol.MsgResponse, Content: "post"}, "[HUB:brian] post"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -719,12 +722,13 @@ func TestFormatRainNudgePMAndHubVariants(t *testing.T) {
 	}
 }
 
-// Ratchet against regression: initial prompt must document the PM/HUB/HUB-OBS
-// tag split so Rain knows which tag means which routing.
+// Phase-S-followup-2 F2-4: only the [HUB:<sender>] + [HUB:FLAG:<sender>]
+// tags are runtime-rendered now. [PM:*] + [HUB-OBS:*] purged. Initial
+// prompt must document the surviving HUB tag set.
 func TestInitialPromptDocumentsPMTag(t *testing.T) {
 	r := &Rain{}
 	prompt := r.initialPrompt()
-	for _, literal := range []string{"[PM:<sender>]", "[HUB:<sender>]", "[HUB-OBS:<from>→<to>]"} {
+	for _, literal := range []string{"[HUB:<sender>]", "[HUB:FLAG:<sender>]"} {
 		if !strings.Contains(prompt, literal) {
 			t.Errorf("initial prompt must document tag %q", literal)
 		}
@@ -1020,7 +1024,8 @@ func TestFormatRainNudge_PhaseR_R2_AuthorlessHR(t *testing.T) {
 		want string
 	}{
 		{"HR broadcast", protocol.Message{FromAgent: "rain", ToAgent: "", Content: "[HR] final draft"}, "[HUB] [HR] final draft"},
-		{"HR PM directed to rain", protocol.Message{FromAgent: "user", ToAgent: "rain", Content: "[HR] direct"}, "[PM] [HR] direct"},
+		// Phase-S-followup-2 F2-4: directed-class collapses to broadcast-class render.
+		{"HR directed to rain (was [PM])", protocol.Message{FromAgent: "user", ToAgent: "rain", Content: "[HR] direct"}, "[HUB] [HR] direct"},
 		{"non-HR broadcast unchanged", protocol.Message{FromAgent: "brian", ToAgent: "", Content: "regular"}, "[HUB:brian] regular"},
 	}
 	for _, tc := range cases {

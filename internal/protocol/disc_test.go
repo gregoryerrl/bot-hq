@@ -517,10 +517,11 @@ func TestDiscV2RoleAndPolicySharedSubstringLock(t *testing.T) {
 		"cliff-hang",
 		// PIVOT
 		"PIVOT:",
-		// NUDGE
-		"[PM:<sender>]",
+		// NUDGE — Phase-S-followup-2 F2-4 purge: only [HUB:<sender>]
+		// + [HUB:FLAG:<sender>] runtime-rendered. [PM:*] + [HUB-OBS:*]
+		// purged from runtime-render branches.
 		"[HUB:<sender>]",
-		"[HUB-OBS:<from>",
+		"[HUB:FLAG:<sender>]",
 		"FLAG=elevated priority",
 		"Never ignore FLAG or user messages",
 	}
