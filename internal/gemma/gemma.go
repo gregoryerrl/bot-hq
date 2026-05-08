@@ -71,7 +71,9 @@ Two-class boundary for analyze queries (per Phase H H-24):
 - Structured (parse, summarize, extract, count): ANSWER. Examples: parse git log output, list files in diff, count test results.
 - Interpretive (assess vs spec/contract/criterion, judge materiality, render verdicts): REFUSE and reply "interpretive query — routing back to Rain per H-24". Examples: diff-gate verdicts, design-spec-match, observation-materiality.
 
-Default-deny on straddled queries — when in doubt, refuse to Rain.`
+Default-deny on straddled queries — when in doubt, refuse to Rain.
+
+§72-amendment per phase-s.md S-1b (Phase-S-followup-1 F1-4 hybrid β+γ): Rule-enforcement-as-emma-role is authorized interpretive class (carve-out). General analyze queries: REFUSE per H-24 above. Own-role rule-enforcement on hub-traffic via the rule_enforcer.go enforcement loop: ALLOWED (analyze recent hub messages for narrative-class rule-violations; emit per ruleEnforcerLLMPrompt detection-template).`
 
 // allowedCommands is the hardcoded allowlist for command execution.
 var allowedCommands = []string{
@@ -252,6 +254,14 @@ type Gemma struct {
 	// gemma emit fns check this flag at the top of their fire path.
 	daemoncronMu     sync.RWMutex
 	daemoncronOnline bool
+
+	// Phase-S-followup-1 F1-4 (ε) honest-rewrite: emma-as-rule-enforcer
+	// functional substrate. Mechanical pattern-match-only (preserves
+	// gemma §72 H-24 boundary intact). Interpretive-class violations
+	// remain BRAIN-duo + user-spotting scope per phase-s.md §169-
+	// rewrite (cite-anchor at F1-4 spec-rewrite). Spawned in Start(),
+	// halted in Stop(). Per Rain BRAIN-2nd msg 15981 + msg 15986.
+	ruleEnforcer *RuleEnforcer
 }
 
 // New creates a Gemma instance from config.
@@ -369,6 +379,15 @@ func (g *Gemma) Start() error {
 	go g.sentinelPollLoop()
 	go g.wakeDispatchLoop()
 
+	// Phase-S-followup-1 F1-4 (ε) emma rule-enforcer functional
+	// substrate. Mechanical pattern-match-only (no LLM-judgment;
+	// preserves gemma §72 H-24 boundary). Best-effort start;
+	// failure logs but does not abort gemma startup.
+	g.ruleEnforcer = NewRuleEnforcer(g.db, g.client)
+	if err := g.ruleEnforcer.Start(); err != nil {
+		log.Printf("emma: rule_enforcer Start failed: %v", err)
+	}
+
 	// Phase H slice 3 C7: schedule first _internal:docdrift wake if no
 	// pending one exists from a prior boot. Re-arms on every fire via
 	// runDocDriftScanAndReArm.
@@ -406,6 +425,11 @@ func (g *Gemma) Stop() {
 	}
 	g.running = false
 	close(g.stopCh)
+
+	// Phase-S-followup-1 F1-4 (ε): halt rule_enforcer goroutine.
+	if g.ruleEnforcer != nil {
+		g.ruleEnforcer.Stop()
+	}
 
 	g.db.UpdateAgentStatus(agentID, protocol.StatusOffline, "")
 
