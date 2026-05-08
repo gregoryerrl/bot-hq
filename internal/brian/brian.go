@@ -517,6 +517,22 @@ func (b *Brian) processNewMessages() {
 	var bypassNudges []string
 	bufferAppended := false
 
+	// Phase-S-followup-1 F1-6: pre-compact buffer flush. When brian's
+	// own PreCompact hook fires (emits MsgCompactNotice from
+	// FromAgent="brian"), flush pending buffer before continuing
+	// processing so context-preserve includes pending msgs pre-
+	// compact (S-5 §84 + S-2 §101 dependency wire).
+	flushPreCompact := false
+	for _, msg := range msgs {
+		if msg.Type == protocol.MsgCompactNotice && msg.FromAgent == "brian" {
+			flushPreCompact = true
+			break
+		}
+	}
+	if flushPreCompact {
+		b.FlushPendingBatch()
+	}
+
 	b.mu.Lock()
 	for _, msg := range msgs {
 		if msg.ID > b.lastMsgID {

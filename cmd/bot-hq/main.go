@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -93,6 +94,12 @@ func main() {
 		case "audit-rules-canonical":
 			runAuditRulesCanonical()
 			return
+		case "emit-compact-notice":
+			runEmitCompactNotice()
+			return
+		case "emit-resume":
+			runEmitResume()
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()
@@ -100,7 +107,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|session-search|webui|context-switch|session-open|install-session-start-hook|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|session-search|webui|context-switch|session-open|install-session-start-hook|emit-compact-notice|emit-resume|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -1005,4 +1012,117 @@ func runWebUI() {
 		fmt.Fprintf(os.Stderr, "webui: serve: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runEmitCompactNotice fires a MsgCompactNotice into the hub on
+// behalf of the agent identified by --agent flag. Used by Claude
+// Code PreCompact hook per phase-s.md S-2 §97 + Phase-S-followup-1
+// F1-5 wire.
+//
+// Discriminator-broadcast: queries hub agents via hub.DB; tags [HR]
+// when any peer has active fire-in-flight (current_task non-empty
+// per Phase-R-followup-1 (f) data-model); untagged when all idle.
+//
+// Usage:
+//
+//	bot-hq emit-compact-notice --agent <id>
+func runEmitCompactNotice() {
+	flagSet := flag.NewFlagSet("emit-compact-notice", flag.ExitOnError)
+	agentID := flagSet.String("agent", "", "agent ID emitting the compact notice (required)")
+	if err := flagSet.Parse(os.Args[2:]); err != nil {
+		fmt.Fprintf(os.Stderr, "parse flags: %v\n", err)
+		os.Exit(1)
+	}
+	if *agentID == "" {
+		fmt.Fprintln(os.Stderr, "emit-compact-notice: --agent <id> required")
+		os.Exit(1)
+	}
+
+	home, _ := os.UserHomeDir()
+	cfg, err := hub.LoadConfig(filepath.Join(home, ".bot-hq", "config.toml"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	dbPath := cfg.Hub.DBPath
+	if dbPath == "" {
+		dbPath = filepath.Join(home, ".bot-hq", "hub.db")
+	}
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open hub db: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	agents, err := db.ListAgents("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "list agents: %v\n", err)
+		os.Exit(1)
+	}
+	peerActive := protocol.AnyPeerActiveFireInFlight(*agentID, agents)
+	content := protocol.BuildCompactNoticeContent(*agentID, peerActive)
+
+	msg := protocol.Message{
+		FromAgent: *agentID,
+		Type:      protocol.MsgCompactNotice,
+		Content:   content,
+	}
+	id, err := db.InsertMessage(msg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "insert message: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("emit-compact-notice: msg %d (peer-active=%v)\n", id, peerActive)
+}
+
+// runEmitResume fires a MsgResume into the hub. Symmetric pair to
+// runEmitCompactNotice; called by post-compact resume mechanism (or
+// manually by user) to signal context-reloaded so peers can resume
+// cross-talk safely.
+//
+// Usage:
+//
+//	bot-hq emit-resume --agent <id>
+func runEmitResume() {
+	flagSet := flag.NewFlagSet("emit-resume", flag.ExitOnError)
+	agentID := flagSet.String("agent", "", "agent ID emitting the resume (required)")
+	if err := flagSet.Parse(os.Args[2:]); err != nil {
+		fmt.Fprintf(os.Stderr, "parse flags: %v\n", err)
+		os.Exit(1)
+	}
+	if *agentID == "" {
+		fmt.Fprintln(os.Stderr, "emit-resume: --agent <id> required")
+		os.Exit(1)
+	}
+
+	home, _ := os.UserHomeDir()
+	cfg, err := hub.LoadConfig(filepath.Join(home, ".bot-hq", "config.toml"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	dbPath := cfg.Hub.DBPath
+	if dbPath == "" {
+		dbPath = filepath.Join(home, ".bot-hq", "hub.db")
+	}
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open hub db: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	content := protocol.BuildResumeContent(*agentID)
+	msg := protocol.Message{
+		FromAgent: *agentID,
+		Type:      protocol.MsgResume,
+		Content:   content,
+	}
+	id, err := db.InsertMessage(msg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "insert message: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("emit-resume: msg %d\n", id)
 }
