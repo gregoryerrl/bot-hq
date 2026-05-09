@@ -31,10 +31,16 @@ type Usage struct {
 }
 
 // pricePerTokenUSD maps "<provider>|<model>" → input/output USD-per-1K-tokens.
-// Source: vendor pricing pages as of 2026-05-09.
-//   - Anthropic Claude Opus 4.7:  $15/1M input  / $75/1M  output
-//   - Anthropic Claude Sonnet 4.6: $3/1M input  / $15/1M  output
-//   - DeepSeek-V4-Pro:            $0.27/1M input / $1.10/1M output
+// Source: vendor pricing pages as of 2026-05-09 (T-8.6 multi-provider extension).
+//   - Anthropic Claude Opus 4.7:    $15/1M input  / $75/1M  output
+//   - Anthropic Claude Sonnet 4.6:  $3/1M input   / $15/1M  output
+//   - Anthropic Claude Haiku 4.5:   $1/1M input   / $5/1M   output
+//   - DeepSeek-V4-Pro:              $0.27/1M input / $1.10/1M output
+//   - OpenAI GPT-4 Turbo:           $10/1M input  / $30/1M  output
+//   - OpenAI GPT-4o:                $5/1M input   / $15/1M  output
+//   - Google Gemini 1.5 Pro:        $3.50/1M input / $10.50/1M output
+//   - Google Gemini 1.5 Flash:      $0.075/1M input / $0.30/1M output
+//   - Mistral Large:                $4/1M input   / $12/1M  output
 //
 // Models not in the table return CostUSD=0 (subscription paths or
 // unrecognized models — caller treats 0 as "not tracked at this site").
@@ -42,11 +48,16 @@ var pricePerTokenUSD = map[string]struct {
 	InputUSDPer1K  float64
 	OutputUSDPer1K float64
 }{
-	"anthropic|claude-default":     {InputUSDPer1K: 0.015, OutputUSDPer1K: 0.075},
-	"anthropic|claude-opus-4-7":    {InputUSDPer1K: 0.015, OutputUSDPer1K: 0.075},
-	"anthropic|claude-sonnet-4-6":  {InputUSDPer1K: 0.003, OutputUSDPer1K: 0.015},
-	"anthropic|claude-haiku-4-5":   {InputUSDPer1K: 0.001, OutputUSDPer1K: 0.005},
-	"deepseek|deepseek-v4-pro":     {InputUSDPer1K: 0.00027, OutputUSDPer1K: 0.0011},
+	"anthropic|claude-default":      {InputUSDPer1K: 0.015, OutputUSDPer1K: 0.075},
+	"anthropic|claude-opus-4-7":     {InputUSDPer1K: 0.015, OutputUSDPer1K: 0.075},
+	"anthropic|claude-sonnet-4-6":   {InputUSDPer1K: 0.003, OutputUSDPer1K: 0.015},
+	"anthropic|claude-haiku-4-5":    {InputUSDPer1K: 0.001, OutputUSDPer1K: 0.005},
+	"deepseek|deepseek-v4-pro":      {InputUSDPer1K: 0.00027, OutputUSDPer1K: 0.0011},
+	"openai|gpt-4-turbo":            {InputUSDPer1K: 0.01, OutputUSDPer1K: 0.03},
+	"openai|gpt-4o":                 {InputUSDPer1K: 0.005, OutputUSDPer1K: 0.015},
+	"google-vertex|gemini-1.5-pro": {InputUSDPer1K: 0.0035, OutputUSDPer1K: 0.0105},
+	"google-vertex|gemini-1.5-flash": {InputUSDPer1K: 0.000075, OutputUSDPer1K: 0.0003},
+	"mistral|mistral-large-latest":  {InputUSDPer1K: 0.004, OutputUSDPer1K: 0.012},
 }
 
 // ComputeCost returns USD cost for the given provider+model+token counts.

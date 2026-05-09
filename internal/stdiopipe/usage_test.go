@@ -50,6 +50,42 @@ func TestComputeCost_deepseekV4Pro(t *testing.T) {
 	}
 }
 
+func TestComputeCost_openaiGPT4Turbo(t *testing.T) {
+	// 1000 input + 500 output → 1*0.01 + 0.5*0.03 = 0.025
+	got := ComputeCost("openai", "gpt-4-turbo", 1000, 500)
+	want := 0.025
+	if !nearlyEqual(got, want) {
+		t.Errorf("ComputeCost openai|gpt-4-turbo = %.9f, want %.9f", got, want)
+	}
+}
+
+func TestComputeCost_googleGeminiPro(t *testing.T) {
+	// 2000 input + 1000 output → 2*0.0035 + 1*0.0105 = 0.0175
+	got := ComputeCost("google-vertex", "gemini-1.5-pro", 2000, 1000)
+	want := 0.0175
+	if !nearlyEqual(got, want) {
+		t.Errorf("ComputeCost google-vertex|gemini-1.5-pro = %.9f, want %.9f", got, want)
+	}
+}
+
+func TestComputeCost_googleGeminiFlash(t *testing.T) {
+	// 100000 input + 50000 output → 100*0.000075 + 50*0.0003 = 0.0075 + 0.015 = 0.0225
+	got := ComputeCost("google-vertex", "gemini-1.5-flash", 100000, 50000)
+	want := 0.0225
+	if !nearlyEqual(got, want) {
+		t.Errorf("ComputeCost google-vertex|gemini-1.5-flash = %.9f, want %.9f", got, want)
+	}
+}
+
+func TestComputeCost_mistralLarge(t *testing.T) {
+	// 5000 input + 2500 output → 5*0.004 + 2.5*0.012 = 0.020 + 0.030 = 0.050
+	got := ComputeCost("mistral", "mistral-large-latest", 5000, 2500)
+	want := 0.050
+	if !nearlyEqual(got, want) {
+		t.Errorf("ComputeCost mistral|mistral-large-latest = %.9f, want %.9f", got, want)
+	}
+}
+
 func TestComputeCost_unknownModelReturnsZero(t *testing.T) {
 	if got := ComputeCost("unknown-provider", "unknown-model", 1000, 500); got != 0 {
 		t.Errorf("ComputeCost unknown = %.6f, want 0 (not in price table)", got)
