@@ -36,13 +36,15 @@ import (
 
 // Driver is one stdio-pipe driver instance for a single agent invocation.
 type Driver struct {
-	agentID string
-	cfg     *hub.AgentModelConfig
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  io.ReadCloser
-	stderr  bytes.Buffer
-	scanner *bufio.Scanner
+	agentID   string
+	cfg       *hub.AgentModelConfig
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	stderr    bytes.Buffer
+	scanner   *bufio.Scanner
+	captured  strings.Builder
+	lastUsage *Usage
 }
 
 // New constructs a Driver for the given agent. Loads agent_model_config
@@ -80,7 +82,13 @@ func (d *Driver) Start(ctx context.Context, mcpConfigPath string, workDir string
 		return errors.New("driver already started")
 	}
 
-	args := []string{"--print", "--mcp-config", mcpConfigPath, "--dangerously-skip-permissions"}
+	args := []string{
+		"--print",
+		"--mcp-config", mcpConfigPath,
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--verbose",
+	}
 	d.cmd = exec.CommandContext(ctx, "claude", args...)
 	d.cmd.Dir = workDir
 
@@ -137,12 +145,18 @@ func (d *Driver) Send(prompt string) error {
 
 // Receive reads the next stdout line from the subprocess. Returns io.EOF
 // when subprocess closes stdout. Use ReceiveAll() to drain to completion.
+//
+// Each scanned line is also accumulated in d.captured for post-Wait
+// usage-parsing (T-2.7 LLM-call-site cost-tracking).
 func (d *Driver) Receive() (string, error) {
 	if d.scanner == nil {
 		return "", errors.New("driver not started")
 	}
 	if d.scanner.Scan() {
-		return d.scanner.Text(), nil
+		txt := d.scanner.Text()
+		d.captured.WriteString(txt)
+		d.captured.WriteByte('\n')
+		return txt, nil
 	}
 	if err := d.scanner.Err(); err != nil {
 		return "", fmt.Errorf("scan: %w", err)
@@ -151,28 +165,34 @@ func (d *Driver) Receive() (string, error) {
 }
 
 // ReceiveAll drains stdout until EOF, returning the joined output. Convenience
-// wrapper for non-streaming use-cases.
+// wrapper for non-streaming use-cases. Output is also retained in d.captured.
 func (d *Driver) ReceiveAll() (string, error) {
 	if d.scanner == nil {
 		return "", errors.New("driver not started")
 	}
-	var sb strings.Builder
 	for d.scanner.Scan() {
-		sb.WriteString(d.scanner.Text())
-		sb.WriteByte('\n')
+		txt := d.scanner.Text()
+		d.captured.WriteString(txt)
+		d.captured.WriteByte('\n')
 	}
 	if err := d.scanner.Err(); err != nil {
 		return "", fmt.Errorf("scan: %w", err)
 	}
-	return sb.String(), nil
+	return d.captured.String(), nil
 }
 
 // Wait blocks until the subprocess exits. Returns exit-code + any error.
+//
+// Post-exit, parses captured stdout for stream-json usage block and
+// populates d.lastUsage (token counts + cost computed via per-provider
+// price table). Parse failures do not affect the exit-code return; the
+// usage data is best-effort for cost-tracking.
 func (d *Driver) Wait() (int, error) {
 	if d.cmd == nil {
 		return -1, errors.New("driver not started")
 	}
 	err := d.cmd.Wait()
+	d.parseLastUsage()
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		return exitErr.ExitCode(), nil
 	}
@@ -181,6 +201,26 @@ func (d *Driver) Wait() (int, error) {
 	}
 	return d.cmd.ProcessState.ExitCode(), nil
 }
+
+// parseLastUsage scans captured output for stream-json usage data and
+// populates d.lastUsage. No-op when captured is empty or no usage block
+// present. Best-effort; errors are silently dropped.
+func (d *Driver) parseLastUsage() {
+	if d.captured.Len() == 0 {
+		return
+	}
+	usage, err := ParseUsage(d.captured.String())
+	if err != nil || usage == nil {
+		return
+	}
+	usage.CostUSD = ComputeCost(d.cfg.Provider, d.cfg.ModelName, usage.InputTokens, usage.OutputTokens)
+	d.lastUsage = usage
+}
+
+// LastUsage returns the parsed token + cost data from the most recent
+// Wait() call. Returns nil if Wait() has not been called or no usage
+// block was present in subprocess output.
+func (d *Driver) LastUsage() *Usage { return d.lastUsage }
 
 // Stderr returns captured stderr output from the subprocess.
 func (d *Driver) Stderr() string { return d.stderr.String() }
