@@ -253,6 +253,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/pending-actions", s.handlePendingActions)
 	mux.HandleFunc("/api/pending-actions/", s.handlePendingActionAck)
 	mux.HandleFunc("/api/agents", s.handleAgents)
+	mux.HandleFunc("/api/agent-model-configs", s.handleAgentModelConfigs)
+	mux.HandleFunc("/api/agent-model-configs/", s.handleAgentModelConfigByID)
 	mux.HandleFunc("/api/voice/ws", s.handleVoiceWS)
 	mux.HandleFunc("/api/webui-context", s.handleWebuiContext)
 	mux.HandleFunc("/api/external-file/", s.handleExternalFile)

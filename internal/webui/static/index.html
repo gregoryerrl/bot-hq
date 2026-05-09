@@ -29,6 +29,7 @@
     </label>
     <button id="register-project-open" type="button" title="Register a new project">+</button>
     <button id="search-open" type="button" title="Search canonical-store contents (Ctrl+K)">🔍</button>
+    <button id="settings-open" type="button" title="Agent model settings">⚙</button>
     <button id="mic-btn" class="mic-btn" type="button" disabled title="Click to talk with Clive (voice)">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
         <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
@@ -189,6 +190,37 @@
         <summary>Show server's current content</summary>
         <pre id="conflict-server-content"></pre>
       </details>
+    </div>
+  </div>
+
+  <!-- Settings modal: agent_model_configs CRUD per phase-t.md v5 T-1.3 -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-card settings-card">
+      <h3>Agent model settings</h3>
+      <p class="muted">Configure provider + model + auth-secret-ref per agent. Stored at <code>hub.db agent_model_configs</code>.</p>
+      <table id="settings-table" class="settings-table">
+        <thead>
+          <tr>
+            <th>Agent</th><th>Provider</th><th>Model</th><th>Endpoint</th><th>Auth</th><th>Enabled</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="settings-table-body"><tr><td colspan="7"><em class="muted">Loading…</em></td></tr></tbody>
+      </table>
+      <h4>Add or update</h4>
+      <div class="settings-form">
+        <label>Agent <input id="settings-agent-id" type="text" placeholder="e.g. coder-myagent" autocomplete="off" /></label>
+        <label>Provider <input id="settings-provider" type="text" placeholder="anthropic | deepseek | …" autocomplete="off" /></label>
+        <label>Model name <input id="settings-model-name" type="text" placeholder="claude-default | deepseek-v4-pro" autocomplete="off" /></label>
+        <label>Endpoint URL <span class="muted">(optional)</span> <input id="settings-base-url" type="text" placeholder="https://api.deepseek.com/anthropic" autocomplete="off" /></label>
+        <label>Auth-secret-ref <input id="settings-auth-ref" type="text" placeholder="oauth:CLAUDE_CODE_OAUTH_TOKEN | env:DEEPSEEK_API_KEY" autocomplete="off" /></label>
+        <label>Notes <span class="muted">(optional)</span> <input id="settings-notes" type="text" autocomplete="off" /></label>
+        <label class="settings-enabled-row"><input id="settings-enabled" type="checkbox" checked /> Enabled</label>
+      </div>
+      <div class="conflict-actions">
+        <button id="settings-submit" type="button">Save</button>
+        <button id="settings-close" type="button">Close</button>
+      </div>
+      <div id="settings-status" class="muted"></div>
     </div>
   </div>
 

@@ -865,3 +865,24 @@ main {
   padding-left: 0.5rem;
   border-left: 2px solid #ccc;
 }
+
+/* T-1.3 settings tab */
+.settings-card { max-width: 900px; }
+.settings-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-bottom: 1rem; }
+.settings-table th, .settings-table td {
+  border-bottom: 1px solid #e2e2e2;
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+.settings-table th { background: #f7f7f7; font-weight: 600; }
+.settings-table code { font-size: 0.82rem; }
+.settings-table .settings-edit, .settings-table .settings-delete {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.5rem;
+  margin-right: 0.25rem;
+}
+.settings-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem 1rem; margin-bottom: 0.75rem; }
+.settings-form label { display: flex; flex-direction: column; font-size: 0.85rem; }
+.settings-form input[type="text"] { padding: 0.3rem; font-size: 0.85rem; }
+.settings-enabled-row { flex-direction: row !important; align-items: center; gap: 0.4rem; }

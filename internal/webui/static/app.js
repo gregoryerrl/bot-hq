@@ -1139,4 +1139,125 @@
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;');
   }
+
+  // ====== Settings tab (T-1.3 agent_model_configs CRUD) ======
+
+  const settingsModal = document.getElementById('settings-modal');
+  document.getElementById('settings-open').addEventListener('click', openSettingsModal);
+  document.getElementById('settings-close').addEventListener('click', closeSettingsModal);
+  document.getElementById('settings-submit').addEventListener('click', submitSettingsForm);
+
+  async function openSettingsModal() {
+    settingsModal.classList.remove('hidden');
+    document.getElementById('settings-status').textContent = '';
+    await loadSettings();
+  }
+
+  function closeSettingsModal() {
+    settingsModal.classList.add('hidden');
+  }
+
+  async function loadSettings() {
+    const tbody = document.getElementById('settings-table-body');
+    tbody.innerHTML = '<tr><td colspan="7"><em class="muted">Loading…</em></td></tr>';
+    try {
+      const r = await fetch('/api/agent-model-configs');
+      if (!r.ok) {
+        tbody.innerHTML = '<tr><td colspan="7"><em class="muted">Failed: ' + r.status + '</em></td></tr>';
+        return;
+      }
+      const rows = await r.json();
+      renderSettingsTable(rows || []);
+    } catch (err) {
+      tbody.innerHTML = '<tr><td colspan="7"><em class="muted">Network error: ' + escapeHtml(err.message) + '</em></td></tr>';
+    }
+  }
+
+  function renderSettingsTable(rows) {
+    const tbody = document.getElementById('settings-table-body');
+    if (rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7"><em class="muted">No agent configs. Add one below.</em></td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map(r => `
+      <tr>
+        <td><code>${escapeHtml(r.agent_id)}</code></td>
+        <td>${escapeHtml(r.provider)}</td>
+        <td>${escapeHtml(r.model_name)}</td>
+        <td><span class="muted">${escapeHtml(r.base_url || '')}</span></td>
+        <td><span class="muted">${escapeHtml(r.auth_secret_ref)}</span></td>
+        <td>${r.enabled ? '✓' : ''}</td>
+        <td>
+          <button class="settings-edit" data-agent="${escapeHtml(r.agent_id)}" type="button">Edit</button>
+          <button class="settings-delete" data-agent="${escapeHtml(r.agent_id)}" type="button">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+    tbody.querySelectorAll('.settings-edit').forEach(btn => {
+      btn.addEventListener('click', () => editSettingsRow(rows.find(x => x.agent_id === btn.dataset.agent)));
+    });
+    tbody.querySelectorAll('.settings-delete').forEach(btn => {
+      btn.addEventListener('click', () => deleteSettingsRow(btn.dataset.agent));
+    });
+  }
+
+  function editSettingsRow(row) {
+    if (!row) return;
+    document.getElementById('settings-agent-id').value = row.agent_id || '';
+    document.getElementById('settings-provider').value = row.provider || '';
+    document.getElementById('settings-model-name').value = row.model_name || '';
+    document.getElementById('settings-base-url').value = row.base_url || '';
+    document.getElementById('settings-auth-ref').value = row.auth_secret_ref || '';
+    document.getElementById('settings-notes').value = row.notes || '';
+    document.getElementById('settings-enabled').checked = !!row.enabled;
+    document.getElementById('settings-status').textContent = 'Editing ' + row.agent_id + ' — change fields then Save.';
+  }
+
+  async function submitSettingsForm() {
+    const status = document.getElementById('settings-status');
+    const dto = {
+      agent_id: document.getElementById('settings-agent-id').value.trim(),
+      provider: document.getElementById('settings-provider').value.trim(),
+      model_name: document.getElementById('settings-model-name').value.trim(),
+      base_url: document.getElementById('settings-base-url').value.trim(),
+      auth_secret_ref: document.getElementById('settings-auth-ref').value.trim(),
+      notes: document.getElementById('settings-notes').value.trim(),
+      enabled: document.getElementById('settings-enabled').checked,
+    };
+    status.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/agent-model-configs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dto),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        status.textContent = 'Save failed (' + r.status + '): ' + t;
+        return;
+      }
+      status.textContent = 'Saved ' + dto.agent_id;
+      await loadSettings();
+    } catch (err) {
+      status.textContent = 'Network error: ' + err.message;
+    }
+  }
+
+  async function deleteSettingsRow(agentID) {
+    if (!confirm('Delete agent_model_config for ' + agentID + '?')) return;
+    const status = document.getElementById('settings-status');
+    status.textContent = 'Deleting…';
+    try {
+      const r = await fetch('/api/agent-model-configs/' + encodeURIComponent(agentID), { method: 'DELETE' });
+      if (r.status !== 204) {
+        const t = await r.text();
+        status.textContent = 'Delete failed (' + r.status + '): ' + t;
+        return;
+      }
+      status.textContent = 'Deleted ' + agentID;
+      await loadSettings();
+    } catch (err) {
+      status.textContent = 'Network error: ' + err.message;
+    }
+  }
 })();
