@@ -629,23 +629,40 @@ func (g *Gemma) handleMessage(msg protocol.Message, mentioned bool) {
 }
 
 // handleMentionDirective processes broadcast-mention class messages
-// per Phase-S-followup-2 M6 user-custom-rule channel design.
+// per Phase-S-followup-2 M6 user-custom-rule channel design + Phase T
+// T-1.5 R53 EFFICIENCY-DRIVEN-DESIGN parser fix (per phase-t.md v5).
 //
-// Routing:
-//   - "@emma rule: clear" → custom-rules.md purge (F2-3 impl)
-//   - "@emma <directive>" (default-class) → append to custom-rules.md
-//     (F2-3 impl) for next 5-min enforcement-loop tick application
-//   - MsgCommand type-discriminator preferred for explicit-directive
-//     class; MsgUpdate/other types still routed (default-directive)
-//     unless content is empty after @emma strip
+// Routing (post-T-1.5 fix):
+//   - "@emma rule: clear" → custom-rules.md purge
+//   - "@emma rule: <directive>" → append to custom-rules.md (F2-3 impl)
+//   - "@emma <anything-without-rule-prefix>" → DROPPED (T-1.5 R53 fix:
+//     eliminates cascade-bug where any @emma-mention <500-chars auto-
+//     promoted to custom-rule; forces explicit `rule:` literal-prefix
+//     discriminator)
 //
-// F2-2 wires the route + emits ack stub; F2-3 fills custom-rules.md
-// persistence + LLM-prompt dynamic-append + 10-rule cap + 500-char-
-// per-rule + 5000-char-section-cap.
+// Pre-T-1.5 cascade-bug: every @emma broadcast-mention body got auto-
+// appended as candidate-rule, forcing agents to emit >500-char hub_send
+// to bypass via cap-rejection (structural cascade-mitigation overhead
+// per R53 efficiency dimension). Fix per phase-t.md v5 T-1.5: explicit
+// `rule:` prefix required for rule-class operations; non-prefixed
+// @emma mentions are conversation-class (logged + dropped, no rule
+// promotion).
 func (g *Gemma) handleMentionDirective(msg protocol.Message, content string) {
 	directive := stripEmmaMention(content)
 	if directive == "" {
 		log.Printf("emma: mention-directive from %s had empty body after @emma strip; dropping", msg.FromAgent)
+		return
+	}
+
+	// T-1.5 R53 fix: require explicit `rule:` literal-prefix for rule-class
+	// operations. Anything else is conversation-class (drop without rule
+	// promotion). Eliminates structural cascade-mitigation overhead.
+	if !hasRulePrefix(directive) {
+		summary := directive
+		if len(summary) > 80 {
+			summary = summary[:80] + "..."
+		}
+		log.Printf("emma: mention from %s lacks `rule:` prefix; conversation-class drop (T-1.5 R53): %s", msg.FromAgent, summary)
 		return
 	}
 
@@ -655,7 +672,8 @@ func (g *Gemma) handleMentionDirective(msg protocol.Message, content string) {
 		summary = summary[:80] + "..."
 	}
 
-	// Detect explicit purge-command
+	// Detect explicit purge-command (must come before generic rule-strip
+	// since "rule: clear" matches both clear-pattern and rule-prefix).
 	if isClearCommand(directive) {
 		removed, err := ClearCustomRules()
 		if err != nil {
@@ -676,7 +694,14 @@ func (g *Gemma) handleMentionDirective(msg protocol.Message, content string) {
 		return
 	}
 
-	rules, rejected, err := AppendCustomRule(directive)
+	// Strip `rule:` prefix before persisting the rule body
+	ruleBody := stripRulePrefix(directive)
+	if ruleBody == "" {
+		log.Printf("emma: mention from %s had empty body after `rule:` prefix strip; dropping", msg.FromAgent)
+		return
+	}
+
+	rules, rejected, err := AppendCustomRule(ruleBody)
 	if err != nil {
 		log.Printf("emma: AppendCustomRule failed for %s: %v", msg.FromAgent, err)
 		g.db.InsertMessage(protocol.Message{
@@ -730,6 +755,45 @@ func isClearCommand(directive string) bool {
 	lower := strings.ToLower(strings.TrimSpace(directive))
 	return lower == "rule: clear" || lower == "rule:clear" ||
 		lower == "clear rules" || lower == "clear custom rules"
+}
+
+// hasRulePrefix reports whether directive starts with the literal `rule:`
+// prefix (case-insensitive, with optional surrounding whitespace). Per
+// Phase T T-1.5 R53 EFFICIENCY-DRIVEN-DESIGN parser fix: only directives
+// with this prefix are eligible for custom-rule promotion (or purge-via-
+// `rule: clear`); everything else is conversation-class drop.
+//
+// Pre-fix cascade-bug: every @emma broadcast-mention body (any content
+// <500 chars) auto-promoted as candidate-rule. Agents emitted >500-char
+// hub_send to bypass via cap-rejection — structural overhead per R53.
+// Fix per phase-t.md v5 T-1.5: require explicit `rule:` prefix.
+//
+// Also accepts the legacy "clear rules" / "clear custom rules" forms
+// for backward-compat with existing isClearCommand patterns.
+func hasRulePrefix(directive string) bool {
+	lower := strings.ToLower(strings.TrimSpace(directive))
+	if strings.HasPrefix(lower, "rule:") {
+		return true
+	}
+	// Backward-compat: "clear rules" / "clear custom rules" route to
+	// isClearCommand without explicit `rule:` prefix.
+	if lower == "clear rules" || lower == "clear custom rules" {
+		return true
+	}
+	return false
+}
+
+// stripRulePrefix removes the leading `rule:` prefix (case-insensitive)
+// from directive + trims surrounding whitespace, returning the rule body.
+// Helper for handleMentionDirective post-T-1.5 R53 parser fix.
+func stripRulePrefix(directive string) string {
+	trimmed := strings.TrimSpace(directive)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "rule:") {
+		return trimmed
+	}
+	rest := trimmed[len("rule:"):]
+	return strings.TrimSpace(rest)
 }
 
 // healthLoop periodically checks if Ollama is still running.

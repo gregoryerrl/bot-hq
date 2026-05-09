@@ -969,6 +969,74 @@ func TestNewSessionArgsInjectsAgentIDEnvFlag(t *testing.T) {
 	}
 }
 
+// TestNewSessionArgsInjectsModelConfigEnvVarsForDeepSeek locks Phase T T-1.4
+// (R51 + R52): when rain's agent_model_config row points at a non-Claude
+// provider (e.g. DeepSeek-V4-Pro via Anthropic-compatible endpoint), the
+// tmux new-session args MUST include the env-var swap (ANTHROPIC_BASE_URL +
+// ANTHROPIC_AUTH_TOKEN + ANTHROPIC_MODEL). Validates env-var injection at
+// agent-spawn-time per phase-t.md v5.
+func TestNewSessionArgsInjectsModelConfigEnvVarsForDeepSeek(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "sk-test-rain-deepseek")
+
+	dir := t.TempDir()
+	db, err := hub.OpenDB(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close()
+	// migrate auto-seeds rain with DeepSeek default config
+
+	r := &Rain{db: db, tmuxSession: "test-session-deepseek", workDir: "/tmp"}
+	args := r.newSessionArgs()
+
+	joined := strings.Join(args, " ")
+	wantSubstrings := []string{
+		"ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic",
+		"ANTHROPIC_AUTH_TOKEN=sk-test-rain-deepseek",
+		"ANTHROPIC_MODEL=deepseek-v4-pro",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in tmux args; got: %v", want, args)
+		}
+	}
+}
+
+// TestNewSessionArgsClaudeOAuthPathInjectsNothing locks the inverse: when
+// rain's config is the Claude OAuth path (e.g. fallback-to-Claude per R51
+// fallback-config), the env-var swap is NOT injected (subprocess inherits
+// CLAUDE_CODE_OAUTH_TOKEN from env directly).
+func TestNewSessionArgsClaudeOAuthPathInjectsNothing(t *testing.T) {
+	dir := t.TempDir()
+	db, err := hub.OpenDB(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close()
+
+	// Override rain's config to Claude OAuth path (simulating fallback)
+	override := &hub.AgentModelConfig{
+		AgentID:       "rain",
+		Provider:      "anthropic",
+		ModelName:     "claude-default",
+		BaseURL:       "",
+		AuthSecretRef: "oauth:CLAUDE_CODE_OAUTH_TOKEN",
+		Enabled:       true,
+		Notes:         "Claude OAuth fallback for test",
+	}
+	if err := db.SetAgentModelConfig(override); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	r := &Rain{db: db, tmuxSession: "test-session-claude", workDir: "/tmp"}
+	args := r.newSessionArgs()
+
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "ANTHROPIC_BASE_URL") || strings.Contains(joined, "ANTHROPIC_AUTH_TOKEN") || strings.Contains(joined, "ANTHROPIC_MODEL") {
+		t.Errorf("Claude OAuth path should NOT inject ANTHROPIC_* env-vars; got: %v", args)
+	}
+}
+
 // TestSendCommandRequiresSinkInitialized locks the Phase I W2 Layer-2 (c)
 // safety branch: if Rain is marked running but the sink field is nil
 // (defensive — should never happen if Start completed), SendCommand

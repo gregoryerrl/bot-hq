@@ -2,6 +2,7 @@ package rain
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/agentconfig"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
@@ -202,12 +204,59 @@ func (r *Rain) writeMCPConfig() error {
 //
 // BOT_HQ_AGENT_ID consumed by internal/outboundhook/hook.go:88 for Stop-hook
 // agent attribution. Same pattern as internal/mcp/tools.go:774-778 (hub_spawn).
+//
+// Phase T T-1.4 (R51 + R52): also loads agent_model_configs row for rain and
+// injects ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN + ANTHROPIC_MODEL env-vars
+// for non-Claude paths (e.g. DeepSeek-V4-Pro). Empty additions for Claude
+// OAuth path (subprocess inherits CLAUDE_CODE_OAUTH_TOKEN from env).
 func (r *Rain) newSessionArgs() []string {
-	return []string{
+	args := []string{
 		"new-session", "-d", "-s", r.tmuxSession,
 		"-c", r.workDir, "-x", "200", "-y", "50",
 		"-e", "BOT_HQ_AGENT_ID=" + agentID,
 	}
+	// T-1.4: append per-agent model-config env-vars (R51 + R52)
+	args = append(args, r.modelConfigEnvArgs()...)
+	return args
+}
+
+// modelConfigEnvArgs loads rain's agent_model_configs row and returns the
+// `-e KEY=VALUE` arg pairs for `tmux new-session`. Returns empty slice when
+// no row exists OR Claude OAuth path (no env-var swap needed). Logs errors
+// at WARN level + falls through to empty (preserves v4 Claude-only behavior
+// per R51 fallthrough discipline).
+func (r *Rain) modelConfigEnvArgs() []string {
+	// Defensive: db nil in unit tests that exercise newSessionArgs() without
+	// a real hub.DB. Fall through to default Claude path.
+	if r.db == nil {
+		return nil
+	}
+	cfg, err := r.db.GetAgentModelConfig(agentID)
+	if err != nil {
+		if errors.Is(err, hub.ErrAgentModelConfigNotFound) {
+			// No config row → fall through to default Claude path (no env-var injection)
+			return nil
+		}
+		log.Printf("rain: agent_model_config load failed for %s: %v (falling through to default)", agentID, err)
+		return nil
+	}
+
+	envs, err := agentconfig.BuildSpawnEnv(cfg)
+	if err != nil {
+		log.Printf("rain: BuildSpawnEnv failed for %s: %v (config provider=%s ref=%s); falling through to default", agentID, err, cfg.Provider, cfg.AuthSecretRef)
+		return nil
+	}
+
+	// Log the env-var-list (REDACTED) for diagnostic visibility per R52
+	if len(envs) > 0 {
+		names := make([]string, 0, len(envs))
+		for _, e := range envs {
+			names = append(names, e.String())
+		}
+		log.Printf("rain: agent_model_config injecting env-vars (R51 + R52): provider=%s model=%s vars=[%s]", cfg.Provider, cfg.ModelName, strings.Join(names, ", "))
+	}
+
+	return agentconfig.FormatTmuxEnvArgs(envs)
 }
 
 func (r *Rain) spawnTmux() error {

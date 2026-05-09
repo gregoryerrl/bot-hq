@@ -219,10 +219,11 @@ func emitBlock(stdout, stderr io.Writer) {
 	fmt.Fprintln(stderr, blockReason)
 }
 
-// shouldFlag applies the three-clause filter:
+// shouldFlag applies the four-clause filter:
 //  1. assistant_text_total_len > 0 (excludes tool-only turns)
-//  2. (planning keyword present OR text length > minTextLenForFlag)
-//  3. no hub_send-class tool call this turn
+//  2. (planning keyword present OR text length > minTextLenForFlag) [R36]
+//  3. OR bare-dot pattern present [R50 — Phase T T-2.5]
+//  4. no hub_send-class tool call this turn
 func shouldFlag(s turnSummary) bool {
 	if s.TextLen == 0 {
 		return false
@@ -231,6 +232,9 @@ func shouldFlag(s turnSummary) bool {
 		return false
 	}
 	if hasPlanningKeyword(s.TextSnip) {
+		return true
+	}
+	if isBareDotPattern(s.TextSnip) {
 		return true
 	}
 	return s.TextLen > minTextLenForFlag

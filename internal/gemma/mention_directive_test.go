@@ -57,3 +57,64 @@ func TestIsClearCommand(t *testing.T) {
 		})
 	}
 }
+
+// TestHasRulePrefix exercises Phase T T-1.5 R53 EFFICIENCY-DRIVEN-DESIGN
+// parser fix per phase-t.md v5: explicit `rule:` literal-prefix discriminator
+// gates custom-rule promotion, eliminating cascade-bug overhead.
+func TestHasRulePrefix(t *testing.T) {
+	tests := []struct {
+		name      string
+		directive string
+		want      bool
+	}{
+		// Cascade-fix: rule-class operations require `rule:` prefix
+		{"canonical rule prefix", "rule: do X", true},
+		{"no space after colon", "rule:do X", true},
+		{"case-insensitive RULE", "RULE: do X", true},
+		{"whitespace tolerant", "  rule: do X  ", true},
+		{"clear command via prefix", "rule: clear", true},
+
+		// Backward-compat for legacy clear-command forms
+		{"legacy clear rules", "clear rules", true},
+		{"legacy clear custom rules", "clear custom rules", true},
+
+		// Non-rule conversation-class (DROPPED post-T-1.5 fix)
+		{"plain conversation", "hello there", false},
+		{"acknowledgement", "thanks", false},
+		{"hub_send-style emit", "emma|status|active:5", false},
+		{"agent peer-coord", "Brian-1st-pass on msg 17146", false},
+		{"chat-class directive without prefix", "do not let them stop", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasRulePrefix(tt.directive); got != tt.want {
+				t.Errorf("hasRulePrefix(%q) = %v, want %v", tt.directive, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStripRulePrefix(t *testing.T) {
+	tests := []struct {
+		name      string
+		directive string
+		want      string
+	}{
+		{"canonical", "rule: do X", "do X"},
+		{"no space", "rule:do X", "do X"},
+		{"upper case", "RULE: do X", "do X"},
+		{"with whitespace", "  rule:   do X  ", "do X"},
+		{"empty after strip", "rule:", ""},
+		{"empty after strip with space", "rule:  ", ""},
+		{"no prefix unchanged", "no prefix here", "no prefix here"},
+		{"only whitespace", "   ", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripRulePrefix(tt.directive); got != tt.want {
+				t.Errorf("stripRulePrefix(%q) = %q, want %q", tt.directive, got, tt.want)
+			}
+		})
+	}
+}

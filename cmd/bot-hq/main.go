@@ -100,6 +100,9 @@ func main() {
 		case "emit-resume":
 			runEmitResume()
 			return
+		case "config":
+			runConfig(os.Args[2:])
+			return
 		case "version":
 			// Ensure config directory and default config exist
 			home, _ := os.UserHomeDir()

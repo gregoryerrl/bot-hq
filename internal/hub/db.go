@@ -145,6 +145,21 @@ func (db *DB) OnMessage(fn func(protocol.Message)) {
 	db.onMessages = append(db.onMessages, fn)
 }
 
+// MessageExists reports whether a message with the given id exists in the
+// messages table. Used by citeanchor.HubMsgChecker (Phase T T-1.9) to
+// validate msg-id citations in scope-lock-docs.
+func (db *DB) MessageExists(id int64) (bool, error) {
+	var exists int
+	err := db.conn.QueryRow("SELECT 1 FROM messages WHERE id = ? LIMIT 1", id).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("query message %d: %w", id, err)
+	}
+	return exists == 1, nil
+}
+
 func (db *DB) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS agents (
@@ -326,6 +341,14 @@ func (db *DB) migrate() error {
 	// non-empty current_task as intentional-idle and suppresses
 	// stale-coder PMs for the agent until cleared.
 	if err := db.addColumnIfMissing("agents", "current_task", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// Phase T T-1.1: per-agent model-config table per R51 PER-AGENT-MODEL-CONFIG-DISCIPLINE
+	// + R52 HUB-DB-CONFIG-DISCIPLINE. Single-source-of-truth for cross-model
+	// agent configuration (Brian-Claude + Rain-DeepSeek-V4-Pro + emma/clive/coder-
+	// template-Claude). Reference-pointer secret-storage; actual secrets resolve
+	// from env-var/keychain/.env at agent-spawn-time.
+	if err := db.migrateAgentModelConfigs(); err != nil {
 		return err
 	}
 	return nil
