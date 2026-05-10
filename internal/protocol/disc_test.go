@@ -901,7 +901,7 @@ func TestPhaseRv2BrainCycleHardeningHeaderAnchor(t *testing.T) {
 // Mirrors PhaseNv6 + Phase R R3/R1 pattern.
 func TestPhaseRv3AutoBoundaryDisciplineSubstringLock(t *testing.T) {
 	must := []string{
-		"AUTO-BOUNDARY-DISCIPLINE (R42 — Phase R R5)",
+		"AUTO-BOUNDARY-DISCIPLINE (R42 — Phase R R5",
 		"hub_session_create",
 		"phase-open keyword",
 		"topic-pivot",
@@ -909,12 +909,16 @@ func TestPhaseRv3AutoBoundaryDisciplineSubstringLock(t *testing.T) {
 		"do all",
 		"smoke",
 		"continuously",
-		"hub_session_close",
 		"DetectBoundaryFromUserMsg",
 		"[SESSION:<8>]",
 		"db.ListSessions",
-		"updated DESC",
-		"Zero open → no prefix",
+		// Phase W additions: close-payload-required + retrospective surfaces
+		"hub_session_finalize",
+		"hub_session_lookback",
+		"hub_session_summary",
+		"close-payload-required",
+		"multi-session-per-day",
+		"pivot-enforcement",
 	}
 	for _, lit := range must {
 		t.Run(lit, func(t *testing.T) {
@@ -928,7 +932,12 @@ func TestPhaseRv3AutoBoundaryDisciplineSubstringLock(t *testing.T) {
 // PhaseRv3AutoBoundaryDiscipline const must start with the rule-anchor
 // prefix the agent prompt embeds recognize.
 func TestPhaseRv3AutoBoundaryDisciplineHeaderAnchor(t *testing.T) {
-	if !strings.HasPrefix(PhaseRv3AutoBoundaryDiscipline, "- AUTO-BOUNDARY-DISCIPLINE (R42 — Phase R R5):") {
-		t.Errorf("rule must start with `- AUTO-BOUNDARY-DISCIPLINE (R42 — Phase R R5):` (prompt anchor); first 80 chars: %q", PhaseRv3AutoBoundaryDiscipline[:80])
+	// Phase W extension: original "(R42 — Phase R R5):" prefix grew to
+	// "(R42 — Phase R R5; Phase W close-discipline 2026-05-10):" to mark
+	// the Phase W close-payload-required addendum. Lock the leading
+	// rule-name + R-number portion which is what agent prompt regex
+	// would target.
+	if !strings.HasPrefix(PhaseRv3AutoBoundaryDiscipline, "- AUTO-BOUNDARY-DISCIPLINE (R42") {
+		t.Errorf("rule must start with `- AUTO-BOUNDARY-DISCIPLINE (R42` (prompt anchor); first 80 chars: %q", PhaseRv3AutoBoundaryDiscipline[:80])
 	}
 }
