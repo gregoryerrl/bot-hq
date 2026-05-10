@@ -863,3 +863,146 @@ func TestCiteAnchorScanRoots_7Paths(t *testing.T) {
 		}
 	}
 }
+
+// Phase W close-summary fields round-trip through render → parse.
+// All new fields populated; verify all survive serialization.
+func TestManifestRoundTrip_PhaseWFields(t *testing.T) {
+	t.Setenv(sessionsDirEnvVar, t.TempDir())
+
+	in := Manifest{
+		ID:            "2026-05-10-test-1",
+		Project:       "test",
+		StartTS:       time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
+		EndTS:         time.Date(2026, 5, 10, 11, 30, 0, 0, time.UTC),
+		StartMsgID:    100,
+		EndMsgID:      287,
+		Agents:        []string{"brian", "rain"},
+		Status:        "closed-pivoted-out",
+		MsgCount:      187,
+		CommitsLanded: []string{"abc1234", "def5678"},
+		FilesTouched:  []string{"internal/foo/foo.go", "cmd/bar/main.go"},
+		Decisions: []string{
+			"105: GREENFLAG | rain greenflagged the refactor approach",
+			"218: HALT | plan-cap 95% halt fired",
+		},
+		Outcome: "Refactored gemma plan-usage to daemoncron.\nRain caught a stat-claim drift mid-cycle; addressed via cite-from-actual.\nSession closed on user pivot to BCC.",
+		Body:    "Free-form body content here.",
+	}
+
+	if err := WriteManifest(in); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+
+	out, err := ReadManifest(in.ID)
+	if err != nil {
+		t.Fatalf("ReadManifest: %v", err)
+	}
+
+	if out.Status != in.Status {
+		t.Errorf("Status round-trip: got %q want %q", out.Status, in.Status)
+	}
+	if out.MsgCount != in.MsgCount {
+		t.Errorf("MsgCount round-trip: got %d want %d", out.MsgCount, in.MsgCount)
+	}
+	if len(out.CommitsLanded) != len(in.CommitsLanded) || out.CommitsLanded[0] != in.CommitsLanded[0] {
+		t.Errorf("CommitsLanded round-trip: got %v want %v", out.CommitsLanded, in.CommitsLanded)
+	}
+	if len(out.FilesTouched) != len(in.FilesTouched) || out.FilesTouched[1] != in.FilesTouched[1] {
+		t.Errorf("FilesTouched round-trip: got %v want %v", out.FilesTouched, in.FilesTouched)
+	}
+	if len(out.Decisions) != len(in.Decisions) {
+		t.Fatalf("Decisions count: got %d want %d", len(out.Decisions), len(in.Decisions))
+	}
+	for i, d := range in.Decisions {
+		if out.Decisions[i] != d {
+			t.Errorf("Decisions[%d]: got %q want %q", i, out.Decisions[i], d)
+		}
+	}
+	if out.Outcome != in.Outcome {
+		t.Errorf("Outcome round-trip mismatch:\ngot:  %q\nwant: %q", out.Outcome, in.Outcome)
+	}
+	// Pre-W fields should also still round-trip
+	if out.StartMsgID != in.StartMsgID || out.EndMsgID != in.EndMsgID {
+		t.Errorf("pre-W msg-id fields broken: got %d/%d want %d/%d", out.StartMsgID, out.EndMsgID, in.StartMsgID, in.EndMsgID)
+	}
+}
+
+// Pre-W manifests (without Phase W close-summary fields) must still
+// parse cleanly — back-compat ratchet.
+func TestManifestParse_PreWBackCompat(t *testing.T) {
+	preW := `---
+id: 2026-05-08-old-session
+project: old
+start_ts: 2026-05-08T00:23:29Z
+agents:
+  - brian
+  - rain
+---
+
+Pre-W manifest body.
+`
+	got, err := parseManifest(preW)
+	if err != nil {
+		t.Fatalf("parseManifest pre-W: %v", err)
+	}
+	if got.ID != "2026-05-08-old-session" {
+		t.Errorf("pre-W ID lost: %q", got.ID)
+	}
+	if got.Status != "" || got.MsgCount != 0 || got.Outcome != "" {
+		t.Errorf("pre-W manifest should have empty Phase W fields, got Status=%q MsgCount=%d Outcome=%q",
+			got.Status, got.MsgCount, got.Outcome)
+	}
+	if len(got.Agents) != 2 {
+		t.Errorf("Agents broken: %v", got.Agents)
+	}
+}
+
+// NextAvailableSessionID returns base id (seq=1) when no session exists,
+// then -2 / -3 / etc. as same-date+project sessions accumulate.
+func TestNextAvailableSessionID(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(sessionsDirEnvVar, dir)
+	when := time.Date(2026, 5, 10, 0, 0, 0, 0, time.UTC)
+
+	// First call → no suffix
+	id1, err := NextAvailableSessionID(when, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != "2026-05-10-demo" {
+		t.Errorf("first id = %q, want 2026-05-10-demo", id1)
+	}
+
+	// Create that session dir; next call should return -2
+	if err := os.MkdirAll(filepath.Join(dir, id1), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id2, err := NextAvailableSessionID(when, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 != "2026-05-10-demo-2" {
+		t.Errorf("second id = %q, want 2026-05-10-demo-2", id2)
+	}
+
+	// Different project → no collision; gets seq=1 form
+	idOther, err := NextAvailableSessionID(when, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idOther != "2026-05-10-other" {
+		t.Errorf("other-project id = %q, want 2026-05-10-other", idOther)
+	}
+
+	// Create -2 too; next should be -3
+	if err := os.MkdirAll(filepath.Join(dir, id2), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	id3, err := NextAvailableSessionID(when, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id3 != "2026-05-10-demo-3" {
+		t.Errorf("third id = %q, want 2026-05-10-demo-3", id3)
+	}
+}

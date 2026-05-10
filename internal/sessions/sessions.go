@@ -66,7 +66,33 @@ type Manifest struct {
 	Phase            string
 	Posture          string
 	CheckpointTS     time.Time
-	Body             string
+
+	// Phase W close-summary fields (sessions hardening 2026-05-10).
+	// Status is the lifecycle marker — `active` while open, `closed`
+	// (normal), `closed-pivoted-out` (closed because user pivoted to
+	// another project), `closed-eod` (closed at end-of-day), or
+	// `closed-auto-migrated` (one-shot migration of pre-W stale-active
+	// sessions). Empty Status defaults to `active` when EndTS is zero
+	// or `closed` when EndTS is set (back-compat for pre-W manifests).
+	Status string
+	// Outcome is the agent-authored narrative at close. Required for
+	// retrospective utility — without it, look-back has only structured
+	// fields. Multi-paragraph markdown is fine.
+	Outcome string
+	// CommitsLanded + FilesTouched — auto-extracted at close via
+	// `git log <repo> --since=<StartTS> --until=<EndTS>`. Enable
+	// cross-session queries (e.g., "which sessions touched file X?").
+	CommitsLanded []string
+	FilesTouched  []string
+	// MsgCount = EndMsgID - StartMsgID. Cached at close so look-back
+	// doesn't need to recompute. Useful for session-density retrospectives.
+	MsgCount int
+	// Decisions — auto-extracted decision-class events (BRAIN-AGREED /
+	// GREENFLAG / HALT / SCOPE-LOCK keywords) from hub messages in the
+	// [StartMsgID, EndMsgID] window. Each entry: "<msg-id>: <kind> | <gloss>".
+	Decisions []string
+
+	Body string
 }
 
 // BoundaryTrigger classifies why a session boundary was detected from
@@ -237,6 +263,40 @@ func renderManifest(m Manifest) string {
 	}
 	if !m.CheckpointTS.IsZero() {
 		b.WriteString("checkpoint_ts: " + m.CheckpointTS.UTC().Format(time.RFC3339) + "\n")
+	}
+	// Phase W close-summary fields. Omit zero-values for back-compat
+	// with pre-W manifests (parseManifest skips missing-field lines).
+	if m.Status != "" {
+		b.WriteString("status: " + m.Status + "\n")
+	}
+	if m.MsgCount > 0 {
+		fmt.Fprintf(&b, "msg_count: %d\n", m.MsgCount)
+	}
+	if len(m.CommitsLanded) > 0 {
+		b.WriteString("commits_landed:\n")
+		for _, sha := range m.CommitsLanded {
+			b.WriteString("  - " + sha + "\n")
+		}
+	}
+	if len(m.FilesTouched) > 0 {
+		b.WriteString("files_touched:\n")
+		for _, f := range m.FilesTouched {
+			b.WriteString("  - " + f + "\n")
+		}
+	}
+	if len(m.Decisions) > 0 {
+		b.WriteString("decisions:\n")
+		for _, d := range m.Decisions {
+			// YAML-safe: escape leading '-' / quoting handled by indent
+			b.WriteString("  - " + escapeYAMLListItem(d) + "\n")
+		}
+	}
+	if m.Outcome != "" {
+		// Multi-paragraph: use literal block scalar so newlines preserved.
+		b.WriteString("outcome: |\n")
+		for _, line := range strings.Split(strings.TrimRight(m.Outcome, "\n"), "\n") {
+			b.WriteString("  " + line + "\n")
+		}
 	}
 	b.WriteString("---\n\n")
 	if m.Body != "" {
@@ -511,9 +571,17 @@ func parseManifest(content string) (Manifest, error) {
 	m.Body = body
 
 	inAgents := false
+	inCommits := false
+	inFiles := false
+	inDecisions := false
+	inOutcome := false
 	for _, line := range strings.Split(frontmatter, "\n") {
 		if line == "" {
 			inAgents = false
+			inCommits = false
+			inFiles = false
+			inDecisions = false
+			// inOutcome continues across blank lines (literal block scalar)
 			continue
 		}
 		if inAgents {
@@ -522,6 +590,37 @@ func parseManifest(content string) (Manifest, error) {
 				continue
 			}
 			inAgents = false
+		}
+		if inCommits {
+			if strings.HasPrefix(line, "  - ") {
+				m.CommitsLanded = append(m.CommitsLanded, strings.TrimPrefix(line, "  - "))
+				continue
+			}
+			inCommits = false
+		}
+		if inFiles {
+			if strings.HasPrefix(line, "  - ") {
+				m.FilesTouched = append(m.FilesTouched, strings.TrimPrefix(line, "  - "))
+				continue
+			}
+			inFiles = false
+		}
+		if inDecisions {
+			if strings.HasPrefix(line, "  - ") {
+				m.Decisions = append(m.Decisions, unescapeYAMLListItem(strings.TrimPrefix(line, "  - ")))
+				continue
+			}
+			inDecisions = false
+		}
+		if inOutcome {
+			if strings.HasPrefix(line, "  ") {
+				if m.Outcome != "" {
+					m.Outcome += "\n"
+				}
+				m.Outcome += strings.TrimPrefix(line, "  ")
+				continue
+			}
+			inOutcome = false
 		}
 		switch {
 		case strings.HasPrefix(line, "id: "):
@@ -556,9 +655,69 @@ func parseManifest(content string) (Manifest, error) {
 			m.Posture = strings.TrimPrefix(line, "posture: ")
 		case strings.HasPrefix(line, "checkpoint_ts: "):
 			m.CheckpointTS, _ = time.Parse(time.RFC3339, strings.TrimPrefix(line, "checkpoint_ts: "))
+		// Phase W close-summary fields
+		case strings.HasPrefix(line, "status: "):
+			m.Status = strings.TrimPrefix(line, "status: ")
+		case strings.HasPrefix(line, "msg_count: "):
+			fmt.Sscanf(strings.TrimPrefix(line, "msg_count: "), "%d", &m.MsgCount)
+		case line == "commits_landed:":
+			inCommits = true
+		case line == "files_touched:":
+			inFiles = true
+		case line == "decisions:":
+			inDecisions = true
+		case line == "outcome: |":
+			inOutcome = true
 		}
 	}
 	return m, nil
+}
+
+// escapeYAMLListItem wraps a value in double quotes if it would otherwise
+// be misparsed as YAML (starts with `-`, contains `:` etc). Used for
+// Decisions entries which can contain arbitrary content.
+func escapeYAMLListItem(s string) string {
+	if s == "" {
+		return `""`
+	}
+	if strings.ContainsAny(s, ":\"\n") || strings.HasPrefix(s, "-") {
+		return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+	}
+	return s
+}
+
+// unescapeYAMLListItem is the inverse of escapeYAMLListItem.
+func unescapeYAMLListItem(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		return strings.ReplaceAll(s[1:len(s)-1], `\"`, `"`)
+	}
+	return s
+}
+
+// NextAvailableSessionID returns a session-id for the given date+project
+// that doesn't collide with an existing session directory. First call for
+// a (date, project) pair returns the seq=1 form (`YYYY-MM-DD-<project>`,
+// no suffix — back-compat with pre-W single-session-per-day convention).
+// Subsequent calls return `YYYY-MM-DD-<project>-2`, `-3`, etc.
+//
+// Used by hub_session_create to support multiple sessions per day per
+// project (Phase W sessions hardening 2026-05-10).
+func NextAvailableSessionID(t time.Time, project string) (string, error) {
+	base := MakeSessionID(t, project)
+	if _, err := os.Stat(filepath.Join(SessionsDir(), base)); os.IsNotExist(err) {
+		return base, nil
+	} else if err != nil {
+		return "", err
+	}
+	for seq := 2; seq < 1000; seq++ {
+		candidate := fmt.Sprintf("%s-%d", base, seq)
+		if _, err := os.Stat(filepath.Join(SessionsDir(), candidate)); os.IsNotExist(err) {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("NextAvailableSessionID: exhausted seq up to 999 for %s", base)
 }
 
 // CheckpointFields carries the fields written by hub_session_checkpoint.
