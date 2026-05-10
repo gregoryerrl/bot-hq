@@ -74,6 +74,9 @@ func main() {
 		case "context-load":
 			runContextLoad()
 			return
+		case "cl-index":
+			runCLIndex()
+			return
 		case "session-lookback":
 			runSessionLookback()
 			return
