@@ -51,12 +51,28 @@ type Context struct {
 // Resolver layering: general → projects/<project>.yaml. The agent layer
 // is intentionally NOT merged here (this is project context, not
 // per-agent context); agents read their own per-agent YAML separately.
+//
+// Use LoadWithAgent when the caller wants the agent layer too
+// (e.g., the sessionopen handler wraps the same primitives but
+// includes the per-agent rules under the "agent" key).
 func Load(canonRoot, project string) (*Context, error) {
+	return LoadWithAgent(canonRoot, project, "")
+}
+
+// LoadWithAgent is Load with an explicit agent layer merged in. When
+// agent is non-empty, the resolver also reads rules/agents/<agent>.yaml
+// and exposes its content under the merged map's "agent" key (matching
+// the resolver's existing semantic). When agent is empty, behaves
+// identically to Load.
+//
+// Used by internal/agents/sessionopen so /api/session-open and the
+// per-pivot context_load tool share the same Layer-2 loader.
+func LoadWithAgent(canonRoot, project, agent string) (*Context, error) {
 	if project == "" {
 		return nil, fmt.Errorf("project key required")
 	}
 
-	merged, err := rules.Resolve(canonRoot, project, "")
+	merged, err := rules.Resolve(canonRoot, project, agent)
 	if err != nil {
 		return nil, fmt.Errorf("resolve rules: %w", err)
 	}

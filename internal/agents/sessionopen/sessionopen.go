@@ -21,7 +21,7 @@ import (
 
 	"github.com/gregoryerrl/bot-hq/internal/agents/bootstrap"
 	"github.com/gregoryerrl/bot-hq/internal/agents/tasks"
-	"github.com/gregoryerrl/bot-hq/internal/rules"
+	"github.com/gregoryerrl/bot-hq/internal/contextload"
 )
 
 // Soft and hard token caps per design-spike §2.2. ~4 chars/token.
@@ -94,13 +94,17 @@ func Build(canonRoot, project, agent string) (*Payload, error) {
 		p.Stats.BootstrapTokens = btoks
 	}
 
-	// Rules resolved.
-	merged, err := rules.Resolve(canonRoot, project, agent)
+	// Rules resolved — uses the same Layer-2 loader as the per-pivot
+	// context_load MCP tool (internal/contextload). Eliminates the
+	// duplicate rules.Resolve call that pre-V coexisted across the
+	// two surfaces. Agent layer included so /api/session-open
+	// continues to surface per-agent rules under the "agent" key.
+	clCtx, err := contextload.LoadWithAgent(canonRoot, project, agent)
 	if err != nil {
 		return nil, fmt.Errorf("rules: %w", err)
 	}
-	p.RulesResolved = merged
-	p.Stats.RulesTokens = approxTokensOfMap(merged)
+	p.RulesResolved = clCtx.Rules
+	p.Stats.RulesTokens = approxTokensOfMap(clCtx.Rules)
 	if p.Stats.RulesTokens > RulesSoftCap {
 		// Rules are structured; we don't truncate the map (keeps semantic intact)
 		// but flag the bloat for the caller.
