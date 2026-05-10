@@ -836,7 +836,7 @@ func TestPhaseRv1ContextLibraryTerminologySubstringLock(t *testing.T) {
 		"glossary.md",
 		"rulebook.md",
 		"agent-onboarding.md",
-		"feedback-memory-index.md",
+		"rules/general.yaml",
 	}
 	for _, lit := range must {
 		t.Run(lit, func(t *testing.T) {
