@@ -333,6 +333,8 @@ RULES:
 
 ` + protocol.PhaseSv2IgnoreNoiseDiscipline + `
 
+` + protocol.PhaseYv1IPIVDiscipline + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 ` + protocol.H13ForcePushProtocol + `

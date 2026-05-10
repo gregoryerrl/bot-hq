@@ -711,4 +711,21 @@ const PhaseSv1AudienceClassLoadBearing = `- AUDIENCE-CLASS-DISCRIMINATOR-LOAD-BE
 // / peer-coord-ack class is NOT speech-trigger), this rule-text
 // hardens against the ~9-watch-confirm-drift Phase S empirical
 // failure-mode (msg 15910).
+// PhaseYv1IPIVDiscipline codifies the Phase Y-2 IPIV-as-tool-surface rule.
+// Discriminator on decision-class: low/routine work skips IPIV (overhead
+// not worth it); medium/high opens an IPIV record before Investigate
+// begins. Bilateral mode auto-fires for medium/high in Investigate + Plan
+// per R44 expanded — the trio doesn't set bilateral manually; the state
+// machine handles it from decision_class.
+//
+// Tool surface: bot_hq_ipiv_open / transition / set_artifact / complete /
+// list. INDEX auto-regen on open + complete keeps the substrate fresh
+// for the next Investigator.
+//
+// Per phase-t.md v5: "investigations FEED CL; CL FEEDS investigations" —
+// closed task subtrees survive indefinitely so Investigate phase pulls
+// prior fault-trees / investigation-docs into new investigations
+// (compounding-knowledge cycle).
+const PhaseYv1IPIVDiscipline = `- IPIV-DISCIPLINE (Phase Y-2): tasks ≥ medium decision-class MUST open an IPIV record via ` + "`mcp__bot-hq__bot_hq_ipiv_open`" + ` BEFORE Investigate work begins. Discriminator on decision-class: (a) low / routine = skip IPIV (one-line refactors / typo fixes / mechanical updates); (b) medium = bilateral Investigate + bilateral Plan auto-fire; (c) high = same as medium plus pre-seal-mechanical-audit (R49) is gating. Phase artifacts attach via ` + "`bot_hq_ipiv_set_artifact`" + ` at end-of-phase: investigation_doc + fault_tree (I phase) → plan_doc / plan_bilateral_a / plan_bilateral_b / plan_merge_log (P phase) → verify_report (V phase). Phase-transitions via ` + "`bot_hq_ipiv_transition`" + ` (valid: I→P; P→Implement | P→I loop-back; Implement→V | Implement→P loop-back; V→Implement | V→P | V→I for fail loop-backs). Task closure via ` + "`bot_hq_ipiv_complete`" + ` with verify_result: pass | fail | escalated. Pass + escalated set ClosedAt (terminal); fail leaves task open + increments verify_loop_count for the V→P loop-back per R-T-4 max-3-retry circuit-breaker. Auto-INDEX-regen on open + complete keeps ` + "`~/.bot-hq/projects/<p>/INDEX.md`" + ` fresh for the next Investigator. Closed task subtrees at ` + "`tasks/<task-id>/`" + ` survive indefinitely — Investigate phase pulls prior fault-trees + investigation-docs into new investigations (compounding-knowledge cycle per phase-t.md "investigations FEED CL; CL FEEDS investigations"). Cite_anchor: phase-t.md v5 IPIV-pipeline architectural-pillar + Phase Y-1 cl-index substrate + Phase Y-2 hub_ipiv_* tool surface 2026-05-10. Per R44 + R47 + R49 + R-T-4 parents + R18 CITE-ANCHOR-REQUIRED.`
+
 const PhaseSv2IgnoreNoiseDiscipline = `- IGNORE-NOISE-DISCIPLINE (Phase-S-followup-1 F1-7 — closes phase-s.md S-4 §117): when a hub broadcast arrives that does NOT include ` + "`@<self>`" + ` mention, the agent self-filters via a pre-response relevance-judgment: (i) "is this addressed-to-me-as-actor" (someone wants me to do/decide something) → respond per AUDIENCE-CLASS-DISCRIMINATOR; (ii) "is this referentially-mentioned" (third-party content / about-me-but-not-to-me / peer-coord between others) → silent-floor (default-ignore). Discriminator at draft-time: a compact-pipe message from peer-A discussing peer-B's recent emit is referential-class; a message from peer-A asking self to verify/respond is addressed-to-me-as-actor class. Watch-confirm / peer-coord-ack class on referential broadcasts is NOT speech-trigger (anti-drift clause vs ~9 watch-confirm drift Phase S empirical msg 15910). Cite_anchor: phase-s.md S-4 §117 ("Agent-side relevance-discriminator fallback... rule-text addition: ignore-noise discipline") + Rain msg 15915 BRAIN-2nd cite-from-actual zero-matches finding + Phase-S-followup-1 F1-7 implementation. Per R6 + PhaseSv1AudienceClassLoadBearing parent + R18 CITE-ANCHOR-REQUIRED.`

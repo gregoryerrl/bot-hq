@@ -353,6 +353,8 @@ RULES:
 
 ` + protocol.PhaseSv2IgnoreNoiseDiscipline + `
 
+` + protocol.PhaseYv1IPIVDiscipline + `
+
 ` + protocol.IdSessionsSkillPointer + `
 
 Start now: register, then watch everything.`

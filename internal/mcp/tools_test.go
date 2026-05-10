@@ -354,6 +354,16 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// Aggregates all sessions for a day → EOD markdown. No caller
 		// dimension.
 		"hub_session_summary": "aggregates sessions by date into EOD markdown; read-only; caller-identity not needed",
+
+		// Phase Y-2 IPIV tools: project-keyed (and task-keyed) operations
+		// over the IPIV state machine. The trio invokes these on behalf
+		// of the work-scope, not bound to caller-identity. Decision-class
+		// + phase + verify-result are the load-bearing dimensions.
+		"bot_hq_ipiv_open":         "opens IPIV task by project + decision_class; caller-identity not needed",
+		"bot_hq_ipiv_transition":   "advances IPIV task phase by project + task_id; caller-identity not needed",
+		"bot_hq_ipiv_set_artifact": "attaches phase artifact path; project + task_id keyed; caller-identity not needed",
+		"bot_hq_ipiv_complete":     "closes IPIV task with verify result; project + task_id keyed; caller-identity not needed",
+		"bot_hq_ipiv_list":         "enumerates IPIV tasks by project; read-only; caller-identity not needed",
 	}
 
 	db := setupTestDB(t)

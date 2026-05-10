@@ -76,18 +76,23 @@ const (
 )
 
 // TaskState is the per-task IPIV state schema per phase-t.md v5.
+//
+// ClosedAt distinguishes open vs closed tasks: zero = still in flight
+// (including post-Verify-fail loop-backs); non-zero = terminal closure
+// (pass / escalated). Set by IPIVRuntime.CompleteTask on terminal result.
 type TaskState struct {
-	TaskID         string                  `yaml:"task_id"`
-	OpenedAt       time.Time               `yaml:"opened_at"`
-	DecisionClass  DecisionClass           `yaml:"decision_class"`
-	CurrentPhase   Stage                   `yaml:"current_phase"`
-	PhaseMode      Mode                    `yaml:"phase_mode"`
-	PhaseBudget    PhaseBudget             `yaml:"phase_budget"`
-	PhaseUsed      map[Stage]PhaseUsage    `yaml:"phase_used"`
-	PhaseArtifacts PhaseArtifacts          `yaml:"phase_artifacts"`
-	PhaseHistory   []PhaseHistoryEntry     `yaml:"phase_history"`
-	VerifyResult   VerifyResult            `yaml:"verify_result"`
-	VerifyLoopCount int                    `yaml:"verify_loop_count"`
+	TaskID          string               `yaml:"task_id"`
+	OpenedAt        time.Time            `yaml:"opened_at"`
+	ClosedAt        time.Time            `yaml:"closed_at,omitempty"`
+	DecisionClass   DecisionClass        `yaml:"decision_class"`
+	CurrentPhase    Stage                `yaml:"current_phase"`
+	PhaseMode       Mode                 `yaml:"phase_mode"`
+	PhaseBudget     PhaseBudget          `yaml:"phase_budget"`
+	PhaseUsed       map[Stage]PhaseUsage `yaml:"phase_used"`
+	PhaseArtifacts  PhaseArtifacts       `yaml:"phase_artifacts"`
+	PhaseHistory    []PhaseHistoryEntry  `yaml:"phase_history"`
+	VerifyResult    VerifyResult         `yaml:"verify_result"`
+	VerifyLoopCount int                  `yaml:"verify_loop_count"`
 }
 
 // PhaseBudget represents per-phase compute-budget allocation per phase-t.md v5.

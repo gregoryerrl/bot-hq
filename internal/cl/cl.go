@@ -70,15 +70,21 @@ type CL struct {
 	root string
 }
 
-// NewCL constructs a CL handle. If root is empty, uses ~/.bot-hq/ via
-// $HOME expansion. Returns error if root cannot be resolved.
+// NewCL constructs a CL handle. If root is empty, uses BOT_HQ_CL_ROOT
+// env var when set (test isolation hook), otherwise resolves to
+// ~/.bot-hq/ via $HOME expansion. Returns error if root cannot be
+// resolved or does not exist.
 func NewCL(root string) (*CL, error) {
 	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("home dir: %w", err)
+		if envRoot := os.Getenv("BOT_HQ_CL_ROOT"); envRoot != "" {
+			root = envRoot
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, fmt.Errorf("home dir: %w", err)
+			}
+			root = filepath.Join(home, ".bot-hq")
 		}
-		root = filepath.Join(home, ".bot-hq")
 	}
 	info, err := os.Stat(root)
 	if err != nil {

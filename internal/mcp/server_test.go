@@ -24,6 +24,19 @@ func setupTestDB(t *testing.T) *hub.DB {
 	// the real CL across many test runs.)
 	t.Setenv("BOT_HQ_SESSIONS_DIR", t.TempDir())
 
+	// Phase Y-2: bot_hq_ipiv_* tools write under <CL_ROOT>/projects/
+	// <project>/tasks/. Same isolation pattern — pin BOT_HQ_CL_ROOT to
+	// a temp dir so IPIV tool tests don't pollute the real CL. Create
+	// the projects/<test-project> subdir so IndexProject succeeds.
+	clRoot := t.TempDir()
+	t.Setenv("BOT_HQ_CL_ROOT", clRoot)
+	if err := os.MkdirAll(filepath.Join(clRoot, "projects", "test-project"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(clRoot, "projects", "test-project.yaml"), []byte("project_name: test-project\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	path := filepath.Join(t.TempDir(), "test.db")
 	db, err := hub.OpenDB(path)
 	if err != nil {
@@ -75,6 +88,11 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_session_finalize",
 		"hub_session_lookback",
 		"hub_session_summary",
+		"bot_hq_ipiv_open",
+		"bot_hq_ipiv_transition",
+		"bot_hq_ipiv_set_artifact",
+		"bot_hq_ipiv_complete",
+		"bot_hq_ipiv_list",
 	}
 
 	if len(tools) != len(expected) {

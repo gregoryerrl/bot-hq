@@ -941,3 +941,46 @@ func TestPhaseRv3AutoBoundaryDisciplineHeaderAnchor(t *testing.T) {
 		t.Errorf("rule must start with `- AUTO-BOUNDARY-DISCIPLINE (R42` (prompt anchor); first 80 chars: %q", PhaseRv3AutoBoundaryDiscipline[:80])
 	}
 }
+
+// TestPhaseYv1IPIVDisciplineSubstringLock locks load-bearing recognition
+// substrings on the Phase Y-2 IPIV rule. Anchors the tool-surface names,
+// decision-class discriminator, valid phase transitions, and terminal vs
+// loop-back result semantics. Mirrors the established pattern.
+func TestPhaseYv1IPIVDisciplineSubstringLock(t *testing.T) {
+	must := []string{
+		"IPIV-DISCIPLINE (Phase Y-2)",
+		"medium decision-class",
+		"bot_hq_ipiv_open",
+		"bot_hq_ipiv_set_artifact",
+		"bot_hq_ipiv_transition",
+		"bot_hq_ipiv_complete",
+		// Decision-class discriminator
+		"low / routine = skip IPIV",
+		"medium = bilateral",
+		"high = same as medium",
+		// Phase transitions
+		"I→P",
+		"P→Implement",
+		"Implement→V",
+		// Terminal vs loop-back
+		"verify_loop_count",
+		"max-3-retry circuit-breaker",
+		"R-T-4",
+		// Substrate cycle
+		"compounding-knowledge cycle",
+		"investigations FEED CL; CL FEEDS investigations",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseYv1IPIVDiscipline, lit) {
+				t.Errorf("Phase Y-2 IPIV ratchet broken: missing literal %q in PhaseYv1IPIVDiscipline", lit)
+			}
+		})
+	}
+}
+
+func TestPhaseYv1IPIVDisciplineHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseYv1IPIVDiscipline, "- IPIV-DISCIPLINE (Phase Y-2)") {
+		t.Errorf("rule must start with `- IPIV-DISCIPLINE (Phase Y-2)` (prompt anchor); first 80 chars: %q", PhaseYv1IPIVDiscipline[:80])
+	}
+}

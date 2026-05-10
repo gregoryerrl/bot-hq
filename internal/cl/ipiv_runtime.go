@@ -160,15 +160,19 @@ func (r *IPIVRuntime) AddImplementCommit(taskID, commitSHA string) (*mvt.TaskSta
 
 // CompleteTask marks the task with a Verify result (pass/fail/escalated).
 // Increments verify_loop_count when result is "fail" (per R-T-4 max-3-retry
-// circuit-breaker).
+// circuit-breaker). Sets ClosedAt when result is terminal (pass/escalated)
+// — fail leaves the task open for the V→P loop-back.
 func (r *IPIVRuntime) CompleteTask(taskID string, result mvt.VerifyResult) (*mvt.TaskState, error) {
 	ts, err := r.GetTask(taskID)
 	if err != nil {
 		return nil, err
 	}
 	ts.VerifyResult = result
-	if result == mvt.VerifyFail {
+	switch result {
+	case mvt.VerifyFail:
 		ts.VerifyLoopCount++
+	case mvt.VerifyPass, mvt.VerifyEscalated:
+		ts.ClosedAt = time.Now().UTC()
 	}
 	if err := r.cl.SaveIPIVState(r.project, ts); err != nil {
 		return nil, fmt.Errorf("save after complete: %w", err)
