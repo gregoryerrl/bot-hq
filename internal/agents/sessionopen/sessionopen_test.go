@@ -22,7 +22,6 @@ func setup(t *testing.T) string {
 	must(filepath.Join(root, "rules", "general.yaml"), "tone:\n  reply: neutral\n")
 	must(filepath.Join(root, "projects", "bot-hq.yaml"), "project_name: bot-hq\ngates:\n  push:\n    requiresApproval: false\n")
 	must(filepath.Join(root, "rules", "agents", "brian.yaml"), "role: HANDS\nexec:\n  pushClass: gated\n")
-	must(filepath.Join(root, "projects", "bot-hq", "bootstrap.md"), "---\nlast_session_id: bs1\nphase_or_milestone: phase-n\nkey_state: testing\nwrite_trigger: graceful\n---\n\nLast session details.\n")
 	must(filepath.Join(root, "projects", "bot-hq", "tasks.md"), "---\ntasks:\n  - id: t1\n    title: Wire session-open\n    status: in_progress\n    owner: brian\n---\n\nTask notes.\n")
 	return root
 }
@@ -35,9 +34,6 @@ func TestBuild_allFields(t *testing.T) {
 	}
 	if !strings.Contains(p.Overview, "trio orchestration") {
 		t.Errorf("overview not loaded: %q", p.Overview)
-	}
-	if p.Bootstrap == nil || p.Bootstrap.Frontmatter.LastSessionID != "bs1" {
-		t.Errorf("bootstrap missing or wrong: %+v", p.Bootstrap)
 	}
 	if p.Tasks == nil || len(p.Tasks.Tasks) != 1 || p.Tasks.Tasks[0].ID != "t1" {
 		t.Errorf("tasks missing: %+v", p.Tasks)
@@ -65,9 +61,6 @@ func TestBuild_missingFiles_partialPayload(t *testing.T) {
 	}
 	if p.Overview != "" {
 		t.Errorf("missing overview should be empty, got %q", p.Overview)
-	}
-	if p.Bootstrap != nil {
-		t.Errorf("missing bootstrap should be nil, got %+v", p.Bootstrap)
 	}
 	if p.Tasks != nil {
 		t.Errorf("missing tasks should be nil, got %+v", p.Tasks)

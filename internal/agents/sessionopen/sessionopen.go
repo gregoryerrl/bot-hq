@@ -1,16 +1,19 @@
 // Package sessionopen builds the session-open payload served by
-// GET /api/session-open?project=X&agent=Y. The payload bundles the four
+// GET /api/session-open?project=X&agent=Y. The payload bundles the
 // session-init artifacts an agent needs at start:
 //
 //   - overview:       project overview markdown (README.md or projects/<p>/overview.md)
-//   - bootstrap:      last-session bootstrap.md (frontmatter + body)
 //   - rules_resolved: deep-merged general → project → agent rules
 //   - tasks:          tasks.md frontmatter + body
 //
 // Per design-spike §2.2: hard cap 5K tokens; soft target 2K; truncation
-// from tail with marker. This package is harness-agnostic — adapters
-// (claude_adapter / emma) format the payload for their respective
-// SessionStart hook surfaces.
+// from tail with marker. This package is harness-agnostic — claude_adapter
+// formats the payload for the Claude SessionStart hook surface.
+//
+// Phase X-1 (post-V cleanup): removed the bootstrap section. Phase V
+// already removed the bootstrap-writer; this surface stopped serving the
+// frozen bootstrap.md to agents at session-start. The replacement is the
+// per-pivot bot_hq_context_load tool (internal/contextload).
 package sessionopen
 
 import (
@@ -19,7 +22,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gregoryerrl/bot-hq/internal/agents/bootstrap"
 	"github.com/gregoryerrl/bot-hq/internal/agents/tasks"
 	"github.com/gregoryerrl/bot-hq/internal/contextload"
 )
@@ -29,10 +31,9 @@ const (
 	SoftTokenCap = 2000
 	HardTokenCap = 5000
 
-	OverviewSoftCap  = 250
-	BootstrapSoftCap = 750
-	RulesSoftCap     = 1200
-	TasksSoftCap     = 600
+	OverviewSoftCap = 250
+	RulesSoftCap    = 1200
+	TasksSoftCap    = 600
 )
 
 // Payload is the JSON shape returned by /api/session-open.
@@ -40,16 +41,9 @@ type Payload struct {
 	Project       string         `json:"project"`
 	Agent         string         `json:"agent"`
 	Overview      string         `json:"overview"`
-	Bootstrap     *BootstrapView `json:"bootstrap,omitempty"`
 	RulesResolved map[string]any `json:"rules_resolved"`
 	Tasks         *TasksView     `json:"tasks,omitempty"`
 	Stats         Stats          `json:"stats"`
-}
-
-// BootstrapView is a JSON-friendly projection of bootstrap.Bootstrap.
-type BootstrapView struct {
-	Frontmatter bootstrap.Frontmatter `json:"frontmatter"`
-	Body        string                `json:"body"`
 }
 
 // TasksView is a JSON-friendly projection of tasks.File.
@@ -60,13 +54,12 @@ type TasksView struct {
 
 // Stats reports approximate token counts per section + truncation flags.
 type Stats struct {
-	OverviewTokens  int  `json:"overview_tokens"`
-	BootstrapTokens int  `json:"bootstrap_tokens"`
-	RulesTokens     int  `json:"rules_tokens"`
-	TasksTokens     int  `json:"tasks_tokens"`
-	TotalTokens     int  `json:"total_tokens"`
-	Truncated       bool `json:"truncated"`
-	OverHardCap     bool `json:"over_hard_cap"`
+	OverviewTokens int  `json:"overview_tokens"`
+	RulesTokens    int  `json:"rules_tokens"`
+	TasksTokens    int  `json:"tasks_tokens"`
+	TotalTokens    int  `json:"total_tokens"`
+	Truncated      bool `json:"truncated"`
+	OverHardCap    bool `json:"over_hard_cap"`
 }
 
 // Build assembles the session-open payload for project + agent against
@@ -84,15 +77,6 @@ func Build(canonRoot, project, agent string) (*Payload, error) {
 		return nil, fmt.Errorf("overview: %w", err)
 	}
 	p.Overview, p.Stats.OverviewTokens = truncate(overview, OverviewSoftCap)
-
-	// Bootstrap.
-	if bs, err := bootstrap.Read(canonRoot, project); err != nil {
-		return nil, fmt.Errorf("bootstrap: %w", err)
-	} else if bs != nil {
-		body, btoks := truncate(bs.Body, BootstrapSoftCap)
-		p.Bootstrap = &BootstrapView{Frontmatter: bs.Frontmatter, Body: body}
-		p.Stats.BootstrapTokens = btoks
-	}
 
 	// Rules resolved — uses the same Layer-2 loader as the per-pivot
 	// context_load MCP tool (internal/contextload). Eliminates the
@@ -120,7 +104,7 @@ func Build(canonRoot, project, agent string) (*Payload, error) {
 		p.Stats.TasksTokens = ttoks
 	}
 
-	p.Stats.TotalTokens = p.Stats.OverviewTokens + p.Stats.BootstrapTokens + p.Stats.RulesTokens + p.Stats.TasksTokens
+	p.Stats.TotalTokens = p.Stats.OverviewTokens + p.Stats.RulesTokens + p.Stats.TasksTokens
 	if p.Stats.TotalTokens > HardTokenCap {
 		p.Stats.OverHardCap = true
 	}

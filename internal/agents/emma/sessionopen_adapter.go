@@ -7,7 +7,9 @@
 //   - drop full rules_resolved body (Emma is poll-only-emit-only; only
 //     role + heartbeat-cadence lines matter)
 //   - drop tasks body (Emma doesn't execute tasks)
-//   - keep overview + compressed bootstrap (cross-restart resume)
+//   - keep overview only (cross-restart resume happens via R20 last_state.json
+//     + R16 bootstrap from active phase-doc / ratchet ledger / hub backlog —
+//     no separate bootstrap.md surface in the post-Phase-V world)
 //   - target ~800 tokens total vs Claude's ~2000
 package emma
 
@@ -35,29 +37,6 @@ func FormatSessionOpen(p *sessionopen.Payload) string {
 	if p.Overview != "" {
 		first := firstParagraph(p.Overview, 60)
 		fmt.Fprintf(&b, "Project: %s\n", strings.TrimSpace(first))
-	}
-
-	// Bootstrap — frontmatter only (no body — gemma context too tight).
-	if p.Bootstrap != nil {
-		fm := p.Bootstrap.Frontmatter
-		var parts []string
-		if fm.LastSessionID != "" {
-			parts = append(parts, "last="+fm.LastSessionID)
-		}
-		if fm.PhaseOrMilestone != "" {
-			parts = append(parts, "phase="+fm.PhaseOrMilestone)
-		}
-		if fm.KeyState != "" {
-			parts = append(parts, "state="+truncate(fm.KeyState, 80))
-		}
-		if fm.WriteTrigger == "stale" {
-			parts = append(parts, "trigger=STALE")
-		} else if fm.WriteTrigger != "" {
-			parts = append(parts, "trigger="+fm.WriteTrigger)
-		}
-		if len(parts) > 0 {
-			fmt.Fprintf(&b, "Bootstrap: %s\n", strings.Join(parts, "; "))
-		}
 	}
 
 	// Rules — extract only role + heartbeat-relevant exec subset (not full map).

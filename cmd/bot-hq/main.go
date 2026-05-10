@@ -194,15 +194,12 @@ func runHub() {
 		log.Printf("[autostart] webui DISABLED via BOT_HQ_WEBUI_DISABLE=1")
 	}
 
-	// 5c. Phase V architecture: bootstrap timer loop removed. The CL is the
-	// durable state; agents read it on-demand via the context_load tool
-	// (internal/contextload) when pivoting to a project. Per-agent state
-	// (last_state.json) is event-written by the agents themselves at
-	// scope-affecting boundaries (commits, halts, phase transitions),
-	// not on a timer. The bootstrap.md file class is now absent-by-default;
-	// sessionopen handler degrades gracefully when missing (BootstrapView
-	// omitted from payload). Removed: runBootstrapDefensiveLoop +
-	// BOT_HQ_BOOTSTRAP_DISABLE env override.
+	// 5c. Phase V/X-1 architecture: bootstrap timer loop and bootstrap.md
+	// surface fully removed. The CL is the durable state; agents read it
+	// on-demand via the context_load tool (internal/contextload) when
+	// pivoting to a project. Per-agent state (last_state.json) is
+	// event-written by the agents themselves at scope-affecting boundaries
+	// (commits, halts, phase transitions), not on a timer.
 
 	// 6. Start Discord bot if configured (Phase R R4 multi-channel support;
 	// either legacy ChannelID OR Phase R HubChannelID populated suffices).

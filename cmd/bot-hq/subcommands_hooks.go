@@ -122,9 +122,10 @@ func runInstallVoiceMirrorHook() {
 // hook into the trio agent's Claude settings.json. The installed hook
 // command invokes `bot-hq session-open` at session-start, which fetches
 // the daemon's /api/session-open and prints markdown the harness
-// prepends as system-prompt context (overview + bootstrap + resolved
-// rules + tasks). Idempotent + non-clobbering, mirroring
-// runInstallTrioHook + runInstallToolgateHook + runInstallVoiceMirrorHook.
+// prepends as system-prompt context (overview + resolved rules + tasks;
+// the bootstrap.md surface was removed in X-1). Idempotent +
+// non-clobbering, mirroring runInstallTrioHook + runInstallToolgateHook +
+// runInstallVoiceMirrorHook.
 //
 // Usage:
 //
@@ -161,7 +162,7 @@ func runInstallSessionStartHook() {
 	}
 	fmt.Printf("SessionStart hook installed in %s\n", settingsPath)
 	fmt.Printf("Hook command: %s\n", sessionstarthook.SettingsHookCommand(botHQPath))
-	fmt.Printf("Hook fires at Claude SessionStart and prepends bot-hq session-open output (overview + bootstrap + resolved rules + tasks) as system-prompt context.\n")
+	fmt.Printf("Hook fires at Claude SessionStart and prepends bot-hq session-open output (overview + resolved rules + tasks) as system-prompt context.\n")
 	fmt.Printf("Project context: $BOT_HQ_PROJECT env var (authoritative); falls back to cwd-inference / 'bot-hq' default.\n")
 	fmt.Printf("Agent context: $BOT_HQ_AGENT env var; falls back to 'brian'.\n")
 	fmt.Printf("Hook activation requires Claude session-restart (settings.json not hot-reloaded mid-session per Phase L Finding-3).\n")

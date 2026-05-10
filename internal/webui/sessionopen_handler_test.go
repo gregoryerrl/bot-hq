@@ -9,9 +9,9 @@ import (
 )
 
 // TestHandleSessionOpen_endToEnd asserts the /api/session-open endpoint
-// returns a fully-populated payload with all 4 sections (overview, bootstrap,
-// rules_resolved, tasks) when the supporting files exist on disk. This is
-// the v3.x-2 cross-cutting smoketest exercising C1-C7 simultaneously.
+// returns a fully-populated payload with overview, rules_resolved, and tasks
+// when the supporting files exist on disk. The bootstrap.md surface was
+// removed in Phase X-1 (post-Phase-V cleanup).
 func TestHandleSessionOpen_endToEnd(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "README.md"), "# bot-hq\n\nTrio orchestration.\n")
@@ -29,8 +29,6 @@ func TestHandleSessionOpen_endToEnd(t *testing.T) {
 		"role: HANDS\nexec:\n  pushClass: gated\n")
 
 	mustMkdir(t, filepath.Join(root, "projects", "bot-hq"))
-	mustWrite(t, filepath.Join(root, "projects", "bot-hq", "bootstrap.md"),
-		"---\nlast_session_id: bs1\nphase_or_milestone: phase-n-v3.x-2\nkey_state: testing session-open\nwrite_trigger: graceful\n---\n\nLast session details.\n")
 	mustWrite(t, filepath.Join(root, "projects", "bot-hq", "tasks.md"),
 		"---\ntasks:\n  - id: t1\n    title: Wire session-open\n    status: in_progress\n    owner: brian\n---\n\nTask body.\n")
 
@@ -55,15 +53,6 @@ func TestHandleSessionOpen_endToEnd(t *testing.T) {
 	overview, _ := payload["overview"].(string)
 	if !strings.Contains(overview, "Trio orchestration") {
 		t.Errorf("overview missing: %q", overview)
-	}
-
-	bs, ok := payload["bootstrap"].(map[string]any)
-	if !ok {
-		t.Fatalf("bootstrap missing or wrong type: %v", payload["bootstrap"])
-	}
-	fm, _ := bs["frontmatter"].(map[string]any)
-	if fm["last_session_id"] != "bs1" {
-		t.Errorf("bootstrap.frontmatter.last_session_id = %v", fm["last_session_id"])
 	}
 
 	rules, ok := payload["rules_resolved"].(map[string]any)
@@ -104,7 +93,7 @@ func TestHandleSessionOpen_missingFiles(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["bootstrap"] != nil {
-		t.Errorf("missing bootstrap should be nil; got %v", payload["bootstrap"])
+	if payload["tasks"] != nil {
+		t.Errorf("missing tasks should be nil; got %v", payload["tasks"])
 	}
 }

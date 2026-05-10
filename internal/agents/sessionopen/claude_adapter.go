@@ -24,34 +24,6 @@ func FormatClaude(p *Payload) string {
 		b.WriteString("\n\n")
 	}
 
-	if p.Bootstrap != nil {
-		b.WriteString("## Bootstrap (last session)\n\n")
-		fm := p.Bootstrap.Frontmatter
-		if fm.LastSessionID != "" {
-			fmt.Fprintf(&b, "**Last session:** `%s` ", fm.LastSessionID)
-		}
-		if !fm.LastSessionCloseAt.IsZero() {
-			fmt.Fprintf(&b, "(closed %s)", fm.LastSessionCloseAt.UTC().Format(time.RFC3339))
-		}
-		if fm.PhaseOrMilestone != "" {
-			fmt.Fprintf(&b, "\n**Phase:** %s", fm.PhaseOrMilestone)
-		}
-		if fm.KeyState != "" {
-			fmt.Fprintf(&b, "\n**Key state:** %s", fm.KeyState)
-		}
-		if fm.WriteTrigger == "stale" {
-			b.WriteString("\n\n> WARNING: bootstrap is stale (>24h since last session-close).")
-		}
-		if fm.WriteTrigger != "" && fm.WriteTrigger != "graceful" {
-			fmt.Fprintf(&b, "\n*Write trigger:* %s", fm.WriteTrigger)
-		}
-		b.WriteString("\n\n")
-		if strings.TrimSpace(p.Bootstrap.Body) != "" {
-			b.WriteString(strings.TrimSpace(p.Bootstrap.Body))
-			b.WriteString("\n\n")
-		}
-	}
-
 	if len(p.RulesResolved) > 0 {
 		b.WriteString("## Resolved rules (general → project → agent)\n\n```yaml\n")
 		out, _ := yaml.Marshal(p.RulesResolved)

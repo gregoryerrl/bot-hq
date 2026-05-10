@@ -9,17 +9,17 @@ import (
 )
 
 // handleSessionOpen responds to GET /api/session-open?project=X&agent=Y with
-// the session-open payload (overview + bootstrap + rules_resolved + tasks +
-// stats). Per Phase N v3.x-2 design-spike §2.2.
+// the session-open payload (overview + rules_resolved + tasks + stats).
+// Per Phase N v3.x-2 design-spike §2.2 (bootstrap section removed in X-1).
 //
 // Query params:
 //
 //	project  optional; defaults to "bot-hq"
 //	agent    optional; if set, agent layer merges into rules_resolved.agent
 //
-// The endpoint never errors on missing files (overview/bootstrap/tasks all
-// return empty); it errors only on yaml-parse failures or filesystem
-// permission denials. Token-bound flags surface in payload.stats.
+// The endpoint never errors on missing files (overview/tasks return empty);
+// it errors only on yaml-parse failures or filesystem permission denials.
+// Token-bound flags surface in payload.stats.
 func (s *Server) handleSessionOpen(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
