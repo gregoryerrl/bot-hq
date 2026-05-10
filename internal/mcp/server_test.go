@@ -85,6 +85,7 @@ func TestToolsRegistered(t *testing.T) {
 		"claude_resume",
 		"claude_stop",
 		"bot_hq_context_load",
+		"bot_hq_agent_bootstrap",
 		"hub_session_finalize",
 		"hub_session_lookback",
 		"hub_session_summary",

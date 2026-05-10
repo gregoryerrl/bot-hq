@@ -155,6 +155,19 @@ func (db *DB) MessageExists(id int64) (bool, error) {
 	return exists == 1, nil
 }
 
+// CurrentMaxMsgID returns the largest message id in hub.messages (0 when
+// the table is empty). Z-0 callers (brian.Start, rain.Start) use it to
+// initialize lastMsgID to "now-forward" semantics so the first poll-tick
+// does NOT replay backlog — durable resume-state comes from the CL
+// bootstrap (see contextload.LoadBootstrap), not from the message stream.
+func (db *DB) CurrentMaxMsgID() (int64, error) {
+	var maxID sql.NullInt64
+	if err := db.conn.QueryRow(`SELECT MAX(id) FROM messages`).Scan(&maxID); err != nil {
+		return 0, fmt.Errorf("query max msg id: %w", err)
+	}
+	return maxID.Int64, nil
+}
+
 // IncrementRebuildGen reads hub_rebuild_gen from settings, increments it by
 // one, persists, and returns the new generation number. Called once at hub
 // startup (NewHub).

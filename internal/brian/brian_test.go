@@ -578,23 +578,42 @@ func TestBrianPromptContainsAsymmetricPivot(t *testing.T) {
 	}
 }
 
-// TestBrianStartupBootstrapIterate locks the H-19 caller-side iterate
-// discipline into STARTUP step 1. Without iteration, large backlogs
-// (post-rebuild, post-idle) silently truncate at 50; the agent acts on
-// a partial mental model. Substrings ratchet the iterate-pattern + the
-// convention-doc pointer.
-func TestBrianStartupBootstrapIterate(t *testing.T) {
+// TestBrianStartupCLFirstBootstrap locks the Z-0 CL-first bootstrap
+// discipline into STARTUP step 1 per vision.md. Replaces the prior
+// H-19 bootstrap-iterate test (removed in Z-0): under the new model
+// agents bootstrap from durable CL state via bot_hq_agent_bootstrap,
+// not from hub_read backlog iteration. Substrings ratchet:
+//   - the bootstrap tool name (canonical entrypoint)
+//   - the project + agent param shape ("brian")
+//   - the explicit NO-BACKLOG-SCRAPE prohibition (anti-regression)
+//   - the vision.md citation (architectural anchor)
+func TestBrianStartupCLFirstBootstrap(t *testing.T) {
 	b := &Brian{}
 	prompt := b.initialPrompt()
 	want := []string{
-		"iterate with `since_id = last_msg.id`",
-		"empty batch",
-		"hub_read caps at 50",
-		"docs/conventions/bootstrap-iterate.md",
+		"bot_hq_agent_bootstrap",
+		`agent="brian"`,
+		"NO BACKLOG SCRAPE",
+		"vision.md",
+		"agents are stateless",
+		"CL is durable",
 	}
 	for _, w := range want {
 		if !strings.Contains(prompt, w) {
-			t.Errorf("initial prompt must contain H-19 bootstrap-iterate literal %q", w)
+			t.Errorf("initial prompt must contain Z-0 CL-first bootstrap literal %q", w)
+		}
+	}
+
+	// Anti-regression: the OLD H-19 backlog-iterate language must NOT
+	// reappear. If it does, somebody reverted Z-0 without flipping the
+	// test pair — fail loudly.
+	mustNotContain := []string{
+		"iterate with `since_id = last_msg.id`",
+		"hub_read caps at 50",
+	}
+	for _, w := range mustNotContain {
+		if strings.Contains(prompt, w) {
+			t.Errorf("Z-0 regression: initial prompt still contains pre-Z-0 backlog-iterate literal %q", w)
 		}
 	}
 }

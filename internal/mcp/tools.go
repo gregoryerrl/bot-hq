@@ -117,6 +117,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubSessionSummary(),
 		hubClearHalt(db),
 		hubContextLoad(),
+		hubAgentBootstrap(),
 		hubIPIVOpen(),
 		hubIPIVTransition(),
 		hubIPIVSetArtifact(),

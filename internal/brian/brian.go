@@ -121,10 +121,17 @@ func (b *Brian) Start() error {
 	// through Sink.Deliver which holds the same mu). Phase I W2 Layer-2 (c).
 	b.sink = tmuxsink.New(hub.NewTmuxSinkStore(b.db), agentID, b.tmuxSession)
 
-	// lastMsgID stays at zero. The first poll-tick uses ReadMessages's tail
-	// semantics (sinceID<=0 → latest N) to replay recent backlog through the
-	// nudge filter chain, so a freshly-booted Brian re-grounds in arc context
-	// rather than starting blind to anything posted before restart.
+	// Z-0 CL-first bootstrap (vision.md "agents are stateless; CL is
+	// durable"): seed lastMsgID with hub's current MAX(id) so the first
+	// poll-tick does NOT replay the backlog. Resume-state comes from
+	// the agent's CL bootstrap call (bot_hq_agent_bootstrap → phase
+	// doc + ratchets + last_state.json + discipline-anchors), not from
+	// scraping ephemeral hub messages (rain restart-noise, emma stale-
+	// coder warnings, etc.). Live messages from now-forward continue
+	// to flow normally via processNewMessages.
+	if maxID, err := b.db.CurrentMaxMsgID(); err == nil {
+		b.lastMsgID = maxID
+	}
 	b.running = true
 
 	// Start background polling
@@ -271,7 +278,9 @@ func (b *Brian) InitialPromptForTest() string { return b.initialPrompt() }
 func (b *Brian) initialPrompt() string {
 	return `You are Brian (agent ID "brian"), the bot-hq orchestrator. Agents: Clive (voice, ID "clive"), Rain (QA, ID "rain").
 
-STARTUP: 1) hub_read to catch up — iterate with ` + "`since_id = last_msg.id`" + ` until an empty batch returns (hub_read caps at 50 per call; do NOT trust a single call to surface a large backlog; see ` + "`docs/conventions/bootstrap-iterate.md`" + `). 2) hub_flag anything needing user attention (startup carve-out: Rain not yet registered, self-flag is implicit per H-2). 3) hub_register id="brian", name="Brian", type="brian". 4) Announce online. 5) On first scope-affecting turn for a project (default: bot-hq), call mcp__bot-hq__bot_hq_context_load with project=<key> to load Layer-2 context (merged rules + project library overview). Re-call when pivoting to another project. Phase V architecture: replaces auto-bootstrap-snapshot reads with explicit on-demand context loads.
+STARTUP (Z-0 CL-first per vision.md "agents are stateless; CL is durable"): 1) Call mcp__bot-hq__bot_hq_agent_bootstrap with project="bot-hq", agent="brian" — returns the durable substrate snapshot (merged rules + project library + active phase doc + ratchets/active.md + last_state.json + discipline-anchors.md). This is your resume context. 2) hub_register id="brian", name="Brian", type="brian". 3) hub_flag anything in the bootstrap snapshot needing immediate user attention (startup carve-out: Rain not yet registered, self-flag is implicit per H-2). 4) Announce online via hub_send broadcast. When pivoting to a different project, re-call bot_hq_agent_bootstrap with that project key.
+
+NO BACKLOG SCRAPE: Do NOT iterate hub_read for catch-up at startup. The CL bootstrap snapshot carries durable state; live messages flow via the daemon's polling forwarder going forward. If you need a specific past message after bootstrap, hub_read with a precise since_id from your last_state.json — do not iterate the whole backlog.
 
 REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cutoff watermark — silently discard any incoming hub message with msg.ID <= current_max_msg_id (post-rebuild boot-replay; not fresh traffic). Apply the filter for the duration of this session.
 

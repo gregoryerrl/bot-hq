@@ -343,3 +343,50 @@ func hubContextLoad() ToolDef {
 
 	return ToolDef{Tool: tool, Handler: handler}
 }
+
+// hubAgentBootstrap is the Z-0 CL-first bootstrap tool. Returns the full
+// durable-substrate snapshot the agent needs on resume per vision.md
+// three-layer model (knowledge + discipline + state):
+//   - merged rules (general → project → agent)
+//   - project library overview + index
+//   - phase/<active>.md (active scope-lock doc)
+//   - ratchets/active.md (operational ratchet ledger)
+//   - <agent>/last_state.json (R20 AgentState resume anchor)
+//   - <agent>/discipline-anchors.md (R24 mutual-halt anchor)
+//
+// Replaces the prior "STARTUP: iterate hub_read until empty" backlog-scrape
+// pattern. Agents bootstrap from CL (durable substrate), not from
+// hub-message ephemera. See internal/contextload.LoadBootstrap.
+func hubAgentBootstrap() ToolDef {
+	tool := mcp.NewTool("bot_hq_agent_bootstrap",
+		mcp.WithDescription("Bootstrap an agent from CL durable state per vision.md. Returns merged rules + project library + active phase doc + ratchets/active.md + per-agent last_state.json + discipline-anchors.md. Call once at session start in lieu of hub_read backlog iteration."),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project key (matches projects/<key>.yaml in canonical-store)")),
+		mcp.WithString("agent", mcp.Required(), mcp.Description("Agent identity (brian/rain/emma) — selects per-agent rule layer + state files")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project, err := req.RequireString("project")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		agent, err := req.RequireString("agent")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("resolve home dir: %v", err)), nil
+		}
+		canonRoot := filepath.Join(home, ".bot-hq")
+
+		bc, err := contextload.LoadBootstrap(canonRoot, project, agent)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("bootstrap load failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(bc.Markdown()), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}

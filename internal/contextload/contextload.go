@@ -209,3 +209,151 @@ func quoteIfNeeded(s string) string {
 	}
 	return s
 }
+
+// BootstrapContext extends Context with the durable CL substrate fields
+// agents need on resume. Per vision.md ("Agents are stateless; CL is
+// durable"): the active phase scope-lock doc, ratchets ledger, per-agent
+// last_state.json, and discipline-anchors.md together carry resume-state
+// — replacing the prior "iterate hub_read until empty" backlog scrape.
+type BootstrapContext struct {
+	*Context
+	Agent             string // agent identity (brian/rain/emma); empty if not requested
+	PhaseDoc          string // contents of phase/<active>.md or "" if absent
+	PhaseDocPath      string // path of the active phase doc (newest mtime under phase/)
+	Ratchets          string // contents of ratchets/active.md
+	LastState         string // contents of <agent>/last_state.json (raw JSON)
+	DisciplineAnchors string // contents of <agent>/discipline-anchors.md
+}
+
+// LoadBootstrap loads the full CL bootstrap context per vision.md three-
+// layer model (knowledge + discipline + state). Equivalent to
+// LoadWithAgent (rules + project library) plus the per-agent resume
+// anchors:
+//   - phase/<active>.md — newest mtime under phase/ (active scope-lock doc)
+//   - ratchets/active.md — operational ratchet ledger
+//   - <agent>/last_state.json — R20 AgentState resume anchor
+//   - <agent>/discipline-anchors.md — R24 mutual-halt anchor
+//
+// Missing files are treated as empty. Use Markdown() on the returned
+// value for agent-consumption rendering.
+func LoadBootstrap(canonRoot, project, agent string) (*BootstrapContext, error) {
+	base, err := LoadWithAgent(canonRoot, project, agent)
+	if err != nil {
+		return nil, err
+	}
+	bc := &BootstrapContext{Context: base, Agent: agent}
+
+	if path, body := findActivePhaseDoc(canonRoot); path != "" {
+		bc.PhaseDoc = body
+		bc.PhaseDocPath = path
+		bc.Sources = append(bc.Sources, path)
+	}
+
+	rpath := filepath.Join(canonRoot, "ratchets", "active.md")
+	if data, err := os.ReadFile(rpath); err == nil {
+		bc.Ratchets = string(data)
+		bc.Sources = append(bc.Sources, rpath)
+	}
+
+	if agent != "" {
+		lspath := filepath.Join(canonRoot, agent, "last_state.json")
+		if data, err := os.ReadFile(lspath); err == nil {
+			bc.LastState = string(data)
+			bc.Sources = append(bc.Sources, lspath)
+		}
+		dapath := filepath.Join(canonRoot, agent, "discipline-anchors.md")
+		if data, err := os.ReadFile(dapath); err == nil {
+			bc.DisciplineAnchors = string(data)
+			bc.Sources = append(bc.Sources, dapath)
+		}
+	}
+
+	return bc, nil
+}
+
+// findActivePhaseDoc returns (path, body) of the newest phase-*.md under
+// canonRoot/phase/. Returns ("", "") if no phase doc exists. Newest by
+// mtime so closed-phase snapshots don't shadow the live one.
+func findActivePhaseDoc(canonRoot string) (string, string) {
+	dir := filepath.Join(canonRoot, "phase")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", ""
+	}
+	var newestPath string
+	var newestMtime time.Time
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newestMtime) {
+			newestMtime = info.ModTime()
+			newestPath = filepath.Join(dir, e.Name())
+		}
+	}
+	if newestPath == "" {
+		return "", ""
+	}
+	data, err := os.ReadFile(newestPath)
+	if err != nil {
+		return "", ""
+	}
+	return newestPath, string(data)
+}
+
+// Markdown renders the BootstrapContext as a single markdown blob with
+// the durable-substrate sections appended after the standard project
+// context. Stable section ordering for cache + diff determinism.
+func (bc *BootstrapContext) Markdown() string {
+	var b strings.Builder
+
+	b.WriteString(bc.Context.Markdown())
+
+	if bc.Agent != "" {
+		fmt.Fprintf(&b, "\n## Bootstrap context (agent=%s)\n\n", bc.Agent)
+		b.WriteString("_Per vision.md: agents are stateless; CL is durable. The sections below carry resume-state in lieu of hub-message backlog scraping._\n\n")
+	}
+
+	if bc.PhaseDoc != "" {
+		fmt.Fprintf(&b, "### Active phase doc — `%s`\n\n", bc.PhaseDocPath)
+		b.WriteString(bc.PhaseDoc)
+		if !strings.HasSuffix(bc.PhaseDoc, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if bc.Ratchets != "" {
+		b.WriteString("### Active ratchets — `ratchets/active.md`\n\n")
+		b.WriteString(bc.Ratchets)
+		if !strings.HasSuffix(bc.Ratchets, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	if bc.LastState != "" {
+		fmt.Fprintf(&b, "### Last state — `%s/last_state.json`\n\n", bc.Agent)
+		b.WriteString("```json\n")
+		b.WriteString(bc.LastState)
+		if !strings.HasSuffix(bc.LastState, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("```\n\n")
+	}
+
+	if bc.DisciplineAnchors != "" {
+		fmt.Fprintf(&b, "### Discipline anchors — `%s/discipline-anchors.md`\n\n", bc.Agent)
+		b.WriteString(bc.DisciplineAnchors)
+		if !strings.HasSuffix(bc.DisciplineAnchors, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}

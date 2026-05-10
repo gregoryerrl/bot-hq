@@ -338,6 +338,13 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// identity is incidental.
 		"bot_hq_context_load": "loads per-project context by project key; caller-identity not needed",
 
+		// Z-0 CL-first agent bootstrap: takes explicit project + agent
+		// parameters, returning the durable-substrate snapshot per
+		// vision.md (rules + library + phase-doc + ratchets + per-agent
+		// state). Replaces the prior hub_read backlog-iterate pattern.
+		// Caller's identity is supplied as an explicit `agent` arg.
+		"bot_hq_agent_bootstrap": "Z-0: explicit (project, agent) params drive the load; no implicit caller-identity required",
+
 		// Phase W session-finalize: closes active session-cluster manifest
 		// for a project. Project-keyed not agent-keyed — the manifest
 		// represents work-scope, not per-agent state. Outcome narrative

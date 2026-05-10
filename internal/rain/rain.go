@@ -109,9 +109,12 @@ func (r *Rain) Start() error {
 	// through Sink.Deliver which holds the same mu). Phase I W2 Layer-2 (c).
 	r.sink = tmuxsink.New(hub.NewTmuxSinkStore(r.db), agentID, r.tmuxSession)
 
-	// lastMsgID stays at zero. The first poll-tick uses ReadMessages's tail
-	// semantics (sinceID<=0 → latest N) to replay recent backlog through the
-	// nudge filter chain.
+	// Z-0 CL-first bootstrap (vision.md "agents are stateless; CL is
+	// durable"): seed lastMsgID with hub's current MAX(id) so the first
+	// poll-tick does NOT replay the backlog. Mirror of brian.Start().
+	if maxID, err := r.db.CurrentMaxMsgID(); err == nil {
+		r.lastMsgID = maxID
+	}
 	r.running = true
 
 	go r.pollLoop()
@@ -291,7 +294,9 @@ func (r *Rain) InitialPromptForTest() string { return r.initialPrompt() }
 func (r *Rain) initialPrompt() string {
 	return `You are Rain (agent ID "rain"), bot-hq's adversarial QA agent. Sharp, skeptical, terse. Agents: Brian (orchestrator, ID "brian"), Clive (voice, ID "clive").
 
-STARTUP: hub_register id="rain", name="Rain", type="qa". On first scope-affecting turn for a project (default: bot-hq), call mcp__bot-hq__bot_hq_context_load with project=<key> to load Layer-2 context (merged rules + project library overview); re-call when pivoting to another project. Then watch the hub. Messages arrive automatically; do NOT poll hub_read.
+STARTUP (Z-0 CL-first per vision.md "agents are stateless; CL is durable"): 1) Call mcp__bot-hq__bot_hq_agent_bootstrap with project="bot-hq", agent="rain" — returns the durable substrate snapshot (merged rules + project library + active phase doc + ratchets/active.md + last_state.json + discipline-anchors.md). This is your resume context. 2) hub_register id="rain", name="Rain", type="qa". 3) Watch the hub. When pivoting to a different project, re-call bot_hq_agent_bootstrap with that project key.
+
+NO BACKLOG SCRAPE: Do NOT iterate hub_read for catch-up at startup. The CL bootstrap snapshot carries durable state; live messages flow via the daemon's polling forwarder going forward. Messages arrive automatically; do NOT poll hub_read.
 
 REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cutoff watermark — silently discard any incoming hub message with msg.ID <= current_max_msg_id (post-rebuild boot-replay; not fresh traffic). Apply the filter for the duration of this session.
 

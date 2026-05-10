@@ -140,6 +140,36 @@ func TestInitialPromptContainsOutboundContract(t *testing.T) {
 	}
 }
 
+// TestRainStartupCLFirstBootstrap mirrors brian_test.go's Z-0 lock.
+// Rain bootstraps the same way per vision.md: bot_hq_agent_bootstrap
+// returns the durable substrate; no hub_read backlog iteration.
+func TestRainStartupCLFirstBootstrap(t *testing.T) {
+	r := &Rain{}
+	prompt := r.initialPrompt()
+	want := []string{
+		"bot_hq_agent_bootstrap",
+		`agent="rain"`,
+		"NO BACKLOG SCRAPE",
+		"vision.md",
+		"agents are stateless",
+		"CL is durable",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("initial prompt must contain Z-0 CL-first bootstrap literal %q", w)
+		}
+	}
+	mustNotContain := []string{
+		"iterate with `since_id = last_msg.id`",
+		"hub_read caps at 50",
+	}
+	for _, w := range mustNotContain {
+		if strings.Contains(prompt, w) {
+			t.Errorf("Z-0 regression: initial prompt still contains pre-Z-0 backlog-iterate literal %q", w)
+		}
+	}
+}
+
 // Ratchet against regression: the prompt must embed the canonical
 // DiscV2OutboundRule const verbatim. Mirror of brian_test.go's
 // TestInitialPromptEmbedsDiscV2OutboundRule. The const itself is
