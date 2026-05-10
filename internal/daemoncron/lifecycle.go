@@ -16,10 +16,10 @@ package daemoncron
 //      (health-fail-pre-restart)
 //   4. RosterPrune — gemma.go:709 stale-offline agent cleanup notice
 //
-// Dual-emit prevention (interpretation (ii)): gemma's emit-call-sites
-// check g.isDaemoncronOnline() — when true, delegate to daemoncron's
-// helpers; when false, fall through to existing gemma-side emit
-// (back-compat / pre-S-1a behavior).
+// Phase-S-followup: gemma's emit-call-sites delegate unconditionally
+// to the helpers below. The legacy daemoncronOnline feature-flag and
+// gemma-side fallback paths were removed once daemoncron became the
+// canonical destination.
 
 import (
 	"fmt"

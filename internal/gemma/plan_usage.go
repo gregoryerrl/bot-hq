@@ -35,11 +35,6 @@ const planUsageResetThreshold = 0.85
 // maxUtil hovers in the [0.90, 0.95) band.
 const planUsagePreSnapThreshold = 0.90
 
-// planCapPreSnapCooldown caps emitPreCompactSnap to once per window. Same
-// pattern as planCapResumeCooldown — bounded suppress of poll-cycle spam
-// when maxUtil hovers near threshold.
-const planCapPreSnapCooldown = 5 * time.Minute
-
 // planCapPreSnapFmt is the locked content substring for [PRE-COMPACT-SNAP]
 // emit. Format: structured payload telling agents to checkpoint AgentState
 // + emit hub_session_close-style SNAP if mid-substantive-work. Recipient
@@ -295,40 +290,16 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 // hits. Observed root cause: 200+ accumulated wakes fired at 1/min today
 // because oscillating maxUtil scheduled one wake per oscillation cycle.
 func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
-	// Phase S S-1a-3: when daemoncron is online, delegate emit + halt-
-	// state-clear to daemoncron's package-scoped helpers (interpretation
-	// (ii) per Rain msg 15796 PUSH-BACK A). Cancel-pending-wakes path
-	// stays gemma-side since it depends on gemma's wake-schedule
-	// machinery (DB-bound but gemma-owned API).
-	if g.isDaemoncronOnline() {
-		daemoncron.EmitPlanCapResume(g.db, now, pct)
-		daemoncron.ClearPlanCapHaltActive()
-		for _, target := range []string{"brian", "rain"} {
-			if n, err := g.db.CancelPendingWakesForTargetByPayloadPrefix(target, "[RESUME]"); err != nil {
-				log.Printf("[plan-cap] cancel pending RESUME wakes for %s failed: %v", target, err)
-			} else if n > 0 {
-				log.Printf("[plan-cap] cancelled %d pending RESUME wakes for %s (auto-clear path emitted via daemoncron)", n, target)
-			}
-		}
-		return
-	}
-	content := fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, pct))
+	// Phase-S-followup: emit + halt-state-clear go through daemoncron
+	// unconditionally. Cancel-pending-wakes stays gemma-side since it
+	// depends on gemma's wake-schedule machinery (DB-bound, gemma-owned API).
+	daemoncron.EmitPlanCapResume(g.db, now, pct)
+	daemoncron.ClearPlanCapHaltActive()
 	for _, target := range []string{"brian", "rain"} {
-		if _, err := g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			ToAgent:   target,
-			Type:      protocol.MsgCommand,
-			Content:   content,
-			Created:   now,
-		}); err != nil {
-			log.Printf("[plan-cap] resume nudge insert failed for %s: %v", target, err)
-		}
-		// Cancel any pending future RESUME wakes for this target — they're
-		// now redundant (we just emitted via the auto-clear path).
 		if n, err := g.db.CancelPendingWakesForTargetByPayloadPrefix(target, "[RESUME]"); err != nil {
 			log.Printf("[plan-cap] cancel pending RESUME wakes for %s failed: %v", target, err)
 		} else if n > 0 {
-			log.Printf("[plan-cap] cancelled %d pending RESUME wakes for %s (auto-clear path emitted)", n, target)
+			log.Printf("[plan-cap] cancelled %d pending RESUME wakes for %s (auto-clear path emitted via daemoncron)", n, target)
 		}
 	}
 }
@@ -342,34 +313,9 @@ func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
 // hovers in [0.90, 0.95) band. Cooldown stamp is per-Gemma-instance
 // (lastPreCompactSnapAt field, mu-protected via planUsageMu).
 func (g *Gemma) emitPreCompactSnap(now time.Time, pct int) {
-	// Phase S S-1a-3: delegate to daemoncron when online (interpretation
-	// (ii) dual-emit-prevention). Daemoncron tracks its own cooldown
-	// state; gemma's cooldown is bypassed in delegate path.
-	if g.isDaemoncronOnline() {
-		daemoncron.EmitPreCompactSnap(g.db, now, pct)
-		return
-	}
-	g.planUsageMu.Lock()
-	coolingDown := !g.lastPreCompactSnapAt.IsZero() && now.Sub(g.lastPreCompactSnapAt) < planCapPreSnapCooldown
-	if !coolingDown {
-		g.lastPreCompactSnapAt = now
-	}
-	g.planUsageMu.Unlock()
-	if coolingDown {
-		return
-	}
-	content := fmt.Sprintf(planCapPreSnapFmt, pct)
-	for _, target := range []string{"brian", "rain"} {
-		if _, err := g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			ToAgent:   target,
-			Type:      protocol.MsgUpdate,
-			Content:   content,
-			Created:   now,
-		}); err != nil {
-			log.Printf("[plan-cap] pre-compact-snap insert failed for %s: %v", target, err)
-		}
-	}
+	// Phase-S-followup: pre-compact-snap goes through daemoncron
+	// unconditionally. Daemoncron tracks its own cooldown state.
+	daemoncron.EmitPreCompactSnap(g.db, now, pct)
 }
 
 // handlePlanUsageError applies the documented backoff policy. Auth-fail

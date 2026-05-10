@@ -18,10 +18,10 @@ package daemoncron
 // carry-forward as Phase-S-followup-2-plan-usage-polling-migration
 // class. Per Rain msg 15799 sub-commit-plan scope (~150-200 LOC).
 //
-// Dual-emit prevention: gemma's emitPreCompactSnap / emitPlanCapResume
-// / 95%-halt emit-paths check g.isDaemoncronOnline() — when true, the
-// fire delegates to daemoncron's helper functions defined here. State
-// (cooldown, dedupe) tracked in daemoncron package-scoped vars.
+// Phase-S-followup: gemma's emitPreCompactSnap / emitPlanCapResume /
+// 95%-halt emit-paths delegate unconditionally to the helper functions
+// defined here. State (cooldown, dedupe) tracked in daemoncron
+// package-scoped vars.
 
 import (
 	"fmt"

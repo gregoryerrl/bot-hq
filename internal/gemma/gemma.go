@@ -146,35 +146,6 @@ type Gemma struct {
 	flagHistory map[string]time.Time
 	flagWindow  []time.Time
 
-	// Phase H slice 3 C4 (H-3a Shape γ) stale-detection state. paneBaseline
-	// tracks the previous tick's tmux #{pane_last_activity} per agent so the
-	// next tick can decide "any pane output since last observation?". Mutex
-	// guards both the map and the paneActivity injection point.
-	//
-	// Phase H slice 4 C7 (H-3a hysteresis lean-(b)): staleFlagTracker remembers
-	// the LastSeen value at the moment of the most recent stale-coder flag for
-	// each agent. Re-firing is suppressed until LastSeen advances past that
-	// value — semantically tighter than the prior 30min window, since a stale
-	// agent doesn't spontaneously un-stale (re-firing every 30min is pure
-	// noise; the meaningful event is "agent came back, then went stale again",
-	// which the advance check captures). Per Rain C3.5 finding (msg 3801):
-	// observed ~60min duplicate-fire was 30min hysteresis + 3/hr rate cap
-	// interaction; lean (b) replaces the hysteresis gate for stale-coder
-	// specifically. Halt-state suppression at checkStaleAgentsAt entry still
-	// takes precedence; advance-check operates only when halt is inactive.
-	staleMu          sync.Mutex
-	paneBaseline     map[string]int64
-	paneActivity     paneActivityFn
-	staleFlagTracker map[string]time.Time
-
-	// Phase J T2.4 (B5b roster-prune cadence throttle): time-windowed
-	// emit cap on stale-coder PMs to suppress spam during AFK windows
-	// where the LastSeen-advance gate (lean (b)) releases on every
-	// re-registration heartbeat but agent remains effectively idle.
-	// staleEmitTimes[agentID] = ordered list of emit timestamps in last
-	// staleEmitWindow; cap at staleEmitMaxPerWindow.
-	staleEmitTimes map[string][]time.Time
-
 	// Phase H slice 3 C5 (H-25 roster hygiene) state. lastPruneAt is read+
 	// written only from healthLoop so no mutex needed; zero value means
 	// "never pruned this run", which triggers a first-tick prune.
@@ -207,18 +178,6 @@ type Gemma struct {
 	// emits to once per planCapResumeCooldown window.
 	lastPlanCapResumeAt time.Time
 
-	// Phase J T2.2-α (B1a pre-compact-snap proactive checkpoint): cooldown
-	// timer suppresses repeated emitPreCompactSnap calls when maxUtil
-	// hovers in [planUsagePreSnapThreshold, planUsageThreshold) band.
-	// Same pattern as lastPlanCapResumeAt; mu-protected via planUsageMu.
-	lastPreCompactSnapAt time.Time
-
-	// Phase J T2.3 (B1b structured-state ledger heartbeat): tracks the
-	// hub-message-id at last heartbeat fire so cadence is msg-count-
-	// driven (every heartbeatMsgInterval messages) rather than wall-clock.
-	heartbeatMu        sync.Mutex
-	lastHeartbeatMsgID int64
-
 	// Phase J tail-2 (K-1 RESUME-spam fix): in-memory transition tracking
 	// for plan-cap halt state. Side-effects (MsgFlag emit, wake-schedule
 	// insertion, RESUME emit) gate on transitions, not raw threshold-
@@ -245,15 +204,6 @@ type Gemma struct {
 	egressBaseline     map[string]egressBaselineEntry
 	egressFlagTracker  map[string]struct{}
 	egressPaneCapture  egressPaneCaptureFn
-
-	// Phase S S-1a-1 dual-emit-prevention flag. Set true via
-	// SetDaemoncronOnline once internal/daemoncron Cron has Started;
-	// gemma emit-call-sites short-circuit when true so daemoncron is
-	// the sole fire-path for migrated surfaces. Per Rain msg 15796
-	// PUSH-BACK A interpretation (ii). Per-surface migration is staged;
-	// gemma emit fns check this flag at the top of their fire path.
-	daemoncronMu     sync.RWMutex
-	daemoncronOnline bool
 
 	// Phase-S-followup-1 F1-4 (ε) honest-rewrite: emma-as-rule-enforcer
 	// functional substrate. Mechanical pattern-match-only (preserves
@@ -400,18 +350,9 @@ func (g *Gemma) Start() error {
 	// MCP-routed inserts arrive via sentinelPollLoop's tick.
 	g.replayThroughSentinel()
 
-	// Phase S S-1a-4: lifecycle online emit — delegate to daemoncron
-	// when online (interpretation (ii) dual-emit-prevention). Pre-S-1a
-	// path emits gemma-side directly.
-	if g.isDaemoncronOnline() {
-		daemoncron.EmitOnline(g.db, g.model)
-	} else {
-		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			Type:      protocol.MsgUpdate,
-			Content:   fmt.Sprintf("Emma online. Model: %s", g.model),
-		})
-	}
+	// Phase-S-followup: lifecycle online emit goes through daemoncron
+	// unconditionally.
+	daemoncron.EmitOnline(g.db, g.model)
 
 	return nil
 }
@@ -661,24 +602,11 @@ func (g *Gemma) healthLoop() {
 			healthy := g.client.IsHealthy(ctx)
 			cancel()
 			if !healthy {
-				// Phase S S-1a-4: delegate health-check-fail emit to
-				// daemoncron when online (interpretation (ii)).
-				if g.isDaemoncronOnline() {
-					daemoncron.EmitOllamaHealthCheckFail(g.db)
-				} else {
-					g.db.InsertMessage(protocol.Message{
-						FromAgent: agentID,
-						Type:      protocol.MsgError,
-						Content:   "Ollama health check failed. Attempting restart...",
-					})
-				}
+				// Phase-S-followup: health-check-fail emit goes through
+				// daemoncron unconditionally.
+				daemoncron.EmitOllamaHealthCheckFail(g.db)
 				g.restartOllama()
 			}
-			// Phase H slice 3 C4: piggyback stale-coder detection on the
-			// healthLoop tick (30s) — no new ticker, cadence well below the
-			// 5min staleThreshold so the two-tick baseline + flag pattern
-			// detects a frozen pane within ~5min30s of the threshold trip.
-			g.checkStaleAgents()
 			// Phase H slice 3 C5: piggyback roster prune at hourly cadence.
 			g.runRosterPrune()
 			// Phase H slice 4 C6 (H-31): scan panestate for context-cap
@@ -690,78 +618,6 @@ func (g *Gemma) healthLoop() {
 			// SQL scan + flag-tracker dedupe; cheap enough not to need
 			// its own ticker.
 			g.auditDeliveryGap()
-			// Phase J T2.3 (B1b structured-state ledger heartbeat):
-			// every-N-msgs cadence emit of state-anchor pointers. Caps
-			// summary-fragmentation drift between phase-close events by
-			// keeping ratchet-ledger reachable from recent hub history.
-			g.runHeartbeatLedger()
-		}
-	}
-}
-
-// heartbeatMsgInterval — Phase J T2.3 (B1b). Heartbeat fires when
-// cumulative hub-message count has advanced ≥ N since the last fire.
-// N=25 candidate per phase-j.md§T2.3 — small enough to keep state
-// reachable in 30+ msg context windows, large enough that low-traffic
-// sessions don't generate gratuitous heartbeats.
-const heartbeatMsgInterval = 25
-
-// SetDaemoncronOnline toggles the Phase S S-1a-1 dual-emit-prevention
-// flag. main.go calls this true once internal/daemoncron has Started;
-// affected gemma emit-call-sites (currently runHeartbeatLedger; future
-// commits expand) short-circuit when true so daemoncron owns the fire
-// path. Per Rain msg 15796 PUSH-BACK A interpretation (ii).
-func (g *Gemma) SetDaemoncronOnline(online bool) {
-	g.daemoncronMu.Lock()
-	defer g.daemoncronMu.Unlock()
-	g.daemoncronOnline = online
-}
-
-// isDaemoncronOnline reads the dual-emit-prevention flag under the
-// RWMutex. Used at the top of migrated emit-call-sites.
-func (g *Gemma) isDaemoncronOnline() bool {
-	g.daemoncronMu.RLock()
-	defer g.daemoncronMu.RUnlock()
-	return g.daemoncronOnline
-}
-
-// runHeartbeatLedger emits a [HEARTBEAT-LEDGER] update to brian + rain
-// at heartbeatMsgInterval cadence. Content: state anchors (latest
-// commit SHA placeholder, active phase-doc path, ratchet-ledger path).
-// Same defense-in-depth role as B1(v) CLAUDE.md Compact Instructions
-// (static) and R20 BOOTSTRAP-ON-CONVERSATION-RESUME (reactive) — this
-// is regular-cadence reinforcement.
-//
-// Phase S S-1a-1: when daemoncron is online, this fn short-circuits
-// — daemoncron's heartbeat-ledger surface owns the fire path so
-// dual-emit is prevented. Pre-daemoncron / daemoncron-disabled paths
-// keep gemma as the sole emitter (back-compat).
-func (g *Gemma) runHeartbeatLedger() {
-	if g.isDaemoncronOnline() {
-		return
-	}
-	recent, err := g.db.GetRecentMessages(1)
-	if err != nil || len(recent) == 0 {
-		return
-	}
-	latestID := recent[0].ID
-	g.heartbeatMu.Lock()
-	if latestID-g.lastHeartbeatMsgID < heartbeatMsgInterval {
-		g.heartbeatMu.Unlock()
-		return
-	}
-	g.lastHeartbeatMsgID = latestID
-	g.heartbeatMu.Unlock()
-
-	content := fmt.Sprintf("[HEARTBEAT-LEDGER] msg-count cadence cycle (every %d msgs). State anchors: phase-doc=~/.bot-hq/phase/<active>.md ratchet-ledger=~/.bot-hq/ratchets/active.md latest-msg-id=%d. R20 AgentState write opportunity.", heartbeatMsgInterval, latestID)
-	for _, target := range []string{"brian", "rain"} {
-		if _, err := g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			ToAgent:   target,
-			Type:      protocol.MsgUpdate,
-			Content:   content,
-		}); err != nil {
-			log.Printf("[heartbeat-ledger] insert failed for %s: %v", target, err)
 		}
 	}
 }
@@ -793,18 +649,9 @@ func (g *Gemma) runRosterPrune() {
 	if len(ids) == 0 {
 		return
 	}
-	// Phase S S-1a-4: delegate roster-prune emit to daemoncron when
-	// online (interpretation (ii) dual-emit-prevention).
-	if g.isDaemoncronOnline() {
-		daemoncron.EmitRosterPrune(g.db, ids)
-	} else {
-		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			ToAgent:   "rain",
-			Type:      protocol.MsgUpdate,
-			Content:   fmt.Sprintf("[ROSTER-PRUNE] Removed %d stale-offline agent rows (last_seen >24h): %s", len(ids), strings.Join(ids, ", ")),
-		})
-	}
+	// Phase-S-followup: roster-prune emit goes through daemoncron
+	// unconditionally.
+	daemoncron.EmitRosterPrune(g.db, ids)
 }
 
 // replayBacklog is the number of recent hub messages Emma re-classifies
@@ -1324,16 +1171,8 @@ func (g *Gemma) restartOllama() {
 	g.ollamaCmd.Stdout = nil
 	g.ollamaCmd.Stderr = nil
 	if err := g.ollamaCmd.Start(); err != nil {
-		// Phase S S-1a-4: delegate restart-fail emit to daemoncron.
-		if g.isDaemoncronOnline() {
-			daemoncron.EmitOllamaRestartFail(g.db, err)
-		} else {
-			g.db.InsertMessage(protocol.Message{
-				FromAgent: agentID,
-				Type:      protocol.MsgError,
-				Content:   fmt.Sprintf("Ollama restart failed: %v", err),
-			})
-		}
+		// Phase-S-followup: restart-fail emit unconditional via daemoncron.
+		daemoncron.EmitOllamaRestartFail(g.db, err)
 		return
 	}
 
@@ -1341,26 +1180,10 @@ func (g *Gemma) restartOllama() {
 	defer cancel()
 	if g.waitForHealth(ctx) {
 		g.db.UpdateAgentStatus(agentID, protocol.StatusOnline, "")
-		// Phase S S-1a-4: delegate restart-success emit.
-		if g.isDaemoncronOnline() {
-			daemoncron.EmitOllamaRestartSuccess(g.db)
-		} else {
-			g.db.InsertMessage(protocol.Message{
-				FromAgent: agentID,
-				Type:      protocol.MsgUpdate,
-				Content:   "Ollama restarted successfully.",
-			})
-		}
+		// Phase-S-followup: restart-success emit unconditional via daemoncron.
+		daemoncron.EmitOllamaRestartSuccess(g.db)
 	} else {
-		// Phase S S-1a-4: delegate restart-timeout emit.
-		if g.isDaemoncronOnline() {
-			daemoncron.EmitOllamaRestartTimeout(g.db)
-		} else {
-			g.db.InsertMessage(protocol.Message{
-				FromAgent: agentID,
-				Type:      protocol.MsgError,
-				Content:   "Ollama restart: health check timed out.",
-			})
-		}
+		// Phase-S-followup: restart-timeout emit unconditional via daemoncron.
+		daemoncron.EmitOllamaRestartTimeout(g.db)
 	}
 }

@@ -6,16 +6,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/panestate"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
-// newContextCapGemma builds an isolated Gemma + temp-DB pair with the
-// stale-detect path neutralized so tests focused on H-31 are not coupled to
-// the H-3a hysteresis state machine.
+// newContextCapGemma builds an isolated Gemma + temp-DB pair. Resets
+// daemoncron's package-scoped plan-usage state so tests don't leak
+// cooldown/halt-flag state across runs.
 func newContextCapGemma(t *testing.T) (*Gemma, *hub.DB) {
 	t.Helper()
+	daemoncron.ResetPlanUsageStateForTest()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := hub.OpenDB(dbPath)
 	if err != nil {
@@ -156,47 +158,6 @@ func TestH31ResetBelow85Rearms(t *testing.T) {
 
 	if got := countContextCapFlags(t, db); got != 2 {
 		t.Errorf("expected 2 flags after reset+rearm cycle, got %d", got)
-	}
-}
-
-// TestHaltSuppressesH3aStaleFire — halt active + agent stale-by-last_seen +
-// silent pane → no [STALE-CODER] PM. Locks the H-3a early-return added in
-// C6 (per BRAIN P1 fold).
-func TestHaltSuppressesH3aStaleFire(t *testing.T) {
-	g, db := newContextCapGemma(t)
-
-	target := "test:0.5"
-	if err := db.RegisterAgent(protocol.Agent{
-		ID:     "coder-during-halt",
-		Name:   "Halted",
-		Type:   protocol.AgentCoder,
-		Status: protocol.StatusOnline,
-		Meta:   `{"tmux_target":"` + target + `"}`,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SetHaltActive(hub.HaltCauseContextCap, "test halt", "emma"); err != nil {
-		t.Fatal(err)
-	}
-
-	// Pane checker that, if reached, would normally produce a flag (silent
-	// across ticks). The halt-state early-return must short-circuit before
-	// the pane checker is consulted.
-	called := false
-	g.paneActivity = func(string) (int64, error) {
-		called = true
-		return 1000, nil
-	}
-
-	virtualNow := time.Now().Add(staleThreshold + time.Minute)
-	g.checkStaleAgentsAt(virtualNow)
-	g.checkStaleAgentsAt(virtualNow.Add(30 * time.Second))
-
-	if called {
-		t.Errorf("paneActivity must not be consulted while halt_state is active")
-	}
-	if got := countStaleCoderMsgs(t, db); got != 0 {
-		t.Errorf("halt_state must suppress all H-3a stale-fires; got %d PMs", got)
 	}
 }
 

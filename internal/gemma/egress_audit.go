@@ -3,6 +3,7 @@ package gemma
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,21 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 )
+
+// metaTmuxTarget extracts the tmux_target field from an agent's Meta JSON.
+// Returns empty string when Meta is empty, unparseable, or omits the key.
+func metaTmuxTarget(meta string) string {
+	if meta == "" {
+		return ""
+	}
+	var m struct {
+		TmuxTarget string `json:"tmux_target"`
+	}
+	if err := json.Unmarshal([]byte(meta), &m); err != nil {
+		return ""
+	}
+	return m.TmuxTarget
+}
 
 // egressGapTickThreshold is how many consecutive monitorLoop ticks the
 // pane-advanced-no-hub-msg condition must persist before emitting an
@@ -143,16 +159,9 @@ func (g *Gemma) auditEgressGapAt(now time.Time) {
 				if len(snippet) > 120 {
 					snippet = snippet[:120] + "…"
 				}
-				// Phase S S-1a-5: delegate egress-audit emit to daemoncron.
-				if g.isDaemoncronOnline() {
-					daemoncron.EmitEgressAudit(g.db, a.ID, gapTicks, snippet)
-				} else {
-					g.db.InsertMessage(protocol.Message{
-						FromAgent: agentID,
-						Type:      protocol.MsgUpdate,
-						Content:   fmt.Sprintf("[EGRESS-GAP] agent %s pane advanced over %d ticks but no hub_send. Last line: %q", a.ID, gapTicks, snippet),
-					})
-				}
+				// Phase-S-followup: egress-audit emit goes through
+				// daemoncron unconditionally.
+				daemoncron.EmitEgressAudit(g.db, a.ID, gapTicks, snippet)
 			}
 		}
 

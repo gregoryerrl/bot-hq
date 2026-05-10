@@ -131,13 +131,10 @@ func runHub() {
 	}
 	defer h.Stop()
 
-	// Phase S S-1a-1: daemoncron — daemon-side cadence-driven hub
-	// emits replicating gemma surfaces (heartbeat-ledger this commit;
-	// stale-coder / plan-usage / context-cap / delivery-gap / egress-
-	// audit / lifecycle / sentinel in subsequent S-1a-N sub-commits).
-	// Per Rain msg 15796 PUSH-BACK A interpretation (ii) dual-emit-
-	// prevention: gemma emit-call-sites short-circuit when daemoncron
-	// is online (wired below post-emma-Start via SetDaemoncronOnline).
+	// Phase-S-followup: daemoncron — daemon-side cadence-driven hub
+	// emits. Owns heartbeat-ledger, stale-coder, plan-usage / context-cap /
+	// delivery-gap / egress-audit / lifecycle / ollama emit fires.
+	// Gemma drives the detection loops + delegates emits unconditionally.
 	dc := daemoncron.NewWithDefaults(h.DB)
 	if err := dc.Start(); err != nil {
 		log.Printf("[autostart] daemoncron FAILED: %v", err)
@@ -311,12 +308,6 @@ func runHub() {
 			// to Emma via her own boot-time replay + the live tick path is
 			// not needed (sentinel is purely event-driven).
 			h.DB.OnMessage(emmaAgent.OnHubMessage)
-			// Phase S S-1a-1: signal emma-side that daemoncron is online
-			// so gemma's heartbeat-ledger emit-call-site short-circuits
-			// (interpretation (ii) dual-emit-prevention per Rain msg 15796).
-			if dc != nil && dc.IsRunning() {
-				emmaAgent.SetDaemoncronOnline(true)
-			}
 			defer emmaAgent.Stop()
 		}
 	}

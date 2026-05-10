@@ -16,10 +16,8 @@ package daemoncron
 // surface; cite-from-actual scope-correction noted in commit-body
 // + S-close housekeeping.
 //
-// Dual-emit prevention via gemma feature-flag delegate (interpretation
-// (ii) per Rain msg 15796 PUSH-BACK A): each gemma emit-call-site
-// short-circuits when daemoncronOnline + delegates to daemoncron's
-// helpers below.
+// Phase-S-followup: gemma's emit-call-sites delegate unconditionally
+// to the helpers below.
 
 import (
 	"fmt"
