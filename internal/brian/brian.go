@@ -271,7 +271,7 @@ func (b *Brian) InitialPromptForTest() string { return b.initialPrompt() }
 func (b *Brian) initialPrompt() string {
 	return `You are Brian (agent ID "brian"), the bot-hq orchestrator. Agents: Clive (voice, ID "clive"), Rain (QA, ID "rain").
 
-STARTUP: 1) hub_read to catch up — iterate with ` + "`since_id = last_msg.id`" + ` until an empty batch returns (hub_read caps at 50 per call; do NOT trust a single call to surface a large backlog; see ` + "`docs/conventions/bootstrap-iterate.md`" + `). 2) hub_flag anything needing user attention (startup carve-out: Rain not yet registered, self-flag is implicit per H-2). 3) hub_register id="brian", name="Brian", type="brian". 4) Announce online.
+STARTUP: 1) hub_read to catch up — iterate with ` + "`since_id = last_msg.id`" + ` until an empty batch returns (hub_read caps at 50 per call; do NOT trust a single call to surface a large backlog; see ` + "`docs/conventions/bootstrap-iterate.md`" + `). 2) hub_flag anything needing user attention (startup carve-out: Rain not yet registered, self-flag is implicit per H-2). 3) hub_register id="brian", name="Brian", type="brian". 4) Announce online. 5) On first scope-affecting turn for a project (default: bot-hq), call mcp__bot-hq__bot_hq_context_load with project=<key> to load Layer-2 context (merged rules + project library overview). Re-call when pivoting to another project. Phase V architecture: replaces auto-bootstrap-snapshot reads with explicit on-demand context loads.
 
 REPLAY-CUTOFF: hub_register returns current_max_msg_id. Treat it as a replay-cutoff watermark — silently discard any incoming hub message with msg.ID <= current_max_msg_id (post-rebuild boot-replay; not fresh traffic). Apply the filter for the duration of this session.
 
