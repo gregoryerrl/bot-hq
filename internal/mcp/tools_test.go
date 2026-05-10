@@ -344,6 +344,11 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// captures workflow-quality observation; auto-extracts structured
 		// fields (commits, files, decisions) from hub messages + git log.
 		"hub_session_finalize": "closes session-cluster manifest by project key; rich payload extracted automatically",
+
+		// Phase W session-lookback: read-only retrospective query keyed by
+		// session_id. No caller-identity dimension — anyone reading should
+		// get the same view.
+		"hub_session_lookback": "renders retrospective markdown by session_id; read-only; caller-identity not needed",
 	}
 
 	db := setupTestDB(t)

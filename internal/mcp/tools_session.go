@@ -489,3 +489,33 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 
 	return ToolDef{Tool: tool, Handler: handler}
 }
+
+// hubSessionLookback returns a markdown retrospective rendering of a
+// session-cluster manifest. Audience is the trio (brian/rain/emma) —
+// optimized format leads with outcome narrative + structured fields
+// so retro is fast to scan.
+//
+// Phase W sessions hardening 2026-05-10.
+func hubSessionLookback() ToolDef {
+	tool := mcp.NewTool("hub_session_lookback",
+		mcp.WithDescription("Retrospective markdown for a session-cluster manifest. Optimized for trio consumption — outcome narrative + structured fields (decisions, commits, files) + raw body. Use to scan a single past session for patterns, decisions, friction points."),
+		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session cluster ID (e.g., 2026-05-10-bot-hq, 2026-05-10-bcc-ad-manager-2)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		sessionID, err := req.RequireString("session_id")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		md, err := sessions.Lookback(sessionID)
+		if err != nil {
+			if sessions.LookbackErrIsMissing(err) {
+				return mcp.NewToolResultError(fmt.Sprintf("session not found: %s", sessionID)), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("lookback %s: %v", sessionID, err)), nil
+		}
+		return mcp.NewToolResultText(md), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
