@@ -16,6 +16,14 @@ import (
 
 func setupTestDB(t *testing.T) *hub.DB {
 	t.Helper()
+	// R39 TEST-ISOLATION: hub_register and hub_session_create write
+	// session-cluster manifests under SessionsDir() when project is
+	// supplied. Override the sessions root so MCP tests don't pollute
+	// the real CL under ~/.bot-hq/sessions/. (Pre-W: TestHubRegister
+	// with project="/projects/test" leaked nested manifest dirs into
+	// the real CL across many test runs.)
+	t.Setenv("BOT_HQ_SESSIONS_DIR", t.TempDir())
+
 	path := filepath.Join(t.TempDir(), "test.db")
 	db, err := hub.OpenDB(path)
 	if err != nil {

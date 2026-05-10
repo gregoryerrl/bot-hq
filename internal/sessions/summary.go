@@ -44,11 +44,13 @@ func SummarizeDate(date time.Time) (string, error) {
 		byProject[m.Project] = append(byProject[m.Project], m)
 	}
 
-	// Compute totals
+	// Compute totals from actually-readable manifests; counts that
+	// claim N when only N-1 are renderable would be misleading.
 	var totalCommits, totalFiles, totalDecisions int
-	var closedCount int
+	var closedCount, readableCount int
 	for _, ms := range byProject {
 		for _, m := range ms {
+			readableCount++
 			totalCommits += len(m.CommitsLanded)
 			totalFiles += len(m.FilesTouched)
 			totalDecisions += len(m.Decisions)
@@ -61,7 +63,10 @@ func SummarizeDate(date time.Time) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Session summary: %s\n\n", prefix)
 	fmt.Fprintf(&b, "**Sessions:** %d (across %d projects, %d closed / %d still active)\n",
-		len(dayIDs), len(byProject), closedCount, len(dayIDs)-closedCount)
+		readableCount, len(byProject), closedCount, readableCount-closedCount)
+	if skipped := len(dayIDs) - readableCount; skipped > 0 {
+		fmt.Fprintf(&b, "_(%d session director%s skipped — manifest unreadable)_\n", skipped, plural(skipped, "y", "ies"))
+	}
 	fmt.Fprintf(&b, "**Total commits landed:** %d\n", totalCommits)
 	fmt.Fprintf(&b, "**Total files touched (sum, may double-count across sessions):** %d\n", totalFiles)
 	fmt.Fprintf(&b, "**Total decisions captured:** %d\n\n", totalDecisions)
@@ -188,4 +193,13 @@ func MigrateStaleActive(cutoff time.Time) ([]string, error) {
 		migrated = append(migrated, id)
 	}
 	return migrated, nil
+}
+
+// plural returns sing for n=1, plur otherwise. Tiny helper for "1 entry"
+// vs "N entries" pluralization in summary diagnostics.
+func plural(n int, sing, plur string) string {
+	if n == 1 {
+		return sing
+	}
+	return plur
 }
