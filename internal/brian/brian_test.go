@@ -453,7 +453,7 @@ func TestPhaseIv1ContentShape(t *testing.T) {
 		// Phase J T1.7 addition
 		"MSG-TYPE-TAXONOMY",
 		// Phase J T2.2 addition
-		"PRE-COMPACT-SNAP",
+		"PRE-HALT-SNAP",
 		// Phase J T2.3 addition
 		"HEARTBEAT-LEDGER",
 	}

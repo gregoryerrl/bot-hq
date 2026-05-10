@@ -245,7 +245,7 @@ const (
 	MsgClassObservation MessageClass = "observation"
 
 	// MsgClassSystemFlag — emma's auto-emissions: HEARTBEAT-LEDGER /
-	// PRE-COMPACT-SNAP / STALE-CODER / RESUME / [FLAG:emma] halt-fires.
+	// PRE-HALT-SNAP / STALE-CODER / RESUME / [FLAG:emma] halt-fires.
 	// System-state pulses, not directives. NOT auth.
 	MsgClassSystemFlag MessageClass = "system-flag"
 )

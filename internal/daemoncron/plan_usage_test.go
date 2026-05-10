@@ -8,10 +8,10 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
-func TestBuildPreCompactSnapContent_Format(t *testing.T) {
-	got := BuildPreCompactSnapContent(92)
-	if !strings.HasPrefix(got, "[PRE-COMPACT-SNAP]") {
-		t.Errorf("missing [PRE-COMPACT-SNAP] prefix; got %q", got)
+func TestBuildPreHaltSnapContent_Format(t *testing.T) {
+	got := BuildPreHaltSnapContent(92)
+	if !strings.HasPrefix(got, "[PRE-HALT-SNAP]") {
+		t.Errorf("missing [PRE-HALT-SNAP] prefix; got %q", got)
 	}
 	if !strings.Contains(got, "92%") {
 		t.Errorf("content should embed 92%%; got %q", got)
@@ -47,19 +47,19 @@ func TestBuildPlanCapCriticalContent_Format(t *testing.T) {
 	}
 }
 
-func TestEmitPreCompactSnap_FiresFirstCall(t *testing.T) {
+func TestEmitPreHaltSnap_FiresFirstCall(t *testing.T) {
 	ResetPlanUsageStateForTest()
 	db := setupTestDB(t)
 	now := time.Now()
 
-	if !EmitPreCompactSnap(db, now, 92) {
+	if !EmitPreHaltSnap(db, now, 92) {
 		t.Error("first call should fire (cooldown not active)")
 	}
 
 	msgs, _ := db.GetRecentMessages(50)
 	count := 0
 	for _, m := range msgs {
-		if m.FromAgent == planUsageAgentID && strings.HasPrefix(m.Content, "[PRE-COMPACT-SNAP]") {
+		if m.FromAgent == planUsageAgentID && strings.HasPrefix(m.Content, "[PRE-HALT-SNAP]") {
 			count++
 		}
 	}
@@ -68,39 +68,39 @@ func TestEmitPreCompactSnap_FiresFirstCall(t *testing.T) {
 	}
 }
 
-func TestEmitPreCompactSnap_CooldownSuppression(t *testing.T) {
+func TestEmitPreHaltSnap_CooldownSuppression(t *testing.T) {
 	ResetPlanUsageStateForTest()
 	db := setupTestDB(t)
 	now := time.Now()
 
-	_ = EmitPreCompactSnap(db, now, 92)
+	_ = EmitPreHaltSnap(db, now, 92)
 	// Second call within 5min cooldown should suppress.
-	if EmitPreCompactSnap(db, now.Add(2*time.Minute), 93) {
+	if EmitPreHaltSnap(db, now.Add(2*time.Minute), 93) {
 		t.Error("second call within cooldown should suppress")
 	}
 }
 
-func TestEmitPreCompactSnap_CooldownExpires(t *testing.T) {
+func TestEmitPreHaltSnap_CooldownExpires(t *testing.T) {
 	ResetPlanUsageStateForTest()
 	db := setupTestDB(t)
 	now := time.Now()
 
-	_ = EmitPreCompactSnap(db, now, 92)
+	_ = EmitPreHaltSnap(db, now, 92)
 	// After cooldown expires, fire again.
-	if !EmitPreCompactSnap(db, now.Add(6*time.Minute), 93) {
+	if !EmitPreHaltSnap(db, now.Add(6*time.Minute), 93) {
 		t.Error("call past cooldown should fire")
 	}
 }
 
-func TestEmitPreCompactSnap_RecipientsBoth(t *testing.T) {
+func TestEmitPreHaltSnap_RecipientsBoth(t *testing.T) {
 	ResetPlanUsageStateForTest()
 	db := setupTestDB(t)
-	_ = EmitPreCompactSnap(db, time.Now(), 92)
+	_ = EmitPreHaltSnap(db, time.Now(), 92)
 
 	msgs, _ := db.GetRecentMessages(50)
 	recipients := map[string]bool{}
 	for _, m := range msgs {
-		if m.FromAgent == planUsageAgentID && strings.HasPrefix(m.Content, "[PRE-COMPACT-SNAP]") {
+		if m.FromAgent == planUsageAgentID && strings.HasPrefix(m.Content, "[PRE-HALT-SNAP]") {
 			recipients[m.ToAgent] = true
 		}
 	}

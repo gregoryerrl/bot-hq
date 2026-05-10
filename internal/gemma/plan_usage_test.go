@@ -476,9 +476,9 @@ func TestPlanCapFireOnFiveHourOnly(t *testing.T) {
 }
 
 // TestPlanCapNoFireOnWeeklyOver — five_hour at 70%% + seven_day at 96%%
-// emits zero halt + zero pre-compact-snap. Mirror of
+// emits zero halt + zero pre-halt-snap. Mirror of
 // TestPlanCapWeeklyOverThresholdNoFire on the standard seven_day window
-// + asserts no R22 PRE-COMPACT-SNAP MsgUpdate either.
+// + asserts no R22 PRE-HALT-SNAP MsgUpdate either.
 func TestPlanCapNoFireOnWeeklyOver(t *testing.T) {
 	g, db := newContextCapGemma(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
@@ -504,8 +504,8 @@ func TestPlanCapNoFireOnWeeklyOver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-COMPACT-SNAP]") {
-			t.Errorf("weekly-only over-threshold must not emit [PRE-COMPACT-SNAP]; got %+v", m)
+		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
+			t.Errorf("weekly-only over-threshold must not emit [PRE-HALT-SNAP]; got %+v", m)
 		}
 	}
 }
@@ -673,10 +673,10 @@ func TestPlanCapPayloadMirrorSymmetry(t *testing.T) {
 	}
 }
 
-// TestPreCompactSnapEmitAtThreshold (Phase J T2.2-α B1a) — emits
-// [PRE-COMPACT-SNAP] to brian + rain when maxUtil hits the proactive
-// pre-snap threshold (0.90+) but is below halt (0.95).
-func TestPreCompactSnapEmitAtThreshold(t *testing.T) {
+// TestPreHaltSnapEmitAtThreshold (Phase J T2.2-α B1a) — emits
+// [PRE-HALT-SNAP] to brian + rain when maxUtil hits the proactive
+// pre-halt threshold (0.90+) but is below halt (0.95).
+func TestPreHaltSnapEmitAtThreshold(t *testing.T) {
 	g, db := newContextCapGemma(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
@@ -693,25 +693,25 @@ func TestPreCompactSnapEmitAtThreshold(t *testing.T) {
 	}
 	preSnaps := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-COMPACT-SNAP]") {
+		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
 			preSnaps++
 		}
 	}
 	// Expected: 1 emit cycle × 2 recipients = 2 msgs.
 	if preSnaps != 2 {
-		t.Errorf("expected 2 [PRE-COMPACT-SNAP] msgs (brian + rain), got %d", preSnaps)
+		t.Errorf("expected 2 [PRE-HALT-SNAP] msgs (brian + rain), got %d", preSnaps)
 	}
 
-	// halt_state must NOT be active (we're in pre-snap band, below halt threshold).
+	// halt_state must NOT be active (we're in pre-halt band, below halt threshold).
 	if _, ok, _ := db.GetHaltCause(hub.HaltCausePlanCap); ok {
-		t.Errorf("plan-cap halt must NOT fire in pre-snap band 0.90-0.95")
+		t.Errorf("plan-cap halt must NOT fire in pre-halt band 0.90-0.95")
 	}
 }
 
-// TestPreCompactSnapCooldown (Phase J T2.2-α) — locks the cooldown gate.
-// Two polls in succession, both at pre-snap threshold, must yield ONE
+// TestPreHaltSnapCooldown (Phase J T2.2-α) — locks the cooldown gate.
+// Two polls in succession, both at pre-halt threshold, must yield ONE
 // emit cycle (2 msgs) — second poll suppressed by cooldown.
-func TestPreCompactSnapCooldown(t *testing.T) {
+func TestPreHaltSnapCooldown(t *testing.T) {
 	g, db := newContextCapGemma(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
@@ -730,26 +730,26 @@ func TestPreCompactSnapCooldown(t *testing.T) {
 	}
 	preSnaps := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-COMPACT-SNAP]") {
+		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
 			preSnaps++
 		}
 	}
 	// Expected: 1 emit cycle × 2 recipients = 2 msgs (NOT 4 — cooldown caps).
 	if preSnaps != 2 {
-		t.Errorf("expected 2 [PRE-COMPACT-SNAP] msgs (cooldown caps to 1 emit cycle); got %d (cooldown broken)", preSnaps)
+		t.Errorf("expected 2 [PRE-HALT-SNAP] msgs (cooldown caps to 1 emit cycle); got %d (cooldown broken)", preSnaps)
 	}
 }
 
-// TestPreCompactSnapPayloadMirrorSymmetry — runtime fmt vs registry
+// TestPreHaltSnapPayloadMirrorSymmetry — runtime fmt vs registry
 // substring set lock for R22 (mirror of TestPlanCapPayloadMirrorSymmetry).
-func TestPreCompactSnapPayloadMirrorSymmetry(t *testing.T) {
+func TestPreHaltSnapPayloadMirrorSymmetry(t *testing.T) {
 	subs := protocol.PayloadMirrorSubstrings("R22")
 	if len(subs) == 0 {
 		t.Fatal("R22 PayloadMirrorSubstrings empty — schema gap")
 	}
 	for _, s := range subs {
-		if !strings.Contains(planCapPreSnapFmt, s) {
-			t.Errorf("R22: planCapPreSnapFmt missing payload-mirror substring %q", s)
+		if !strings.Contains(planCapPreHaltFmt, s) {
+			t.Errorf("R22: planCapPreHaltFmt missing payload-mirror substring %q", s)
 		}
 	}
 }

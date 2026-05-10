@@ -3,7 +3,7 @@ package daemoncron
 // Plan-usage 3-sub-emit surface — Phase S S-1a-3.
 //
 // Migrates the 3 plan-usage emit-templates from gemma to daemoncron:
-//   1. PRE-COMPACT-SNAP — emit at 90% threshold; advise agents to
+//   1. PRE-HALT-SNAP — emit at 90% threshold; advise agents to
 //      checkpoint AgentState + emit SNAP if mid-substantive-work
 //   2. PLAN-CAP-RESUME — emit when plan-usage drops below threshold
 //      (auto-clear path); recipients resume work
@@ -18,7 +18,7 @@ package daemoncron
 // carry-forward as Phase-S-followup-2-plan-usage-polling-migration
 // class. Per Rain msg 15799 sub-commit-plan scope (~150-200 LOC).
 //
-// Phase-S-followup: gemma's emitPreCompactSnap / emitPlanCapResume /
+// Phase-S-followup: gemma's emitPreHaltSnap / emitPlanCapResume /
 // 95%-halt emit-paths delegate unconditionally to the helper functions
 // defined here. State (cooldown, dedupe) tracked in daemoncron
 // package-scoped vars.
@@ -33,10 +33,10 @@ import (
 )
 
 const (
-	// planCapPreSnapFmt — locked content substring for [PRE-COMPACT-SNAP]
+	// planCapPreHaltFmt — locked content substring for [PRE-HALT-SNAP]
 	// per gemma pre-migration; consumer-side R22 prompt-rule recognition
-	// gate matches "[PRE-COMPACT-SNAP]" prefix.
-	planCapPreSnapFmt = "[PRE-COMPACT-SNAP] plan usage at %d%%, approaching halt threshold — checkpoint AgentState (R20) + emit SNAP if mid-substantive-work to preserve resume anchors. headroom remaining before halt-fire."
+	// gate matches "[PRE-HALT-SNAP]" prefix.
+	planCapPreHaltFmt = "[PRE-HALT-SNAP] plan usage at %d%%, approaching halt threshold — checkpoint AgentState (R20) + emit SNAP if mid-substantive-work to preserve resume anchors. headroom remaining before halt-fire."
 
 	// planCapResumeFmt — locked content substring for plan-cap RESUME
 	// emit. Brian/Rain STARTUP prompts match against "plan usage reset"
@@ -48,8 +48,8 @@ const (
 	// kept consumer-recognition-compatible.
 	planCapReasonFmt = "plan usage at %d%%, halt + idle in pane"
 
-	// planCapPreSnapCooldown caps EmitPreCompactSnap to once per window.
-	planCapPreSnapCooldown = 5 * time.Minute
+	// planCapPreHaltCooldown caps EmitPreHaltSnap to once per window.
+	planCapPreHaltCooldown = 5 * time.Minute
 
 	// planUsageAgentID + recipients preserved from gemma pre-migration.
 	planUsageAgentID = "emma"
@@ -59,22 +59,22 @@ const (
 // surfaces. Package-scoped + mu-guarded since gemma calls these
 // helpers sequentially from its poll loop (single-caller-context).
 var (
-	planUsageStateMu     sync.Mutex
-	lastPreCompactSnapAt time.Time
-	planCapHaltActive    bool
+	planUsageStateMu  sync.Mutex
+	lastPreHaltSnapAt time.Time
+	planCapHaltActive bool
 )
 
-// BuildPreCompactSnapContent formats the [PRE-COMPACT-SNAP] content
+// BuildPreHaltSnapContent formats the [PRE-HALT-SNAP] content
 // for the given plan-usage pct. Pure function — no side effects;
 // callers (gemma delegate path or daemoncron emit) can read the
 // canonical format. Consumer-side R22 recognition gate matches the
-// "[PRE-COMPACT-SNAP]" prefix.
-func BuildPreCompactSnapContent(pct int) string {
-	return fmt.Sprintf(planCapPreSnapFmt, pct)
+// "[PRE-HALT-SNAP]" prefix.
+func BuildPreHaltSnapContent(pct int) string {
+	return fmt.Sprintf(planCapPreHaltFmt, pct)
 }
 
 // BuildPlanCapResumeContent formats the [RESUME] auto-clear content.
-// Same pure-function pattern as BuildPreCompactSnapContent.
+// Same pure-function pattern as BuildPreHaltSnapContent.
 func BuildPlanCapResumeContent(pct int) string {
 	return fmt.Sprintf("[RESUME] %s", fmt.Sprintf(planCapResumeFmt, pct))
 }
@@ -94,25 +94,25 @@ type dbInserter interface {
 	InsertMessage(protocol.Message) (int64, error)
 }
 
-// EmitPreCompactSnap emits the [PRE-COMPACT-SNAP] MsgUpdate to brian
-// + rain, gated by planCapPreSnapCooldown. Returns true if emit
+// EmitPreHaltSnap emits the [PRE-HALT-SNAP] MsgUpdate to brian
+// + rain, gated by planCapPreHaltCooldown. Returns true if emit
 // fired; false if cooldown suppressed.
 //
 // Cadence migration deferred — gemma polls anthropic API + calls this
 // when threshold crosses. daemoncron tracks the per-process cooldown
 // state package-scoped (single-caller-context per runtime).
-func EmitPreCompactSnap(db dbInserter, now time.Time, pct int) bool {
+func EmitPreHaltSnap(db dbInserter, now time.Time, pct int) bool {
 	planUsageStateMu.Lock()
-	coolingDown := !lastPreCompactSnapAt.IsZero() && now.Sub(lastPreCompactSnapAt) < planCapPreSnapCooldown
+	coolingDown := !lastPreHaltSnapAt.IsZero() && now.Sub(lastPreHaltSnapAt) < planCapPreHaltCooldown
 	if !coolingDown {
-		lastPreCompactSnapAt = now
+		lastPreHaltSnapAt = now
 	}
 	planUsageStateMu.Unlock()
 	if coolingDown {
 		return false
 	}
 
-	content := BuildPreCompactSnapContent(pct)
+	content := BuildPreHaltSnapContent(pct)
 	for _, target := range []string{"brian", "rain"} {
 		if _, err := db.InsertMessage(protocol.Message{
 			FromAgent: planUsageAgentID,
@@ -121,7 +121,7 @@ func EmitPreCompactSnap(db dbInserter, now time.Time, pct int) bool {
 			Content:   content,
 			Created:   now,
 		}); err != nil {
-			log.Printf("[daemoncron plan-cap pre-compact-snap] insert failed for %s: %v", target, err)
+			log.Printf("[daemoncron plan-cap pre-halt-snap] insert failed for %s: %v", target, err)
 		}
 	}
 	return true
@@ -187,6 +187,6 @@ func ClearPlanCapHaltActive() {
 func ResetPlanUsageStateForTest() {
 	planUsageStateMu.Lock()
 	defer planUsageStateMu.Unlock()
-	lastPreCompactSnapAt = time.Time{}
+	lastPreHaltSnapAt = time.Time{}
 	planCapHaltActive = false
 }

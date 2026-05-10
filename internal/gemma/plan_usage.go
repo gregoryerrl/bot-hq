@@ -27,19 +27,19 @@ const planUsageThreshold = 0.95
 // halt only re-arms after a clean drop below 0.85.
 const planUsageResetThreshold = 0.85
 
-// planUsagePreSnapThreshold is the proactive checkpoint threshold (Phase J
+// planUsagePreHaltThreshold is the proactive checkpoint threshold (Phase J
 // T2.2-α B1a). Below the halt-fire threshold (0.95) but above the reset
 // threshold (0.85) so it fires while agents still have headroom to commit
-// in-flight work + write AgentState before halt. Pre-compact-snap fires
-// once per planCapPreSnapCooldown window (5min) to prevent spam when
+// in-flight work + write AgentState before halt. Pre-halt-snap fires
+// once per planCapPreHaltCooldown window (5min) to prevent spam when
 // maxUtil hovers in the [0.90, 0.95) band.
-const planUsagePreSnapThreshold = 0.90
+const planUsagePreHaltThreshold = 0.90
 
-// planCapPreSnapFmt is the locked content substring for [PRE-COMPACT-SNAP]
+// planCapPreHaltFmt is the locked content substring for [PRE-HALT-SNAP]
 // emit. Format: structured payload telling agents to checkpoint AgentState
 // + emit hub_session_close-style SNAP if mid-substantive-work. Recipient
-// behavior governed by R22 PRE-COMPACT-SNAP rule.
-const planCapPreSnapFmt = "[PRE-COMPACT-SNAP] plan usage at %d%%, approaching halt threshold — checkpoint AgentState (R20) + emit SNAP if mid-substantive-work to preserve resume anchors. headroom remaining before halt-fire."
+// behavior governed by R22 PRE-HALT-SNAP rule.
+const planCapPreHaltFmt = "[PRE-HALT-SNAP] plan usage at %d%%, approaching halt threshold — checkpoint AgentState (R20) + emit SNAP if mid-substantive-work to preserve resume anchors. headroom remaining before halt-fire."
 
 // planUsageBaseInterval is the steady-state poll cadence (60s). Tests
 // override via SetPlanUsageNow to step the gate deterministically.
@@ -223,14 +223,14 @@ func (g *Gemma) checkPlanUsage(now time.Time) {
 		g.firePlanCapHalt(now, fiveHourPct)
 		return
 	}
-	// Phase J T2.2-α (B1a): proactive pre-compact-snap signal in
-	// [planUsagePreSnapThreshold, planUsageThreshold). Fires once per
-	// planCapPreSnapCooldown window. Cooldown suppresses spam when 5h util
+	// Phase J T2.2-α (B1a): proactive pre-halt-snap signal in
+	// [planUsagePreHaltThreshold, planUsageThreshold). Fires once per
+	// planCapPreHaltCooldown window. Cooldown suppresses spam when 5h util
 	// hovers in the band; cooldown stamp shared with resume-emit pattern
 	// (mu-protected via planUsageMu).
-	if fiveHourUtil >= planUsagePreSnapThreshold {
-		g.emitPreCompactSnap(now, fiveHourPct)
-		// Fall through — pre-snap is informational; halt + clear logic
+	if fiveHourUtil >= planUsagePreHaltThreshold {
+		g.emitPreHaltSnap(now, fiveHourPct)
+		// Fall through — pre-halt-snap is informational; halt + clear logic
 		// below still applies on the same poll if state crossed back below
 		// reset threshold (rare since we only land here when ≥ 0.90).
 	}
@@ -304,18 +304,18 @@ func (g *Gemma) emitPlanCapResume(now time.Time, pct int) {
 	}
 }
 
-// emitPreCompactSnap inserts MsgUpdate records to brian + rain telling
+// emitPreHaltSnap inserts MsgUpdate records to brian + rain telling
 // each agent to checkpoint AgentState (R20) + emit hub_session_close-style
 // SNAP if mid-substantive-work. Phase J T2.2-α (B1a). Substring
-// "[PRE-COMPACT-SNAP]" matches the R22 prompt-rule recognition gate.
+// "[PRE-HALT-SNAP]" matches the R22 prompt-rule recognition gate.
 //
-// Cooldown via planCapPreSnapCooldown (5min) suppresses spam when maxUtil
+// Cooldown via planCapPreHaltCooldown (5min) suppresses spam when maxUtil
 // hovers in [0.90, 0.95) band. Cooldown stamp is per-Gemma-instance
-// (lastPreCompactSnapAt field, mu-protected via planUsageMu).
-func (g *Gemma) emitPreCompactSnap(now time.Time, pct int) {
-	// Phase-S-followup: pre-compact-snap goes through daemoncron
+// (lastPreHaltSnapAt field, mu-protected via planUsageMu).
+func (g *Gemma) emitPreHaltSnap(now time.Time, pct int) {
+	// Phase-S-followup: pre-halt-snap goes through daemoncron
 	// unconditionally. Daemoncron tracks its own cooldown state.
-	daemoncron.EmitPreCompactSnap(g.db, now, pct)
+	daemoncron.EmitPreHaltSnap(g.db, now, pct)
 }
 
 // handlePlanUsageError applies the documented backoff policy. Auth-fail
