@@ -372,6 +372,17 @@ func runWebUI() {
 //
 //	bot-hq emit-compact-notice --agent <id>
 func runEmitCompactNotice() {
+	// Defensive degrade: when invoked from a Claude Code session that lacks
+	// BOT_HQ_AGENT_ID (i.e., not a trio pane), the PreCompact hook command
+	// `bot-hq emit-compact-notice --agent ${BOT_HQ_AGENT_ID}` resolves to
+	// `--agent` with empty / missing value. Without this guard, Go's flag
+	// parser exits non-zero, which Claude Code interprets as "block the
+	// compact." Non-trio sessions have no peers to notify; the right answer
+	// is noop + exit 0 so compaction proceeds normally.
+	if emptyAgentInvocation(os.Args[2:]) {
+		fmt.Fprintln(os.Stderr, "emit-compact-notice: no BOT_HQ_AGENT_ID (non-trio session); skipping notice")
+		return
+	}
 	flagSet := flag.NewFlagSet("emit-compact-notice", flag.ExitOnError)
 	agentID := flagSet.String("agent", "", "agent ID emitting the compact notice (required)")
 	if err := flagSet.Parse(os.Args[2:]); err != nil {
@@ -430,6 +441,12 @@ func runEmitCompactNotice() {
 //
 //	bot-hq emit-resume --agent <id>
 func runEmitResume() {
+	// Defensive degrade: same shape as runEmitCompactNotice — non-trio
+	// sessions noop instead of failing.
+	if emptyAgentInvocation(os.Args[2:]) {
+		fmt.Fprintln(os.Stderr, "emit-resume: no BOT_HQ_AGENT_ID (non-trio session); skipping notice")
+		return
+	}
 	flagSet := flag.NewFlagSet("emit-resume", flag.ExitOnError)
 	agentID := flagSet.String("agent", "", "agent ID emitting the resume (required)")
 	if err := flagSet.Parse(os.Args[2:]); err != nil {
@@ -471,3 +488,25 @@ func runEmitResume() {
 	}
 	fmt.Printf("emit-resume: msg %d\n", id)
 }
+
+// emptyAgentInvocation reports whether args (typically os.Args[2:])
+// indicates the caller invoked the subcommand without a real --agent
+// value. Triggered when a hook command like
+// `bot-hq emit-compact-notice --agent ${BOT_HQ_AGENT_ID}` runs with
+// the env var unset/empty (non-trio Claude Code session). Both
+// shell-shapes covered: `--agent` (no following arg) and
+// `--agent ""` / `--agent=""`.
+func emptyAgentInvocation(args []string) bool {
+	for i, a := range args {
+		switch a {
+		case "--agent", "-agent":
+			if i+1 >= len(args) || args[i+1] == "" {
+				return true
+			}
+		case "--agent=", "-agent=":
+			return true
+		}
+	}
+	return false
+}
+
