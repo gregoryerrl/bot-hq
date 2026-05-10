@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/gregoryerrl/bot-hq/internal/mvt"
 	"gopkg.in/yaml.v3"
@@ -138,17 +137,3 @@ func (c *CL) IPIVStatePath(project, taskID string) string {
 	return filepath.Join(c.root, "projects", project, "tasks", taskID, "ipiv-state.yaml")
 }
 
-// projectFromIPIVPath extracts the project-id from a canonical IPIV state path.
-// Returns empty string if path doesn't match the expected layout.
-// Used for back-derivation in tests + cross-ref-graph.
-func (c *CL) projectFromIPIVPath(path string) string {
-	rel, err := filepath.Rel(c.root, path)
-	if err != nil {
-		return ""
-	}
-	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) < 4 || parts[0] != "projects" || parts[2] != "tasks" {
-		return ""
-	}
-	return parts[1]
-}

@@ -33,7 +33,6 @@ func makeRepoWithMergedBranch(t *testing.T) (repoDir, mainSHA, branchName, branc
 	mustWrite(t, filepath.Join(repoDir, "README"), "init")
 	mustRun(t, repoDir, "git", "add", "README")
 	mustRun(t, repoDir, "git", "commit", "-m", "init")
-	mainSHA = strings.TrimSpace(mustOut(t, repoDir, "git", "rev-parse", "HEAD"))
 
 	// Feature branch with a commit
 	branchName = "feature/already-merged"

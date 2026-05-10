@@ -438,10 +438,3 @@ func wrapText(text string, maxWidth int) string {
 	return strings.Join(out, "\n")
 }
 
-// messageColor determines the display color for a message based on the sender.
-func (h HubTab) messageColor(msg protocol.Message) lipgloss.Color {
-	if msg.Type == protocol.MsgError {
-		return ColorError
-	}
-	return agentColor(msg.FromAgent)
-}

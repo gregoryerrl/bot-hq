@@ -2,7 +2,6 @@ package webui
 
 import (
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -316,12 +315,3 @@ func readCanonicalFile(root, relPath string) ([]byte, string, error) {
 	return data, info.ModTime().UTC().Format("2006-01-02T15:04:05Z"), nil
 }
 
-// statCanonical stats a file under root. Returns os.FileInfo on success.
-// Helper for handlers needing mtime without read.
-func statCanonical(root, relPath string) (fs.FileInfo, error) {
-	abs, err := resolveCanonicalPath(root, relPath)
-	if err != nil {
-		return nil, err
-	}
-	return os.Stat(abs)
-}

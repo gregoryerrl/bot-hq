@@ -229,10 +229,3 @@ func maskSecret(s string) string {
 	return strings.Repeat("●", 8)
 }
 
-// checkbox renders a boolean as a checkbox.
-func checkbox(v bool) string {
-	if v {
-		return "[x]"
-	}
-	return "[ ]"
-}

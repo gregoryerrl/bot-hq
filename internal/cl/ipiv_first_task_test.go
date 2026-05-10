@@ -197,7 +197,7 @@ func TestIPIVFirstTask_endToEnd(t *testing.T) {
 	rt.RecordPhaseUsage(taskID, "rain", 4000, 0.12)
 
 	// === Verify result: PASS ===
-	ts, err = rt.CompleteTask(taskID, mvt.VerifyPass)
+	_, err = rt.CompleteTask(taskID, mvt.VerifyPass)
 	if err != nil {
 		t.Fatalf("CompleteTask: %v", err)
 	}
