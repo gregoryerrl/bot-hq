@@ -5,9 +5,7 @@ package daemoncron
 //
 // Cadence: 30s tick (mirrors gemma healthLoop pre-migration).
 //
-// Detection logic — same gates as gemma pre-migration except pane-
-// activity tmux check (deferred to follow-up; tmux-specific signal
-// requires tmux package import + paneActivity injectable):
+// Detection logic — Shape γ hybrid:
 //
 //  1. Halt-state check — IsHalted() suppresses stale-fires during
 //     active halt window (all-hands-idle by convention).
@@ -15,26 +13,27 @@ package daemoncron
 //     suppresses until next non-HALT user msg.
 //  3. ListAgents scan — only Online/Working agents > staleThreshold
 //     LastSeen-aged are candidates.
-//  4. flagStaleCoder per-agent gates: intentional-idle short-circuit
+//  4. Pane-activity check (Shape γ): for agents with tmux_target Meta,
+//     compare current `#{pane_last_activity}` against last tick's
+//     baseline. First tick establishes baseline (no flag); subsequent
+//     ticks flag only when pane is silent across ticks. Fall through
+//     to Shape α (last_seen alone) for agents without tmux_target.
+//  5. flagStaleCoder per-agent gates: intentional-idle short-circuit
 //     (CurrentTask non-empty) → recent-msg backstop (HasRecentMessage
 //     From) → LastSeen-advance dedupe → rate-cap (1 per 4h window).
-//
-// Pane-activity gemma-side check is temporarily disabled when daemon-
-// cron is online (gemma.checkStaleAgents short-circuits via the
-// daemoncronOnline feature-flag). Net effect: pane-active-but-
-// LastSeen-stale agents may fire 1 PM per 4h vs pre-migration zero
-// PMs. Rate-cap (1/4h per agent) bounds noise; pane-checker
-// migration scheduled S-1a-followup once tmux dependency surface
-// designed for daemoncron.
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
+	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 )
 
 const (
@@ -44,7 +43,7 @@ const (
 	// staleEmitWindow + staleEmitMaxPerWindow are the rate-cap
 	// parameters per Phase Q post-close smoke loosening (1/4h vs
 	// pre-3-per-hour).
-	staleEmitWindow      = 4 * time.Hour
+	staleEmitWindow       = 4 * time.Hour
 	staleEmitMaxPerWindow = 1
 
 	// staleTickInterval is the surface's poll cadence (matches gemma
@@ -53,27 +52,79 @@ const (
 
 	// staleAgentID + staleRecipient — preserved from gemma pre-
 	// migration so consumer-side rule-text recognition unchanged.
-	staleAgentID    = "emma"
-	staleRecipient  = "rain"
+	staleAgentID   = "emma"
+	staleRecipient = "rain"
 )
 
-// userHaltPatternRe — same shape as gemma's userHaltPatternRe but
-// scoped to daemoncron package. Matches `[HUB:user] HALT` style
-// halt directives (case-insensitive on the HALT token).
+// userHaltPatternRe matches the canonical user-HALT directive shape in
+// hub message content. Used by runStaleCoderSurface (Phase I W1b I-6 C1)
+// to suppress stale-checks while the trio is intentionally halted by user
+// directive — agents are legitimately idle and stale-flag-fires would be
+// FPs. The check is content-pattern based rather than halt_state-based
+// because user-HALT is currently a content-only signal: no path
+// transitions hub.halt_state to active on user-HALT (existing
+// SetHaltActive paths fire only on context-cap 95%, not user direction).
+// When user emits a non-HALT directive (e.g., "proceed", "go"), the
+// halt-state implicitly clears via the latest-user-message check —
+// no explicit halt-clear API needed for this surgical fix.
 var userHaltPatternRe = regexp.MustCompile(`(?i)\bHALT\b`)
+
+// paneActivityFn returns the tmux #{pane_last_activity} unix timestamp for
+// the given pane target. Abstracted as a function field so stale-detection
+// tests can inject a deterministic fake without exec'ing real tmux.
+type paneActivityFn func(target string) (int64, error)
+
+// defaultPaneActivity shells out to `tmux display -p -t <target>
+// '#{pane_last_activity}'`. tmux returns 0 when the target doesn't exist or
+// the format is unsupported on the running tmux version — callers treat
+// errors as "no usable pane signal" and fall through to the Shape α path.
+func defaultPaneActivity(target string) (int64, error) {
+	out, err := tmuxpkg.Exec("display", "-p", "-t", target, "#{pane_last_activity}")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+}
+
+// metaTmuxTarget extracts the tmux_target field from an agent's Meta JSON.
+// Returns empty string when Meta is empty, unparseable, or omits the key —
+// the agent is then routed through the Shape α fallback (last_seen alone).
+func metaTmuxTarget(meta string) string {
+	if meta == "" {
+		return ""
+	}
+	var m struct {
+		TmuxTarget string `json:"tmux_target"`
+	}
+	if err := json.Unmarshal([]byte(meta), &m); err != nil {
+		return ""
+	}
+	return m.TmuxTarget
+}
 
 // staleState tracks per-agent dedupe + rate-cap state. Package-
 // scoped + mu-guarded since stale-coder fires from a single
 // goroutine (own ticker).
 var (
 	staleStateMu     sync.Mutex
-	staleFlagTracker map[string]time.Time     // agent_id → last LastSeen seen
-	staleEmitTimes   map[string][]time.Time   // agent_id → recent emit timestamps
+	staleFlagTracker map[string]time.Time   // agent_id → last LastSeen seen
+	staleEmitTimes   map[string][]time.Time // agent_id → recent emit timestamps
+	paneBaseline     map[string]int64       // agent_id → last tick's #{pane_last_activity}
+	paneActivityImpl paneActivityFn         // injectable for tests
 )
+
+// SetPaneActivityForTest overrides the default tmux-shelling pane
+// activity checker. Tests inject a deterministic fake; production
+// leaves it unset so defaultPaneActivity is used.
+func SetPaneActivityForTest(fn paneActivityFn) {
+	staleStateMu.Lock()
+	defer staleStateMu.Unlock()
+	paneActivityImpl = fn
+}
 
 // runStaleCoderSurface is the surfaceFunc for stale-coder. Scans
 // active agents; flags those past staleThreshold subject to all
-// dedupe/rate-cap gates.
+// dedupe/rate-cap gates. Mirrors gemma checkStaleAgentsAt semantics.
 func runStaleCoderSurface(c *Cron) {
 	now := c.Now()
 
@@ -92,6 +143,16 @@ func runStaleCoderSurface(c *Cron) {
 		return
 	}
 
+	staleStateMu.Lock()
+	checker := paneActivityImpl
+	if checker == nil {
+		checker = defaultPaneActivity
+	}
+	if paneBaseline == nil {
+		paneBaseline = make(map[string]int64)
+	}
+	staleStateMu.Unlock()
+
 	for _, a := range agents {
 		if a.ID == staleAgentID {
 			continue
@@ -102,13 +163,41 @@ func runStaleCoderSurface(c *Cron) {
 		if now.Sub(a.LastSeen) <= staleThreshold {
 			continue
 		}
+
+		// Shape γ pane-activity check: for agents with tmux_target Meta,
+		// compare current pane activity against last tick's baseline.
+		// First observation per agent establishes baseline without
+		// flagging — a real "no activity since last tick" signal needs
+		// at least one prior tick to compare against.
+		target := metaTmuxTarget(a.Meta)
+		if target != "" {
+			cur, perr := checker(target)
+			if perr == nil {
+				staleStateMu.Lock()
+				prev, seen := paneBaseline[a.ID]
+				paneBaseline[a.ID] = cur
+				staleStateMu.Unlock()
+				if !seen {
+					// First observation — establish baseline; defer
+					// flagging to the next tick so "since last tick"
+					// has meaning.
+					continue
+				}
+				if cur != prev {
+					continue // pane advanced → agent alive (probably mid-bash)
+				}
+				// pane silent across ticks → fall through to flag
+			}
+			// checker error: degrade to Shape α — flag on last_seen alone.
+		}
+
 		flagStaleCoder(c, a, now)
 	}
 }
 
 // flagStaleCoder emits the [STALE-CODER] PM gated by intentional-
 // idle / recent-msg / LastSeen-advance / rate-cap. Identical gate
-// semantics to gemma flagStaleAgent (sans pane-activity check).
+// semantics to gemma flagStaleAgent (pre-migration).
 func flagStaleCoder(c *Cron, a protocol.Agent, now time.Time) {
 	// Intentional-idle filter (Phase-R-followup-1 (f)) — agent
 	// declaring active multi-step work-thread via current_task.
@@ -168,4 +257,6 @@ func ResetStaleStateForTest() {
 	defer staleStateMu.Unlock()
 	staleFlagTracker = nil
 	staleEmitTimes = nil
+	paneBaseline = nil
+	paneActivityImpl = nil
 }
