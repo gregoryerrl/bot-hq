@@ -519,3 +519,34 @@ func hubSessionLookback() ToolDef {
 
 	return ToolDef{Tool: tool, Handler: handler}
 }
+
+// hubSessionSummary aggregates closed + active sessions for a date
+// into EOD-shaped markdown. Phase W sessions hardening.
+func hubSessionSummary() ToolDef {
+	tool := mcp.NewTool("hub_session_summary",
+		mcp.WithDescription("Aggregate all sessions for a date (default: today) into a markdown summary. Per-project sections, per-session outcome+counts, day totals. Used by trio to generate EOD reports."),
+		mcp.WithString("date", mcp.Description("Date in YYYY-MM-DD format. Defaults to today (UTC).")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		dateStr := req.GetString("date", "")
+		var when time.Time
+		if dateStr == "" {
+			when = time.Now().UTC()
+		} else {
+			parsed, err := time.Parse("2006-01-02", dateStr)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("invalid date format (want YYYY-MM-DD): %s", dateStr)), nil
+			}
+			when = parsed.UTC()
+		}
+
+		md, err := sessions.SummarizeDate(when)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("summarize: %v", err)), nil
+		}
+		return mcp.NewToolResultText(md), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}

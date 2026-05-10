@@ -66,6 +66,7 @@ func TestToolsRegistered(t *testing.T) {
 		"bot_hq_context_load",
 		"hub_session_finalize",
 		"hub_session_lookback",
+		"hub_session_summary",
 	}
 
 	if len(tools) != len(expected) {

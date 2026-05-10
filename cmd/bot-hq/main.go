@@ -77,6 +77,12 @@ func main() {
 		case "session-lookback":
 			runSessionLookback()
 			return
+		case "session-summary":
+			runSessionSummary()
+			return
+		case "session-migrate-stale":
+			runSessionMigrateStale()
+			return
 		case "session-open":
 			runSessionOpen()
 			return

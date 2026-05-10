@@ -349,6 +349,11 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// session_id. No caller-identity dimension — anyone reading should
 		// get the same view.
 		"hub_session_lookback": "renders retrospective markdown by session_id; read-only; caller-identity not needed",
+
+		// Phase W session-summary: read-only aggregator keyed by date.
+		// Aggregates all sessions for a day → EOD markdown. No caller
+		// dimension.
+		"hub_session_summary": "aggregates sessions by date into EOD markdown; read-only; caller-identity not needed",
 	}
 
 	db := setupTestDB(t)
