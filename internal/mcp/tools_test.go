@@ -337,6 +337,13 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// overview so the agent has Layer 2 context after pivot. Caller's
 		// identity is incidental.
 		"bot_hq_context_load": "loads per-project context by project key; caller-identity not needed",
+
+		// Phase W session-finalize: closes active session-cluster manifest
+		// for a project. Project-keyed not agent-keyed — the manifest
+		// represents work-scope, not per-agent state. Outcome narrative
+		// captures workflow-quality observation; auto-extracts structured
+		// fields (commits, files, decisions) from hub messages + git log.
+		"hub_session_finalize": "closes session-cluster manifest by project key; rich payload extracted automatically",
 	}
 
 	db := setupTestDB(t)

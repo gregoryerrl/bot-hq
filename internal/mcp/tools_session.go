@@ -120,23 +120,50 @@ func hubSessionCreate(db *hub.DB) ToolDef {
 			"session_id": sess.ID,
 		}
 		if project := strings.TrimSpace(req.GetString("project", "")); project != "" {
-			clusterID := sessions.MakeSessionID(time.Now(), project)
-			manifest := sessions.Manifest{
-				ID:      clusterID,
-				Project: project,
-				StartTS: sess.Created,
-				Agents:  agentList,
-				Body:    fmt.Sprintf("Session purpose: %s\nMode: %s\nIn-db session UUID: %s\n", purpose, mode, sess.ID),
+			// Phase W pivot enforcement: detect active session for any
+			// other project and reject. Forces explicit hub_session_finalize
+			// before pivoting — preserves close-summary discipline.
+			if otherID, otherProject, ferr := sessions.FindActiveForAnyOtherProject(project); ferr == nil && otherID != "" {
+				return mcp.NewToolResultError(fmt.Sprintf(
+					"active session %q exists for project %q — call hub_session_finalize with project=%q + outcome before pivoting to %q",
+					otherID, otherProject, otherProject, project,
+				)), nil
 			}
-			if werr := sessions.WriteManifest(manifest); werr != nil {
-				// Don't fail the in-db session create on manifest-write
-				// error — log via response and let caller decide. Per
-				// Phase N v2 §3 graceful-degradation lean.
-				response["manifest_write_error"] = werr.Error()
+
+			// Phase W multi-session-per-day support: NextAvailableSessionID
+			// returns "YYYY-MM-DD-<project>" for the first session of the
+			// day (back-compat) and -2 / -3 / etc. for subsequent same-day
+			// sessions. Agent calls hub_session_create per work scope.
+			clusterID, idErr := sessions.NextAvailableSessionID(time.Now(), project)
+			if idErr != nil {
+				response["manifest_write_error"] = fmt.Sprintf("next-id resolution: %v", idErr)
 			} else {
-				response["session_cluster_id"] = clusterID
-				if ierr := sessions.WriteIndex(); ierr != nil {
-					response["index_write_error"] = ierr.Error()
+				// StartMsgID seeds from the latest hub msg-id at create
+				// time so Finalize can compute MsgCount = end - start.
+				var startMsgID int
+				if recent, rerr := db.GetRecentMessages(1); rerr == nil && len(recent) > 0 {
+					startMsgID = int(recent[0].ID)
+				}
+
+				manifest := sessions.Manifest{
+					ID:         clusterID,
+					Project:    project,
+					StartTS:    sess.Created,
+					StartMsgID: startMsgID,
+					Agents:     agentList,
+					Status:     "active",
+					Body:       fmt.Sprintf("Session purpose: %s\nMode: %s\nIn-db session UUID: %s\n", purpose, mode, sess.ID),
+				}
+				if werr := sessions.WriteManifest(manifest); werr != nil {
+					// Don't fail the in-db session create on manifest-write
+					// error — log via response and let caller decide. Per
+					// Phase N v2 §3 graceful-degradation lean.
+					response["manifest_write_error"] = werr.Error()
+				} else {
+					response["session_cluster_id"] = clusterID
+					if ierr := sessions.WriteIndex(); ierr != nil {
+						response["index_write_error"] = ierr.Error()
+					}
 				}
 			}
 		}
@@ -364,6 +391,99 @@ func hubSessionJoin(db *hub.DB) ToolDef {
 			"status":     "joined",
 			"session_id": sessionID,
 			"agent_id":   agentID,
+		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubSessionFinalize implements Phase W close-summary writing for the
+// session-cluster manifest. Distinct from hub_session_close (which
+// stores per-agent SNAP into hub.DB for cold-start bootstrap context).
+//
+// Behavior:
+//  1. FindActiveForProject(project) — locates the active manifest.
+//  2. ReadMessages(agentID="", sinceID=StartMsgID, limit=10000) — pulls
+//     the hub message window for decision extraction.
+//  3. GetRecentMessages(1) — gets the latest msg-id for MsgCount cache.
+//  4. ExtractGitChanges(repo_path) — populates CommitsLanded +
+//     FilesTouched (skipped when repo_path is empty).
+//  5. sessions.Finalize(...) — writes the rich-payload manifest +
+//     rebuilds the index.
+func hubSessionFinalize(db *hub.DB) ToolDef {
+	tool := mcp.NewTool("hub_session_finalize",
+		mcp.WithDescription("Close the active session-cluster manifest for a project with rich retrospective payload (outcome narrative + auto-extracted CommitsLanded / FilesTouched / Decisions / MsgCount). Phase W sessions hardening."),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project key whose active session is being finalized (e.g., bot-hq, bcc-ad-manager)")),
+		mcp.WithString("outcome", mcp.Required(), mcp.Description("Agent-authored narrative summarizing what happened in this session. Multi-paragraph fine. Required for retrospective utility.")),
+		mcp.WithString("status", mcp.Description("Session close status: closed (default) | closed-pivoted-out | closed-eod | closed-auto-migrated. Determines retrospective category.")),
+		mcp.WithString("repo_path", mcp.Description("Optional git repo path for CommitsLanded + FilesTouched extraction (e.g., /Users/gregoryerrl/Projects/bot-hq). Skipped when omitted.")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project, err := req.RequireString("project")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		outcome, err := req.RequireString("outcome")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		status := req.GetString("status", "closed")
+		repoPath := req.GetString("repo_path", "")
+
+		activeID, err := sessions.FindActiveForProject(project)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("find active for %s: %v", project, err)), nil
+		}
+		if activeID == "" {
+			return mcp.NewToolResultError(fmt.Sprintf("no active session found for project %q", project)), nil
+		}
+
+		manifest, err := sessions.ReadManifest(activeID)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("read active manifest: %v", err)), nil
+		}
+
+		// Pull hub messages between [StartMsgID, latest] for decision extraction.
+		// Empty agentID = no per-agent filter. Limit=10000 covers a generous
+		// session window without needing pagination for typical sessions.
+		var msgs []protocol.Message
+		if manifest.StartMsgID > 0 {
+			msgs, err = db.ReadMessages("", int64(manifest.StartMsgID), 10000)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("read messages: %v", err)), nil
+			}
+		}
+
+		// Latest msg-id for MsgCount cache + EndMsgID. GetRecentMessages(1)
+		// returns the most-recent row regardless of agent.
+		var latestMsgID int
+		recent, rerr := db.GetRecentMessages(1)
+		if rerr == nil && len(recent) > 0 {
+			latestMsgID = int(recent[0].ID)
+		}
+
+		closed, err := sessions.Finalize(activeID, sessions.FinalizeOptions{
+			Outcome:     outcome,
+			Status:      status,
+			Now:         time.Now().UTC(),
+			Messages:    msgs,
+			RepoPath:    repoPath,
+			LatestMsgID: latestMsgID,
+		})
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("finalize: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(toJSON(map[string]any{
+			"status":          "finalized",
+			"session_id":      closed.ID,
+			"project":         closed.Project,
+			"end_ts":          closed.EndTS.Format(time.RFC3339),
+			"msg_count":       closed.MsgCount,
+			"decisions_count": len(closed.Decisions),
+			"commits_count":   len(closed.CommitsLanded),
+			"files_count":     len(closed.FilesTouched),
 		})), nil
 	}
 
