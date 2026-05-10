@@ -63,6 +63,7 @@ func TestToolsRegistered(t *testing.T) {
 		"claude_send",
 		"claude_resume",
 		"claude_stop",
+		"bot_hq_context_load",
 	}
 
 	if len(tools) != len(expected) {

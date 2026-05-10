@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gregoryerrl/bot-hq/internal/contextload"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -300,6 +303,42 @@ func hubCancelWake(db *hub.DB) ToolDef {
 			"wake_id":     id,
 			"fire_status": w.FireStatus,
 		})), nil
+	}
+
+	return ToolDef{Tool: tool, Handler: handler}
+}
+
+// hubContextLoad exposes the per-project context loader as an MCP tool.
+// Phase V architecture: replaces auto-bootstrap with explicit on-demand
+// load. Agent calls this when pivoting to a project; the returned
+// markdown blob is the layered (general → project) rules + project
+// library overview + cite-anchor sources.
+//
+// See internal/contextload for the assembly logic.
+func hubContextLoad() ToolDef {
+	tool := mcp.NewTool("bot_hq_context_load",
+		mcp.WithDescription("Load per-project context: merged rules + library overview + cite-anchor sources. Call when pivoting to work on a project."),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project key (matches projects/<key>.yaml in canonical-store)")),
+	)
+
+	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project, err := req.RequireString("project")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("resolve home dir: %v", err)), nil
+		}
+		canonRoot := filepath.Join(home, ".bot-hq")
+
+		c, err := contextload.Load(canonRoot, project)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("context load failed: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(c.Markdown()), nil
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}

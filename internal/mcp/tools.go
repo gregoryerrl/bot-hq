@@ -113,6 +113,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubCancelWake(db),
 		hubSessionClose(db),
 		hubClearHalt(db),
+		hubContextLoad(),
 		claudeList(db),
 		claudeRead(db),
 		claudeMessage(db),

@@ -331,6 +331,12 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// Phase H slice 4 C6 (H-31): explicit operator-invocable halt clear.
 		// No caller-context — the tool dismisses a global halt-state machine.
 		"hub_clear_halt": "manually clears global halt_state; no per-caller context",
+
+		// Phase V context-load: per-project context query keyed by project,
+		// not by caller. Returns the merged general → project rules + library
+		// overview so the agent has Layer 2 context after pivot. Caller's
+		// identity is incidental.
+		"bot_hq_context_load": "loads per-project context by project key; caller-identity not needed",
 	}
 
 	db := setupTestDB(t)

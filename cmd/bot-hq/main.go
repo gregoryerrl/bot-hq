@@ -71,6 +71,9 @@ func main() {
 		case "context-switch":
 			runContextSwitch()
 			return
+		case "context-load":
+			runContextLoad()
+			return
 		case "session-open":
 			runSessionOpen()
 			return
@@ -96,7 +99,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|session-search|webui|context-switch|session-open|install-session-start-hook|emit-compact-notice|emit-resume|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|session-search|webui|context-switch|context-load|session-open|install-session-start-hook|emit-compact-notice|emit-resume|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
