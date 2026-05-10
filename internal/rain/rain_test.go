@@ -975,6 +975,11 @@ func TestNewSessionArgsInjectsAgentIDEnvFlag(t *testing.T) {
 // tmux new-session args MUST include the env-var swap (ANTHROPIC_BASE_URL +
 // ANTHROPIC_AUTH_TOKEN + ANTHROPIC_MODEL). Validates env-var injection at
 // agent-spawn-time per phase-t.md v5.
+//
+// T-9 cycle-3: explicitly overrides the seeded row to env:scheme (isolated
+// from cycle-3 default file:scheme + real-filesystem vault) per R39
+// TEST-ISOLATION; the test is locking env-var-resolution mechanics, not
+// default-scheme choice.
 func TestNewSessionArgsInjectsModelConfigEnvVarsForDeepSeek(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "sk-test-rain-deepseek")
 
@@ -984,7 +989,21 @@ func TestNewSessionArgsInjectsModelConfigEnvVarsForDeepSeek(t *testing.T) {
 		t.Fatalf("OpenDB: %v", err)
 	}
 	defer db.Close()
-	// migrate auto-seeds rain with DeepSeek default config
+
+	// R39 TEST-ISOLATION: override the seeded row to env:scheme so the test
+	// is independent of cycle-3 default file:scheme + real-filesystem vault.
+	override := &hub.AgentModelConfig{
+		AgentID:       "rain",
+		Provider:      "deepseek",
+		ModelName:     "deepseek-v4-pro",
+		BaseURL:       "https://api.deepseek.com/anthropic",
+		AuthSecretRef: "env:DEEPSEEK_API_KEY",
+		Enabled:       true,
+		Notes:         "T-9 test override: env:scheme for env-var resolution lock",
+	}
+	if err := db.SetAgentModelConfig(override); err != nil {
+		t.Fatalf("Set rain override: %v", err)
+	}
 
 	r := &Rain{db: db, tmuxSession: "test-session-deepseek", workDir: "/tmp"}
 	args := r.newSessionArgs()
@@ -993,6 +1012,54 @@ func TestNewSessionArgsInjectsModelConfigEnvVarsForDeepSeek(t *testing.T) {
 	wantSubstrings := []string{
 		"ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic",
 		"ANTHROPIC_AUTH_TOKEN=sk-test-rain-deepseek",
+		"ANTHROPIC_MODEL=deepseek-v4-pro",
+	}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in tmux args; got: %v", want, args)
+		}
+	}
+}
+
+// TestNewSessionArgsInjectsModelConfigEnvVarsForDeepSeek_FileVaultPath locks
+// the cycle-3 T-9 default file:scheme path: when rain's row points at a
+// FileVault-MVP `file:<path>#KEY` secret-ref, secret resolution reads the
+// vault file (not an env var) and the same 3 env vars get injected.
+// R39 TEST-ISOLATION via t.TempDir() vault path.
+func TestNewSessionArgsInjectsModelConfigEnvVarsForDeepSeek_FileVaultPath(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := filepath.Join(dir, "rain.env")
+	if err := os.WriteFile(vaultPath, []byte("DEEPSEEK_API_KEY=sk-test-vault-rain\n"), 0600); err != nil {
+		t.Fatalf("write vault: %v", err)
+	}
+
+	dbPath := filepath.Join(dir, "hub.db")
+	db, err := hub.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close()
+
+	override := &hub.AgentModelConfig{
+		AgentID:       "rain",
+		Provider:      "deepseek",
+		ModelName:     "deepseek-v4-pro",
+		BaseURL:       "https://api.deepseek.com/anthropic",
+		AuthSecretRef: "file:" + vaultPath + "#DEEPSEEK_API_KEY",
+		Enabled:       true,
+		Notes:         "T-9 test override: isolated FileVault path",
+	}
+	if err := db.SetAgentModelConfig(override); err != nil {
+		t.Fatalf("Set rain override: %v", err)
+	}
+
+	r := &Rain{db: db, tmuxSession: "test-session-deepseek-file", workDir: "/tmp"}
+	args := r.newSessionArgs()
+
+	joined := strings.Join(args, " ")
+	wantSubstrings := []string{
+		"ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic",
+		"ANTHROPIC_AUTH_TOKEN=sk-test-vault-rain",
 		"ANTHROPIC_MODEL=deepseek-v4-pro",
 	}
 	for _, want := range wantSubstrings {

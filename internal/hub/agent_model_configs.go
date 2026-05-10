@@ -18,6 +18,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -71,7 +74,67 @@ func (db *DB) migrateAgentModelConfigs() error {
 			}
 		}
 	}
+
+	// Phase T T-9 cycle-3: idempotent in-place migration for existing DBs that
+	// were seeded under cycle-2 default `env:DEEPSEEK_API_KEY`. When a vault
+	// file is present at the canonical FileVault MVP path (T-8.10), convert
+	// the row to file: scheme so spawn-time secret resolution succeeds without
+	// requiring the daemon shell to export DEEPSEEK_API_KEY.
+	if err := db.migrateEnvSchemeToFileVaultForRain(); err != nil {
+		return fmt.Errorf("migrate rain env→file vault: %w", err)
+	}
 	return nil
+}
+
+// vaultPathFnForRain resolves the canonical FileVault MVP path for the rain
+// agent's DEEPSEEK_API_KEY. Overridable in tests for R39 TEST-ISOLATION.
+var vaultPathFnForRain = func() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".bot-hq", "agents", "rain", ".env"), nil
+}
+
+// migrateEnvSchemeToFileVaultForRain converts an existing rain row using
+// `env:DEEPSEEK_API_KEY` to `file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY`
+// when the vault file is present on disk. Idempotent: no-op when the row
+// already uses file: scheme, when the row is absent, or when the vault file
+// is absent (env: scheme still applies if the env-var is exported).
+func (db *DB) migrateEnvSchemeToFileVaultForRain() error {
+	cfg, err := db.GetAgentModelConfig("rain")
+	if err != nil {
+		if errors.Is(err, ErrAgentModelConfigNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	if cfg.AuthSecretRef != "env:DEEPSEEK_API_KEY" {
+		return nil
+	}
+
+	vaultPath, err := vaultPathFnForRain()
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(vaultPath)
+	if err != nil {
+		// Vault file absent → leave env: scheme alone (env-var path may still apply).
+		return nil
+	}
+	if info.IsDir() {
+		return nil
+	}
+
+	cfg.AuthSecretRef = "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY"
+	migrationNote := "cycle-3 T-9 auto-migrated env:→file: scheme on vault-detect"
+	if strings.TrimSpace(cfg.Notes) == "" {
+		cfg.Notes = migrationNote
+	} else {
+		cfg.Notes = cfg.Notes + "; " + migrationNote
+	}
+	return db.SetAgentModelConfig(cfg)
 }
 
 // DefaultAgentModelConfigs returns the seed default-rows per phase-t.md v5 R51.
@@ -95,9 +158,9 @@ func DefaultAgentModelConfigs() []*AgentModelConfig {
 			Provider:      "deepseek",
 			ModelName:     "deepseek-v4-pro",
 			BaseURL:       "https://api.deepseek.com/anthropic",
-			AuthSecretRef: "env:DEEPSEEK_API_KEY",
+			AuthSecretRef: "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY",
 			Enabled:       true,
-			Notes:         "EYES role; DeepSeek-V4-Pro for cross-model genuine-cognitive-diversity per user msg 17094 + R44 expanded",
+			Notes:         "EYES role; DeepSeek-V4-Pro for cross-model genuine-cognitive-diversity per user msg 17094 + R44 expanded; FileVault path per T-8.10 + T-9 cycle-3 default-alignment",
 		},
 		{
 			AgentID:       "emma",

@@ -18,7 +18,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
+	"github.com/gregoryerrl/bot-hq/internal/citecheck"
 	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
+	"github.com/gregoryerrl/bot-hq/internal/pastedetect"
 	"github.com/gregoryerrl/bot-hq/internal/projects"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/sessions"
@@ -503,6 +505,25 @@ func hubSend(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
+		// Phase T T-11 cycle-3: paste-detection screen. Halt secrets at
+		// the daemon entry point so they never land in hub.db / Discord
+		// forwards. Mechanical enforcement-conversion of the "do NOT
+		// paste into hub" warning (msg 17454 step-2) that recurred at
+		// msg 17460.
+		if d := pastedetect.Inspect(content); d.Found() {
+			return mcp.NewToolResultError(pastedetect.FormatBlockReason(d)), nil
+		}
+
+		// Phase T T-12 cycle-3: cite-check (informational, NOT blocking).
+		// Detect msg-id citations in content + verify they resolve in
+		// hub.db. Concerns are appended to the success response so the
+		// emitting agent gets immediate mechanical feedback on cite drift.
+		// R31-sub graduation: enforcement-conversion via daemon-side post-
+		// validation; agent self-corrects on next emit.
+		citeConcerns := citecheck.Inspect(content, func(id int64) (bool, error) {
+			return db.MessageExists(id)
+		})
+
 		mt := protocol.MessageType(msgType)
 		if !mt.Valid() {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid message type: %s", msgType)), nil
@@ -526,10 +547,14 @@ func hubSend(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("send failed: %v", err)), nil
 		}
 
-		return mcp.NewToolResultText(toJSON(map[string]any{
+		response := map[string]any{
 			"status":     "sent",
 			"message_id": id,
-		})), nil
+		}
+		if notice := citecheck.FormatNotice(citeConcerns); notice != "" {
+			response["cite_check"] = notice
+		}
+		return mcp.NewToolResultText(toJSON(response)), nil
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}

@@ -226,6 +226,21 @@ func runHub() {
 		}
 	}
 
+	// 6b. Phase T T-14 cycle-3: tmux orphan-session cleanup. On daemon-
+	// restart, kill any pre-restart bot-hq-* tmux sessions before spawning
+	// fresh ones — eliminates the orphan-pane confusion class that Rain
+	// msg 17419 push-back A flagged (old panes look alive but are
+	// orphaned from the new daemon's hub-coord routing). Best-effort:
+	// failures are logged but do not block startup.
+	if killed, errs := tmuxpkg.CleanupOrphanSessions(nil); len(killed) > 0 || len(errs) > 0 {
+		if len(killed) > 0 {
+			log.Printf("[autostart] tmux orphan-cleanup killed %d session(s): %v", len(killed), killed)
+		}
+		for _, e := range errs {
+			log.Printf("[autostart] tmux orphan-cleanup err: %v", e)
+		}
+	}
+
 	// 7. Build Brian orchestrator instance (Start deferred until after TUI
 	// is ready so its first inserts reach the TUI via OnMessage).
 	var brianOrch *brian.Brian
@@ -274,6 +289,15 @@ func runHub() {
 			log.Printf("[autostart] rain OK")
 			defer rainAgent.Stop()
 		}
+	}
+
+	// 9b-T-10. Phase T T-10 cycle-3: vault file mtime watcher. Detects
+	// user-side rotation (manual edit of `~/.bot-hq/agents/<agent>/.env`)
+	// and emits a hub MsgUpdate so rotation feedback reaches the user
+	// without a "signal me when done" hub round-trip — eliminates the
+	// paste-to-hub temptation class that recurred in this rotation cycle.
+	if vw := startVaultWatcher(h); vw != nil {
+		defer vw.Stop()
 	}
 
 	// 9c. Start Emma (the persistent monitor agent, backed by the gemma package + model) if configured

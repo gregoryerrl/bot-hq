@@ -1,8 +1,10 @@
 package hub
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func newTestDBForAgentConfigs(t *testing.T) *DB {
@@ -78,8 +80,138 @@ func TestAgentModelConfigs_rainDeepSeek(t *testing.T) {
 	if cfg.BaseURL != "https://api.deepseek.com/anthropic" {
 		t.Errorf("rain base_url = %q, want Anthropic-compatible endpoint", cfg.BaseURL)
 	}
-	if cfg.AuthSecretRef != "env:DEEPSEEK_API_KEY" {
-		t.Errorf("rain auth_secret_ref = %q, want env:DEEPSEEK_API_KEY (reference-pointer per R52)", cfg.AuthSecretRef)
+	if cfg.AuthSecretRef != "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY" {
+		t.Errorf("rain auth_secret_ref = %q, want file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY (FileVault per T-8.10 + T-9 cycle-3 default-alignment)", cfg.AuthSecretRef)
+	}
+}
+
+// TestMigrateEnvSchemeToFileVaultForRain validates the cycle-3 T-9 idempotent
+// migration: existing rain rows seeded under cycle-2 default `env:DEEPSEEK_API_KEY`
+// are auto-converted to `file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY` when
+// the vault file is present. R39 TEST-ISOLATION via t.TempDir() vault path.
+func TestMigrateEnvSchemeToFileVaultForRain(t *testing.T) {
+	cases := []struct {
+		name        string
+		startScheme string
+		writeVault  bool
+		wantScheme  string
+	}{
+		{
+			name:        "env_scheme_with_vault_present_migrates",
+			startScheme: "env:DEEPSEEK_API_KEY",
+			writeVault:  true,
+			wantScheme:  "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY",
+		},
+		{
+			name:        "env_scheme_without_vault_left_alone",
+			startScheme: "env:DEEPSEEK_API_KEY",
+			writeVault:  false,
+			wantScheme:  "env:DEEPSEEK_API_KEY",
+		},
+		{
+			name:        "file_scheme_idempotent_noop",
+			startScheme: "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY",
+			writeVault:  true,
+			wantScheme:  "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDBForAgentConfigs(t)
+
+			// Override default seeded scheme for this case.
+			cfg, err := db.GetAgentModelConfig("rain")
+			if err != nil {
+				t.Fatalf("Get rain: %v", err)
+			}
+			cfg.AuthSecretRef = tc.startScheme
+			if err := db.SetAgentModelConfig(cfg); err != nil {
+				t.Fatalf("Set rain: %v", err)
+			}
+
+			// Configure isolated vault path; conditionally create vault file.
+			vaultDir := t.TempDir()
+			vaultFile := filepath.Join(vaultDir, "rain.env")
+			if tc.writeVault {
+				if err := os.WriteFile(vaultFile, []byte("DEEPSEEK_API_KEY=sk-test\n"), 0600); err != nil {
+					t.Fatalf("write vault: %v", err)
+				}
+			}
+			old := vaultPathFnForRain
+			vaultPathFnForRain = func() (string, error) { return vaultFile, nil }
+			t.Cleanup(func() { vaultPathFnForRain = old })
+
+			if err := db.migrateEnvSchemeToFileVaultForRain(); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+
+			got, err := db.GetAgentModelConfig("rain")
+			if err != nil {
+				t.Fatalf("Get post-migrate: %v", err)
+			}
+			if got.AuthSecretRef != tc.wantScheme {
+				t.Errorf("AuthSecretRef = %q, want %q", got.AuthSecretRef, tc.wantScheme)
+			}
+		})
+	}
+}
+
+// TestMigrateEnvSchemeToFileVaultForRain_idempotentRunTwice validates that
+// running the migration twice is safe — the first run converts env: → file:,
+// the second run is a no-op (no double-update, UpdatedAt should not advance
+// on a no-op run). Per R37/R39 discipline.
+func TestMigrateEnvSchemeToFileVaultForRain_idempotentRunTwice(t *testing.T) {
+	db := newTestDBForAgentConfigs(t)
+
+	// Seed env: scheme on rain row to simulate cycle-2-installed DB.
+	cfg, err := db.GetAgentModelConfig("rain")
+	if err != nil {
+		t.Fatalf("Get rain: %v", err)
+	}
+	cfg.AuthSecretRef = "env:DEEPSEEK_API_KEY"
+	if err := db.SetAgentModelConfig(cfg); err != nil {
+		t.Fatalf("Set rain: %v", err)
+	}
+
+	// Configure isolated vault path with vault file present.
+	vaultDir := t.TempDir()
+	vaultFile := filepath.Join(vaultDir, "rain.env")
+	if err := os.WriteFile(vaultFile, []byte("DEEPSEEK_API_KEY=sk-test\n"), 0600); err != nil {
+		t.Fatalf("write vault: %v", err)
+	}
+	old := vaultPathFnForRain
+	vaultPathFnForRain = func() (string, error) { return vaultFile, nil }
+	t.Cleanup(func() { vaultPathFnForRain = old })
+
+	// First run: env: → file:
+	if err := db.migrateEnvSchemeToFileVaultForRain(); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+	afterFirst, err := db.GetAgentModelConfig("rain")
+	if err != nil {
+		t.Fatalf("Get post-first: %v", err)
+	}
+	if afterFirst.AuthSecretRef != "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY" {
+		t.Fatalf("first run AuthSecretRef = %q, want file:scheme", afterFirst.AuthSecretRef)
+	}
+	firstUpdatedAt := afterFirst.UpdatedAt
+
+	// Sleep briefly to ensure UpdatedAt would change if a write occurred.
+	time.Sleep(time.Second)
+
+	// Second run: no-op (already file: scheme)
+	if err := db.migrateEnvSchemeToFileVaultForRain(); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	afterSecond, err := db.GetAgentModelConfig("rain")
+	if err != nil {
+		t.Fatalf("Get post-second: %v", err)
+	}
+	if afterSecond.AuthSecretRef != "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY" {
+		t.Errorf("second run AuthSecretRef changed = %q, want unchanged file:scheme", afterSecond.AuthSecretRef)
+	}
+	if !afterSecond.UpdatedAt.Equal(firstUpdatedAt) {
+		t.Errorf("second run mutated UpdatedAt = %v, want unchanged %v (no-op should not write)", afterSecond.UpdatedAt, firstUpdatedAt)
 	}
 }
 

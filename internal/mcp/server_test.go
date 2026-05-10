@@ -406,6 +406,87 @@ func TestHubSend_S4_PMRemoved(t *testing.T) {
 	}
 }
 
+// TestHubSend_T11_PasteDetectionBlocksApiKey locks the Phase T T-11
+// cycle-3 contract: hub_send rejects content that contains an API-key
+// pattern (sk-xxx) before persisting the message. Prevents the
+// paste-to-hub recurrence class observed at msgs 17421 + 17460.
+func TestHubSend_T11_PasteDetectionBlocksApiKey(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	handlers := make(map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error))
+	for _, td := range tools {
+		handlers[td.Tool.Name] = td.Handler
+	}
+	ctx := context.Background()
+
+	preMsgs, err := db.GetRecentMessages(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preCount := len(preMsgs)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"from":    "user",
+		"type":    "command",
+		"content": "DEEPSEEK_API_KEY=sk-deadbeefcafebabedeadbeefcafebabe",
+	}
+	result, err := handlers["hub_send"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected paste-detection block; got success result")
+	}
+
+	// Verify the block returned a useful remediation hint.
+	textBlock, ok := result.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent in result; got %T", result.Content[0])
+	}
+	if !strings.Contains(textBlock.Text, "BLOCKED") {
+		t.Errorf("block reason missing BLOCKED marker: %s", textBlock.Text)
+	}
+	if !strings.Contains(textBlock.Text, "FileVault") {
+		t.Errorf("block reason missing FileVault remediation hint: %s", textBlock.Text)
+	}
+
+	// Verify NO new message was persisted (defensive screen pre-DB-write).
+	postMsgs, err := db.GetRecentMessages(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(postMsgs) != preCount {
+		t.Errorf("paste-detection block leaked into DB: pre=%d post=%d", preCount, len(postMsgs))
+	}
+}
+
+// TestHubSend_T11_CompactPipeContentPasses locks the inverse: normal
+// peer-coord compact-pipe content (no API-key) is NOT blocked.
+func TestHubSend_T11_CompactPipeContentPasses(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	handlers := make(map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error))
+	for _, td := range tools {
+		handlers[td.Tool.Name] = td.Handler
+	}
+	ctx := context.Background()
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"from":    "brian",
+		"type":    "update",
+		"content": "brian|update|standing-for-rain-BRAIN-2nd|cycle-closed",
+	}
+	result, err := handlers["hub_send"](ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.IsError {
+		t.Fatalf("expected normal peer-coord content to pass; got error: %v", result.Content)
+	}
+}
+
 // TestHubSend_S4_SchemaDropsToParam locks that the MCP tool schema
 // for hub_send no longer declares a `to:` parameter. MCP clients
 // reading the schema see only from / session_id / type / content.
