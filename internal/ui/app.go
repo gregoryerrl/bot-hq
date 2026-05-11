@@ -201,6 +201,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				FromAgent: "user",
 				Type:      protocol.MsgCommand,
 				Content:   content,
+				// Z-5f: when the Hub is filtered to a specific session
+				// (user is viewing one session's traffic), tag outbound
+				// input with that session_id so replies land IN the
+				// session — matches user's mental model that "talking
+				// while looking at session X" means "talking to session
+				// X." Unfiltered view leaves SessionID="" (main hub).
+				SessionID: a.hubTab.SessionFilter(),
 			}
 			if target != "" {
 				m.ToAgent = target
