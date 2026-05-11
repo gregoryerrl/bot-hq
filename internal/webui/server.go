@@ -62,12 +62,6 @@ type Server struct {
 	sseMu           sync.Mutex
 	sseSubsByOrigin map[string][]*cliveSubscriber
 
-	// SSE subscriber state for /api/hub/stream (Z-5b). Parallel
-	// infrastructure to the clive feed but unfiltered — every new hub
-	// message fans out; client-side filter chooses what to render.
-	hubSseMu           sync.Mutex
-	hubSseSubsByOrigin map[string][]*hubSubscriber
-
 	// Ambient webui-focus state. Frontend POSTs to /api/webui-context on
 	// file-open / project-pick / tab-switch; voice handler reads pre-
 	// Gemini.Connect to inject "[USER VIEWING: ...]" into systemInstruction
@@ -135,8 +129,6 @@ func NewServer(db *hub.DB, opts ...Option) (*Server, error) {
 	}
 	s.initSSE()
 	s.wireCliveBroadcast()
-	s.initHubSSE()
-	s.wireHubBroadcast()
 	s.wireUserPendingActions()
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
@@ -261,8 +253,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/pending-actions", s.handlePendingActions)
 	mux.HandleFunc("/api/pending-actions/", s.handlePendingActionAck)
 	mux.HandleFunc("/api/agents", s.handleAgents)
-	mux.HandleFunc("/api/hub/messages", s.handleHubMessages)
-	mux.HandleFunc("/api/hub/stream", s.handleHubStream)
 	mux.HandleFunc("/api/agent-model-configs", s.handleAgentModelConfigs)
 	mux.HandleFunc("/api/agent-model-configs/", s.handleAgentModelConfigByID)
 	mux.HandleFunc("/api/voice/ws", s.handleVoiceWS)

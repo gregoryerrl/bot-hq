@@ -29,7 +29,6 @@
     </label>
     <button id="register-project-open" type="button" title="Register a new project">+</button>
     <button id="search-open" type="button" title="Search canonical-store contents (Ctrl+K)">🔍</button>
-    <button id="hub-open" type="button" title="Open Hub — aggregated session messages + talk to Emma (Z-5b)">💬 Hub</button>
     <button id="settings-open" type="button" title="Agent model settings">⚙</button>
     <button id="mic-btn" class="mic-btn" type="button" disabled title="Click to talk with Clive (voice)">
       <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
@@ -101,25 +100,6 @@
         </div>
       </div>
       <textarea id="doc-content" spellcheck="false" placeholder="Pick a file from a destination to edit." class="hidden"></textarea>
-      <!-- Z-5b Hub chat view: aggregated session-tagged messages +
-           filter dropdown + user input. Hidden until ▼ Hub clicked. -->
-      <div id="doc-hub" class="doc-hub hidden">
-        <header class="doc-hub-header">
-          <strong>Hub</strong>
-          <select id="hub-filter" title="Filter by session">
-            <option value="__ALL__">All sessions (aggregated)</option>
-            <option value="">Main hub only (session_id='')</option>
-          </select>
-          <span id="hub-stream-status" class="muted"></span>
-          <span class="spacer"></span>
-          <button id="hub-close" type="button">×</button>
-        </header>
-        <div id="hub-feed" class="hub-feed"><em class="muted">Connecting…</em></div>
-        <form id="hub-send-form" class="hub-send-form">
-          <textarea id="hub-send-input" placeholder="Type a message. Bare 'hi emma' triggers Emma on the main hub; @brian / @rain / @emma anywhere routes to that agent." rows="2"></textarea>
-          <button id="hub-send-submit" type="submit">Send</button>
-        </form>
-      </div>
       <div id="doc-status" class="muted"></div>
     </section>
   </main>
