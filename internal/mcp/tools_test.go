@@ -343,6 +343,12 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// authorized agent — emma typically — can open on user's behalf).
 		"hub_session_open": "Z-3: project + scope_name drive session allocation; caller-identity not bound (emma orchestrates on user's behalf)",
 
+		// Z-4-a project-data read tool: project + source name are the
+		// load-bearing dimensions. Caller (from) IS recorded for audit
+		// but doesn't gate access — that's done via per-agent yaml
+		// restrictions (allowed_sources).
+		"bot_hq_project_query": "Z-4-a: project + source + query drive the read; caller (from) audited but not gating (per-agent yaml restriction is separate)",
+
 		// Phase W session-finalize: closes active session-cluster manifest
 		// for a project. Project-keyed not agent-keyed — the manifest
 		// represents work-scope, not per-agent state. Outcome narrative
