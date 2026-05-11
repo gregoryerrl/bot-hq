@@ -10,10 +10,15 @@
 //   - Per-project: 4 destinations parameterized by project key (Overview,
 //     Rules, Plans, Etc).
 //
-// Bot-hq is the just-another-project — its artifacts live at top-level
-// (phase/, ratchets/, gates/, README.md) rather than under projects/bot-hq/.
-// Special-case resolvers handle bot-hq paths; everything else uses the
-// projects/<p>/* convention.
+// Post-Z-1: bot-hq is just-another-project. Its operational artifacts
+// (phase/, ratchets/, discipline-log.md, voice-mirror-log.md, arcs-index,
+// conventions-index) live under projects/bot-hq/ following the same
+// projects/<p>/* convention as every other project. Cross-project
+// surfaces (gates/, rules/, sessions/, agent-state) stay at top-level.
+//
+// Global nav resolvers (Disciplines + Ratchets) are bot-hq-canonical
+// minimum-fix: they resolve to projects/bot-hq/* explicitly. Full
+// per-project parameterization is a Phase Z+ scope.
 //
 // HIDE list (per scope-lock-v4.2): runtime/code/log/binary surfaces that
 // fail the agent-context-yes / internal-code-no discriminator. Enforced
@@ -276,7 +281,9 @@ func resolveSessions(root, _ string) ([]TreeNode, error) {
 }
 
 func resolveDisciplines(root, _ string) ([]TreeNode, error) {
-	n, err := fileNode(root, "discipline-log.md", false)
+	// Post-Z-1: bot-hq's discipline-log lives at projects/bot-hq/discipline-log.md
+	// (canonical project; Phase Z+ may parameterize per current-project context).
+	n, err := fileNode(root, "projects/bot-hq/discipline-log.md", false)
 	if err != nil || n == nil {
 		return nil, err
 	}
@@ -284,7 +291,9 @@ func resolveDisciplines(root, _ string) ([]TreeNode, error) {
 }
 
 func resolveRatchets(root, _ string) ([]TreeNode, error) {
-	return dirFiles(root, "ratchets", ".md")
+	// Post-Z-1: bot-hq's ratchets/ dir lives at projects/bot-hq/ratchets/
+	// (canonical project; Phase Z+ may parameterize per current-project context).
+	return dirFiles(root, "projects/bot-hq/ratchets", ".md")
 }
 
 func resolveGlobalRules(root, _ string) ([]TreeNode, error) {
@@ -368,6 +377,7 @@ func resolveProjectRules(root, project string) ([]TreeNode, error) {
 	}
 	// bot-hq additionally surfaces gates/*.md (per user msg 8889 "gates are
 	// rules"; gate-content folds into rules.yaml gates: schema-field in Phase O).
+	// Note: gates/ stays top-level post-Z-1 (cross-project discipline).
 	if project == "bot-hq" {
 		gates, err := dirFiles(root, "gates", ".md")
 		if err != nil {
@@ -383,8 +393,9 @@ func resolveProjectPlans(root, project string) ([]TreeNode, error) {
 		return nil, nil
 	}
 	if project == "bot-hq" {
-		// Phases ARE bot-hq's plans (user msg 8859).
-		return dirFiles(root, "phase", ".md")
+		// Phases ARE bot-hq's plans (user msg 8859). Post-Z-1: phase/ moved
+		// from top-level to projects/bot-hq/phase/ per CL generalization.
+		return dirFiles(root, "projects/bot-hq/phase", ".md")
 	}
 	return dirFiles(root, "projects/"+project+"/plans", ".md")
 }

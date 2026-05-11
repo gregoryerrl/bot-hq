@@ -114,7 +114,7 @@ func runInstallVoiceMirrorHook() {
 	fmt.Printf("Hook fires on Write tool calls against user-artifact paths per R40 VOICE-MIRROR-DISCIPLINE (alert-only, NOT blocking).\n")
 	fmt.Printf("INCLUDE patterns: ~/Documents/*, ~/Desktop/*, ~/.bot-hq/projects/<project>/{plans,eod,clips}/*, CLAUDE.md, README.md\n")
 	fmt.Printf("SKIP patterns: **/memory/**, .git/, .cache/, node_modules/\n")
-	fmt.Printf("Log: ~/.bot-hq/voice-mirror-log.md (override via BOT_HQ_VOICE_MIRROR_LOG_PATH env).\n")
+	fmt.Printf("Log: ~/.bot-hq/projects/bot-hq/voice-mirror-log.md (override via BOT_HQ_VOICE_MIRROR_LOG_PATH env).\n")
 	fmt.Printf("Hook activation requires Claude session-restart (settings.json not hot-reloaded mid-session per Phase L Finding-3).\n")
 }
 

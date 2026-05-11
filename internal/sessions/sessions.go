@@ -790,9 +790,9 @@ var citedMsgIDPattern = regexp.MustCompile(`(?i)\bmsg[\s-]+(\d{3,})(?:[-/](\d{3,
 // canonRoot + repoRoot directly into ScanCitedMsgIDs.
 func CiteAnchorScanRoots(canonRoot, repoRoot string) []string {
 	return []string{
-		filepath.Join(canonRoot, "discipline-log.md"),
-		filepath.Join(canonRoot, "phase"),
-		filepath.Join(canonRoot, "ratchets"),
+		filepath.Join(canonRoot, "projects", "bot-hq", "discipline-log.md"),
+		filepath.Join(canonRoot, "projects", "bot-hq", "phase"),
+		filepath.Join(canonRoot, "projects", "bot-hq", "ratchets"),
 		filepath.Join(canonRoot, "projects"),
 		filepath.Join(canonRoot, "brian", "discipline-anchors.md"),
 		filepath.Join(canonRoot, "rain", "discipline-anchors.md"),

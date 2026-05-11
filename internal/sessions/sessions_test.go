@@ -719,10 +719,11 @@ func TestScanCitedMsgIDs_BasicExtraction(t *testing.T) {
 	tmpdir := t.TempDir()
 	canonRoot := filepath.Join(tmpdir, ".bot-hq")
 	repoRoot := filepath.Join(tmpdir, "Projects", "bot-hq")
-	if err := os.MkdirAll(canonRoot, 0o755); err != nil {
+	disciplineLogDir := filepath.Join(canonRoot, "projects", "bot-hq")
+	if err := os.MkdirAll(disciplineLogDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	disciplineLog := filepath.Join(canonRoot, "discipline-log.md")
+	disciplineLog := filepath.Join(disciplineLogDir, "discipline-log.md")
 	if err := os.WriteFile(disciplineLog, []byte("event at msg 15497 referenced; range msg 5194-5218 cited; user msg-7919 trust-shaking"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -741,10 +742,11 @@ func TestScanCitedMsgIDs_DigitsBelow3SkipsLowConfidence(t *testing.T) {
 	tmpdir := t.TempDir()
 	canonRoot := filepath.Join(tmpdir, ".bot-hq")
 	repoRoot := filepath.Join(tmpdir, "Projects", "bot-hq")
-	if err := os.MkdirAll(canonRoot, 0o755); err != nil {
+	disciplineLogDir := filepath.Join(canonRoot, "projects", "bot-hq")
+	if err := os.MkdirAll(disciplineLogDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(canonRoot, "discipline-log.md"), []byte("msg 12 (too short, skipped); msg 999 (kept)"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(disciplineLogDir, "discipline-log.md"), []byte("msg 12 (too short, skipped); msg 999 (kept)"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cited, err := ScanCitedMsgIDs(canonRoot, repoRoot)
@@ -792,11 +794,12 @@ func TestPruneOlderThanWithCitePreservation_ExemptsCitedSession(t *testing.T) {
 	tmpdir := t.TempDir()
 	canonRoot := filepath.Join(tmpdir, ".bot-hq")
 	repoRoot := filepath.Join(tmpdir, "Projects", "bot-hq")
-	if err := os.MkdirAll(canonRoot, 0o755); err != nil {
+	disciplineLogDir := filepath.Join(canonRoot, "projects", "bot-hq")
+	if err := os.MkdirAll(disciplineLogDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	// Cite-anchor doc references msg 5000.
-	if err := os.WriteFile(filepath.Join(canonRoot, "discipline-log.md"), []byte("seen at msg 5000"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(disciplineLogDir, "discipline-log.md"), []byte("seen at msg 5000"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now()
@@ -846,9 +849,9 @@ func TestPruneOlderThanWithCitePreservation_ZeroDaysNoOp(t *testing.T) {
 func TestCiteAnchorScanRoots_7Paths(t *testing.T) {
 	roots := CiteAnchorScanRoots("/canon", "/repo")
 	want := []string{
-		"/canon/discipline-log.md",
-		"/canon/phase",
-		"/canon/ratchets",
+		"/canon/projects/bot-hq/discipline-log.md",
+		"/canon/projects/bot-hq/phase",
+		"/canon/projects/bot-hq/ratchets",
 		"/canon/projects",
 		"/canon/brian/discipline-anchors.md",
 		"/canon/rain/discipline-anchors.md",

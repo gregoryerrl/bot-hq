@@ -2,7 +2,7 @@
 // that observes Write tool calls against user-artifact path patterns
 // per R40 VOICE-MIRROR-DISCIPLINE. Hook is alert-only (NOT blocking) —
 // matched paths produce a discipline-record entry at
-// ~/.bot-hq/voice-mirror-log.md for retro review at phase-close.
+// ~/.bot-hq/projects/bot-hq/voice-mirror-log.md for retro review at phase-close.
 //
 // INCLUDE patterns (RATIFIED at scope-lock v2 OQ-1b PASS-3 per Brian
 // msg 8103 + Rain msg 8102):
@@ -58,8 +58,8 @@ const (
 // RunHook is the PreToolUse hook entry point for voice-mirror discipline.
 // Always returns ExitAllow (alert-only); on user-artifact path match,
 // appends a log entry to the voice-mirror log file (default
-// ~/.bot-hq/voice-mirror-log.md; overridable via BOT_HQ_VOICE_MIRROR_LOG_PATH
-// env for tests).
+// ~/.bot-hq/projects/bot-hq/voice-mirror-log.md; overridable via
+// BOT_HQ_VOICE_MIRROR_LOG_PATH env for tests).
 func RunHook(stdin io.Reader, _ io.Writer) int {
 	var input HookInput
 	if err := json.NewDecoder(stdin).Decode(&input); err != nil {
@@ -93,7 +93,7 @@ func RunHook(stdin io.Reader, _ io.Writer) int {
 	logPath := os.Getenv(logPathEnvVar)
 	if logPath == "" {
 		home, _ := os.UserHomeDir()
-		logPath = filepath.Join(home, ".bot-hq", "voice-mirror-log.md")
+		logPath = filepath.Join(home, ".bot-hq", "projects", "bot-hq", "voice-mirror-log.md")
 	}
 
 	appendLogEntry(logPath, agentID, filePath, snippet)

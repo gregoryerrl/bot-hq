@@ -3,8 +3,9 @@
 //
 // Wires the citeanchor + cl validators into the PreToolUse hook chain.
 // On Write/Edit operations targeting scope-lock-doc class artifacts
-// (~/.bot-hq/phase/*.md), runs cite-anchor validation on the new content
-// + reports invalid anchors as warnings (default) or blocks (strict mode).
+// (~/.bot-hq/projects/<project>/phase/*.md, post-Z-1), runs cite-anchor
+// validation on the new content + reports invalid anchors as warnings
+// (default) or blocks (strict mode).
 //
 // Catches G3-class failures empirically: Phase S 13-miss-failure case
 // where bilateral seal failed to catch architectural-fork + 5 deliverables
@@ -48,8 +49,9 @@ type R49Verdict struct {
 // be blocked + a human-readable summary.
 //
 // Scope: only fires for paths matching scope-lock-doc class (e.g.
-// ~/.bot-hq/phase/*.md). Non-scope-lock paths return ShouldBlock=false
-// with empty result.
+// ~/.bot-hq/projects/<project>/phase/*.md, post-Z-1; legacy
+// ~/.bot-hq/phase/*.md still recognized for transition-window safety).
+// Non-scope-lock paths return ShouldBlock=false with empty result.
 //
 // Mode: env-var BOT_HQ_R49_MODE controls block-vs-warn behavior.
 // Default is "warn".
@@ -85,26 +87,27 @@ func R49PreSealAudit(ctx context.Context, filePath string, newContent []byte) R4
 }
 
 // IsScopeLockDoc reports whether a file path matches the scope-lock-doc
-// class convention. Currently: any *.md under ~/.bot-hq/phase/ qualifies.
+// class convention. Post-Z-1: any *.md under ~/.bot-hq/projects/<p>/phase/
+// qualifies (project-scoped). Legacy ~/.bot-hq/phase/*.md still recognized
+// during transition window; post-soak (~7d) the legacy substring check
+// can be dropped.
 func IsScopeLockDoc(path string) bool {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = path
 	}
-	home, _ := os.UserHomeDir()
-	if home == "" {
-		// Fall back to substring check
-		return strings.Contains(abs, "/.bot-hq/phase/") && strings.HasSuffix(abs, ".md")
-	}
-	scopeLockDir := filepath.Join(home, ".bot-hq", "phase")
-	rel, err := filepath.Rel(scopeLockDir, abs)
-	if err != nil {
+	if !strings.HasSuffix(abs, ".md") {
 		return false
 	}
-	if strings.HasPrefix(rel, "..") {
-		return false
+	// Z-1 transition: cover BOTH old top-level and new project-scoped paths.
+	// Post-soak simplification: drop the legacy "/.bot-hq/phase/" check.
+	if strings.Contains(abs, "/.bot-hq/phase/") {
+		return true
 	}
-	return strings.HasSuffix(abs, ".md")
+	if strings.Contains(abs, "/.bot-hq/projects/") && strings.Contains(abs, "/phase/") {
+		return true
+	}
+	return false
 }
 
 func formatR49FailReason(filePath string, res citeanchor.ValidationResult) string {

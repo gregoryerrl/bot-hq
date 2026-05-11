@@ -20,7 +20,7 @@ const (
 	// when a non-Rain agent attempts hub_broadcast invocation.
 	HubBroadcastRainGateBlockMsg = "Phase R R2 hub_broadcast Rain-only gate: tool blocked.\n" +
 		"Reason: hub_broadcast is reserved for Rain (BOT_HQ_AGENT_ID=rain) per Phase R R1 [HR]-only-Rain authority.\n" +
-		"Re-anchor: ~/.bot-hq/phase/phase-r.md R2 cluster + R1 BRAIN-cycle hardening.\n" +
+		"Re-anchor: ~/.bot-hq/projects/bot-hq/phase/phase-r.md R2 cluster + R1 BRAIN-cycle hardening.\n" +
 		"Recovery: use hub_send for non-[HR] broadcasts; only Rain emits [HR]-tagged trio-consensus content.\n"
 )
 

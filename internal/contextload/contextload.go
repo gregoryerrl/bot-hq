@@ -229,10 +229,13 @@ type BootstrapContext struct {
 // layer model (knowledge + discipline + state). Equivalent to
 // LoadWithAgent (rules + project library) plus the per-agent resume
 // anchors:
-//   - phase/<active>.md — newest mtime under phase/ (active scope-lock doc)
-//   - ratchets/active.md — operational ratchet ledger
+//   - projects/<project>/phase/<active>.md — newest mtime (active scope-lock doc)
+//   - projects/<project>/ratchets/active.md — operational ratchet ledger
 //   - <agent>/last_state.json — R20 AgentState resume anchor
 //   - <agent>/discipline-anchors.md — R24 mutual-halt anchor
+//
+// Post-Z-1: phase + ratchets are project-scoped (under projects/<project>/).
+// Per-agent state stays at top-level (cross-project resume-anchors).
 //
 // Missing files are treated as empty. Use Markdown() on the returned
 // value for agent-consumption rendering.
@@ -243,13 +246,13 @@ func LoadBootstrap(canonRoot, project, agent string) (*BootstrapContext, error) 
 	}
 	bc := &BootstrapContext{Context: base, Agent: agent}
 
-	if path, body := findActivePhaseDoc(canonRoot); path != "" {
+	if path, body := findActivePhaseDoc(canonRoot, project); path != "" {
 		bc.PhaseDoc = body
 		bc.PhaseDocPath = path
 		bc.Sources = append(bc.Sources, path)
 	}
 
-	rpath := filepath.Join(canonRoot, "ratchets", "active.md")
+	rpath := filepath.Join(canonRoot, "projects", project, "ratchets", "active.md")
 	if data, err := os.ReadFile(rpath); err == nil {
 		bc.Ratchets = string(data)
 		bc.Sources = append(bc.Sources, rpath)
@@ -272,10 +275,16 @@ func LoadBootstrap(canonRoot, project, agent string) (*BootstrapContext, error) 
 }
 
 // findActivePhaseDoc returns (path, body) of the newest phase-*.md under
-// canonRoot/phase/. Returns ("", "") if no phase doc exists. Newest by
-// mtime so closed-phase snapshots don't shadow the live one.
-func findActivePhaseDoc(canonRoot string) (string, string) {
-	dir := filepath.Join(canonRoot, "phase")
+// canonRoot/projects/<project>/phase/. Returns ("", "") if no phase doc
+// exists or project is empty. Newest by mtime so closed-phase snapshots
+// don't shadow the live one.
+//
+// Post-Z-1: phase docs are project-scoped at projects/<project>/phase/.
+func findActivePhaseDoc(canonRoot, project string) (string, string) {
+	if project == "" {
+		return "", ""
+	}
+	dir := filepath.Join(canonRoot, "projects", project, "phase")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", ""

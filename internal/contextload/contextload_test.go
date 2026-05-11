@@ -154,16 +154,19 @@ func TestMarkdown_StableOrdering(t *testing.T) {
 }
 
 // makeBootstrapCL extends makeTestCL with the durable-substrate files
-// LoadBootstrap surfaces: phase/<latest>.md, ratchets/active.md, and
-// per-agent <agent>/last_state.json + discipline-anchors.md.
+// LoadBootstrap surfaces: projects/demo/phase/<latest>.md (post-Z-1
+// project-scoped), projects/demo/ratchets/active.md, and per-agent
+// <agent>/last_state.json + discipline-anchors.md (top-level, cross-project).
 func makeBootstrapCL(t *testing.T, agent string) string {
 	t.Helper()
 	root := makeTestCL(t)
 
-	if err := os.MkdirAll(filepath.Join(root, "phase"), 0o755); err != nil {
+	phaseDir := filepath.Join(root, "projects", "demo", "phase")
+	ratchetsDir := filepath.Join(root, "projects", "demo", "ratchets")
+	if err := os.MkdirAll(phaseDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "ratchets"), 0o755); err != nil {
+	if err := os.MkdirAll(ratchetsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if agent != "" {
@@ -172,19 +175,19 @@ func makeBootstrapCL(t *testing.T, agent string) string {
 		}
 	}
 
-	if err := os.WriteFile(filepath.Join(root, "phase", "phase-a.md"),
+	if err := os.WriteFile(filepath.Join(phaseDir, "phase-a.md"),
 		[]byte("# phase a (older)\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Older phase doc, then sleep then write the newer to guarantee
 	// distinct mtimes on coarse-resolution filesystems.
 	time.Sleep(10 * time.Millisecond)
-	if err := os.WriteFile(filepath.Join(root, "phase", "phase-b.md"),
+	if err := os.WriteFile(filepath.Join(phaseDir, "phase-b.md"),
 		[]byte("# phase b (active)\n\nActive scope-lock content.\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(filepath.Join(root, "ratchets", "active.md"),
+	if err := os.WriteFile(filepath.Join(ratchetsDir, "active.md"),
 		[]byte("# active ratchets\n\n- R1 closed\n- R2 open\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

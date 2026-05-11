@@ -59,7 +59,7 @@ var (
 // dual-emit-prevention transition window so round-tripping via either
 // emit-source produces identical hub-history.
 func heartbeatContentTemplate(latestID int64) string {
-	return fmt.Sprintf("[HEARTBEAT-LEDGER] msg-count cadence cycle (every %d msgs). State anchors: phase-doc=~/.bot-hq/phase/<active>.md ratchet-ledger=~/.bot-hq/ratchets/active.md latest-msg-id=%d. R20 AgentState write opportunity.", heartbeatMsgInterval, latestID)
+	return fmt.Sprintf("[HEARTBEAT-LEDGER] msg-count cadence cycle (every %d msgs). State anchors: phase-doc=~/.bot-hq/projects/bot-hq/phase/<active>.md ratchet-ledger=~/.bot-hq/projects/bot-hq/ratchets/active.md latest-msg-id=%d. R20 AgentState write opportunity.", heartbeatMsgInterval, latestID)
 }
 
 // runHeartbeatLedgerSurface is the surfaceFunc for the heartbeat-

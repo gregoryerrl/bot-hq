@@ -82,10 +82,10 @@ const planCapReasonFmt = "plan usage at %d%%, halt + idle in pane"
 // maxUtil drops below planUsageResetThreshold AND a halt was previously
 // active. Format: "plan usage reset to <N>%, resume work via R16
 // cross-restart-resume protocol bootstrap (a) git status (b)
-// ~/.bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/ratchets/active.md
+// ~/.bot-hq/projects/bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/projects/bot-hq/ratchets/active.md
 // (d) hub_read backlog since halt-fire". Locked substring: "plan usage
 // reset" — agents grep this in their initial-prompt match-rule.
-const planCapResumeFmt = "plan usage reset to %d%%, resume work via R16 cross-restart-resume protocol bootstrap (a) git status (b) ~/.bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/ratchets/active.md (d) hub_read backlog since halt-fire"
+const planCapResumeFmt = "plan usage reset to %d%%, resume work via R16 cross-restart-resume protocol bootstrap (a) git status (b) ~/.bot-hq/projects/bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/projects/bot-hq/ratchets/active.md (d) hub_read backlog since halt-fire"
 
 // planCapResumeCooldown caps emitPlanCapResume to once per window even
 // if the hadHalt-gate keeps firing on each poll (observed Phase J pass-3,

@@ -185,13 +185,21 @@ func walkDir(absDir, relPath string) ([]TreeNode, error) {
 		name := e.Name()
 		isDir := e.IsDir()
 		// At top level (relPath == ""), apply both skip lists.
-		// Nested levels skip dotfiles only — rules/projects/foo.git
-		// at nested levels is gitignored via dot-prefix.
+		// Nested levels skip dotfiles + HIDE-basename files — Z-1
+		// moved voice-mirror-log.md to projects/bot-hq/, so basename
+		// HIDE must apply at nested-level too to preserve S3 intent.
 		if relPath == "" && shouldSkip(name, isDir) {
 			continue
 		}
-		if relPath != "" && strings.HasPrefix(name, ".") {
-			continue
+		if relPath != "" {
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			if !isDir {
+				if _, ok := hideListBasenames[name]; ok {
+					continue
+				}
+			}
 		}
 		childRel := name
 		if relPath != "" {

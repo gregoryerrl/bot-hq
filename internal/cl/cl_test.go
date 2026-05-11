@@ -11,7 +11,7 @@ import (
 func newTestCL(t *testing.T) *CL {
 	t.Helper()
 	root := t.TempDir()
-	// Seed minimal CL skeleton
+	// Seed minimal CL skeleton — Z-1 layout (project-scoped phase/ratchets/discipline-log)
 	must := func(p string, content string) {
 		full := filepath.Join(root, p)
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
@@ -21,18 +21,20 @@ func newTestCL(t *testing.T) *CL {
 			t.Fatalf("write %s: %v", full, err)
 		}
 	}
-	must("phase/phase-t.md", "# Phase T scope-lock-doc\n")
-	must("phase/phase-s.md", "# Phase S scope-lock-doc\n")
-	must("ratchets/active.md", "# Active ratchets\n")
+	// Project-scoped (post-Z-1) artifacts under projects/bot-hq/
+	must("projects/bot-hq/phase/phase-t.md", "# Phase T scope-lock-doc\n")
+	must("projects/bot-hq/phase/phase-s.md", "# Phase S scope-lock-doc\n")
+	must("projects/bot-hq/ratchets/active.md", "# Active ratchets\n")
+	must("projects/bot-hq/discipline-log.md", "# Discipline log\n")
+	must("projects/bot-hq/README.md", "# bot-hq project\n")
+	// Top-level (cross-project) artifacts
 	must("gates/pre-commit-checklist.md", "# Pre-commit\n")
-	must("discipline-log.md", "# Discipline log\n")
 	must("tasks.md", "# Tasks\n")
 	must("glossary.md", "# Glossary\n")
 	must("roles.md", "# Roles\n")
 	must("brian/last_state.json", `{"agent_id":"brian","phase":"Phase T v5"}`)
 	must("rain/last_state.json", `{"agent_id":"rain","phase":"Phase T v5"}`)
 	must("rules/general.yaml", "version: 1\n")
-	must("projects/bot-hq/README.md", "# bot-hq project\n")
 
 	cl, err := NewCL(root)
 	if err != nil {
@@ -74,30 +76,50 @@ func TestNewCL_rootIsFile_errors(t *testing.T) {
 	}
 }
 
-func TestPathFor_phase(t *testing.T) {
+func TestPathFor_phaseProject(t *testing.T) {
 	cl := newTestCL(t)
-	got, err := cl.PathFor(ClassPhase, "phase-t")
+	got, err := cl.PathFor(ClassPhase, "bot-hq", "phase-t")
 	if err != nil {
 		t.Fatalf("PathFor: %v", err)
 	}
+	want := filepath.Join(cl.Root(), "projects", "bot-hq", "phase", "phase-t.md")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestPathFor_phaseLegacyTopLevel(t *testing.T) {
+	cl := newTestCL(t)
+	// project="" → legacy top-level path
+	got, _ := cl.PathFor(ClassPhase, "", "phase-t")
 	want := filepath.Join(cl.Root(), "phase", "phase-t.md")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
-func TestPathFor_ratchetActive(t *testing.T) {
+func TestPathFor_ratchetActiveProject(t *testing.T) {
 	cl := newTestCL(t)
-	got, _ := cl.PathFor(ClassRatchet, "active")
-	want := filepath.Join(cl.Root(), "ratchets", "active.md")
+	got, _ := cl.PathFor(ClassRatchet, "bot-hq", "active")
+	want := filepath.Join(cl.Root(), "projects", "bot-hq", "ratchets", "active.md")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
-func TestPathFor_agentState(t *testing.T) {
+func TestPathFor_disciplineLogProject(t *testing.T) {
 	cl := newTestCL(t)
-	got, _ := cl.PathFor(ClassAgentState, "brian")
+	got, _ := cl.PathFor(ClassDisciplineLog, "bot-hq", "")
+	want := filepath.Join(cl.Root(), "projects", "bot-hq", "discipline-log.md")
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestPathFor_agentStateGlobal(t *testing.T) {
+	cl := newTestCL(t)
+	// ClassAgentState is global — project param ignored
+	got, _ := cl.PathFor(ClassAgentState, "", "brian")
 	want := filepath.Join(cl.Root(), "brian", "last_state.json")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -106,7 +128,7 @@ func TestPathFor_agentState(t *testing.T) {
 
 func TestPathFor_ipivState(t *testing.T) {
 	cl := newTestCL(t)
-	got, _ := cl.PathFor(ClassIPIVState, "bot-hq/task-abc")
+	got, _ := cl.PathFor(ClassIPIVState, "", "bot-hq/task-abc")
 	want := filepath.Join(cl.Root(), "projects", "bot-hq", "task-abc", "ipiv-state.yaml")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -115,15 +137,15 @@ func TestPathFor_ipivState(t *testing.T) {
 
 func TestPathFor_unsupportedClass(t *testing.T) {
 	cl := newTestCL(t)
-	_, err := cl.PathFor(ClassUnknown, "anything")
+	_, err := cl.PathFor(ClassUnknown, "", "anything")
 	if err == nil {
 		t.Error("expected ErrUnsupportedClass")
 	}
 }
 
-func TestGet_existingPhase(t *testing.T) {
+func TestGet_existingPhaseProjectScoped(t *testing.T) {
 	cl := newTestCL(t)
-	a, err := cl.Get(ClassPhase, "phase-t")
+	a, err := cl.Get(ClassPhase, "bot-hq", "phase-t")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -143,15 +165,15 @@ func TestGet_existingPhase(t *testing.T) {
 
 func TestGet_missing_returnsErrNotFound(t *testing.T) {
 	cl := newTestCL(t)
-	_, err := cl.Get(ClassPhase, "nonexistent")
+	_, err := cl.Get(ClassPhase, "bot-hq", "nonexistent")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("err = %v, want wrap of ErrNotFound", err)
 	}
 }
 
-func TestList_phaseClass(t *testing.T) {
+func TestList_phaseClassProjectScoped(t *testing.T) {
 	cl := newTestCL(t)
-	arts, err := cl.List(ClassPhase)
+	arts, err := cl.List(ClassPhase, "bot-hq")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -166,7 +188,8 @@ func TestList_phaseClass(t *testing.T) {
 
 func TestList_referenceDocsClass(t *testing.T) {
 	cl := newTestCL(t)
-	arts, err := cl.List(ClassReference)
+	// Reference docs are global — project param empty
+	arts, err := cl.List(ClassReference, "")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -186,9 +209,9 @@ func TestList_referenceDocsClass(t *testing.T) {
 
 func TestList_classWithoutDirReturnsEmpty(t *testing.T) {
 	cl := newTestCL(t)
-	// Gates/* dir exists in seed; remove ratchets/ to test empty-dir behavior
-	os.RemoveAll(filepath.Join(cl.Root(), "ratchets"))
-	arts, err := cl.List(ClassRatchet)
+	// Remove project-scoped ratchets dir to test empty-dir behavior
+	os.RemoveAll(filepath.Join(cl.Root(), "projects", "bot-hq", "ratchets"))
+	arts, err := cl.List(ClassRatchet, "bot-hq")
 	if err != nil {
 		t.Fatalf("List with missing dir: %v (should be nil error, empty result)", err)
 	}
@@ -197,9 +220,9 @@ func TestList_classWithoutDirReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestRead_byPath(t *testing.T) {
+func TestRead_byPathProjectScoped(t *testing.T) {
 	cl := newTestCL(t)
-	path := filepath.Join(cl.Root(), "phase", "phase-t.md")
+	path := filepath.Join(cl.Root(), "projects", "bot-hq", "phase", "phase-t.md")
 	a, err := cl.Read(path)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -210,16 +233,20 @@ func TestRead_byPath(t *testing.T) {
 	if a.ID != "phase-t" {
 		t.Errorf("id = %q, want phase-t", a.ID)
 	}
+	if a.Project != "bot-hq" {
+		t.Errorf("project = %q, want bot-hq", a.Project)
+	}
 }
 
-func TestWrite_atomicCreate(t *testing.T) {
+func TestWrite_atomicCreateProjectScoped(t *testing.T) {
 	cl := newTestCL(t)
-	path := filepath.Join(cl.Root(), "phase", "phase-new.md")
+	path := filepath.Join(cl.Root(), "projects", "bot-hq", "phase", "phase-new.md")
 	a := &Artifact{
 		Class:   ClassPhase,
 		ID:      "phase-new",
 		Path:    path,
 		Content: []byte("# New phase\n"),
+		Project: "bot-hq",
 	}
 	if err := cl.Write(a); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -284,7 +311,7 @@ func TestWalk_visitsAllArtifactsAndSkipsRuntimeEphemera(t *testing.T) {
 		t.Fatalf("Walk: %v", err)
 	}
 
-	// Verify expected classes seen
+	// Verify expected classes seen (post-Z-1: phase + ratchet + discipline-log live under projects/bot-hq/)
 	if visited[ClassPhase] < 2 {
 		t.Errorf("phase visited = %d, want >= 2", visited[ClassPhase])
 	}
@@ -308,13 +335,19 @@ func TestWalk_visitsAllArtifactsAndSkipsRuntimeEphemera(t *testing.T) {
 func TestDetectClass_knownPaths(t *testing.T) {
 	cl := newTestCL(t)
 	cases := []struct {
-		path  string
-		want  Class
+		path string
+		want Class
 	}{
+		// Project-scoped post-Z-1 paths
+		{filepath.Join(cl.Root(), "projects/bot-hq/phase/phase-t.md"), ClassPhase},
+		{filepath.Join(cl.Root(), "projects/bot-hq/ratchets/active.md"), ClassRatchet},
+		{filepath.Join(cl.Root(), "projects/bot-hq/discipline-log.md"), ClassDisciplineLog},
+		// Legacy top-level paths (still recognized for transition-window safety)
 		{filepath.Join(cl.Root(), "phase/phase-t.md"), ClassPhase},
 		{filepath.Join(cl.Root(), "ratchets/active.md"), ClassRatchet},
-		{filepath.Join(cl.Root(), "gates/pre-commit-checklist.md"), ClassGate},
 		{filepath.Join(cl.Root(), "discipline-log.md"), ClassDisciplineLog},
+		// Global classes (unchanged by Z-1)
+		{filepath.Join(cl.Root(), "gates/pre-commit-checklist.md"), ClassGate},
 		{filepath.Join(cl.Root(), "tasks.md"), ClassTasks},
 		{filepath.Join(cl.Root(), "glossary.md"), ClassReference},
 		{filepath.Join(cl.Root(), "brian/last_state.json"), ClassAgentState},
@@ -336,6 +369,8 @@ func TestDeriveID_knownPaths(t *testing.T) {
 		path string
 		want string
 	}{
+		{filepath.Join(cl.Root(), "projects/bot-hq/phase/phase-t.md"), "phase-t"},
+		{filepath.Join(cl.Root(), "projects/bot-hq/ratchets/active.md"), "active"},
 		{filepath.Join(cl.Root(), "phase/phase-t.md"), "phase-t"},
 		{filepath.Join(cl.Root(), "ratchets/active.md"), "active"},
 		{filepath.Join(cl.Root(), "rules/general.yaml"), "general"},

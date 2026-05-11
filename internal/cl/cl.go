@@ -9,16 +9,28 @@
 //   - T-2 investigator-toolset (cluster D + E)
 //   - T-2 R49 PRE-SEAL-MECHANICAL-AUDIT (R44/R49 hooks)
 //
-// CL artifacts include:
-//   - phase/<phase-id>.md             — scope-lock-doc per R10
-//   - ratchets/active.md              — forward-ratchet ledger
-//   - projects/<project>/             — per-project library
-//   - rules/{general,projects,agents}/ — discipline-rule configs
-//   - sessions/<id>/                  — session manifests
-//   - gates/<checklist>.md            — Tier-3 pre-action checklists
-//   - <agent>/{last_state.json,discipline-anchors.md}
-//   - discipline-log.md / tasks.md / voice-mirror-log.md
-//   - 10 top-level reference docs (glossary / roles / etc.)
+// Post-Z-1 layout (CL = generalized cross-project substrate):
+//
+//   Top-level (cross-project):
+//     - rules/{general,projects,agents}/ — discipline-rule configs
+//     - sessions/<id>/                    — session manifests
+//     - gates/<checklist>.md              — Tier-3 pre-action checklists
+//     - <agent>/{last_state.json,discipline-anchors.md}
+//     - tasks.md                          — cross-project task pointer
+//     - 6 reference docs at top-level (glossary / roles / agent-onboarding /
+//       rulebook / mcp-tool-manifest / last-state-schema)
+//     - README.md                         — CL Manifest entrypoint
+//
+//   Per-project (projects/<project>/):
+//     - phase/<phase-id>.md               — scope-lock-doc per R10
+//     - ratchets/active.md                — forward-ratchet ledger
+//     - ratchets/active-phase-*-closed-*.md — closed phase snapshots
+//     - discipline-log.md                 — Joint discipline log
+//     - voice-mirror-log.md               — R40 hook log
+//     - arcs-index.md                     — phase-arc snapshot pointers
+//     - conventions-index.md              — convention pointers
+//     - tasks/<task-id>/                  — IPIV task artifacts
+//     - README.md / INDEX.md              — project library
 //
 // Excluded from CL (per Phase R R3-b conventions):
 //   - code (lives in ~/Projects/bot-hq/)
@@ -99,22 +111,38 @@ func NewCL(root string) (*CL, error) {
 // Root returns the absolute path of the CL root directory.
 func (c *CL) Root() string { return c.root }
 
-// PathFor constructs the canonical file path for a (class, id) pair.
+// PathFor constructs the canonical file path for a (class, project, id) triple.
 // Returns ErrUnsupportedClass for classes lacking a single-file convention.
-func (c *CL) PathFor(class Class, id string) (string, error) {
+//
+// Project-scoped classes (ClassPhase, ClassRatchet, ClassDisciplineLog) use
+// projects/<project>/... prefix when project != "". Other classes ignore
+// the project parameter (global CL surface).
+func (c *CL) PathFor(class Class, project, id string) (string, error) {
 	switch class {
 	case ClassPhase:
+		if project != "" {
+			return filepath.Join(c.root, "projects", project, "phase", id+".md"), nil
+		}
 		return filepath.Join(c.root, "phase", id+".md"), nil
 	case ClassRatchet:
+		if project != "" {
+			if id == "active" {
+				return filepath.Join(c.root, "projects", project, "ratchets", "active.md"), nil
+			}
+			return filepath.Join(c.root, "projects", project, "ratchets", id+".md"), nil
+		}
 		if id == "active" {
 			return filepath.Join(c.root, "ratchets", "active.md"), nil
 		}
 		// Closed ratchets stored as date-stamped files
 		return filepath.Join(c.root, "ratchets", id+".md"), nil
+	case ClassDisciplineLog:
+		if project != "" {
+			return filepath.Join(c.root, "projects", project, "discipline-log.md"), nil
+		}
+		return filepath.Join(c.root, "discipline-log.md"), nil
 	case ClassGate:
 		return filepath.Join(c.root, "gates", id+".md"), nil
-	case ClassDisciplineLog:
-		return filepath.Join(c.root, "discipline-log.md"), nil
 	case ClassTasks:
 		return filepath.Join(c.root, "tasks.md"), nil
 	case ClassReference:
@@ -140,10 +168,11 @@ func (c *CL) PathFor(class Class, id string) (string, error) {
 	}
 }
 
-// Get loads an artifact by (class, id). Returns ErrNotFound if the file does not exist.
-// The returned Artifact has Content populated + Loaded=true.
-func (c *CL) Get(class Class, id string) (*Artifact, error) {
-	path, err := c.PathFor(class, id)
+// Get loads an artifact by (class, project, id). Returns ErrNotFound if
+// the file does not exist. The returned Artifact has Content populated +
+// Loaded=true. Pass project="" for global classes.
+func (c *CL) Get(class Class, project, id string) (*Artifact, error) {
+	path, err := c.PathFor(class, project, id)
 	if err != nil {
 		return nil, err
 	}
@@ -193,8 +222,12 @@ func (c *CL) Write(a *Artifact) error {
 
 // List enumerates artifacts of the given class. Returns empty slice on
 // missing class-directory (treats as zero-result, not error).
-func (c *CL) List(class Class) ([]*Artifact, error) {
-	dir, err := c.classDir(class)
+//
+// For project-scoped classes (ClassPhase, ClassRatchet, ClassDisciplineLog),
+// pass the project key to enumerate that project's artifacts. Pass project=""
+// for legacy top-level lookup (returns empty post-Z-1 if top-level dirs moved).
+func (c *CL) List(class Class, project string) ([]*Artifact, error) {
+	dir, err := c.classDir(class, project)
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +290,7 @@ func (c *CL) Walk(visit func(*Artifact) error) error {
 // last_state.json into a generic map. T-1.7 IPIV-state-tracking will add
 // a typed variant.
 func (c *CL) LoadAgentState(agentID string) (map[string]interface{}, error) {
-	a, err := c.Get(ClassAgentState, agentID)
+	a, err := c.Get(ClassAgentState, "", agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -268,11 +301,17 @@ func (c *CL) LoadAgentState(agentID string) (map[string]interface{}, error) {
 	return state, nil
 }
 
-func (c *CL) classDir(class Class) (string, error) {
+func (c *CL) classDir(class Class, project string) (string, error) {
 	switch class {
 	case ClassPhase:
+		if project != "" {
+			return filepath.Join(c.root, "projects", project, "phase"), nil
+		}
 		return filepath.Join(c.root, "phase"), nil
 	case ClassRatchet:
+		if project != "" {
+			return filepath.Join(c.root, "projects", project, "ratchets"), nil
+		}
 		return filepath.Join(c.root, "ratchets"), nil
 	case ClassGate:
 		return filepath.Join(c.root, "gates"), nil
@@ -290,11 +329,34 @@ func (c *CL) matchesClass(class Class, path string) bool {
 	}
 	switch class {
 	case ClassPhase:
-		return strings.HasPrefix(rel, "phase/") && strings.HasSuffix(rel, ".md")
+		// Post-Z-1: projects/<p>/phase/*.md; legacy: phase/*.md
+		if !strings.HasSuffix(rel, ".md") {
+			return false
+		}
+		if strings.HasPrefix(rel, "phase/") {
+			return true
+		}
+		// Match projects/<project>/phase/*.md (any project)
+		parts := strings.Split(rel, string(filepath.Separator))
+		return len(parts) >= 4 && parts[0] == "projects" && parts[2] == "phase"
 	case ClassRatchet:
-		return strings.HasPrefix(rel, "ratchets/") && strings.HasSuffix(rel, ".md")
+		if !strings.HasSuffix(rel, ".md") {
+			return false
+		}
+		if strings.HasPrefix(rel, "ratchets/") {
+			return true
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		return len(parts) >= 4 && parts[0] == "projects" && parts[2] == "ratchets"
 	case ClassGate:
 		return strings.HasPrefix(rel, "gates/") && strings.HasSuffix(rel, ".md")
+	case ClassDisciplineLog:
+		// Post-Z-1: projects/<p>/discipline-log.md; legacy: top-level discipline-log.md
+		if rel == "discipline-log.md" {
+			return true
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		return len(parts) == 3 && parts[0] == "projects" && parts[2] == "discipline-log.md"
 	case ClassReference:
 		// Top-level *.md files are reference docs (glossary.md / roles.md / etc.)
 		return !strings.Contains(rel, "/") && strings.HasSuffix(rel, ".md")
@@ -323,6 +385,21 @@ func (c *CL) detectClass(path string) Class {
 	case "sessions":
 		return ClassSession
 	case "projects":
+		// Project-scoped phase/ratchets/discipline-log per Z-1 generalization.
+		// projects/<project>/phase/<id>.md → ClassPhase
+		// projects/<project>/ratchets/<id>.md → ClassRatchet
+		// projects/<project>/discipline-log.md → ClassDisciplineLog
+		// projects/<project>/<task-id>/ipiv-state.yaml → ClassIPIVState
+		// Other projects/<project>/* → ClassProject
+		if len(parts) >= 4 && parts[2] == "phase" && strings.HasSuffix(parts[len(parts)-1], ".md") {
+			return ClassPhase
+		}
+		if len(parts) >= 4 && parts[2] == "ratchets" && strings.HasSuffix(parts[len(parts)-1], ".md") {
+			return ClassRatchet
+		}
+		if len(parts) == 3 && parts[2] == "discipline-log.md" {
+			return ClassDisciplineLog
+		}
 		if len(parts) > 2 && strings.HasSuffix(parts[len(parts)-1], "ipiv-state.yaml") {
 			return ClassIPIVState
 		}
@@ -370,8 +447,18 @@ func (c *CL) deriveID(path string) string {
 			return parts[1]
 		}
 	case "projects":
+		// Project-scoped phase/ratchets/discipline-log → strip-extension on final segment.
+		// E.g., projects/bot-hq/phase/phase-t.md → "phase-t"; ratchets/active.md → "active";
+		// discipline-log.md → "discipline-log".
+		if len(parts) >= 4 && (parts[2] == "phase" || parts[2] == "ratchets") {
+			fname := parts[len(parts)-1]
+			return strings.TrimSuffix(fname, filepath.Ext(fname))
+		}
+		if len(parts) == 3 && parts[2] == "discipline-log.md" {
+			return "discipline-log"
+		}
+		// Generic projects/<project>/... id (strip extension on final segment)
 		if len(parts) > 1 {
-			// Strip extension on final segment
 			parts[len(parts)-1] = strings.TrimSuffix(parts[len(parts)-1], filepath.Ext(parts[len(parts)-1]))
 			return strings.Join(parts[1:], "/")
 		}

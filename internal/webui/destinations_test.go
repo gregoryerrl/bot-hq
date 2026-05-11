@@ -16,14 +16,16 @@ func fillCanonicalLayout(t *testing.T, root string) {
 	t.Helper()
 	mustWrite(t, filepath.Join(root, "README.md"), "# bot-hq\n")
 	mustWrite(t, filepath.Join(root, "tasks.md"), "---\ntasks: []\n---\n\n# Global tasks\n")
-	mustWrite(t, filepath.Join(root, "discipline-log.md"), "# Discipline log\n")
+	// Post-Z-1: bot-hq's operational artifacts under projects/bot-hq/
+	mustMkdir(t, filepath.Join(root, "projects", "bot-hq"))
+	mustWrite(t, filepath.Join(root, "projects", "bot-hq", "discipline-log.md"), "# Discipline log\n")
 
-	mustMkdir(t, filepath.Join(root, "phase"))
-	mustWrite(t, filepath.Join(root, "phase", "phase-n.md"), "# Phase N\n")
-	mustWrite(t, filepath.Join(root, "phase", "phase-i.md"), "# Phase I\n")
+	mustMkdir(t, filepath.Join(root, "projects", "bot-hq", "phase"))
+	mustWrite(t, filepath.Join(root, "projects", "bot-hq", "phase", "phase-n.md"), "# Phase N\n")
+	mustWrite(t, filepath.Join(root, "projects", "bot-hq", "phase", "phase-i.md"), "# Phase I\n")
 
-	mustMkdir(t, filepath.Join(root, "ratchets"))
-	mustWrite(t, filepath.Join(root, "ratchets", "active.md"), "ratchet\n")
+	mustMkdir(t, filepath.Join(root, "projects", "bot-hq", "ratchets"))
+	mustWrite(t, filepath.Join(root, "projects", "bot-hq", "ratchets", "active.md"), "ratchet\n")
 
 	mustMkdir(t, filepath.Join(root, "rules"))
 	mustWrite(t, filepath.Join(root, "rules", "general.yaml"), "tone:\n  reply: g\n")

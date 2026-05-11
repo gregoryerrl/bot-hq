@@ -38,11 +38,11 @@ type AgentState struct {
 
 	// LastPhaseDoc is the basename of the active scope-lock doc
 	// (e.g., "phase-j.md"). Cross-validates against
-	// ~/.bot-hq/phase/<active>.md presence at bootstrap.
+	// ~/.bot-hq/projects/bot-hq/phase/<active>.md presence at bootstrap.
 	LastPhaseDoc string `json:"last_phase_doc"`
 
 	// LastRatchetPull is when the agent last read
-	// ~/.bot-hq/ratchets/active.md.
+	// ~/.bot-hq/projects/bot-hq/ratchets/active.md.
 	LastRatchetPull time.Time `json:"last_ratchet_pull_at"`
 
 	// LastStateWrite is when this AgentState was written. Stale state

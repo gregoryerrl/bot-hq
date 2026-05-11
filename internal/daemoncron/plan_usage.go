@@ -41,7 +41,7 @@ const (
 	// planCapResumeFmt — locked content substring for plan-cap RESUME
 	// emit. Brian/Rain STARTUP prompts match against "plan usage reset"
 	// substring; consumer-side recognition gate.
-	planCapResumeFmt = "plan usage reset to %d%%, resume work via R16 cross-restart-resume protocol bootstrap (a) git status (b) ~/.bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/ratchets/active.md (d) hub_read backlog since halt-fire"
+	planCapResumeFmt = "plan usage reset to %d%%, resume work via R16 cross-restart-resume protocol bootstrap (a) git status (b) ~/.bot-hq/projects/bot-hq/phase/<active-phase>.md (c) ~/.bot-hq/projects/bot-hq/ratchets/active.md (d) hub_read backlog since halt-fire"
 
 	// planCapReasonFmt — literal substring brian/rain STARTUP prompts
 	// match against ("plan usage at <N>%, halt"). Any reformat MUST be
