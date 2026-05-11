@@ -172,15 +172,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case SessionsUpdated:
+		// Z-8e: forward to both Hub (strip column) and Sessions tab (list).
 		var cmd tea.Cmd
 		a.sessionsTab, cmd = a.sessionsTab.Update(msg)
+		a.hubTab, _ = a.hubTab.Update(msg)
 		return a, cmd
 
 	case SessionSelected:
-		a.hubTab.SetSessionFilter(msg.SessionID)
-		if msg.SessionID != "" {
-			a.activeTab = TabHub
-		}
+		// Z-8e: SessionSelected stays as a tab-routing hint. Z-8f will
+		// land the Sessions-tab drilled-in container view; until then
+		// it's a no-op (Sessions tab handles its own selection state
+		// internally for Z-8f's container).
 		return a, nil
 
 	case CommandSubmitted:

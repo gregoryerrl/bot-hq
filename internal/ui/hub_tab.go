@@ -28,15 +28,16 @@ type CommandSubmitted struct {
 	Text string
 }
 
-// HubTab displays a scrollable, color-coded message feed with a command input.
+// HubTab displays the main hub view: cross-session-relevant traffic on
+// the left (user-to-emma chat + broadcasts + elevations from any
+// session) and per-session strip column on the right (one card per
+// active session with recent message previews).
 //
-// Z-3 sessions-as-containers retargets the Hub tab's conversational
-// partner to emma (global stateless meta-orchestrator). Per architecture/
-// sessions-as-containers.md "Hub TUI split" section: Hub-tab = user-to-emma
-// conversation + cross-session [HR]/Flag/Tag feed; Sessions-tab = per-
-// session interactive view with input targeting that session's BRAIN-duo.
-// emma's broadcast scope (session_id = "" globals + HR/flag/tag cross-cuts)
-// is what surfaces here.
+// Z-8e separates Hub from Container: pre-Z-8e the Hub tab was reused
+// as both the global view and the per-session-filtered view (via
+// SetSessionFilter from the Sessions tab). Post-Z-8e the per-session
+// view lives in the Sessions tab as a drilled-in container view, and
+// the Hub tab strictly shows main-hub traffic via PassesMainHubView.
 //
 // Input is a textarea (not textinput) so users can compose multi-line
 // messages and paste long content without truncation. Keybindings are
@@ -44,14 +45,14 @@ type CommandSubmitted struct {
 // alt+enter insert a newline. CharLimit is left at textarea's default 0
 // (unlimited).
 type HubTab struct {
-	messages      []protocol.Message
-	viewport      viewport.Model
-	input         textarea.Model
-	width         int
-	height        int
-	focused       bool // true when the command input is focused
-	sessionFilter string
-	pane          *panestate.Manager // first-order activity strip source
+	messages []protocol.Message
+	viewport viewport.Model
+	input    textarea.Model
+	width    int
+	height   int
+	focused  bool // true when the command input is focused
+	sessions []protocol.Session // Z-8e: active sessions for the strip column
+	pane     *panestate.Manager // first-order activity strip source
 	// followBottom sticks the viewport to the latest message. Default true so
 	// hub initial render snaps to present (fixes post-restart "rendered mid-
 	// conversation"). Disengages on user scroll-up; re-engages on G / end.
@@ -112,6 +113,10 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 		if h.followBottom {
 			h.viewport.GotoBottom()
 		}
+
+	case SessionsUpdated:
+		// Z-8e: track active sessions for the strip column render.
+		h.sessions = msg.Sessions
 
 	case tea.KeyMsg:
 		if h.focused {
@@ -186,14 +191,30 @@ func (h *HubTab) SetSize(width, height int) {
 	h.resize()
 }
 
-// SetSessionFilter filters the hub to only show messages from a specific session.
-// Pass an empty string to clear the filter. Re-engages auto-follow on the new
-// view since switching filter is the user asking to see "latest of this slice."
-func (h *HubTab) SetSessionFilter(sessionID string) {
-	h.sessionFilter = sessionID
-	h.viewport.SetContent(h.renderMessages())
-	h.viewport.GotoBottom()
-	h.followBottom = true
+// SetSessionFilter is retained as a no-op for back-compat with callers
+// not yet ported to Z-8f (Sessions tab container view). Z-8e dropped
+// the per-session filter from the Hub tab — main hub now strictly
+// shows rows where PassesMainHubView. Callers wanting a session view
+// should use the Sessions tab drill-in.
+func (h *HubTab) SetSessionFilter(_ string) {
+	// no-op: Z-8e
+}
+
+// sessionStripColumnWidth returns the right-column width for session
+// strips: 30% of total width, clamped to [24, 40] cols. Narrower
+// terminals collapse the column (returns 0 → strip skipped in View).
+func (h HubTab) sessionStripColumnWidth() int {
+	if h.width < 80 {
+		return 0
+	}
+	w := h.width * 30 / 100
+	if w < 24 {
+		w = 24
+	}
+	if w > 40 {
+		w = 40
+	}
+	return w
 }
 
 // resize recalculates viewport and input dimensions. When the user is in
@@ -209,7 +230,18 @@ func (h *HubTab) resize() {
 		vpHeight = 1
 	}
 
-	h.viewport.Width = h.width
+	// Z-8e: chat viewport takes left ~70% width when the strip column
+	// renders; full width when terminal is too narrow for the strip.
+	stripW := h.sessionStripColumnWidth()
+	vpWidth := h.width
+	if stripW > 0 {
+		vpWidth = h.width - stripW - 1 // -1 for the vertical separator
+		if vpWidth < 20 {
+			vpWidth = 20
+		}
+	}
+
+	h.viewport.Width = vpWidth
 	h.viewport.Height = vpHeight
 	h.input.SetWidth(h.width - 4) // Account for prompt and padding
 	h.input.SetHeight(inputRows)
@@ -220,23 +252,23 @@ func (h *HubTab) resize() {
 	}
 }
 
-// View renders the HubTab. Layout (top to bottom):
+// View renders the HubTab. Layout:
 //
-//	viewport       — scrollable message feed
-//	indicator      — scrolled-up hint (empty when followBottom)
-//	strip top      — top border of activity strip
-//	strip          — per-agent activity dots (Phase E commit 4)
-//	strip bottom   — bottom border of activity strip
-//	input          — command input
+//	┌─────────────┬─────────────┐
+//	│ chat        │ session     │
+//	│ viewport    │ strips      │
+//	│             │ (Z-8e col)  │
+//	├─────────────┴─────────────┤
+//	│ indicator (full-width)    │
+//	│ agent dots strip          │
+//	│ input textarea            │
+//	└───────────────────────────┘
 //
-// Indicator and strip slots are both always-reserved so the input bar
-// position stays stable across followBottom toggles and strip-empty/
-// non-empty transitions. Strip is bracketed by horizontal borders so
-// the activity row is visually separated from both the indicator above
-// and the input below.
+// The session-strip column renders when terminal is wide enough
+// (sessionStripColumnWidth > 0); otherwise it collapses and the chat
+// takes full width. Bottom slots (indicator/strip/input) span the
+// full width regardless.
 func (h HubTab) View() string {
-	// At narrow widths (<~50 cols) lipgloss may wrap or truncate the hint;
-	// cosmetic-recoverable, revisit if reported.
 	indicatorStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
 	indicatorText := ""
 	if !h.followBottom {
@@ -244,29 +276,49 @@ func (h HubTab) View() string {
 	}
 	indicator := indicatorStyle.Render(indicatorText)
 
-	stripContent := ""
+	agentStripContent := ""
 	if h.pane != nil {
-		stripContent = renderStrip(h.pane.Snapshot(), h.pane.HubSnapshot(), h.width)
+		agentStripContent = renderStrip(h.pane.Snapshot(), h.pane.HubSnapshot(), h.width)
 	}
-	// Top+bottom borders only (no side borders) — matches the prior
-	// full-width separator aesthetic while bracketing the strip on both
-	// sides. Border foreground reuses the dim grey from the old separator.
-	stripStyle := lipgloss.NewStyle().
+	agentStripStyle := lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder(), true, false, true, false).
 		BorderForeground(lipgloss.Color("#555555")).
 		Width(h.width).
 		Foreground(ColorStatus)
-	strip := stripStyle.Render(stripContent)
+	agentStrip := agentStripStyle.Render(agentStripContent)
+
+	// Z-8e: build the top-row split (chat viewport + session strip
+	// column). When terminal is too narrow the column collapses and
+	// chat takes full width.
+	stripW := h.sessionStripColumnWidth()
+	var topRow string
+	if stripW > 0 {
+		// Render the strip column with the same height as the chat
+		// viewport so the row aligns cleanly.
+		stripHeight := h.viewport.Height
+		stripColStyle := lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder(), false, false, false, true).
+			BorderForeground(lipgloss.Color("#555555")).
+			Width(stripW).
+			Height(stripHeight)
+		stripCol := stripColStyle.Render(renderSessionStrips(h.sessions, h.messages, stripW, stripHeight))
+		topRow = lipgloss.JoinHorizontal(lipgloss.Top, h.viewport.View(), stripCol)
+	} else {
+		topRow = h.viewport.View()
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
-		h.viewport.View(),
+		topRow,
 		indicator,
-		strip,
+		agentStrip,
 		h.input.View(),
 	)
 }
 
-// renderMessages builds the full string content for the viewport from all messages.
+// renderMessages builds the full string content for the viewport from
+// the main-hub-view subset of all messages: broadcasts + elevations
+// (Z-8c PassesMainHubView). Session-scoped non-elevated chatter is
+// hidden from the main hub view.
 func (h HubTab) renderMessages() string {
 	if len(h.messages) == 0 {
 		empty := lipgloss.NewStyle().
@@ -277,10 +329,15 @@ func (h HubTab) renderMessages() string {
 
 	var lines []string
 	for _, msg := range h.messages {
-		if h.sessionFilter != "" && msg.SessionID != h.sessionFilter {
+		if !protocol.PassesMainHubView(msg) {
 			continue
 		}
 		lines = append(lines, h.formatMessage(msg))
+	}
+	if len(lines) == 0 {
+		return lipgloss.NewStyle().
+			Foreground(ColorStatus).
+			Render("No main-hub traffic yet. Session-scoped activity lives in the Sessions tab; elevated signals ([HR]/Flag) will surface here.")
 	}
 	return strings.Join(lines, "\n")
 }
