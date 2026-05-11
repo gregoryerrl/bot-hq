@@ -210,9 +210,44 @@ func (g *SystemMonitor) Stop() {
 	close(g.stopCh)
 }
 
-// healthLoop runs the 30s cadence tier: roster-prune + context-cap +
-// delivery-gap audit. Pre-Z-9d this also polled Ollama health; that path
-// is retired (no more Ollama).
+// healthLoop runs the 30s cadence tier: roster-prune + delivery-gap audit.
+// Pre-Z-9d this also polled Ollama health (path retired with Ollama) and
+// context-cap (H-31 halt, disabled below).
+//
+// Why H-31 is disabled:
+//
+// `checkContextCap` reads ContextPct from Claude Code's status-line text
+// (`X% until auto-compact`). That percentage is computed against Claude
+// Code's INTERNAL auto-compact threshold per pane — empirically ~280k
+// tokens on a DeepSeek-V4-Pro pane (verified from session-file usage data
+// 2026-05-12), NOT against the model's actual context window (~200k
+// Anthropic, 1M DeepSeek). So the daemon's 95%-threshold halt fires at
+// roughly the same effective token count regardless of backend model.
+//
+// Pre-Z-0 this protection was load-bearing: agents had in-pane state
+// (last_state.json) that auto-compact could lose, so H-31 gave them a
+// runway to checkpoint before compaction destroyed the working set.
+//
+// Post-Z-0 (CL-first bootstrap per vision.md) and Z-9d (subprocess
+// pattern; agents are explicitly stateless, CL holds memory), auto-compact
+// is recoverable: the agent's pane summary loss is irrelevant because the
+// next daemon-pushed hub message arrives at a fresh-compacted pane and
+// R20 bootstrap-on-resume re-grounds the agent from CL pointers
+// (last_state.json on disk, ratchets, phase doc). H-31's "give agents a
+// runway" is now solving a problem that no longer exists.
+//
+// The kill-cascade we observed (msg 18432 → session-finalize at 02:14 in
+// session cl-uniformity-webui-nav-refactor-x6mfiv): one of the duo agents
+// read the H-15 halt-reason wording "idle for fresh session" and called
+// `hub_session_finalize`, taking down BOTH panes + archiving the Discord
+// thread. The trigger was a false positive against DeepSeek's real
+// capacity and the response was disproportionate.
+//
+// `checkContextCap` function + tests + `EmitContextCapCritical` daemoncron
+// helper + `ClearHaltIfDuoReregistered` recovery path all remain defined
+// (no call site = dormant). Reversal is `g.checkContextCap(time.Now())`
+// re-inserted here. If a future model-aware redesign wants to revive
+// H-31, those surfaces are intact.
 func (g *SystemMonitor) healthLoop() {
 	ticker := time.NewTicker(healthInterval)
 	defer ticker.Stop()
@@ -222,7 +257,7 @@ func (g *SystemMonitor) healthLoop() {
 			return
 		case <-ticker.C:
 			g.runRosterPrune()
-			g.checkContextCap(time.Now())
+			// H-31 context-cap halt DISABLED — see healthLoop doc above.
 			g.auditDeliveryGap()
 		}
 	}
