@@ -1260,4 +1260,164 @@
       status.textContent = 'Network error: ' + err.message;
     }
   }
+
+  // ====== Z-5b Hub chat surface ======
+  //
+  // Aggregated session-tagged message feed + per-session filter + send
+  // input. Subscribes to /api/hub/stream SSE; falls back gracefully on
+  // disconnect (reconnect on next openHub). Filter dropdown persists in
+  // localStorage. Sends POST to /api/hub/messages with the current
+  // filter as session_id (or empty for main-hub messages).
+  const hubState = {
+    open: false,
+    sse: null,
+    filter: localStorage.getItem('hub-filter') || '__ALL__',
+    rendered: new Set(),
+  };
+
+  function openHub() {
+    hubState.open = true;
+    hideLanding();
+    const editorEls = ['doc-rendered', 'doc-content'];
+    editorEls.forEach(function (id) {
+      const el = document.getElementById(id); if (el) el.classList.add('hidden');
+    });
+    document.getElementById('doc-hub').classList.remove('hidden');
+    document.getElementById('doc-path').textContent = 'Hub';
+    document.getElementById('doc-mtime').textContent = '';
+    document.getElementById('hub-filter').value = hubState.filter;
+    refreshSessionFilterOptions();
+    connectHubSSE();
+  }
+
+  function closeHub() {
+    hubState.open = false;
+    if (hubState.sse) { hubState.sse.close(); hubState.sse = null; }
+    document.getElementById('doc-hub').classList.add('hidden');
+    document.getElementById('doc-path').textContent = 'Pick a destination on the left.';
+    showLanding();
+  }
+
+  async function refreshSessionFilterOptions() {
+    // Populate filter dropdown with active sessions from /api/sessions
+    // (best-effort: keeps fixed __ALL__ + main-hub options + appends
+    // per-session entries from the sessions index).
+    try {
+      const r = await fetch('/api/sessions');
+      const d = await r.json();
+      const idx = (d.index || '').trim();
+      const sel = document.getElementById('hub-filter');
+      // Strip dynamic options (preserve the first 2 fixed ones)
+      while (sel.options.length > 2) sel.remove(2);
+      if (!idx) return;
+      // sessions/index.md is markdown; pull lines that look like session-ids
+      // (anything containing a hyphen + short hex). Simple permissive parse.
+      const seen = new Set();
+      idx.split('\n').forEach(function (line) {
+        const m = line.match(/([a-z0-9][a-z0-9._-]*-[a-z0-9]{6,8})/);
+        if (m && !seen.has(m[1])) {
+          seen.add(m[1]);
+          const opt = document.createElement('option');
+          opt.value = m[1];
+          opt.textContent = m[1];
+          sel.appendChild(opt);
+        }
+      });
+      sel.value = hubState.filter;
+    } catch (err) {
+      // best-effort; leave fixed options
+    }
+  }
+
+  function connectHubSSE() {
+    if (hubState.sse) { hubState.sse.close(); hubState.sse = null; }
+    document.getElementById('hub-feed').innerHTML = '<em class="muted">Connecting to live stream…</em>';
+    hubState.rendered.clear();
+    const status = document.getElementById('hub-stream-status');
+    status.textContent = '⟳';
+    const es = new EventSource('/api/hub/stream');
+    hubState.sse = es;
+    es.addEventListener('hub', function (ev) {
+      try {
+        const m = JSON.parse(ev.data);
+        renderHubMessage(m);
+        status.textContent = '● live';
+      } catch (err) { /* skip malformed */ }
+    });
+    es.onerror = function () {
+      status.textContent = '✗ disconnected (refresh to retry)';
+    };
+  }
+
+  function renderHubMessage(m) {
+    if (hubState.rendered.has(m.id)) return;
+    hubState.rendered.add(m.id);
+    const filter = hubState.filter;
+    if (filter !== '__ALL__' && m.session_id !== filter) return;
+    const feed = document.getElementById('hub-feed');
+    // Clear the "Connecting…" placeholder on first message
+    if (feed.firstElementChild && feed.firstElementChild.tagName === 'EM') feed.innerHTML = '';
+    const row = document.createElement('div');
+    row.className = 'hub-msg';
+    if (m.from_agent === 'user') row.classList.add('hub-msg-user');
+    if (m.from_agent === 'emma' || m.from_agent === 'Emma') row.classList.add('hub-msg-emma');
+    if (m.from_agent === 'system') row.classList.add('hub-msg-system');
+    const tag = m.session_id ? '[' + m.session_id + ']' : '[main]';
+    const ts = (m.created || '').slice(11, 16);
+    row.innerHTML =
+      '<span class="hub-msg-session-tag">' + escapeHtml(tag) + '</span> ' +
+      '<span class="hub-msg-from">' + escapeHtml(m.from_agent || '?') + ':</span> ' +
+      '<span class="hub-msg-content">' + escapeHtml(m.content || '') + '</span> ' +
+      '<span class="hub-msg-ts muted">' + escapeHtml(ts) + '</span>';
+    feed.appendChild(row);
+    // auto-scroll only if user is near bottom (within 80px) — preserves
+    // their reading position if they scrolled up to browse history
+    if (feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80) {
+      feed.scrollTop = feed.scrollHeight;
+    }
+  }
+
+  async function sendHubMessage(ev) {
+    ev.preventDefault();
+    const input = document.getElementById('hub-send-input');
+    const content = input.value.trim();
+    if (!content) return;
+    const filter = hubState.filter;
+    const sessionID = (filter === '__ALL__' || filter === '') ? '' : filter;
+    try {
+      const r = await fetch('/api/hub/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: content, session_id: sessionID }),
+      });
+      if (!r.ok) {
+        const t = await r.text();
+        alert('Send failed (' + r.status + '): ' + t);
+        return;
+      }
+      input.value = '';
+      // The SSE stream will echo our message back; no local render here
+      // (avoids double-render + ensures we display the canonical wire
+      // shape from the daemon).
+    } catch (err) {
+      alert('Send failed: ' + err.message);
+    }
+  }
+
+  document.getElementById('hub-open').addEventListener('click', openHub);
+  document.getElementById('hub-close').addEventListener('click', closeHub);
+  document.getElementById('hub-send-form').addEventListener('submit', sendHubMessage);
+  document.getElementById('hub-filter').addEventListener('change', function () {
+    hubState.filter = this.value;
+    localStorage.setItem('hub-filter', this.value);
+    // Re-render: clear feed + replay from cache by reconnecting (cheap;
+    // initial-snapshot from /api/hub/stream gives us the recent 100).
+    if (hubState.open) connectHubSSE();
+  });
+  // Ctrl+Enter in the textarea sends (UX nicety).
+  document.getElementById('hub-send-input').addEventListener('keydown', function (ev) {
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') {
+      document.getElementById('hub-send-form').requestSubmit();
+    }
+  });
 })();
