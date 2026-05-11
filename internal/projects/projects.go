@@ -43,6 +43,36 @@ type Rules struct {
 	CoderToolsPerActionApproval []string `yaml:"coder_tools_per_action_approval"`
 	CommitStyle                 string   `yaml:"commit_style"`
 	RequireIssueLink            bool     `yaml:"require_issue_link"`
+	Extensions                  ExtensionsBlock `yaml:"extensions,omitempty"`
+}
+
+// ExtensionsBlock declares per-project files/dirs beyond the canonical
+// 9-subdir schema. Each class is a list of basenames relative to
+// projects/<p>/. Filename convention: explicit-extension for files
+// (e.g., "vision.md"), bare-name for dirs (e.g., "phase"). Absent
+// extensions block = canonical-only with free-form discovery for any
+// undeclared on-disk files.
+//
+// Project-private catch-all (5th class per Plan-B R.1 taxonomy) is
+// implicit — undeclared on-disk files surface in nav under "More" without
+// needing a field here.
+type ExtensionsBlock struct {
+	UniversalOptIn      []string `yaml:"universal_opt_in,omitempty"`
+	ExternalDocsPointer []string `yaml:"external_docs_pointer,omitempty"`
+	BrainDuoOperational []string `yaml:"brain_duo_operational,omitempty"`
+	FoundationalAnchors []string `yaml:"foundational_anchors,omitempty"`
+}
+
+// AllNames returns every basename declared across all 4 classes. Used by
+// the tree-walker to determine which non-canonical files/dirs have a
+// declared class.
+func (e ExtensionsBlock) AllNames() []string {
+	out := make([]string, 0, len(e.UniversalOptIn)+len(e.ExternalDocsPointer)+len(e.BrainDuoOperational)+len(e.FoundationalAnchors))
+	out = append(out, e.UniversalOptIn...)
+	out = append(out, e.ExternalDocsPointer...)
+	out = append(out, e.BrainDuoOperational...)
+	out = append(out, e.FoundationalAnchors...)
+	return out
 }
 
 // nestedGates / nestedBranch / nestedCommit are the canonical nested-form
@@ -96,6 +126,9 @@ type rulesAux struct {
 	CoderToolsPerActionApproval []string `yaml:"coder_tools_per_action_approval"`
 	CommitStyle                 string   `yaml:"commit_style"`
 	RequireIssueLink            bool     `yaml:"require_issue_link"`
+
+	// Phase Z-CL-uniformity: extensions block (new in this IPAV).
+	Extensions ExtensionsBlock `yaml:"extensions,omitempty"`
 }
 
 // UnmarshalYAML accepts both the canonical nested form (gates/branch/commit
@@ -153,6 +186,9 @@ func (r *Rules) UnmarshalYAML(value *yaml.Node) error {
 		r.CoderToolsBlocked = a.CoderToolsBlocked
 		r.CoderToolsPerActionApproval = a.CoderToolsPerActionApproval
 	}
+
+	// Extensions: no flat/nested duality — single form only.
+	r.Extensions = a.Extensions
 	return nil
 }
 
@@ -336,6 +372,113 @@ func (r *Rules) ValidateBranchName(name string) error {
 		return &ValidationError{Name: name, Pattern: r.BranchPattern, Help: r.BranchPatternHelp}
 	}
 	return nil
+}
+
+// ExtensionsValidationError carries one finding from ValidateExtensions.
+// Severity is "error" (blocks cl-index --validate exit-zero) or "warning"
+// (non-blocking; surfaced for review). Class names the offending taxonomy
+// bucket; Name names the offending basename; Rule is the human-readable
+// explanation.
+type ExtensionsValidationError struct {
+	Project  string
+	Class    string
+	Name     string
+	Severity string
+	Rule     string
+}
+
+func (e *ExtensionsValidationError) Error() string {
+	return fmt.Sprintf("extensions[%s].%s/%q [%s]: %s", e.Project, e.Class, e.Name, e.Severity, e.Rule)
+}
+
+// extensionsBasenameRE constrains extension declarations to safe
+// path-segment basenames. No `/` (path traversal), no leading `.`
+// (dotfiles outside HIDE list), no consecutive dots or trailing dot
+// (per filesystem-portability + readability).
+var extensionsBasenameRE = regexp.MustCompile(`^[a-z][a-z0-9-]*(\.[a-z0-9]+)*$`)
+
+// ValidateExtensions checks the Rules.Extensions block for semantic
+// validity per Plan-doc §1.1 rules:
+//
+//  1. brain_duo_operational non-empty when ProjectName != "bot-hq" → error
+//  2. each basename matches extensionsBasenameRE → error if not
+//  3. duplicate basename across any 2 classes → error
+//  4. declared basename not present on disk (under canonRoot/projects/<p>/) → warning
+//
+// canonRoot is the CL root (e.g., ~/.bot-hq). Empty canonRoot disables
+// rule #4 (on-disk check skipped — useful for parse-only tests).
+//
+// Returns a flat slice of findings. Caller filters by Severity.
+func (r *Rules) ValidateExtensions(canonRoot string) []ExtensionsValidationError {
+	var out []ExtensionsValidationError
+	proj := r.ProjectName
+
+	// Rule 1: brain_duo_operational is bot-hq-only.
+	if len(r.Extensions.BrainDuoOperational) > 0 && proj != "bot-hq" {
+		for _, name := range r.Extensions.BrainDuoOperational {
+			out = append(out, ExtensionsValidationError{
+				Project: proj, Class: "brain_duo_operational", Name: name,
+				Severity: "error",
+				Rule:     "brain_duo_operational class is bot-hq meta-project privilege; other projects cannot declare it",
+			})
+		}
+	}
+
+	// Rule 2: filename convention per class.
+	classes := map[string][]string{
+		"universal_opt_in":      r.Extensions.UniversalOptIn,
+		"external_docs_pointer": r.Extensions.ExternalDocsPointer,
+		"brain_duo_operational": r.Extensions.BrainDuoOperational,
+		"foundational_anchors":  r.Extensions.FoundationalAnchors,
+	}
+	for class, names := range classes {
+		for _, name := range names {
+			if !extensionsBasenameRE.MatchString(name) {
+				out = append(out, ExtensionsValidationError{
+					Project: proj, Class: class, Name: name,
+					Severity: "error",
+					Rule:     "basename must match ^[a-z][a-z0-9-]*(\\.[a-z0-9]+)*$ (no `/`, no `..`, no leading `.`)",
+				})
+			}
+		}
+	}
+
+	// Rule 3: duplicate basenames across classes.
+	seen := make(map[string]string) // basename -> first class
+	for class, names := range classes {
+		for _, name := range names {
+			if prev, ok := seen[name]; ok && prev != class {
+				out = append(out, ExtensionsValidationError{
+					Project: proj, Class: class, Name: name,
+					Severity: "error",
+					Rule:     fmt.Sprintf("duplicate basename %q already declared in class %q", name, prev),
+				})
+			} else if !ok {
+				seen[name] = class
+			}
+		}
+	}
+
+	// Rule 4: declared-not-on-disk (warning). Requires canonRoot.
+	if canonRoot != "" && proj != "" {
+		projDir := filepath.Join(canonRoot, "projects", proj)
+		for class, names := range classes {
+			for _, name := range names {
+				path := filepath.Join(projDir, name)
+				if _, err := os.Stat(path); err != nil {
+					if os.IsNotExist(err) {
+						out = append(out, ExtensionsValidationError{
+							Project: proj, Class: class, Name: name,
+							Severity: "warning",
+							Rule:     fmt.Sprintf("declared but not present on disk at %s", path),
+						})
+					}
+				}
+			}
+		}
+	}
+
+	return out
 }
 
 // IsCoderToolBlocked reports whether the given command-line is blocked under
