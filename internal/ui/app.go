@@ -46,18 +46,32 @@ type App struct {
 // NewApp creates a new App model with the Hub tab active.
 func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 	hubTab := NewHubTab()
+	sessionsTab := NewSessionsTab()
 	var lastID int64
 	if db != nil {
 		if recent, err := db.GetRecentMessages(100); err == nil {
 			// GetRecentMessages returns chronological (oldest→newest);
-			// iterate forward so hubTab.messages preserves that order.
+			// iterate forward so message order is preserved. Fan out
+			// to BOTH hubTab and sessionsTab so the Z-8f container
+			// view has full session history on cold boot rather than
+			// starting empty (the bug observed in the Z-8 live test).
 			for i := 0; i < len(recent); i++ {
 				m := recent[i]
-				hubTab, _ = hubTab.Update(MessageReceived{Message: m})
+				received := MessageReceived{Message: m}
+				hubTab, _ = hubTab.Update(received)
+				sessionsTab, _ = sessionsTab.Update(received)
 				if m.ID > lastID {
 					lastID = m.ID
 				}
 			}
+		}
+		// Also seed the active session list so the Hub tab strip
+		// column has content immediately rather than waiting for the
+		// first tick to fire.
+		if sessions, err := db.ListSessions(""); err == nil {
+			upd := SessionsUpdated{Sessions: sessions}
+			hubTab, _ = hubTab.Update(upd)
+			sessionsTab, _ = sessionsTab.Update(upd)
 		}
 	}
 	var pane *panestate.Manager
@@ -73,7 +87,7 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 		activeTab:   TabHub,
 		hubTab:      hubTab,
 		agentsTab:   agentsTab,
-		sessionsTab: NewSessionsTab(),
+		sessionsTab: sessionsTab,
 		settingsTab: NewSettingsTab(cfg, db),
 		db:          db,
 		brian:       b,
@@ -123,14 +137,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if a.db != nil {
-			// Poll sessions
+			// Poll sessions — fan out to both Sessions tab (list +
+			// container) and Hub tab (Z-8e strip column).
 			if sessions, err := a.db.ListSessions(""); err == nil {
-				a.sessionsTab, _ = a.sessionsTab.Update(SessionsUpdated{Sessions: sessions})
+				upd := SessionsUpdated{Sessions: sessions}
+				a.sessionsTab, _ = a.sessionsTab.Update(upd)
+				a.hubTab, _ = a.hubTab.Update(upd)
 			}
-			// Poll new messages
+			// Poll new messages — fan out to both Hub tab (main view)
+			// and Sessions tab (Z-8f container stream).
 			if msgs, err := a.db.ReadMessages("", a.lastMsgID, 50); err == nil {
 				for _, m := range msgs {
-					a.hubTab, _ = a.hubTab.Update(MessageReceived{Message: m})
+					received := MessageReceived{Message: m}
+					a.hubTab, _ = a.hubTab.Update(received)
+					a.sessionsTab, _ = a.sessionsTab.Update(received)
 					if m.ID > a.lastMsgID {
 						a.lastMsgID = m.ID
 					}
