@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -412,9 +413,10 @@ func hubSessionJoin(db *hub.DB) ToolDef {
 //     rebuilds the index.
 func hubSessionFinalize(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_session_finalize",
-		mcp.WithDescription("Close the active session-cluster manifest for a project with rich retrospective payload (outcome narrative + auto-extracted CommitsLanded / FilesTouched / Decisions / MsgCount). Z-3 extension: kill duo tmux sessions, archive Discord thread, capture per-agent closing_state from session state.json slots. Phase W + Z-3 sessions hardening."),
-		mcp.WithString("project", mcp.Required(), mcp.Description("Project key whose active session is being finalized (e.g., bot-hq, bcc-ad-manager)")),
+		mcp.WithDescription("Close a session-cluster manifest with rich retrospective payload (outcome narrative + auto-extracted CommitsLanded / FilesTouched / Decisions / MsgCount). Z-3 extension: kill duo tmux sessions, archive Discord thread, capture per-agent closing_state from session state.json slots. Z-3 sessions-as-containers: pass session_id to target a specific scope-keyed Z-3 session (recommended); legacy date-keyed callers can still omit and rely on FindActiveForProject. Phase W + Z-3 sessions hardening."),
+		mcp.WithString("project", mcp.Required(), mcp.Description("Project key (e.g., bot-hq, bcc-ad-manager)")),
 		mcp.WithString("outcome", mcp.Required(), mcp.Description("Agent-authored narrative summarizing what happened in this session. Multi-paragraph fine. Required for retrospective utility.")),
+		mcp.WithString("session_id", mcp.Description("Z-3: target a specific scope-keyed session container (e.g., 'z-3-foo-abc123'). When omitted, falls back to FindActiveForProject which only matches the legacy date-keyed YYYY-MM-DD-<project> shape.")),
 		mcp.WithString("status", mcp.Description("Session close status: closed (default) | closed-pivoted-out | closed-eod | closed-auto-migrated. Determines retrospective category.")),
 		mcp.WithString("repo_path", mcp.Description("Optional git repo path for CommitsLanded + FilesTouched extraction (e.g., /Users/gregoryerrl/Projects/bot-hq). Skipped when omitted.")),
 		mcp.WithBoolean("force", mcp.Description("Z-3: bypass graceful-shutdown ack timeout when killing duo tmux sessions. Default false. Caller should pre-confirm with user before force=true.")),
@@ -432,13 +434,22 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 		status := req.GetString("status", "closed")
 		repoPath := req.GetString("repo_path", "")
 		force := req.GetBool("force", false)
+		explicitSessionID := req.GetString("session_id", "")
 
-		activeID, err := sessions.FindActiveForProject(project)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("find active for %s: %v", project, err)), nil
-		}
-		if activeID == "" {
-			return mcp.NewToolResultError(fmt.Sprintf("no active session found for project %q", project)), nil
+		// Z-3: explicit session_id takes precedence (scope-keyed
+		// session). Fall back to FindActiveForProject for legacy
+		// date-keyed callers.
+		var activeID string
+		if explicitSessionID != "" {
+			activeID = explicitSessionID
+		} else {
+			activeID, err = sessions.FindActiveForProject(project)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("find active for %s: %v", project, err)), nil
+			}
+			if activeID == "" {
+				return mcp.NewToolResultError(fmt.Sprintf("no active session found for project %q (Z-3 hint: pass session_id explicitly for scope-keyed sessions)", project)), nil
+			}
 		}
 
 		manifest, err := sessions.ReadManifest(activeID)
@@ -447,9 +458,13 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 		}
 
 		// Z-3 daemon-side finalize hook: kill duo tmux + archive Discord
-		// thread + capture per-agent closing_state. Best-effort — if the
-		// hook fails, the manifest still gets finalized but the daemon
-		// state may be partial (user can manually clean up tmux).
+		// thread + capture per-agent closing_state. Two paths:
+		//   - In-daemon: hook is installed; call directly.
+		//   - In-subprocess: hook is nil; enqueue + poll the
+		//     session_lifecycle_queue (Z-3d bridge symmetric to open).
+		// Best-effort — if the hook fails, the manifest still gets
+		// finalized but the daemon state may be partial (user can
+		// manually clean up tmux).
 		var closingState map[string]string
 		var killedTmux []string
 		var discordArchived bool
@@ -460,13 +475,36 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 				Force:           force,
 			})
 			if hErr != nil {
-				// Log into outcome but do not abort the finalize.
 				outcome = outcome + "\n\n[Z-3 finalize-hook err: " + hErr.Error() + "]"
 			}
 			if r != nil {
 				closingState = r.ClosingState
 				killedTmux = r.KilledTmux
 				discordArchived = r.DiscordArchived
+			}
+		} else {
+			// Z-3d subprocess bridge: enqueue finalize op + poll.
+			opID, qErr := db.EnqueueSessionOp(hub.SessionLifecycleOp{
+				Kind:            "finalize",
+				SessionID:       activeID,
+				Project:         project,
+				DiscordThreadID: manifest.DiscordThreadID,
+				Force:           force,
+			})
+			if qErr == nil {
+				resultJSON, pErr := pollSessionOp(db, opID, 30*time.Second)
+				if pErr == nil {
+					var r SessionFinalizeResult
+					if jErr := json.Unmarshal([]byte(resultJSON), &r); jErr == nil {
+						closingState = r.ClosingState
+						killedTmux = r.KilledTmux
+						discordArchived = r.DiscordArchived
+					}
+				} else {
+					outcome = outcome + "\n\n[Z-3d finalize-queue err: " + pErr.Error() + "]"
+				}
+			} else {
+				outcome = outcome + "\n\n[Z-3d enqueue err: " + qErr.Error() + "]"
 			}
 		}
 
