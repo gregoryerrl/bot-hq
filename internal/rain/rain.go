@@ -106,13 +106,17 @@ func (r *Rain) Start() error {
 	// Register rain agent in the hub. Meta carries tmux_target so panestate's
 	// pane-tier observer (extractTmuxTarget) can capture this pane — the launcher
 	// is the source of truth for tmux_target since it owns the session-name lifetime.
+	// Z-3d race fix: include session_id at daemon-side register-time so rain's
+	// first hub_send (announce online) auto-tags correctly, instead of racing
+	// against Claude Code's later hub_register from BOT_HQ_SESSION_ID env.
 	metaJSON, _ := json.Marshal(map[string]string{"tmux_target": r.tmuxSession})
 	agent := protocol.Agent{
-		ID:     agentID,
-		Name:   agentName,
-		Type:   agentType,
-		Status: protocol.StatusOnline,
-		Meta:   string(metaJSON),
+		ID:             agentID,
+		Name:           agentName,
+		Type:           agentType,
+		Status:         protocol.StatusOnline,
+		Meta:           string(metaJSON),
+		AgentSessionID: r.sessionID,
 	}
 	if err := r.db.RegisterAgent(agent); err != nil {
 		return fmt.Errorf("rain register: %w", err)

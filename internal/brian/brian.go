@@ -118,13 +118,17 @@ func (b *Brian) Start() error {
 	// Register brian agent in the hub. Meta carries tmux_target so panestate's
 	// pane-tier observer (extractTmuxTarget) can capture this pane — the launcher
 	// is the source of truth for tmux_target since it owns the session-name lifetime.
+	// Z-3d race fix: include session_id at daemon-side register-time so brian's
+	// first hub_send (announce online) auto-tags correctly, instead of racing
+	// against Claude Code's later hub_register from BOT_HQ_SESSION_ID env.
 	metaJSON, _ := json.Marshal(map[string]string{"tmux_target": b.tmuxSession})
 	agent := protocol.Agent{
-		ID:     agentID,
-		Name:   agentName,
-		Type:   agentType,
-		Status: protocol.StatusOnline,
-		Meta:   string(metaJSON),
+		ID:             agentID,
+		Name:           agentName,
+		Type:           agentType,
+		Status:         protocol.StatusOnline,
+		Meta:           string(metaJSON),
+		AgentSessionID: b.sessionID,
 	}
 	if err := b.db.RegisterAgent(agent); err != nil {
 		return fmt.Errorf("brian register: %w", err)
