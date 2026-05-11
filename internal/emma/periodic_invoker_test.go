@@ -26,7 +26,7 @@ func TestInternalDispatchRoutingPrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	wakeID, err := db.InsertWakeSchedule("_internal:test-noop", agentID, "noop-payload", time.Now().Add(-1*time.Second))
 	if err != nil {
@@ -68,7 +68,7 @@ func TestPeriodicInvokerReArmsAfterFire(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	if _, err := db.InsertWakeSchedule(internalDocDriftTarget, agentID, "", time.Now().Add(-1*time.Second)); err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestBootstrapDocDriftSchedulesIfNoPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	g.bootstrapInternalDocDrift()
 
@@ -124,7 +124,7 @@ func TestBootstrapDocDriftSkipsIfPendingExists(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	if _, err := db.InsertWakeSchedule(internalDocDriftTarget, agentID, "", time.Now().Add(docDriftInterval)); err != nil {
 		t.Fatal(err)

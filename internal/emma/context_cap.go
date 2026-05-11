@@ -39,7 +39,7 @@ type paneSnapshotFn func() []panestate.AgentSnapshot
 // initContextCapDefault wires the default paneSnapFn to a panestate.Manager
 // backed by the hub DB + real tmux.CapturePane. Lazy-init: tests override
 // before Start() runs and skip this path entirely.
-func (g *Emma) initContextCapDefault() {
+func (g *SystemMonitor) initContextCapDefault() {
 	if g.paneSnapFn != nil {
 		return
 	}
@@ -62,7 +62,7 @@ func (g *Emma) initContextCapDefault() {
 // halt would still let a NEW agent (different id, same squeeze) double-fire
 // before the existing halt is cleared. The IsHaltActive gate collapses any
 // in-flight squeeze into the single in-progress halt window.
-func (g *Emma) checkContextCap(now time.Time) {
+func (g *SystemMonitor) checkContextCap(now time.Time) {
 	if g.paneSnapFn == nil {
 		return
 	}
@@ -100,7 +100,7 @@ func (g *Emma) checkContextCap(now time.Time) {
 		// gemma-side since it manages halt-state that other gemma
 		// paths consume.
 		daemoncron.EmitContextCapCritical(g.db, now, s.ID, s.ContextPct)
-		if err := g.db.SetHaltActive(hub.HaltCauseContextCap, reason, agentID); err != nil {
+		if err := g.db.SetHaltActive(hub.HaltCauseContextCap, reason, systemFromAgent); err != nil {
 			log.Printf("[context-cap] set halt active failed: %v", err)
 		}
 	}
@@ -109,7 +109,7 @@ func (g *Emma) checkContextCap(now time.Time) {
 // resetContextCapHysteresis clears the per-agent flag-history entry so the
 // next squeeze past 95% is allowed to fire even if it falls inside the
 // 30-min hysteresis window of the previous fire.
-func (g *Emma) resetContextCapHysteresis(agentID string) {
+func (g *SystemMonitor) resetContextCapHysteresis(agentID string) {
 	g.flagMu.Lock()
 	defer g.flagMu.Unlock()
 	delete(g.flagHistory, "context-cap:"+agentID)

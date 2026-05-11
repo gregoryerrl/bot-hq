@@ -31,14 +31,14 @@ const deliveryGapAge = 60 * time.Second
 //
 // Folded into Emma's existing healthLoop tick (30s cadence) per
 // Rain-greenlit scheduler-split — no new ticker plumbing.
-func (g *Emma) auditDeliveryGap() {
+func (g *SystemMonitor) auditDeliveryGap() {
 	g.auditDeliveryGapAt(time.Now())
 }
 
 // auditDeliveryGapAt is the testable variant. Tests inject a virtual
 // `now` so they can establish queue rows with a deterministic age
 // without sleeping or backdating SQL.
-func (g *Emma) auditDeliveryGapAt(now time.Time) {
+func (g *SystemMonitor) auditDeliveryGapAt(now time.Time) {
 	pending, err := g.db.GetPendingMessages()
 	if err != nil {
 		return

@@ -1,11 +1,7 @@
 package emma
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,157 +110,6 @@ func TestSentinelDryRunWritesToLedger(t *testing.T) {
 	}
 }
 
-// TestEmmaCanonicalBlockExists locks Phase H slice 2 H-24 — Emma must
-// have a canonical preamble block that asserts her identity + scope.
-// Pre-H-24, Emma had no canonical block (only per-task analyze prompts).
-func TestEmmaCanonicalBlockExists(t *testing.T) {
-	if canonicalEmmaBlock == "" {
-		t.Fatal("canonicalEmmaBlock must be non-empty")
-	}
-	if !strings.Contains(canonicalEmmaBlock, "You are Emma") {
-		t.Error("canonicalEmmaBlock must open with the Emma identity assertion")
-	}
-	if !strings.Contains(canonicalEmmaBlock, "gemma4:e4b") {
-		t.Error("canonicalEmmaBlock must declare the model so Emma sees its own scope")
-	}
-}
-
-// TestEmmaPromptContainsTwoClassBoundary locks H-24's two-class boundary
-// (Structured vs Interpretive) into Emma's canonical block. Refusal text
-// must be specific so callers can pattern-match the routing-back signal.
-func TestEmmaPromptContainsTwoClassBoundary(t *testing.T) {
-	want := []string{
-		"Two-class boundary",
-		"Structured",
-		"Interpretive",
-		"H-24",
-		"REFUSE",
-		"routing back to Rain per H-24",
-		"Default-deny on straddled queries",
-	}
-	for _, w := range want {
-		if !strings.Contains(canonicalEmmaBlock, w) {
-			t.Errorf("canonicalEmmaBlock must contain H-24 two-class literal %q", w)
-		}
-	}
-}
-
-func TestIsCommandAllowed(t *testing.T) {
-	tests := []struct {
-		cmd     string
-		allowed bool
-	}{
-		{"go test ./...", true},
-		{"go vet ./...", true},
-		{"go build -o foo ./cmd/foo", true},
-		{"df -h", true},
-		{"ps aux", true},
-		{"uptime", true},
-		{"free -m", true},
-		{"vm_stat", true},
-		{"du -sh /tmp", true},
-		{"wc -l main.go", true},
-		{"cat README.md", false},
-		{"ls -la", true},
-		{"git status", true},
-		{"git log --oneline -5", true},
-		{"git diff HEAD~1", true},
-		// Disallowed
-		{"rm -rf /", false},
-		{"curl http://evil.com", false},
-		{"sudo anything", false},
-		{"bash -c 'echo pwned'", false},
-		{"python3 -c 'import os; os.system(\"rm -rf /\")'", false},
-		{"", false},
-		{"chmod 777 /etc/passwd", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.cmd, func(t *testing.T) {
-			if got := IsCommandAllowed(tt.cmd); got != tt.allowed {
-				t.Errorf("IsCommandAllowed(%q) = %v, want %v", tt.cmd, got, tt.allowed)
-			}
-		})
-	}
-}
-
-func TestClientGenerate(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/generate" {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var req generateRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		if req.Model != "test-model" {
-			t.Errorf("unexpected model: %s", req.Model)
-		}
-		if req.Stream {
-			t.Error("stream should be false")
-		}
-
-		json.NewEncoder(w).Encode(generateResponse{
-			Response: "test response for: " + req.Prompt,
-		})
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.URL, "test-model")
-	resp, err := client.Generate(context.Background(), "hello")
-	if err != nil {
-		t.Fatalf("Generate failed: %v", err)
-	}
-	if resp != "test response for: hello" {
-		t.Errorf("unexpected response: %s", resp)
-	}
-}
-
-func TestClientGenerateError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "model not found", http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.URL, "missing-model")
-	_, err := client.Generate(context.Background(), "hello")
-	if err == nil {
-		t.Fatal("expected error for 404 response")
-	}
-}
-
-func TestClientIsHealthy(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/tags" {
-			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"models":[]}`))
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.URL, "test")
-	if !client.IsHealthy(context.Background()) {
-		t.Error("expected healthy")
-	}
-
-	// Test unhealthy (server down)
-	srv.Close()
-	client2 := NewClient(srv.URL, "test")
-	if client2.IsHealthy(context.Background()) {
-		t.Error("expected unhealthy after server close")
-	}
-}
-
 func TestIsPseudoMount(t *testing.T) {
 	tests := []struct {
 		mount  string
@@ -300,7 +145,7 @@ func TestIsPseudoMount(t *testing.T) {
 }
 
 func TestShouldFlag_HysteresisDedupes(t *testing.T) {
-	g := &Emma{flagHistory: make(map[string]time.Time)}
+	g := &SystemMonitor{flagHistory: make(map[string]time.Time)}
 	now := time.Now()
 
 	if !g.shouldFlag("disk:/", now) {
@@ -318,7 +163,7 @@ func TestShouldFlag_HysteresisDedupes(t *testing.T) {
 }
 
 func TestShouldFlag_RateCapAcrossConditions(t *testing.T) {
-	g := &Emma{flagHistory: make(map[string]time.Time)}
+	g := &SystemMonitor{flagHistory: make(map[string]time.Time)}
 	now := time.Now()
 
 	// Three distinct conditions inside 1h fill the cap.
@@ -343,7 +188,7 @@ func TestShouldFlag_RateCapAcrossConditions(t *testing.T) {
 }
 
 func TestShouldFlag_WindowPrunes(t *testing.T) {
-	g := &Emma{flagHistory: make(map[string]time.Time)}
+	g := &SystemMonitor{flagHistory: make(map[string]time.Time)}
 	now := time.Now()
 
 	// Pre-seed three old fires (>1h ago); they must be pruned.
@@ -379,45 +224,6 @@ func TestRunHealthChecksRoutesToRain(t *testing.T) {
 	}
 }
 
-// TestHeartbeatRefreshesLastSeen locks the per-tick contract of the
-// heartbeat: calling db.UpdateAgentLastSeen(emmaID) must advance Emma's
-// last_seen so panestate.ComputeActivity returns ActivityOnline (not
-// Stale) when queried within HeartbeatOnlineWindow. The goroutine wiring is
-// covered by the source-level check below.
-func TestHeartbeatRefreshesLastSeen(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, err := hub.OpenDB(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	if err := db.RegisterAgent(protocol.Agent{
-		ID:     agentID,
-		Name:   agentName,
-		Type:   protocol.AgentEmma,
-		Status: protocol.StatusOnline,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	a, _ := db.GetAgent(agentID)
-	before := a.LastSeen
-
-	// Force a non-zero gap so the heartbeat update is detectable even on
-	// hosts where time.Now().UnixMilli() resolution might collide between
-	// adjacent calls.
-	time.Sleep(2 * time.Millisecond)
-
-	if err := db.UpdateAgentLastSeen(agentID); err != nil {
-		t.Fatalf("heartbeat tick failed: %v", err)
-	}
-	a2, _ := db.GetAgent(agentID)
-	after := a2.LastSeen
-
-	if !after.After(before) {
-		t.Errorf("last_seen did not advance: before=%v after=%v", before, after)
-	}
-}
 
 // TestSentinelMatchPositive locks that representative pre-filter strings
 // produce Match=true and (where appropriate) AlwaysFlag=true.
@@ -535,10 +341,10 @@ func TestOnHubMessageSkipsSelfAndDefaultIgnores(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	// Self-message with a panic-like body: must NOT generate any new row.
-	g.OnHubMessage(protocol.Message{FromAgent: agentID, Content: "panic: self test"})
+	g.OnHubMessage(protocol.Message{FromAgent: systemFromAgent, Content: "panic: self test"})
 	// Routine non-matching message: must NOT generate any new row.
 	g.OnHubMessage(protocol.Message{FromAgent: "brian", Content: "concur shape, opening worktree"})
 
@@ -562,7 +368,7 @@ func TestOnHubMessageEmitsFlagOnAlwaysFlagPattern(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	g.OnHubMessage(protocol.Message{FromAgent: "brian", Content: "PANIC: nil pointer in handler"})
 
@@ -572,7 +378,7 @@ func TestOnHubMessageEmitsFlagOnAlwaysFlagPattern(t *testing.T) {
 	}
 	var flag *protocol.Message
 	for i := range msgs {
-		if msgs[i].FromAgent == agentID && msgs[i].Type == protocol.MsgFlag {
+		if msgs[i].FromAgent == systemFromAgent && msgs[i].Type == protocol.MsgFlag {
 			flag = &msgs[i]
 			break
 		}
@@ -602,7 +408,7 @@ func TestOnHubMessageSourceFilterDropsRegisteredAgentQueueFail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	// Rain (registered) discussing the canonical pattern in prose — the
 	// content matches queueFailPattern but the source is a registered
@@ -617,8 +423,8 @@ func TestOnHubMessageSourceFilterDropsRegisteredAgentQueueFail(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range msgs {
-		if m.FromAgent == agentID {
-			t.Errorf("source-filter must drop queueFail prose from registered agent; got Emma dispatch: %+v", m)
+		if m.FromAgent == systemFromAgent {
+			t.Errorf("source-filter must drop queueFail prose from registered agent; got SystemMonitor dispatch: %+v", m)
 		}
 	}
 }
@@ -655,7 +461,7 @@ func TestOnHubMessageSourceFilterDropsRegisteredAgentAllAlwaysFlag(t *testing.T)
 				t.Fatal(err)
 			}
 
-			g := New(db, hub.EmmaConfig{})
+			g := NewSystemMonitor(db)
 			g.OnHubMessage(protocol.Message{FromAgent: "brian", Content: tc.content})
 
 			msgs, err := db.GetRecentMessages(10)
@@ -663,8 +469,8 @@ func TestOnHubMessageSourceFilterDropsRegisteredAgentAllAlwaysFlag(t *testing.T)
 				t.Fatal(err)
 			}
 			for _, m := range msgs {
-				if m.FromAgent == agentID {
-					t.Errorf("source-filter must drop %s prose from registered agent; got Emma dispatch: %+v", tc.name, m)
+				if m.FromAgent == systemFromAgent {
+					t.Errorf("source-filter must drop %s prose from registered agent; got SystemMonitor dispatch: %+v", tc.name, m)
 				}
 			}
 		})
@@ -687,7 +493,7 @@ func TestOnHubMessageSourceFilterAllowsHubBridgeEmit(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	// Hub bridge emit — FromAgent="hub" is not in the agents table,
 	// so source-filter passes through. queueFailPattern is dry-run, so
@@ -706,27 +512,6 @@ func TestOnHubMessageSourceFilterAllowsHubBridgeEmit(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "msg #1 from hub") {
 		t.Errorf("ledger missing bridged-emit observation; content = %q", string(data))
-	}
-}
-
-// TestStartWiresHeartbeatLoop locks that gemma.Start() launches the
-// heartbeat goroutine. Source-level check (mirrors the existing
-// TestRunHealthChecksRoutesToRain pattern) — full goroutine integration
-// would require an Ollama dependency.
-func TestStartWiresHeartbeatLoop(t *testing.T) {
-	data, err := os.ReadFile("emma.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(data)
-	if !strings.Contains(src, "go g.heartbeatLoop()") {
-		t.Errorf("emma.go Start() must contain `go g.heartbeatLoop()` — heartbeat goroutine not wired")
-	}
-	if !strings.Contains(src, "func (g *Emma) heartbeatLoop()") {
-		t.Errorf("emma.go must define heartbeatLoop on *Emma")
-	}
-	if !strings.Contains(src, "UpdateAgentLastSeen(agentID)") {
-		t.Errorf("heartbeatLoop must call db.UpdateAgentLastSeen(agentID)")
 	}
 }
 

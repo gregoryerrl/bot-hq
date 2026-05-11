@@ -117,7 +117,7 @@ type PlanUsageFetcher interface {
 // SetPlanUsageFetcher overrides the producer used by checkPlanUsage. Used
 // by tests to inject a deterministic fake; production calls
 // initPlanUsageDefault on Start.
-func (g *Emma) SetPlanUsageFetcher(f PlanUsageFetcher) {
+func (g *SystemMonitor) SetPlanUsageFetcher(f PlanUsageFetcher) {
 	g.planUsageMu.Lock()
 	defer g.planUsageMu.Unlock()
 	g.planUsageFetch = f
@@ -127,7 +127,7 @@ func (g *Emma) SetPlanUsageFetcher(f PlanUsageFetcher) {
 // successful plan-usage polls update the right-aligned strip segment.
 // cmd/bot-hq/main.go calls this after the TUI's Manager exists; tests
 // inject a recorder.
-func (g *Emma) SetHubPublisher(fn func(panestate.HubSnapshot)) {
+func (g *SystemMonitor) SetHubPublisher(fn func(panestate.HubSnapshot)) {
 	g.planUsageMu.Lock()
 	defer g.planUsageMu.Unlock()
 	g.hubPublisher = fn
@@ -136,7 +136,7 @@ func (g *Emma) SetHubPublisher(fn func(panestate.HubSnapshot)) {
 // initPlanUsageDefault wires the production PlanUsageFetcher when none has
 // been injected. macOS-only — non-darwin hosts publish PlanUsagePct=-1
 // once and skip polling forever (no subprocess spawn, no API call).
-func (g *Emma) initPlanUsageDefault() {
+func (g *SystemMonitor) initPlanUsageDefault() {
 	g.planUsageMu.Lock()
 	defer g.planUsageMu.Unlock()
 	if g.planUsageFetch != nil {
@@ -160,7 +160,7 @@ func (g *Emma) initPlanUsageDefault() {
 // 60s base cadence + 600s backoff are enforced inside this function via
 // lastPlanPoll/planBackoffUntil; callers (sentinelPollLoop tick) invoke
 // every 5s.
-func (g *Emma) checkPlanUsage(now time.Time) {
+func (g *SystemMonitor) checkPlanUsage(now time.Time) {
 	g.planUsageMu.Lock()
 	fetch := g.planUsageFetch
 	publisher := g.hubPublisher
@@ -289,7 +289,7 @@ func (g *Emma) checkPlanUsage(now time.Time) {
 // are redundant and would just re-spam the agents' panes when fire_at
 // hits. Observed root cause: 200+ accumulated wakes fired at 1/min today
 // because oscillating maxUtil scheduled one wake per oscillation cycle.
-func (g *Emma) emitPlanCapResume(now time.Time, pct int) {
+func (g *SystemMonitor) emitPlanCapResume(now time.Time, pct int) {
 	// Phase-S-followup: emit + halt-state-clear go through daemoncron
 	// unconditionally. Cancel-pending-wakes stays gemma-side since it
 	// depends on gemma's wake-schedule machinery (DB-bound, gemma-owned API).
@@ -312,7 +312,7 @@ func (g *Emma) emitPlanCapResume(now time.Time, pct int) {
 // Cooldown via planCapPreHaltCooldown (5min) suppresses spam when maxUtil
 // hovers in [0.90, 0.95) band. Cooldown stamp is per-Emma-instance
 // (lastPreHaltSnapAt field, mu-protected via planUsageMu).
-func (g *Emma) emitPreHaltSnap(now time.Time, pct int) {
+func (g *SystemMonitor) emitPreHaltSnap(now time.Time, pct int) {
 	// Phase-S-followup: pre-halt-snap goes through daemoncron
 	// unconditionally. Daemoncron tracks its own cooldown state.
 	daemoncron.EmitPreHaltSnap(g.db, now, pct)
@@ -324,7 +324,7 @@ func (g *Emma) emitPreHaltSnap(now time.Time, pct int) {
 // retry next 60s gate; if still expired, the log stays quiet thanks to
 // the once-log guard). ErrUnsupportedPlatform is logged once and never
 // retried (initPlanUsageDefault already filtered it).
-func (g *Emma) handlePlanUsageError(now time.Time, err error) {
+func (g *SystemMonitor) handlePlanUsageError(now time.Time, err error) {
 	if errors.Is(err, anthropic.ErrTokenExpired) {
 		log.Printf("[plan-cap] keychain credential near-expiry; skipping poll until refreshed")
 		return
@@ -405,7 +405,7 @@ func utilToPct(u float64) int {
 // 2026-04-29; Rain msg 5909 BRAIN-2nd-acked + Rain msg 5933 reminder
 // pre-commit). cite_anchor: plan_usage.go:237/418 asymmetry + commit
 // 9ac82a7 + ratchet K-1-bis-resolved.
-func (g *Emma) seedPlanCapHaltActiveFromDB() {
+func (g *SystemMonitor) seedPlanCapHaltActiveFromDB() {
 	_, active, err := g.db.GetHaltCause(hub.HaltCausePlanCap)
 	if err != nil {
 		log.Printf("[plan-cap] seed planCapHaltActive: GetHaltCause failed: %v", err)
@@ -427,7 +427,7 @@ func (g *Emma) seedPlanCapHaltActiveFromDB() {
 // 2026-05-02 weekly-halt-removal: pct is always the five_hour-window
 // utilization (caller derives from perWindow[FiveHour]); reason text no
 // longer carries a window tag since five_hour is the only halt-driver.
-func (g *Emma) firePlanCapHalt(now time.Time, pct int) {
+func (g *SystemMonitor) firePlanCapHalt(now time.Time, pct int) {
 	reason := fmt.Sprintf(planCapReasonFmt, pct)
 
 	// Phase J tail-2 (K-1 RESUME-spam fix): in-memory transition gate.
@@ -445,7 +445,7 @@ func (g *Emma) firePlanCapHalt(now time.Time, pct int) {
 	if !wasActive && g.shouldFlag("plan-cap", now) {
 		content := fmt.Sprintf("[CRITICAL] %s", reason)
 		if _, err := g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
+			FromAgent: systemFromAgent,
 			ToAgent:   "user",
 			Type:      protocol.MsgFlag,
 			Content:   content,
@@ -458,7 +458,7 @@ func (g *Emma) firePlanCapHalt(now time.Time, pct int) {
 	// SetHaltActive always runs — IsHalted consumers (e.g., checkStaleAgents
 	// suppression-during-halt) need accurate DB state regardless of in-memory
 	// transition tracking.
-	if err := g.db.SetHaltActive(hub.HaltCausePlanCap, reason, agentID); err != nil {
+	if err := g.db.SetHaltActive(hub.HaltCausePlanCap, reason, systemFromAgent); err != nil {
 		log.Printf("[plan-cap] set halt active failed: %v", err)
 	}
 
@@ -486,7 +486,7 @@ func (g *Emma) firePlanCapHalt(now time.Time, pct int) {
 				// Already a wake queued — skip duplicate.
 				continue
 			}
-			if _, err := g.db.InsertWakeSchedule(target, agentID, wakePayload, wakeAt); err != nil {
+			if _, err := g.db.InsertWakeSchedule(target, systemFromAgent, wakePayload, wakeAt); err != nil {
 				log.Printf("[plan-cap] schedule wake insert failed for %s: %v", target, err)
 			}
 		}

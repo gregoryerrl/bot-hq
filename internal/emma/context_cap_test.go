@@ -12,10 +12,10 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
-// newContextCapEmma builds an isolated Emma + temp-DB pair. Resets
-// daemoncron's package-scoped plan-usage state so tests don't leak
+// newContextCapSystemMonitor builds an isolated SystemMonitor + temp-DB pair.
+// Resets daemoncron's package-scoped plan-usage state so tests don't leak
 // cooldown/halt-flag state across runs.
-func newContextCapEmma(t *testing.T) (*Emma, *hub.DB) {
+func newContextCapSystemMonitor(t *testing.T) (*SystemMonitor, *hub.DB) {
 	t.Helper()
 	daemoncron.ResetPlanUsageStateForTest()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -24,7 +24,7 @@ func newContextCapEmma(t *testing.T) (*Emma, *hub.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return New(db, hub.EmmaConfig{}), db
+	return NewSystemMonitor(db), db
 }
 
 // fakePaneSnap returns a paneSnapshotFn yielding a fixed slice each call.
@@ -55,7 +55,7 @@ func countContextCapFlags(t *testing.T, db *hub.DB) int {
 // TestH31FlagFiresAt95 — UsagePct=95 + halt inactive + hysteresis-clear → one
 // critical FLAG and halt_state set active.
 func TestH31FlagFiresAt95(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
 		{ID: "brian", ContextPct: 95},
 	})
@@ -78,7 +78,7 @@ func TestH31FlagFiresAt95(t *testing.T) {
 // inclusive ≥95 threshold so a future off-by-one regression doesn't fire on
 // 94% (which would alarm constantly under normal operation).
 func TestH31NoFlagBelow95(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
 		{ID: "brian", ContextPct: 94},
 	})
@@ -102,7 +102,7 @@ func TestH31NoFlagBelow95(t *testing.T) {
 // the loop entirely. Even if halt were cleared, the per-agent hysteresis on
 // `context-cap:<id>` would still suppress within the 30min window.
 func TestH31HysteresisAndHaltSuppressDoubleFire(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.paneSnapFn = fakePaneSnap([]panestate.AgentSnapshot{
 		{ID: "brian", ContextPct: 96},
 	})
@@ -128,7 +128,7 @@ func TestH31HysteresisAndHaltSuppressDoubleFire(t *testing.T) {
 // halt-suppression gate alone would still block without that clear, which
 // is the correct behavior under the halt-all-work convention.
 func TestH31ResetBelow85Rearms(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	now := time.Now()
 
 	// Tick 1: squeeze hits 95.
@@ -165,7 +165,7 @@ func TestH31ResetBelow85Rearms(t *testing.T) {
 // TestHaltClearsOnDuoReregister — set halt, advance brian/rain/clive
 // last_seen past set_at via re-register, ClearHaltIfDuoReregistered fires.
 func TestHaltClearsOnDuoReregister(t *testing.T) {
-	_, db := newContextCapEmma(t)
+	_, db := newContextCapSystemMonitor(t)
 
 	if err := db.SetHaltActive(hub.HaltCauseContextCap, "test halt", "emma"); err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestHaltClearsOnDuoReregister(t *testing.T) {
 // members; both advanced → cleared. Locks the BRAIN R1 micro-refine
 // (currently-registered, not registered-or-blocked).
 func TestHaltDoesNotClearWithPrunedDuoMember(t *testing.T) {
-	_, db := newContextCapEmma(t)
+	_, db := newContextCapSystemMonitor(t)
 
 	if err := db.SetHaltActive(hub.HaltCauseContextCap, "test halt", "emma"); err != nil {
 		t.Fatal(err)
@@ -252,7 +252,7 @@ func TestHaltDoesNotClearWithPrunedDuoMember(t *testing.T) {
 // all. Comparison set is empty; the contract says empty MUST NOT clear (an
 // empty set is absence of evidence, not evidence of fresh-context arrival).
 func TestHaltDoesNotClearWithEmptyComparisonSet(t *testing.T) {
-	_, db := newContextCapEmma(t)
+	_, db := newContextCapSystemMonitor(t)
 
 	if err := db.SetHaltActive(hub.HaltCauseContextCap, "test halt", "emma"); err != nil {
 		t.Fatal(err)
@@ -275,7 +275,7 @@ func TestHaltDoesNotClearWithEmptyComparisonSet(t *testing.T) {
 // Locks the no-op invariant for the early-boot window before the first
 // panestate.Refresh has populated the snapshot.
 func TestEmptyPaneSnapNoOp(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.paneSnapFn = fakePaneSnap(nil)
 
 	g.checkContextCap(time.Now())

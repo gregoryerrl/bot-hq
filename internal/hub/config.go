@@ -56,14 +56,18 @@ type RainConfig struct {
 	WorkDir   string `toml:"work_dir"`
 }
 
-// EmmaConfig configures emma the global meta-orchestrator. Z-3 renamed
-// from GemmaConfig; legacy fields kept for read-back-compat with existing
-// config.toml files that pre-date the rename. Model/OllamaURL are
-// effectively dead post-Z-3 (emma is a Claude Code instance configured
-// for DeepSeek-V4-Pro via R51+R52, not an Ollama agent) but preserved
-// to avoid TOML parse-failures on legacy config files.
+// EmmaConfig configures emma the global hub orchestrator. Z-9d completed
+// the DeepSeek-V4-Pro migration: emma is now the tmux Claude Code
+// Subprocess (mirroring brian/rain) with per-agent model config resolved
+// from agent_model_configs (R51 + R52). The legacy Model/OllamaURL/
+// MaxConcurrent fields are preserved for TOML-parse-compat with old
+// config.toml files but are not consumed by any runtime path.
 type EmmaConfig struct {
-	AutoStart     bool   `toml:"auto_start"`
+	AutoStart bool   `toml:"auto_start"`
+	WorkDir   string `toml:"work_dir"`
+
+	// Legacy dead fields (Z-3 + Z-9d). Retained only so existing config.toml
+	// files don't fail to parse after upgrade.
 	Model         string `toml:"model"`
 	OllamaURL     string `toml:"ollama_url"`
 	MaxConcurrent int    `toml:"max_concurrent"`

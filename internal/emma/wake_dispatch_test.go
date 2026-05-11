@@ -9,10 +9,11 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
-// newWakeTestEmma returns an in-memory Emma wired to a fresh DB. We bypass
-// New()/Start() so the test stays free of Ollama + the goroutines we don't
-// want firing alongside dispatchWakes. Only the db field is needed.
-func newWakeTestEmma(t *testing.T) (*Emma, *hub.DB) {
+// newWakeTestSystemMonitor returns an in-memory SystemMonitor wired to a
+// fresh DB. Bypasses Start() so the test stays free of the daemon-cadence
+// goroutines we don't want firing alongside dispatchWakes. Only the db
+// field is needed.
+func newWakeTestSystemMonitor(t *testing.T) (*SystemMonitor, *hub.DB) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := hub.OpenDB(dbPath)
@@ -20,7 +21,7 @@ func newWakeTestEmma(t *testing.T) (*Emma, *hub.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	g := &Emma{db: db, stopCh: make(chan struct{})}
+	g := &SystemMonitor{db: db, stopCh: make(chan struct{})}
 	return g, db
 }
 
@@ -28,7 +29,7 @@ func newWakeTestEmma(t *testing.T) (*Emma, *hub.DB) {
 // a pending wake whose fire_at is in the past gets a hub_send (from='emma',
 // type='command') and the row transitions pending → fired with fired_at set.
 func TestDispatchWakesFiresAndFlipsState(t *testing.T) {
-	g, db := newWakeTestEmma(t)
+	g, db := newWakeTestSystemMonitor(t)
 
 	id, err := db.InsertWakeSchedule("brian", "rain", "wake-up: re-test 3", time.Now().Add(-1*time.Second))
 	if err != nil {
@@ -56,7 +57,7 @@ func TestDispatchWakesFiresAndFlipsState(t *testing.T) {
 	}
 	var found *protocol.Message
 	for i := range msgs {
-		if msgs[i].FromAgent == agentID && msgs[i].Content == "wake-up: re-test 3" {
+		if msgs[i].FromAgent == systemFromAgent && msgs[i].Content == "wake-up: re-test 3" {
 			found = &msgs[i]
 		}
 	}
@@ -75,7 +76,7 @@ func TestDispatchWakesFiresAndFlipsState(t *testing.T) {
 // not dispatched on the current tick — Emma's clock-driven gating, not just
 // "fire everything pending."
 func TestDispatchWakesSkipsFutureRows(t *testing.T) {
-	g, db := newWakeTestEmma(t)
+	g, db := newWakeTestSystemMonitor(t)
 	futureID, _ := db.InsertWakeSchedule("brian", "rain", "later", time.Now().Add(time.Hour))
 
 	g.dispatchWakes()
@@ -89,7 +90,7 @@ func TestDispatchWakesSkipsFutureRows(t *testing.T) {
 // TestDispatchWakesSkipsCancelled locks the cancel-then-dispatch race: a row
 // already cancelled before its fire_at must not produce a hub_send.
 func TestDispatchWakesSkipsCancelled(t *testing.T) {
-	g, db := newWakeTestEmma(t)
+	g, db := newWakeTestSystemMonitor(t)
 	id, _ := db.InsertWakeSchedule("brian", "rain", "p", time.Now().Add(-1*time.Second))
 	if _, err := db.CancelWake(id); err != nil {
 		t.Fatal(err)
@@ -100,7 +101,7 @@ func TestDispatchWakesSkipsCancelled(t *testing.T) {
 	// No hub message produced for brian.
 	msgs, _ := db.ReadMessages("brian", 0, 50)
 	for _, m := range msgs {
-		if m.FromAgent == agentID {
+		if m.FromAgent == systemFromAgent {
 			t.Errorf("cancelled wake produced hub_send: %+v", m)
 		}
 	}
@@ -114,7 +115,7 @@ func TestDispatchWakesSkipsCancelled(t *testing.T) {
 // once even if dispatchWakes is called repeatedly — ListPendingWakes excludes
 // terminal-state rows so the second call sees nothing.
 func TestDispatchWakesIdempotentWithinTick(t *testing.T) {
-	g, db := newWakeTestEmma(t)
+	g, db := newWakeTestSystemMonitor(t)
 	db.InsertWakeSchedule("brian", "rain", "once", time.Now().Add(-1*time.Second))
 
 	g.dispatchWakes()
@@ -123,7 +124,7 @@ func TestDispatchWakesIdempotentWithinTick(t *testing.T) {
 	msgs, _ := db.ReadMessages("brian", 0, 50)
 	count := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && m.Content == "once" {
+		if m.FromAgent == systemFromAgent && m.Content == "once" {
 			count++
 		}
 	}

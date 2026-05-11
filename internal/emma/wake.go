@@ -9,7 +9,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
-func (g *Emma) wakeDispatchLoop() {
+func (g *SystemMonitor) wakeDispatchLoop() {
 	ticker := time.NewTicker(wakeDispatchInterval)
 	defer ticker.Stop()
 	for {
@@ -34,7 +34,7 @@ func (g *Emma) wakeDispatchLoop() {
 // prefixed `_internal:` route to in-process handlers via dispatchInternalWake
 // instead of writing a hub_send. Each handler is responsible for re-arming
 // itself.
-func (g *Emma) dispatchWakes() {
+func (g *SystemMonitor) dispatchWakes() {
 	wakes, err := g.db.ListPendingWakes(time.Now())
 	if err != nil {
 		log.Printf("[wake] list pending: %v", err)
@@ -49,7 +49,7 @@ func (g *Emma) dispatchWakes() {
 			continue
 		}
 		msg := protocol.Message{
-			FromAgent: agentID,
+			FromAgent: systemFromAgent,
 			ToAgent:   w.TargetAgent,
 			Type:      protocol.MsgCommand,
 			Content:   w.Payload,
@@ -90,7 +90,7 @@ const docDriftInterval = 30 * time.Minute
 // is still marked fired by the caller so it doesn't pile up as pending).
 //
 // Phase H slice 3 C7 (#6 H-23 periodic invoker).
-func (g *Emma) dispatchInternalWake(w hub.WakeSchedule) {
+func (g *SystemMonitor) dispatchInternalWake(w hub.WakeSchedule) {
 	switch w.TargetAgent {
 	case internalDocDriftTarget:
 		g.runDocDriftScanAndReArm()
@@ -107,7 +107,7 @@ func (g *Emma) dispatchInternalWake(w hub.WakeSchedule) {
 // Best-effort: if cwd is not a bot-hq checkout (no docs/arcs/), the scan
 // returns 0 observations and the re-arm still fires — the next tick is
 // equally a no-op until the binary lands somewhere with arcs to scan.
-func (g *Emma) runDocDriftScanAndReArm() {
+func (g *SystemMonitor) runDocDriftScanAndReArm() {
 	obs, err := ScanArcsForDocDrift("docs/arcs", ".")
 	if err != nil {
 		log.Printf("[wake] docdrift scan: %v", err)
@@ -115,7 +115,7 @@ func (g *Emma) runDocDriftScanAndReArm() {
 		EmitDocDriftObservations(obs)
 	}
 	next := time.Now().Add(docDriftInterval)
-	if _, err := g.db.InsertWakeSchedule(internalDocDriftTarget, agentID, "", next); err != nil {
+	if _, err := g.db.InsertWakeSchedule(internalDocDriftTarget, systemFromAgent, "", next); err != nil {
 		log.Printf("[wake] docdrift re-arm: %v", err)
 	}
 }
@@ -124,7 +124,7 @@ func (g *Emma) runDocDriftScanAndReArm() {
 // Emma start if no pending one exists. Subsequent wakes are scheduled by
 // runDocDriftScanAndReArm. Idempotent across rebuilds — skips if a
 // pending wake from a prior boot is still in the table.
-func (g *Emma) bootstrapInternalDocDrift() {
+func (g *SystemMonitor) bootstrapInternalDocDrift() {
 	pending, err := g.db.HasPendingWakeForTarget(internalDocDriftTarget)
 	if err != nil {
 		log.Printf("[wake] docdrift bootstrap pending check: %v", err)
@@ -134,7 +134,7 @@ func (g *Emma) bootstrapInternalDocDrift() {
 		return
 	}
 	next := time.Now().Add(docDriftInterval)
-	if _, err := g.db.InsertWakeSchedule(internalDocDriftTarget, agentID, "", next); err != nil {
+	if _, err := g.db.InsertWakeSchedule(internalDocDriftTarget, systemFromAgent, "", next); err != nil {
 		log.Printf("[wake] docdrift bootstrap: %v", err)
 	}
 }

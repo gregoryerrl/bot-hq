@@ -69,7 +69,7 @@ func countPlanCapFlags(t *testing.T, db *hub.DB) int {
 	}
 	n := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && m.Type == protocol.MsgFlag &&
+		if m.FromAgent == systemFromAgent && m.Type == protocol.MsgFlag &&
 			strings.Contains(m.Content, "[CRITICAL]") &&
 			strings.Contains(m.Content, "plan usage at") &&
 			strings.Contains(m.Content, "halt + idle in pane") {
@@ -82,7 +82,7 @@ func countPlanCapFlags(t *testing.T, db *hub.DB) int {
 // TestPlanCapFiresAt95 — first poll at maxUtil=0.96 fires hub_flag,
 // upserts plan-cap halt_state, and publishes HubSnapshot{96,five_hour}.
 func TestPlanCapFiresAt95(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
@@ -120,7 +120,7 @@ func TestPlanCapFiresAt95(t *testing.T) {
 // publish: each successful poll surfaces both five_hour + seven_day pcts
 // independently of which is max. Missing windows publish -1.
 func TestPlanCapPublishesDualWindowPcts(t *testing.T) {
-	g, _ := newContextCapEmma(t)
+	g, _ := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
@@ -153,7 +153,7 @@ func TestPlanCapPublishesDualWindowPcts(t *testing.T) {
 // SevenDayPct=-1 so the strip can render `7d:--%` distinguishably from
 // `7d:0%`.
 func TestPlanCapMissingSevenDayPublishesNeg1(t *testing.T) {
-	g, _ := newContextCapEmma(t)
+	g, _ := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
@@ -178,7 +178,7 @@ func TestPlanCapMissingSevenDayPublishesNeg1(t *testing.T) {
 // later poll at 70% deletes the plan-cap halt row AND re-arms the
 // shouldFlag hysteresis so a fresh squeeze past 95% fires anew.
 func TestPlanCapResetClearsHaltAndRearmsHysteresis(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	fake := &fakePlanUsageFetch{
@@ -213,7 +213,7 @@ func TestPlanCapResetClearsHaltAndRearmsHysteresis(t *testing.T) {
 // Cooldown caps emitPlanCapResume to once per planCapResumeCooldown
 // window even if hadHalt-gate fires on multiple polls.
 func TestPlanCapResumeCooldownSuppressesRapidReEmits(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	// Sequence: fire→clear (cycle 1) → fire→clear (cycle 2) within
@@ -235,7 +235,7 @@ func TestPlanCapResumeCooldownSuppressesRapidReEmits(t *testing.T) {
 	}
 	resumes := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "plan usage reset") {
+		if m.FromAgent == systemFromAgent && strings.Contains(m.Content, "plan usage reset") {
 			resumes++
 		}
 	}
@@ -255,7 +255,7 @@ func TestPlanCapResumeCooldownSuppressesRapidReEmits(t *testing.T) {
 // so this fixture exercises a "weekly squeeze with five_hour absent"
 // path — neither halt nor pre-snap fires (which is the assertion).
 func TestPlanCapBetweenThresholdsHoldsState(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.90},
@@ -277,7 +277,7 @@ func TestPlanCapBetweenThresholdsHoldsState(t *testing.T) {
 // preserved by leaving publisher untouched). Backoff stays unset so the
 // next 60s tick retries.
 func TestPlanCapNearExpirySkipsSilently(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
@@ -303,7 +303,7 @@ func TestPlanCapNearExpirySkipsSilently(t *testing.T) {
 // staying blank. Without this, "fresh boot" and "producer errored" render
 // identically and the user can't tell the producer is alive but failing.
 func TestPlanCapAuthFailPublishesUnknownSnapshot(t *testing.T) {
-	g, _ := newContextCapEmma(t)
+	g, _ := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
@@ -331,7 +331,7 @@ func TestPlanCapAuthFailPublishesUnknownSnapshot(t *testing.T) {
 // to now+600s. Subsequent calls inside that window short-circuit without
 // hitting the fetcher again.
 func TestPlanCapBackoffCadenceOn5xx(t *testing.T) {
-	g, _ := newContextCapEmma(t)
+	g, _ := newContextCapSystemMonitor(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
 	fake := &fakePlanUsageFetch{
 		err: []error{errors.New("server error: status 502"), errors.New("never reached")},
@@ -368,7 +368,7 @@ func TestPlanCapBackoffCadenceOn5xx(t *testing.T) {
 // cadence only fetches once. Locks the cadence gate against accidental
 // re-issue when the surrounding sentinelPollLoop ticks at 5s.
 func TestPlanCapTickGate(t *testing.T) {
-	g, _ := newContextCapEmma(t)
+	g, _ := newContextCapSystemMonitor(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
 	fake := &fakePlanUsageFetch{
 		maxUtil: []float64{0.50, 0.50},
@@ -394,7 +394,7 @@ func TestPlanCapTickGate(t *testing.T) {
 // The plan-cap clear must not touch the context-cap row; halts coexist
 // independently.
 func TestPlanCapDoesNotClearContextCap(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.70},
@@ -419,7 +419,7 @@ func TestPlanCapDoesNotClearContextCap(t *testing.T) {
 // fired halt + tagged reason "(opus)". Post-change, halt-fire gates on
 // five_hour utilization only.
 func TestPlanCapWeeklyOverThresholdNoFire(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.96},
@@ -445,7 +445,7 @@ func TestPlanCapWeeklyOverThresholdNoFire(t *testing.T) {
 // five_hour window drives halt. Reason text contains canonical substring
 // without any window tag (windowDisplayTag deleted as part of the change).
 func TestPlanCapFireOnFiveHourOnly(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.99},
@@ -480,7 +480,7 @@ func TestPlanCapFireOnFiveHourOnly(t *testing.T) {
 // TestPlanCapWeeklyOverThresholdNoFire on the standard seven_day window
 // + asserts no R22 PRE-HALT-SNAP MsgUpdate either.
 func TestPlanCapNoFireOnWeeklyOver(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetHubPublisher(func(panestate.HubSnapshot) {})
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.96},
@@ -504,7 +504,7 @@ func TestPlanCapNoFireOnWeeklyOver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
+		if m.FromAgent == systemFromAgent && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
 			t.Errorf("weekly-only over-threshold must not emit [PRE-HALT-SNAP]; got %+v", m)
 		}
 	}
@@ -514,7 +514,7 @@ func TestPlanCapNoFireOnWeeklyOver(t *testing.T) {
 // initPlanUsageDefault skipped on non-darwin), checkPlanUsage is a
 // no-op. Locks the safe-default contract.
 func TestPlanCapNilFetcherIsNoop(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 
@@ -533,7 +533,7 @@ func TestPlanCapNilFetcherIsNoop(t *testing.T) {
 // now + planCapWakeOffset (5h+1min). Belt-and-suspenders backup against
 // Anthropic API itself being rate-limited at rollover-time.
 func TestPlanCapFireSchedulesWakes(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.96},
 		window:  []string{anthropic.WindowFiveHour},
@@ -573,7 +573,7 @@ func TestPlanCapFireSchedulesWakes(t *testing.T) {
 // "plan usage reset" so agents recognize the resume directive and
 // re-bootstrap via R16.
 func TestPlanCapResetEmitsResumeNudge(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	fake := &fakePlanUsageFetch{
 		maxUtil: []float64{0.96, 0.70},
 		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour},
@@ -591,7 +591,7 @@ func TestPlanCapResetEmitsResumeNudge(t *testing.T) {
 	}
 	gotBrian, gotRain := 0, 0
 	for _, m := range msgs {
-		if m.FromAgent != agentID || m.Type != protocol.MsgCommand {
+		if m.FromAgent != systemFromAgent || m.Type != protocol.MsgCommand {
 			continue
 		}
 		if !strings.Contains(m.Content, "plan usage reset") {
@@ -616,7 +616,7 @@ func TestPlanCapResetEmitsResumeNudge(t *testing.T) {
 // idempotency guard: at sub-threshold usage with no prior halt active,
 // no resume nudges fire. Otherwise every steady-state poll would re-emit.
 func TestPlanCapResetWithoutPriorHaltDoesNotEmitResumeNudge(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.50},
 		window:  []string{anthropic.WindowFiveHour},
@@ -629,7 +629,7 @@ func TestPlanCapResetWithoutPriorHaltDoesNotEmitResumeNudge(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range msgs {
-		if m.FromAgent == agentID && m.Type == protocol.MsgCommand && strings.Contains(m.Content, "plan usage reset") {
+		if m.FromAgent == systemFromAgent && m.Type == protocol.MsgCommand && strings.Contains(m.Content, "plan usage reset") {
 			t.Errorf("steady-state sub-threshold poll must not emit resume nudge; got: %+v", m)
 		}
 	}
@@ -677,7 +677,7 @@ func TestPlanCapPayloadMirrorSymmetry(t *testing.T) {
 // [PRE-HALT-SNAP] to brian + rain when maxUtil hits the proactive
 // pre-halt threshold (0.90+) but is below halt (0.95).
 func TestPreHaltSnapEmitAtThreshold(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
@@ -693,7 +693,7 @@ func TestPreHaltSnapEmitAtThreshold(t *testing.T) {
 	}
 	preSnaps := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
+		if m.FromAgent == systemFromAgent && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
 			preSnaps++
 		}
 	}
@@ -712,7 +712,7 @@ func TestPreHaltSnapEmitAtThreshold(t *testing.T) {
 // Two polls in succession, both at pre-halt threshold, must yield ONE
 // emit cycle (2 msgs) — second poll suppressed by cooldown.
 func TestPreHaltSnapCooldown(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
@@ -730,7 +730,7 @@ func TestPreHaltSnapCooldown(t *testing.T) {
 	}
 	preSnaps := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
+		if m.FromAgent == systemFromAgent && strings.Contains(m.Content, "[PRE-HALT-SNAP]") {
 			preSnaps++
 		}
 	}
@@ -760,7 +760,7 @@ func TestPreHaltSnapPayloadMirrorSymmetry(t *testing.T) {
 // never observed an over-threshold poll → planCapHaltActive stays
 // false → no RESUME emit even though hadHalt-from-DB is true.
 func TestPlanCapResumeNoEmitOnPreExistingHaltWithoutTransition(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	// Pre-seed halt_state row (simulating persisted state from prior session
@@ -784,7 +784,7 @@ func TestPlanCapResumeNoEmitOnPreExistingHaltWithoutTransition(t *testing.T) {
 	}
 	resumes := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "plan usage reset") {
+		if m.FromAgent == systemFromAgent && strings.Contains(m.Content, "plan usage reset") {
 			resumes++
 		}
 	}
@@ -797,7 +797,7 @@ func TestPlanCapResumeNoEmitOnPreExistingHaltWithoutTransition(t *testing.T) {
 // tail-2 K-1) — locks idempotency: 5 consecutive ≥95% polls produce
 // EXACTLY ONE flag-emit + ONE wake-schedule-pair (not 5 of each).
 func TestFirePlanCapHaltIdempotentOnRepeatedOverThresholdPolls(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
@@ -830,7 +830,7 @@ func TestFirePlanCapHaltIdempotentOnRepeatedOverThresholdPolls(t *testing.T) {
 // scheduling another. Defense-in-depth alongside the existing transition
 // gate.
 func TestPlanCapWakeScheduleDedupesAcrossOscillation(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.96, 0.50, 0.96, 0.50, 0.96, 0.50},
 		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour, anthropic.WindowFiveHour},
@@ -867,7 +867,7 @@ func TestPlanCapWakeScheduleDedupesAcrossOscillation(t *testing.T) {
 // cancelled. Otherwise the scheduled wakes fire later as redundant
 // re-spam (observed: 504 fired wakes today during the failure window).
 func TestEmitPlanCapResumeCancelsPendingWakes(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	g.SetPlanUsageFetcher(&fakePlanUsageFetch{
 		maxUtil: []float64{0.96, 0.50},
 		window:  []string{anthropic.WindowFiveHour, anthropic.WindowFiveHour},
@@ -908,7 +908,7 @@ func TestEmitPlanCapResumeCancelsPendingWakes(t *testing.T) {
 // cite_anchor: plan_usage.go:237/418 asymmetry; commit 9ac82a7
 // (post-rebuild hotfix); ratchet K-1-bis-resolved.
 func TestPlanCapHaltActiveSeededFromDBOnRestart(t *testing.T) {
-	g, db := newContextCapEmma(t)
+	g, db := newContextCapSystemMonitor(t)
 	rec := &hubRecorder{}
 	g.SetHubPublisher(rec.publish)
 
@@ -956,7 +956,7 @@ func TestPlanCapHaltActiveSeededFromDBOnRestart(t *testing.T) {
 // the first over-threshold poll correctly emits the hub_flag for a
 // genuinely new halt.
 func TestSeedPlanCapHaltActiveFromDBNoOpWhenNoActiveRow(t *testing.T) {
-	g, _ := newContextCapEmma(t)
+	g, _ := newContextCapSystemMonitor(t)
 
 	// Sanity: no halt row, in-mem bool false.
 	if g.planCapHaltActive {

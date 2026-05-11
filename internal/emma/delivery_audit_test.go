@@ -30,7 +30,7 @@ func countDeliveryGapMsgs(t *testing.T, db *hub.DB) int {
 // ago AND status='pending' produces a [DELIVERY-GAP] alert. The
 // virtual-now pattern lets us age the queue row deterministically.
 func TestAuditDeliveryGapFiresWhenPendingExceedsAge(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 
 	if err := db.EnqueueMessage(42, "rain", "bot-hq-rain", "[brian] test msg"); err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestAuditDeliveryGapFiresWhenPendingExceedsAge(t *testing.T) {
 // TestAuditDeliveryGapSuppressesYoungRows locks the v1 negative: a
 // pending row younger than deliveryGapAge does NOT flag.
 func TestAuditDeliveryGapSuppressesYoungRows(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 
 	if err := db.EnqueueMessage(42, "rain", "bot-hq-rain", "[brian] test msg"); err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestAuditDeliveryGapSuppressesYoungRows(t *testing.T) {
 // TestAuditDeliveryGapHysteresis locks the per-row dedup contract:
 // repeated audits of the same stalled row do NOT re-fire.
 func TestAuditDeliveryGapHysteresis(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	db.EnqueueMessage(99, "brian", "bot-hq-brian", "[rain] test")
 
 	pending, _ := db.GetPendingMessages()
@@ -95,7 +95,7 @@ func TestAuditDeliveryGapHysteresis(t *testing.T) {
 // per-row (queue-id), not per-agent. A new pending row to the same
 // agent, also stalled, must produce a new alert.
 func TestAuditDeliveryGapRefiresOnNewQueueRow(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	db.EnqueueMessage(1, "rain", "bot-hq-rain", "first")
 	pending, _ := db.GetPendingMessages()
 	first := pending[0]
@@ -116,7 +116,7 @@ func TestAuditDeliveryGapRefiresOnNewQueueRow(t *testing.T) {
 // (drained or exhausted), the dedup entry is removed so the tracker
 // doesn't grow unbounded over a long-running session.
 func TestAuditDeliveryGapTrackerPrunesDrainedRows(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	db.EnqueueMessage(1, "rain", "bot-hq-rain", "first")
 	pending, _ := db.GetPendingMessages()
 	qmID := pending[0].ID
@@ -169,7 +169,7 @@ func TestDeliveryGapAgeConstant(t *testing.T) {
 // fires SQLite CURRENT_TIMESTAMP server-side), read back via
 // GetPendingMessages, assert Created is sane.
 func TestQueueRowCreatedRoundTrip(t *testing.T) {
-	_, db := newTestEmma(t)
+	_, db := newTestSystemMonitor(t)
 
 	before := time.Now().Add(-2 * time.Second)
 	if err := db.EnqueueMessage(7, "rain", "bot-hq-rain", "[brian] roundtrip"); err != nil {
@@ -204,7 +204,7 @@ func TestQueueRowCreatedRoundTrip(t *testing.T) {
 // stays self-consistent inside the year-0001 anchor. Production fires
 // math.MaxInt64 sentinels.
 func TestAuditDeliveryGapPositiveFireOnRealClock(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 
 	if err := db.EnqueueMessage(11, "rain", "bot-hq-rain", "[brian] real-clock"); err != nil {
 		t.Fatal(err)

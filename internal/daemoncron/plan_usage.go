@@ -51,8 +51,11 @@ const (
 	// planCapPreHaltCooldown caps EmitPreHaltSnap to once per window.
 	planCapPreHaltCooldown = 5 * time.Minute
 
-	// planUsageAgentID + recipients preserved from gemma pre-migration.
-	planUsageAgentID = "emma"
+	// planUsageAgentID is the FromAgent for plan-cap [PRE-HALT-SNAP] /
+	// [RESUME] / [CRITICAL] emits. Z-9d flipped from "emma" to "system"
+	// to match the SystemMonitor convention — plan-cap signaling is
+	// daemon-cadence work, not Emma the orchestrator emitting prose.
+	planUsageAgentID = "system"
 )
 
 // planUsageState tracks cooldown + halt-active dedupe for the 3 emit

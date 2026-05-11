@@ -7,8 +7,10 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 )
 
-// newTestEmma constructs an isolated *Emma + fresh sqlite DB for tests.
-func newTestEmma(t *testing.T) (*Emma, *hub.DB) {
+// newTestSystemMonitor constructs an isolated *SystemMonitor + fresh sqlite DB
+// for tests. Z-9d: renamed from newTestEmma when the Emma type split into
+// SystemMonitor (daemon-cadence) + Subprocess (tmux Claude Code).
+func newTestSystemMonitor(t *testing.T) (*SystemMonitor, *hub.DB) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, err := hub.OpenDB(dbPath)
@@ -16,5 +18,5 @@ func newTestEmma(t *testing.T) (*Emma, *hub.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return New(db, hub.EmmaConfig{}), db
+	return NewSystemMonitor(db), db
 }

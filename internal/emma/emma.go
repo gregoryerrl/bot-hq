@@ -1,3 +1,18 @@
+// Package emma houses two distinct surfaces post-Z-9d:
+//
+//  1. Subprocess (subprocess.go) — the tmux Claude Code pane that
+//     IS Emma the hub orchestrator (DeepSeek-V4-Pro per vision.md).
+//     Registers as the "emma" agent in hub.db.agents.
+//
+//  2. SystemMonitor (this file + delivery_audit / egress_audit /
+//     plan_usage / sentinel / wake / context_cap) — the pure-Go
+//     daemon-cadence audit + observation engine. Signs emits as
+//     "system" (Z-8b convention); does NOT register as an agent.
+//
+// Historical drift: pre-Z-9d this package ran Ollama (gemma4:e4b) and
+// did BOTH roles via a single Emma struct. Z-9d split them per vision.md.
+// The Ollama path + canonicalEmmaBlock + custom_rules + rule_enforcer +
+// mention_directive surfaces were retired with the same slice.
 package emma
 
 import (
@@ -18,12 +33,21 @@ import (
 )
 
 const (
+	// agentID is the shared agent identifier for emma the hub orchestrator
+	// (the Subprocess registers under this ID). SystemMonitor uses it for
+	// self-filtering (skip emma-subprocess's own emits from sentinel) and
+	// for context-cap exclusion (emma's pane is stateless; never halt on it).
 	agentID   = "emma"
 	agentName = "Emma"
 
-	pollInterval           = 3 * time.Second
+	// systemFromAgent is the synthetic from_agent label that SystemMonitor
+	// emits under (Z-8b convention extended Z-9d). The label is NOT a
+	// registered agent — there is no agents.id="system" row. It exists
+	// only as a discriminator on messages so the user can distinguish
+	// daemon-cadence audits from agent-authored prose.
+	systemFromAgent = "system"
+
 	healthInterval         = 30 * time.Second
-	heartbeatInterval      = 30 * time.Second
 	defaultMonitorInterval = 5 * time.Minute
 	// sentinelPollInterval gates the H-22 cross-process MCP-insert catch-up
 	// path. See sentinelPollLoop for the rationale on why this exists.
@@ -34,98 +58,18 @@ const (
 	// "fires within tick_interval + 1s" acceptance bound from the design.
 	wakeDispatchInterval = 1 * time.Second
 
-	defaultModel     = "gemma4:e4b"
-	defaultOllamaURL = "http://localhost:11434"
-	defaultMaxConc   = 3
-
 	// Phase D — flag dedupe + rate cap (shared across all monitor conditions).
 	flagHysteresisWindow   = 30 * time.Minute
 	flagRateCapPerHour     = 3
 	monitorPreconditionGap = 1 * time.Hour
 )
 
-// TaskType determines how command output is handled.
-type TaskType string
-
-const (
-	TaskExec    TaskType = "exec"
-	TaskAnalyze TaskType = "analyze"
-)
-
-// canonicalEmmaBlock is Emma's two-class identity + boundary preamble per
-// Phase H slice 2 H-24. Prepended to every TaskAnalyze prompt so the
-// gemma4:e4b model sees its scope explicitly, refuses interpretive
-// queries, and routes them back to Rain for inline handling.
-//
-// Structured class = parse / summarize / extract / count. These are
-// gemma4:e4b safe.
-//
-// Interpretive class = assess vs spec / contract / criterion. These need
-// a richer model (Rain) and are out-of-scope for Emma. Default-deny on
-// straddled queries.
-//
-// See docs/conventions/emma-analyze-classes.md for the full class table.
-const canonicalEmmaBlock = `You are Emma, bot-hq's analyze sentinel (model: gemma4:e4b).
-
-Two-class boundary for analyze queries (per Phase H H-24):
-- Structured (parse, summarize, extract, count): ANSWER. Examples: parse git log output, list files in diff, count test results.
-- Interpretive (assess vs spec/contract/criterion, judge materiality, render verdicts): REFUSE and reply "interpretive query — routing back to Rain per H-24". Examples: diff-gate verdicts, design-spec-match, observation-materiality.
-
-Default-deny on straddled queries — when in doubt, refuse to Rain.
-
-§72-amendment per phase-s.md S-1b (Phase-S-followup-1 F1-4 hybrid β+γ): Rule-enforcement-as-emma-role is authorized interpretive class (carve-out). General analyze queries: REFUSE per H-24 above. Own-role rule-enforcement on hub-traffic via the rule_enforcer.go enforcement loop: ALLOWED (analyze recent hub messages for narrative-class rule-violations; emit per ruleEnforcerLLMPrompt detection-template).`
-
-// allowedCommands is the hardcoded allowlist for command execution.
-var allowedCommands = []string{
-	"go test",
-	"go vet",
-	"go build",
-	"df -h",
-	"ps aux",
-	"uptime",
-	"free -m",
-	"vm_stat",
-	"du -sh",
-	"wc -l",
-	"ls",
-	"git status",
-	"git log",
-	"git diff",
-	"gh issue view",
-	"gh issue list",
-	"gh pr view",
-	"gh pr list",
-	"curl -s",
-	"curl -sL",
-}
-
-// SharedSem is the package-level semaphore that caps total concurrent Emma
-// tasks across both the persistent agent and the hub_spawn_gemma MCP tool.
-// Initialized by New(); callers that bypass New() must call InitSharedSem().
-var SharedSem chan struct{}
-
-// InitSharedSem sets up the shared semaphore if not already created.
-func InitSharedSem(maxConc int) {
-	if SharedSem == nil {
-		SharedSem = make(chan struct{}, maxConc)
-	}
-}
-
-// ProjectDir returns the bot-hq project directory for health checks.
-func ProjectDir() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Projects", "bot-hq")
-}
-
-// Emma manages the Ollama sidecar and processes tasks via the hub.
-type Emma struct {
-	db     *hub.DB
-	client *Client
-
-	model     string
-	ollamaURL string
-
-	ollamaCmd *exec.Cmd
+// SystemMonitor runs the daemon-cadence audits + observation work that
+// used to live inside the Ollama-driven Emma. Pure Go, no LLM, signs
+// emits as "system". The conversational "emma" agent is the Subprocess
+// in subprocess.go.
+type SystemMonitor struct {
+	db        *hub.DB
 	lastMsgID int64
 
 	monitorInterval time.Duration
@@ -136,8 +80,8 @@ type Emma struct {
 
 	// sentinelMu guards lastSentinelMsgID. The watermark is read+advanced
 	// from sentinelPollLoop and replayThroughSentinel — distinct goroutines.
-	sentinelMu         sync.Mutex
-	lastSentinelMsgID  int64
+	sentinelMu        sync.Mutex
+	lastSentinelMsgID int64
 
 	// Phase D flag bookkeeping. flagHistory dedupes by condition key
 	// (last-fired timestamp). flagWindow is a sliding 1h record of all
@@ -156,149 +100,63 @@ type Emma struct {
 	// Start via initContextCapDefault.
 	paneSnapFn paneSnapshotFn
 
-	// Phase H slice 5 C1 (H-32+H-33) plan-usage state. planUsageFetch is
-	// the fetcher abstraction (default wired to a real
-	// anthropic.UsageClient on Start; tests inject a fake). hubPublisher
-	// is the panestate.Manager.SetHubSnapshot sink — production wires it
-	// in cmd/bot-hq/main.go after the TUI's Manager exists; tests inject
-	// a recorder. lastPlanPoll/planBackoffUntil gate the 60s cadence and
-	// 600s backoff respectively.
+	// Phase H slice 5 C1 (H-32+H-33) plan-usage state. Same field shape as
+	// pre-Z-9d. planUsageFetch is the fetcher abstraction (default wired to
+	// a real anthropic.UsageClient on Start; tests inject a fake).
+	// hubPublisher is the panestate.Manager.SetHubSnapshot sink — production
+	// wires it in cmd/bot-hq/main.go after the TUI's Manager exists; tests
+	// inject a recorder.
 	planUsageFetch    PlanUsageFetcher
 	hubPublisher      func(panestate.HubSnapshot)
 	planUsageMu       sync.Mutex
 	lastPlanPoll      time.Time
 	planBackoffUntil  time.Time
-	planUsageWarnedOS bool // logged-once flag for ErrUnsupportedPlatform
+	planUsageWarnedOS bool
 
-	// Phase J tail (RESUME-spam fix per hub.db msgs 5194-5218 trace):
-	// cooldown timer suppresses repeated emitPlanCapResume calls when
-	// plan-usage fluctuates around halt-threshold (observed: ~30 RESUME
-	// emits between two legit halt cycles). Even if hadHalt-gate fires
-	// hot (DB row recreated by intermittent >=95% reads), cooldown caps
-	// emits to once per planCapResumeCooldown window.
+	// Phase J tail (RESUME-spam fix) + tail-2 (K-1) in-memory transition
+	// tracking for plan-cap halt state. Mu-protected via planUsageMu.
 	lastPlanCapResumeAt time.Time
+	planCapHaltActive   bool
 
-	// Phase J tail-2 (K-1 RESUME-spam fix): in-memory transition tracking
-	// for plan-cap halt state. Side-effects (MsgFlag emit, wake-schedule
-	// insertion, RESUME emit) gate on transitions, not raw threshold-
-	// crossings. Eliminates spam when maxUtil jitters around threshold.
-	// Mu-protected via planUsageMu.
-	planCapHaltActive bool
-
-	// Slice-5 H-22-bis item 4 auditor state.
-	//
-	// deliveryFlagTracker dedupes [DELIVERY-GAP] alerts by message_queue
-	// row id — one fire per stalled queue row, no re-fires until the row
-	// drains or exhausts. Pruned each tick of rows no longer pending.
+	// Slice-5 H-22-bis item 4 auditor state. deliveryFlagTracker dedupes
+	// [DELIVERY-GAP] alerts by message_queue row id.
 	deliveryFlagMu      sync.Mutex
 	deliveryFlagTracker map[int64]struct{}
 
-	// Egress auditor state. egressBaseline is the per-agent prior-tick
-	// pane content hash + max-msg-id + consecutive-gap-tick count. The
-	// auditor flags only after egressGapTickThreshold consecutive ticks
-	// of pane-advanced-no-hub-msg, suppressing single-tick legitimate
-	// mid-thought silence. egressFlagTracker dedupes by `agent_id:hash`
-	// so a new pane state re-arms the alert (Rain Q4 caveat).
-	// egressPaneCapture is injected for tests.
-	egressMu           sync.Mutex
-	egressBaseline     map[string]egressBaselineEntry
-	egressFlagTracker  map[string]struct{}
-	egressPaneCapture  egressPaneCaptureFn
-
-	// Phase-S-followup-1 F1-4 (ε) honest-rewrite: emma-as-rule-enforcer
-	// functional substrate. Mechanical pattern-match-only (preserves
-	// gemma §72 H-24 boundary intact). Interpretive-class violations
-	// remain BRAIN-duo + user-spotting scope per phase-s.md §169-
-	// rewrite (cite-anchor at F1-4 spec-rewrite). Spawned in Start(),
-	// halted in Stop(). Per Rain BRAIN-2nd msg 15981 + msg 15986.
-	ruleEnforcer *RuleEnforcer
+	// Egress auditor state — see egress_audit.go for full rationale.
+	egressMu          sync.Mutex
+	egressBaseline    map[string]egressBaselineEntry
+	egressFlagTracker map[string]struct{}
+	egressPaneCapture egressPaneCaptureFn
 }
 
-// New creates a Emma instance from config.
-func New(db *hub.DB, cfg hub.EmmaConfig) *Emma {
-	model := cfg.Model
-	if model == "" {
-		model = defaultModel
-	}
-	ollamaURL := cfg.OllamaURL
-	if ollamaURL == "" {
-		ollamaURL = defaultOllamaURL
-	}
-	maxConc := cfg.MaxConcurrent
-	if maxConc <= 0 {
-		maxConc = defaultMaxConc
-	}
-
-	InitSharedSem(maxConc)
-
-	return &Emma{
+// NewSystemMonitor builds the daemon-cadence engine. No config dependency:
+// the EmmaConfig fields that used to drive Ollama (Model/OllamaURL/MaxConcurrent)
+// are dead post-Z-9d.
+func NewSystemMonitor(db *hub.DB) *SystemMonitor {
+	return &SystemMonitor{
 		db:              db,
-		model:           model,
-		ollamaURL:       ollamaURL,
 		monitorInterval: defaultMonitorInterval,
 		stopCh:          make(chan struct{}),
 		flagHistory:     make(map[string]time.Time),
 	}
 }
 
-// Start launches the Ollama sidecar, waits for health, and registers on the hub.
-func (g *Emma) Start() error {
+// Start launches the daemon-cadence goroutines. Idempotent. Does NOT
+// register a hub agent — SystemMonitor is unregistered infrastructure.
+func (g *SystemMonitor) Start() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.running {
 		return nil
 	}
 
-	// Start Ollama serve process
-	g.ollamaCmd = exec.Command("ollama", "serve")
-	g.ollamaCmd.Env = append(os.Environ(),
-		"OLLAMA_FLASH_ATTENTION=1",
-		"OLLAMA_KV_CACHE_TYPE=q8_0",
-	)
-	// Discard stdout/stderr — Ollama logs to its own file
-	g.ollamaCmd.Stdout = nil
-	g.ollamaCmd.Stderr = nil
-	if err := g.ollamaCmd.Start(); err != nil {
-		return fmt.Errorf("ollama serve: %w", err)
-	}
-
-	// Create client
-	g.client = NewClient(g.ollamaURL, g.model)
-
-	// Wait for Ollama to become healthy (up to 30s)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if !g.waitForHealth(ctx) {
-		g.ollamaCmd.Process.Kill()
-		return fmt.Errorf("ollama did not become healthy within 30s")
-	}
-
-	// Register on the hub
-	agent := protocol.Agent{
-		ID:     agentID,
-		Name:   agentName,
-		Type:   protocol.AgentEmma,
-		Status: protocol.StatusOnline,
-	}
-	if err := g.db.RegisterAgent(agent); err != nil {
-		return fmt.Errorf("emma register: %w", err)
-	}
-
-	// Get current last message ID so we only process new messages
+	// Seed lastMsgID with hub's current MAX so the first sentinel-poll
+	// tick doesn't replay the entire backlog. Same Z-0 CL-first principle
+	// brian/rain follow.
 	msgs, err := g.db.GetRecentMessages(1)
 	if err == nil && len(msgs) > 0 {
 		g.lastMsgID = msgs[0].ID
-	}
-
-	// Phase-S-followup-1 F1-3: R20 BOOTSTRAP-ON-CONVERSATION-RESUME parity
-	// per phase-s.md S-1b §171 (post-fork-(a) revert; emma role lives on
-	// gemma4:e4b model, gemma writes own AgentState mirroring brian/rain).
-	// Best-effort write — failure logs but does not abort startup.
-	bootstrapState := protocol.AgentState{
-		LastSelfMsgID: g.lastMsgID,
-	}
-	if err := protocol.WriteAgentState(agentID, bootstrapState); err != nil {
-		log.Printf("emma: WriteAgentState bootstrap failed: %v", err)
 	}
 
 	g.running = true
@@ -317,26 +175,13 @@ func (g *Emma) Start() error {
 	// Phase J tail-4 (K-1-bis-deeper Axis A): seed in-memory
 	// planCapHaltActive from hub.db halt_state so the post-restart
 	// fire-path correctly recognizes continuous halt across process
-	// restart. Closes asymmetry with clear-path (which already cross-
-	// checks GetHaltCause). See plan_usage.go seedPlanCapHaltActiveFromDB
-	// for the full rationale + cite_anchor.
+	// restart.
 	g.seedPlanCapHaltActiveFromDB()
 
-	go g.pollLoop()
 	go g.healthLoop()
-	go g.heartbeatLoop()
 	go g.monitorLoop()
 	go g.sentinelPollLoop()
 	go g.wakeDispatchLoop()
-
-	// Phase-S-followup-1 F1-4 (ε) emma rule-enforcer functional
-	// substrate. Mechanical pattern-match-only (no LLM-judgment;
-	// preserves gemma §72 H-24 boundary). Best-effort start;
-	// failure logs but does not abort gemma startup.
-	g.ruleEnforcer = NewRuleEnforcer(g.db, g.client)
-	if err := g.ruleEnforcer.Start(); err != nil {
-		log.Printf("emma: rule_enforcer Start failed: %v", err)
-	}
 
 	// Phase H slice 3 C7: schedule first _internal:docdrift wake if no
 	// pending one exists from a prior boot. Re-arms on every fire via
@@ -350,15 +195,12 @@ func (g *Emma) Start() error {
 	// MCP-routed inserts arrive via sentinelPollLoop's tick.
 	g.replayThroughSentinel()
 
-	// Phase-S-followup: lifecycle online emit goes through daemoncron
-	// unconditionally.
-	daemoncron.EmitOnline(g.db, g.model)
-
 	return nil
 }
 
-// Stop shuts down the Emma agent and Ollama process.
-func (g *Emma) Stop() {
+// Stop halts the daemon-cadence goroutines. No Ollama kill or agent-
+// status update — SystemMonitor doesn't own either.
+func (g *SystemMonitor) Stop() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if !g.running {
@@ -366,266 +208,21 @@ func (g *Emma) Stop() {
 	}
 	g.running = false
 	close(g.stopCh)
-
-	// Phase-S-followup-1 F1-4 (ε): halt rule_enforcer goroutine.
-	if g.ruleEnforcer != nil {
-		g.ruleEnforcer.Stop()
-	}
-
-	g.db.UpdateAgentStatus(agentID, protocol.StatusOffline, "")
-
-	if g.ollamaCmd != nil && g.ollamaCmd.Process != nil {
-		g.ollamaCmd.Process.Kill()
-		g.ollamaCmd.Wait()
-	}
 }
 
-// waitForHealth polls until Ollama responds or context expires.
-func (g *Emma) waitForHealth(ctx context.Context) bool {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-ticker.C:
-			if g.client.IsHealthy(ctx) {
-				return true
-			}
-		}
-	}
-}
-
-// IsCommandAllowed checks if a command matches the allowlist (prefix match).
-func IsCommandAllowed(command string) bool {
-	trimmed := strings.TrimSpace(command)
-	for _, prefix := range allowedCommands {
-		if strings.HasPrefix(trimmed, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// ExecuteTask runs a command and optionally passes output through Ollama.
-func (g *Emma) ExecuteTask(ctx context.Context, command string, taskType TaskType, workDir string) (string, error) {
-	if !IsCommandAllowed(command) {
-		return "", fmt.Errorf("command not allowed: %s", command)
-	}
-
-	// Acquire shared semaphore
-	select {
-	case SharedSem <- struct{}{}:
-		defer func() { <-SharedSem }()
-	case <-ctx.Done():
-		return "", ctx.Err()
-	}
-
-	// Run the command
-	parts := strings.Fields(command)
-	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-	if workDir != "" {
-		cmd.Dir = workDir
-	}
-
-	output, err := cmd.CombinedOutput()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return "", fmt.Errorf("exec: %w", err)
-		}
-	}
-
-	result := string(output)
-
-	switch taskType {
-	case TaskExec:
-		return fmt.Sprintf("exit_code: %d\n%s", exitCode, result), nil
-	case TaskAnalyze:
-		prompt := fmt.Sprintf("%s\n\nQuery: Summarize this output concisely. Flag any errors or anomalies:\n\n```\n%s\n```", canonicalEmmaBlock, result)
-		analysis, err := g.client.Generate(ctx, prompt)
-		if err != nil {
-			return fmt.Sprintf("exit_code: %d\n%s\n\n[ollama analysis failed: %v]", exitCode, result, err), nil
-		}
-		return analysis, nil
-	default:
-		return "", fmt.Errorf("unknown task type: %s", taskType)
-	}
-}
-
-// pollLoop checks for new messages directed at the gemma agent.
-func (g *Emma) pollLoop() {
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-g.stopCh:
-			return
-		case <-ticker.C:
-			g.processNewMessages()
-		}
-	}
-}
-
-// processNewMessages reads hub messages directed at emma and handles them.
-func (g *Emma) processNewMessages() {
-	msgs, err := g.db.ReadMessages(agentID, g.lastMsgID, 50)
-	if err != nil {
-		return
-	}
-
-	for _, msg := range msgs {
-		if msg.ID > g.lastMsgID {
-			g.lastMsgID = msg.ID
-		}
-
-		if msg.FromAgent == agentID {
-			continue
-		}
-
-		// Z-8d: Emma sees the same rows the main-hub view sees —
-		// broadcasts + cross-session elevations only. Session-scoped
-		// non-elevated chatter is invisible to Emma; sessions own
-		// their conversation. Matches PassesMainHubView (Z-8c).
-		if !protocol.PassesMainHubView(msg) {
-			continue
-		}
-
-		// Phase-S-followup-2 F2-2: accept legacy directed (ToAgent==
-		// agentID) OR broadcast-mention (ToAgent=="" + @emma in
-		// content). Z-5a relaxes the broadcast branch via
-		// MentionsAgentLenient: main-hub (session_id=="") messages
-		// also match bare-name addressing ("hi emma", "emma?").
-		directed := msg.ToAgent == agentID
-		mentioned := msg.ToAgent == "" && protocol.MentionsAgentLenient(msg.Content, agentID, msg.SessionID)
-		if !directed && !mentioned {
-			continue
-		}
-
-		// Parse task from message content
-		go g.handleMessage(msg, mentioned)
-	}
-}
-
-// handleMessage processes a single hub message. Routing:
-//   - broadcast-mention class (mentioned=true) → directive-class
-//     (custom-rule input) per Phase-S-followup-2 M6
-//   - legacy directed class (mentioned=false) + "exec:"/"analyze:"
-//     prefix → existing task-executor path
-//   - else → drop with log
-//
-// MsgCommand type-discriminator: per types.go "directive requiring
-// action by recipient" — broadcast-mention class with MsgCommand
-// type signals user-rule-directive. F2-3 implements custom-rules.md
-// persistence; F2-2 stubs the route + ack.
-func (g *Emma) handleMessage(msg protocol.Message, mentioned bool) {
-	content := strings.TrimSpace(msg.Content)
-
-	if mentioned {
-		g.handleMentionDirective(msg, content)
-		return
-	}
-
-	var taskType TaskType
-	var command string
-
-	if strings.HasPrefix(content, "exec:") {
-		taskType = TaskExec
-		command = strings.TrimSpace(strings.TrimPrefix(content, "exec:"))
-	} else if strings.HasPrefix(content, "analyze:") {
-		taskType = TaskAnalyze
-		command = strings.TrimSpace(strings.TrimPrefix(content, "analyze:"))
-	} else {
-		// No recognized prefix — drop. Emma is a tool agent; unprefixed
-		// content (greetings, acks, malformed dispatches) must not be
-		// shell-executed. Log with sender + truncated content so triage
-		// has a grep target when an expected task never runs.
-		truncated := content
-		if len(truncated) > 80 {
-			truncated = truncated[:80]
-		}
-		log.Printf("emma: dropped non-prefixed message from %s: %s", msg.FromAgent, truncated)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	result, err := g.ExecuteTask(ctx, command, taskType, "")
-	if err != nil {
-		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			ToAgent:   msg.FromAgent,
-			Type:      protocol.MsgError,
-			Content:   fmt.Sprintf("Task failed: %v", err),
-		})
-		return
-	}
-
-	// Truncate if very long
-	if len(result) > 10000 {
-		result = result[:10000] + "\n...[truncated]"
-	}
-
-	g.db.InsertMessage(protocol.Message{
-		FromAgent: agentID,
-		ToAgent:   msg.FromAgent,
-		Type:      protocol.MsgResult,
-		Content:   result,
-	})
-}
-
-// handleMentionDirective processes broadcast-mention class messages
-// per Phase-S-followup-2 M6 user-custom-rule channel design + Phase T
-// T-1.5 R53 EFFICIENCY-DRIVEN-DESIGN parser fix (per phase-t.md v5).
-//
-// Routing (post-T-1.5 fix):
-//   - "@emma rule: clear" → custom-rules.md purge
-//   - "@emma rule: <directive>" → append to custom-rules.md (F2-3 impl)
-//   - "@emma <anything-without-rule-prefix>" → DROPPED (T-1.5 R53 fix:
-//     eliminates cascade-bug where any @emma-mention <500-chars auto-
-//     promoted to custom-rule; forces explicit `rule:` literal-prefix
-//     discriminator)
-//
-// Pre-T-1.5 cascade-bug: every @emma broadcast-mention body got auto-
-// appended as candidate-rule, forcing agents to emit >500-char hub_send
-// to bypass via cap-rejection (structural cascade-mitigation overhead
-// per R53 efficiency dimension). Fix per phase-t.md v5 T-1.5: explicit
-// `rule:` prefix required for rule-class operations; non-prefixed
-// @emma mentions are conversation-class (logged + dropped, no rule
-// promotion).
-// healthLoop periodically checks if Ollama is still running.
-func (g *Emma) healthLoop() {
+// healthLoop runs the 30s cadence tier: roster-prune + context-cap +
+// delivery-gap audit. Pre-Z-9d this also polled Ollama health; that path
+// is retired (no more Ollama).
+func (g *SystemMonitor) healthLoop() {
 	ticker := time.NewTicker(healthInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-g.stopCh:
 			return
 		case <-ticker.C:
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			healthy := g.client.IsHealthy(ctx)
-			cancel()
-			if !healthy {
-				// Phase-S-followup: health-check-fail emit goes through
-				// daemoncron unconditionally.
-				daemoncron.EmitOllamaHealthCheckFail(g.db)
-				g.restartOllama()
-			}
-			// Phase H slice 3 C5: piggyback roster prune at hourly cadence.
 			g.runRosterPrune()
-			// Phase H slice 4 C6 (H-31): scan panestate for context-cap
-			// squeeze; fire halt-flag + set halt_state when any non-emma
-			// agent is at or above 95% usage.
 			g.checkContextCap(time.Now())
-			// Slice-5 H-22-bis item 4 (cheap-tier auditor): piggyback
-			// delivery-gap detection on the 30s healthLoop tick. Single
-			// SQL scan + flag-tracker dedupe; cheap enough not to need
-			// its own ticker.
 			g.auditDeliveryGap()
 		}
 	}
@@ -641,10 +238,10 @@ const pruneInterval = 1 * time.Hour
 const pruneThreshold = 24 * time.Hour
 
 // runRosterPrune deletes offline agent rows older than pruneThreshold and
-// PMs Rain with the pruned IDs for audit. Idempotent (no-op when nothing
+// emits a [ROSTER-PRUNE] notice for audit. Idempotent (no-op when nothing
 // to prune). Live agents (online/working) are protected by the status
 // filter inside PruneStaleOfflineAgents — never pruned regardless of age.
-func (g *Emma) runRosterPrune() {
+func (g *SystemMonitor) runRosterPrune() {
 	now := time.Now()
 	if !g.lastPruneAt.IsZero() && now.Sub(g.lastPruneAt) < pruneInterval {
 		return
@@ -652,29 +249,27 @@ func (g *Emma) runRosterPrune() {
 	g.lastPruneAt = now
 	ids, err := g.db.PruneStaleOfflineAgents(pruneThreshold)
 	if err != nil {
-		log.Printf("[gemma] roster prune failed: %v", err)
+		log.Printf("[system-monitor] roster prune failed: %v", err)
 		return
 	}
 	if len(ids) == 0 {
 		return
 	}
-	// Phase-S-followup: roster-prune emit goes through daemoncron
-	// unconditionally.
 	daemoncron.EmitRosterPrune(g.db, ids)
 }
 
-// replayBacklog is the number of recent hub messages Emma re-classifies
-// at boot to catch active failures from the pre-restart window.
+// replayBacklog is the number of recent hub messages SystemMonitor
+// re-classifies at boot to catch active failures from the pre-restart window.
 const replayBacklog = 50
 
-// OnHubMessage is the OnMessage subscriber Emma registers with the hub.
-// Pure dispatcher: skips Emma's own messages, runs SentinelMatch, and
-// hands matched messages to dispatchSentinelHit. Default-ignore for
-// any non-match.
+// OnHubMessage is the OnMessage subscriber SystemMonitor registers with the hub.
+// Pure dispatcher: skips own emits (FromAgent="system") + registered-agent
+// emits (process-self-tool-call), runs SentinelMatch on everything else, and
+// hands matched messages to dispatchSentinelHit.
 //
 // Wired post-Start in cmd/bot-hq/main.go via h.DB.OnMessage(...).
-func (g *Emma) OnHubMessage(msg protocol.Message) {
-	if msg.FromAgent == agentID {
+func (g *SystemMonitor) OnHubMessage(msg protocol.Message) {
+	if msg.FromAgent == systemFromAgent {
 		return // skip self to avoid feedback loops
 	}
 	d := SentinelMatch(msg)
@@ -692,15 +287,7 @@ func (g *Emma) OnHubMessage(msg protocol.Message) {
 	// segfault 1) — zero observed real-event loss against 100% observed FP
 	// suppression. Earlier H-22-bis source-filter (queueFailPattern only)
 	// was conservative; data-supported extension to all sentinel patterns
-	// landed Phase I W1b. The original "other patterns can legitimately
-	// come from any source" framing was theoretical-but-unmatched-by-traffic.
-	//
-	// Revisit-trigger: if a future monitor/sidecar architecture routes
-	// crash-reports via hub_send with from_agent set to a registered agent
-	// (e.g., a watchdog that registers + emits crash events), this filter
-	// will suppress them. Refine to content-shape-based discrimination at
-	// that point — out-of-band capture stays the canonical crash-report
-	// channel for now.
+	// landed Phase I W1b.
 	if g.isFromRegisteredAgent(msg.FromAgent) {
 		return
 	}
@@ -708,11 +295,8 @@ func (g *Emma) OnHubMessage(msg protocol.Message) {
 }
 
 // isFromRegisteredAgent reports whether the given agent ID is currently
-// registered in the hub. Used by OnHubMessage as a source-filter for
-// hub-bridged sentinel patterns. Best-effort: a DB error returns false
-// (fail-open — let the sentinel evaluate; the cost of an extra dispatch
-// is lower than the cost of suppressing a real event).
-func (g *Emma) isFromRegisteredAgent(id string) bool {
+// registered in the hub. Best-effort: a DB error returns false (fail-open).
+func (g *SystemMonitor) isFromRegisteredAgent(id string) bool {
 	if id == "" {
 		return false
 	}
@@ -730,17 +314,17 @@ func (g *Emma) isFromRegisteredAgent(id string) bool {
 
 // dispatchSentinelHit emits the appropriate hub message for a sentinel
 // match. Always-flag matches go out as Type=MsgFlag (Discord-bound);
-// pre-filter-only matches go out as Type=MsgUpdate observations to
-// Rain. Both paths reuse Emma.shouldFlag so a noisy storm doesn't
-// blow past the existing rate cap and hysteresis window.
-func (g *Emma) dispatchSentinelHit(msg protocol.Message, d SentinelDecision) {
+// pre-filter-only matches go out as Type=MsgUpdate observations to Rain.
+// Both paths reuse shouldFlag's hysteresis + rate cap. Emits sign as
+// "system" (Z-8b convention extended Z-9d).
+func (g *SystemMonitor) dispatchSentinelHit(msg protocol.Message, d SentinelDecision) {
 	now := time.Now()
 	if d.AlwaysFlag {
 		if !g.shouldFlag("sentinel:"+d.Pattern, now) {
 			return
 		}
 		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
+			FromAgent: systemFromAgent,
 			Type:      protocol.MsgFlag,
 			Content:   fmt.Sprintf("Sentinel always-flag hit in msg #%d (from %s, pattern %s): %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)),
 		})
@@ -750,86 +334,50 @@ func (g *Emma) dispatchSentinelHit(msg protocol.Message, d SentinelDecision) {
 		return
 	}
 	// H-22 dry-run gate: patterns in the tuning-gate period write to a
-	// ledger file instead of pinging Rain via hub. Rain reviews the
-	// ledger out-of-band and flips the pattern to live after ≤5%
-	// false-positive rate confirmed.
+	// ledger file instead of pinging Rain via hub.
 	if name, isDryRun := IsDryRunPattern(d.Pattern); isDryRun {
 		AppendToDryRunLedger(name, fmt.Sprintf("msg #%d from %s | pattern %s | %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)))
 		return
 	}
 	g.db.InsertMessage(protocol.Message{
-		FromAgent: agentID,
+		FromAgent: systemFromAgent,
 		ToAgent:   "rain",
 		Type:      protocol.MsgUpdate,
 		Content:   fmt.Sprintf("Sentinel match in msg #%d (from %s, pattern %s): %s", msg.ID, msg.FromAgent, d.Pattern, summarizeOutput(msg.Content, 200)),
 	})
 }
 
-// OnHubMessageReplay is the silent-mode variant of OnHubMessage used by
-// replayThroughSentinel at boot. It runs SentinelMatch and writes to the
-// dry-run ledger for matched dry-run patterns (correctness — preserves
-// cross-bounce dedup), but skips shouldFlag entirely so boot-replay
-// never arms the hysteresis window for live triggers, and skips
-// always-flag/Rain-emit paths so replay never spams Discord/Rain.
-//
-// Phase H slice 3 #4 (replay silent-mode): caught live during slice-2
-// closure cycle (msgs 3463/3467) — boot-replay over the last 50 msgs
-// could arm flagHistory["sentinel-obs:queueFailPattern"] for the full
-// 30-min hysteresis window, blocking subsequent live triggers. The
-// slipping pathology becomes worse under repeated rebuilds within a
-// 50-msg traffic burst (sliding-window arming).
-//
-// Splits replay-path from dispatch-path so hydration side-effects
-// (ledger write) are decoupled from notification side-effects
-// (hysteresis arm + Rain/Discord emit).
 // sentinelPollLoop is the cross-process catch-up path for sentinel
-// detection. Closes the H-22 acceptance gap discovered at slice 2
-// runtime test 3.
+// detection. Closes the H-22 acceptance gap discovered at slice 2 runtime
+// test 3.
 //
-// Why this exists: db.OnMessage callbacks (where Emma's OnHubMessage
-// is wired in cmd/bot-hq/main.go) are a process-local Go list. They
-// fire only for inserts made by *the same process* that registered
-// the callback. Brian, Rain, and coders all emit hub_send via the
-// MCP server (separate process), so their inserts never traverse the
-// TUI process's onMessages list. Pre-hotfix, Emma's only path to see
-// such messages was the boot-time replayThroughSentinel window of
-// the last 50 messages.
-//
-// Distinction vs H-18 (Rain's MCP polling rule dropped): Rain polls
-// from a Claude Code session via MCP, where messages-arrive-
-// automatically is delivered by MCP push. Emma is the in-process Go
-// monitor with direct DB access; she has no MCP push primitive for
-// cross-process inserts. Different architectural surface — H-18's
-// "don't poll" rule applies to MCP clients, not to in-process agents
-// reading their own DB.
-func (g *Emma) sentinelPollLoop() {
+// Why this exists: db.OnMessage callbacks fire only for inserts made by
+// *the same process* that registered the callback. Brian, Rain, coders,
+// and the Subprocess all emit hub_send via the MCP server (separate
+// process), so their inserts never traverse the TUI process's onMessages
+// list. Pre-hotfix, SystemMonitor's only path to see such messages was
+// the boot-time replayThroughSentinel window.
+func (g *SystemMonitor) sentinelPollLoop() {
 	ticker := time.NewTicker(sentinelPollInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-g.stopCh:
 			return
 		case <-ticker.C:
 			g.pollSentinel()
-			// Phase H slice 5 C1 (H-32+H-33): plan-usage check
-			// piggybacks on the 5s sentinel tick. The 60s base
-			// cadence + 600s backoff gates live inside checkPlanUsage
-			// so this loop stays a uniform 5s tick.
+			// Phase H slice 5 C1 (H-32+H-33): plan-usage check piggybacks
+			// on the 5s sentinel tick. The 60s base cadence + 600s backoff
+			// gates live inside checkPlanUsage.
 			g.checkPlanUsage(time.Now())
 		}
 	}
 }
 
-// pollSentinel reads all DB messages newer than the watermark and
-// feeds each through OnHubMessage. Updates the watermark to the max
-// processed ID so the next tick is incremental, not cumulative.
-//
-// Batch limit (200) bounds work per tick. Under sustained burst
-// the loop catches up across consecutive ticks; the ledger dedup
-// invariant guards against double-write if a boot-replay window
-// overlaps with the polling window.
-func (g *Emma) pollSentinel() {
+// pollSentinel reads all DB messages newer than the watermark and feeds
+// each through OnHubMessage. Updates the watermark to the max processed
+// ID so the next tick is incremental.
+func (g *SystemMonitor) pollSentinel() {
 	g.sentinelMu.Lock()
 	since := g.lastSentinelMsgID
 	g.sentinelMu.Unlock()
@@ -854,48 +402,10 @@ func (g *Emma) pollSentinel() {
 	g.sentinelMu.Unlock()
 }
 
-// wakeDispatchLoop is the agentic time-trigger primitive landed in Phase H
-// slice 3 C1 (#7). Each tick, it scans wake_schedule for pending rows whose
-// fire_at is now in the past and dispatches each via hub_send (from='emma',
-// type='command'). Reuses Emma's already-running clock infrastructure so no
-// new daemon is needed; this is the third in-process Emma tick loop after
-// sentinelPollLoop and monitorLoop.
-//
-// Cross-process safety: db.OnMessage callbacks fire only for inserts made by
-// the registering process (per H-22 distinction), but wake dispatch happens
-// inside Emma's own process via db.InsertMessage, so the resulting message
-// reaches OnMessage subscribers without crossing process boundaries here.
-// The MCP wake-schedule writes (cross-process) are caught by reading the
-// shared wake_schedule table directly each tick — same pattern as
-// sentinelPollLoop's read of the shared messages table.
-// heartbeatLoop refreshes Emma's last_seen on a fast cadence so she stays
-// in panestate.ActivityOnline (and thus visible in the hub strip) during
-// quiet observation periods. Claude-pane agents get this refresh for free
-// via the MCP middleware on every tool call (internal/mcp/tools.go);
-// Emma is a Go-internal monitor with no MCP entry point, so the refresh
-// must be explicit.
-//
-// Interval is well within panestate.HeartbeatOnlineWindow (60s) — 30s gives 2x
-// margin against GC pauses and schedule jitter.
-func (g *Emma) heartbeatLoop() {
-	ticker := time.NewTicker(heartbeatInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-g.stopCh:
-			return
-		case <-ticker.C:
-			_ = g.db.UpdateAgentLastSeen(agentID)
-		}
-	}
-}
-
 // monitorLoop proactively runs Tier 1 health checks on a configurable interval.
-func (g *Emma) monitorLoop() {
+func (g *SystemMonitor) monitorLoop() {
 	ticker := time.NewTicker(g.monitorInterval)
 	defer ticker.Stop()
-
 	for {
 		select {
 		case <-g.stopCh:
@@ -904,9 +414,6 @@ func (g *Emma) monitorLoop() {
 			g.runHealthChecks()
 			// Slice-5 H-22-bis item 4 (expensive-tier auditor): pane
 			// content + cross-agent hub-msg scan once per 5min cadence.
-			// Late-detection backstop redundant with item 3 Stop hook —
-			// catches missed-hook cases (env var absent, install drift,
-			// hook script bug) within 10min wall (egressGapTickThreshold=2).
 			g.auditEgressGap()
 		}
 	}
@@ -919,10 +426,7 @@ type anomaly struct {
 }
 
 // checkAgentImbalance reports an offline-ratio anomaly if non-coder agents
-// skew offline. Coders (protocol.AgentCoder) are excluded from the count
-// because they are spawn-and-die by design — their offline state is the
-// expected steady state, not an anomaly. Returns (anomaly, true) when the
-// imbalance trips, otherwise (zero, false).
+// skew offline. Coders are excluded — they are spawn-and-die by design.
 func checkAgentImbalance(agents []protocol.Agent) (anomaly, bool) {
 	online, offline := 0, 0
 	considered := 0
@@ -947,10 +451,7 @@ func checkAgentImbalance(agents []protocol.Agent) (anomaly, bool) {
 }
 
 // pseudoFilesystemMounts lists mount-point prefixes whose capacity reading
-// is a kernel artifact, not real disk pressure. Filter them before flagging.
-// macOS: devfs at /dev, VM scratch at /System/Volumes/VM, firmlinks under
-// /System/Volumes/{Preboot,Update}, signed system at /System/Volumes/iSCPreboot.
-// Linux: /proc, /sys, /run, /dev are pseudo-fs.
+// is a kernel artifact, not real disk pressure.
 var pseudoFilesystemMounts = []string{
 	"/dev",
 	"/proc",
@@ -975,14 +476,17 @@ func isPseudoMount(mount string) bool {
 }
 
 // shouldSkipMonitor returns true when monitorLoop should no-op entirely.
-// Precondition: no non-emma hub traffic in the last hour AND no agents
-// currently in `working` status. Avoids alerting about an empty house.
-func (g *Emma) shouldSkipMonitor() bool {
+// Precondition: no non-system, non-emma hub traffic in the last hour AND
+// no agents currently in `working` status. Avoids alerting about an empty
+// house. Filters both systemFromAgent (our own emits) and agentID (emma
+// subprocess emits) since both are background noise from the monitor's
+// perspective.
+func (g *SystemMonitor) shouldSkipMonitor() bool {
 	cutoff := time.Now().Add(-monitorPreconditionGap)
 	msgs, err := g.db.GetRecentMessages(50)
 	if err == nil {
 		for _, m := range msgs {
-			if m.FromAgent != agentID && m.Created.After(cutoff) {
+			if m.FromAgent != systemFromAgent && m.FromAgent != agentID && m.Created.After(cutoff) {
 				return false
 			}
 		}
@@ -1001,7 +505,7 @@ func (g *Emma) shouldSkipMonitor() bool {
 
 // shouldFlag applies hysteresis (per-condition) and the shared rate cap.
 // Returns true if this anomaly should be emitted now and records it.
-func (g *Emma) shouldFlag(condition string, now time.Time) bool {
+func (g *SystemMonitor) shouldFlag(condition string, now time.Time) bool {
 	g.flagMu.Lock()
 	defer g.flagMu.Unlock()
 
@@ -1030,9 +534,9 @@ func (g *Emma) shouldFlag(condition string, now time.Time) bool {
 
 // runHealthChecks executes Tier 1 checks and reports anomalies to Rain.
 // Refinement A: hub-quiet is no longer a standalone flag — it's only
-// useful inside a Tier 3 stall-detector conjunction (Phase F).
+// useful inside a Tier 3 stall-detector conjunction.
 // Refinement B: the whole loop no-ops when nobody is working.
-func (g *Emma) runHealthChecks() {
+func (g *SystemMonitor) runHealthChecks() {
 	if g.shouldSkipMonitor() {
 		return
 	}
@@ -1060,8 +564,6 @@ func (g *Emma) runHealthChecks() {
 	cancel2()
 	for _, line := range strings.Split(string(dfOut), "\n") {
 		fields := strings.Fields(line)
-		// macOS df -h: Filesystem Size Used Avail Capacity iused ifree %iused Mounted-on (9 cols)
-		// Linux df -h: Filesystem Size Used Avail Use% Mounted-on (6 cols)
 		if len(fields) < 6 {
 			continue
 		}
@@ -1088,10 +590,6 @@ func (g *Emma) runHealthChecks() {
 	if vmErr != nil {
 		anomalies = append(anomalies, anomaly{key: "vm-stat-failed", msg: "vm_stat failed"})
 	} else {
-		// Sum "available" pages: free + inactive + speculative + purgeable.
-		// macOS reports very few "Pages free" under normal load because the kernel
-		// aggressively caches via the other buckets; only the combined total reflects
-		// actual memory pressure.
 		availablePages := 0
 		for _, line := range strings.Split(string(vmOut), "\n") {
 			var match string
@@ -1117,7 +615,6 @@ func (g *Emma) runHealthChecks() {
 			fmt.Sscanf(pagesStr, "%d", &pages)
 			availablePages += pages
 		}
-		// Flag only if combined available memory drops below ~512MB (16384 pages on Apple Silicon 16KB pages).
 		if availablePages > 0 && availablePages < 32768 {
 			anomalies = append(anomalies, anomaly{
 				key: "low-memory",
@@ -1134,7 +631,7 @@ func (g *Emma) runHealthChecks() {
 		}
 	}
 
-	// Apply hysteresis + rate cap, then emit the survivors as one bundled flag.
+	// Apply hysteresis + rate cap, then emit the survivors as one bundled report.
 	now := time.Now()
 	var allowed []string
 	for _, a := range anomalies {
@@ -1145,7 +642,7 @@ func (g *Emma) runHealthChecks() {
 	if len(allowed) > 0 {
 		report := "Monitor check anomalies:\n- " + strings.Join(allowed, "\n- ")
 		g.db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
+			FromAgent: systemFromAgent,
 			ToAgent:   "rain",
 			Type:      protocol.MsgResult,
 			Content:   report,
@@ -1162,37 +659,8 @@ func summarizeOutput(s string, maxLen int) string {
 	return "..." + s[len(s)-maxLen:]
 }
 
-// restartOllama kills and restarts the Ollama process.
-func (g *Emma) restartOllama() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	if g.ollamaCmd != nil && g.ollamaCmd.Process != nil {
-		g.ollamaCmd.Process.Kill()
-		g.ollamaCmd.Wait()
-	}
-
-	g.ollamaCmd = exec.Command("ollama", "serve")
-	g.ollamaCmd.Env = append(os.Environ(),
-		"OLLAMA_FLASH_ATTENTION=1",
-		"OLLAMA_KV_CACHE_TYPE=q8_0",
-	)
-	g.ollamaCmd.Stdout = nil
-	g.ollamaCmd.Stderr = nil
-	if err := g.ollamaCmd.Start(); err != nil {
-		// Phase-S-followup: restart-fail emit unconditional via daemoncron.
-		daemoncron.EmitOllamaRestartFail(g.db, err)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if g.waitForHealth(ctx) {
-		g.db.UpdateAgentStatus(agentID, protocol.StatusOnline, "")
-		// Phase-S-followup: restart-success emit unconditional via daemoncron.
-		daemoncron.EmitOllamaRestartSuccess(g.db)
-	} else {
-		// Phase-S-followup: restart-timeout emit unconditional via daemoncron.
-		daemoncron.EmitOllamaRestartTimeout(g.db)
-	}
+// ProjectDir returns the bot-hq project directory for health checks.
+func ProjectDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Projects", "bot-hq")
 }

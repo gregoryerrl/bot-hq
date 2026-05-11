@@ -320,32 +320,48 @@ func runHub() {
 		defer vw.Stop()
 	}
 
-	// 9c. Start Emma (the persistent monitor agent, backed by the gemma package + model) if configured
+	// 9c. Start the SystemMonitor (daemon-cadence Go work) + Emma Subprocess
+	// (tmux Claude Code on DeepSeek-V4-Pro per Z-9d / vision.md). The two
+	// run independently:
+	//   - SystemMonitor: sentinel detection, plan-cap, context-cap, delivery
+	//     + egress audits, wake-dispatch. Emits as "system". No agent
+	//     registration.
+	//   - Subprocess: registered as the "emma" agent; handles conversational
+	//     queries via DeepSeek-V4-Pro through claude CLI subprocess.
 	if cfg.Emma.AutoStart {
-		emmaAgent := emma.New(h.DB, cfg.Emma)
-		// Phase H slice 5 C1 (H-32): wire Emma's plan-usage producer to
-		// the TUI's panestate.Manager so successful 60s polls publish
-		// HubSnapshot{PlanUsagePct, PlanWindow} that strip.go reads. Set
-		// before Start so the first poll's publish lands in the same
-		// Manager the UI is reading from.
+		systemMon := emma.NewSystemMonitor(h.DB)
+		// Phase H slice 5 C1 (H-32): wire plan-usage producer to the TUI's
+		// panestate.Manager so successful 60s polls publish HubSnapshot
+		// {PlanUsagePct, PlanWindow} that strip.go reads. Set before Start
+		// so the first poll's publish lands in the same Manager the UI is
+		// reading from.
 		if uiPane != nil {
-			emmaAgent.SetHubPublisher(uiPane.SetHubSnapshot)
+			systemMon.SetHubPublisher(uiPane.SetHubSnapshot)
 		}
-		if err := emmaAgent.Start(); err != nil {
-			log.Printf("[autostart] emma FAILED: %v", err)
+		if err := systemMon.Start(); err != nil {
+			log.Printf("[autostart] system-monitor FAILED: %v", err)
 			h.DB.InsertMessage(protocol.Message{
 				FromAgent: "system",
 				Type:      protocol.MsgError,
-				Content:   fmt.Sprintf("Emma auto-start failed: %v", err),
+				Content:   fmt.Sprintf("SystemMonitor auto-start failed: %v", err),
 			})
 		} else {
-			log.Printf("[autostart] emma OK")
-			// Wire Emma's hub-reactive sentinel subscriber. OnMessage fires
-			// for every in-process insert; cross-process MCP inserts surface
-			// to Emma via her own boot-time replay + the live tick path is
-			// not needed (sentinel is purely event-driven).
-			h.DB.OnMessage(emmaAgent.OnHubMessage)
-			defer emmaAgent.Stop()
+			log.Printf("[autostart] system-monitor OK")
+			h.DB.OnMessage(systemMon.OnHubMessage)
+			defer systemMon.Stop()
+		}
+
+		emmaSub := emma.NewSubprocess(h.DB, cfg.Emma.WorkDir)
+		if err := emmaSub.Start(); err != nil {
+			log.Printf("[autostart] emma subprocess FAILED: %v", err)
+			h.DB.InsertMessage(protocol.Message{
+				FromAgent: "system",
+				Type:      protocol.MsgError,
+				Content:   fmt.Sprintf("Emma subprocess auto-start failed: %v", err),
+			})
+		} else {
+			log.Printf("[autostart] emma subprocess OK (tmux=%s)", emmaSub.TmuxSession())
+			defer emmaSub.Stop()
 		}
 	}
 
