@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,29 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/sessions"
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+// pollSessionOp polls db.GetSessionOp every 500ms until the op reaches
+// "fired" or "failed", or the timeout expires. Returns the result_json
+// blob from the daemon-side handler, or an error.
+func pollSessionOp(db *hub.DB, opID int64, timeout time.Duration) (string, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		op, err := db.GetSessionOp(opID)
+		if err != nil {
+			return "", err
+		}
+		switch op.Status {
+		case "fired":
+			return op.ResultJSON, nil
+		case "failed":
+			return "", fmt.Errorf("daemon hook failed: %s", op.ResultJSON)
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timeout after %v (status=%s)", timeout, op.Status)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
 
 // SessionOpenRequest is the input the daemon-side hook receives when
 // hub_session_open MCP tool fires. The hook is responsible for spawning
@@ -282,7 +306,17 @@ func hubSessionOpen(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("write manifest at %s (SessionsDir=%s): %v", sessions.ManifestPath(sessionID), sessions.SessionsDir(), mErr)), nil
 		}
 
-		// Dispatch to daemon-side hook for spawn + Discord thread.
+		// Dispatch to daemon-side hook for spawn + Discord thread. Two
+		// paths:
+		//   - In-daemon: hook is installed (mcp.SetSessionOpenHook called
+		//     from runHub via installSessionLifecycleHooks). Call it
+		//     directly — synchronous + no IPC.
+		//   - In-subprocess: hook is nil (bot-hq mcp subprocess doesn't
+		//     run installSessionLifecycleHooks). Z-3d: enqueue a row in
+		//     session_lifecycle_queue + poll for daemon to drain. The
+		//     daemon's queue ticker (runSessionLifecycleQueueLoop in
+		//     cmd/bot-hq/session_lifecycle.go) calls the hook + writes
+		//     the result back; we parse it here and return.
 		hook := getSessionOpenHook()
 		var info SessionOpenInfo
 		if hook != nil {
@@ -299,13 +333,29 @@ func hubSessionOpen(db *hub.DB) ToolDef {
 				info = *r
 			}
 		} else {
-			// Hook not installed: session container is allocated but no
-			// spawn happened. Caller decides what to do (degraded mode).
-			info = SessionOpenInfo{
-				SessionID: sessionID,
-				Project:   project,
-				Scope:     scope,
-				Agents:    []string{},
+			// Z-3d subprocess bridge path.
+			plistJSON := "[]"
+			if len(pointerList) > 0 {
+				if b, jErr := json.Marshal(pointerList); jErr == nil {
+					plistJSON = string(b)
+				}
+			}
+			opID, qErr := db.EnqueueSessionOp(hub.SessionLifecycleOp{
+				Kind:            "open",
+				SessionID:       sessionID,
+				Project:         project,
+				Scope:           scope,
+				PointerListJSON: plistJSON,
+			})
+			if qErr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("enqueue session-open: %v", qErr)), nil
+			}
+			result, pErr := pollSessionOp(db, opID, 30*time.Second)
+			if pErr != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("session-open queue (id=%d): %v — session container created at sessions/%s/ but BRAIN-duo not spawned (daemon not running or queue stuck)", opID, pErr, sessionID)), nil
+			}
+			if err := json.Unmarshal([]byte(result), &info); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("parse session-open result: %v (raw: %q)", err, result)), nil
 			}
 		}
 

@@ -204,6 +204,32 @@ func (db *DB) migrate() error {
 	if err := db.addColumnIfMissing("agents", "session_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// Z-3d: session-lifecycle queue. Bridges per-agent stdio MCP
+	// subprocesses to daemon-side spawn machinery (subprocess writes a
+	// pending row; daemon's queue ticker reads + executes the hook +
+	// writes result; subprocess polls for completion). Mirrors the
+	// existing message_queue table's drain-loop pattern.
+	if _, err := db.conn.Exec(`
+		CREATE TABLE IF NOT EXISTS session_lifecycle_queue (
+			id                INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind              TEXT NOT NULL CHECK(kind IN ('open','finalize')),
+			session_id        TEXT NOT NULL,
+			project           TEXT NOT NULL DEFAULT '',
+			scope             TEXT NOT NULL DEFAULT '',
+			pointer_list_json TEXT NOT NULL DEFAULT '',
+			discord_thread_id TEXT NOT NULL DEFAULT '',
+			force             INTEGER NOT NULL DEFAULT 0,
+			status            TEXT NOT NULL DEFAULT 'pending'
+			                  CHECK(status IN ('pending','fired','failed')),
+			result_json       TEXT NOT NULL DEFAULT '',
+			created           INTEGER NOT NULL,
+			claimed_at        INTEGER NOT NULL DEFAULT 0,
+			fired_at          INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_slq_status ON session_lifecycle_queue(status, id);
+	`); err != nil {
+		return fmt.Errorf("create session_lifecycle_queue: %w", err)
+	}
 	return nil
 }
 

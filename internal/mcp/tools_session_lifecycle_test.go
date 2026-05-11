@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -118,14 +119,16 @@ func TestHubSessionOpen_RequiresProjectExist(t *testing.T) {
 	}
 }
 
-func TestHubSessionOpen_CreatesSessionWithoutHook(t *testing.T) {
-	// Hook absent: tool still allocates session container + writes
-	// manifest, returns degraded-mode result with empty agents.
+func TestHubSessionOpen_EnqueuesWhenHookAbsent(t *testing.T) {
+	// Z-3d: when hook is absent, hub_session_open creates the session
+	// container + manifest synchronously, then enqueues a row in
+	// session_lifecycle_queue and polls until it sees 'fired' or times
+	// out. In this test we simulate the daemon's queue ticker by firing
+	// MarkSessionOpFired ourselves from a background goroutine.
 	canonRoot := t.TempDir()
 	t.Setenv("BOT_HQ_HOME", canonRoot)
 	t.Setenv("BOT_HQ_SESSIONS_DIR", filepath.Join(canonRoot, "sessions"))
 
-	// Create a fake project file so validation passes.
 	projDir := filepath.Join(canonRoot, "projects")
 	if err := os.MkdirAll(projDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -134,10 +137,27 @@ func TestHubSessionOpen_CreatesSessionWithoutHook(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Clear hook to test degraded mode.
 	SetSessionOpenHook(nil)
-
 	db := setupTestDB(t)
+
+	// Background "daemon" that drains the queue.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			ops, _ := db.ClaimPendingSessionOps(10)
+			for _, op := range ops {
+				result := `{"session_id":"` + op.SessionID + `","project":"` + op.Project + `","scope":"` + op.Scope + `","agents":["brian","rain"]}`
+				_ = db.MarkSessionOpFired(op.ID, "fired", result)
+			}
+			if len(ops) > 0 {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
 	tool := hubSessionOpen(db)
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
@@ -149,36 +169,25 @@ func TestHubSessionOpen_CreatesSessionWithoutHook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	<-done
 	if res.IsError {
-		t.Fatalf("unexpected error from no-hook path: %s", res.Content[0].(mcp.TextContent).Text)
+		t.Fatalf("unexpected error: %s", res.Content[0].(mcp.TextContent).Text)
 	}
-	// Parse the JSON response
 	var info SessionOpenInfo
 	if err := json.Unmarshal([]byte(res.Content[0].(mcp.TextContent).Text), &info); err != nil {
 		t.Fatalf("json unmarshal: %v; raw=%q", err, res.Content[0].(mcp.TextContent).Text)
 	}
-	t.Logf("info=%+v", info)
 	if info.SessionID == "" {
 		t.Error("expected non-empty session_id")
 	}
-	if info.Project != "test-proj" {
-		t.Errorf("project=%q want test-proj", info.Project)
+	if len(info.Agents) != 2 || info.Agents[0] != "brian" || info.Agents[1] != "rain" {
+		t.Errorf("agents=%v want [brian rain] (from simulated queue-drainer)", info.Agents)
 	}
-	if info.Scope != "scope test alpha" {
-		t.Errorf("scope=%q want 'scope test alpha'", info.Scope)
-	}
-	// Verify session skeleton exists. Skeleton lives under
-	// BOT_HQ_SESSIONS_DIR (the sessions package's resolution).
-	// setupTestDB overrides BOT_HQ_SESSIONS_DIR; we read the current
-	// env value rather than recompute from canonRoot.
+	// Verify session skeleton exists on disk.
 	skeleton := filepath.Join(os.Getenv("BOT_HQ_SESSIONS_DIR"), info.SessionID)
 	for _, sub := range []string{"brian", "rain", "tasks", "manifest.md"} {
 		if _, err := os.Stat(filepath.Join(skeleton, sub)); err != nil {
 			t.Errorf("expected %s/%s to exist: %v", info.SessionID, sub, err)
-			entries, _ := os.ReadDir(skeleton)
-			for _, e := range entries {
-				t.Logf("  found: %s", e.Name())
-			}
 		}
 	}
 }

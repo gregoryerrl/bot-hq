@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/brian"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
@@ -59,10 +61,15 @@ func (r *sessionDuoRegistry) Remove(sid string) {
 // On hub_session_finalize, kill that pair's tmux sessions, capture
 // per-agent state.json for closing_state, optionally archive Discord
 // thread.
+//
+// Z-3d session-lifecycle queue bridge: also launches the queue-drain
+// goroutine that processes hub_session_open / hub_session_finalize
+// requests enqueued by per-agent stdio MCP subprocesses (which can't
+// reach the in-daemon hook variable across process boundary).
 func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string) *sessionDuoRegistry {
 	reg := newSessionDuoRegistry()
 
-	mcp.SetSessionOpenHook(func(req mcp.SessionOpenRequest) (*mcp.SessionOpenInfo, error) {
+	openFn := func(req mcp.SessionOpenRequest) (*mcp.SessionOpenInfo, error) {
 		b := brian.New(h.DB, brianWorkDir)
 		b.SetSessionID(req.SessionID)
 		if err := b.Start(); err != nil {
@@ -84,9 +91,9 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string) 
 			Agents:    []string{"brian", "rain"},
 			// DiscordThreadID populated by Discord lifecycle hook (Group F)
 		}, nil
-	})
+	}
 
-	mcp.SetSessionFinalizeHook(func(req mcp.SessionFinalizeRequest) (*mcp.SessionFinalizeResult, error) {
+	finalizeFn := func(req mcp.SessionFinalizeRequest) (*mcp.SessionFinalizeResult, error) {
 		result := &mcp.SessionFinalizeResult{
 			KilledTmux:   []string{},
 			ClosingState: map[string]string{},
@@ -114,9 +121,93 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string) 
 		reg.Remove(req.SessionID)
 		log.Printf("[session-finalize] killed brian+rain for session=%s (force=%v)", req.SessionID, req.Force)
 		return result, nil
-	})
+	}
+
+	mcp.SetSessionOpenHook(openFn)
+	mcp.SetSessionFinalizeHook(finalizeFn)
+
+	// Z-3d: drain queue for subprocess MCP requests.
+	go runSessionLifecycleQueueLoop(h, openFn, finalizeFn)
 
 	return reg
+}
+
+// runSessionLifecycleQueueLoop is the daemon-side drain goroutine for
+// the Z-3d session_lifecycle_queue table. Subprocess MCP servers (per-
+// agent stdio bot-hq mcp processes) enqueue requests when they need
+// daemon-side spawn machinery; this loop picks them up + calls the
+// installed hooks + writes results back so subprocesses can return them
+// to the MCP caller. Mirrors the existing hub message_queue drain
+// pattern.
+//
+// Tick interval 500ms — matches subprocess poll interval. Lower would
+// add SQLite read pressure; higher would slow round-trip.
+func runSessionLifecycleQueueLoop(h *hub.Hub,
+	openFn func(mcp.SessionOpenRequest) (*mcp.SessionOpenInfo, error),
+	finalizeFn func(mcp.SessionFinalizeRequest) (*mcp.SessionFinalizeResult, error),
+) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		ops, err := h.DB.ClaimPendingSessionOps(10)
+		if err != nil {
+			log.Printf("[slq] poll error: %v", err)
+			continue
+		}
+		for _, op := range ops {
+			processSessionLifecycleOp(h, op, openFn, finalizeFn)
+		}
+	}
+}
+
+func processSessionLifecycleOp(h *hub.Hub, op hub.SessionLifecycleOp,
+	openFn func(mcp.SessionOpenRequest) (*mcp.SessionOpenInfo, error),
+	finalizeFn func(mcp.SessionFinalizeRequest) (*mcp.SessionFinalizeResult, error),
+) {
+	switch op.Kind {
+	case "open":
+		var pointerList []string
+		if op.PointerListJSON != "" && op.PointerListJSON != "[]" {
+			_ = json.Unmarshal([]byte(op.PointerListJSON), &pointerList)
+		}
+		info, err := openFn(mcp.SessionOpenRequest{
+			SessionID:   op.SessionID,
+			Project:     op.Project,
+			Scope:       op.Scope,
+			PointerList: pointerList,
+		})
+		if err != nil {
+			_ = h.DB.MarkSessionOpFired(op.ID, "failed", err.Error())
+			log.Printf("[slq] open id=%d failed: %v", op.ID, err)
+			return
+		}
+		body, _ := json.Marshal(info)
+		if err := h.DB.MarkSessionOpFired(op.ID, "fired", string(body)); err != nil {
+			log.Printf("[slq] mark-fired id=%d err: %v", op.ID, err)
+			return
+		}
+		log.Printf("[slq] open id=%d fired session=%s", op.ID, op.SessionID)
+	case "finalize":
+		result, err := finalizeFn(mcp.SessionFinalizeRequest{
+			SessionID:       op.SessionID,
+			DiscordThreadID: op.DiscordThreadID,
+			Force:           op.Force,
+		})
+		if err != nil {
+			_ = h.DB.MarkSessionOpFired(op.ID, "failed", err.Error())
+			log.Printf("[slq] finalize id=%d failed: %v", op.ID, err)
+			return
+		}
+		body, _ := json.Marshal(result)
+		if err := h.DB.MarkSessionOpFired(op.ID, "fired", string(body)); err != nil {
+			log.Printf("[slq] mark-fired id=%d err: %v", op.ID, err)
+			return
+		}
+		log.Printf("[slq] finalize id=%d fired session=%s", op.ID, op.SessionID)
+	default:
+		_ = h.DB.MarkSessionOpFired(op.ID, "failed", fmt.Sprintf("unknown kind %q", op.Kind))
+		log.Printf("[slq] unknown kind %q for id=%d", op.Kind, op.ID)
+	}
 }
 
 // capturePerAgentState reads sessions/<sid>/<agent>/state.json for both
