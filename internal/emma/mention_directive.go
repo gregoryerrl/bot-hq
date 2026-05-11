@@ -1,9 +1,11 @@
 package emma
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
@@ -15,15 +17,23 @@ func (g *Emma) handleMentionDirective(msg protocol.Message, content string) {
 		return
 	}
 
-	// T-1.5 R53 fix: require explicit `rule:` literal-prefix for rule-class
-	// operations. Anything else is conversation-class (drop without rule
-	// promotion). Eliminates structural cascade-mitigation overhead.
+	// Z-5g per vision.md: Emma is the global hub orchestrator, NOT a
+	// rule-enforcer. Phase T R53's "rule:-or-drop" gate was correct
+	// before Z-0 / Z-1 / Z-3 repositioned Emma as the user's conversation
+	// partner for session-lifecycle + CL pointer + project brainstorm.
+	// New routing:
+	//
+	//   - "@emma rule: ..."     → custom-rules.md operations (preserved)
+	//   - "@emma <conversation>" → LLM-generated reply posted back to hub
+	//                              in the same session_id (so a per-session
+	//                              "ask emma" routes inside that session)
+	//
+	// The cascade-bug R53 was guarding against was "every mention body
+	// auto-promoted to a rule" — that's still prevented because rule
+	// promotion still requires the `rule:` literal prefix; conversation
+	// replies don't touch custom-rules.md at all.
 	if !hasRulePrefix(directive) {
-		summary := directive
-		if len(summary) > 80 {
-			summary = summary[:80] + "..."
-		}
-		log.Printf("emma: mention from %s lacks `rule:` prefix; conversation-class drop (T-1.5 R53): %s", msg.FromAgent, summary)
+		g.handleConversationMention(msg, directive)
 		return
 	}
 
@@ -88,6 +98,86 @@ func (g *Emma) handleMentionDirective(msg protocol.Message, content string) {
 		Type:      protocol.MsgResult,
 		Content:   fmt.Sprintf("emma|custom-rule-added|from:%s|active-count:%d|directive:%s|apply-at:next-enforcement-tick", msg.FromAgent, len(rules), summary),
 	})
+}
+
+// handleConversationMention replies to a non-rule-prefixed user mention
+// using Emma's hub-orchestrator persona per vision.md (look at CL, point
+// BRAIN-duo, manage session lifecycle, brainstorm projects). The reply
+// is posted back to hub with the same session_id as the inbound message
+// so per-session "ask emma" stays inside the session view, and main-hub
+// chat stays on main hub.
+//
+// Z-5g. Concurrency-capped via SharedSem (same pool as TaskAnalyze).
+func (g *Emma) handleConversationMention(msg protocol.Message, directive string) {
+	summary := directive
+	if len(summary) > 80 {
+		summary = summary[:80] + "..."
+	}
+	log.Printf("emma: conversation-mention from %s (session=%q): %s", msg.FromAgent, msg.SessionID, summary)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	// Bound concurrent generation against SharedSem (same pool that
+	// TaskAnalyze + hub_spawn_gemma compete for).
+	select {
+	case SharedSem <- struct{}{}:
+		defer func() { <-SharedSem }()
+	case <-ctx.Done():
+		log.Printf("emma: conversation reply timed out acquiring SharedSem for %s", msg.FromAgent)
+		return
+	}
+
+	prompt := buildConversationPrompt(directive)
+	reply, err := g.client.Generate(ctx, prompt)
+	if err != nil {
+		log.Printf("emma: conversation Generate failed for %s: %v", msg.FromAgent, err)
+		g.db.InsertMessage(protocol.Message{
+			FromAgent: agentID,
+			ToAgent:   msg.FromAgent,
+			Type:      protocol.MsgError,
+			Content:   fmt.Sprintf("emma reply failed: %v", err),
+			SessionID: msg.SessionID,
+		})
+		return
+	}
+	reply = strings.TrimSpace(reply)
+	if reply == "" {
+		reply = "(emma had no reply — try rephrasing)"
+	}
+	if _, err := g.db.InsertMessage(protocol.Message{
+		FromAgent: agentID,
+		// Z-5i: broadcast reply (was ToAgent: msg.FromAgent). Matches the
+		// user-mockup "[main] emma: ..." with no arrow. The user posted
+		// the question in the open hub; Emma's answer goes on the open
+		// hub too.
+		Type:      protocol.MsgUpdate,
+		Content:   reply,
+		SessionID: msg.SessionID,
+	}); err != nil {
+		log.Printf("emma: failed to post conversation reply for %s: %v", msg.FromAgent, err)
+	}
+}
+
+// buildConversationPrompt frames Emma's hub-orchestrator persona per
+// vision.md so the model knows what scope to answer in. Keeps prompt
+// short for gemma4:e4b context budget; vision.md anchor is named
+// (not pasted in full) so we don't blow context on every turn.
+func buildConversationPrompt(userMessage string) string {
+	return `You are Emma, bot-hq's global hub orchestrator (DeepSeek-V4-Pro per vision.md, currently running on gemma4:e4b).
+
+Per vision.md your role is:
+- Look at CL (the Context Library at ~/.bot-hq/) to ground answers
+- Point BRAIN-duo (brian + rain) at relevant areas when the user wants work done
+- Manage session lifecycle (open/close sessions)
+- Brainstorm new project ideation with the user
+- You do NOT participate in BRAIN-cycle; you do NOT hold state; you do NOT elevate
+
+Be concise (under 4 sentences unless the user asked for detail). If the user wants action, suggest the bot-hq tool that achieves it (hub_session_open / hub_send / etc.) rather than describing what you would do.
+
+User: ` + userMessage + `
+
+Emma:`
 }
 
 // stripEmmaMention removes the leading @emma token from content

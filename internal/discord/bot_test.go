@@ -323,9 +323,9 @@ func TestBuildEmbed_PrecedenceMatrix(t *testing.T) {
 			colorFlagRed, "🚨 ATTENTION NEEDED", "", "msg 9"},
 		{"Error with HR prefix still Error-shape (Error wins precedence)", protocol.Message{ID: 10, FromAgent: "brian", Type: protocol.MsgError, Content: "[HR] boom"},
 			colorErrorRed, "Error", "brian", "msg 10"},
-		// Author-format Refine-2 unified
-		{"Update PM has from→to author", protocol.Message{ID: 11, FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgUpdate, Content: "ping"},
-			colorUpdateGray, "", "brian → rain", "msg 11"},
+		// Z-5i: ToAgent-set message renders as from-only (no arrow).
+		{"Update with ToAgent set still renders as from-only", protocol.Message{ID: 11, FromAgent: "brian", ToAgent: "rain", Type: protocol.MsgUpdate, Content: "ping"},
+			colorUpdateGray, "", "brian", "msg 11"},
 		{"Update broadcast has from-only author", protocol.Message{ID: 12, FromAgent: "brian", ToAgent: "", Type: protocol.MsgUpdate, Content: "global"},
 			colorUpdateGray, "", "brian", "msg 12"},
 		{"HR PM still HR-shape Author-nil per R2", protocol.Message{ID: 13, FromAgent: "rain", ToAgent: "brian", Type: protocol.MsgResponse, Content: "[HR] direct"},
@@ -360,15 +360,18 @@ func TestBuildEmbed_PrecedenceMatrix(t *testing.T) {
 	}
 }
 
-func TestAuthorFor_PMVsBroadcast(t *testing.T) {
+func TestAuthorFor_NameIsFromAgentOnly(t *testing.T) {
+	// Z-5i: author is always just the sender — no "<from> → <to>"
+	// arrow rendering. Phase S S-4 removed PM semantics; the arrow
+	// was display-only inertia that lied about wire shape.
 	bm := protocol.Message{FromAgent: "brian", ToAgent: ""}
-	pm := protocol.Message{FromAgent: "brian", ToAgent: "rain"}
+	withTo := protocol.Message{FromAgent: "brian", ToAgent: "rain"}
 
 	if got := authorFor(bm); got.Name != "brian" {
 		t.Errorf("broadcast author = %q, want %q", got.Name, "brian")
 	}
-	if got := authorFor(pm); got.Name != "brian → rain" {
-		t.Errorf("PM author = %q, want %q", got.Name, "brian → rain")
+	if got := authorFor(withTo); got.Name != "brian" {
+		t.Errorf("ToAgent-set author = %q, want %q (Z-5i drops arrow)", got.Name, "brian")
 	}
 }
 

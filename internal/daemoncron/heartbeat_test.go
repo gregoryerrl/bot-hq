@@ -82,13 +82,13 @@ func TestRunHeartbeatLedgerSurface_ThresholdCrossEmits(t *testing.T) {
 			heartbeatCount++
 		}
 	}
-	// Heartbeat fires for both brian + rain → 2 emits.
-	if heartbeatCount != 2 {
-		t.Errorf("expected 2 heartbeat emits at threshold cross (brian + rain); got %d", heartbeatCount)
+	// Z-5h: single broadcast emit (ToAgent="") replaces per-recipient PMs.
+	if heartbeatCount != 1 {
+		t.Errorf("expected 1 broadcast heartbeat emit at threshold cross; got %d", heartbeatCount)
 	}
 }
 
-func TestRunHeartbeatLedgerSurface_RecipientsCorrect(t *testing.T) {
+func TestRunHeartbeatLedgerSurface_BroadcastNotPM(t *testing.T) {
 	ResetHeartbeatStateForTest()
 	db := setupTestDB(t)
 	c := New(db)
@@ -101,17 +101,15 @@ func TestRunHeartbeatLedgerSurface_RecipientsCorrect(t *testing.T) {
 	}
 	runHeartbeatLedgerSurface(c)
 	msgs, _ := db.GetRecentMessages(50)
-	recipients := map[string]bool{}
 	for _, m := range msgs {
 		if m.FromAgent == heartbeatAgentID && strings.HasPrefix(m.Content, "[HEARTBEAT-LEDGER]") {
-			recipients[m.ToAgent] = true
+			if m.ToAgent != "" {
+				t.Errorf("Z-5h: expected heartbeat ToAgent='' (broadcast), got %q", m.ToAgent)
+			}
+			if m.FromAgent != "system" {
+				t.Errorf("Z-5h: expected heartbeat FromAgent='system', got %q", m.FromAgent)
+			}
 		}
-	}
-	if !recipients["brian"] {
-		t.Error("expected heartbeat emit to brian recipient")
-	}
-	if !recipients["rain"] {
-		t.Error("expected heartbeat emit to rain recipient")
 	}
 }
 
@@ -137,7 +135,7 @@ func TestRunHeartbeatLedgerSurface_DedupesWithinThreshold(t *testing.T) {
 		})
 	}
 	runHeartbeatLedgerSurface(c)
-	// Total heartbeat emits should still be 2 (single threshold cross).
+	// Z-5h: 1 broadcast emit total (was 2 PM emits pre-Z-5h).
 	msgs, _ := db.GetRecentMessages(100)
 	heartbeatCount := 0
 	for _, m := range msgs {
@@ -145,7 +143,7 @@ func TestRunHeartbeatLedgerSurface_DedupesWithinThreshold(t *testing.T) {
 			heartbeatCount++
 		}
 	}
-	if heartbeatCount != 2 {
-		t.Errorf("expected dedupe to keep heartbeat count at 2 within threshold window; got %d", heartbeatCount)
+	if heartbeatCount != 1 {
+		t.Errorf("expected dedupe to keep broadcast heartbeat count at 1 within threshold window; got %d", heartbeatCount)
 	}
 }

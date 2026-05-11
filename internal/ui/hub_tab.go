@@ -196,6 +196,14 @@ func (h *HubTab) SetSessionFilter(sessionID string) {
 	h.followBottom = true
 }
 
+// SessionFilter returns the current session filter. Empty means "show
+// all sessions" (aggregated main-hub view). Used by app.go to tag
+// outbound user input with the viewed session so replies go INTO that
+// session instead of always landing on the main hub. Z-5f.
+func (h HubTab) SessionFilter() string {
+	return h.sessionFilter
+}
+
 // resize recalculates viewport and input dimensions. When the user is in
 // follow-bottom mode (initial render or actively tracking latest), snap to
 // bottom after the resize so a terminal resize doesn't strand them mid-feed.
@@ -285,15 +293,29 @@ func (h HubTab) renderMessages() string {
 	return strings.Join(lines, "\n")
 }
 
-// formatMessage renders a single message as "[HH:MM:SS] from → to: content"
-// with each agent name colored independently.
+// formatMessage renders a single message as "[HH:MM:SS] [session] from: content".
+// Z-5i removed the "→ to:" arrow rendering: Phase S S-4 already dropped
+// PM semantics from the wire protocol; the prior arrow display
+// implied a PM-class targeting that hasn't existed since S-4. User-
+// mockup format is "[Session-id] sender: content" — sender colored
+// per agentColor, session-tag in aggregated view only.
 func (h HubTab) formatMessage(msg protocol.Message) string {
 	timestamp := msg.Created.Format("15:04:05")
+	sessionTag := h.sessionTagFor(msg) // empty when filter is set
 
 	if msg.Type == protocol.MsgFlag {
 		flagStyle := lipgloss.NewStyle().Foreground(ColorError).Bold(true)
 		fromStyle := lipgloss.NewStyle().Foreground(agentColor(msg.FromAgent))
 		tsStyle := lipgloss.NewStyle().Foreground(ColorStatus)
+		if sessionTag != "" {
+			return fmt.Sprintf("%s %s %s %s %s",
+				tsStyle.Render("["+timestamp+"]"),
+				tsStyle.Render(sessionTag),
+				flagStyle.Render("⚑ FLAG"),
+				fromStyle.Render(msg.FromAgent+":"),
+				flagStyle.Render(msg.Content),
+			)
+		}
 		return fmt.Sprintf("%s %s %s %s",
 			tsStyle.Render("["+timestamp+"]"),
 			flagStyle.Render("⚑ FLAG"),
@@ -303,15 +325,9 @@ func (h HubTab) formatMessage(msg protocol.Message) string {
 	}
 
 	tsStyle := lipgloss.NewStyle().Foreground(ColorStatus)
-	arrowStyle := lipgloss.NewStyle().Foreground(ColorStatus)
 
 	fromColor := agentColor(msg.FromAgent)
 	fromStyle := lipgloss.NewStyle().Foreground(fromColor)
-	toName := "*"
-	if msg.ToAgent != "" {
-		toName = msg.ToAgent
-	}
-	toStyle := lipgloss.NewStyle().Foreground(agentColor(toName))
 
 	// Message content matches the author's color
 	msgColor := fromColor
@@ -319,8 +335,14 @@ func (h HubTab) formatMessage(msg protocol.Message) string {
 		msgColor = ColorError
 	}
 
-	// Build the prefix to calculate its visible width for wrapping
-	prefix := fmt.Sprintf("[%s] %s → %s: ", timestamp, msg.FromAgent, toName)
+	// Build the prefix (including optional session tag) to calculate its
+	// visible width for wrapping.
+	var prefix string
+	if sessionTag != "" {
+		prefix = fmt.Sprintf("[%s] %s %s: ", timestamp, sessionTag, msg.FromAgent)
+	} else {
+		prefix = fmt.Sprintf("[%s] %s: ", timestamp, msg.FromAgent)
+	}
 	prefixLen := len(prefix)
 
 	// Wrap content to fit viewport width
@@ -331,14 +353,59 @@ func (h HubTab) formatMessage(msg protocol.Message) string {
 
 	msgStyle := lipgloss.NewStyle().Foreground(msgColor)
 
-	return fmt.Sprintf("%s %s %s %s%s %s",
+	if sessionTag != "" {
+		return fmt.Sprintf("%s %s %s: %s",
+			tsStyle.Render("["+timestamp+"]"),
+			tsStyle.Render(sessionTag),
+			fromStyle.Render(msg.FromAgent),
+			msgStyle.Render(content),
+		)
+	}
+	return fmt.Sprintf("%s %s: %s",
 		tsStyle.Render("["+timestamp+"]"),
 		fromStyle.Render(msg.FromAgent),
-		arrowStyle.Render("→"),
-		toStyle.Render(toName),
-		arrowStyle.Render(":"),
 		msgStyle.Render(content),
 	)
+}
+
+// sessionTagFor returns the short session-attribution tag for a message
+// in the aggregated view, or "" when the Hub is filtered to a single
+// session (where the tag would be redundant on every row).
+//
+//   - filter set       → "" (no tag)
+//   - msg.SessionID==""→ "[main]"
+//   - else             → "[<scope4>·<uuid>]" — first 4 chars of the
+//     scope-slug + '·' + the trailing uuid-suffix (everything after the
+//     last '-'). Combining both halves keeps the tag readable (scope
+//     hint) and distinct (uuid-suffix has high entropy), avoiding
+//     collisions across sessions with shared scope-prefixes like
+//     "captain-hook-A-…" vs "captain-hook-B-…".
+//
+// Falls back to the raw id when no '-' is present (legacy date-keyed
+// IDs are rare post Z-3 but keep the path defensive).
+func (h HubTab) sessionTagFor(msg protocol.Message) string {
+	if h.sessionFilter != "" {
+		return ""
+	}
+	if msg.SessionID == "" {
+		return "[main]"
+	}
+	id := msg.SessionID
+	idx := strings.LastIndex(id, "-")
+	if idx <= 0 || idx >= len(id)-1 {
+		// No '-' or trailing '-' — use first 6 chars as best-effort.
+		if len(id) > 6 {
+			return "[" + id[:6] + "]"
+		}
+		return "[" + id + "]"
+	}
+	scope := id[:idx]
+	uuid := id[idx+1:]
+	scopeShort := scope
+	if len(scopeShort) > 4 {
+		scopeShort = scopeShort[:4]
+	}
+	return "[" + scopeShort + "·" + uuid + "]"
 }
 
 // parseCommand extracts an @agent target from user input.

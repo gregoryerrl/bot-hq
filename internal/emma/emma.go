@@ -488,10 +488,11 @@ func (g *Emma) processNewMessages() {
 
 		// Phase-S-followup-2 F2-2: accept legacy directed (ToAgent==
 		// agentID) OR broadcast-mention (ToAgent=="" + @emma in
-		// content). Mention-based routing replaces PM-class targeting
-		// post-S-4 PM-removal. Per protocol/mention.go regex.
+		// content). Z-5a relaxes the broadcast branch via
+		// MentionsAgentLenient: main-hub (session_id=="") messages
+		// also match bare-name addressing ("hi emma", "emma?").
 		directed := msg.ToAgent == agentID
-		mentioned := msg.ToAgent == "" && protocol.MentionsAgent(msg.Content, agentID)
+		mentioned := msg.ToAgent == "" && protocol.MentionsAgentLenient(msg.Content, agentID, msg.SessionID)
 		if !directed && !mentioned {
 			continue
 		}
