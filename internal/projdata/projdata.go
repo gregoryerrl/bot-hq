@@ -28,18 +28,76 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 )
 
+// normalizeDriverType maps Laravel-style DB_CONNECTION values + common
+// aliases to bot-hq's canonical driver names.
+func normalizeDriverType(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "pgsql", "postgres", "postgresql":
+		return "postgres"
+	case "mysql", "mariadb":
+		return "mysql"
+	case "sqlite", "sqlite3":
+		return "sqlite"
+	default:
+		return strings.ToLower(strings.TrimSpace(s))
+	}
+}
+
+// buildPostgresDSN assembles a postgres URL from components. Password is
+// URL-encoded so special chars (e.g., @) don't break parsing.
+func buildPostgresDSN(host, port, db, user, pass, sslmode string) string {
+	if sslmode == "" {
+		sslmode = "prefer"
+	}
+	hostport := host
+	if port != "" {
+		hostport = host + ":" + port
+	}
+	userinfo := url.UserPassword(user, pass).String()
+	return "postgres://" + userinfo + "@" + hostport + "/" + db + "?sslmode=" + sslmode
+}
+
+// buildMySQLDSN assembles a mysql DSN per go-sql-driver/mysql format:
+// user:pass@tcp(host:port)/db?...
+func buildMySQLDSN(host, port, db, user, pass string) string {
+	if port == "" {
+		port = "3306"
+	}
+	return user + ":" + pass + "@tcp(" + host + ":" + port + ")/" + db + "?parseTime=true"
+}
+
 // DataSourceConfig is one entry in a project yaml's `data_sources.databases`
 // list. Loaded by Load() + ResolveSource().
+//
+// Two credential modes (yaml chooses one):
+//   - dsn_env: single env-var name holding a complete DSN string (e.g.,
+//     PROD_DB_RO_DSN=postgres://user:pass@host:5432/db?sslmode=require).
+//     Used when the operator already has a DSN-shaped secret.
+//   - Component env-vars: host_env / port_env / database_env / username_env
+//     / password_env each name an env-var holding one piece. Useful for
+//     Laravel-style .env files (DB_HOST / DB_PORT / DB_DATABASE / etc.)
+//     where bot-hq can reuse the same env file the app already uses.
 type DataSourceConfig struct {
 	Name                string `yaml:"name"`
-	Type                string `yaml:"type"`     // sqlite | postgres | mysql
+	Type                string `yaml:"type"`     // sqlite | postgres | mysql; auto-derived from DB_CONNECTION if empty + ConnectionEnv set
 	DSNEnv              string `yaml:"dsn_env"`  // env-var name resolved from EnvFile
 	EnvFile             string `yaml:"env_file"` // file name under projects/<project>/env/
 	ReadOnly            bool   `yaml:"read_only"`
 	QueryTimeoutSeconds int    `yaml:"query_timeout_seconds"`
+
+	// Component env-vars (alternative to dsn_env; used when env file is
+	// Laravel-style with discrete host/port/user/pass/db pieces).
+	ConnectionEnv string `yaml:"connection_env"` // env-var name (e.g., DB_CONNECTION → "pgsql"/"mysql"/"sqlite")
+	HostEnv       string `yaml:"host_env"`
+	PortEnv       string `yaml:"port_env"`
+	DatabaseEnv   string `yaml:"database_env"`
+	UsernameEnv   string `yaml:"username_env"`
+	PasswordEnv   string `yaml:"password_env"`
+	SSLMode       string `yaml:"sslmode"` // postgres-specific; defaults to "prefer"
 }
 
 // ProjectDataSources groups all data-source entries for one project.
@@ -124,12 +182,48 @@ func Query(ctx context.Context, cfg DataSourceConfig, env map[string]string, que
 	if err := ValidateSelectOnly(query); err != nil {
 		return nil, fmt.Errorf("sql gate reject: %w", err)
 	}
-	dsn, ok := env[cfg.DSNEnv]
-	if !ok || dsn == "" {
-		return nil, fmt.Errorf("env var %s not set in env file %s", cfg.DSNEnv, cfg.EnvFile)
+
+	// Resolve driver type — yaml `type` wins; else look at ConnectionEnv.
+	dbType := normalizeDriverType(cfg.Type)
+	if dbType == "" && cfg.ConnectionEnv != "" {
+		dbType = normalizeDriverType(env[cfg.ConnectionEnv])
+	}
+	if dbType == "" {
+		return nil, fmt.Errorf("data source %q has no driver type (yaml `type:` or env %s required)", cfg.Name, cfg.ConnectionEnv)
 	}
 
-	driverName, dsnReady, err := prepareDSN(cfg.Type, dsn)
+	// Resolve DSN — single-DSN mode wins; else build from components.
+	var dsn string
+	if cfg.DSNEnv != "" {
+		v, ok := env[cfg.DSNEnv]
+		if !ok || v == "" {
+			return nil, fmt.Errorf("env var %s not set in env file %s", cfg.DSNEnv, cfg.EnvFile)
+		}
+		dsn = v
+	} else if cfg.HostEnv != "" {
+		host := env[cfg.HostEnv]
+		port := env[cfg.PortEnv]
+		database := env[cfg.DatabaseEnv]
+		user := env[cfg.UsernameEnv]
+		pass := env[cfg.PasswordEnv]
+		if host == "" || database == "" || user == "" {
+			return nil, fmt.Errorf("component env vars incomplete (need at minimum host/database/username; got host=%q database=%q username=%q)", redact(host), redact(database), redact(user))
+		}
+		switch dbType {
+		case "postgres":
+			dsn = buildPostgresDSN(host, port, database, user, pass, cfg.SSLMode)
+		case "mysql":
+			dsn = buildMySQLDSN(host, port, database, user, pass)
+		case "sqlite":
+			return nil, fmt.Errorf("sqlite does not support component env vars; use dsn_env with a file path")
+		default:
+			return nil, fmt.Errorf("unsupported driver %q for component-env DSN build", dbType)
+		}
+	} else {
+		return nil, fmt.Errorf("data source %q has neither dsn_env nor component env vars (host_env/port_env/database_env/username_env/password_env)", cfg.Name)
+	}
+
+	driverName, dsnReady, err := prepareDSN(dbType, dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +242,7 @@ func Query(ctx context.Context, cfg DataSourceConfig, env map[string]string, que
 
 	// Postgres / MySQL: set session-level RO at connection open. SQLite
 	// honors via ?mode=ro in prepareDSN.
-	switch cfg.Type {
+	switch dbType {
 	case "postgres":
 		if _, err := db.ExecContext(qctx, "SET default_transaction_read_only = on"); err != nil {
 			return nil, fmt.Errorf("set ro: %w", err)
@@ -251,6 +345,15 @@ func prepareDSN(dbType, dsn string) (driverName, dsnReady string, err error) {
 	default:
 		return "", "", fmt.Errorf("unsupported data source type %q (supported: sqlite, postgres, mysql)", dbType)
 	}
+}
+
+// redact replaces all characters of a string with X for safe display
+// in errors when the value might be PII or a credential.
+func redact(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.Repeat("X", len(s))
 }
 
 // normalizeValue converts driver-returned []byte to string for JSON
