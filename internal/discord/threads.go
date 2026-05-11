@@ -1,10 +1,10 @@
-// Package discord — Z-3 sessions-as-containers thread lifecycle.
+// Package discord — Z-3/Z-7 sessions-as-containers thread lifecycle.
 //
-// Per architecture/sessions-as-containers.md "Per-project channels +
-// per-session threads": bot-hq creates one Discord channel per project
-// (e.g. #bot-hq, #bcc-ad-manager) and spawns a thread within that
-// channel for each active session. Threads auto-archive per Discord
-// server policy; the bot non-destructively archives on session-close.
+// Z-7: a single hub channel (hub_channel_id) parents per-session
+// threads. The bot spawns one thread per active session on
+// hub_session_open and non-destructively archives it on close. No
+// per-project channels — sessions for any project share the hub
+// channel; the thread name (scope-slug) carries the disambiguation.
 //
 // Why threads over channels: Discord caps servers at 500 channels and
 // imposes 5/5s channel-creation rate-limit server-wide. Threads have
@@ -29,20 +29,28 @@ type ThreadArchiver interface {
 	ChannelEditComplex(channelID string, data *discordgo.ChannelEdit, options ...discordgo.RequestOption) (*discordgo.Channel, error)
 }
 
-// CreateSessionThread spawns a thread within the given project's channel
-// for the named scope-slug. Returns the new thread's ID for storage in
-// the session manifest's discord_thread_id frontmatter field.
+// CreateSessionThread spawns a thread under the bot's hub channel for
+// the named scope-slug. Returns the new thread's ID for storage in the
+// session manifest's discord_thread_id frontmatter field.
+//
+// Z-7: parent channel = hub channel (resolveHubChannel). No
+// per-project parent — the scope-slug thread name carries the
+// disambiguation.
 //
 // Thread name = scope-slug (matches session-id slug portion for greppable
 // matching between session manifests and Discord history).
 //
 // AutoArchiveDuration: 1 day (most session work fits within a day; user
 // can extend by activity per Discord auto-archive semantics).
-func (b *Bot) CreateSessionThread(projectChannelID, scopeSlug string) (string, error) {
+func (b *Bot) CreateSessionThread(scopeSlug string) (string, error) {
 	if b.session == nil {
 		return "", fmt.Errorf("discord session not started")
 	}
-	return createSessionThread(b.session, projectChannelID, scopeSlug)
+	parent := b.resolveHubChannel()
+	if parent == "" {
+		return "", fmt.Errorf("no hub channel configured for thread parent")
+	}
+	return createSessionThread(b.session, parent, scopeSlug)
 }
 
 func createSessionThread(s ThreadCreator, projectChannelID, scopeSlug string) (string, error) {

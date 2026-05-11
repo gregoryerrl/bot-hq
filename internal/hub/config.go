@@ -31,23 +31,19 @@ type CliveConfig struct {
 type DiscordConfig struct {
 	Token     string `toml:"token"`
 	ChannelID string `toml:"channel_id"`
-	// Phase R R4 multi-channel routing — when populated, hub messages
-	// route by class: MsgFlag → FlagsChannelID; session-event class
-	// (content prefix `[SESSION:`) → SessionsChannelID; everything else
-	// → HubChannelID. Empty class-specific IDs fall back to
-	// HubChannelID. HubChannelID empty falls back to legacy ChannelID
-	// for backwards-compat with pre-R4 single-channel deployments.
-	// User-fire path documented at ~/.bot-hq/tasks.md T-001.
-	HubChannelID      string `toml:"hub_channel_id"`
-	FlagsChannelID    string `toml:"flags_channel_id"`
-	SessionsChannelID string `toml:"sessions_channel_id"`
-	// MonitorChannelID is the Z-3 sticky #bot-hq-monitor cross-session
-	// global feed channel. Receives emma globals + [HR]/Flag/Tag cross-
-	// cuts. Per architecture/sessions-as-containers.md "Per-project
-	// channels + per-session threads" section. Per-project channels are
-	// discovered by name-matching against projects/<key>.yaml at bot
-	// startup (not statically configured here).
-	MonitorChannelID string `toml:"monitor_channel_id"`
+	// Phase R R4 + Z-7 routing — when populated, hub messages route by
+	// class: MsgFlag → FlagsChannelID; session-scoped (msg.SessionID
+	// != "") → per-session thread under HubChannelID; everything else
+	// → HubChannelID. Empty FlagsChannelID falls back to HubChannelID.
+	// HubChannelID empty falls back to legacy ChannelID for
+	// backwards-compat with pre-R4 single-channel deployments.
+	//
+	// Z-7 removed SessionsChannelID + MonitorChannelID — sessions now
+	// surface as threads under the hub channel (no separate
+	// channel-per-class for session events), and the cross-session
+	// monitor concept collapses into the hub channel itself.
+	HubChannelID   string `toml:"hub_channel_id"`
+	FlagsChannelID string `toml:"flags_channel_id"`
 }
 
 type BrianConfig struct {
@@ -137,8 +133,6 @@ var EditableSettings = []SettingKey{
 	{Key: "discord.channel_id", Label: "Channel ID (legacy)", Section: "DISCORD"},
 	{Key: "discord.hub_channel_id", Label: "Hub Channel ID", Section: "DISCORD"},
 	{Key: "discord.flags_channel_id", Label: "Flags Channel ID", Section: "DISCORD"},
-	{Key: "discord.sessions_channel_id", Label: "Sessions Channel ID", Section: "DISCORD"},
-	{Key: "discord.monitor_channel_id", Label: "Monitor Channel ID (Z-3 sticky #bot-hq-monitor)", Section: "DISCORD"},
 	{Key: "clive.gemini_api_key", Label: "Gemini Key", Section: "CLIVE", IsSecret: true},
 	{Key: "clive.voice", Label: "Voice", Section: "CLIVE"},
 	{Key: "hub.clive_port", Label: "Clive Port", Section: "HUB"},
@@ -170,10 +164,6 @@ func (cfg *Config) ApplyDBSettings(db *DB) {
 			cfg.Discord.HubChannelID = v
 		case "discord.flags_channel_id":
 			cfg.Discord.FlagsChannelID = v
-		case "discord.sessions_channel_id":
-			cfg.Discord.SessionsChannelID = v
-		case "discord.monitor_channel_id":
-			cfg.Discord.MonitorChannelID = v
 		case "clive.gemini_api_key":
 			cfg.Clive.GeminiAPIKey = v
 		case "clive.voice":
@@ -209,10 +199,6 @@ func (cfg *Config) GetSettingValue(key string) string {
 		return cfg.Discord.HubChannelID
 	case "discord.flags_channel_id":
 		return cfg.Discord.FlagsChannelID
-	case "discord.sessions_channel_id":
-		return cfg.Discord.SessionsChannelID
-	case "discord.monitor_channel_id":
-		return cfg.Discord.MonitorChannelID
 	case "clive.gemini_api_key":
 		return cfg.Clive.GeminiAPIKey
 	case "clive.voice":

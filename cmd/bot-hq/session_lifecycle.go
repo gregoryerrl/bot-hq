@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/brian"
+	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
@@ -66,7 +67,11 @@ func (r *sessionDuoRegistry) Remove(sid string) {
 // goroutine that processes hub_session_open / hub_session_finalize
 // requests enqueued by per-agent stdio MCP subprocesses (which can't
 // reach the in-daemon hook variable across process boundary).
-func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string) *sessionDuoRegistry {
+//
+// Z-7: discordBot (nullable) is used to spawn a per-session thread
+// under the hub channel on open and archive it on finalize. nil bot =
+// Discord disabled; lifecycle proceeds with empty thread-id.
+func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string, discordBot *discord.Bot) *sessionDuoRegistry {
 	reg := newSessionDuoRegistry()
 
 	openFn := func(req mcp.SessionOpenRequest) (*mcp.SessionOpenInfo, error) {
@@ -83,13 +88,26 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string) 
 			return nil, fmt.Errorf("rain spawn for session %s: %w", req.SessionID, err)
 		}
 		reg.Add(req.SessionID, &duoPair{Brian: b, Rain: r})
-		log.Printf("[session-open] spawned brian+rain for session=%s scope=%s project=%s", req.SessionID, req.Scope, req.Project)
+
+		threadID := ""
+		if discordBot != nil {
+			// Thread name = full session-id so two sessions with the
+			// same scope-slug (different uuid suffix) get distinct,
+			// greppable threads.
+			if tid, terr := discordBot.CreateSessionThread(req.SessionID); terr == nil {
+				threadID = tid
+				discordBot.RegisterSessionThread(req.SessionID, threadID)
+			} else {
+				log.Printf("[session-open] discord thread create for %s: %v", req.SessionID, terr)
+			}
+		}
+		log.Printf("[session-open] spawned brian+rain for session=%s scope=%s project=%s discord_thread=%q", req.SessionID, req.Scope, req.Project, threadID)
 		return &mcp.SessionOpenInfo{
-			SessionID: req.SessionID,
-			Project:   req.Project,
-			Scope:     req.Scope,
-			Agents:    []string{"brian", "rain"},
-			// DiscordThreadID populated by Discord lifecycle hook (Group F)
+			SessionID:       req.SessionID,
+			Project:         req.Project,
+			Scope:           req.Scope,
+			DiscordThreadID: threadID,
+			Agents:          []string{"brian", "rain"},
 		}, nil
 	}
 
@@ -98,6 +116,21 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string) 
 			KilledTmux:   []string{},
 			ClosingState: map[string]string{},
 		}
+
+		// Z-7: archive the session's Discord thread (non-destructive;
+		// pinned messages survive, thread is unarchive-able on resume).
+		// Empty thread-id = pre-Z-7 session OR Discord-disabled deploy
+		// — skip gracefully. Best-effort: archive failure doesn't block
+		// duo-kill / state-capture.
+		if discordBot != nil && req.DiscordThreadID != "" {
+			if aerr := discordBot.ArchiveSessionThread(req.DiscordThreadID); aerr != nil {
+				log.Printf("[session-finalize] discord thread archive %s: %v", req.DiscordThreadID, aerr)
+			} else {
+				result.DiscordArchived = true
+			}
+			discordBot.UnregisterSessionThread(req.SessionID)
+		}
+
 		pair, ok := reg.Get(req.SessionID)
 		if !ok {
 			// Session might have been opened in a previous daemon run.
@@ -119,7 +152,7 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string) 
 			result.KilledTmux = append(result.KilledTmux, "rain")
 		}
 		reg.Remove(req.SessionID)
-		log.Printf("[session-finalize] killed brian+rain for session=%s (force=%v)", req.SessionID, req.Force)
+		log.Printf("[session-finalize] killed brian+rain for session=%s (force=%v discord_archived=%v)", req.SessionID, req.Force, result.DiscordArchived)
 		return result, nil
 	}
 

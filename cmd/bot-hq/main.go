@@ -206,18 +206,22 @@ func runHub() {
 
 	// 6. Start Discord bot if configured (Phase R R4 multi-channel support;
 	// either legacy ChannelID OR Phase R HubChannelID populated suffices).
+	// Z-7: held in an outer-scoped var so the session-lifecycle hook can
+	// reach it to create + archive per-session threads under the hub
+	// channel.
+	var discordBot *discord.Bot
 	if cfg.Discord.Token != "" && (cfg.Discord.ChannelID != "" || cfg.Discord.HubChannelID != "") {
-		discordBot, err := discord.NewBot(
+		b, err := discord.NewBot(
 			cfg.Discord.Token,
 			cfg.Discord.ChannelID,
 			cfg.Discord.HubChannelID,
 			cfg.Discord.FlagsChannelID,
-			cfg.Discord.SessionsChannelID,
 			h,
 		)
 		if err == nil {
-			if err := discordBot.Start(); err == nil {
-				defer discordBot.Stop()
+			if err := b.Start(); err == nil {
+				discordBot = b
+				defer b.Stop()
 			}
 		}
 	}
@@ -243,7 +247,7 @@ func runHub() {
 	// spawns on-demand per session per architecture/sessions-as-
 	// containers.md. Legacy [brian]/[rain] AutoStart paths preserved
 	// for backward-compat (Group E backward-compat).
-	_ = installSessionLifecycleHooks(h, cfg.Brian.WorkDir, cfg.Rain.WorkDir)
+	_ = installSessionLifecycleHooks(h, cfg.Brian.WorkDir, cfg.Rain.WorkDir, discordBot)
 
 	// 7. Build Brian orchestrator instance (Start deferred until after TUI
 	// is ready so its first inserts reach the TUI via OnMessage). Z-3a:

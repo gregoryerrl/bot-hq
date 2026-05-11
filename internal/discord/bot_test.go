@@ -58,7 +58,7 @@ func TestShouldForwardToDiscord_AudienceCases(t *testing.T) {
 }
 
 func TestNewBotRequiresToken(t *testing.T) {
-	_, err := NewBot("", "channel-id", "", "", "", nil)
+	_, err := NewBot("", "channel-id", "", "", nil)
 	if err == nil {
 		t.Error("expected error for empty token")
 	}
@@ -66,14 +66,14 @@ func TestNewBotRequiresToken(t *testing.T) {
 
 func TestNewBotRequiresChannel(t *testing.T) {
 	// Phase R R4: legacy channelID OR new hubChannelID must be set
-	_, err := NewBot("token", "", "", "", "", nil)
+	_, err := NewBot("token", "", "", "", nil)
 	if err == nil {
 		t.Error("expected error when both channel_id and hub_channel_id empty")
 	}
 }
 
 func TestNewBotRequiresHub(t *testing.T) {
-	_, err := NewBot("token", "channel-id", "", "", "", nil)
+	_, err := NewBot("token", "channel-id", "", "", nil)
 	if err == nil {
 		t.Error("expected error for nil hub")
 	}
@@ -82,16 +82,18 @@ func TestNewBotRequiresHub(t *testing.T) {
 // Phase R R4 — 5-state multi-channel routing matrix per Rain msg 15538
 // Refine-2/3 BRAIN-2nd. Covers (i) legacy single-channel / (ii) partial-
 // migration hub-only / (iii) partial-migration hub+flags / (iv) partial-
-// migration hub+sessions / (v) fully-migrated.
+// migration hub+flags / (iv) fully-migrated R4 + Z-7. Z-7 removed
+// the SessionsChannelID + [SESSION: content-prefix branch — session
+// routing is now thread-based via msg.SessionID lookup (covered in
+// threads_registry_test.go).
 func TestChannelForMessage_RoutingMatrix(t *testing.T) {
 	cases := []struct {
-		name              string
-		channelID         string
-		hubChannelID      string
-		flagsChannelID    string
-		sessionsChannelID string
-		msg               protocol.Message
-		want              string
+		name           string
+		channelID      string
+		hubChannelID   string
+		flagsChannelID string
+		msg            protocol.Message
+		want           string
 	}{
 		// (i) legacy single-channel: pre-R4 deployments
 		{
@@ -106,23 +108,11 @@ func TestChannelForMessage_RoutingMatrix(t *testing.T) {
 			msg:       protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
 			want:      "legacy",
 		},
-		{
-			name:      "legacy: session-event routes to channelID (no sessions-channel)",
-			channelID: "legacy",
-			msg:       protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345] opened"},
-			want:      "legacy",
-		},
 		// (ii) partial-migration hub-only
 		{
 			name:         "hub-only: all classes route to hubChannelID",
 			hubChannelID: "hub",
 			msg:          protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
-			want:         "hub",
-		},
-		{
-			name:         "hub-only: session-event also routes to hubChannelID",
-			hubChannelID: "hub",
-			msg:          protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345]"},
 			want:         "hub",
 		},
 		// (iii) partial-migration hub+flags
@@ -133,61 +123,29 @@ func TestChannelForMessage_RoutingMatrix(t *testing.T) {
 			msg:            protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
 			want:           "flags",
 		},
+		// (iv) fully-migrated R4 + Z-7 (sessions are threads, tested
+		// separately in threads_registry_test.go)
 		{
-			name:           "hub+flags: session-event falls back to hub (no sessions-channel)",
+			name:           "fully-migrated: hub-class → hub",
 			hubChannelID:   "hub",
 			flagsChannelID: "flags",
-			msg:            protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345]"},
+			msg:            protocol.Message{Type: protocol.MsgUpdate, Content: "regular update"},
 			want:           "hub",
 		},
-		// (iv) partial-migration hub+sessions
 		{
-			name:              "hub+sessions: session-event routes to sessionsChannelID",
-			hubChannelID:      "hub",
-			sessionsChannelID: "sessions",
-			msg:               protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345]"},
-			want:              "sessions",
-		},
-		{
-			name:              "hub+sessions: flag falls back to hub (no flags-channel)",
-			hubChannelID:      "hub",
-			sessionsChannelID: "sessions",
-			msg:               protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
-			want:               "hub",
-		},
-		// (v) fully-migrated R4
-		{
-			name:              "fully-migrated: hub-class → hub",
-			hubChannelID:      "hub",
-			flagsChannelID:    "flags",
-			sessionsChannelID: "sessions",
-			msg:               protocol.Message{Type: protocol.MsgUpdate, Content: "regular update"},
-			want:              "hub",
-		},
-		{
-			name:              "fully-migrated: flag-class → flags",
-			hubChannelID:      "hub",
-			flagsChannelID:    "flags",
-			sessionsChannelID: "sessions",
-			msg:               protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
-			want:              "flags",
-		},
-		{
-			name:              "fully-migrated: session-event → sessions",
-			hubChannelID:      "hub",
-			flagsChannelID:    "flags",
-			sessionsChannelID: "sessions",
-			msg:               protocol.Message{Type: protocol.MsgUpdate, Content: "[SESSION:abc12345] opened"},
-			want:              "sessions",
+			name:           "fully-migrated: flag-class → flags",
+			hubChannelID:   "hub",
+			flagsChannelID: "flags",
+			msg:            protocol.Message{Type: protocol.MsgFlag, Content: "alert"},
+			want:           "flags",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			b := &Bot{
-				channelID:         tc.channelID,
-				hubChannelID:      tc.hubChannelID,
-				flagsChannelID:    tc.flagsChannelID,
-				sessionsChannelID: tc.sessionsChannelID,
+				channelID:      tc.channelID,
+				hubChannelID:   tc.hubChannelID,
+				flagsChannelID: tc.flagsChannelID,
 			}
 			if got := b.channelForMessage(tc.msg); got != tc.want {
 				t.Errorf("channelForMessage(%q, type=%q) = %q, want %q", tc.msg.Content, tc.msg.Type, got, tc.want)
@@ -196,14 +154,14 @@ func TestChannelForMessage_RoutingMatrix(t *testing.T) {
 	}
 }
 
-// TestListensOnChannel — Phase R R4 incoming-message filter expanded to
-// {channelID, hubChannelID, flagsChannelID, sessionsChannelID}.
+// TestListensOnChannel — incoming-message filter for {channelID,
+// hubChannelID, flagsChannelID}. Session-thread acceptance is tested
+// separately in threads_registry_test.go.
 func TestListensOnChannel(t *testing.T) {
 	b := &Bot{
-		channelID:         "legacy",
-		hubChannelID:      "hub",
-		flagsChannelID:    "flags",
-		sessionsChannelID: "sessions",
+		channelID:      "legacy",
+		hubChannelID:   "hub",
+		flagsChannelID: "flags",
 	}
 	cases := []struct {
 		id   string
@@ -212,7 +170,6 @@ func TestListensOnChannel(t *testing.T) {
 		{"legacy", true},
 		{"hub", true},
 		{"flags", true},
-		{"sessions", true},
 		{"unknown", false},
 		{"", false},
 	}
