@@ -329,11 +329,12 @@ func TestHandleDestinationsEndpoint(t *testing.T) {
 	if p.Project != "bot-hq" {
 		t.Errorf("project = %q, want bot-hq", p.Project)
 	}
-	// Expect 8 global + 11 project = 19 destinations (Phase Q library
-	// schema: Overview + Rules + Plans + Architecture + Decisions +
-	// Conventions + Glossary + Audit notes + EOD + Clips + Project docs).
-	if len(p.Destinations) != 19 {
-		t.Errorf("destinations count = %d, want 19; got %+v", len(p.Destinations), p.Destinations)
+	// Expect 8 global + 12 project = 20 destinations (Phase Q library
+	// schema + Z-4-a-2 Env: Overview + Rules + Plans + Architecture +
+	// Decisions + Conventions + Glossary + Audit notes + EOD + Clips +
+	// Env + Project docs).
+	if len(p.Destinations) != 20 {
+		t.Errorf("destinations count = %d, want 20; got %+v", len(p.Destinations), p.Destinations)
 	}
 }
 
@@ -467,8 +468,8 @@ func TestResolveDestinations_EmptyCanonicalStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	if len(dests) != 19 {
-		t.Errorf("expected 19 destinations, got %d", len(dests))
+	if len(dests) != 20 {
+		t.Errorf("expected 20 destinations, got %d", len(dests))
 	}
 	// Most/all should be empty Nodes — no panic.
 	for _, d := range dests {

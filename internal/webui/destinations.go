@@ -119,6 +119,7 @@ func ProjectDestinations() []Destination {
 		{Name: "Audit notes", Section: "project", Resolver: resolveProjectAuditNotes},
 		{Name: "EOD", Section: "project", Resolver: resolveProjectEOD},
 		{Name: "Clips", Section: "project", Resolver: resolveProjectClips},
+		{Name: "Env", Section: "project", Resolver: resolveProjectEnv},
 		{Name: "Project docs", Section: "project", Resolver: resolveProjectExternalDocs},
 	}
 }
@@ -437,6 +438,18 @@ func resolveProjectAuditNotes(root, project string) ([]TreeNode, error) {
 		return nil, nil
 	}
 	return dirFiles(root, "projects/"+project+"/audit-notes", ".md")
+}
+
+// resolveProjectEnv surfaces ~/.bot-hq/projects/<project>/env/*.env
+// files for the Z-4-a per-project CL env editor. These are secret-class
+// gitignored files referenced by yaml `data_sources` blocks
+// (dsn_env + env_file pointers). Webui file-editor handles read+write
+// at /api/files/<path>; this resolver just exposes the nav entry.
+func resolveProjectEnv(root, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	return dirFiles(root, "projects/"+project+"/env", ".env")
 }
 
 func resolveProjectEOD(root, project string) ([]TreeNode, error) {
