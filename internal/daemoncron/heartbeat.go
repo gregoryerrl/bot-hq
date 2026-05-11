@@ -38,19 +38,18 @@ const (
 	heartbeatTickInterval = 30 * time.Second
 
 	// heartbeatAgentID is the FromAgent identifier used on emits.
-	// Stays "emma" so the rule-text recognition path (R20/R22 etc.)
-	// continues working unchanged post-migration; daemon-side emit
-	// vs gemma-side emit is invisible to consumers.
-	heartbeatAgentID = "emma"
+	// Z-8b: daemon-cadence with no model invocation = system class
+	// per architecture/hub-message-truth.md. Recipients recognize the
+	// "[HEARTBEAT-LEDGER]" content prefix; from_agent is honest.
+	heartbeatAgentID = "system"
 )
 
 // heartbeatState tracks the last-fired msg-id for cadence dedupe.
 // Lives package-scoped + mu-guarded since the heartbeat surface fires
 // from a single goroutine (own ticker); state is per-process.
 var (
-	heartbeatStateMu      sync.Mutex
-	heartbeatLastMsgID    int64
-	heartbeatRecipients   = []string{"brian", "rain"}
+	heartbeatStateMu   sync.Mutex
+	heartbeatLastMsgID int64
 )
 
 // heartbeatContentTemplate is the canonical content format. Kept in
@@ -81,15 +80,17 @@ func runHeartbeatLedgerSurface(c *Cron) {
 	heartbeatStateMu.Unlock()
 
 	content := heartbeatContentTemplate(latestID)
-	for _, target := range heartbeatRecipients {
-		if _, err := c.db.InsertMessage(protocol.Message{
-			FromAgent: heartbeatAgentID,
-			ToAgent:   target,
-			Type:      protocol.MsgUpdate,
-			Content:   content,
-		}); err != nil {
-			log.Printf("[daemoncron heartbeat-ledger] insert failed for %s: %v", target, err)
-		}
+	// Z-8b: single broadcast emit (ToAgent="") replaces per-recipient
+	// PM emits. Phase S S-4 dropped PM; brian + rain both poll the
+	// broadcast channel and recognize the "[HEARTBEAT-LEDGER]"
+	// content prefix in their R20-bootstrap path.
+	if _, err := c.db.InsertMessage(protocol.Message{
+		FromAgent: heartbeatAgentID,
+		ToAgent:   "",
+		Type:      protocol.MsgUpdate,
+		Content:   content,
+	}); err != nil {
+		log.Printf("[daemoncron heartbeat-ledger] insert failed: %v", err)
 	}
 }
 

@@ -42,7 +42,8 @@ func countContextCapFlags(t *testing.T, db *hub.DB) int {
 	}
 	n := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && m.Type == protocol.MsgFlag &&
+		// Z-8b: daemon-cadence threshold flag emits as "system" (was "emma").
+		if m.FromAgent == "system" && m.Type == protocol.MsgFlag &&
 			strings.Contains(m.Content, "[CRITICAL]") &&
 			strings.Contains(m.Content, "halt + checkpoint via H-15") {
 			n++

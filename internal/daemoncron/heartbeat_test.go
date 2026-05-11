@@ -82,13 +82,16 @@ func TestRunHeartbeatLedgerSurface_ThresholdCrossEmits(t *testing.T) {
 			heartbeatCount++
 		}
 	}
-	// Heartbeat fires for both brian + rain → 2 emits.
-	if heartbeatCount != 2 {
-		t.Errorf("expected 2 heartbeat emits at threshold cross (brian + rain); got %d", heartbeatCount)
+	// Z-8b: single broadcast emit (was per-recipient PM × 2).
+	if heartbeatCount != 1 {
+		t.Errorf("expected 1 heartbeat broadcast at threshold cross; got %d", heartbeatCount)
 	}
 }
 
-func TestRunHeartbeatLedgerSurface_RecipientsCorrect(t *testing.T) {
+func TestRunHeartbeatLedgerSurface_BroadcastNotPM(t *testing.T) {
+	// Z-8b: emits go out as broadcast (ToAgent="") so brian + rain
+	// both see them via their pollLoops. Recipients recognize the
+	// "[HEARTBEAT-LEDGER]" content prefix; from_agent="system".
 	ResetHeartbeatStateForTest()
 	db := setupTestDB(t)
 	c := New(db)
@@ -101,17 +104,15 @@ func TestRunHeartbeatLedgerSurface_RecipientsCorrect(t *testing.T) {
 	}
 	runHeartbeatLedgerSurface(c)
 	msgs, _ := db.GetRecentMessages(50)
-	recipients := map[string]bool{}
 	for _, m := range msgs {
 		if m.FromAgent == heartbeatAgentID && strings.HasPrefix(m.Content, "[HEARTBEAT-LEDGER]") {
-			recipients[m.ToAgent] = true
+			if m.ToAgent != "" {
+				t.Errorf("heartbeat emit ToAgent=%q, want '' (broadcast)", m.ToAgent)
+			}
+			if m.FromAgent != "system" {
+				t.Errorf("heartbeat from_agent=%q, want 'system'", m.FromAgent)
+			}
 		}
-	}
-	if !recipients["brian"] {
-		t.Error("expected heartbeat emit to brian recipient")
-	}
-	if !recipients["rain"] {
-		t.Error("expected heartbeat emit to rain recipient")
 	}
 }
 
@@ -137,7 +138,7 @@ func TestRunHeartbeatLedgerSurface_DedupesWithinThreshold(t *testing.T) {
 		})
 	}
 	runHeartbeatLedgerSurface(c)
-	// Total heartbeat emits should still be 2 (single threshold cross).
+	// Z-8b: single broadcast emit per threshold cross.
 	msgs, _ := db.GetRecentMessages(100)
 	heartbeatCount := 0
 	for _, m := range msgs {
@@ -145,7 +146,7 @@ func TestRunHeartbeatLedgerSurface_DedupesWithinThreshold(t *testing.T) {
 			heartbeatCount++
 		}
 	}
-	if heartbeatCount != 2 {
-		t.Errorf("expected dedupe to keep heartbeat count at 2 within threshold window; got %d", heartbeatCount)
+	if heartbeatCount != 1 {
+		t.Errorf("expected dedupe to keep heartbeat count at 1 within threshold window; got %d", heartbeatCount)
 	}
 }
