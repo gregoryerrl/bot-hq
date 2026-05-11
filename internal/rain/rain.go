@@ -536,6 +536,11 @@ func (r *Rain) processNewMessages() {
 	// Read all messages ("" agentID disables SQL targeting) so shouldForwardToRain
 	// is the single point of truth. Calling ReadMessages("rain", ...) would SQL-filter
 	// out brian→user and other cross-traffic before the Go filter ever sees them.
+	//
+	// Z-3d-fix5: when this Rain instance is bound to a session (r.sessionID
+	// non-empty), filter inbound messages to same-session or untagged-global.
+	// Otherwise multiple concurrent rain instances cross-stream into each
+	// other's tmux panes.
 	msgs, err := r.db.ReadMessages("", r.lastMsgID, 50)
 	if err != nil {
 		return
@@ -545,6 +550,11 @@ func (r *Rain) processNewMessages() {
 	for _, msg := range msgs {
 		if msg.ID > r.lastMsgID {
 			r.lastMsgID = msg.ID
+		}
+		// Z-3d-fix5 multi-session filter: when bound to a session, only
+		// forward messages from this session or untagged globals.
+		if r.sessionID != "" && msg.SessionID != "" && msg.SessionID != r.sessionID {
+			continue
 		}
 		if !shouldForwardToRain(msg) {
 			// Phase I W2 I-7 observability: structured filter-drop log so

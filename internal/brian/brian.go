@@ -548,6 +548,12 @@ func (b *Brian) FlushPendingBatch() {
 // processNewMessages checks for new messages and nudges Brian via tmux.
 // Phase S S-5: applies a 3s debounce-on-quiet buffer for non-bypass-
 // class messages; user-msgs + MsgFlag bypass and flush pending alongside.
+//
+// Z-3d-fix5: when this Brian instance is bound to a session (b.sessionID
+// non-empty), filter inbound messages to those tagged with the same
+// session_id OR untagged (global emits — emma heartbeats, system msgs).
+// Without this filter, multiple concurrent brian instances all see all
+// hub traffic and cross-stream into each other's tmux panes.
 func (b *Brian) processNewMessages() {
 	msgs, err := b.db.ReadMessages("", b.lastMsgID, 50)
 	if err != nil {
@@ -578,6 +584,11 @@ func (b *Brian) processNewMessages() {
 	for _, msg := range msgs {
 		if msg.ID > b.lastMsgID {
 			b.lastMsgID = msg.ID
+		}
+		// Z-3d-fix5 multi-session filter: when bound to a session, only
+		// forward messages from this session or untagged globals.
+		if b.sessionID != "" && msg.SessionID != "" && msg.SessionID != b.sessionID {
+			continue
 		}
 		if !shouldForwardToBrian(msg) {
 			continue
