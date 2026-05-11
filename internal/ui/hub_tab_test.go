@@ -662,3 +662,93 @@ func TestSessionFilterIsNoOp(t *testing.T) {
 		t.Errorf("after SetSessionFilter, still want empty (Z-8e no-op), got %q", h.SessionFilter())
 	}
 }
+
+// TestHubTabStripViewportSizedOnResize locks Z-9e: when the terminal is
+// wide enough for the strip column, the strip viewport gets a non-zero
+// width + matches the chat viewport's height. Below the threshold, it
+// collapses to zero.
+func TestHubTabStripViewportSizedOnResize(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(140, 30)
+	if h.stripViewport.Width <= 0 {
+		t.Errorf("strip viewport should have positive width at terminal 140 cols; got %d", h.stripViewport.Width)
+	}
+	if h.stripViewport.Height != h.viewport.Height {
+		t.Errorf("strip viewport height = %d, want = chat viewport %d", h.stripViewport.Height, h.viewport.Height)
+	}
+	if h.chatColEnd <= 0 || h.chatColEnd >= 140 {
+		t.Errorf("chatColEnd = %d, want a column between 0 and terminal width", h.chatColEnd)
+	}
+
+	// Narrow terminal → strip collapses.
+	h.SetSize(60, 30)
+	if h.stripViewport.Width != 0 {
+		t.Errorf("strip viewport should collapse to width=0 at terminal 60 cols; got %d", h.stripViewport.Width)
+	}
+}
+
+// TestHubTabCtrlRTogglesStripActive locks Z-9e ctrl+r toggle: each
+// press flips arrow-key routing target. Mouse wheel routing is
+// independent (covered separately).
+func TestHubTabCtrlRTogglesStripActive(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(140, 30)
+	if h.stripActive {
+		t.Fatal("stripActive should default to false (arrow keys drive chat by default)")
+	}
+
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if !h.stripActive {
+		t.Errorf("ctrl+r should set stripActive=true")
+	}
+
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if h.stripActive {
+		t.Errorf("second ctrl+r should toggle stripActive back to false")
+	}
+}
+
+// TestHubTabCtrlRIgnoredWhenStripCollapsed locks the narrow-terminal
+// guard: at widths where the strip column collapses, ctrl+r is a no-op
+// so the active-pane indicator stays accurate.
+func TestHubTabCtrlRIgnoredWhenStripCollapsed(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(60, 30) // strip collapses below 80 cols
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if h.stripActive {
+		t.Errorf("ctrl+r with collapsed strip should stay stripActive=false; got true")
+	}
+}
+
+// TestHubTabMouseRoutesByCursorX locks Z-9e mouse-position routing:
+// the chat viewport's followBottom state is the cleanest observable
+// discriminator. A wheel event over the strip column must NOT touch
+// the chat side (followBottom stays true); a wheel over the chat
+// column updates chat scroll + recomputes followBottom.
+func TestHubTabMouseRoutesByCursorX(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(140, 30)
+	h = fillMessages(h, 200)
+	if !h.followBottom {
+		t.Fatal("setup: expected followBottom=true after fillMessages")
+	}
+
+	// Wheel over strip column (X past chatColEnd) — chat untouched,
+	// followBottom stays true.
+	h, _ = h.Update(tea.MouseMsg{
+		X: h.chatColEnd + 5, Y: 5,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp,
+	})
+	if !h.followBottom {
+		t.Errorf("mouse wheel over strip column should leave chat followBottom intact; flipped to false")
+	}
+
+	// Wheel over chat column (X within chat) — chat scrolls up, follow disengages.
+	h, _ = h.Update(tea.MouseMsg{
+		X: 10, Y: 5,
+		Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp,
+	})
+	if h.followBottom {
+		t.Errorf("mouse wheel over chat column should scroll chat up and disengage followBottom")
+	}
+}

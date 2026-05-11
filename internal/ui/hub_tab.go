@@ -51,15 +51,28 @@ type CommandSubmitted struct {
 type HubTab struct {
 	messages []protocol.Message
 	viewport viewport.Model
-	input    textarea.Model
-	width    int
-	height   int
-	focused  bool // true when the command input is focused
-	sessions []protocol.Session // Z-8e: active sessions for the strip column
-	pane     *panestate.Manager // first-order activity strip source
-	// followBottom sticks the viewport to the latest message. Default true so
-	// hub initial render snaps to present (fixes post-restart "rendered mid-
-	// conversation"). Disengages on user scroll-up; re-engages on G / end.
+	// stripViewport scrolls the right-side session-strip column. Z-9e
+	// upgrade: previously a static lipgloss render that clipped when more
+	// than ~5 active sessions overflowed the column height. Now backed
+	// by a real viewport.Model so the bottom cards stay reachable.
+	stripViewport viewport.Model
+	// stripActive routes arrow keys / PgUp / PgDn to stripViewport when
+	// true, chat viewport when false. Toggled via Ctrl+R. Mouse wheel
+	// always routes by cursor X position regardless of this flag.
+	stripActive bool
+	// chatColEnd is the rightmost X column the chat viewport occupies
+	// (inclusive). Mouse messages with X > chatColEnd route to the strip
+	// viewport. Recomputed on every resize.
+	chatColEnd int
+	input      textarea.Model
+	width      int
+	height     int
+	focused    bool // true when the command input is focused
+	sessions   []protocol.Session // Z-8e: active sessions for the strip column
+	pane       *panestate.Manager // first-order activity strip source
+	// followBottom sticks the chat viewport to the latest message. Default
+	// true so hub initial render snaps to present. Disengages on user
+	// scroll-up; re-engages on G / end.
 	followBottom bool
 }
 
@@ -92,10 +105,14 @@ func NewHubTab() HubTab {
 	vp := viewport.New(80, 20)
 	vp.MouseWheelEnabled = true
 
+	stripVp := viewport.New(30, 20)
+	stripVp.MouseWheelEnabled = true
+
 	return HubTab{
-		viewport:     vp,
-		input:        ta,
-		followBottom: true,
+		viewport:      vp,
+		stripViewport: stripVp,
+		input:         ta,
+		followBottom:  true,
 	}
 }
 
@@ -117,10 +134,14 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 		if h.followBottom {
 			h.viewport.GotoBottom()
 		}
+		// Strip-card preview lines pull from msg history per-session, so
+		// new messages can shift the strip too. Recompute its content.
+		h.refreshStripContent()
 
 	case SessionsUpdated:
 		// Z-8e: track active sessions for the strip column render.
 		h.sessions = msg.Sessions
+		h.refreshStripContent()
 
 	case tea.KeyMsg:
 		if h.focused {
@@ -148,9 +169,18 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 			key := msg.String()
 			switch key {
 			case "end":
-				// Jump to present: snap to bottom and re-engage auto-follow.
+				// Jump to present: snap chat to bottom and re-engage auto-follow.
+				// Always operates on the chat pane regardless of stripActive —
+				// "return to present" is a chat concept.
 				h.viewport.GotoBottom()
 				h.followBottom = true
+			case "ctrl+r":
+				// Z-9e: toggle arrow-key / PgUp / PgDn target between
+				// chat viewport (default) and strip viewport. Mouse
+				// wheel routes by cursor position regardless.
+				if h.sessionStripColumnWidth() > 0 {
+					h.stripActive = !h.stripActive
+				}
 			default:
 				// Auto-focus input on any printable rune-bearing KeyMsg
 				// OR on a bracketed-paste delivery. Z-9c: the check is
@@ -165,6 +195,10 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 					var cmd tea.Cmd
 					h.input, cmd = h.input.Update(msg)
 					cmds = append(cmds, cmd)
+				} else if h.stripActive && h.sessionStripColumnWidth() > 0 {
+					var cmd tea.Cmd
+					h.stripViewport, cmd = h.stripViewport.Update(msg)
+					cmds = append(cmds, cmd)
 				} else {
 					var cmd tea.Cmd
 					h.viewport, cmd = h.viewport.Update(msg)
@@ -178,10 +212,19 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if !h.focused {
-			var cmd tea.Cmd
-			h.viewport, cmd = h.viewport.Update(msg)
-			cmds = append(cmds, cmd)
-			h.followBottom = h.viewport.AtBottom()
+			// Z-9e: mouse wheel routes by cursor X position. Cursor over
+			// strip column → strip viewport; otherwise → chat viewport.
+			// chatColEnd is recomputed on every resize.
+			if h.sessionStripColumnWidth() > 0 && msg.X > h.chatColEnd {
+				var cmd tea.Cmd
+				h.stripViewport, cmd = h.stripViewport.Update(msg)
+				cmds = append(cmds, cmd)
+			} else {
+				var cmd tea.Cmd
+				h.viewport, cmd = h.viewport.Update(msg)
+				cmds = append(cmds, cmd)
+				h.followBottom = h.viewport.AtBottom()
+			}
 		}
 	}
 
@@ -259,10 +302,50 @@ func (h *HubTab) resize() {
 	h.input.SetWidth(h.width - 4) // Account for prompt and padding
 	h.input.SetHeight(inputRows)
 
+	// Z-9e: strip viewport sizing + mouse-routing X-boundary. chatColEnd
+	// is the rightmost column owned by the chat (inclusive). Anything to
+	// the right of it belongs to the strip column. When the strip
+	// collapses (narrow terminal), chatColEnd extends to the full width
+	// so MouseMsgs all route to chat.
+	if stripW > 0 {
+		// Strip viewport sits inside a left-bordered container (1 col
+		// border + content). Account for the border when sizing the
+		// inner viewport so it fits without horizontal clipping.
+		innerStripW := stripW - 1
+		if innerStripW < 1 {
+			innerStripW = 1
+		}
+		h.stripViewport.Width = innerStripW
+		h.stripViewport.Height = vpHeight
+		h.chatColEnd = vpWidth // separator is at column vpWidth; strip begins after
+		// If stripActive was set when the column was wider and the user
+		// then shrank the terminal below the strip threshold, fall back
+		// to chat-active.
+	} else {
+		h.stripViewport.Width = 0
+		h.stripViewport.Height = 0
+		h.chatColEnd = h.width
+		h.stripActive = false
+	}
+
 	h.viewport.SetContent(h.renderMessages())
 	if h.followBottom {
 		h.viewport.GotoBottom()
 	}
+	h.refreshStripContent()
+}
+
+// refreshStripContent recomputes the strip viewport's content from the
+// current sessions + messages slice. Caller is responsible for invoking
+// after any state change that affects strip rendering (SessionsUpdated,
+// MessageReceived, resize). Cheap — pure string build.
+func (h *HubTab) refreshStripContent() {
+	if h.stripViewport.Width <= 0 {
+		return
+	}
+	// Pass a generous height so renderSessionStrips emits all cards;
+	// the viewport handles scroll-clipping internally.
+	h.stripViewport.SetContent(renderSessionStrips(h.sessions, h.messages, h.stripViewport.Width, 9999))
 }
 
 // View renders the HubTab. Layout:
@@ -282,15 +365,26 @@ func (h *HubTab) resize() {
 // it collapses and the chat takes full width.
 func (h HubTab) View() string {
 	indicatorStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
-	indicatorText := ""
-	if !h.followBottom {
-		indicatorText = "↓ scrolled up — press end to return"
+	var parts []string
+	if h.sessionStripColumnWidth() > 0 {
+		// Z-9e: show which pane arrow keys / PgUp / PgDn drive. Mouse
+		// wheel routes by cursor position so this hint is only relevant
+		// to keyboard users.
+		if h.stripActive {
+			parts = append(parts, "[strips] ctrl+r → chat")
+		} else {
+			parts = append(parts, "[chat] ctrl+r → strips")
+		}
 	}
-	indicator := indicatorStyle.Render(indicatorText)
+	if !h.followBottom {
+		parts = append(parts, "↓ scrolled up — press end to return")
+	}
+	indicator := indicatorStyle.Render(strings.Join(parts, "  "))
 
 	// Z-8e: build the top-row split (chat viewport + session strip
-	// column). When terminal is too narrow the column collapses and
-	// chat takes full width.
+	// column). Z-9e: strip column is now a real viewport (scrollable).
+	// When terminal is too narrow the column collapses and chat takes
+	// full width.
 	stripW := h.sessionStripColumnWidth()
 	var topRow string
 	if stripW > 0 {
@@ -300,7 +394,7 @@ func (h HubTab) View() string {
 			BorderForeground(lipgloss.Color("#555555")).
 			Width(stripW).
 			Height(stripHeight)
-		stripCol := stripColStyle.Render(renderSessionStrips(h.sessions, h.messages, stripW, stripHeight))
+		stripCol := stripColStyle.Render(h.stripViewport.View())
 		topRow = lipgloss.JoinHorizontal(lipgloss.Top, h.viewport.View(), stripCol)
 	} else {
 		topRow = h.viewport.View()
