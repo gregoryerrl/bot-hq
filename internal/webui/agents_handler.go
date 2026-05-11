@@ -13,13 +13,19 @@ package webui
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
 // handleAgents serves GET /api/agents → list of registered agents
-// with full struct fields including current_task. No filters in v1;
-// frontend / API consumers can filter client-side over the small N.
+// with full struct fields including current_task.
+//
+// Optional `?session_id=<id>` (Z-5c) narrows to agents that have
+// posted in that session within the last hour. session_id is "" (or
+// omitted) returns the global agents-table snapshot. Per-session view
+// derives from messages.from_agent rather than agents.session_id
+// (last-write-wins per registration, lies under concurrent sessions).
 func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -29,7 +35,15 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "hub.DB not configured"})
 		return
 	}
-	agents, err := s.db.ListAgents("")
+	var (
+		agents []protocol.Agent
+		err    error
+	)
+	if sid, ok := r.URL.Query()["session_id"]; ok {
+		agents, err = s.db.AgentsActiveInSession(sid[0], time.Hour)
+	} else {
+		agents, err = s.db.ListAgents("")
+	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("list agents: %v", err), http.StatusInternalServerError)
 		return

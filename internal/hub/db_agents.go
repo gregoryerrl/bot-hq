@@ -302,3 +302,61 @@ func (db *DB) ListAgents(statusFilter string) ([]protocol.Agent, error) {
 	}
 	return agents, nil
 }
+
+// AgentsActiveInSession returns the agents that have posted at least
+// one message in the given session within the recentWindow. Derives
+// from messages.from_agent rather than agents.session_id — the latter
+// is last-write-wins per registration and lies when N sessions are
+// alive concurrently. Z-5c.
+//
+// sessionID == "" selects the main hub (out-of-session traffic);
+// recentWindow caps how stale a sender can be and still count as
+// "active." Pass 0 for no recency filter (all messages ever in the
+// session).
+func (db *DB) AgentsActiveInSession(sessionID string, recentWindow time.Duration) ([]protocol.Agent, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if recentWindow > 0 {
+		cutoff := time.Now().Add(-recentWindow).UnixMilli()
+		rows, err = db.conn.Query(
+			`SELECT a.id, a.name, a.type, a.status, a.project, a.meta, a.registered, a.last_seen, a.rebuild_gen, a.current_task
+			 FROM agents a
+			 WHERE a.id IN (SELECT DISTINCT from_agent FROM messages WHERE session_id = ? AND created > ?)
+			 ORDER BY a.last_seen DESC`,
+			sessionID, cutoff,
+		)
+	} else {
+		rows, err = db.conn.Query(
+			`SELECT a.id, a.name, a.type, a.status, a.project, a.meta, a.registered, a.last_seen, a.rebuild_gen, a.current_task
+			 FROM agents a
+			 WHERE a.id IN (SELECT DISTINCT from_agent FROM messages WHERE session_id = ?)
+			 ORDER BY a.last_seen DESC`,
+			sessionID,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var agents []protocol.Agent
+	for rows.Next() {
+		var a protocol.Agent
+		var typ, status string
+		var registered, lastSeen int64
+		if err := rows.Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen, &a.CurrentTask); err != nil {
+			return nil, err
+		}
+		a.Type = protocol.AgentType(typ)
+		a.Status = protocol.AgentStatus(status)
+		a.Registered = time.UnixMilli(registered)
+		a.LastSeen = time.UnixMilli(lastSeen)
+		agents = append(agents, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return agents, nil
+}
