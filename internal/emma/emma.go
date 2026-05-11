@@ -486,6 +486,14 @@ func (g *Emma) processNewMessages() {
 			continue
 		}
 
+		// Z-8d: Emma sees the same rows the main-hub view sees —
+		// broadcasts + cross-session elevations only. Session-scoped
+		// non-elevated chatter is invisible to Emma; sessions own
+		// their conversation. Matches PassesMainHubView (Z-8c).
+		if !protocol.PassesMainHubView(msg) {
+			continue
+		}
+
 		// Phase-S-followup-2 F2-2: accept legacy directed (ToAgent==
 		// agentID) OR broadcast-mention (ToAgent=="" + @emma in
 		// content). Mention-based routing replaces PM-class targeting
