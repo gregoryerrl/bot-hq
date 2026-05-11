@@ -83,6 +83,14 @@ func (db *DB) migrateAgentModelConfigs() error {
 	if err := db.migrateEnvSchemeToFileVaultForRain(); err != nil {
 		return fmt.Errorf("migrate rain env→file vault: %w", err)
 	}
+
+	// Z-9d: idempotent in-place migration for existing DBs that were seeded
+	// under Phase T cycle-3 default `claude-haiku-default` for emma. Per
+	// vision.md emma is DeepSeek-V4-Pro; convert when rain's vault file is
+	// present so the row's secret-ref resolves at spawn-time.
+	if err := db.migrateEmmaHaikuToDeepSeek(); err != nil {
+		return fmt.Errorf("migrate emma haiku→deepseek: %w", err)
+	}
 	return nil
 }
 
@@ -137,6 +145,57 @@ func (db *DB) migrateEnvSchemeToFileVaultForRain() error {
 	return db.SetAgentModelConfig(cfg)
 }
 
+// migrateEmmaHaikuToDeepSeek converts an existing emma row using the Phase T
+// cycle-3 default (provider=anthropic + claude-haiku-default + oauth:) to the
+// Z-9d DeepSeek-V4-Pro shape sharing rain's vault file. Idempotent: no-op when
+// the emma row is absent, already migrated (provider=deepseek), or carries any
+// user customization (any field differs from the pre-Z-9d default — leave the
+// override alone). Vault-file existence is required so spawn-time secret
+// resolution succeeds; if the file is missing, the migration skips and emma
+// remains on the legacy haiku row until the vault appears.
+func (db *DB) migrateEmmaHaikuToDeepSeek() error {
+	cfg, err := db.GetAgentModelConfig("emma")
+	if err != nil {
+		if errors.Is(err, ErrAgentModelConfigNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	// Migrate only the exact pre-Z-9d default shape. Any deviation = user override.
+	if cfg.Provider != "anthropic" ||
+		cfg.ModelName != "claude-haiku-default" ||
+		cfg.BaseURL != "" ||
+		cfg.AuthSecretRef != "oauth:CLAUDE_CODE_OAUTH_TOKEN" {
+		return nil
+	}
+
+	vaultPath, err := vaultPathFnForRain()
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(vaultPath)
+	if err != nil {
+		// Vault file absent → leave haiku row alone; user provisions vault then re-migrates on next boot.
+		return nil
+	}
+	if info.IsDir() {
+		return nil
+	}
+
+	cfg.Provider = "deepseek"
+	cfg.ModelName = "deepseek-v4-pro"
+	cfg.BaseURL = "https://api.deepseek.com/anthropic"
+	cfg.AuthSecretRef = "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY"
+	migrationNote := "Z-9d auto-migrated haiku→DeepSeek-V4-Pro on vault-detect (shares rain's vault per vision.md)"
+	if strings.TrimSpace(cfg.Notes) == "" {
+		cfg.Notes = migrationNote
+	} else {
+		cfg.Notes = cfg.Notes + "; " + migrationNote
+	}
+	return db.SetAgentModelConfig(cfg)
+}
+
 // DefaultAgentModelConfigs returns the seed default-rows per phase-t.md v5 R51.
 // brian + emma + clive + coder-template default to Claude OAuth (MAX-subscription
 // preserved per R43 narrowed). rain defaults to DeepSeek-V4-Pro via Anthropic-
@@ -164,12 +223,12 @@ func DefaultAgentModelConfigs() []*AgentModelConfig {
 		},
 		{
 			AgentID:       "emma",
-			Provider:      "anthropic",
-			ModelName:     "claude-haiku-default",
-			BaseURL:       "",
-			AuthSecretRef: "oauth:CLAUDE_CODE_OAUTH_TOKEN",
+			Provider:      "deepseek",
+			ModelName:     "deepseek-v4-pro",
+			BaseURL:       "https://api.deepseek.com/anthropic",
+			AuthSecretRef: "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY",
 			Enabled:       true,
-			Notes:         "Discipline-machinery agent; Claude-Haiku for cost-efficiency",
+			Notes:         "Hub orchestrator (global, stateless) per vision.md; DeepSeek-V4-Pro shares rain's vault file (Z-9d)",
 		},
 		{
 			AgentID:       "clive",
