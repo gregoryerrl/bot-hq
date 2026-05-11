@@ -6,8 +6,8 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 )
 
-func (g *Emma) OnHubMessageReplay(msg protocol.Message) {
-	if msg.FromAgent == agentID {
+func (g *SystemMonitor) OnHubMessageReplay(msg protocol.Message) {
+	if msg.FromAgent == systemFromAgent {
 		return
 	}
 	d := SentinelMatch(msg)
@@ -44,7 +44,7 @@ func (g *Emma) OnHubMessageReplay(msg protocol.Message) {
 // sentinelPollLoop tick doesn't re-process the same messages. Cross-
 // bounce dedup of ledger entries is handled by AppendToDryRunLedger's
 // msg-id parse.
-func (g *Emma) replayThroughSentinel() {
+func (g *SystemMonitor) replayThroughSentinel() {
 	msgs, err := g.db.GetRecentMessages(replayBacklog)
 	if err != nil {
 		return

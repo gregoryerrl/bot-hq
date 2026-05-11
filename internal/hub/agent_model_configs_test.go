@@ -65,6 +65,26 @@ func TestAgentModelConfigs_brianDefaults(t *testing.T) {
 	}
 }
 
+func TestAgentModelConfigs_emmaDeepSeek(t *testing.T) {
+	db := newTestDBForAgentConfigs(t)
+	cfg, err := db.GetAgentModelConfig("emma")
+	if err != nil {
+		t.Fatalf("Get emma: %v", err)
+	}
+	if cfg.Provider != "deepseek" {
+		t.Errorf("emma provider = %q, want deepseek (Z-9d per vision.md)", cfg.Provider)
+	}
+	if cfg.ModelName != "deepseek-v4-pro" {
+		t.Errorf("emma model_name = %q, want deepseek-v4-pro", cfg.ModelName)
+	}
+	if cfg.BaseURL != "https://api.deepseek.com/anthropic" {
+		t.Errorf("emma base_url = %q, want Anthropic-compatible endpoint", cfg.BaseURL)
+	}
+	if cfg.AuthSecretRef != "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY" {
+		t.Errorf("emma auth_secret_ref = %q, want shared rain vault path (Z-9d)", cfg.AuthSecretRef)
+	}
+}
+
 func TestAgentModelConfigs_rainDeepSeek(t *testing.T) {
 	db := newTestDBForAgentConfigs(t)
 	cfg, err := db.GetAgentModelConfig("rain")
@@ -212,6 +232,135 @@ func TestMigrateEnvSchemeToFileVaultForRain_idempotentRunTwice(t *testing.T) {
 	}
 	if !afterSecond.UpdatedAt.Equal(firstUpdatedAt) {
 		t.Errorf("second run mutated UpdatedAt = %v, want unchanged %v (no-op should not write)", afterSecond.UpdatedAt, firstUpdatedAt)
+	}
+}
+
+// TestMigrateEmmaHaikuToDeepSeek validates the Z-9d idempotent migration:
+// existing emma rows seeded under Phase T cycle-3 default (claude-haiku-default
+// + oauth:CLAUDE_CODE_OAUTH_TOKEN) are auto-converted to DeepSeek-V4-Pro
+// sharing rain's vault path when that vault file exists. User overrides (any
+// field differing from the pre-Z-9d default) are left untouched.
+func TestMigrateEmmaHaikuToDeepSeek(t *testing.T) {
+	cases := []struct {
+		name        string
+		startCfg    AgentModelConfig // overrides emma row before migration
+		writeVault  bool
+		wantPost    AgentModelConfig // expected post-migration shape (subset of fields checked)
+	}{
+		{
+			name: "haiku_default_with_vault_migrates",
+			startCfg: AgentModelConfig{
+				Provider:      "anthropic",
+				ModelName:     "claude-haiku-default",
+				BaseURL:       "",
+				AuthSecretRef: "oauth:CLAUDE_CODE_OAUTH_TOKEN",
+			},
+			writeVault: true,
+			wantPost: AgentModelConfig{
+				Provider:      "deepseek",
+				ModelName:     "deepseek-v4-pro",
+				BaseURL:       "https://api.deepseek.com/anthropic",
+				AuthSecretRef: "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY",
+			},
+		},
+		{
+			name: "haiku_default_without_vault_left_alone",
+			startCfg: AgentModelConfig{
+				Provider:      "anthropic",
+				ModelName:     "claude-haiku-default",
+				BaseURL:       "",
+				AuthSecretRef: "oauth:CLAUDE_CODE_OAUTH_TOKEN",
+			},
+			writeVault: false,
+			wantPost: AgentModelConfig{
+				Provider:      "anthropic",
+				ModelName:     "claude-haiku-default",
+				BaseURL:       "",
+				AuthSecretRef: "oauth:CLAUDE_CODE_OAUTH_TOKEN",
+			},
+		},
+		{
+			name: "already_deepseek_idempotent_noop",
+			startCfg: AgentModelConfig{
+				Provider:      "deepseek",
+				ModelName:     "deepseek-v4-pro",
+				BaseURL:       "https://api.deepseek.com/anthropic",
+				AuthSecretRef: "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY",
+			},
+			writeVault: true,
+			wantPost: AgentModelConfig{
+				Provider:      "deepseek",
+				ModelName:     "deepseek-v4-pro",
+				BaseURL:       "https://api.deepseek.com/anthropic",
+				AuthSecretRef: "file:~/.bot-hq/agents/rain/.env#DEEPSEEK_API_KEY",
+			},
+		},
+		{
+			name: "user_override_haiku_with_custom_secret_left_alone",
+			startCfg: AgentModelConfig{
+				Provider:      "anthropic",
+				ModelName:     "claude-haiku-default",
+				BaseURL:       "",
+				AuthSecretRef: "env:CUSTOM_TOKEN", // user override
+			},
+			writeVault: true,
+			wantPost: AgentModelConfig{
+				Provider:      "anthropic",
+				ModelName:     "claude-haiku-default",
+				BaseURL:       "",
+				AuthSecretRef: "env:CUSTOM_TOKEN",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := newTestDBForAgentConfigs(t)
+
+			// Reset emma row to the case-specific starting shape.
+			cfg, err := db.GetAgentModelConfig("emma")
+			if err != nil {
+				t.Fatalf("Get emma: %v", err)
+			}
+			cfg.Provider = tc.startCfg.Provider
+			cfg.ModelName = tc.startCfg.ModelName
+			cfg.BaseURL = tc.startCfg.BaseURL
+			cfg.AuthSecretRef = tc.startCfg.AuthSecretRef
+			if err := db.SetAgentModelConfig(cfg); err != nil {
+				t.Fatalf("Set emma: %v", err)
+			}
+
+			vaultDir := t.TempDir()
+			vaultFile := filepath.Join(vaultDir, "rain.env")
+			if tc.writeVault {
+				if err := os.WriteFile(vaultFile, []byte("DEEPSEEK_API_KEY=sk-test\n"), 0600); err != nil {
+					t.Fatalf("write vault: %v", err)
+				}
+			}
+			old := vaultPathFnForRain
+			vaultPathFnForRain = func() (string, error) { return vaultFile, nil }
+			t.Cleanup(func() { vaultPathFnForRain = old })
+
+			if err := db.migrateEmmaHaikuToDeepSeek(); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+
+			got, err := db.GetAgentModelConfig("emma")
+			if err != nil {
+				t.Fatalf("Get post-migrate: %v", err)
+			}
+			if got.Provider != tc.wantPost.Provider {
+				t.Errorf("Provider = %q, want %q", got.Provider, tc.wantPost.Provider)
+			}
+			if got.ModelName != tc.wantPost.ModelName {
+				t.Errorf("ModelName = %q, want %q", got.ModelName, tc.wantPost.ModelName)
+			}
+			if got.BaseURL != tc.wantPost.BaseURL {
+				t.Errorf("BaseURL = %q, want %q", got.BaseURL, tc.wantPost.BaseURL)
+			}
+			if got.AuthSecretRef != tc.wantPost.AuthSecretRef {
+				t.Errorf("AuthSecretRef = %q, want %q", got.AuthSecretRef, tc.wantPost.AuthSecretRef)
+			}
+		})
 	}
 }
 

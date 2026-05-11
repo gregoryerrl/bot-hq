@@ -46,7 +46,7 @@ func countEgressGapMsgs(t *testing.T, db *hub.DB) int {
 // on first observation and only flags after a prior tick exists for
 // comparison.
 func TestAuditEgressGapBaselineNoFlagFirstTick(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	target := "test:0.1"
 	if err := db.RegisterAgent(protocol.Agent{
 		ID:     "rain",
@@ -72,7 +72,7 @@ func TestAuditEgressGapBaselineNoFlagFirstTick(t *testing.T) {
 // pane-advanced AND no hub_send from the agent, an [EGRESS-GAP] alert
 // fires.
 func TestAuditEgressGapFiresAfterThresholdTicks(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	target := "test:0.1"
 	db.RegisterAgent(protocol.Agent{
 		ID:     "rain",
@@ -105,7 +105,7 @@ func TestAuditEgressGapFiresAfterThresholdTicks(t *testing.T) {
 // emits a hub message between ticks, the consecutive-tick counter
 // resets and no flag fires.
 func TestAuditEgressGapResetsOnHubSend(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	target := "test:0.1"
 	db.RegisterAgent(protocol.Agent{
 		ID:     "rain",
@@ -141,7 +141,7 @@ func TestAuditEgressGapResetsOnHubSend(t *testing.T) {
 // hasn't changed (idle agent at a clean prompt) does NOT count as
 // advancing, so no gap accumulates.
 func TestAuditEgressGapPaneStableNoFlag(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	target := "test:0.1"
 	db.RegisterAgent(protocol.Agent{
 		ID:     "rain",
@@ -170,7 +170,7 @@ func TestAuditEgressGapPaneStableNoFlag(t *testing.T) {
 // the first flag requires a NEW pane state, not just persistence of
 // the gap on the same state.
 func TestAuditEgressGapHysteresisKeyIncludesHash(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	target := "test:0.1"
 	db.RegisterAgent(protocol.Agent{
 		ID:     "rain",
@@ -242,7 +242,7 @@ func TestLastNonEmptyLine(t *testing.T) {
 // their final tool call before posting close-SNAP would otherwise
 // false-flag during the halt window.
 func TestAuditEgressGapHaltSuppression(t *testing.T) {
-	g, db := newTestEmma(t)
+	g, db := newTestSystemMonitor(t)
 	target := "test:0.1"
 	db.RegisterAgent(protocol.Agent{
 		ID:     "rain",

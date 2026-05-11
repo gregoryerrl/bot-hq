@@ -65,12 +65,12 @@ func defaultEgressPaneCapture(target string, lines int) (string, error) {
 // Folded into Emma's existing monitorLoop tick (5min cadence) per
 // Rain-greenlit scheduler-split. Co-located with stale-detect by
 // design intent.
-func (g *Emma) auditEgressGap() {
+func (g *SystemMonitor) auditEgressGap() {
 	g.auditEgressGapAt(time.Now())
 }
 
 // auditEgressGapAt is the testable variant.
-func (g *Emma) auditEgressGapAt(now time.Time) {
+func (g *SystemMonitor) auditEgressGapAt(now time.Time) {
 	if halted, _ := g.db.IsHalted(); halted {
 		// Per H-31 halt-suppression precedent: do not flag during halt.
 		return

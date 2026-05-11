@@ -41,7 +41,7 @@ func TestPollSentinelCatchesCrossProcessInserts(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 	// Deliberately NOT calling db.OnMessage(g.OnHubMessage) — models the
 	// cross-process scenario where MCP-server inserts don't fire the
 	// TUI-process callback list.
@@ -88,7 +88,7 @@ func TestPollSentinelWatermarkPreventsReprocess(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	if _, err := db.InsertMessage(protocol.Message{
 		FromAgent: "brian",
@@ -220,7 +220,7 @@ func TestReplayThroughSentinelSetsWatermark(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	var lastID int64
 	for i := 0; i < 5; i++ {
@@ -265,8 +265,8 @@ func TestPollSentinelHonorsStopCh(t *testing.T) {
 	if !strings.Contains(src, "go g.sentinelPollLoop()") {
 		t.Errorf("emma.go Start() must contain `go g.sentinelPollLoop()` — sentinel polling not wired")
 	}
-	if !strings.Contains(src, "func (g *Emma) sentinelPollLoop()") {
-		t.Errorf("emma.go must define sentinelPollLoop on *Emma")
+	if !strings.Contains(src, "func (g *SystemMonitor) sentinelPollLoop()") {
+		t.Errorf("emma.go must define sentinelPollLoop on *SystemMonitor")
 	}
 	if !strings.Contains(src, "<-g.stopCh") {
 		t.Errorf("sentinelPollLoop body must select on stopCh for clean shutdown")

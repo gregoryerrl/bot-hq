@@ -27,7 +27,7 @@ func TestReplaySilentDoesNotArmHysteresis(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	if _, err := db.InsertMessage(protocol.Message{
 		FromAgent: "brian",
@@ -61,7 +61,7 @@ func TestReplaySilentWritesDryRunLedger(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	if _, err := db.InsertMessage(protocol.Message{
 		FromAgent: "brian",
@@ -97,7 +97,7 @@ func TestReplayThenLiveDispatchFiresShouldFlag(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	// Boot-replay window: matching msg already in DB.
 	if _, err := db.InsertMessage(protocol.Message{
@@ -148,7 +148,7 @@ func TestReplaySilentSkipsAlwaysFlag(t *testing.T) {
 	}
 	defer db.Close()
 
-	g := New(db, hub.EmmaConfig{})
+	g := NewSystemMonitor(db)
 
 	// Insert an always-flag-shaped message via SentinelMatch's known
 	// always-flag patterns. If none of the current sentinel patterns
