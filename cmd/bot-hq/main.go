@@ -18,6 +18,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
+	"github.com/gregoryerrl/bot-hq/internal/sessions"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
 	"github.com/gregoryerrl/bot-hq/internal/ui"
 	"github.com/gregoryerrl/bot-hq/internal/webui"
@@ -226,13 +227,15 @@ func runHub() {
 		}
 	}
 
-	// 6b. Phase T T-14 cycle-3: tmux orphan-session cleanup. On daemon-
-	// restart, kill any pre-restart bot-hq-* tmux sessions before spawning
-	// fresh ones — eliminates the orphan-pane confusion class that Rain
-	// msg 17419 push-back A flagged (old panes look alive but are
-	// orphaned from the new daemon's hub-coord routing). Best-effort:
-	// failures are logged but do not block startup.
-	if killed, errs := tmuxpkg.CleanupOrphanSessions(nil); len(killed) > 0 || len(errs) > 0 {
+	// 6b. Phase T T-14 cycle-3 + Z-8h: tmux orphan-session cleanup. On
+	// daemon-restart, kill any pre-restart bot-hq-* tmux sessions
+	// UNLESS the suffix matches an active session-id (post-Z-8h agent
+	// panes are named bot-hq-<role>-<session-id>; legacy Unix-ts panes
+	// don't match active session-ids and remain killable). Sparing
+	// active-session panes lets duo state survive a daemon restart.
+	// Best-effort: failures are logged but do not block startup.
+	activeSessionIDs, _ := sessions.ListActiveSessionIDs()
+	if killed, errs := tmuxpkg.CleanupOrphanSessions(nil, activeSessionIDs); len(killed) > 0 || len(errs) > 0 {
 		if len(killed) > 0 {
 			log.Printf("[autostart] tmux orphan-cleanup killed %d session(s): %v", len(killed), killed)
 		}

@@ -89,7 +89,7 @@ func TestCleanupOrphanSessions_KillsMatchingSessions(t *testing.T) {
 		_ = KillSession(keep)
 	})
 
-	killed, errs := CleanupOrphanSessions(nil)
+	killed, errs := CleanupOrphanSessions(nil, nil)
 	for _, e := range errs {
 		t.Errorf("cleanup err: %v", e)
 	}
@@ -128,11 +128,76 @@ func TestCleanupOrphanSessions_KillsMatchingSessions(t *testing.T) {
 func TestCleanupOrphanSessions_HandlesNoTmux(t *testing.T) {
 	// We can't disable tmux mid-test; we only verify the function does not
 	// panic when called with empty prefixes (no matches → nothing killed).
-	killed, errs := CleanupOrphanSessions([]string{"definitely-no-such-prefix-"})
+	killed, errs := CleanupOrphanSessions([]string{"definitely-no-such-prefix-"}, nil)
 	if len(killed) != 0 {
 		t.Errorf("expected zero kills for no-such-prefix; got %v", killed)
 	}
 	if len(errs) > 0 {
 		t.Errorf("expected zero errors; got %v", errs)
+	}
+}
+
+// TestCleanupOrphanSessions_SparesActiveSessionPanes — Z-8h: panes
+// named with an active session-id must survive cleanup so duo state
+// continues across daemon restart.
+func TestCleanupOrphanSessions_SparesActiveSessionPanes(t *testing.T) {
+	if !HasTmux() {
+		t.Skip("tmux not available — skipping integration test")
+	}
+
+	dir := t.TempDir()
+	activeID := "z-8-h-test-keep01"
+	orphanID := "z-8-h-test-orph2"
+
+	activePane := "bot-hq-brian-" + activeID
+	orphanPane := "bot-hq-brian-" + orphanID
+
+	if err := NewSession(activePane, dir); err != nil {
+		t.Fatalf("create active: %v", err)
+	}
+	if err := NewSession(orphanPane, dir); err != nil {
+		_ = KillSession(activePane)
+		t.Fatalf("create orphan: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = KillSession(activePane)
+		_ = KillSession(orphanPane)
+	})
+
+	killed, errs := CleanupOrphanSessions(nil, []string{activeID})
+	for _, e := range errs {
+		t.Errorf("cleanup err: %v", e)
+	}
+
+	for _, name := range killed {
+		if name == activePane {
+			t.Errorf("active-session pane %q was killed; cleanup violated Z-8h sparing", activePane)
+		}
+	}
+
+	orphanKilled := false
+	for _, name := range killed {
+		if name == orphanPane {
+			orphanKilled = true
+			break
+		}
+	}
+	if !orphanKilled {
+		t.Errorf("orphan pane %q should have been killed; got %v", orphanPane, killed)
+	}
+
+	survivors, err := ListSessions()
+	if err != nil {
+		t.Fatalf("post-cleanup list: %v", err)
+	}
+	foundActive := false
+	for _, s := range survivors {
+		if s.Name == activePane {
+			foundActive = true
+			break
+		}
+	}
+	if !foundActive {
+		t.Errorf("active-session pane %q missing post-cleanup; should have been spared", activePane)
 	}
 }

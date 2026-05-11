@@ -476,6 +476,33 @@ func ListSessionIDs() ([]string, error) {
 	return ids, nil
 }
 
+// ListActiveSessionIDs returns the session-ids of every session whose
+// manifest currently reports status=active. Used by Z-8h orphan-cleanup
+// to spare agent tmux panes that still belong to live sessions across
+// a daemon restart.
+//
+// Best-effort: unreadable / unparseable manifests are silently skipped
+// (the caller would rather over-kill than under-kill panes, but
+// under-killing an active session breaks user work). Empty list when
+// there are no active sessions.
+func ListActiveSessionIDs() ([]string, error) {
+	ids, err := ListSessionIDs()
+	if err != nil {
+		return nil, err
+	}
+	var active []string
+	for _, id := range ids {
+		m, mErr := ReadManifest(id)
+		if mErr != nil {
+			continue
+		}
+		if m.Status == "active" {
+			active = append(active, id)
+		}
+	}
+	return active, nil
+}
+
 // MostRecentForProject returns the most-recent session-id matching the
 // given project key. Lexicographic sort on session-id (which begins
 // with YYYY-MM-DD) ensures most-recent = max id.
