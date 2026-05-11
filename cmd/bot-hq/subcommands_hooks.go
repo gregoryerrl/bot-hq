@@ -23,17 +23,17 @@ func runOutboundMissHook() {
 	os.Exit(outboundhook.RunHook(os.Stdin, os.Stdout, os.Stderr))
 }
 
-// runInstallTrioHook installs the OUTBOUND-MISS Stop hook into the
-// trio agent's Claude settings.json. Idempotent + non-clobbering.
+// runInstallDuoHook installs the OUTBOUND-MISS Stop hook into the
+// duo agent's Claude settings.json. Idempotent + non-clobbering.
 //
 // Usage:
 //
-//	bot-hq install-trio-hook            # writes ~/.claude/settings.json
-//	bot-hq install-trio-hook <path>     # writes a custom path
+//	bot-hq install-duo-hook            # writes ~/.claude/settings.json
+//	bot-hq install-duo-hook <path>     # writes a custom path
 //
 // User must additionally export BOT_HQ_AGENT_ID=<id> in the agent's
 // pane environment so the hook knows which agent it is firing for.
-func runInstallTrioHook() {
+func runInstallDuoHook() {
 	settingsPath := ""
 	if len(os.Args) > 2 {
 		settingsPath = os.Args[2]
@@ -51,13 +51,13 @@ func runInstallTrioHook() {
 		fmt.Fprintf(os.Stderr, "resolve bot-hq binary path: %v\n", err)
 		os.Exit(1)
 	}
-	if err := outboundhook.InstallTrioHook(settingsPath, botHQPath); err != nil {
+	if err := outboundhook.InstallDuoHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(os.Stderr, "install: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("OUTBOUND-MISS hook installed in %s\n", settingsPath)
 	fmt.Printf("Hook command: %s\n", outboundhook.SettingsHookCommand(botHQPath))
-	fmt.Printf("Reminder: autostart trio panes set BOT_HQ_AGENT_ID automatically. For panes launched outside autostart (manual claude exec), export BOT_HQ_AGENT_ID=<id> before launch.\n")
+	fmt.Printf("Reminder: autostart duo panes set BOT_HQ_AGENT_ID automatically. For panes launched outside autostart (manual claude exec), export BOT_HQ_AGENT_ID=<id> before launch.\n")
 }
 
 // runToolPermissionHook is the PreToolUse hook entry point for the K-16
@@ -76,9 +76,9 @@ func runVoiceMirrorHook() {
 }
 
 // runInstallVoiceMirrorHook installs the Phase N v2 #3 N-2 PreToolUse-
-// Write hook into the trio agent's Claude settings.json per R40 VOICE-
+// Write hook into the duo agent's Claude settings.json per R40 VOICE-
 // MIRROR-DISCIPLINE. Idempotent + non-clobbering, mirroring
-// runInstallToolgateHook + runInstallTrioHook patterns.
+// runInstallToolgateHook + runInstallDuoHook patterns.
 //
 // Usage:
 //
@@ -105,7 +105,7 @@ func runInstallVoiceMirrorHook() {
 		fmt.Fprintf(os.Stderr, "resolve bot-hq binary path: %v\n", err)
 		os.Exit(1)
 	}
-	if err := voicemirror.InstallTrioHook(settingsPath, botHQPath); err != nil {
+	if err := voicemirror.InstallDuoHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(os.Stderr, "install: %v\n", err)
 		os.Exit(1)
 	}
@@ -119,12 +119,12 @@ func runInstallVoiceMirrorHook() {
 }
 
 // runInstallSessionStartHook installs the Phase N v3.x-1.5 SessionStart
-// hook into the trio agent's Claude settings.json. The installed hook
+// hook into the duo agent's Claude settings.json. The installed hook
 // command invokes `bot-hq session-open` at session-start, which fetches
 // the daemon's /api/session-open and prints markdown the harness
 // prepends as system-prompt context (overview + resolved rules + tasks;
 // the bootstrap.md surface was removed in X-1). Idempotent +
-// non-clobbering, mirroring runInstallTrioHook + runInstallToolgateHook +
+// non-clobbering, mirroring runInstallDuoHook + runInstallToolgateHook +
 // runInstallVoiceMirrorHook.
 //
 // Usage:
@@ -156,7 +156,7 @@ func runInstallSessionStartHook() {
 		fmt.Fprintf(os.Stderr, "resolve bot-hq binary path: %v\n", err)
 		os.Exit(1)
 	}
-	if err := sessionstarthook.InstallTrioHook(settingsPath, botHQPath); err != nil {
+	if err := sessionstarthook.InstallDuoHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(os.Stderr, "install: %v\n", err)
 		os.Exit(1)
 	}
@@ -169,8 +169,8 @@ func runInstallSessionStartHook() {
 }
 
 // runInstallToolgateHook installs the K-16 PreToolUse class-split gate
-// hook into the trio agent's Claude settings.json. Idempotent +
-// non-clobbering, mirroring runInstallTrioHook's pattern.
+// hook into the duo agent's Claude settings.json. Idempotent +
+// non-clobbering, mirroring runInstallDuoHook's pattern.
 //
 // Usage:
 //
@@ -194,7 +194,7 @@ func runInstallToolgateHook() {
 		fmt.Fprintf(os.Stderr, "resolve bot-hq binary path: %v\n", err)
 		os.Exit(1)
 	}
-	if err := toolgate.InstallTrioHook(settingsPath, botHQPath); err != nil {
+	if err := toolgate.InstallDuoHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(os.Stderr, "install: %v\n", err)
 		os.Exit(1)
 	}
@@ -202,6 +202,6 @@ func runInstallToolgateHook() {
 	fmt.Printf("Hook command: %s\n", toolgate.SettingsHookCommand(botHQPath))
 	fmt.Printf("Gates active per BOT_HQ_AGENT_ID:\n")
 	fmt.Printf("  rain → K-16 class-split (HANDS-execute blocked) + K-13 R12 commit-gate\n")
-	fmt.Printf("  brian (or non-rain trio member) → L-5 R33 pre-commit + pre-push + pre-merge gate-CHECK\n")
+	fmt.Printf("  brian (or non-rain duo member) → L-5 R33 pre-commit + pre-push + pre-merge gate-CHECK\n")
 	fmt.Printf("Hook activation requires Claude session-restart (settings.json not hot-reloaded mid-session).\n")
 }

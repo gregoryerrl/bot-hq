@@ -585,3 +585,17 @@ func TestHubTabIndicatorHidesAfterEndKey(t *testing.T) {
 		t.Errorf("indicator must hide after end re-engages followBottom; View=%q", out)
 	}
 }
+
+// TestHubTabPlaceholderZ3EmmaTarget — Z-3 substring-lock: the Hub tab
+// placeholder must cite emma as the conversational target per
+// architecture/sessions-as-containers.md "Hub TUI split" section.
+// Anti-regression-lock against pre-Z-3 "Type a command" framing.
+func TestHubTabPlaceholderZ3EmmaTarget(t *testing.T) {
+	h := NewHubTab()
+	got := h.input.Placeholder
+	for _, want := range []string{"emma"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("Hub-tab placeholder missing Z-3 substring %q (got: %q)", want, got)
+		}
+	}
+}

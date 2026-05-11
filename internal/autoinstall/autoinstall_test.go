@@ -52,7 +52,7 @@ func TestRun_FreshSettingsInstallsBothHooks(t *testing.T) {
 }
 
 // TestRun_Idempotent verifies calling Run twice with identical inputs
-// does not duplicate hook entries (defers to underlying InstallTrioHook
+// does not duplicate hook entries (defers to underlying InstallDuoHook
 // idempotency).
 func TestRun_Idempotent(t *testing.T) {
 	dir := t.TempDir()
@@ -84,7 +84,7 @@ func TestRun_Idempotent(t *testing.T) {
 
 // TestRun_PreservesUnrelatedHooks verifies non-clobbering behavior: an
 // existing user-configured PreToolUse hook (different command) is left
-// alone; Run only adds the bot-hq trio hooks alongside.
+// alone; Run only adds the bot-hq duo hooks alongside.
 func TestRun_PreservesUnrelatedHooks(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")

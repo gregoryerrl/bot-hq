@@ -198,6 +198,12 @@ func (db *DB) migrate() error {
 	if err := db.migrateAgentModelConfigs(); err != nil {
 		return err
 	}
+	// Z-3: session_id column on agents. Binds BRAIN-duo agents to their
+	// containing session per sessions-as-containers architecture. emma
+	// (global) and clive/discord (out-of-session) leave session_id empty.
+	if err := db.addColumnIfMissing("agents", "session_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	return nil
 }
 

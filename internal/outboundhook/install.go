@@ -20,7 +20,7 @@ func SettingsHookCommand(botHQPath string) string {
 	return botHQPath + " " + hookCommandSuffix
 }
 
-// InstallTrioHook installs the OUTBOUND-MISS Stop hook into the given
+// InstallDuoHook installs the OUTBOUND-MISS Stop hook into the given
 // settings.json path. Idempotent: a Stop-hook entry with the exact same
 // command string is left alone. Non-clobbering: existing unrelated
 // hooks (other Stop matchers, other event types) are preserved
@@ -31,12 +31,12 @@ func SettingsHookCommand(botHQPath string) string {
 // botHQPath should be the absolute path of the bot-hq binary (typically
 // from os.Executable()) so the installed hook references a stable
 // location regardless of $PATH state at hook-fire time.
-func InstallTrioHook(settingsPath, botHQPath string) error {
+func InstallDuoHook(settingsPath, botHQPath string) error {
 	if settingsPath == "" {
-		return errors.New("install-trio-hook: settings path required")
+		return errors.New("install-duo-hook: settings path required")
 	}
 	if botHQPath == "" {
-		return errors.New("install-trio-hook: bot-hq binary path required")
+		return errors.New("install-duo-hook: bot-hq binary path required")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {

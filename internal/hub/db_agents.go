@@ -16,10 +16,11 @@ func (db *DB) RegisterAgent(agent protocol.Agent) error {
 	}
 	gen := db.CurrentRebuildGen()
 	_, err := db.conn.Exec(
-		`INSERT OR REPLACE INTO agents (id, name, type, status, project, meta, registered, last_seen, rebuild_gen)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT OR REPLACE INTO agents (id, name, type, status, project, meta, registered, last_seen, rebuild_gen, session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		agent.ID, agent.Name, string(agent.Type), string(agent.Status),
 		agent.Project, agent.Meta, agent.Registered.UnixMilli(), now, gen,
+		agent.AgentSessionID,
 	)
 	return err
 }
@@ -54,10 +55,11 @@ func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, string, e
 	defer tx.Rollback()
 
 	if _, err := tx.Exec(
-		`INSERT OR REPLACE INTO agents (id, name, type, status, project, meta, registered, last_seen, rebuild_gen, last_seen_msg_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		`INSERT OR REPLACE INTO agents (id, name, type, status, project, meta, registered, last_seen, rebuild_gen, last_seen_msg_id, session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
 		agent.ID, agent.Name, string(agent.Type), string(agent.Status),
 		agent.Project, agent.Meta, agent.Registered.UnixMilli(), now, gen,
+		agent.AgentSessionID,
 	); err != nil {
 		return 0, "", err
 	}
@@ -91,14 +93,14 @@ func (db *DB) RegisterAgentWithWatermark(agent protocol.Agent) (int64, string, e
 	}
 
 	// Phase H slice 4 C6 (H-31): causality-only halt-state auto-clear. After
-	// commit, check whether this register advances the trio past the active
-	// halt's set_at; if every currently-registered trio member's last_seen is
+	// commit, check whether this register advances the duo past the active
+	// halt's set_at; if every currently-registered duo member's last_seen is
 	// now past set_at, clear. Best-effort — clear errors are logged but never
 	// fail the register.
-	if cleared, cerr := db.ClearHaltIfTrioReregistered(HaltStateTrio); cerr != nil {
+	if cleared, cerr := db.ClearHaltIfDuoReregistered(HaltStateDuo); cerr != nil {
 		log.Printf("[halt-state] auto-clear check failed: %v", cerr)
 	} else if cleared {
-		log.Printf("[halt-state] auto-cleared after %s re-register completed trio", agent.ID)
+		log.Printf("[halt-state] auto-cleared after %s re-register completed duo", agent.ID)
 	}
 
 	return watermark, snap.String, nil
@@ -109,8 +111,8 @@ func (db *DB) GetAgent(id string) (protocol.Agent, error) {
 	var typ, status string
 	var registered, lastSeen int64
 	err := db.conn.QueryRow(
-		`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen, current_task FROM agents WHERE id = ?`, id,
-	).Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen, &a.CurrentTask)
+		`SELECT id, name, type, status, project, meta, registered, last_seen, rebuild_gen, current_task, session_id FROM agents WHERE id = ?`, id,
+	).Scan(&a.ID, &a.Name, &typ, &status, &a.Project, &a.Meta, &registered, &lastSeen, &a.RebuildGen, &a.CurrentTask, &a.AgentSessionID)
 	if err != nil {
 		return a, err
 	}

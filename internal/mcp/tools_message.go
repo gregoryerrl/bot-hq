@@ -59,9 +59,10 @@ func hubFlag(db *hub.DB) ToolDef {
 
 func hubSend(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_send",
-		mcp.WithDescription("Send a message through the hub. Phase S S-4: PM `to:` parameter REMOVED — all messages broadcast. To target a specific agent, use @<agent> mention in content (e.g., `@brian please review` / `@rain BRAIN-2nd needed` / `@emma rule-violation observed`). The agent recognizes its own name and self-filters relevance via DB-side audience-class-discriminator (R6) load-bearing post-PM-removal. Historical to_agent column preserved for forensics-trail; new messages always broadcast."),
+		mcp.WithDescription("Send a message through the hub. Phase S S-4: PM `to:` parameter REMOVED — all messages broadcast. To target a specific agent, use @<agent> mention in content (e.g., `@brian please review` / `@rain BRAIN-2nd needed` / `@emma rule-violation observed`). The agent recognizes its own name and self-filters relevance via DB-side audience-class-discriminator (R6) load-bearing post-PM-removal. Historical to_agent column preserved for forensics-trail; new messages always broadcast. Z-3 sessions-as-containers: session_id auto-tags from sender's BOT_HQ_SESSION_ID env via agent registry; to_session override for explicit cross-session routing (rare)."),
 		mcp.WithString("from", mcp.Required(), mcp.Description("Sender agent ID")),
-		mcp.WithString("session_id", mcp.Description("Session ID if part of a session")),
+		mcp.WithString("session_id", mcp.Description("Session ID override — defaults to sender's bound session_id from agents table. Empty = global emit (visible cross-session).")),
+		mcp.WithString("to_session", mcp.Description("Z-3: route this message to a specific session (cross-session addressing — rare; agents in different sessions communicating). Takes precedence over session_id override.")),
 		mcp.WithString("type", mcp.Required(), mcp.Description("Message type: handshake, question, response, command, update, result, error")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Message content")),
 	)
@@ -107,6 +108,21 @@ func hubSend(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid message type: %s", msgType)), nil
 		}
 
+		// Z-3 session_id resolution priority:
+		//  1. explicit to_session arg (cross-session routing)
+		//  2. explicit session_id arg (override)
+		//  3. sender's agents.session_id binding (auto-tag at send-time)
+		//  4. empty (global emit, visible cross-session)
+		sessionID := req.GetString("to_session", "")
+		if sessionID == "" {
+			sessionID = req.GetString("session_id", "")
+		}
+		if sessionID == "" {
+			if a, gErr := db.GetAgent(from); gErr == nil {
+				sessionID = a.AgentSessionID
+			}
+		}
+
 		msg := protocol.Message{
 			FromAgent: from,
 			// Phase S S-4: ToAgent always empty; PM removed in favor of
@@ -114,7 +130,7 @@ func hubSend(db *hub.DB) ToolDef {
 			// messages with non-empty to_agent preserved at DB layer
 			// for forensics-trail per R2 authorless-display pattern.
 			ToAgent:   "",
-			SessionID: req.GetString("session_id", ""),
+			SessionID: sessionID,
 			Type:      mt,
 			Content:   content,
 			Created:   time.Now(),
@@ -140,10 +156,11 @@ func hubSend(db *hub.DB) ToolDef {
 
 func hubRead(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_read",
-		mcp.WithDescription("Read messages from the hub"),
+		mcp.WithDescription("Read messages from the hub. Z-3 sessions-as-containers: optional session_id filter narrows to a specific session (defaults to caller's bound session); use \"__all__\" to read cross-session."),
 		mcp.WithString("agent_id", mcp.Required(), mcp.Description("Agent ID to read messages for")),
 		mcp.WithNumber("since_id", mcp.Description("Only return messages after this ID")),
 		mcp.WithNumber("limit", mcp.Description("Max messages to return (default 50)")),
+		mcp.WithString("session_id", mcp.Description("Z-3 session filter. Defaults to caller's agents.session_id (per-session view). Pass \"__all__\" to disable filtering for cross-session reads (emma's global view).")),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -155,9 +172,30 @@ func hubRead(db *hub.DB) ToolDef {
 		sinceID := int64(req.GetFloat("since_id", 0))
 		limit := req.GetInt("limit", 50)
 
+		// Z-3 session filter resolution.
+		sessionFilter := req.GetString("session_id", "")
+		// Empty string + agent is known → default to agent's bound session.
+		if sessionFilter == "" {
+			if a, gErr := db.GetAgent(agentID); gErr == nil {
+				sessionFilter = a.AgentSessionID
+			}
+		}
+		applyFilter := sessionFilter != "" && sessionFilter != "__all__"
+
 		msgs, err := db.ReadMessages(agentID, sinceID, limit)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("read failed: %v", err)), nil
+		}
+
+		if applyFilter {
+			filtered := msgs[:0]
+			for _, m := range msgs {
+				// Show: session-tagged matches OR untagged (global/system).
+				if m.SessionID == "" || m.SessionID == sessionFilter {
+					filtered = append(filtered, m)
+				}
+			}
+			msgs = filtered
 		}
 
 		// Truncate older message content to save tokens.
@@ -176,7 +214,7 @@ func hubRead(db *hub.DB) ToolDef {
 	return ToolDef{Tool: tool, Handler: handler}
 }
 
-// hubBroadcast implements Phase R R2 trio-consensus authorless [HR]
+// hubBroadcast implements Phase R R2 duo-consensus authorless [HR]
 // broadcast. Wraps hub_send-equivalent emit with two key behaviors:
 //
 //   - Auto-prefix `[HR] ` to content (idempotent via HasPrefix guard
@@ -195,7 +233,7 @@ func hubRead(db *hub.DB) ToolDef {
 // Per phase-r.md R2 cluster + Rain msg 15561 BRAIN-2nd 6 refinements.
 func hubBroadcast(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_broadcast",
-		mcp.WithDescription("Phase R R2 — emit a trio-consensus [HR]-tagged broadcast. Auto-prefixes [HR] to content (idempotent). DB preserves from_agent for forensics; display layer strips sender at render time. Rain-gated via PreToolUse toolgate-hook (BOT_HQ_AGENT_ID=rain check); Brian invocation blocked. Use for BRAIN-cycle final drafts where authorless trio-voice rendering is intended."),
+		mcp.WithDescription("Phase R R2 — emit a duo-consensus [HR]-tagged broadcast. Auto-prefixes [HR] to content (idempotent). DB preserves from_agent for forensics; display layer strips sender at render time. Rain-gated via PreToolUse toolgate-hook (BOT_HQ_AGENT_ID=rain check); Brian invocation blocked. Use for BRAIN-cycle final drafts where authorless duo-voice rendering is intended."),
 		mcp.WithString("from", mcp.Required(), mcp.Description("Sender agent ID (preserved in DB for forensics; stripped at display)")),
 		mcp.WithString("content", mcp.Required(), mcp.Description("Message content. Auto-prefixed with `[HR] ` if not already; double-prefix suppressed.")),
 		mcp.WithString("type", mcp.Description("Message type: response | update | result. Default: response. Excludes flag (use hub_flag) and command/error.")),

@@ -1,7 +1,7 @@
 package daemoncron
 
 // Lifecycle-hooks surface — Phase S S-1a-4 (programmatic-move from
-// internal/gemma/gemma.go scattered emit-call-sites).
+// internal/emma/gemma.go scattered emit-call-sites).
 //
 // Migrates 4 distinct agent-lifecycle event emit-templates from
 // gemma to daemoncron with extract-with-delegate architecture. Events

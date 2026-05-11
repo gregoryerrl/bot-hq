@@ -126,10 +126,10 @@ func TestPathFor_agentStateGlobal(t *testing.T) {
 	}
 }
 
-func TestPathFor_ipivState(t *testing.T) {
+func TestPathFor_ipavState(t *testing.T) {
 	cl := newTestCL(t)
-	got, _ := cl.PathFor(ClassIPIVState, "", "bot-hq/task-abc")
-	want := filepath.Join(cl.Root(), "projects", "bot-hq", "task-abc", "ipiv-state.yaml")
+	got, _ := cl.PathFor(ClassIPAVState, "", "bot-hq/task-abc")
+	want := filepath.Join(cl.Root(), "projects", "bot-hq", "task-abc", "ipav-state.yaml")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -353,7 +353,7 @@ func TestDetectClass_knownPaths(t *testing.T) {
 		{filepath.Join(cl.Root(), "brian/last_state.json"), ClassAgentState},
 		{filepath.Join(cl.Root(), "rules/general.yaml"), ClassRule},
 		{filepath.Join(cl.Root(), "projects/bot-hq/README.md"), ClassProject},
-		{filepath.Join(cl.Root(), "projects/bot-hq/task-abc/ipiv-state.yaml"), ClassIPIVState},
+		{filepath.Join(cl.Root(), "projects/bot-hq/task-abc/ipav-state.yaml"), ClassIPAVState},
 	}
 	for _, tc := range cases {
 		got := cl.detectClass(tc.path)

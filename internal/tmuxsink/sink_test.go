@@ -164,7 +164,7 @@ func TestIsReady_RunningWithBoxDrawingPrefix(t *testing.T) {
 }
 
 // TestIsReady_RealWorldFixtures locks IsReady against real-world Claude
-// Code pane captures (idle trio, active synth ✶ spinner, active bash
+// Code pane captures (idle duo, active synth ✶ spinner, active bash
 // Running…, quoted Running… inside agent reply).
 //
 // Ported from internal/hub/hub_test.go TestIsReady (which tested the prior
@@ -173,10 +173,10 @@ func TestIsReady_RunningWithBoxDrawingPrefix(t *testing.T) {
 // locks preserved: INSERT-mode footer + ✻ summary glyph must NOT
 // false-busy; spinner ✶ in scan window MUST classify busy.
 func TestIsReady_RealWorldFixtures(t *testing.T) {
-	// Realistic capture of an idle trio agent pane: prompt-box bordered by
+	// Realistic capture of an idle duo agent pane: prompt-box bordered by
 	// `──` lines, INSERT-mode footer below. The `✻ Crunched` line is the
 	// most-recent turn's static summary glyph — must not flag busy.
-	idleTrioPane := strings.Join([]string{
+	idleDuoPane := strings.Join([]string{
 		"⏺ Brian's drive. Watching.",
 		"",
 		"✻ Crunched for 3s",
@@ -242,7 +242,7 @@ func TestIsReady_RealWorldFixtures(t *testing.T) {
 		{"prompt after output", "some output\n$ ", true},
 
 		// H-22-bis regression-lock + Rain's real-world pane fixtures.
-		{"idle trio pane with INSERT footer + ✻ summary glyph", idleTrioPane, true},
+		{"idle duo pane with INSERT footer + ✻ summary glyph", idleDuoPane, true},
 		{"active synthesizing — ✶ glyph above prompt box", activeSynthPane, false},
 		{"active bash — Running… line-prefix above prompt box", activeBashPane, false},
 		{"quoted Running… inside agent reply (substring not prefix)", quotedRunningPane, true},

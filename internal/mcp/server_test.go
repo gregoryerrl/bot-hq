@@ -24,9 +24,9 @@ func setupTestDB(t *testing.T) *hub.DB {
 	// the real CL across many test runs.)
 	t.Setenv("BOT_HQ_SESSIONS_DIR", t.TempDir())
 
-	// Phase Y-2: bot_hq_ipiv_* tools write under <CL_ROOT>/projects/
+	// Phase Y-2: bot_hq_ipav_* tools write under <CL_ROOT>/projects/
 	// <project>/tasks/. Same isolation pattern — pin BOT_HQ_CL_ROOT to
-	// a temp dir so IPIV tool tests don't pollute the real CL. Create
+	// a temp dir so IPAV tool tests don't pollute the real CL. Create
 	// the projects/<test-project> subdir so IndexProject succeeds.
 	clRoot := t.TempDir()
 	t.Setenv("BOT_HQ_CL_ROOT", clRoot)
@@ -68,7 +68,6 @@ func TestToolsRegistered(t *testing.T) {
 		"hub_set_current_task",
 		"hub_status",
 		"hub_spawn",
-		"hub_spawn_gemma",
 		"hub_schedule_wake",
 		"hub_cancel_wake",
 		"hub_session_close",
@@ -85,15 +84,15 @@ func TestToolsRegistered(t *testing.T) {
 		"claude_resume",
 		"claude_stop",
 		"bot_hq_context_load",
-		"bot_hq_agent_bootstrap",
+		"hub_session_open",
 		"hub_session_finalize",
 		"hub_session_lookback",
 		"hub_session_summary",
-		"bot_hq_ipiv_open",
-		"bot_hq_ipiv_transition",
-		"bot_hq_ipiv_set_artifact",
-		"bot_hq_ipiv_complete",
-		"bot_hq_ipiv_list",
+		"bot_hq_ipav_open",
+		"bot_hq_ipav_transition",
+		"bot_hq_ipav_set_artifact",
+		"bot_hq_ipav_complete",
+		"bot_hq_ipav_list",
 	}
 
 	if len(tools) != len(expected) {

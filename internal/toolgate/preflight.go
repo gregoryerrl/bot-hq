@@ -44,12 +44,12 @@ type Verdict struct {
 	AgentID  string
 }
 
-// trioAgentWhitelist enumerates BOT_HQ_AGENT_ID values that consume
-// ~/.claude/settings.json hooks (Claude-Code trio agents). Emma is
+// duoAgentWhitelist enumerates BOT_HQ_AGENT_ID values that consume
+// ~/.claude/settings.json hooks (Claude-Code duo agents). Emma is
 // gemma-based and does NOT consume settings.json hooks — emma agent-id
 // fails whitelist as WARNING (not CRITICAL) since emma does not require
 // toolgate enforcement. Per Phase M M-1 (i) design-spike v1.1 §1 + §3 L1.
-var trioAgentWhitelist = []string{"brian", "rain"}
+var duoAgentWhitelist = []string{"brian", "rain"}
 
 // VerifyHookInstallation reads settingsPath, parses JSON, navigates
 // PreToolUse[].hooks[], returns Verdict.
@@ -145,11 +145,11 @@ func containsAll(s string, subs []string) bool {
 // VerifyAgentEnv reads BOT_HQ_AGENT_ID from os.Getenv.
 //
 // Verdict mapping:
-//   - PASS:     env present and value ∈ trioAgentWhitelist {brian, rain}
+//   - PASS:     env present and value ∈ duoAgentWhitelist {brian, rain}
 //   - WARNING:  env present but value not in whitelist (e.g., "emma" or
 //               typo). Emma is intentionally WARNING-class — emma is
 //               gemma-based and does not require toolgate enforcement,
-//               so emma misconfig flags but does not halt trio.
+//               so emma misconfig flags but does not halt duo.
 //   - CRITICAL: env absent (agent context unknown; cannot route alerts)
 //
 // Per Phase M M-1 (i) design-spike v1.1 §3 L1 + Brian PASS-1 BRAIN-add
@@ -165,14 +165,14 @@ func VerifyAgentEnv() Verdict {
 		return v
 	}
 
-	for _, valid := range trioAgentWhitelist {
+	for _, valid := range duoAgentWhitelist {
 		if id == valid {
 			return v
 		}
 	}
 
 	v.Status = StatusWarning
-	v.Findings = append(v.Findings, fmt.Sprintf("BOT_HQ_AGENT_ID=%q not in Claude-Code-trio whitelist %v (emma is gemma-based; emma agent-id is WARNING-class, not CRITICAL)", id, trioAgentWhitelist))
+	v.Findings = append(v.Findings, fmt.Sprintf("BOT_HQ_AGENT_ID=%q not in Claude-Code-duo whitelist %v (emma is gemma-based; emma agent-id is WARNING-class, not CRITICAL)", id, duoAgentWhitelist))
 	return v
 }
 
@@ -183,7 +183,7 @@ func VerifyAgentEnv() Verdict {
 // Default expected substrings: {"bot-hq", hookCommandSuffix} where
 // hookCommandSuffix == "tool-permission-hook" per install.go.
 //
-// Caller invariant: invoke AFTER hub_register. The trio's session-start
+// Caller invariant: invoke AFTER hub_register. The duo's session-start
 // flow registers first, THEN runs preflight, THEN emits hub_send /
 // hub_flag if !PASS. Per design-spike §3 L3 register→preflight→emit
 // ordering edge-case.

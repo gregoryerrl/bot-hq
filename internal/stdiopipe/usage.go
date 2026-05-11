@@ -2,7 +2,7 @@
 //
 // Parses claude CLI subprocess output (--output-format stream-json) for
 // per-call token usage + computes USD cost via per-provider/model price
-// table. Wires Driver.Wait() → IPIVRuntime.RecordPhaseUsage downstream.
+// table. Wires Driver.Wait() → IPAVRuntime.RecordPhaseUsage downstream.
 //
 // Public API:
 //   - Usage struct: token counts + computed cost

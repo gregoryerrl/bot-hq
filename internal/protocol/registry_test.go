@@ -14,7 +14,7 @@ import (
 //   - Q3 agent_applicability matches embed-site path prefix
 //   - Q4 R16 payload-mirror Option B (shared-substring-set) — checked here
 //     against the const-text source; runtime-emit symmetry via the
-//     companion test in internal/gemma/plan_usage_test.go
+//     companion test in internal/emma/plan_usage_test.go
 //   - Q5 history_pointer field flexible (string)
 //   - Q6 F2 fold (planCapReasonFmt cleanup) — in disc.go const + plan_usage.go const
 func TestRuleNamespaceRatchet(t *testing.T) {

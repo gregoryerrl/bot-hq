@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/gregoryerrl/bot-hq/internal/gemma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/outboundhook"
 	"github.com/gregoryerrl/bot-hq/internal/projects"
@@ -133,7 +132,7 @@ func hubSpawn(db *hub.DB) ToolDef {
 		// logged but spawn continues. Mirrors the worktree-hooks pattern.
 		if mcpErr == nil {
 			projectSettingsPath := filepath.Join(project, ".claude", "settings.json")
-			if err := outboundhook.InstallTrioHook(projectSettingsPath, botHQPath); err != nil {
+			if err := outboundhook.InstallDuoHook(projectSettingsPath, botHQPath); err != nil {
 				log.Printf("[hub-spawn] outbound-miss hook install failed for %s: %v (spawn continuing without hook)", projectSettingsPath, err)
 			}
 		}
@@ -240,118 +239,12 @@ If a commit fails with "stale base", run `+"`git fetch origin && git rebase orig
 	return ToolDef{Tool: tool, Handler: handler}
 }
 
-// --- Gemma tools ---
-
-func hubSpawnGemma(db *hub.DB) ToolDef {
-	tool := mcp.NewTool("hub_spawn_gemma",
-		mcp.WithDescription("Spawn a Gemma task: run a command and optionally analyze the output with the local Gemma model via Ollama"),
-		mcp.WithString("command", mcp.Required(), mcp.Description("Shell command to run (must be on the allowlist: go test/vet/build, df, ps, uptime, free, vm_stat, du, wc, ls, git status/log/diff)")),
-		mcp.WithString("task_type", mcp.Required(), mcp.Description("Task type: exec (raw output) or analyze (pass output through Gemma for interpretation)")),
-		mcp.WithString("project", mcp.Description("Working directory for the command (default: bot-hq project dir)")),
-	)
-
-	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		command, err := req.RequireString("command")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-		taskTypeStr, err := req.RequireString("task_type")
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-
-		switch taskTypeStr {
-		case "exec", "analyze":
-		default:
-			return mcp.NewToolResultError(fmt.Sprintf("invalid task_type: %s (must be exec or analyze)", taskTypeStr)), nil
-		}
-
-		if !gemma.IsCommandAllowed(command) {
-			return mcp.NewToolResultError(fmt.Sprintf("command not allowed: %s", command)), nil
-		}
-
-		workDir := req.GetString("project", "")
-		if workDir == "" {
-			workDir = gemma.ProjectDir()
-		}
-
-		// Honor the shared concurrency cap across persistent agent + MCP spawns.
-		gemma.InitSharedSem(3)
-		select {
-		case gemma.SharedSem <- struct{}{}:
-			defer func() { <-gemma.SharedSem }()
-		case <-ctx.Done():
-			return mcp.NewToolResultError("cancelled waiting for gemma slot"), nil
-		}
-
-		taskID := uuid.New().String()[:8]
-		agentID := fmt.Sprintf("gemma-%s", taskID)
-
-		db.RegisterAgent(protocol.Agent{
-			ID:     agentID,
-			Name:   fmt.Sprintf("Gemma %s", taskID),
-			Type:   protocol.AgentGemma,
-			Status: protocol.StatusWorking,
-		})
-
-		parts := strings.Fields(command)
-		cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-		cmd.Dir = workDir
-		output, cmdErr := cmd.CombinedOutput()
-
-		exitCode := 0
-		if cmdErr != nil {
-			if exitErr, ok := cmdErr.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			}
-		}
-
-		var result string
-		if taskTypeStr == "analyze" {
-			ollamaURL := "http://localhost:11434"
-			model := "gemma4:e4b"
-			if settings, sErr := db.GetAllSettings(); sErr == nil {
-				if v, ok := settings["gemma.ollama_url"]; ok && v != "" {
-					ollamaURL = v
-				}
-				if v, ok := settings["gemma.model"]; ok && v != "" {
-					model = v
-				}
-			}
-
-			client := gemma.NewClient(ollamaURL, model)
-			prompt := fmt.Sprintf("Summarize this output concisely. Flag any errors or anomalies:\n\n```\n%s\n```", string(output))
-			analysis, aErr := client.Generate(ctx, prompt)
-			if aErr != nil {
-				result = fmt.Sprintf("exit_code: %d\n%s\n\n[ollama analysis failed: %v]", exitCode, string(output), aErr)
-			} else {
-				result = analysis
-			}
-		} else {
-			result = fmt.Sprintf("exit_code: %d\n%s", exitCode, string(output))
-		}
-
-		if len(result) > 10000 {
-			result = result[:10000] + "\n...[truncated]"
-		}
-
-		db.InsertMessage(protocol.Message{
-			FromAgent: agentID,
-			Type:      protocol.MsgResult,
-			Content:   result,
-		})
-
-		db.UnregisterAgent(agentID)
-
-		return mcp.NewToolResultText(toJSON(map[string]any{
-			"status":  "completed",
-			"task_id": taskID,
-			"result":  result,
-		})), nil
-	}
-
-	return ToolDef{Tool: tool, Handler: handler}
-}
+// Z-3 Group I: hub_spawn_gemma MCP tool DELETED. emma (formerly the
+// gemma-package agent) is now a Claude Code instance configured for
+// DeepSeek-V4-Pro via R51+R52 env-var injection (same proxy pattern as
+// rain) — no longer talks to Ollama. The "gemma" naming was legacy from
+// when emma ran the Ollama gemma:e4b model. Removed per architecture/
+// sessions-as-containers.md "emma minimum-viable capability" + plan §I3.
 
 // blockedPrefixes are system directories that hub_spawn should never use.
 var blockedPrefixes = func() []string {

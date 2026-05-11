@@ -126,7 +126,7 @@ func TestRunHook_NonBashTool(t *testing.T) {
 }
 
 // TestRunHook_NoAgentID locks the defensive default: missing
-// BOT_HQ_AGENT_ID env var → allow with no warning. Non-trio Claude
+// BOT_HQ_AGENT_ID env var → allow with no warning. Non-duo Claude
 // Code instances (e.g., ad-hoc local dev) shouldn't be blocked.
 func TestRunHook_NoAgentID(t *testing.T) {
 	input := HookInput{

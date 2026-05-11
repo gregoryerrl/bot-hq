@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gregoryerrl/bot-hq/internal/agentconfig"
+	"github.com/gregoryerrl/bot-hq/internal/contextload"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
@@ -37,6 +38,13 @@ type Rain struct {
 	tmuxSession string
 	lastMsgID   int64
 
+	// sessionID is the Z-3 session-as-container binding. Set via
+	// SetSessionID before Start. Empty for legacy global-autostart spawn
+	// (Group E backward-compat); non-empty for hub_session_open spawn.
+	// Propagated as BOT_HQ_SESSION_ID env to the tmux session so
+	// hub_register auto-tags agents.session_id.
+	sessionID string
+
 	// sink wraps tmux pane delivery with isReady-check + retry-queue
 	// semantics shared with hub.dispatchToTmux. Constructed in Start()
 	// after the tmux session spawns; rebuilt in restart() with the new
@@ -47,6 +55,15 @@ type Rain struct {
 	running bool
 	stopCh  chan struct{}
 }
+
+// SetSessionID binds this Rain instance to a Z-3 session container.
+// Called by the daemon's session_open hook before Start; propagates as
+// BOT_HQ_SESSION_ID env and triggers daemon-paste bootstrap render at
+// spawn-time. Empty value = legacy global-autostart path (no binding).
+func (r *Rain) SetSessionID(sid string) { r.sessionID = sid }
+
+// SessionID returns this Rain's bound session_id (empty for global).
+func (r *Rain) SessionID() string { return r.sessionID }
 
 // New creates a Rain instance. workDir is where the Claude Code session runs.
 func New(db *hub.DB, workDir string) *Rain {
@@ -218,6 +235,11 @@ func (r *Rain) newSessionArgs() []string {
 		"-c", r.workDir, "-x", "200", "-y", "50",
 		"-e", "BOT_HQ_AGENT_ID=" + agentID,
 	}
+	// Z-3 session-as-containers: propagate BOT_HQ_SESSION_ID env when
+	// this Rain is bound to a session (hub_session_open spawn path).
+	if r.sessionID != "" {
+		args = append(args, "-e", "BOT_HQ_SESSION_ID="+r.sessionID)
+	}
 	// T-1.4: append per-agent model-config env-vars (R51 + R52)
 	args = append(args, r.modelConfigEnvArgs()...)
 	return args
@@ -280,7 +302,15 @@ func (r *Rain) spawnTmux() error {
 
 	time.Sleep(3 * time.Second)
 
+	// Send the initial rain prompt with daemon-paste bootstrap prepended
+	// when bound to a session (Z-3 sessions-as-containers).
 	prompt := r.initialPrompt()
+	if r.sessionID != "" {
+		canonRoot, _ := protocol.CanonRoot()
+		if bs, bsErr := contextload.RenderSessionBootstrap(canonRoot, r.sessionID, agentID); bsErr == nil && bs != "" {
+			prompt = "# DAEMON-PASTE BOOTSTRAP (Z-3 sessions-as-containers)\n\n" + bs + "\n\n---\n\n" + prompt
+		}
+	}
 	if err := tmuxpkg.SendKeys(r.tmuxSession, prompt, true); err != nil {
 		return fmt.Errorf("tmux send prompt: %w", err)
 	}
@@ -292,9 +322,9 @@ func (r *Rain) spawnTmux() error {
 func (r *Rain) InitialPromptForTest() string { return r.initialPrompt() }
 
 func (r *Rain) initialPrompt() string {
-	return `You are Rain (agent ID "rain"), bot-hq's adversarial QA agent. Sharp, skeptical, terse. Agents: Brian (orchestrator, ID "brian"), Clive (voice, ID "clive").
+	return `You are Rain (agent ID "rain"), the EYES half of bot-hq's BRAIN-duo (Brian + Rain bilateral cognitive engine, per-session). Sharp, skeptical, terse. Agents in scope: Brian (HANDS half of duo, ID "brian"), Emma (global stateless meta-orchestrator, ID "emma"), Clive (voice, ID "clive").
 
-STARTUP (Z-0 CL-first per vision.md "agents are stateless; CL is durable"): 1) Call mcp__bot-hq__bot_hq_agent_bootstrap with project="bot-hq", agent="rain" — returns the durable substrate snapshot (merged rules + project library + active phase doc + ratchets/active.md + last_state.json + discipline-anchors.md). This is your resume context. 2) hub_register id="rain", name="Rain", type="qa". 3) Watch the hub. When pivoting to a different project, re-call bot_hq_agent_bootstrap with that project key.
+STARTUP (Z-3 daemon-paste bootstrap per architecture/sessions-as-containers.md "Bootstrap moves to daemon" — extends Z-0 CL-first principle per vision.md that "agents are stateless; CL is durable"): your session-scoped bootstrap (session manifest + per-agent state slot + project library + discipline anchors) is pasted by the daemon into this prompt at spawn-time — no bootstrap MCP call needed. BOT_HQ_SESSION_ID env binds you to the containing session. 1) hub_register id="rain", name="Rain", type="qa" (session_id auto-tags from env). 2) Watch the hub. For cross-project read after spawn, use bot_hq_context_load (different lifecycle from spawn-time bootstrap).
 
 NO BACKLOG SCRAPE: Do NOT iterate hub_read for catch-up at startup. The CL bootstrap snapshot carries durable state; live messages flow via the daemon's polling forwarder going forward. Messages arrive automatically; do NOT poll hub_read.
 
@@ -358,7 +388,7 @@ RULES:
 
 ` + protocol.PhaseSv2IgnoreNoiseDiscipline + `
 
-` + protocol.PhaseYv1IPIVDiscipline + `
+` + protocol.PhaseYv1IPAVDiscipline + `
 
 ` + protocol.IdSessionsSkillPointer + `
 

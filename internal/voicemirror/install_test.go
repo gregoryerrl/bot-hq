@@ -32,15 +32,15 @@ func TestSettingsHookCommand(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHook_FreshSettings locks install-into-missing-settings:
+// TestInstallDuoHook_FreshSettings locks install-into-missing-settings:
 // settings.json absent → created with PreToolUse-Write hook.
-func TestInstallTrioHook_FreshSettings(t *testing.T) {
+func TestInstallDuoHook_FreshSettings(t *testing.T) {
 	tmp := t.TempDir()
 	settingsPath := filepath.Join(tmp, "settings.json")
 	botHQ := "/usr/local/bin/bot-hq"
 
-	if err := InstallTrioHook(settingsPath, botHQ); err != nil {
-		t.Fatalf("InstallTrioHook: %v", err)
+	if err := InstallDuoHook(settingsPath, botHQ); err != nil {
+		t.Fatalf("InstallDuoHook: %v", err)
 	}
 
 	settings := readSettings(t, settingsPath)
@@ -69,18 +69,18 @@ func TestInstallTrioHook_FreshSettings(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHook_Idempotent locks idempotency: re-install with
+// TestInstallDuoHook_Idempotent locks idempotency: re-install with
 // same path-and-command = no duplicate entry.
-func TestInstallTrioHook_Idempotent(t *testing.T) {
+func TestInstallDuoHook_Idempotent(t *testing.T) {
 	tmp := t.TempDir()
 	settingsPath := filepath.Join(tmp, "settings.json")
 	botHQ := "/usr/local/bin/bot-hq"
 
-	if err := InstallTrioHook(settingsPath, botHQ); err != nil {
-		t.Fatalf("first InstallTrioHook: %v", err)
+	if err := InstallDuoHook(settingsPath, botHQ); err != nil {
+		t.Fatalf("first InstallDuoHook: %v", err)
 	}
-	if err := InstallTrioHook(settingsPath, botHQ); err != nil {
-		t.Fatalf("second InstallTrioHook: %v", err)
+	if err := InstallDuoHook(settingsPath, botHQ); err != nil {
+		t.Fatalf("second InstallDuoHook: %v", err)
 	}
 
 	settings := readSettings(t, settingsPath)
@@ -102,11 +102,11 @@ func TestInstallTrioHook_Idempotent(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHook_PreservesOtherHooks locks non-clobbering: existing
+// TestInstallDuoHook_PreservesOtherHooks locks non-clobbering: existing
 // non-Write entries (other matchers, other event types like Stop) are
 // preserved verbatim. Critical for co-existence with toolgate (Bash) +
 // outboundhook (Stop).
-func TestInstallTrioHook_PreservesOtherHooks(t *testing.T) {
+func TestInstallDuoHook_PreservesOtherHooks(t *testing.T) {
 	tmp := t.TempDir()
 	settingsPath := filepath.Join(tmp, "settings.json")
 
@@ -133,8 +133,8 @@ func TestInstallTrioHook_PreservesOtherHooks(t *testing.T) {
 	data, _ := json.MarshalIndent(pre, "", "  ")
 	os.WriteFile(settingsPath, data, 0o644)
 
-	if err := InstallTrioHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
-		t.Fatalf("InstallTrioHook: %v", err)
+	if err := InstallDuoHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
+		t.Fatalf("InstallDuoHook: %v", err)
 	}
 
 	settings := readSettings(t, settingsPath)
@@ -162,14 +162,14 @@ func TestInstallTrioHook_PreservesOtherHooks(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHook_BadJSON locks defensive behavior on invalid
+// TestInstallDuoHook_BadJSON locks defensive behavior on invalid
 // settings.json: error rather than silent overwrite.
-func TestInstallTrioHook_BadJSON(t *testing.T) {
+func TestInstallDuoHook_BadJSON(t *testing.T) {
 	tmp := t.TempDir()
 	settingsPath := filepath.Join(tmp, "settings.json")
 	os.WriteFile(settingsPath, []byte("not json"), 0o644)
 
-	err := InstallTrioHook(settingsPath, "/usr/local/bin/bot-hq")
+	err := InstallDuoHook(settingsPath, "/usr/local/bin/bot-hq")
 	if err == nil {
 		t.Fatalf("expected error on bad JSON; got nil")
 	}
@@ -178,18 +178,18 @@ func TestInstallTrioHook_BadJSON(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHook_RequiresSettingsPath locks input validation.
-func TestInstallTrioHook_RequiresSettingsPath(t *testing.T) {
-	if err := InstallTrioHook("", "/usr/local/bin/bot-hq"); err == nil {
+// TestInstallDuoHook_RequiresSettingsPath locks input validation.
+func TestInstallDuoHook_RequiresSettingsPath(t *testing.T) {
+	if err := InstallDuoHook("", "/usr/local/bin/bot-hq"); err == nil {
 		t.Errorf("expected error on empty settingsPath; got nil")
 	}
 }
 
-// TestInstallTrioHook_RequiresBotHQPath locks input validation.
-func TestInstallTrioHook_RequiresBotHQPath(t *testing.T) {
+// TestInstallDuoHook_RequiresBotHQPath locks input validation.
+func TestInstallDuoHook_RequiresBotHQPath(t *testing.T) {
 	tmp := t.TempDir()
 	settingsPath := filepath.Join(tmp, "settings.json")
-	if err := InstallTrioHook(settingsPath, ""); err == nil {
+	if err := InstallDuoHook(settingsPath, ""); err == nil {
 		t.Errorf("expected error on empty botHQPath; got nil")
 	}
 }

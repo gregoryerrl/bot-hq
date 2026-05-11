@@ -24,7 +24,7 @@ import (
 )
 
 // decisionKeywordPattern matches the canonical decision-class signals
-// the trio uses in hub messages. Case-insensitive — the keywords are
+// the duo uses in hub messages. Case-insensitive — the keywords are
 // canonical-form in disc.go but some prose / summary content uses
 // lowercase variants.
 var decisionKeywordPattern = regexp.MustCompile(`(?i)\b(BRAIN-AGREED|GREENFLAG|HALT|SCOPE-LOCK)\b`)

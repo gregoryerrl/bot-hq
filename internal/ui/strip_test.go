@@ -186,7 +186,7 @@ func TestAgentTypeTier(t *testing.T) {
 		{protocol.AgentQA, 1},
 		{protocol.AgentVoice, 1},
 		{protocol.AgentDiscord, 2},
-		{protocol.AgentGemma, 2},
+		{protocol.AgentEmma, 2},
 		{protocol.AgentCoder, 3},
 		{protocol.AgentType("unknown"), 4},
 	}

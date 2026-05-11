@@ -21,7 +21,7 @@ func makeTestCL(t *testing.T) string {
 		t.Fatal(err)
 	}
 
-	// general.yaml — universal trio defaults
+	// general.yaml — universal duo defaults
 	generalYAML := `tone:
   reply: "compact + cite-anchored"
 greenlight:
@@ -314,5 +314,146 @@ func TestLoadBootstrap_NoAgentSkipsAgentSections(t *testing.T) {
 	md := bc.Markdown()
 	if strings.Contains(md, "Bootstrap context (agent=") {
 		t.Errorf("agent='' Markdown should not render agent header; got: %q", md[:200])
+	}
+}
+
+// Z-3 RenderSessionBootstrap tests — daemon-paste bootstrap with 25 KB
+// cap. Per architecture/sessions-as-containers.md "Bootstrap moves to
+// daemon" section.
+
+func TestRenderSessionBootstrap_HappyPath(t *testing.T) {
+	root := t.TempDir()
+	sid := "z-3-test-abc123"
+	agent := "brian"
+
+	// Session manifest with project + scope + pointer_list.
+	manifestDir := filepath.Join(root, "sessions", sid)
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `---
+id: ` + sid + `
+project: bot-hq
+scope: Z-3 sessions-as-containers test
+pointer_list:
+  - projects/bot-hq/architecture/sessions-as-containers.md
+  - projects/bot-hq/vision.md
+agents:
+  - brian
+  - rain
+status: active
+---
+
+session body
+`
+	if err := os.WriteFile(filepath.Join(manifestDir, "manifest.md"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Per-agent state slot.
+	agentDir := filepath.Join(manifestDir, agent)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "state.json"), []byte(`{"last_self_msg_id": 42}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Project library README.
+	projDir := filepath.Join(root, "projects", "bot-hq")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projDir, "README.md"), []byte("# bot-hq\n\nDuo orchestration.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := RenderSessionBootstrap(root, sid, agent)
+	if err != nil {
+		t.Fatalf("RenderSessionBootstrap: %v", err)
+	}
+
+	for _, want := range []string{
+		"## Session",
+		"id: " + sid,
+		"agent: brian",
+		"project: bot-hq",
+		"scope: Z-3 sessions-as-containers test",
+		"## Emma's pointers",
+		"projects/bot-hq/architecture/sessions-as-containers.md",
+		"## Per-agent state slot",
+		`"last_self_msg_id": 42`,
+		"## Project library",
+		"Duo orchestration.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("bootstrap missing %q", want)
+		}
+	}
+}
+
+func TestRenderSessionBootstrap_EnforcesCapWithTruncationMarker(t *testing.T) {
+	root := t.TempDir()
+	sid := "scope-overflow"
+	agent := "brian"
+
+	manifestDir := filepath.Join(root, "sessions", sid)
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, "manifest.md"), []byte("---\nid: "+sid+"\nproject: bot-hq\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stuff project README with 30 KB of content to force truncation.
+	projDir := filepath.Join(root, "projects", "bot-hq")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("OVERFLOW LINE PADDING TEXT\n", 1300) // ~36 KB
+	if err := os.WriteFile(filepath.Join(projDir, "README.md"), []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := RenderSessionBootstrap(root, sid, agent)
+	if err != nil {
+		t.Fatalf("RenderSessionBootstrap: %v", err)
+	}
+	if !strings.Contains(got, "[bootstrap truncated") {
+		t.Errorf("missing truncation marker in oversized render (len=%d)", len(got))
+	}
+	// Cap + small marker overhead, allow ±200 bytes slack.
+	if len(got) > SessionBootstrapCapBytes+200 {
+		t.Errorf("rendered bootstrap %d exceeds cap %d + slack", len(got), SessionBootstrapCapBytes+200)
+	}
+}
+
+func TestRenderSessionBootstrap_RequiresArgs(t *testing.T) {
+	cases := []struct {
+		name, root, sid, agent string
+	}{
+		{"empty root", "", "sid", "brian"},
+		{"empty sid", "/tmp", "", "brian"},
+		{"empty agent", "/tmp", "sid", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := RenderSessionBootstrap(tc.root, tc.sid, tc.agent); err == nil {
+				t.Errorf("expected error for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestRenderSessionBootstrap_AgnosticToMissingManifest(t *testing.T) {
+	// Edge: empty-session render (manifest doesn't exist yet). Returns
+	// minimal valid bootstrap with no project context. Fault-tree F16.
+	root := t.TempDir()
+	got, err := RenderSessionBootstrap(root, "fresh-session", "rain")
+	if err != nil {
+		t.Fatalf("RenderSessionBootstrap: %v", err)
+	}
+	if !strings.Contains(got, "id: fresh-session") {
+		t.Errorf("minimal-bootstrap missing session id; got %q", got)
 	}
 }

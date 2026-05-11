@@ -1,6 +1,6 @@
 // Package anthropic exposes a read-only client for the unauthenticated-by-
 // design Claude Code OAuth usage endpoint. Slice 5 C1 (H-32) wires this
-// into Emma's plan-usage producer so the trio can halt at 95% utilization
+// into Emma's plan-usage producer so the duo can halt at 95% utilization
 // before user-driven rebuild-for-autonomy.
 package anthropic
 

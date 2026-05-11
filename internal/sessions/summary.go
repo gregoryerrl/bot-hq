@@ -1,5 +1,5 @@
 // Phase W EOD summary aggregator: render all sessions matching a
-// date as an aggregated retrospective. Optimized for trio EOD-report
+// date as an aggregated retrospective. Optimized for duo EOD-report
 // generation — the agent reads this and weaves it into user-facing
 // EOD-voice content per feedback_eod_style.md.
 

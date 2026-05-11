@@ -3,7 +3,7 @@
 //
 // Resolution model (per docs/plans/2026-05-07-phase-n-v3.x-1.5-agent-consumption-design-spike.md §2.1):
 //
-//   - Layer 1: ~/.bot-hq/rules/general.yaml  — cross-project trio rules
+//   - Layer 1: ~/.bot-hq/rules/general.yaml  — cross-project duo rules
 //   - Layer 2: ~/.bot-hq/projects/<p>.yaml   — project-specific overrides
 //   - Layer 3: ~/.bot-hq/rules/agents/<a>.yaml — per-agent role + exec
 //

@@ -84,11 +84,11 @@ var busyMarkerLinePrefixes = []string{"Running…", "Working…"}
 // queues input to next-turn submit. False-busy degrades to queue-exhaust
 // + ledger spam (the H-22-bis incident: persistent INSERT-mode footer
 // `-- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)` broke the
-// last-line-suffix heuristic, classifying every trio agent as busy and
+// last-line-suffix heuristic, classifying every duo agent as busy and
 // exhausting every directed PM at 30/30). Pick the failure mode you can
 // survive.
 //
-// Trio runs with --dangerously-skip-permissions; coders inheriting via
+// Duo runs with --dangerously-skip-permissions; coders inheriting via
 // spawn-contract get the same. Pane-with-active-modal-prompt panes
 // (non-bypass coders) will be classified ready and may receive paste
 // into the modal — acceptable per spawn-contract baseline.

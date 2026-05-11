@@ -129,7 +129,7 @@ type AgentSnapshot struct {
 }
 
 // HubSnapshot is the account-scoped surface populated by Emma's
-// plan-usage producer (internal/gemma/plan_usage.go). The strip reads it
+// plan-usage producer (internal/emma/plan_usage.go). The strip reads it
 // for the right-aligned plan-% segment introduced by slice 5 C1 (H-32).
 type HubSnapshot struct {
 	// PlanUsagePct is the maximum utilization across the four oauth/usage

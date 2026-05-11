@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -56,14 +57,20 @@ func hubRegister(db *hub.DB) ToolDef {
 		// Meta via MCP, add an explicit tmux_target param to the tool schema rather
 		// than removing this preservation.
 		existing, _ := db.GetAgent(id)
+		// Z-3: bind agent to its containing session via BOT_HQ_SESSION_ID
+		// env (set at tmux spawn-time by the daemon's session_open hook).
+		// Empty env = global agent (emma, clive, discord) — leaves
+		// session_id empty per the Z-3 substrate restructure.
+		sessionID := os.Getenv("BOT_HQ_SESSION_ID")
 		agent := protocol.Agent{
-			ID:         id,
-			Name:       name,
-			Type:       agentType,
-			Status:     protocol.StatusOnline,
-			Project:    req.GetString("project", ""),
-			Meta:       existing.Meta,
-			Registered: time.Now(),
+			ID:             id,
+			Name:           name,
+			Type:           agentType,
+			Status:         protocol.StatusOnline,
+			Project:        req.GetString("project", ""),
+			Meta:           existing.Meta,
+			Registered:     time.Now(),
+			AgentSessionID: sessionID,
 		}
 
 		// Phase H slice 3 C3 (#2): atomic register + watermark. Returns the
@@ -150,14 +157,14 @@ func mergeAgentList(existing []string, id string) []string {
 // hubClearHalt is the explicit operator-invocable clear path for the
 // halt_state machine landed in Phase H slice 4 C6 (H-31). The default
 // halt-clear path is causality-only — set on Emma's context-cap flag, cleared
-// when the trio re-registers post-rebuild past set_at. This tool provides an
+// when the duo re-registers post-rebuild past set_at. This tool provides an
 // abort lever for the case where the operator wants to dismiss the halt
-// without restarting trio sessions (e.g. false-fire investigation, manual
+// without restarting duo sessions (e.g. false-fire investigation, manual
 // recovery). No args; idempotent — calling on an inactive halt returns
 // `not_active`.
 func hubClearHalt(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_clear_halt",
-		mcp.WithDescription("Manually clear an active halt_state without trio re-register. Use when an operator wants to abort the halt-all-work convention (e.g. false-fire, in-place recovery). The default halt-clear is causality-only via trio re-registration; this is the explicit override."),
+		mcp.WithDescription("Manually clear an active halt_state without duo re-register. Use when an operator wants to abort the halt-all-work convention (e.g. false-fire, in-place recovery). The default halt-clear is causality-only via duo re-registration; this is the explicit override."),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

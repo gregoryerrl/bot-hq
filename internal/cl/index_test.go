@@ -162,7 +162,7 @@ func TestIndexAll_writesTopLevelIndex(t *testing.T) {
 		t.Fatalf("top-level INDEX.md not written: %v", err)
 	}
 	got := string(data)
-	if !strings.Contains(got, "Bot-HQ — cross-project IPIV index") {
+	if !strings.Contains(got, "Bot-HQ — cross-project IPAV index") {
 		t.Errorf("top-level INDEX missing header")
 	}
 	if !strings.Contains(got, "[myproj](projects/myproj/INDEX.md)") {
@@ -170,7 +170,7 @@ func TestIndexAll_writesTopLevelIndex(t *testing.T) {
 	}
 }
 
-func TestIndexProject_ipivTasks(t *testing.T) {
+func TestIndexProject_ipavTasks(t *testing.T) {
 	root, c := setupIndexFixture(t)
 	taskDir := filepath.Join(root, "projects", "myproj", "tasks", "task-abc")
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
@@ -181,7 +181,7 @@ current_phase: investigate
 decision_class: medium
 opened_at: 2026-05-09T10:00:00Z
 `
-	if err := os.WriteFile(filepath.Join(taskDir, "ipiv-state.yaml"), []byte(stateYAML), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(taskDir, "ipav-state.yaml"), []byte(stateYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	rendered, _, err := c.IndexProject("myproj")
@@ -189,7 +189,7 @@ opened_at: 2026-05-09T10:00:00Z
 		t.Fatal(err)
 	}
 	if !strings.Contains(rendered, "task-abc") {
-		t.Errorf("active IPIV task not surfaced: %s", rendered)
+		t.Errorf("active IPAV task not surfaced: %s", rendered)
 	}
 	if !strings.Contains(rendered, "investigate") {
 		t.Errorf("phase not surfaced")

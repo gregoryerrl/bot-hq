@@ -1,7 +1,7 @@
 package daemoncron
 
 // Stale-coder surface — Phase S S-1a-2 (programmatic-move from
-// internal/gemma/stale_detect.go flagStaleAgent + checkStaleAgentsAt).
+// internal/emma/stale_detect.go flagStaleAgent + checkStaleAgentsAt).
 //
 // Cadence: 30s tick (mirrors gemma healthLoop pre-migration).
 //
@@ -58,7 +58,7 @@ const (
 
 // userHaltPatternRe matches the canonical user-HALT directive shape in
 // hub message content. Used by runStaleCoderSurface (Phase I W1b I-6 C1)
-// to suppress stale-checks while the trio is intentionally halted by user
+// to suppress stale-checks while the duo is intentionally halted by user
 // directive — agents are legitimately idle and stale-flag-fires would be
 // FPs. The check is content-pattern based rather than halt_state-based
 // because user-HALT is currently a content-only signal: no path

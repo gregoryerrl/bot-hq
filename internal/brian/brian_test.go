@@ -578,29 +578,34 @@ func TestBrianPromptContainsAsymmetricPivot(t *testing.T) {
 	}
 }
 
-// TestBrianStartupCLFirstBootstrap locks the Z-0 CL-first bootstrap
-// discipline into STARTUP step 1 per vision.md. Replaces the prior
-// H-19 bootstrap-iterate test (removed in Z-0): under the new model
-// agents bootstrap from durable CL state via bot_hq_agent_bootstrap,
-// not from hub_read backlog iteration. Substrings ratchet:
-//   - the bootstrap tool name (canonical entrypoint)
-//   - the project + agent param shape ("brian")
-//   - the explicit NO-BACKLOG-SCRAPE prohibition (anti-regression)
-//   - the vision.md citation (architectural anchor)
+// TestBrianStartupDaemonPasteBootstrap locks the Z-3 daemon-paste
+// bootstrap discipline into STARTUP step 1 per architecture/sessions-as-
+// containers.md "Bootstrap moves to daemon". Replaces the Z-0 CL-first
+// test: under the new model, bootstrap content is pasted by the daemon
+// into the agent's initial prompt at spawn-time — no bot_hq_agent_bootstrap
+// MCP call. Substrings ratchet:
+//   - daemon-paste anchor (canonical entrypoint)
+//   - BOT_HQ_SESSION_ID env binding
+//   - hub_register with session_id auto-tag
+//   - NO-BACKLOG-SCRAPE prohibition (anti-regression)
+//   - vision.md citation (architectural anchor)
+//   - sessions-as-containers anchor (Z-3 cite)
 func TestBrianStartupCLFirstBootstrap(t *testing.T) {
 	b := &Brian{}
 	prompt := b.initialPrompt()
 	want := []string{
-		"bot_hq_agent_bootstrap",
-		`agent="brian"`,
+		"daemon-paste",
+		"BOT_HQ_SESSION_ID",
+		`type="brian"`,
 		"NO BACKLOG SCRAPE",
 		"vision.md",
 		"agents are stateless",
 		"CL is durable",
+		"sessions-as-containers",
 	}
 	for _, w := range want {
 		if !strings.Contains(prompt, w) {
-			t.Errorf("initial prompt must contain Z-0 CL-first bootstrap literal %q", w)
+			t.Errorf("initial prompt must contain Z-3 daemon-paste bootstrap literal %q", w)
 		}
 	}
 
@@ -1064,5 +1069,32 @@ func TestFormatBatch_TwoMessagesGetBatchPrefix(t *testing.T) {
 	got := formatBatch([]string{"[HUB:rain] a", "[HUB:user] b"})
 	if !strings.HasPrefix(got, "[BATCH:2]\n") {
 		t.Errorf("2-msg batch should start with [BATCH:2]\\n; got %q", got)
+	}
+}
+
+// TestInitialPromptZ3DuoTerminology — Z-3 substring-lock: agent prompts
+// must cite the duo terminology (per architecture/sessions-as-containers.md
+// "duo, not trio" cleanup). Anti-regression-lock against trio reappearance.
+func TestInitialPromptZ3DuoTerminology(t *testing.T) {
+	b := &Brian{}
+	prompt := b.InitialPromptForTest()
+	for _, want := range []string{
+		"duo",
+		"IPAV-DISCIPLINE",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("brian initialPrompt missing Z-3 substring %q", want)
+		}
+	}
+	for _, banned := range []string{
+		"trio",
+		"TRIO",
+		"IPIV-DISCIPLINE",
+		"gemma",
+		"ollama",
+	} {
+		if strings.Contains(prompt, banned) {
+			t.Errorf("brian initialPrompt contains Z-3 anti-lock %q (must not reappear post-Z-3)", banned)
+		}
 	}
 }

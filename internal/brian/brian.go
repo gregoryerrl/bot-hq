@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/contextload"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	tmuxpkg "github.com/gregoryerrl/bot-hq/internal/tmux"
@@ -41,6 +42,13 @@ type Brian struct {
 	tmuxSession string
 	lastMsgID   int64
 
+	// sessionID is the Z-3 session-as-container binding. Set via
+	// SetSessionID before Start. Empty for legacy global-autostart spawn
+	// (Group E backward-compat); non-empty for hub_session_open spawn.
+	// Propagated as BOT_HQ_SESSION_ID env to the tmux session so
+	// hub_register auto-tags agents.session_id.
+	sessionID string
+
 	// sink wraps tmux pane delivery with isReady-check + retry-queue
 	// semantics shared with hub.dispatchToTmux. Constructed in Start()
 	// after the tmux session spawns; rebuilt in restart() with the new
@@ -71,6 +79,15 @@ func New(db *hub.DB, workDir string) *Brian {
 		stopCh:  make(chan struct{}),
 	}
 }
+
+// SetSessionID binds this Brian instance to a Z-3 session container.
+// Called by the daemon's session_open hook before Start; propagates as
+// BOT_HQ_SESSION_ID env and triggers daemon-paste bootstrap render at
+// spawn-time. Empty value = legacy global-autostart path (no binding).
+func (b *Brian) SetSessionID(sid string) { b.sessionID = sid }
+
+// SessionID returns this Brian's bound session_id (empty for global).
+func (b *Brian) SessionID() string { return b.sessionID }
 
 // Start spawns the Claude Code session in tmux and begins polling for messages.
 func (b *Brian) Start() error {
@@ -233,11 +250,17 @@ func (b *Brian) writeMCPConfig() error {
 // BOT_HQ_AGENT_ID consumed by internal/outboundhook/hook.go:88 for Stop-hook
 // agent attribution. Same pattern as internal/mcp/tools.go:774-778 (hub_spawn).
 func (b *Brian) newSessionArgs() []string {
-	return []string{
+	args := []string{
 		"new-session", "-d", "-s", b.tmuxSession,
 		"-c", b.workDir, "-x", "200", "-y", "50",
 		"-e", "BOT_HQ_AGENT_ID=" + agentID,
 	}
+	// Z-3 session-as-containers: propagate BOT_HQ_SESSION_ID env when
+	// this Brian is bound to a session (hub_session_open spawn path).
+	if b.sessionID != "" {
+		args = append(args, "-e", "BOT_HQ_SESSION_ID="+b.sessionID)
+	}
+	return args
 }
 
 // spawnTmux creates a new tmux session running Claude Code with the brian prompt.
@@ -262,8 +285,15 @@ func (b *Brian) spawnTmux() error {
 	// Wait for Claude to initialize
 	time.Sleep(3 * time.Second)
 
-	// Send the initial brian prompt
+	// Send the initial brian prompt with daemon-paste bootstrap prepended
+	// when bound to a session (Z-3 sessions-as-containers).
 	prompt := b.initialPrompt()
+	if b.sessionID != "" {
+		canonRoot, _ := protocol.CanonRoot()
+		if bs, bsErr := contextload.RenderSessionBootstrap(canonRoot, b.sessionID, agentID); bsErr == nil && bs != "" {
+			prompt = "# DAEMON-PASTE BOOTSTRAP (Z-3 sessions-as-containers)\n\n" + bs + "\n\n---\n\n" + prompt
+		}
+	}
 	if err := tmuxpkg.SendKeys(b.tmuxSession, prompt, true); err != nil {
 		return fmt.Errorf("tmux send prompt: %w", err)
 	}
@@ -276,9 +306,9 @@ func (b *Brian) InitialPromptForTest() string { return b.initialPrompt() }
 
 // initialPrompt returns the system prompt that tells Claude how to be the brian.
 func (b *Brian) initialPrompt() string {
-	return `You are Brian (agent ID "brian"), the bot-hq orchestrator. Agents: Clive (voice, ID "clive"), Rain (QA, ID "rain").
+	return `You are Brian (agent ID "brian"), the HANDS half of bot-hq's BRAIN-duo (Brian + Rain bilateral cognitive engine, per-session). Agents in scope: Rain (EYES half of duo, ID "rain"), Emma (global stateless meta-orchestrator, ID "emma"), Clive (voice, ID "clive").
 
-STARTUP (Z-0 CL-first per vision.md "agents are stateless; CL is durable"): 1) Call mcp__bot-hq__bot_hq_agent_bootstrap with project="bot-hq", agent="brian" — returns the durable substrate snapshot (merged rules + project library + active phase doc + ratchets/active.md + last_state.json + discipline-anchors.md). This is your resume context. 2) hub_register id="brian", name="Brian", type="brian". 3) hub_flag anything in the bootstrap snapshot needing immediate user attention (startup carve-out: Rain not yet registered, self-flag is implicit per H-2). 4) Announce online via hub_send broadcast. When pivoting to a different project, re-call bot_hq_agent_bootstrap with that project key.
+STARTUP (Z-3 daemon-paste bootstrap per architecture/sessions-as-containers.md "Bootstrap moves to daemon" — extends Z-0 CL-first principle per vision.md that "agents are stateless; CL is durable"): your session-scoped bootstrap (session manifest + per-agent state slot + project library + discipline anchors) is pasted by the daemon into this prompt at spawn-time — no bootstrap MCP call needed. BOT_HQ_SESSION_ID env binds you to the containing session. 1) hub_register id="brian", name="Brian", type="brian" (session_id auto-tags from env). 2) hub_flag anything in the bootstrap requiring immediate user attention (startup carve-out: Rain not yet registered, self-flag is implicit per H-2). 3) Announce online via hub_send broadcast. For cross-project read after spawn, use bot_hq_context_load (different lifecycle from spawn-time bootstrap).
 
 NO BACKLOG SCRAPE: Do NOT iterate hub_read for catch-up at startup. The CL bootstrap snapshot carries durable state; live messages flow via the daemon's polling forwarder going forward. If you need a specific past message after bootstrap, hub_read with a precise since_id from your last_state.json — do not iterate the whole backlog.
 
@@ -342,7 +372,7 @@ RULES:
 
 ` + protocol.PhaseSv2IgnoreNoiseDiscipline + `
 
-` + protocol.PhaseYv1IPIVDiscipline + `
+` + protocol.PhaseYv1IPAVDiscipline + `
 
 ` + protocol.IdSessionsSkillPointer + `
 

@@ -15,7 +15,7 @@ type Config struct {
 	Discord DiscordConfig `toml:"discord"`
 	Brian   BrianConfig   `toml:"brian"`
 	Rain    RainConfig    `toml:"rain"`
-	Gemma   GemmaConfig   `toml:"gemma"`
+	Emma    EmmaConfig    `toml:"emma"`
 }
 
 type HubConfig struct {
@@ -41,6 +41,13 @@ type DiscordConfig struct {
 	HubChannelID      string `toml:"hub_channel_id"`
 	FlagsChannelID    string `toml:"flags_channel_id"`
 	SessionsChannelID string `toml:"sessions_channel_id"`
+	// MonitorChannelID is the Z-3 sticky #bot-hq-monitor cross-session
+	// global feed channel. Receives emma globals + [HR]/Flag/Tag cross-
+	// cuts. Per architecture/sessions-as-containers.md "Per-project
+	// channels + per-session threads" section. Per-project channels are
+	// discovered by name-matching against projects/<key>.yaml at bot
+	// startup (not statically configured here).
+	MonitorChannelID string `toml:"monitor_channel_id"`
 }
 
 type BrianConfig struct {
@@ -53,7 +60,13 @@ type RainConfig struct {
 	WorkDir   string `toml:"work_dir"`
 }
 
-type GemmaConfig struct {
+// EmmaConfig configures emma the global meta-orchestrator. Z-3 renamed
+// from GemmaConfig; legacy fields kept for read-back-compat with existing
+// config.toml files that pre-date the rename. Model/OllamaURL are
+// effectively dead post-Z-3 (emma is a Claude Code instance configured
+// for DeepSeek-V4-Pro via R51+R52, not an Ollama agent) but preserved
+// to avoid TOML parse-failures on legacy config files.
+type EmmaConfig struct {
 	AutoStart     bool   `toml:"auto_start"`
 	Model         string `toml:"model"`
 	OllamaURL     string `toml:"ollama_url"`
@@ -125,6 +138,7 @@ var EditableSettings = []SettingKey{
 	{Key: "discord.hub_channel_id", Label: "Hub Channel ID", Section: "DISCORD"},
 	{Key: "discord.flags_channel_id", Label: "Flags Channel ID", Section: "DISCORD"},
 	{Key: "discord.sessions_channel_id", Label: "Sessions Channel ID", Section: "DISCORD"},
+	{Key: "discord.monitor_channel_id", Label: "Monitor Channel ID (Z-3 sticky #bot-hq-monitor)", Section: "DISCORD"},
 	{Key: "clive.gemini_api_key", Label: "Gemini Key", Section: "CLIVE", IsSecret: true},
 	{Key: "clive.voice", Label: "Voice", Section: "CLIVE"},
 	{Key: "hub.clive_port", Label: "Clive Port", Section: "HUB"},
@@ -132,9 +146,8 @@ var EditableSettings = []SettingKey{
 	{Key: "brian.work_dir", Label: "Work Dir", Section: "BRIAN"},
 	{Key: "rain.auto_start", Label: "Auto-start", Section: "RAIN"},
 	{Key: "rain.work_dir", Label: "Work Dir", Section: "RAIN"},
-	{Key: "gemma.auto_start", Label: "Auto-start", Section: "GEMMA"},
-	{Key: "gemma.model", Label: "Model", Section: "GEMMA"},
-	{Key: "gemma.ollama_url", Label: "Ollama URL", Section: "GEMMA"},
+	{Key: "emma.auto_start", Label: "Auto-start", Section: "EMMA"},
+	{Key: "emma.model", Label: "Model", Section: "EMMA"},
 }
 
 // ApplyDBSettings overlays DB settings onto the config.
@@ -159,6 +172,8 @@ func (cfg *Config) ApplyDBSettings(db *DB) {
 			cfg.Discord.FlagsChannelID = v
 		case "discord.sessions_channel_id":
 			cfg.Discord.SessionsChannelID = v
+		case "discord.monitor_channel_id":
+			cfg.Discord.MonitorChannelID = v
 		case "clive.gemini_api_key":
 			cfg.Clive.GeminiAPIKey = v
 		case "clive.voice":
@@ -175,12 +190,10 @@ func (cfg *Config) ApplyDBSettings(db *DB) {
 			cfg.Rain.AutoStart = v == "true"
 		case "rain.work_dir":
 			cfg.Rain.WorkDir = v
-		case "gemma.auto_start":
-			cfg.Gemma.AutoStart = v == "true"
-		case "gemma.model":
-			cfg.Gemma.Model = v
-		case "gemma.ollama_url":
-			cfg.Gemma.OllamaURL = v
+		case "emma.auto_start":
+			cfg.Emma.AutoStart = v == "true"
+		case "emma.model":
+			cfg.Emma.Model = v
 		}
 	}
 }
@@ -198,6 +211,8 @@ func (cfg *Config) GetSettingValue(key string) string {
 		return cfg.Discord.FlagsChannelID
 	case "discord.sessions_channel_id":
 		return cfg.Discord.SessionsChannelID
+	case "discord.monitor_channel_id":
+		return cfg.Discord.MonitorChannelID
 	case "clive.gemini_api_key":
 		return cfg.Clive.GeminiAPIKey
 	case "clive.voice":
@@ -218,15 +233,13 @@ func (cfg *Config) GetSettingValue(key string) string {
 		return "false"
 	case "rain.work_dir":
 		return cfg.Rain.WorkDir
-	case "gemma.auto_start":
-		if cfg.Gemma.AutoStart {
+	case "emma.auto_start":
+		if cfg.Emma.AutoStart {
 			return "true"
 		}
 		return "false"
-	case "gemma.model":
-		return cfg.Gemma.Model
-	case "gemma.ollama_url":
-		return cfg.Gemma.OllamaURL
+	case "emma.model":
+		return cfg.Emma.Model
 	default:
 		return ""
 	}

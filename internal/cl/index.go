@@ -13,8 +13,8 @@
 //     conventions/       # coding/git conventions
 //     glossary/          # domain terms
 //     audit-notes/       # past audit findings + open known issues
-//     plans/             # ad-hoc plan docs (non-IPIV-task scoped)
-//     tasks/             # IPIV per-task subtree (managed by hub_ipiv_*)
+//     plans/             # ad-hoc plan docs (non-IPAV-task scoped)
+//     tasks/             # IPAV per-task subtree (managed by hub_ipav_*)
 //     eod/               # user-facing EOD clips
 //     clips/             # user-message clips
 //
@@ -44,8 +44,8 @@ type IndexFrontmatter struct {
 	Generator          string    `yaml:"generator"`
 	SchemaVersion      int       `yaml:"schema_version"`
 	TotalArtifacts     int       `yaml:"total_artifacts,omitempty"`
-	IPIVTasksOpen      int       `yaml:"ipiv_tasks_open"`
-	IPIVTasksClosed30d int       `yaml:"ipiv_tasks_closed_30d"`
+	IPAVTasksOpen      int       `yaml:"ipav_tasks_open"`
+	IPAVTasksClosed30d int       `yaml:"ipav_tasks_closed_30d"`
 }
 
 // IndexSchemaVersion bumps when frontmatter shape changes incompatibly.
@@ -74,7 +74,7 @@ var subdirDescription = map[string]string{
 	"glossary":     "Domain terms + acronyms.",
 	"audit-notes":  "Past audit findings + open known issues.",
 	"plans":        "In-flight + completed planning docs.",
-	"tasks":        "IPIV per-task subtree (managed by hub_ipiv_*).",
+	"tasks":        "IPAV per-task subtree (managed by hub_ipav_*).",
 	"eod":          "End-of-day clips (user-facing).",
 	"clips":        "User-message + paste-back clips.",
 }
@@ -154,9 +154,9 @@ func (c *CL) renderProjectIndex(project, projDir string) (string, error) {
 		totalArtifacts += len(filtered)
 	}
 
-	openTasks, closed30dTasks, err := c.scanIPIVTasks(project, projDir)
+	openTasks, closed30dTasks, err := c.scanIPAVTasks(project, projDir)
 	if err != nil {
-		return "", fmt.Errorf("scan IPIV tasks: %w", err)
+		return "", fmt.Errorf("scan IPAV tasks: %w", err)
 	}
 
 	fm := IndexFrontmatter{
@@ -165,8 +165,8 @@ func (c *CL) renderProjectIndex(project, projDir string) (string, error) {
 		Generator:          "bot-hq cl-index",
 		SchemaVersion:      IndexSchemaVersion,
 		TotalArtifacts:     totalArtifacts,
-		IPIVTasksOpen:      len(openTasks),
-		IPIVTasksClosed30d: len(closed30dTasks),
+		IPAVTasksOpen:      len(openTasks),
+		IPAVTasksClosed30d: len(closed30dTasks),
 	}
 
 	var b strings.Builder
@@ -192,8 +192,8 @@ func (c *CL) renderProjectIndex(project, projDir string) (string, error) {
 	}
 	b.WriteString("\n")
 
-	// IPIV tasks
-	b.WriteString("## Active IPIV tasks\n\n")
+	// IPAV tasks
+	b.WriteString("## Active IPAV tasks\n\n")
 	if len(openTasks) == 0 {
 		b.WriteString("(none)\n\n")
 	} else {
@@ -205,7 +205,7 @@ func (c *CL) renderProjectIndex(project, projDir string) (string, error) {
 		b.WriteString("\n")
 	}
 
-	b.WriteString("## Recently closed IPIV tasks (last 30 days)\n\n")
+	b.WriteString("## Recently closed IPAV tasks (last 30 days)\n\n")
 	if len(closed30dTasks) == 0 {
 		b.WriteString("(none)\n\n")
 	} else {
@@ -232,8 +232,8 @@ func (c *CL) renderProjectIndex(project, projDir string) (string, error) {
 			b.WriteString("\n\n")
 		}
 		if s.Name == "tasks" {
-			// IPIV tasks rendered above; subdir listing here would duplicate.
-			b.WriteString("(see Active IPIV tasks + Recently closed sections above)\n\n")
+			// IPAV tasks rendered above; subdir listing here would duplicate.
+			b.WriteString("(see Active IPAV tasks + Recently closed sections above)\n\n")
 			continue
 		}
 		if len(s.Files) == 0 {
@@ -282,15 +282,15 @@ func (c *CL) renderProjectIndex(project, projDir string) (string, error) {
 		}
 	}
 
-	b.WriteString("## Cross-project IPIV index\n\n")
-	b.WriteString("See `~/.bot-hq/INDEX.md` for active + recently-closed IPIV tasks across all projects.\n")
+	b.WriteString("## Cross-project IPAV index\n\n")
+	b.WriteString("See `~/.bot-hq/INDEX.md` for active + recently-closed IPAV tasks across all projects.\n")
 
 	return b.String(), nil
 }
 
-// IPIVTaskRow is a row in the cross-project IPIV index. Fields kept
+// IPAVTaskRow is a row in the cross-project IPAV index. Fields kept
 // minimal — the per-task subtree carries the full record.
-type IPIVTaskRow struct {
+type IPAVTaskRow struct {
 	Project       string
 	TaskID        string
 	CurrentPhase  string
@@ -300,9 +300,9 @@ type IPIVTaskRow struct {
 	Result        string
 }
 
-// scanIPIVTasks walks projects/<project>/tasks/<task-id>/ipiv-state.yaml
+// scanIPAVTasks walks projects/<project>/tasks/<task-id>/ipav-state.yaml
 // and partitions into (open, closed-within-30-days).
-func (c *CL) scanIPIVTasks(project, projDir string) (open, recent []IPIVTaskRow, err error) {
+func (c *CL) scanIPAVTasks(project, projDir string) (open, recent []IPAVTaskRow, err error) {
 	tasksDir := filepath.Join(projDir, "tasks")
 	entries, err := os.ReadDir(tasksDir)
 	if err != nil {
@@ -317,7 +317,7 @@ func (c *CL) scanIPIVTasks(project, projDir string) (open, recent []IPIVTaskRow,
 			continue
 		}
 		taskID := e.Name()
-		row, ok, err := loadIPIVTaskRow(project, filepath.Join(tasksDir, taskID))
+		row, ok, err := loadIPAVTaskRow(project, filepath.Join(tasksDir, taskID))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -336,16 +336,16 @@ func (c *CL) scanIPIVTasks(project, projDir string) (open, recent []IPIVTaskRow,
 	return open, recent, nil
 }
 
-// loadIPIVTaskRow reads ipiv-state.yaml and projects to a flat row.
+// loadIPAVTaskRow reads ipav-state.yaml and projects to a flat row.
 // Returns ok=false if the state file is missing (orphaned task dir).
-func loadIPIVTaskRow(project, taskDir string) (IPIVTaskRow, bool, error) {
-	statePath := filepath.Join(taskDir, "ipiv-state.yaml")
+func loadIPAVTaskRow(project, taskDir string) (IPAVTaskRow, bool, error) {
+	statePath := filepath.Join(taskDir, "ipav-state.yaml")
 	data, err := os.ReadFile(statePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return IPIVTaskRow{}, false, nil
+			return IPAVTaskRow{}, false, nil
 		}
-		return IPIVTaskRow{}, false, err
+		return IPAVTaskRow{}, false, err
 	}
 	var raw struct {
 		TaskID         string    `yaml:"task_id"`
@@ -356,9 +356,9 @@ func loadIPIVTaskRow(project, taskDir string) (IPIVTaskRow, bool, error) {
 		VerifyResult   string    `yaml:"verify_result"`
 	}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return IPIVTaskRow{}, false, fmt.Errorf("parse %s: %w", statePath, err)
+		return IPAVTaskRow{}, false, fmt.Errorf("parse %s: %w", statePath, err)
 	}
-	return IPIVTaskRow{
+	return IPAVTaskRow{
 		Project:       project,
 		CurrentPhase:  raw.CurrentPhase,
 		DecisionClass: raw.DecisionClass,
@@ -369,7 +369,7 @@ func loadIPIVTaskRow(project, taskDir string) (IPIVTaskRow, bool, error) {
 }
 
 // IndexAll regenerates INDEX.md for every project under projects/<p>/
-// AND emits a top-level ~/.bot-hq/INDEX.md cross-project IPIV index.
+// AND emits a top-level ~/.bot-hq/INDEX.md cross-project IPAV index.
 // Returns the list of project keys whose INDEX.md actually changed +
 // whether the top-level INDEX.md changed.
 func (c *CL) IndexAll() (changedProjects []string, topChanged bool, err error) {
@@ -419,13 +419,13 @@ func (c *CL) ListProjects() ([]string, error) {
 	return out, nil
 }
 
-// indexTopLevel writes ~/.bot-hq/INDEX.md aggregating IPIV tasks across
+// indexTopLevel writes ~/.bot-hq/INDEX.md aggregating IPAV tasks across
 // all projects. Returns whether the on-disk file changed.
 func (c *CL) indexTopLevel(projects []string) (bool, error) {
-	var allOpen, allRecent []IPIVTaskRow
+	var allOpen, allRecent []IPAVTaskRow
 	for _, p := range projects {
 		projDir := filepath.Join(c.root, "projects", p)
-		open, recent, err := c.scanIPIVTasks(p, projDir)
+		open, recent, err := c.scanIPAVTasks(p, projDir)
 		if err != nil {
 			return false, fmt.Errorf("scan %s: %w", p, err)
 		}
@@ -439,14 +439,14 @@ func (c *CL) indexTopLevel(projects []string) (bool, error) {
 		Project:            "(all)",
 		Generator:          "bot-hq cl-index --all",
 		SchemaVersion:      IndexSchemaVersion,
-		IPIVTasksOpen:      len(allOpen),
-		IPIVTasksClosed30d: len(allRecent),
+		IPAVTasksOpen:      len(allOpen),
+		IPAVTasksClosed30d: len(allRecent),
 	}
 	if err := writeFrontmatter(&b, fm); err != nil {
 		return false, err
 	}
 
-	b.WriteString("# Bot-HQ — cross-project IPIV index\n\n")
+	b.WriteString("# Bot-HQ — cross-project IPAV index\n\n")
 	b.WriteString("Auto-generated. Regenerate via `bot-hq cl-index --all`.\n\n")
 	b.WriteString("Per-project library indexes live at `~/.bot-hq/projects/<project>/INDEX.md`.\n\n")
 
@@ -456,7 +456,7 @@ func (c *CL) indexTopLevel(projects []string) (bool, error) {
 	}
 	b.WriteString("\n")
 
-	b.WriteString("## Active IPIV tasks (all projects)\n\n")
+	b.WriteString("## Active IPAV tasks (all projects)\n\n")
 	if len(allOpen) == 0 {
 		b.WriteString("(none)\n\n")
 	} else {

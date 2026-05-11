@@ -243,7 +243,7 @@ func (db *DB) HasRecentMessageFrom(fromAgent string, since time.Time) (bool, err
 // GetLatestMessageFrom returns the most recent message from the given
 // agent, or (Message{}, false, nil) if no message exists. Used by Emma's
 // stale-coder detection (Phase I I-6 C1) to check whether the latest user
-// message is a HALT directive — if so, the trio is intentionally idle and
+// message is a HALT directive — if so, the duo is intentionally idle and
 // stale-checks must suppress until user emits a non-HALT directive.
 func (db *DB) GetLatestMessageFrom(fromAgent string) (protocol.Message, bool, error) {
 	var m protocol.Message

@@ -286,7 +286,7 @@ func (b *Bot) forwardToDiscord(ch <-chan protocol.Message) {
 const (
 	colorFlagRed         = 0xed4245 // Discord danger
 	colorErrorRed        = 0xed4245 // same as flag; disambiguated by title
-	colorHRPink          = 0xeb459e // high-relevance trio-consensus
+	colorHRPink          = 0xeb459e // high-relevance duo-consensus
 	colorResultGreen     = 0x57f287 // Discord success
 	colorCommandYellow   = 0xfee75c // Discord warning
 	colorResponseBlurple = 0x5865f2 // Discord brand

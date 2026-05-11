@@ -30,7 +30,7 @@ func SettingsHookCommand(botHQPath string) string {
 	return botHQPath + " " + hookCommandSuffix
 }
 
-// InstallTrioHook installs the SessionStart hook into the given
+// InstallDuoHook installs the SessionStart hook into the given
 // settings.json path. Idempotent: an entry whose command exactly
 // matches SettingsHookCommand(botHQPath) is left alone. Non-clobbering:
 // other SessionStart entries (different commands), other matchers, and
@@ -38,11 +38,11 @@ func SettingsHookCommand(botHQPath string) string {
 // created. Invalid JSON → error (caller surfaces; no silent rewrite-
 // corrupt).
 //
-// Naming mirrors outboundhook.InstallTrioHook + voicemirror.InstallTrioHook
-// (each package's primary trio installer is named "InstallTrioHook" by
+// Naming mirrors outboundhook.InstallDuoHook + voicemirror.InstallDuoHook
+// (each package's primary duo installer is named "InstallDuoHook" by
 // convention). SessionStart hook activation requires Claude session-
 // restart per Phase L Finding-3 (settings.json not hot-reloaded).
-func InstallTrioHook(settingsPath, botHQPath string) error {
+func InstallDuoHook(settingsPath, botHQPath string) error {
 	if settingsPath == "" {
 		return errors.New("install-session-start-hook: settings path required")
 	}

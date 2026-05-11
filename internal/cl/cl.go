@@ -3,7 +3,7 @@
 // (internal Go-code identifier: canonical-store). This package exposes
 // CL artifacts via Go API for consumption by:
 //
-//   - T-1.7 IPIV-state-tracking schema in CL
+//   - T-1.7 IPAV-state-tracking schema in CL
 //   - T-1.8 cross-reference graph
 //   - T-1.10 discoverability + indexing
 //   - T-2 investigator-toolset (cluster D + E)
@@ -29,7 +29,7 @@
 //     - voice-mirror-log.md               — R40 hook log
 //     - arcs-index.md                     — phase-arc snapshot pointers
 //     - conventions-index.md              — convention pointers
-//     - tasks/<task-id>/                  — IPIV task artifacts
+//     - tasks/<task-id>/                  — IPAV task artifacts
 //     - README.md / INDEX.md              — project library
 //
 // Excluded from CL (per Phase R R3-b conventions):
@@ -62,7 +62,7 @@ const (
 	ClassDisciplineLog  Class = "discipline-log"
 	ClassTasks          Class = "tasks"
 	ClassReference      Class = "reference"
-	ClassIPIVState      Class = "ipiv-state" // T-1.7 sub-class
+	ClassIPAVState      Class = "ipav-state" // T-1.7 sub-class
 	ClassUnknown        Class = "unknown"
 )
 
@@ -160,9 +160,9 @@ func (c *CL) PathFor(class Class, project, id string) (string, error) {
 		return filepath.Join(c.root, "rules", id+".yaml"), nil
 	case ClassSession:
 		return filepath.Join(c.root, "sessions", id, "manifest.md"), nil
-	case ClassIPIVState:
+	case ClassIPAVState:
 		// id format: "<project>/<task-id>"
-		return filepath.Join(c.root, "projects", id, "ipiv-state.yaml"), nil
+		return filepath.Join(c.root, "projects", id, "ipav-state.yaml"), nil
 	default:
 		return "", fmt.Errorf("%w: %s", ErrUnsupportedClass, class)
 	}
@@ -287,7 +287,7 @@ func (c *CL) Walk(visit func(*Artifact) error) error {
 }
 
 // LoadAgentState convenience helper: reads + JSON-decodes an agent's
-// last_state.json into a generic map. T-1.7 IPIV-state-tracking will add
+// last_state.json into a generic map. T-1.7 IPAV-state-tracking will add
 // a typed variant.
 func (c *CL) LoadAgentState(agentID string) (map[string]interface{}, error) {
 	a, err := c.Get(ClassAgentState, "", agentID)
@@ -389,7 +389,7 @@ func (c *CL) detectClass(path string) Class {
 		// projects/<project>/phase/<id>.md → ClassPhase
 		// projects/<project>/ratchets/<id>.md → ClassRatchet
 		// projects/<project>/discipline-log.md → ClassDisciplineLog
-		// projects/<project>/<task-id>/ipiv-state.yaml → ClassIPIVState
+		// projects/<project>/<task-id>/ipav-state.yaml → ClassIPAVState
 		// Other projects/<project>/* → ClassProject
 		if len(parts) >= 4 && parts[2] == "phase" && strings.HasSuffix(parts[len(parts)-1], ".md") {
 			return ClassPhase
@@ -400,8 +400,8 @@ func (c *CL) detectClass(path string) Class {
 		if len(parts) == 3 && parts[2] == "discipline-log.md" {
 			return ClassDisciplineLog
 		}
-		if len(parts) > 2 && strings.HasSuffix(parts[len(parts)-1], "ipiv-state.yaml") {
-			return ClassIPIVState
+		if len(parts) > 2 && strings.HasSuffix(parts[len(parts)-1], "ipav-state.yaml") {
+			return ClassIPAVState
 		}
 		return ClassProject
 	case "discipline-log.md":

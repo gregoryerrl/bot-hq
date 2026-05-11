@@ -53,7 +53,7 @@ func TestSaveLoad_roundTrip(t *testing.T) {
 
 	original, _ := NewSoloPlan("task-1", "brian", "T-3 plan", "Implement plan primitives")
 	original.AddStep("Sketch primitives", "design Plan struct + step API", nil)
-	original.AddCiteAnchor("internal/cl/ipiv_runtime.go")
+	original.AddCiteAnchor("internal/cl/ipav_runtime.go")
 
 	if err := original.Save(path); err != nil {
 		t.Fatalf("Save: %v", err)

@@ -330,12 +330,12 @@ func TestRunHookDedupSuppressesRepeat(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHookFreshFile locks: missing settings.json → created
+// TestInstallDuoHookFreshFile locks: missing settings.json → created
 // with our hook entry only.
-func TestInstallTrioHookFreshFile(t *testing.T) {
+func TestInstallDuoHookFreshFile(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, ".claude", "settings.json")
-	if err := InstallTrioHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
+	if err := InstallDuoHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(settingsPath)
@@ -353,15 +353,15 @@ func TestInstallTrioHookFreshFile(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHookIdempotent locks: running twice must not duplicate
+// TestInstallDuoHookIdempotent locks: running twice must not duplicate
 // the entry.
-func TestInstallTrioHookIdempotent(t *testing.T) {
+func TestInstallDuoHookIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
-	if err := InstallTrioHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
+	if err := InstallDuoHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
 		t.Fatal(err)
 	}
-	if err := InstallTrioHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
+	if err := InstallDuoHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(settingsPath)
@@ -374,9 +374,9 @@ func TestInstallTrioHookIdempotent(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHookPreservesUnrelatedHook locks: existing user hooks
+// TestInstallDuoHookPreservesUnrelatedHook locks: existing user hooks
 // (other matchers, other event types) must be preserved verbatim.
-func TestInstallTrioHookPreservesUnrelatedHook(t *testing.T) {
+func TestInstallDuoHookPreservesUnrelatedHook(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	existing := map[string]any{
@@ -402,7 +402,7 @@ func TestInstallTrioHookPreservesUnrelatedHook(t *testing.T) {
 	data, _ := json.MarshalIndent(existing, "", "  ")
 	os.WriteFile(settingsPath, data, 0o600)
 
-	if err := InstallTrioHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
+	if err := InstallDuoHook(settingsPath, "/usr/local/bin/bot-hq"); err != nil {
 		t.Fatal(err)
 	}
 	final, _ := os.ReadFile(settingsPath)
@@ -444,14 +444,14 @@ func TestInstallTrioHookPreservesUnrelatedHook(t *testing.T) {
 	}
 }
 
-// TestInstallTrioHookInvalidJSONReturnsError locks the no-silent-corrupt
+// TestInstallDuoHookInvalidJSONReturnsError locks the no-silent-corrupt
 // contract: invalid JSON → error, no rewrite.
-func TestInstallTrioHookInvalidJSONReturnsError(t *testing.T) {
+func TestInstallDuoHookInvalidJSONReturnsError(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
 	os.WriteFile(settingsPath, []byte("{ this is not json"), 0o600)
 
-	err := InstallTrioHook(settingsPath, "/usr/local/bin/bot-hq")
+	err := InstallDuoHook(settingsPath, "/usr/local/bin/bot-hq")
 	if err == nil {
 		t.Fatal("expected error on invalid JSON, got nil")
 	}

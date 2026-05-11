@@ -19,7 +19,7 @@ func SettingsHookCommand(botHQPath string) string {
 	return botHQPath + " " + hookCommandSuffix
 }
 
-// InstallTrioHook installs the K-16 PreToolUse class-split gate hook
+// InstallDuoHook installs the K-16 PreToolUse class-split gate hook
 // into the given settings.json path. Idempotent: a PreToolUse-Bash hook
 // with the exact same command string is left alone. Non-clobbering:
 // existing unrelated hooks (other PreToolUse matchers, other event
@@ -30,9 +30,9 @@ func SettingsHookCommand(botHQPath string) string {
 // installed hook references a stable location regardless of $PATH state
 // at hook-fire time.
 //
-// Phase K K-16 — mirrors outboundhook.InstallTrioHook pattern (Stop
+// Phase K K-16 — mirrors outboundhook.InstallDuoHook pattern (Stop
 // hook) for the PreToolUse / Bash class-split gate.
-func InstallTrioHook(settingsPath, botHQPath string) error {
+func InstallDuoHook(settingsPath, botHQPath string) error {
 	if settingsPath == "" {
 		return errors.New("install-toolgate-hook: settings path required")
 	}

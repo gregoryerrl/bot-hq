@@ -20,6 +20,14 @@ type SessionSelected struct {
 }
 
 // SessionsTab displays a list of active and recent sessions.
+//
+// Z-3 sessions-as-containers: sessions are scope-keyed (slug-uuid), not
+// date-keyed. The per-session interactive view (input → BRAIN-duo of
+// focused session; nested tabs for active sessions) is a Z-3-follow-up
+// landing in a subsequent commit — Z-3 ships the substrate (manifest +
+// MCP tools + bootstrap) and minimal UI awareness here; full TUI
+// retargeting (per-session input box, agents-strip, focused-session
+// state) is deferred to keep Z-3 within atomic-commit scope.
 type SessionsTab struct {
 	sessions []protocol.Session
 	width    int

@@ -770,10 +770,10 @@ func TestVoiceMirrorDisciplineSubstringLock(t *testing.T) {
 		"VOICE-MIRROR-DISCIPLINE (R40)",
 		"user-facing artifact",
 		"user's voice",
-		"trio operational voice",
+		"duo operational voice",
 		"Antipattern",
 		"EOD report",
-		"trio-operational-jargon",
+		"duo-operational-jargon",
 		"Discriminator at Write-tool-fire time",
 		"PreToolUse-hook (alert-only, NOT blocking)",
 		"internal/voicemirror/hook.go",
@@ -942,20 +942,20 @@ func TestPhaseRv3AutoBoundaryDisciplineHeaderAnchor(t *testing.T) {
 	}
 }
 
-// TestPhaseYv1IPIVDisciplineSubstringLock locks load-bearing recognition
-// substrings on the Phase Y-2 IPIV rule. Anchors the tool-surface names,
+// TestPhaseYv1IPAVDisciplineSubstringLock locks load-bearing recognition
+// substrings on the Phase Y-2 IPAV rule. Anchors the tool-surface names,
 // decision-class discriminator, valid phase transitions, and terminal vs
 // loop-back result semantics. Mirrors the established pattern.
-func TestPhaseYv1IPIVDisciplineSubstringLock(t *testing.T) {
+func TestPhaseYv1IPAVDisciplineSubstringLock(t *testing.T) {
 	must := []string{
-		"IPIV-DISCIPLINE (Phase Y-2)",
+		"IPAV-DISCIPLINE (Phase Y-2)",
 		"medium decision-class",
-		"bot_hq_ipiv_open",
-		"bot_hq_ipiv_set_artifact",
-		"bot_hq_ipiv_transition",
-		"bot_hq_ipiv_complete",
+		"bot_hq_ipav_open",
+		"bot_hq_ipav_set_artifact",
+		"bot_hq_ipav_transition",
+		"bot_hq_ipav_complete",
 		// Decision-class discriminator
-		"low / routine = skip IPIV",
+		"low / routine = skip IPAV",
 		"medium = bilateral",
 		"high = same as medium",
 		// Phase transitions
@@ -972,15 +972,15 @@ func TestPhaseYv1IPIVDisciplineSubstringLock(t *testing.T) {
 	}
 	for _, lit := range must {
 		t.Run(lit, func(t *testing.T) {
-			if !strings.Contains(PhaseYv1IPIVDiscipline, lit) {
-				t.Errorf("Phase Y-2 IPIV ratchet broken: missing literal %q in PhaseYv1IPIVDiscipline", lit)
+			if !strings.Contains(PhaseYv1IPAVDiscipline, lit) {
+				t.Errorf("Phase Y-2 IPAV ratchet broken: missing literal %q in PhaseYv1IPAVDiscipline", lit)
 			}
 		})
 	}
 }
 
-func TestPhaseYv1IPIVDisciplineHeaderAnchor(t *testing.T) {
-	if !strings.HasPrefix(PhaseYv1IPIVDiscipline, "- IPIV-DISCIPLINE (Phase Y-2)") {
-		t.Errorf("rule must start with `- IPIV-DISCIPLINE (Phase Y-2)` (prompt anchor); first 80 chars: %q", PhaseYv1IPIVDiscipline[:80])
+func TestPhaseYv1IPAVDisciplineHeaderAnchor(t *testing.T) {
+	if !strings.HasPrefix(PhaseYv1IPAVDiscipline, "- IPAV-DISCIPLINE (Phase Y-2)") {
+		t.Errorf("rule must start with `- IPAV-DISCIPLINE (Phase Y-2)` (prompt anchor); first 80 chars: %q", PhaseYv1IPAVDiscipline[:80])
 	}
 }

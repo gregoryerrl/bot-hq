@@ -1,7 +1,7 @@
 package daemoncron
 
 // Heartbeat-ledger surface — Phase S S-1a-1 (programmatic-move from
-// internal/gemma/gemma.go:619 runHeartbeatLedger).
+// internal/emma/gemma.go:619 runHeartbeatLedger).
 //
 // Cadence: every 25 hub messages (heartbeatMsgInterval). Tick interval
 // 30s mirrors gemma's healthLoop tick — small enough to detect the

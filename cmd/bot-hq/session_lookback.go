@@ -8,7 +8,7 @@ import (
 )
 
 // runSessionLookback is the CLI surface for hub_session_lookback.
-// Mirrors the MCP tool — useful for shell debugging + non-trio
+// Mirrors the MCP tool — useful for shell debugging + non-duo
 // invocation paths.
 //
 // Usage:

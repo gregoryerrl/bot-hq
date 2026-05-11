@@ -14,7 +14,7 @@ import (
 // removed in Phase X-1 (post-Phase-V cleanup).
 func TestHandleSessionOpen_endToEnd(t *testing.T) {
 	root := t.TempDir()
-	mustWrite(t, filepath.Join(root, "README.md"), "# bot-hq\n\nTrio orchestration.\n")
+	mustWrite(t, filepath.Join(root, "README.md"), "# bot-hq\n\nDuo orchestration.\n")
 
 	mustMkdir(t, filepath.Join(root, "rules"))
 	mustWrite(t, filepath.Join(root, "rules", "general.yaml"),
@@ -51,7 +51,7 @@ func TestHandleSessionOpen_endToEnd(t *testing.T) {
 	}
 
 	overview, _ := payload["overview"].(string)
-	if !strings.Contains(overview, "Trio orchestration") {
+	if !strings.Contains(overview, "Duo orchestration") {
 		t.Errorf("overview missing: %q", overview)
 	}
 

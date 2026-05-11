@@ -71,7 +71,7 @@ func R44AntiCrossCheck(agentID, hypothesisOwner, operation string) HookVerdict {
 // R45ModeTagCheck implements R45 ROLE-MODE-SWITCH-DISCIPLINE mode-tag
 // enforcement. Tool calls fired during a mode must match the tool-
 // permission profile for that mode. Mode is read from env-var
-// BOT_HQ_AGENT_MODE (set at mode-transition by IPIV state machine).
+// BOT_HQ_AGENT_MODE (set at mode-transition by IPAV state machine).
 //
 // Restricted modes (subset; full enforcement is T-2 expansion):
 //   - "implement-verify" (Rain): must NOT use Edit/Write tools (Verify is

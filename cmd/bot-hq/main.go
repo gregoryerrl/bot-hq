@@ -14,7 +14,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/brian"
 	"github.com/gregoryerrl/bot-hq/internal/daemoncron"
 	"github.com/gregoryerrl/bot-hq/internal/discord"
-	"github.com/gregoryerrl/bot-hq/internal/gemma"
+	"github.com/gregoryerrl/bot-hq/internal/emma"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
@@ -38,8 +38,8 @@ func main() {
 		case "outbound-miss-hook":
 			runOutboundMissHook()
 			return
-		case "install-trio-hook":
-			runInstallTrioHook()
+		case "install-duo-hook":
+			runInstallDuoHook()
 			return
 		case "tool-permission-hook":
 			runToolPermissionHook()
@@ -111,7 +111,7 @@ func main() {
 			fmt.Printf("bot-hq v%s\n", protocol.Version)
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-trio-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|session-search|webui|context-switch|context-load|session-open|install-session-start-hook|emit-compact-notice|emit-resume|version]\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "unknown command: %s\nUsage: bot-hq [mcp|status|audit-pane-drift|audit-rules-canonical|outbound-miss-hook|install-duo-hook|tool-permission-hook|install-toolgate-hook|preflight-check|voice-mirror-hook|install-voice-mirror-hook|session-load|session-prune|session-search|webui|context-switch|context-load|session-open|install-session-start-hook|emit-compact-notice|emit-resume|version]\n", os.Args[1])
 			os.Exit(1)
 		}
 	}
@@ -237,10 +237,20 @@ func runHub() {
 		}
 	}
 
+	// Z-3 sessions-as-containers: wire session_open/finalize hooks so
+	// hub_session_open MCP tool can spawn BRAIN-duo bound to a session
+	// via BOT_HQ_SESSION_ID env. Daemon idle ambient is emma-only; duo
+	// spawns on-demand per session per architecture/sessions-as-
+	// containers.md. Legacy [brian]/[rain] AutoStart paths preserved
+	// for backward-compat (Group E backward-compat).
+	_ = installSessionLifecycleHooks(h, cfg.Brian.WorkDir, cfg.Rain.WorkDir)
+
 	// 7. Build Brian orchestrator instance (Start deferred until after TUI
-	// is ready so its first inserts reach the TUI via OnMessage).
+	// is ready so its first inserts reach the TUI via OnMessage). Z-3:
+	// AutoStart still honored for backward-compat with single-session-
+	// today operation; future deprecation deferred to Z-4.
 	var brianOrch *brian.Brian
-	log.Printf("[autostart] brian=%v rain=%v emma=%v", cfg.Brian.AutoStart, cfg.Rain.AutoStart, cfg.Gemma.AutoStart)
+	log.Printf("[autostart] brian=%v rain=%v emma=%v", cfg.Brian.AutoStart, cfg.Rain.AutoStart, cfg.Emma.AutoStart)
 	if cfg.Brian.AutoStart {
 		brianOrch = brian.New(h.DB, cfg.Brian.WorkDir)
 	}
@@ -297,8 +307,8 @@ func runHub() {
 	}
 
 	// 9c. Start Emma (the persistent monitor agent, backed by the gemma package + model) if configured
-	if cfg.Gemma.AutoStart {
-		emmaAgent := gemma.New(h.DB, cfg.Gemma)
+	if cfg.Emma.AutoStart {
+		emmaAgent := emma.New(h.DB, cfg.Emma)
 		// Phase H slice 5 C1 (H-32): wire Emma's plan-usage producer to
 		// the TUI's panestate.Manager so successful 60s polls publish
 		// HubSnapshot{PlanUsagePct, PlanWindow} that strip.go reads. Set

@@ -13,7 +13,7 @@
 // model-aware (Brian-Claude vs Rain-DeepSeek may need different prompt
 // framing per per-mode-per-model template registry). Rain has block-
 // authority at both checkpoints; Verify-fail loop-back to prior phase via
-// IPIV state machine.
+// IPAV state machine.
 //
 // Sandbox tech: Testcontainers-Go primary; Playwright with tracing for
 // browser-class. Sandbox warm-pool + Verify-result cache (T-4 R53

@@ -1,10 +1,10 @@
-// Package contextload assembles the per-project context blob the trio
+// Package contextload assembles the per-project context blob the duo
 // loads when pivoting to work on a project. Replaces the auto-bootstrap
 // loop's role of "tell agents what they're working on" with an
 // explicit, on-demand mechanism.
 //
 // Architecture:
-//   - Layer 1 (trio OS) lives in agent prompts; Layer 1 is loaded at
+//   - Layer 1 (duo OS) lives in agent prompts; Layer 1 is loaded at
 //     spawn and applies regardless of project.
 //   - Layer 2 (project context) is what this package produces. Read
 //     when the user pivots to a project (R20/R16 resume; user msg
@@ -312,6 +312,184 @@ func findActivePhaseDoc(canonRoot, project string) (string, string) {
 		return "", ""
 	}
 	return newestPath, string(data)
+}
+
+// SessionBootstrapCapBytes is the Z-3 hard cap on RenderSessionBootstrap
+// output. Bootstrap content above this size is truncated with a marker
+// directing the agent to use hub_read for additional context. Per
+// architecture/sessions-as-containers.md "Bootstrap moves to daemon"
+// section — replaces ~194 KB LoadBootstrap with ~25 KB session-scoped.
+const SessionBootstrapCapBytes = 25 * 1024
+
+// RenderSessionBootstrap produces the Z-3 daemon-paste bootstrap payload
+// for a BRAIN-duo agent (brian or rain) at spawn-time. Reads:
+//
+//   - sessions/<sessionID>/manifest.md — session metadata (project, scope,
+//     pointer_list, agents)
+//   - sessions/<sessionID>/<agent>/state.json — per-agent state slot
+//     (empty {} on fresh open is acceptable)
+//   - <agent>/discipline-anchors.md — top-level per-agent (R24 cross-
+//     session mutual-halt anchor; stays at top-level per Z-3 substrate
+//     restructure)
+//   - projects/<project>/README.md + INDEX.md — project library overview
+//   - phase + ratchets at project-scoped paths (post-Z-1)
+//
+// emma's pointer-list (paths in CL, not content) is rendered as a
+// section so BRAIN-duo can expand on those starting points.
+//
+// Output is markdown capped at SessionBootstrapCapBytes; on overflow,
+// trailing sections are truncated with a marker:
+//
+//	[bootstrap truncated; X bytes omitted — use hub_read for more]
+//
+// Per architecture/sessions-as-containers.md "Bootstrap render structure
+// (post-cap)" — agent receives bootstrap; does not perform one.
+func RenderSessionBootstrap(canonRoot, sessionID, agent string) (string, error) {
+	if canonRoot == "" {
+		return "", fmt.Errorf("canonRoot required")
+	}
+	if sessionID == "" {
+		return "", fmt.Errorf("sessionID required")
+	}
+	if agent == "" {
+		return "", fmt.Errorf("agent required")
+	}
+
+	var b strings.Builder
+
+	// Session manifest (project, scope, pointer_list)
+	manifestPath := filepath.Join(canonRoot, "sessions", sessionID, "manifest.md")
+	manifestBytes, _ := os.ReadFile(manifestPath)
+	project, scope, pointers := parseSessionFrontmatter(string(manifestBytes))
+
+	fmt.Fprintf(&b, "## Session\n\n")
+	fmt.Fprintf(&b, "- id: %s\n", sessionID)
+	fmt.Fprintf(&b, "- agent: %s\n", agent)
+	if project != "" {
+		fmt.Fprintf(&b, "- project: %s\n", project)
+	}
+	if scope != "" {
+		fmt.Fprintf(&b, "- scope: %s\n", scope)
+	}
+	fmt.Fprintf(&b, "\n_Per vision.md: agents are stateless; CL is durable. This bootstrap was rendered by the daemon at spawn-time — no bot_hq_agent_bootstrap tool call needed._\n\n")
+
+	if len(pointers) > 0 {
+		b.WriteString("## Emma's pointers (CL paths to read; starting points, not the limit)\n\n")
+		for _, p := range pointers {
+			fmt.Fprintf(&b, "- %s\n", p)
+		}
+		b.WriteString("\n")
+	}
+
+	// Per-agent state slot
+	statePath := filepath.Join(canonRoot, "sessions", sessionID, agent, "state.json")
+	if data, err := os.ReadFile(statePath); err == nil && len(data) > 0 {
+		fmt.Fprintf(&b, "## Per-agent state slot — `sessions/%s/%s/state.json`\n\n", sessionID, agent)
+		b.WriteString("```json\n")
+		b.WriteString(string(data))
+		if !strings.HasSuffix(string(data), "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("```\n\n")
+	}
+
+	// Discipline anchors (top-level per agent; R24 cross-session)
+	dapath := filepath.Join(canonRoot, agent, "discipline-anchors.md")
+	if data, err := os.ReadFile(dapath); err == nil && len(data) > 0 {
+		fmt.Fprintf(&b, "## Discipline anchors — `%s/discipline-anchors.md`\n\n", agent)
+		b.WriteString(string(data))
+		if !strings.HasSuffix(string(data), "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Project library overview (README + INDEX)
+	if project != "" {
+		readmePath := filepath.Join(canonRoot, "projects", project, "README.md")
+		if data, err := os.ReadFile(readmePath); err == nil && len(data) > 0 {
+			fmt.Fprintf(&b, "## Project library — `projects/%s/README.md`\n\n", project)
+			b.WriteString(string(data))
+			if !strings.HasSuffix(string(data), "\n") {
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+		indexPath := filepath.Join(canonRoot, "projects", project, "INDEX.md")
+		if data, err := os.ReadFile(indexPath); err == nil && len(data) > 0 {
+			fmt.Fprintf(&b, "## Project library — `projects/%s/INDEX.md`\n\n", project)
+			b.WriteString(string(data))
+			if !strings.HasSuffix(string(data), "\n") {
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+
+		// Active phase doc + ratchets (project-scoped per Z-1).
+		if path, body := findActivePhaseDoc(canonRoot, project); path != "" {
+			fmt.Fprintf(&b, "## Active phase doc — `%s`\n\n", path)
+			b.WriteString(body)
+			if !strings.HasSuffix(body, "\n") {
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+		rpath := filepath.Join(canonRoot, "projects", project, "ratchets", "active.md")
+		if data, err := os.ReadFile(rpath); err == nil {
+			b.WriteString("## Active ratchets — `ratchets/active.md`\n\n")
+			b.WriteString(string(data))
+			if !strings.HasSuffix(string(data), "\n") {
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	rendered := b.String()
+	if len(rendered) > SessionBootstrapCapBytes {
+		// Truncate at the cap boundary; mark the overflow so the agent
+		// knows to use hub_read for additional context.
+		omitted := len(rendered) - SessionBootstrapCapBytes
+		truncated := rendered[:SessionBootstrapCapBytes]
+		truncated += fmt.Sprintf("\n\n[bootstrap truncated; %d bytes omitted — use hub_read for more]\n", omitted)
+		return truncated, nil
+	}
+	return rendered, nil
+}
+
+// parseSessionFrontmatter is a minimal YAML-frontmatter extractor for the
+// session manifest. Returns (project, scope, pointerList). Avoids the
+// full sessions.parseManifest import-cycle (sessions imports protocol;
+// contextload is referenced from sessions-adjacent surfaces).
+func parseSessionFrontmatter(content string) (project, scope string, pointers []string) {
+	if !strings.HasPrefix(content, "---\n") {
+		return "", "", nil
+	}
+	rest := strings.TrimPrefix(content, "---\n")
+	end := strings.Index(rest, "\n---\n")
+	if end < 0 {
+		return "", "", nil
+	}
+	frontmatter := rest[:end]
+	inPointers := false
+	for _, line := range strings.Split(frontmatter, "\n") {
+		if inPointers {
+			if strings.HasPrefix(line, "  - ") {
+				pointers = append(pointers, strings.TrimPrefix(line, "  - "))
+				continue
+			}
+			inPointers = false
+		}
+		switch {
+		case strings.HasPrefix(line, "project: "):
+			project = strings.TrimPrefix(line, "project: ")
+		case strings.HasPrefix(line, "scope: "):
+			scope = strings.TrimPrefix(line, "scope: ")
+		case line == "pointer_list:":
+			inPointers = true
+		}
+	}
+	return project, scope, pointers
 }
 
 // Markdown renders the BootstrapContext as a single markdown blob with

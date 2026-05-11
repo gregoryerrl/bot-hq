@@ -28,7 +28,7 @@ func agentTypeTier(t protocol.AgentType) int {
 	switch t {
 	case protocol.AgentBrian, protocol.AgentQA, protocol.AgentVoice:
 		return 1 // peer-coord agents — most relevant to first-order check
-	case protocol.AgentDiscord, protocol.AgentGemma:
+	case protocol.AgentDiscord, protocol.AgentEmma:
 		return 2 // service agents
 	case protocol.AgentCoder:
 		return 3 // worker agents

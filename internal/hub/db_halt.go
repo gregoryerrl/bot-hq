@@ -75,20 +75,20 @@ func (db *DB) GetHaltCause(cause string) (HaltState, bool, error) {
 	return h, true, nil
 }
 
-// ClearHaltIfTrioReregistered clears the context-cap halt iff every
-// currently-registered trio member has last_seen > halt_state.set_at.
+// ClearHaltIfDuoReregistered clears the context-cap halt iff every
+// currently-registered duo member has last_seen > halt_state.set_at.
 // Scoped to cause="context-cap" per slice-5 C1 (H-33) — plan-cap halts do
-// not auto-clear on trio re-register; they clear organically via
+// not auto-clear on duo re-register; they clear organically via
 // window-rollover or poll-shows-decay.
 //
 // Members missing from the agents table (e.g. pruned, never-registered) are
-// excluded from the comparison set so a partial trio can still trigger a
-// clear. An empty comparison set (no trio member registered at all) does not
+// excluded from the comparison set so a partial duo can still trigger a
+// clear. An empty comparison set (no duo member registered at all) does not
 // clear — that is not evidence of fresh-context re-arrival, just absence.
 //
 // Returns (true, nil) when the clear fired, (false, nil) when the
-// context-cap halt was not active or the trio condition was unmet.
-func (db *DB) ClearHaltIfTrioReregistered(trioIDs []string) (bool, error) {
+// context-cap halt was not active or the duo condition was unmet.
+func (db *DB) ClearHaltIfDuoReregistered(duoIDs []string) (bool, error) {
 	row, ok, err := db.GetHaltCause(HaltCauseContextCap)
 	if err != nil {
 		return false, err
@@ -100,7 +100,7 @@ func (db *DB) ClearHaltIfTrioReregistered(trioIDs []string) (bool, error) {
 
 	considered := 0
 	advanced := 0
-	for _, id := range trioIDs {
+	for _, id := range duoIDs {
 		var lastSeen int64
 		err := db.conn.QueryRow(
 			`SELECT last_seen FROM agents WHERE id = ?`, id,

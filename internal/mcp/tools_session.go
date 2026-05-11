@@ -412,11 +412,12 @@ func hubSessionJoin(db *hub.DB) ToolDef {
 //     rebuilds the index.
 func hubSessionFinalize(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_session_finalize",
-		mcp.WithDescription("Close the active session-cluster manifest for a project with rich retrospective payload (outcome narrative + auto-extracted CommitsLanded / FilesTouched / Decisions / MsgCount). Phase W sessions hardening."),
+		mcp.WithDescription("Close the active session-cluster manifest for a project with rich retrospective payload (outcome narrative + auto-extracted CommitsLanded / FilesTouched / Decisions / MsgCount). Z-3 extension: kill duo tmux sessions, archive Discord thread, capture per-agent closing_state from session state.json slots. Phase W + Z-3 sessions hardening."),
 		mcp.WithString("project", mcp.Required(), mcp.Description("Project key whose active session is being finalized (e.g., bot-hq, bcc-ad-manager)")),
 		mcp.WithString("outcome", mcp.Required(), mcp.Description("Agent-authored narrative summarizing what happened in this session. Multi-paragraph fine. Required for retrospective utility.")),
 		mcp.WithString("status", mcp.Description("Session close status: closed (default) | closed-pivoted-out | closed-eod | closed-auto-migrated. Determines retrospective category.")),
 		mcp.WithString("repo_path", mcp.Description("Optional git repo path for CommitsLanded + FilesTouched extraction (e.g., /Users/gregoryerrl/Projects/bot-hq). Skipped when omitted.")),
+		mcp.WithBoolean("force", mcp.Description("Z-3: bypass graceful-shutdown ack timeout when killing duo tmux sessions. Default false. Caller should pre-confirm with user before force=true.")),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -430,6 +431,7 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 		}
 		status := req.GetString("status", "closed")
 		repoPath := req.GetString("repo_path", "")
+		force := req.GetBool("force", false)
 
 		activeID, err := sessions.FindActiveForProject(project)
 		if err != nil {
@@ -442,6 +444,30 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 		manifest, err := sessions.ReadManifest(activeID)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("read active manifest: %v", err)), nil
+		}
+
+		// Z-3 daemon-side finalize hook: kill duo tmux + archive Discord
+		// thread + capture per-agent closing_state. Best-effort — if the
+		// hook fails, the manifest still gets finalized but the daemon
+		// state may be partial (user can manually clean up tmux).
+		var closingState map[string]string
+		var killedTmux []string
+		var discordArchived bool
+		if hook := getSessionFinalizeHook(); hook != nil {
+			r, hErr := hook(SessionFinalizeRequest{
+				SessionID:       activeID,
+				DiscordThreadID: manifest.DiscordThreadID,
+				Force:           force,
+			})
+			if hErr != nil {
+				// Log into outcome but do not abort the finalize.
+				outcome = outcome + "\n\n[Z-3 finalize-hook err: " + hErr.Error() + "]"
+			}
+			if r != nil {
+				closingState = r.ClosingState
+				killedTmux = r.KilledTmux
+				discordArchived = r.DiscordArchived
+			}
 		}
 
 		// Pull hub messages between [StartMsgID, latest] for decision extraction.
@@ -475,15 +501,26 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("finalize: %v", err)), nil
 		}
 
+		// Z-3: append closing_state to manifest after Finalize did its
+		// auto-extraction. ReadManifest → set ClosingState → WriteManifest.
+		if len(closingState) > 0 {
+			if cur, rerr := sessions.ReadManifest(closed.ID); rerr == nil {
+				cur.ClosingState = closingState
+				_ = sessions.WriteManifest(cur)
+			}
+		}
+
 		return mcp.NewToolResultText(toJSON(map[string]any{
-			"status":          "finalized",
-			"session_id":      closed.ID,
-			"project":         closed.Project,
-			"end_ts":          closed.EndTS.Format(time.RFC3339),
-			"msg_count":       closed.MsgCount,
-			"decisions_count": len(closed.Decisions),
-			"commits_count":   len(closed.CommitsLanded),
-			"files_count":     len(closed.FilesTouched),
+			"status":           "finalized",
+			"session_id":       closed.ID,
+			"project":          closed.Project,
+			"end_ts":           closed.EndTS.Format(time.RFC3339),
+			"msg_count":        closed.MsgCount,
+			"decisions_count":  len(closed.Decisions),
+			"commits_count":    len(closed.CommitsLanded),
+			"files_count":      len(closed.FilesTouched),
+			"killed_tmux":      killedTmux,
+			"discord_archived": discordArchived,
 		})), nil
 	}
 
@@ -491,14 +528,14 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 }
 
 // hubSessionLookback returns a markdown retrospective rendering of a
-// session-cluster manifest. Audience is the trio (brian/rain/emma) —
+// session-cluster manifest. Audience is the duo (brian/rain/emma) —
 // optimized format leads with outcome narrative + structured fields
 // so retro is fast to scan.
 //
 // Phase W sessions hardening 2026-05-10.
 func hubSessionLookback() ToolDef {
 	tool := mcp.NewTool("hub_session_lookback",
-		mcp.WithDescription("Retrospective markdown for a session-cluster manifest. Optimized for trio consumption — outcome narrative + structured fields (decisions, commits, files) + raw body. Use to scan a single past session for patterns, decisions, friction points."),
+		mcp.WithDescription("Retrospective markdown for a session-cluster manifest. Optimized for duo consumption — outcome narrative + structured fields (decisions, commits, files) + raw body. Use to scan a single past session for patterns, decisions, friction points."),
 		mcp.WithString("session_id", mcp.Required(), mcp.Description("Session cluster ID (e.g., 2026-05-10-bot-hq, 2026-05-10-bcc-ad-manager-2)")),
 	)
 
@@ -524,7 +561,7 @@ func hubSessionLookback() ToolDef {
 // into EOD-shaped markdown. Phase W sessions hardening.
 func hubSessionSummary() ToolDef {
 	tool := mcp.NewTool("hub_session_summary",
-		mcp.WithDescription("Aggregate all sessions for a date (default: today) into a markdown summary. Per-project sections, per-session outcome+counts, day totals. Used by trio to generate EOD reports."),
+		mcp.WithDescription("Aggregate all sessions for a date (default: today) into a markdown summary. Per-project sections, per-session outcome+counts, day totals. Used by duo to generate EOD reports."),
 		mcp.WithString("date", mcp.Description("Date in YYYY-MM-DD format. Defaults to today (UTC).")),
 	)
 

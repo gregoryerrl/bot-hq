@@ -10,12 +10,12 @@ const (
 	AgentBrian   AgentType = "brian"
 	AgentDiscord AgentType = "discord"
 	AgentQA      AgentType = "qa"
-	AgentGemma   AgentType = "gemma"
+	AgentEmma    AgentType = "emma"
 )
 
 func (a AgentType) Valid() bool {
 	switch a {
-	case AgentCoder, AgentVoice, AgentBrian, AgentDiscord, AgentQA, AgentGemma:
+	case AgentCoder, AgentVoice, AgentBrian, AgentDiscord, AgentQA, AgentEmma:
 		return true
 	}
 	return false
@@ -45,7 +45,7 @@ func (a AgentStatus) Valid() bool {
 // docs/plans/2026-04-29-msg-type-taxonomy-audit.md §4. Active types
 // (6): Update/Response/Command/Result/Error/Flag. Deprecated/legacy
 // (2): Handshake/Question (kept Valid() to avoid breaking existing
-// hub history; trio agents avoid in new emits).
+// hub history; duo agents avoid in new emits).
 //
 // Cross-mapping with R9 AUDIENCE-CLASS-DISCRIMINATOR ([HR] tag) and
 // R8 COMPACT-COMMIT-FORMAT (compact-eligible) per audit §4.3:
@@ -63,12 +63,12 @@ func (a AgentStatus) Valid() bool {
 type MessageType string
 
 const (
-	// MsgHandshake — DEPRECATED (per audit F3). Trio agents avoid in new
+	// MsgHandshake — DEPRECATED (per audit F3). Duo agents avoid in new
 	// emits; the "." HANDSHAKE-TERMINATOR pattern uses MsgUpdate or
 	// untagged compact format. Kept Valid() for hub-history compatibility.
 	MsgHandshake MessageType = "handshake"
 
-	// MsgQuestion — DEPRECATED (per audit F3). Trio agents avoid; use
+	// MsgQuestion — DEPRECATED (per audit F3). Duo agents avoid; use
 	// MsgCommand for asks-with-action-required or MsgUpdate for asks-as-
 	// information. Kept Valid() for hub-history compatibility.
 	MsgQuestion MessageType = "question"
@@ -144,7 +144,7 @@ const (
 	MsgResume MessageType = "resume"
 )
 
-// ActiveMessageTypes lists the 6 trio-recommended types per
+// ActiveMessageTypes lists the 6 duo-recommended types per
 // Phase J T1.7 (B7) codification. Use these in new emits; deprecated
 // types (MsgHandshake/MsgQuestion) remain Valid() for hub-history
 // compatibility but new agent code avoids them.
@@ -188,7 +188,7 @@ func (m MessageType) IsActive() bool {
 }
 
 // IsDeprecated reports whether this MessageType is legacy-preserved
-// only. Trio agents emit warnings if they see new traffic of these.
+// only. Duo agents emit warnings if they see new traffic of these.
 func (m MessageType) IsDeprecated() bool {
 	for _, t := range DeprecatedMessageTypes {
 		if m == t {
@@ -318,6 +318,13 @@ type Agent struct {
 	// via hub_set_current_task MCP tool at work-start; clear via empty
 	// string at work-end.
 	CurrentTask string `json:"current_task,omitempty"`
+	// AgentSessionID is the Z-3 binding to a per-session container
+	// (sessions-as-containers). Set at register-time from the
+	// BOT_HQ_SESSION_ID env var of the spawning tmux session. Empty
+	// for global agents (emma, clive, discord). Distinct from the
+	// top-level Message.SessionID field which routes individual
+	// messages.
+	AgentSessionID string `json:"agent_session_id,omitempty"`
 }
 
 type Session struct {

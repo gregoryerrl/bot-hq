@@ -113,7 +113,7 @@ type ChecklistVerdict struct {
 //     Allow=true SkippedForm="override". Push/merge have NO normal-bypass.
 //  2. Compute current SHA256 of gate-file at ~/.bot-hq/gates/<file>.
 //     Absent → Allow=true SkippedForm="gatefile-absent" (fail-soft per
-//     K-13 pattern; non-trio Claude Code instances should not block).
+//     K-13 pattern; non-duo Claude Code instances should not block).
 //  3. For commit/push classes: extract footer SHA-cite from commit
 //     message. Match → Allow=true. Mismatch or absent → fall through.
 //  4. AgentState path (mandatory for merge; fallback for commit/push):

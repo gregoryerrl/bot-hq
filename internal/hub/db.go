@@ -220,17 +220,17 @@ func (db *DB) CurrentRebuildGen() int64 {
 	return gen
 }
 
-// HaltStateTrio names the agents whose joint re-registration auto-clears an
+// HaltStateDuo names the agents whose joint re-registration auto-clears an
 // active context-cap halt_state. Causality-only: a halt set by Emma at T_h
-// clears once every currently-registered trio member has last_seen > T_h.
+// clears once every currently-registered duo member has last_seen > T_h.
 // Members absent from the agents table (pruned/never-registered) are excluded
-// from the comparison set so a partial trio can still produce a clear; an
+// from the comparison set so a partial duo can still produce a clear; an
 // empty comparison set never clears (would be a false positive).
 //
 // Phase H slice 4 C6 (H-31). Slice 5 C1 (H-33) scopes the auto-clear to
 // cause="context-cap" only — plan-cap clears organically via window-rollover
 // or poll-shows-decay, not via re-register.
-var HaltStateTrio = []string{"brian", "rain", "clive"}
+var HaltStateDuo = []string{"brian", "rain", "clive"}
 
 // Halt cause constants. cause is the primary key of halt_state in the
 // multi-row cause-keyed schema (Phase H slice 5 C1). Each cause can be
@@ -241,7 +241,7 @@ const (
 )
 
 // HaltState is one row of the cause-keyed halt_state table. Returned by
-// GetHaltCause for production callers (e.g. trio-re-register clear path).
+// GetHaltCause for production callers (e.g. duo-re-register clear path).
 type HaltState struct {
 	Cause  string
 	SetAt  time.Time

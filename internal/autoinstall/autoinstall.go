@@ -1,6 +1,6 @@
-// Package autoinstall wires the trio Stop-hook (outboundhook) + PreToolUse-Bash
+// Package autoinstall wires the duo Stop-hook (outboundhook) + PreToolUse-Bash
 // hook (toolgate) installers into the bot-hq MCP server startup flow.
-// Phase M M-1 c2 — eliminates the manual `bot-hq install-trio-hook` +
+// Phase M M-1 c2 — eliminates the manual `bot-hq install-duo-hook` +
 // `bot-hq install-toolgate-hook` invocation gap that produced Phase L
 // Finding-1 (installer-not-run on this machine, settings.json had only
 // the Stop hook absent the PreToolUse hook).
@@ -11,7 +11,7 @@
 //     installer can't write settings.json (e.g., $HOME unwritable, settings
 //     file permission denied). Manual `bot-hq install-*` subcommands remain
 //     available for explicit re-install.
-//   - Idempotent + non-clobbering: defers to the existing InstallTrioHook
+//   - Idempotent + non-clobbering: defers to the existing InstallDuoHook
 //     helpers in outboundhook + toolgate which already implement the
 //     idempotent + non-clobbering write semantics. Repeated MCP-server
 //     restarts converge to a single hook entry per matcher.
@@ -49,11 +49,11 @@ func Run(settingsPath, botHQPath string, warn io.Writer) {
 		return
 	}
 
-	if err := outboundhook.InstallTrioHook(settingsPath, botHQPath); err != nil {
+	if err := outboundhook.InstallDuoHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(warn, "autoinstall: outbound-miss Stop hook install failed (best-effort): %v\n", err)
 	}
 
-	if err := toolgate.InstallTrioHook(settingsPath, botHQPath); err != nil {
+	if err := toolgate.InstallDuoHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(warn, "autoinstall: toolgate PreToolUse hook install failed (best-effort): %v\n", err)
 	}
 
@@ -63,7 +63,7 @@ func Run(settingsPath, botHQPath string, warn io.Writer) {
 	// Without this hook, the v3.x USER-EXERCISE point #2 (edit-rule →
 	// fresh-session abides) cannot close-loop. Best-effort + idempotent
 	// per existing installer pattern.
-	if err := sessionstarthook.InstallTrioHook(settingsPath, botHQPath); err != nil {
+	if err := sessionstarthook.InstallDuoHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(warn, "autoinstall: session-start hook install failed (best-effort): %v\n", err)
 	}
 
@@ -71,7 +71,7 @@ func Run(settingsPath, botHQPath string, warn io.Writer) {
 	// the same "user shouldn't need to run separate install commands"
 	// principle. Hooks fire alert-only; no behavior break if missing but
 	// user-artifact write-discipline has reduced enforcement.
-	if err := voicemirror.InstallTrioHook(settingsPath, botHQPath); err != nil {
+	if err := voicemirror.InstallDuoHook(settingsPath, botHQPath); err != nil {
 		fmt.Fprintf(warn, "autoinstall: voice-mirror hook install failed (best-effort): %v\n", err)
 	}
 }

@@ -1504,11 +1504,11 @@ func TestSetHaltActiveIdempotentUpsert(t *testing.T) {
 	}
 }
 
-// TestClearHaltIfTrioReregisteredScopedToContextCap locks the H-33
+// TestClearHaltIfDuoReregisteredScopedToContextCap locks the H-33
 // scoping: the auto-clear path now only deletes the context-cap row,
 // even when the plan-cap row is also active. Plan-cap clears organically
 // via window-rollover or poll-shows-decay, not via re-register.
-func TestClearHaltIfTrioReregisteredScopedToContextCap(t *testing.T) {
+func TestClearHaltIfDuoReregisteredScopedToContextCap(t *testing.T) {
 	db := setupTestDB(t)
 
 	if err := db.SetHaltActive(HaltCauseContextCap, "ctx", "emma"); err != nil {
@@ -1519,25 +1519,25 @@ func TestClearHaltIfTrioReregisteredScopedToContextCap(t *testing.T) {
 	}
 	time.Sleep(5 * time.Millisecond)
 
-	for _, id := range HaltStateTrio {
+	for _, id := range HaltStateDuo {
 		if err := db.RegisterAgent(protocol.Agent{
 			ID: id, Name: id, Type: protocol.AgentBrian, Status: protocol.StatusOnline,
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	cleared, err := db.ClearHaltIfTrioReregistered(HaltStateTrio)
+	cleared, err := db.ClearHaltIfDuoReregistered(HaltStateDuo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !cleared {
-		t.Fatalf("expected context-cap clear after trio re-register past set_at")
+		t.Fatalf("expected context-cap clear after duo re-register past set_at")
 	}
 	if _, ok, _ := db.GetHaltCause(HaltCauseContextCap); ok {
 		t.Errorf("context-cap row must be deleted")
 	}
 	if _, ok, _ := db.GetHaltCause(HaltCausePlanCap); !ok {
-		t.Errorf("plan-cap row must SURVIVE trio re-register (H-33 scoping)")
+		t.Errorf("plan-cap row must SURVIVE duo re-register (H-33 scoping)")
 	}
 }
 

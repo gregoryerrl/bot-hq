@@ -1,8 +1,8 @@
 // Phase W lookback: render a session manifest as agent-friendly
 // retrospective markdown.
 //
-// Audience: the trio (brian/rain/emma). User said they won't typically
-// invoke lookback themselves; the trio reads + reasons over the output.
+// Audience: the duo (brian/rain/emma). User said they won't typically
+// invoke lookback themselves; the duo reads + reasons over the output.
 // Optimized for that — leads with the outcome narrative + structured
 // fields so the agent can scan in O(seconds) and pick up the patterns
 // retro requires.

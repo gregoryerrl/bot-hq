@@ -10,7 +10,7 @@ import (
 
 // hookCommandSuffix is the bot-hq subcommand that invokes RunHook for
 // the voice-mirror PreToolUse hook. Mirrors toolgate's
-// hookCommandSuffix pattern + outboundhook InstallTrioHook precedent.
+// hookCommandSuffix pattern + outboundhook InstallDuoHook precedent.
 const hookCommandSuffix = "voice-mirror-hook"
 
 // SettingsHookCommand returns the command string written into
@@ -20,7 +20,7 @@ func SettingsHookCommand(botHQPath string) string {
 	return botHQPath + " " + hookCommandSuffix
 }
 
-// InstallTrioHook installs the Phase N v2 #3 N-2 voice-mirror
+// InstallDuoHook installs the Phase N v2 #3 N-2 voice-mirror
 // PreToolUse-Write hook into the given settings.json path. Idempotent
 // (existing hook with same command is left alone) + non-clobbering
 // (other PreToolUse matchers + other event types preserved). Missing
@@ -30,14 +30,14 @@ func SettingsHookCommand(botHQPath string) string {
 // installed hook references a stable location regardless of $PATH at
 // hook-fire time.
 //
-// Mirrors toolgate.InstallTrioHook pattern (which is a Bash hook) but
+// Mirrors toolgate.InstallDuoHook pattern (which is a Bash hook) but
 // installs a Write-matcher hook — voice-mirror discipline applies to
 // Write tool calls against user-artifact paths per R40 +
 // MatchesUserArtifactPath path-set.
 //
 // Phase N v2 #8 close-composite — folds install-voice-mirror-hook
 // subcommand per Rain Q2 lean (b1) at PASS-2 of #3 N-2.
-func InstallTrioHook(settingsPath, botHQPath string) error {
+func InstallDuoHook(settingsPath, botHQPath string) error {
 	if settingsPath == "" {
 		return errors.New("install-voice-mirror-hook: settings path required")
 	}

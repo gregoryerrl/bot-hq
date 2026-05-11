@@ -12,7 +12,7 @@ func TestFormatSessionOpen_compressesAggressively(t *testing.T) {
 	p := &sessionopen.Payload{
 		Project:  "bot-hq",
 		Agent:    "emma",
-		Overview: "# bot-hq\n\nA trio orchestration system for managing parallel agents working on multiple projects.\n",
+		Overview: "# bot-hq\n\nA duo orchestration system for managing parallel agents working on multiple projects.\n",
 		RulesResolved: map[string]any{
 			"agent": map[string]any{
 				"role": "heartbeat-ledger emitter + plan-usage poller",

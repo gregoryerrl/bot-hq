@@ -140,23 +140,26 @@ func TestInitialPromptContainsOutboundContract(t *testing.T) {
 	}
 }
 
-// TestRainStartupCLFirstBootstrap mirrors brian_test.go's Z-0 lock.
-// Rain bootstraps the same way per vision.md: bot_hq_agent_bootstrap
-// returns the durable substrate; no hub_read backlog iteration.
+// TestRainStartupDaemonPasteBootstrap mirrors brian_test.go's Z-3 lock.
+// Rain bootstraps the same way per architecture/sessions-as-containers.md
+// "Bootstrap moves to daemon" — daemon-paste at spawn-time, no
+// bot_hq_agent_bootstrap MCP call. BOT_HQ_SESSION_ID env binds.
 func TestRainStartupCLFirstBootstrap(t *testing.T) {
 	r := &Rain{}
 	prompt := r.initialPrompt()
 	want := []string{
-		"bot_hq_agent_bootstrap",
-		`agent="rain"`,
+		"daemon-paste",
+		"BOT_HQ_SESSION_ID",
+		`type="qa"`,
 		"NO BACKLOG SCRAPE",
 		"vision.md",
 		"agents are stateless",
 		"CL is durable",
+		"sessions-as-containers",
 	}
 	for _, w := range want {
 		if !strings.Contains(prompt, w) {
-			t.Errorf("initial prompt must contain Z-0 CL-first bootstrap literal %q", w)
+			t.Errorf("initial prompt must contain Z-3 daemon-paste bootstrap literal %q", w)
 		}
 	}
 	mustNotContain := []string{
@@ -1199,5 +1202,32 @@ func TestFormatRainNudge_PhaseR_R2_AuthorlessHR(t *testing.T) {
 				t.Errorf("formatRainNudge = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestInitialPromptZ3DuoTerminology — Z-3 substring-lock: agent prompts
+// must cite the duo terminology (per architecture/sessions-as-containers.md
+// "duo, not trio" cleanup). Anti-regression-lock against trio reappearance.
+func TestInitialPromptZ3DuoTerminology(t *testing.T) {
+	r := &Rain{}
+	prompt := r.InitialPromptForTest()
+	for _, want := range []string{
+		"duo",
+		"IPAV-DISCIPLINE",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("rain initialPrompt missing Z-3 substring %q", want)
+		}
+	}
+	for _, banned := range []string{
+		"trio",
+		"TRIO",
+		"IPIV-DISCIPLINE",
+		"gemma",
+		"ollama",
+	} {
+		if strings.Contains(prompt, banned) {
+			t.Errorf("rain initialPrompt contains Z-3 anti-lock %q (must not reappear post-Z-3)", banned)
+		}
 	}
 }

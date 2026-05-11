@@ -92,6 +92,17 @@ type Manifest struct {
 	// [StartMsgID, EndMsgID] window. Each entry: "<msg-id>: <kind> | <gloss>".
 	Decisions []string
 
+	// Z-3 sessions-as-containers fields. Scope is the human-readable
+	// scope name from hub_session_open (distinct from ID which is the
+	// slug-uuid identifier). PointerList holds emma's curated CL paths
+	// supplied at session-open. DiscordThreadID maps the session to its
+	// Discord thread within the project channel. ClosingState captures
+	// per-agent state.json content at finalize-time (key=agent-id).
+	Scope            string
+	PointerList      []string
+	DiscordThreadID  string
+	ClosingState     map[string]string
+
 	Body string
 }
 
@@ -296,6 +307,34 @@ func renderManifest(m Manifest) string {
 		b.WriteString("outcome: |\n")
 		for _, line := range strings.Split(strings.TrimRight(m.Outcome, "\n"), "\n") {
 			b.WriteString("  " + line + "\n")
+		}
+	}
+	// Z-3 sessions-as-containers fields (omit zero-values for back-compat).
+	if m.Scope != "" {
+		b.WriteString("scope: " + m.Scope + "\n")
+	}
+	if len(m.PointerList) > 0 {
+		b.WriteString("pointer_list:\n")
+		for _, p := range m.PointerList {
+			b.WriteString("  - " + p + "\n")
+		}
+	}
+	if m.DiscordThreadID != "" {
+		b.WriteString("discord_thread_id: " + m.DiscordThreadID + "\n")
+	}
+	if len(m.ClosingState) > 0 {
+		b.WriteString("closing_state:\n")
+		agents := make([]string, 0, len(m.ClosingState))
+		for a := range m.ClosingState {
+			agents = append(agents, a)
+		}
+		sort.Strings(agents)
+		for _, a := range agents {
+			// Literal-block scalar per agent for multi-line state.json content
+			b.WriteString("  " + a + ": |\n")
+			for _, line := range strings.Split(strings.TrimRight(m.ClosingState[a], "\n"), "\n") {
+				b.WriteString("    " + line + "\n")
+			}
 		}
 	}
 	b.WriteString("---\n\n")
@@ -575,6 +614,9 @@ func parseManifest(content string) (Manifest, error) {
 	inFiles := false
 	inDecisions := false
 	inOutcome := false
+	inPointerList := false
+	inClosingState := false
+	currentClosingAgent := ""
 	for _, line := range strings.Split(frontmatter, "\n") {
 		if line == "" {
 			inAgents = false
@@ -622,6 +664,38 @@ func parseManifest(content string) (Manifest, error) {
 			}
 			inOutcome = false
 		}
+		if inPointerList {
+			if strings.HasPrefix(line, "  - ") {
+				m.PointerList = append(m.PointerList, strings.TrimPrefix(line, "  - "))
+				continue
+			}
+			inPointerList = false
+		}
+		if inClosingState {
+			if strings.HasPrefix(line, "    ") {
+				// Continuation line of current agent's literal-block scalar.
+				v := strings.TrimPrefix(line, "    ")
+				if m.ClosingState == nil {
+					m.ClosingState = map[string]string{}
+				}
+				if existing := m.ClosingState[currentClosingAgent]; existing != "" {
+					m.ClosingState[currentClosingAgent] = existing + "\n" + v
+				} else {
+					m.ClosingState[currentClosingAgent] = v
+				}
+				continue
+			}
+			if strings.HasPrefix(line, "  ") && strings.HasSuffix(line, ": |") {
+				currentClosingAgent = strings.TrimSuffix(strings.TrimPrefix(line, "  "), ": |")
+				if m.ClosingState == nil {
+					m.ClosingState = map[string]string{}
+				}
+				m.ClosingState[currentClosingAgent] = ""
+				continue
+			}
+			inClosingState = false
+			currentClosingAgent = ""
+		}
 		switch {
 		case strings.HasPrefix(line, "id: "):
 			m.ID = strings.TrimPrefix(line, "id: ")
@@ -668,6 +742,15 @@ func parseManifest(content string) (Manifest, error) {
 			inDecisions = true
 		case line == "outcome: |":
 			inOutcome = true
+		// Z-3 sessions-as-containers fields
+		case strings.HasPrefix(line, "scope: "):
+			m.Scope = strings.TrimPrefix(line, "scope: ")
+		case line == "pointer_list:":
+			inPointerList = true
+		case strings.HasPrefix(line, "discord_thread_id: "):
+			m.DiscordThreadID = strings.TrimPrefix(line, "discord_thread_id: ")
+		case line == "closing_state:":
+			inClosingState = true
 		}
 	}
 	return m, nil

@@ -39,7 +39,7 @@ const ExitBlock = 2
 //  3. Extract command string from ToolInput["command"]; non-string or
 //     missing → allow (defensive).
 //  4. Read BOT_HQ_AGENT_ID env var; missing → allow with no warning
-//     (defensive default — don't block non-trio Claude Code instances).
+//     (defensive default — don't block non-duo Claude Code instances).
 //  5. If agent_id == "rain" AND IsHANDSExecutePattern(command) →
 //     write block message to stderr + return ExitBlock.
 //  6. Otherwise → allow.

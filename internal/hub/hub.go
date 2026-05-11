@@ -346,7 +346,7 @@ type dispatchDecisionRecord struct {
 
 // diagDir returns the directory for diagnostic output files. Honors
 // BOT_HQ_HOME for test isolation, mirroring the convention used by
-// internal/gemma sentinelsDir.
+// internal/emma sentinelsDir.
 func diagDir() (string, error) {
 	if h := os.Getenv("BOT_HQ_HOME"); h != "" {
 		return filepath.Join(h, "diag"), nil

@@ -1,5 +1,5 @@
 // Package investigate provides the bilateral-Investigate orchestrator
-// per phase-t.md v5 T-2.2 — wraps cl.IPIVRuntime + faulttree + hypothesis
+// per phase-t.md v5 T-2.2 — wraps cl.IPAVRuntime + faulttree + hypothesis
 // + R44 anti-cross-confirmation-bias into a high-level workflow:
 //
 //	OpenInvestigation → ProposeHypothesis (navigator) → AssignAntiCross
@@ -41,15 +41,15 @@ type LoopStore interface {
 
 // Orchestrator wraps the bilateral-Investigate workflow.
 type Orchestrator struct {
-	rt        *cl.IPIVRuntime
+	rt        *cl.IPAVRuntime
 	treeStore TreeStore
 	loopStore LoopStore
 }
 
-// New constructs an Orchestrator scoped to the given IPIV runtime + storage.
-func New(rt *cl.IPIVRuntime, treeStore TreeStore, loopStore LoopStore) (*Orchestrator, error) {
+// New constructs an Orchestrator scoped to the given IPAV runtime + storage.
+func New(rt *cl.IPAVRuntime, treeStore TreeStore, loopStore LoopStore) (*Orchestrator, error) {
 	if rt == nil {
-		return nil, errors.New("IPIVRuntime is required")
+		return nil, errors.New("IPAVRuntime is required")
 	}
 	if treeStore == nil || loopStore == nil {
 		return nil, errors.New("treeStore and loopStore are required")
@@ -68,12 +68,12 @@ type Investigation struct {
 	ModelA string
 	ModelB string
 
-	rt        *cl.IPIVRuntime
+	rt        *cl.IPAVRuntime
 	treeStore TreeStore
 	loopStore LoopStore
 }
 
-// OpenInvestigation creates a new IPIV task at Investigate phase + initializes
+// OpenInvestigation creates a new IPAV task at Investigate phase + initializes
 // an empty fault-tree. agentA + agentB must differ (R44 anti-cross).
 func (o *Orchestrator) OpenInvestigation(decisionClass mvt.DecisionClass, agentA, agentB, modelA, modelB string) (*Investigation, error) {
 	if agentA == "" || agentB == "" {
@@ -280,7 +280,7 @@ func (i *Investigation) AddCiteAnchor(nodeID, anchor string) error {
 	return i.treeStore.Save(i.TaskID, tree)
 }
 
-// Finalize transitions the IPIV task from Investigate to Plan phase. Errors
+// Finalize transitions the IPAV task from Investigate to Plan phase. Errors
 // when investigation has not yet converged (use IsConverged() to check).
 // Returns the post-transition TaskState.
 func (i *Investigation) Finalize() (*mvt.TaskState, error) {

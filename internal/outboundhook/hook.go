@@ -20,8 +20,8 @@
 // on every shouldFlag-true turn (zero bypass class); alert-dedupe
 // continues to suppress hub-message spam within dedupWindow.
 //
-// InstallTrioHook installs the Stop hook into ~/.claude/settings.json
-// for long-lived trio agents (brian/rain) that aren't spawned via
+// InstallDuoHook installs the Stop hook into ~/.claude/settings.json
+// for long-lived duo agents (brian/rain) that aren't spawned via
 // hub_spawn. Idempotent + non-clobbering: existing unrelated hooks
 // preserved, our hook appended only if not already present by command
 // path.
@@ -159,7 +159,7 @@ const blockReason = "OUTBOUND-DISCIPLINE-MECHANICAL violation: substantive pane 
 //  4. Returns ExitBlock (defense)
 //
 // On any error path or shouldFlag-false: returns ExitAllow (defensive —
-// don't block agent on hook-side bugs / non-trio sessions / sub-threshold
+// don't block agent on hook-side bugs / non-duo sessions / sub-threshold
 // turns). Per Phase M M-2 c1 audit-doc v1.1 §5.1 + Q5 Option (ii)
 // decoupled-block: block fires on every shouldFlag-true turn; only the
 // alert path is gated by dedupe.

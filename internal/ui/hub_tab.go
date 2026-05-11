@@ -30,6 +30,14 @@ type CommandSubmitted struct {
 
 // HubTab displays a scrollable, color-coded message feed with a command input.
 //
+// Z-3 sessions-as-containers retargets the Hub tab's conversational
+// partner to emma (global stateless meta-orchestrator). Per architecture/
+// sessions-as-containers.md "Hub TUI split" section: Hub-tab = user-to-emma
+// conversation + cross-session [HR]/Flag/Tag feed; Sessions-tab = per-
+// session interactive view with input targeting that session's BRAIN-duo.
+// emma's broadcast scope (session_id = "" globals + HR/flag/tag cross-cuts)
+// is what surfaces here.
+//
 // Input is a textarea (not textinput) so users can compose multi-line
 // messages and paste long content without truncation. Keybindings are
 // flipped from textarea's defaults: enter submits, shift+enter / ctrl+j /
@@ -60,7 +68,7 @@ func (h *HubTab) SetPane(p *panestate.Manager) {
 // NewHubTab creates a new HubTab with default dimensions.
 func NewHubTab() HubTab {
 	ta := textarea.New()
-	ta.Placeholder = "Type a command (@agent message, spawn project, etc.)..."
+	ta.Placeholder = "Talk to emma (open/close sessions, route cross-session, brainstorm new project)..."
 	ta.CharLimit = 0 // unlimited; long pastes must round-trip without truncation
 	ta.ShowLineNumbers = false
 	ta.SetHeight(inputRows)

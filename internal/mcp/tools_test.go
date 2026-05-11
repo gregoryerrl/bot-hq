@@ -300,7 +300,6 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 
 		// Spawn tools: caller anonymous; spawned agent registers itself separately.
 		"hub_spawn":       "spawns a new coder agent; caller's identity is incidental",
-		"hub_spawn_gemma": "spawns a gemma scout; caller's identity is incidental",
 
 		// Session-scoped tools: operate on session_id which may be linked to an
 		// agent via agents.meta.tmux_target. Resolving that mapping adds
@@ -338,12 +337,11 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// identity is incidental.
 		"bot_hq_context_load": "loads per-project context by project key; caller-identity not needed",
 
-		// Z-0 CL-first agent bootstrap: takes explicit project + agent
-		// parameters, returning the durable-substrate snapshot per
-		// vision.md (rules + library + phase-doc + ratchets + per-agent
-		// state). Replaces the prior hub_read backlog-iterate pattern.
-		// Caller's identity is supplied as an explicit `agent` arg.
-		"bot_hq_agent_bootstrap": "Z-0: explicit (project, agent) params drive the load; no implicit caller-identity required",
+		// Z-3 sessions-as-containers: open a new session-cluster with
+		// BRAIN-duo bound via BOT_HQ_SESSION_ID env. Project + scope_name
+		// are the load-bearing dimensions, not caller-identity (any
+		// authorized agent — emma typically — can open on user's behalf).
+		"hub_session_open": "Z-3: project + scope_name drive session allocation; caller-identity not bound (emma orchestrates on user's behalf)",
 
 		// Phase W session-finalize: closes active session-cluster manifest
 		// for a project. Project-keyed not agent-keyed — the manifest
@@ -362,15 +360,15 @@ func TestBuildTools_AllExpectedKeysExtractable(t *testing.T) {
 		// dimension.
 		"hub_session_summary": "aggregates sessions by date into EOD markdown; read-only; caller-identity not needed",
 
-		// Phase Y-2 IPIV tools: project-keyed (and task-keyed) operations
-		// over the IPIV state machine. The trio invokes these on behalf
+		// Phase Y-2 IPAV tools: project-keyed (and task-keyed) operations
+		// over the IPAV state machine. The duo invokes these on behalf
 		// of the work-scope, not bound to caller-identity. Decision-class
 		// + phase + verify-result are the load-bearing dimensions.
-		"bot_hq_ipiv_open":         "opens IPIV task by project + decision_class; caller-identity not needed",
-		"bot_hq_ipiv_transition":   "advances IPIV task phase by project + task_id; caller-identity not needed",
-		"bot_hq_ipiv_set_artifact": "attaches phase artifact path; project + task_id keyed; caller-identity not needed",
-		"bot_hq_ipiv_complete":     "closes IPIV task with verify result; project + task_id keyed; caller-identity not needed",
-		"bot_hq_ipiv_list":         "enumerates IPIV tasks by project; read-only; caller-identity not needed",
+		"bot_hq_ipav_open":         "opens IPAV task by project + decision_class; caller-identity not needed",
+		"bot_hq_ipav_transition":   "advances IPAV task phase by project + task_id; caller-identity not needed",
+		"bot_hq_ipav_set_artifact": "attaches phase artifact path; project + task_id keyed; caller-identity not needed",
+		"bot_hq_ipav_complete":     "closes IPAV task with verify result; project + task_id keyed; caller-identity not needed",
+		"bot_hq_ipav_list":         "enumerates IPAV tasks by project; read-only; caller-identity not needed",
 	}
 
 	db := setupTestDB(t)

@@ -10,7 +10,7 @@ import (
 
 // runContextLoad is the CLI surface for the per-project context loader.
 // Mirrors the bot_hq_context_load MCP tool — useful for shell debugging,
-// session-open hooks that prefer CLI over MCP, and trio-bypass cases.
+// session-open hooks that prefer CLI over MCP, and duo-bypass cases.
 //
 // Usage:
 //

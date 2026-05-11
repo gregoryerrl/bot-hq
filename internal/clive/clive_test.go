@@ -52,7 +52,7 @@ func TestInitialPromptContainsDISCv2(t *testing.T) {
 }
 
 // TestInitialPromptContainsR36Mechanical pins R36 OUTBOUND-DISCIPLINE-
-// MECHANICAL since outbound-miss enforcement applies to all trio
+// MECHANICAL since outbound-miss enforcement applies to all duo
 // agents uniformly (Clive emissions must carry hub_send same as
 // Brian / Rain).
 func TestInitialPromptContainsR36Mechanical(t *testing.T) {

@@ -21,14 +21,14 @@ const (
 	HubBroadcastRainGateBlockMsg = "Phase R R2 hub_broadcast Rain-only gate: tool blocked.\n" +
 		"Reason: hub_broadcast is reserved for Rain (BOT_HQ_AGENT_ID=rain) per Phase R R1 [HR]-only-Rain authority.\n" +
 		"Re-anchor: ~/.bot-hq/projects/bot-hq/phase/phase-r.md R2 cluster + R1 BRAIN-cycle hardening.\n" +
-		"Recovery: use hub_send for non-[HR] broadcasts; only Rain emits [HR]-tagged trio-consensus content.\n"
+		"Recovery: use hub_send for non-[HR] broadcasts; only Rain emits [HR]-tagged duo-consensus content.\n"
 )
 
 // VerifyHubBroadcastRainGate returns ExitBlock if a non-Rain agent
 // attempts hub_broadcast invocation; ExitAllow otherwise. agentID is
 // read from BOT_HQ_AGENT_ID env-var by the caller (RunHook).
 //
-// Empty agentID → ExitAllow (defensive: don't block non-trio Claude
+// Empty agentID → ExitAllow (defensive: don't block non-duo Claude
 // Code instances; mirrors K-16 + R33 defensive default).
 func VerifyHubBroadcastRainGate(agentID string) (allow bool, reason string) {
 	if agentID == "" {

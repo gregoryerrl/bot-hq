@@ -54,7 +54,7 @@ type Rule struct {
 	HistoryPointer string
 
 	// PayloadMirror is the optional file:line:identifier of a runtime-emit
-	// equivalent — e.g., "internal/gemma/plan_usage.go:59:planCapResumeFmt"
+	// equivalent — e.g., "internal/emma/plan_usage.go:59:planCapResumeFmt"
 	// for RESUME-FROM-HALT. When non-empty, the ratchet test asserts the
 	// const text and the runtime-emit string share a substring-set
 	// (Option B per Q4). Empty means no runtime-emit equivalent.
@@ -66,7 +66,7 @@ type Rule struct {
 }
 
 // Rules is the canonical enumeration of all prompt-rules across the bot-hq
-// trio's prompt surface. Source-of-truth for TestRuleNamespaceRatchet
+// duo's prompt surface. Source-of-truth for TestRuleNamespaceRatchet
 // (registry_test.go).
 //
 // Maintenance: when adding a new rule (const-shared OR inline), ALSO add
@@ -111,7 +111,7 @@ var Rules = []Rule{
 		EmbeddedIn:         []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"},
 		TestLockTestNames:  []string{"TestPhaseIv1ContentShape"},
 		HistoryPointer:     "internal/protocol/disc.go:25-62",
-		PayloadMirror:      "internal/gemma/plan_usage.go:59:planCapResumeFmt",
+		PayloadMirror:      "internal/emma/plan_usage.go:59:planCapResumeFmt",
 		AgentApplicability: []string{"brian", "rain"},
 	},
 	// Phase J T1.1 const additions: R17/R18/R19 added per pass-3 user
@@ -122,8 +122,8 @@ var Rules = []Rule{
 	{ID: "R19", Name: "CYCLE-CLOSE-USER-BLOCKING", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R19", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
 	{ID: "R20", Name: "BOOTSTRAP-ON-CONVERSATION-RESUME", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R20", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestAgentStateRoundTrip"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
 	{ID: "R21", Name: "MSG-TYPE-TAXONOMY", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R21", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestMessageTypeTaxonomy"}, HistoryPointer: "internal/protocol/disc.go:25-62", AgentApplicability: []string{"brian", "rain"}},
-	{ID: "R22", Name: "PRE-HALT-SNAP", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R22", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestPreHaltSnapEmitAtThreshold", "TestPreHaltSnapCooldown"}, HistoryPointer: "internal/protocol/disc.go:25-62", PayloadMirror: "internal/gemma/plan_usage.go:planCapPreHaltFmt", AgentApplicability: []string{"brian", "rain"}},
-	{ID: "R23", Name: "HEARTBEAT-LEDGER", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R23", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestHeartbeatLedgerEmitsAtInterval"}, HistoryPointer: "internal/protocol/disc.go:25-62", PayloadMirror: "internal/gemma/gemma.go:runHeartbeatLedger", AgentApplicability: []string{"brian", "rain"}},
+	{ID: "R22", Name: "PRE-HALT-SNAP", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R22", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestPreHaltSnapEmitAtThreshold", "TestPreHaltSnapCooldown"}, HistoryPointer: "internal/protocol/disc.go:25-62", PayloadMirror: "internal/emma/plan_usage.go:planCapPreHaltFmt", AgentApplicability: []string{"brian", "rain"}},
+	{ID: "R23", Name: "HEARTBEAT-LEDGER", ConstName: "protocol.PhaseIv1ProtocolHardening", SubID: "R23", EmbeddedIn: []string{"internal/brian/brian.go:261", "internal/rain/rain.go:247"}, TestLockTestNames: []string{"TestPhaseIv1ContentShape", "TestHeartbeatLedgerEmitsAtInterval"}, HistoryPointer: "internal/protocol/disc.go:25-62", PayloadMirror: "internal/emma/gemma.go:runHeartbeatLedger", AgentApplicability: []string{"brian", "rain"}},
 	{
 		ID:                 "H-13",
 		Name:               "FORCE-PUSH-TOKEN-PROTOCOL",
@@ -142,7 +142,7 @@ var Rules = []Rule{
 		EmbeddedIn:         []string{"internal/brian/brian.go:284", "internal/rain/rain.go:265"},
 		TestLockTestNames:  []string{"TestBrianPromptContainsHaltAllWork", "TestRainPromptContainsHaltAllWork"},
 		HistoryPointer:     "internal/protocol/disc.go:113-128",
-		PayloadMirror:      "internal/gemma/plan_usage.go:48:planCapReasonFmt",
+		PayloadMirror:      "internal/emma/plan_usage.go:48:planCapReasonFmt",
 		AgentApplicability: []string{"brian", "rain"},
 	},
 	{
@@ -153,7 +153,7 @@ var Rules = []Rule{
 		EmbeddedIn:         []string{"internal/brian/brian.go:284", "internal/rain/rain.go:265"},
 		TestLockTestNames:  []string{"TestBrianPromptContainsResumeFromHalt", "TestRainPromptContainsResumeFromHalt"},
 		HistoryPointer:     "internal/protocol/disc.go:113-128",
-		PayloadMirror:      "internal/gemma/plan_usage.go:59:planCapResumeFmt",
+		PayloadMirror:      "internal/emma/plan_usage.go:59:planCapResumeFmt",
 		AgentApplicability: []string{"brian", "rain"},
 	},
 }

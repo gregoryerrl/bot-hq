@@ -27,11 +27,11 @@ func TestVerifyHubBroadcastRainGate_BlockBrian(t *testing.T) {
 }
 
 func TestVerifyHubBroadcastRainGate_AllowEmptyAgentID(t *testing.T) {
-	// Defensive default: non-trio Claude Code instances (no BOT_HQ_AGENT_ID
+	// Defensive default: non-duo Claude Code instances (no BOT_HQ_AGENT_ID
 	// env-var set) should be allowed through. Mirrors K-16 + R33 pattern.
 	allow, _ := VerifyHubBroadcastRainGate("")
 	if !allow {
-		t.Error("empty agent_id should be allowed (defensive default for non-trio sessions)")
+		t.Error("empty agent_id should be allowed (defensive default for non-duo sessions)")
 	}
 }
 

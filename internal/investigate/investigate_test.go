@@ -91,9 +91,9 @@ func (e *loopNotFoundErr) Error() string {
 func newTestOrchestrator(t *testing.T) *Orchestrator {
 	t.Helper()
 	c := mustMakeCL(t)
-	rt, err := cl.NewIPIVRuntime(c, "test-project")
+	rt, err := cl.NewIPAVRuntime(c, "test-project")
 	if err != nil {
-		t.Fatalf("NewIPIVRuntime: %v", err)
+		t.Fatalf("NewIPAVRuntime: %v", err)
 	}
 	o, err := New(rt, newMemTreeStore(), newMemLoopStore())
 	if err != nil {
@@ -110,7 +110,7 @@ func TestNew_validation(t *testing.T) {
 	}
 
 	c := mustMakeCL(t)
-	rt, _ := cl.NewIPIVRuntime(c, "test")
+	rt, _ := cl.NewIPAVRuntime(c, "test")
 
 	if _, err := New(rt, nil, newMemLoopStore()); err == nil {
 		t.Error("expected error for nil treeStore")

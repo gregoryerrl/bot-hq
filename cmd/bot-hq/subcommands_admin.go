@@ -33,11 +33,11 @@ func runMCP() {
 		os.Exit(1)
 	}
 
-	// Phase M M-1 c2 — auto-install trio Stop-hook + PreToolUse-Bash hook
+	// Phase M M-1 c2 — auto-install duo Stop-hook + PreToolUse-Bash hook
 	// at MCP server startup (idempotent + non-clobbering + best-effort).
 	// Closes Phase L Finding-1 (installer-not-run on this machine; cost
 	// detection-time of ~1 day on Phase L close) by removing the manual
-	// `bot-hq install-trio-hook` + `bot-hq install-toolgate-hook`
+	// `bot-hq install-duo-hook` + `bot-hq install-toolgate-hook`
 	// invocation gap. Subcommands remain available for explicit re-install.
 	if home != "" {
 		if botHQPath, execErr := os.Executable(); execErr == nil && botHQPath != "" {
@@ -373,14 +373,14 @@ func runWebUI() {
 //	bot-hq emit-compact-notice --agent <id>
 func runEmitCompactNotice() {
 	// Defensive degrade: when invoked from a Claude Code session that lacks
-	// BOT_HQ_AGENT_ID (i.e., not a trio pane), the PreCompact hook command
+	// BOT_HQ_AGENT_ID (i.e., not a duo pane), the PreCompact hook command
 	// `bot-hq emit-compact-notice --agent ${BOT_HQ_AGENT_ID}` resolves to
 	// `--agent` with empty / missing value. Without this guard, Go's flag
 	// parser exits non-zero, which Claude Code interprets as "block the
-	// compact." Non-trio sessions have no peers to notify; the right answer
+	// compact." Non-duo sessions have no peers to notify; the right answer
 	// is noop + exit 0 so compaction proceeds normally.
 	if emptyAgentInvocation(os.Args[2:]) {
-		fmt.Fprintln(os.Stderr, "emit-compact-notice: no BOT_HQ_AGENT_ID (non-trio session); skipping notice")
+		fmt.Fprintln(os.Stderr, "emit-compact-notice: no BOT_HQ_AGENT_ID (non-duo session); skipping notice")
 		return
 	}
 	flagSet := flag.NewFlagSet("emit-compact-notice", flag.ExitOnError)
@@ -441,10 +441,10 @@ func runEmitCompactNotice() {
 //
 //	bot-hq emit-resume --agent <id>
 func runEmitResume() {
-	// Defensive degrade: same shape as runEmitCompactNotice — non-trio
+	// Defensive degrade: same shape as runEmitCompactNotice — non-duo
 	// sessions noop instead of failing.
 	if emptyAgentInvocation(os.Args[2:]) {
-		fmt.Fprintln(os.Stderr, "emit-resume: no BOT_HQ_AGENT_ID (non-trio session); skipping notice")
+		fmt.Fprintln(os.Stderr, "emit-resume: no BOT_HQ_AGENT_ID (non-duo session); skipping notice")
 		return
 	}
 	flagSet := flag.NewFlagSet("emit-resume", flag.ExitOnError)
@@ -493,7 +493,7 @@ func runEmitResume() {
 // indicates the caller invoked the subcommand without a real --agent
 // value. Triggered when a hook command like
 // `bot-hq emit-compact-notice --agent ${BOT_HQ_AGENT_ID}` runs with
-// the env var unset/empty (non-trio Claude Code session). Both
+// the env var unset/empty (non-duo Claude Code session). Both
 // shell-shapes covered: `--agent` (no following arg) and
 // `--agent ""` / `--agent=""`.
 func emptyAgentInvocation(args []string) bool {

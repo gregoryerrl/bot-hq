@@ -18,7 +18,7 @@ func setup(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	must(filepath.Join(root, "README.md"), "# bot-hq\n\nA trio orchestration system.\n")
+	must(filepath.Join(root, "README.md"), "# bot-hq\n\nA duo orchestration system.\n")
 	must(filepath.Join(root, "rules", "general.yaml"), "tone:\n  reply: neutral\n")
 	must(filepath.Join(root, "projects", "bot-hq.yaml"), "project_name: bot-hq\ngates:\n  push:\n    requiresApproval: false\n")
 	must(filepath.Join(root, "rules", "agents", "brian.yaml"), "role: HANDS\nexec:\n  pushClass: gated\n")
@@ -32,7 +32,7 @@ func TestBuild_allFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(p.Overview, "trio orchestration") {
+	if !strings.Contains(p.Overview, "duo orchestration") {
 		t.Errorf("overview not loaded: %q", p.Overview)
 	}
 	if p.Tasks == nil || len(p.Tasks.Tasks) != 1 || p.Tasks.Tasks[0].ID != "t1" {
