@@ -25,6 +25,14 @@ type TreeNode struct {
 	// surfaced read-only via /api/external-file. Frontend disables save
 	// + revert affordances when External=true.
 	External bool `json:"external,omitempty"`
+	// Class is the filter-chain classification when emitted by the
+	// /api/files?tree=1 endpoint: "universal_opt_in" /
+	// "external_docs_pointer" / "brain_duo_operational" /
+	// "foundational_anchors" (extensions allowlist match);
+	// "project_private" (catch-all under projects/<p>/); or "" when
+	// classification doesn't apply (global walk, dirs without project
+	// context, legacy callers).
+	Class string `json:"class,omitempty"`
 }
 
 // canonicalSkipList is the set of top-level entries excluded from the

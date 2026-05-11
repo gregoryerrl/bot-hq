@@ -189,10 +189,29 @@ func (s *Server) handleDestinations(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFilesTree responds to GET /api/files with the canonical-store
-// tree (excluding runtime state per shouldSkip rules).
+// tree. Two modes per Phase R3 R5 cl-uniformity-webui-nav-refactor:
+//
+//   - Legacy (default, no tree=1 query): returns walkCanonicalTree result.
+//     Preserves pre-Phase-R-3 behavior so existing consumers keep working
+//     until S5 migrates the frontend.
+//   - tree=1 mode: routes through BuildFilteredTree with the cl.IsHidden
+//     filter chain + extensions allowlist classification + project_private
+//     catch-all. Optional root=<canonical-rel-path> param scopes the walk
+//     to a subtree (e.g., root=projects/bot-hq). Returns classified nodes
+//     so the frontend can group by Class.
 func (s *Server) handleFilesTree(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Query().Get("tree") == "1" {
+		root := r.URL.Query().Get("root")
+		tree, err := BuildFilteredTree(s.canonicalRoot, root)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("filtered walk: %v", err), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"root": root, "tree": tree})
 		return
 	}
 	tree, err := walkCanonicalTree(s.canonicalRoot)

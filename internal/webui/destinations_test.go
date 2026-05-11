@@ -116,180 +116,13 @@ func TestListProjects_EmptyDirOnlyBotHQ(t *testing.T) {
 	}
 }
 
-func TestResolveDestinations_GlobalSection_BotHQProject(t *testing.T) {
-	root := t.TempDir()
-	fillCanonicalLayout(t, root)
-
-	dests, err := ResolveDestinations(root, "bot-hq")
-	if err != nil {
-		t.Fatalf("ResolveDestinations: %v", err)
-	}
-	byName := map[string]Destination{}
-	for _, d := range dests {
-		byName[d.Name] = d
-	}
-
-	// Global:
-	if got := byName["Documents"].Nodes; len(got) != 2 || got[0].Name != "README.md" || got[1].Name != "tasks.md" {
-		t.Errorf("Documents nodes = %+v, want [README.md tasks.md]", got)
-	}
-	if got := byName["Disciplines"].Nodes; len(got) != 1 || got[0].Name != "discipline-log.md" {
-		t.Errorf("Disciplines nodes = %+v, want 1 discipline-log.md", got)
-	}
-	if got := byName["Ratchets"].Nodes; len(got) != 1 || got[0].Name != "active.md" {
-		t.Errorf("Ratchets nodes = %+v", got)
-	}
-	if got := byName["Global Rules"].Nodes; len(got) != 1 || got[0].Name != "general.yaml" {
-		t.Errorf("Global Rules nodes = %+v", got)
-	}
-	if got := byName["Agent Rules"].Nodes; len(got) != 2 {
-		t.Errorf("Agent Rules nodes count = %d, want 2 (brian+rain)", len(got))
-	}
-	if got := byName["Agent Notes"].Nodes; len(got) != 2 {
-		t.Errorf("Agent Notes nodes count = %d, want 2", len(got))
-	}
-	if got := byName["Sessions"].Nodes; len(got) != 1 {
-		t.Errorf("Sessions nodes count = %d, want 1", len(got))
-	}
-	if got := byName["Etc"].Section; got != "global" {
-		// First Etc is global; we won't dig further for content.
-	}
-}
-
-func TestResolveDestinations_BotHQProjectSection(t *testing.T) {
-	root := t.TempDir()
-	fillCanonicalLayout(t, root)
-
-	dests, err := ResolveDestinations(root, "bot-hq")
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	// Project-section destinations always come after global; collect the
-	// project-section ones explicitly.
-	var proj map[string]Destination = map[string]Destination{}
-	for _, d := range dests {
-		if d.Section == "project" {
-			proj[d.Name] = d
-		}
-	}
-
-	// Overview = projects/bot-hq/README.md + INDEX.md (Phase Q schema).
-	if got := proj["Overview"].Nodes; len(got) != 2 || got[0].Name != "README.md" || got[1].Name != "INDEX.md" {
-		t.Errorf("bot-hq Overview = %+v, want [README.md, INDEX.md]", got)
-	}
-	// Rules = projects/bot-hq.yaml + gates/*.md (2 gates in fixture).
-	rules := proj["Rules"].Nodes
-	if len(rules) != 3 {
-		t.Errorf("bot-hq Rules nodes count = %d, want 3 (yaml + 2 gates); got=%+v", len(rules), rules)
-	}
-	hasYaml := false
-	gateCount := 0
-	for _, n := range rules {
-		if strings.HasSuffix(n.Path, ".yaml") {
-			hasYaml = true
-		}
-		if strings.HasPrefix(n.Path, "gates/") {
-			gateCount++
-		}
-	}
-	if !hasYaml || gateCount != 2 {
-		t.Errorf("bot-hq Rules: hasYaml=%v gateCount=%d, want true/2", hasYaml, gateCount)
-	}
-
-	// Plans = phase/*.md (2 in fixture).
-	if got := proj["Plans"].Nodes; len(got) != 2 {
-		t.Errorf("bot-hq Plans nodes = %d, want 2 phase files; got %+v", len(got), got)
-	}
-
-	// Phase Q library subdirs are not seeded for bot-hq in fixture (bot-hq
-	// uses canonical-store top-level for its load-bearing artifacts), so
-	// these destinations report empty.
-	for _, name := range []string{"Architecture", "Decisions", "Conventions", "Glossary", "Audit notes", "EOD", "Clips"} {
-		if got := proj[name].Nodes; len(got) != 0 {
-			t.Errorf("bot-hq %s nodes = %d, want 0; got %+v", name, len(got), got)
-		}
-	}
-}
-
-func TestResolveDestinations_NonBotHQProjectSection(t *testing.T) {
-	root := t.TempDir()
-	fillCanonicalLayout(t, root)
-
-	dests, err := ResolveDestinations(root, "myproj")
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	proj := map[string]Destination{}
-	for _, d := range dests {
-		if d.Section == "project" {
-			proj[d.Name] = d
-		}
-	}
-
-	// Overview from projects/myproj/{README.md,INDEX.md} (Phase Q schema).
-	if got := proj["Overview"].Nodes; len(got) != 2 || got[0].Name != "README.md" || got[1].Name != "INDEX.md" {
-		t.Errorf("myproj Overview = %+v, want [README.md, INDEX.md]", got)
-	}
-	// Rules = projects/myproj.yaml; gates do NOT surface for non-bot-hq.
-	rules := proj["Rules"].Nodes
-	if len(rules) != 1 || rules[0].Path != "projects/myproj.yaml" {
-		t.Errorf("myproj Rules = %+v, want only projects/myproj.yaml", rules)
-	}
-	for _, n := range rules {
-		if strings.HasPrefix(n.Path, "gates/") {
-			t.Errorf("non-bot-hq Rules unexpectedly surfaced gate path %q", n.Path)
-		}
-	}
-	// Plans from projects/myproj/plans/*.md.
-	if got := proj["Plans"].Nodes; len(got) != 1 || got[0].Path != "projects/myproj/plans/plans-1.md" {
-		t.Errorf("myproj Plans = %+v", got)
-	}
-	// Phase Q library subdir destinations each have 1 fixture file.
-	for _, want := range []struct {
-		name, path string
-	}{
-		{"Architecture", "projects/myproj/architecture/architecture-1.md"},
-		{"Decisions", "projects/myproj/decisions/decisions-1.md"},
-		{"Conventions", "projects/myproj/conventions/conventions-1.md"},
-		{"Glossary", "projects/myproj/glossary/glossary-1.md"},
-		{"Audit notes", "projects/myproj/audit-notes/audit-notes-1.md"},
-		{"EOD", "projects/myproj/eod/eod-1.md"},
-		{"Clips", "projects/myproj/clips/clips-1.md"},
-	} {
-		got := proj[want.name].Nodes
-		if len(got) != 1 || got[0].Path != want.path {
-			t.Errorf("myproj %s = %+v, want 1 node at %s", want.name, got, want.path)
-		}
-	}
-	// Project docs is the dual-root destination — empty in test (no
-	// ~/Projects/myproj/docs/ on disk during test).
-	if got := proj["Project docs"].Nodes; len(got) != 0 {
-		t.Errorf("myproj Project docs = %d nodes, want 0 (no external dir in test); got %+v", len(got), got)
-	}
-}
-
-func TestResolveDestinations_OverviewBlankState(t *testing.T) {
-	root := t.TempDir()
-	mustMkdir(t, filepath.Join(root, "projects"))
-	mustWrite(t, filepath.Join(root, "projects", "newproj.yaml"), "project_name: newproj\n")
-	// projects/newproj/README.md and INDEX.md NOT created — should yield
-	// a Missing marker for README.md (Phase Q blank-state).
-
-	dests, err := ResolveDestinations(root, "newproj")
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	for _, d := range dests {
-		if d.Section == "project" && d.Name == "Overview" {
-			if len(d.Nodes) != 1 {
-				t.Fatalf("Overview nodes = %d, want 1 missing-marker; got %+v", len(d.Nodes), d.Nodes)
-			}
-			if !d.Nodes[0].Missing {
-				t.Errorf("Overview node Missing = false, want true; got %+v", d.Nodes[0])
-			}
-		}
-	}
-}
+// TestResolveDestinations_GlobalSection_BotHQProject + sibling
+// TestResolveDestinations_{BotHQProjectSection,NonBotHQProjectSection,
+// OverviewBlankState,HideListEnforced,EmptyCanonicalStore} tested the
+// pre-Phase-R3-R5 hardcoded resolver list (25+ resolveProject* / global
+// resolvers in destinations.go). Phase R3 R5 S4 dropped the resolver
+// list; coverage migrated to treewalker_test.go + crossproject_test.go
+// for the yaml-driven nav model that replaced it.
 
 func TestHandleProjectsEndpoint(t *testing.T) {
 	root := t.TempDir()
@@ -310,6 +143,9 @@ func TestHandleProjectsEndpoint(t *testing.T) {
 	}
 }
 
+// TestHandleDestinationsEndpoint covers the post-Phase-R3-R5 backward-
+// compat shim: the route stays alive returning an empty Destination list
+// until S5 atomic-deletion + frontend migration to /api/files?tree=1.
 func TestHandleDestinationsEndpoint(t *testing.T) {
 	root := t.TempDir()
 	fillCanonicalLayout(t, root)
@@ -329,12 +165,9 @@ func TestHandleDestinationsEndpoint(t *testing.T) {
 	if p.Project != "bot-hq" {
 		t.Errorf("project = %q, want bot-hq", p.Project)
 	}
-	// Expect 8 global + 13 project = 21 destinations (Phase Q library
-	// schema + Z-4-a-2 Env + Z-4-a-tasks: Overview + Rules + Plans +
-	// Architecture + Decisions + Conventions + Glossary + Audit notes +
-	// EOD + Clips + Env + Tasks + Project docs).
-	if len(p.Destinations) != 21 {
-		t.Errorf("destinations count = %d, want 21; got %+v", len(p.Destinations), p.Destinations)
+	// Post-S4: destinations list is empty until S5 deletes the route.
+	if len(p.Destinations) != 0 {
+		t.Errorf("destinations count = %d, want 0 (backward-compat shim); got %+v", len(p.Destinations), p.Destinations)
 	}
 }
 
@@ -354,32 +187,10 @@ func TestHandleDestinationsEndpoint_DefaultBotHQ(t *testing.T) {
 
 // HIDE-list verification — confirm runtime/code paths absent from any
 // destination output. Walks every destination's Nodes recursively.
-func TestResolveDestinations_HideListEnforced(t *testing.T) {
-	root := t.TempDir()
-	fillCanonicalLayout(t, root)
-
-	for _, project := range []string{"bot-hq", "myproj"} {
-		dests, err := ResolveDestinations(root, project)
-		if err != nil {
-			t.Fatalf("project=%s: %v", project, err)
-		}
-		for _, d := range dests {
-			for _, n := range d.Nodes {
-				p := n.Path
-				// HIDE list: db/log/jsonl/voice-mirror-log/last_state.json/diag/sentinels/bridge/plugins
-				banned := []string{
-					"hub.db", "live.log", "voice-mirror-log.md",
-					"last_state.json", "diag/", "sentinels/", "bridge/", "plugins/",
-				}
-				for _, b := range banned {
-					if strings.Contains(p, b) {
-						t.Errorf("project=%s dest=%s surfaced HIDE-list path %q", project, d.Name, p)
-					}
-				}
-			}
-		}
-	}
-}
+// TestResolveDestinations_HideListEnforced previously walked the resolver
+// output to assert no HIDE-class path surfaced; that responsibility moved
+// to cl.IsHidden (covered by internal/cl/hidden_test.go) and the
+// tree-walker (covered by treewalker_test.go).
 
 // HIDE-list at file-content endpoint level: even if a path is requested,
 // it must be rejected if it's HIDE-class.
@@ -460,20 +271,16 @@ func TestResolveCanonicalPath_StillRejectsEscape_v3x1(t *testing.T) {
 	}
 }
 
-// Sanity: a brand-new install (no canonical-store dirs at all) should not
-// crash any resolver.
+// Sanity: a brand-new install (no canonical-store dirs at all) should
+// not crash the backward-compat shim. Post-S4 returns an empty list.
 func TestResolveDestinations_EmptyCanonicalStore(t *testing.T) {
 	root := t.TempDir()
 	dests, err := ResolveDestinations(root, "bot-hq")
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
-	if len(dests) != 21 {
-		t.Errorf("expected 21 destinations, got %d", len(dests))
-	}
-	// Most/all should be empty Nodes — no panic.
-	for _, d := range dests {
-		_ = d.Nodes
+	if len(dests) != 0 {
+		t.Errorf("expected 0 destinations (S4 backward-compat shim), got %d", len(dests))
 	}
 }
 
