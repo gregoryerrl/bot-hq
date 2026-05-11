@@ -115,6 +115,20 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string, 
 			KilledTmux:   []string{},
 			ClosingState: map[string]string{},
 		}
+
+		// Z-7: archive the session's Discord thread (non-destructive;
+		// pinned messages survive, thread is unarchive-able on resume).
+		// Empty thread-id = pre-Z-7 session OR Discord-disabled deploy
+		// — skip gracefully. Best-effort: archive failure doesn't block
+		// duo-kill / state-capture.
+		if discordBot != nil && req.DiscordThreadID != "" {
+			if aerr := discordBot.ArchiveSessionThread(req.DiscordThreadID); aerr != nil {
+				log.Printf("[session-finalize] discord thread archive %s: %v", req.DiscordThreadID, aerr)
+			} else {
+				result.DiscordArchived = true
+			}
+		}
+
 		pair, ok := reg.Get(req.SessionID)
 		if !ok {
 			// Session might have been opened in a previous daemon run.
@@ -136,7 +150,7 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string, 
 			result.KilledTmux = append(result.KilledTmux, "rain")
 		}
 		reg.Remove(req.SessionID)
-		log.Printf("[session-finalize] killed brian+rain for session=%s (force=%v)", req.SessionID, req.Force)
+		log.Printf("[session-finalize] killed brian+rain for session=%s (force=%v discord_archived=%v)", req.SessionID, req.Force, result.DiscordArchived)
 		return result, nil
 	}
 
