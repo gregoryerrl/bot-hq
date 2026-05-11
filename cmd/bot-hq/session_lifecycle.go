@@ -96,6 +96,7 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string, 
 			// greppable threads.
 			if tid, terr := discordBot.CreateSessionThread(req.SessionID); terr == nil {
 				threadID = tid
+				discordBot.RegisterSessionThread(req.SessionID, threadID)
 			} else {
 				log.Printf("[session-open] discord thread create for %s: %v", req.SessionID, terr)
 			}
@@ -127,6 +128,7 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string, 
 			} else {
 				result.DiscordArchived = true
 			}
+			discordBot.UnregisterSessionThread(req.SessionID)
 		}
 
 		pair, ok := reg.Get(req.SessionID)

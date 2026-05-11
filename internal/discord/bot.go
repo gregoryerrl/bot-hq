@@ -30,6 +30,14 @@ type Bot struct {
 	botUserID         string
 	mu                sync.Mutex
 	stopCh            chan struct{}
+
+	// Z-7: session_id↔thread_id registry. Populated by session-open
+	// hook + bootstrapThreadRegistry at Start. Outbound messages with
+	// SessionID look up their thread here; inbound messages from a
+	// known thread auto-tag with the session_id.
+	threadsMu       sync.RWMutex
+	threadByID      map[string]string // session_id → thread_id
+	sessionByThread map[string]string // thread_id → session_id
 }
 
 // NewBot creates a new Discord bot. It validates the token and channel
@@ -79,16 +87,20 @@ func (b *Bot) resolveHubChannel() string {
 	return b.channelID
 }
 
-// channelForMessage returns the destination channel ID for a hub message
-// per Phase R R4 routing discriminator.
+// channelForMessage returns the destination channel ID for a hub message.
 //
-// Routing matrix:
-//   - MsgFlag → flagsChannelID; falls back to hub-channel if empty (partial-migration)
-//   - content prefix "[SESSION:" → sessionsChannelID; falls back to hub-channel if empty
-//   - everything else → hub-channel (hubChannelID OR legacy channelID)
+// Routing matrix (first match wins):
+//  1. MsgFlag → flagsChannelID; falls back to hub-channel if empty
+//     (flags are global signals, kept in the hub channel — not in a
+//     session's thread — so they surface across all session views).
+//  2. msg.SessionID != "" with a registered thread → that thread.
+//     Session-scoped chatter lands in the session's thread.
+//  3. content prefix "[SESSION:" → sessionsChannelID (Phase R R5
+//     forward-compat; falls back to hub-channel if empty).
+//  4. everything else → hub-channel (hubChannelID OR legacy channelID).
 //
-// Pre-R4 single-channel deployments (legacy channelID set, R4 fields empty)
-// route everything to channelID.
+// Pre-R4 single-channel deployments (legacy channelID set, R4 fields
+// empty) still route everything to channelID via the hub fallback.
 func (b *Bot) channelForMessage(msg protocol.Message) string {
 	hub := b.resolveHubChannel()
 	if msg.Type == protocol.MsgFlag {
@@ -97,10 +109,13 @@ func (b *Bot) channelForMessage(msg protocol.Message) string {
 		}
 		return hub
 	}
-	// Session-event detection via [SESSION:<8>] content prefix per Phase R R5
-	// forward-compat. Phase R R5 will codify the prefix on session-create /
-	// session-close emits; until then this branch matches no current emits
-	// (defensive forward-compat — no behavior change pre-R5).
+	if msg.SessionID != "" {
+		if tid := b.threadForSession(msg.SessionID); tid != "" {
+			return tid
+		}
+		// Fall through — unknown session-id (pre-Z-7 session OR
+		// thread create failed) lands in the hub channel.
+	}
 	if strings.HasPrefix(msg.Content, "[SESSION:") {
 		if b.sessionsChannelID != "" {
 			return b.sessionsChannelID
@@ -162,6 +177,11 @@ func (b *Bot) Start() error {
 	}); err != nil {
 		log.Printf("[discord] failed to register agent: %v", err)
 	}
+
+	// Z-7: load session_id↔thread_id mappings from existing active
+	// session manifests so outbound routing + inbound tagging survive
+	// daemon restarts.
+	b.bootstrapThreadRegistry()
 
 	// Subscribe to hub messages targeted at the "discord" agent
 	ch := b.hub.RegisterWSClient("discord")
