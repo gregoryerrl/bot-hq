@@ -190,143 +190,11 @@ func TestAppTickRefreshesPanestate(t *testing.T) {
 	}
 }
 
-// TestAppTickPropagatesAgentsToTab verifies the AgentsTab still receives the
-// agent slice via AgentsUpdated after the panestate plumbing change. Locks
-// the "behavior at user-visible level: zero" guarantee for commit 3.
-func TestAppTickPropagatesAgentsToTab(t *testing.T) {
-	db := newTestDB(t)
-	if err := db.RegisterAgent(protocol.Agent{
-		ID:     "tab-agent",
-		Name:   "Tab Agent",
-		Type:   protocol.AgentBrian,
-		Status: protocol.StatusOnline,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	app := NewApp(hub.Config{}, db, nil)
-
-	updated, _ := app.Update(tickMsg(time.Now()))
-	app = updated.(App)
-
-	if got := len(app.agentsTab.agents); got != 1 {
-		t.Errorf("agentsTab.agents len = %d, want 1", got)
-	}
-	if got := app.agentsTab.agents[0].ID; got != "tab-agent" {
-		t.Errorf("agentsTab.agents[0].ID = %q, want tab-agent", got)
-	}
-}
-
-// TestKeyDispatchOnAgentsTab_CursorNav verifies App.Update routes tea.KeyMsg
-// to the agents tab when activeTab=TabAgents. Regression: A2 added cursor
-// handlers to AgentsTab.Update but app.go's KeyMsg default lacked a TabAgents
-// branch, so every key (j/k/arrows/enter) was silently dropped at the App
-// router. Unit tests on AgentsTab.Update couldn't catch this — the gap was
-// one layer up at App.Update. This test exercises the parent router.
-func TestKeyDispatchOnAgentsTab_CursorNav(t *testing.T) {
-	db := newTestDB(t)
-	for i, id := range []string{"a1", "a2", "a3"} {
-		if err := db.RegisterAgent(protocol.Agent{
-			ID:     id,
-			Name:   "Agent " + id,
-			Type:   protocol.AgentBrian,
-			Status: protocol.StatusOnline,
-		}); err != nil {
-			t.Fatalf("register %d: %v", i, err)
-		}
-	}
-	app := NewApp(hub.Config{}, db, nil)
-	updated, _ := app.Update(tickMsg(time.Now()))
-	app = updated.(App)
-	app.activeTab = TabAgents
-
-	if got := app.agentsTab.cursor; got != 0 {
-		t.Fatalf("initial cursor = %d, want 0", got)
-	}
-
-	updated, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
-	app = updated.(App)
-	if got := app.agentsTab.cursor; got != 1 {
-		t.Errorf("after j: cursor = %d, want 1 (App.Update did not route key to AgentsTab)", got)
-	}
-
-	updated, _ = app.Update(tea.KeyMsg{Type: tea.KeyDown})
-	app = updated.(App)
-	if got := app.agentsTab.cursor; got != 2 {
-		t.Errorf("after KeyDown: cursor = %d, want 2", got)
-	}
-
-	updated, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
-	app = updated.(App)
-	if got := app.agentsTab.cursor; got != 1 {
-		t.Errorf("after k: cursor = %d, want 1", got)
-	}
-}
-
-// TestKeyDispatchOnAgentsTab_EnterOpensModal verifies the Enter path through
-// App.Update reaches AgentsTab and opens the pane modal when the cursor is
-// on an agent with a tmux_target. Pairs with the cursor-nav test to cover
-// both navigation and modal-trigger surfaces of the Slice 1 regression.
-func TestKeyDispatchOnAgentsTab_EnterOpensModal(t *testing.T) {
-	db := newTestDB(t)
-	if err := db.RegisterAgent(protocol.Agent{
-		ID:     "tmux-agent",
-		Name:   "Tmux Agent",
-		Type:   protocol.AgentBrian,
-		Status: protocol.StatusOnline,
-		Meta:   `{"tmux_target":"bot-hq:0.1"}`,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	app := NewApp(hub.Config{}, db, nil)
-	app.agentsTab = NewAgentsTab(func(target string, lines int) (string, error) {
-		return "captured pane content for " + target, nil
-	})
-	if app.pane != nil {
-		app.agentsTab.SetPane(app.pane)
-	}
-	updated, _ := app.Update(tickMsg(time.Now()))
-	app = updated.(App)
-	app.activeTab = TabAgents
-
-	if app.agentsTab.paneModal != nil {
-		t.Fatal("paneModal non-nil before Enter")
-	}
-
-	updated, _ = app.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	app = updated.(App)
-	if app.agentsTab.paneModal == nil {
-		t.Errorf("paneModal nil after Enter (App.Update did not route Enter to AgentsTab)")
-	}
-}
-
-// TestKeyDispatchInverse verifies that keys do NOT reach the agents tab when
-// activeTab is something else (e.g. TabHub). Catches future regressions
-// where someone wires keys to all tabs unconditionally.
-func TestKeyDispatchInverse(t *testing.T) {
-	db := newTestDB(t)
-	for _, id := range []string{"a1", "a2", "a3"} {
-		if err := db.RegisterAgent(protocol.Agent{
-			ID:     id,
-			Name:   "Agent " + id,
-			Type:   protocol.AgentBrian,
-			Status: protocol.StatusOnline,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	app := NewApp(hub.Config{}, db, nil)
-	updated, _ := app.Update(tickMsg(time.Now()))
-	app = updated.(App)
-	app.activeTab = TabHub
-
-	startCursor := app.agentsTab.cursor
-
-	updated, _ = app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
-	app = updated.(App)
-	if got := app.agentsTab.cursor; got != startCursor {
-		t.Errorf("agentsTab.cursor advanced to %d while activeTab=TabHub; want %d (key leaked across tab boundary)", got, startCursor)
-	}
-}
+// Z-9a: Agents tab dropped — TestAppTickPropagatesAgentsToTab +
+// TestKeyDispatchOnAgentsTab_{CursorNav,EnterOpensModal} +
+// TestKeyDispatchInverse all removed (they tested AgentsTab behavior
+// that no longer exists). Hub + Sessions tab dispatch is exercised by
+// their own tests.
 
 // TestPanestateSnapshotFreshness verifies that after a DB last_seen update,
 // the next tick's snapshot reflects the new state. Locks against tabs
@@ -441,14 +309,14 @@ func TestAppCtrlCStillQuits(t *testing.T) {
 	}
 }
 
-// TestAppTabCyclingUnchanged locks that tab/shift+tab still cycle through
-// all 4 tabs and back to the start. The Path C trim (removing 1/2/3/4)
-// must not regress this surface.
+// TestAppTabCyclingUnchanged locks that tab/shift+tab still cycle
+// through all tabs and back to the start. Z-9a: 4 tabs → 3 (Agents
+// dropped).
 func TestAppTabCyclingUnchanged(t *testing.T) {
 	app := NewApp(hub.Config{}, nil, nil)
 	app.activeTab = TabHub
 
-	expect := []Tab{TabAgents, TabSessions, TabSettings, TabHub}
+	expect := []Tab{TabSessions, TabSettings, TabHub}
 	for i, want := range expect {
 		updated, _ := app.Update(tea.KeyMsg{Type: tea.KeyTab})
 		app = updated.(App)
@@ -457,8 +325,7 @@ func TestAppTabCyclingUnchanged(t *testing.T) {
 		}
 	}
 
-	// Reverse cycle via shift+tab.
-	expect = []Tab{TabSettings, TabSessions, TabAgents, TabHub}
+	expect = []Tab{TabSettings, TabSessions, TabHub}
 	for i, want := range expect {
 		updated, _ := app.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 		app = updated.(App)

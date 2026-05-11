@@ -234,9 +234,10 @@ func (h HubTab) SessionFilter() string {
 // bottom after the resize so a terminal resize doesn't strand them mid-feed.
 // When the user has scrolled up, preserve their scroll position.
 func (h *HubTab) resize() {
-	// Reserve: 1 indicator + 1 strip top border + 1 strip + 1 strip bottom border + inputRows.
-	// Total = 4 + inputRows (unchanged from prior separator+indicator+strip+padding layout).
-	reserved := 4 + inputRows
+	// Reserve: 1 indicator + inputRows. Z-9a dropped the bottom
+	// activity-strip section (3 rows: top border + strip + bottom
+	// border), freeing those rows for the chat viewport.
+	reserved := 1 + inputRows
 	vpHeight := h.height - reserved
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -272,14 +273,13 @@ func (h *HubTab) resize() {
 //	│             │ (Z-8e col)  │
 //	├─────────────┴─────────────┤
 //	│ indicator (full-width)    │
-//	│ agent dots strip          │
 //	│ input textarea            │
 //	└───────────────────────────┘
 //
-// The session-strip column renders when terminal is wide enough
-// (sessionStripColumnWidth > 0); otherwise it collapses and the chat
-// takes full width. Bottom slots (indicator/strip/input) span the
-// full width regardless.
+// Z-9a: bottom agent-dots activity strip dropped (Agents tab gone;
+// plan-usage moved to top tab bar in app.View). The session-strip
+// column on the right renders when terminal is wide enough; otherwise
+// it collapses and the chat takes full width.
 func (h HubTab) View() string {
 	indicatorStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
 	indicatorText := ""
@@ -288,25 +288,12 @@ func (h HubTab) View() string {
 	}
 	indicator := indicatorStyle.Render(indicatorText)
 
-	agentStripContent := ""
-	if h.pane != nil {
-		agentStripContent = renderStrip(h.pane.Snapshot(), h.pane.HubSnapshot(), h.width)
-	}
-	agentStripStyle := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), true, false, true, false).
-		BorderForeground(lipgloss.Color("#555555")).
-		Width(h.width).
-		Foreground(ColorStatus)
-	agentStrip := agentStripStyle.Render(agentStripContent)
-
 	// Z-8e: build the top-row split (chat viewport + session strip
 	// column). When terminal is too narrow the column collapses and
 	// chat takes full width.
 	stripW := h.sessionStripColumnWidth()
 	var topRow string
 	if stripW > 0 {
-		// Render the strip column with the same height as the chat
-		// viewport so the row aligns cleanly.
 		stripHeight := h.viewport.Height
 		stripColStyle := lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), false, false, false, true).
@@ -322,7 +309,6 @@ func (h HubTab) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		topRow,
 		indicator,
-		agentStrip,
 		h.input.View(),
 	)
 }
