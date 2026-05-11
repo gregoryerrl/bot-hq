@@ -147,7 +147,10 @@ func (g *Emma) handleConversationMention(msg protocol.Message, directive string)
 	}
 	if _, err := g.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
-		ToAgent:   msg.FromAgent,
+		// Z-5i: broadcast reply (was ToAgent: msg.FromAgent). Matches the
+		// user-mockup "[main] emma: ..." with no arrow. The user posted
+		// the question in the open hub; Emma's answer goes on the open
+		// hub too.
 		Type:      protocol.MsgUpdate,
 		Content:   reply,
 		SessionID: msg.SessionID,

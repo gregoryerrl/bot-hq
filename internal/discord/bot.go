@@ -309,8 +309,8 @@ const embedDescriptionLimit = 4096
 // continuity (sender stripped at render; DB from_agent preserved for
 // forensics).
 //
-// PM-class (msg.ToAgent != "") → author renders as `<from> → <to>` per
-// Refine-2 unified format; broadcast → author renders as `<from>` only.
+// Z-5i: author renders as `<from>` only (the PM-class arrow rendering
+// was display-only inertia from pre-Phase-S-4 PM semantics).
 //
 // Description carries content unchunked here; buildEmbedChunks handles
 // >4096-char splits. Caller pairs with ChannelMessageSendEmbed.
@@ -357,15 +357,14 @@ func buildEmbed(msg protocol.Message) *discordgo.MessageEmbed {
 	return embed
 }
 
-// authorFor returns the embed Author per Phase-R-followup Refine-2
-// unified format: PM-class (ToAgent != "") → `<from> → <to>`;
-// broadcast (ToAgent == "") → `<from>` only. Pure helper.
+// authorFor returns the embed Author = the sender's name.
+// Z-5i: dropped the "<from> → <to>" PM-style rendering — Phase S S-4
+// removed PM semantics; the arrow was display-only inertia that lied
+// about the wire shape. ToAgent is still a routing field (used by the
+// Discord forwarder filter via shouldForwardToDiscord) but it doesn't
+// surface in the user-visible embed.
 func authorFor(msg protocol.Message) *discordgo.MessageEmbedAuthor {
-	name := msg.FromAgent
-	if msg.ToAgent != "" {
-		name = msg.FromAgent + " → " + msg.ToAgent
-	}
-	return &discordgo.MessageEmbedAuthor{Name: name}
+	return &discordgo.MessageEmbedAuthor{Name: msg.FromAgent}
 }
 
 // buildEmbedChunks returns 1+ embeds covering content longer than

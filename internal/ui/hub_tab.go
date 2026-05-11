@@ -293,13 +293,12 @@ func (h HubTab) renderMessages() string {
 	return strings.Join(lines, "\n")
 }
 
-// formatMessage renders a single message as "[HH:MM:SS] [session] from → to: content"
-// with each agent name colored independently. The [session] tag shows
-// the short session-id in the aggregated view (sessionFilter==""); it's
-// omitted when filtering to one session (redundant). Z-5e closes the
-// mental-model gap from the EOD retro: aggregated view needs per-row
-// session attribution so the user can tell which session each line is
-// from. System events / main-hub messages render as "[main]".
+// formatMessage renders a single message as "[HH:MM:SS] [session] from: content".
+// Z-5i removed the "→ to:" arrow rendering: Phase S S-4 already dropped
+// PM semantics from the wire protocol; the prior arrow display
+// implied a PM-class targeting that hasn't existed since S-4. User-
+// mockup format is "[Session-id] sender: content" — sender colored
+// per agentColor, session-tag in aggregated view only.
 func (h HubTab) formatMessage(msg protocol.Message) string {
 	timestamp := msg.Created.Format("15:04:05")
 	sessionTag := h.sessionTagFor(msg) // empty when filter is set
@@ -326,15 +325,9 @@ func (h HubTab) formatMessage(msg protocol.Message) string {
 	}
 
 	tsStyle := lipgloss.NewStyle().Foreground(ColorStatus)
-	arrowStyle := lipgloss.NewStyle().Foreground(ColorStatus)
 
 	fromColor := agentColor(msg.FromAgent)
 	fromStyle := lipgloss.NewStyle().Foreground(fromColor)
-	toName := "*"
-	if msg.ToAgent != "" {
-		toName = msg.ToAgent
-	}
-	toStyle := lipgloss.NewStyle().Foreground(agentColor(toName))
 
 	// Message content matches the author's color
 	msgColor := fromColor
@@ -346,9 +339,9 @@ func (h HubTab) formatMessage(msg protocol.Message) string {
 	// visible width for wrapping.
 	var prefix string
 	if sessionTag != "" {
-		prefix = fmt.Sprintf("[%s] %s %s → %s: ", timestamp, sessionTag, msg.FromAgent, toName)
+		prefix = fmt.Sprintf("[%s] %s %s: ", timestamp, sessionTag, msg.FromAgent)
 	} else {
-		prefix = fmt.Sprintf("[%s] %s → %s: ", timestamp, msg.FromAgent, toName)
+		prefix = fmt.Sprintf("[%s] %s: ", timestamp, msg.FromAgent)
 	}
 	prefixLen := len(prefix)
 
@@ -361,22 +354,16 @@ func (h HubTab) formatMessage(msg protocol.Message) string {
 	msgStyle := lipgloss.NewStyle().Foreground(msgColor)
 
 	if sessionTag != "" {
-		return fmt.Sprintf("%s %s %s %s %s%s %s",
+		return fmt.Sprintf("%s %s %s: %s",
 			tsStyle.Render("["+timestamp+"]"),
 			tsStyle.Render(sessionTag),
 			fromStyle.Render(msg.FromAgent),
-			arrowStyle.Render("→"),
-			toStyle.Render(toName),
-			arrowStyle.Render(":"),
 			msgStyle.Render(content),
 		)
 	}
-	return fmt.Sprintf("%s %s %s %s%s %s",
+	return fmt.Sprintf("%s %s: %s",
 		tsStyle.Render("["+timestamp+"]"),
 		fromStyle.Render(msg.FromAgent),
-		arrowStyle.Render("→"),
-		toStyle.Render(toName),
-		arrowStyle.Render(":"),
 		msgStyle.Render(content),
 	)
 }

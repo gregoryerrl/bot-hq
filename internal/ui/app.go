@@ -191,28 +191,26 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Handle commands from the Hub tab command bar
+		// Handle commands from the Hub tab command bar.
+		// Z-5i: ToAgent setting removed. Phase S S-4 already dropped PM
+		// semantics; @<target> mentions in content do the routing via
+		// MentionsAgent (the body is the full input as the user typed
+		// it, including the @<target> token, so emma's pollLoop +
+		// brian/rain's shouldForward* see the mention and route).
 		if a.db != nil {
-			target, content := parseCommand(msg.Text)
-			if content == "" && target != "" {
+			content := strings.TrimSpace(msg.Text)
+			if content == "" {
 				return a, nil
 			}
-			m := protocol.Message{
+			a.db.InsertMessage(protocol.Message{
 				FromAgent: "user",
 				Type:      protocol.MsgCommand,
 				Content:   content,
-				// Z-5f: when the Hub is filtered to a specific session
-				// (user is viewing one session's traffic), tag outbound
-				// input with that session_id so replies land IN the
-				// session — matches user's mental model that "talking
-				// while looking at session X" means "talking to session
-				// X." Unfiltered view leaves SessionID="" (main hub).
+				// Z-5f: when the Hub is filtered to a session, tag the
+				// outbound message with that session_id so the reply
+				// lands IN the session.
 				SessionID: a.hubTab.SessionFilter(),
-			}
-			if target != "" {
-				m.ToAgent = target
-			}
-			a.db.InsertMessage(m)
+			})
 		}
 		return a, nil
 
