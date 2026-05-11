@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -108,14 +109,24 @@ func hubSend(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid message type: %s", msgType)), nil
 		}
 
-		// Z-3 session_id resolution priority:
+		// Z-3 session_id resolution priority (post Z-3d-fix4 multi-session):
 		//  1. explicit to_session arg (cross-session routing)
 		//  2. explicit session_id arg (override)
-		//  3. sender's agents.session_id binding (auto-tag at send-time)
-		//  4. empty (global emit, visible cross-session)
+		//  3. BOT_HQ_SESSION_ID env — set per-subprocess at daemon spawn-
+		//     time, authoritative for the subprocess's session binding.
+		//     Replaces the agents-table lookup which can't disambiguate
+		//     when multiple subprocesses share an agent name (e.g., two
+		//     brian instances bound to two concurrent sessions).
+		//  4. sender's agents.session_id (legacy fallback for global
+		//     agents that don't run inside a session container — clive,
+		//     discord, emma — their env is empty so they emit globally).
+		//  5. empty (global emit, visible cross-session)
 		sessionID := req.GetString("to_session", "")
 		if sessionID == "" {
 			sessionID = req.GetString("session_id", "")
+		}
+		if sessionID == "" {
+			sessionID = os.Getenv("BOT_HQ_SESSION_ID")
 		}
 		if sessionID == "" {
 			if a, gErr := db.GetAgent(from); gErr == nil {
@@ -172,9 +183,14 @@ func hubRead(db *hub.DB) ToolDef {
 		sinceID := int64(req.GetFloat("since_id", 0))
 		limit := req.GetInt("limit", 50)
 
-		// Z-3 session filter resolution.
+		// Z-3 session filter resolution (post Z-3d-fix4 multi-session):
+		// prefer BOT_HQ_SESSION_ID env over agents-table lookup so the
+		// per-subprocess view stays scoped correctly when multiple
+		// subprocesses share an agent name.
 		sessionFilter := req.GetString("session_id", "")
-		// Empty string + agent is known → default to agent's bound session.
+		if sessionFilter == "" {
+			sessionFilter = os.Getenv("BOT_HQ_SESSION_ID")
+		}
 		if sessionFilter == "" {
 			if a, gErr := db.GetAgent(agentID); gErr == nil {
 				sessionFilter = a.AgentSessionID
