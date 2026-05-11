@@ -246,11 +246,18 @@ func runHub() {
 	_ = installSessionLifecycleHooks(h, cfg.Brian.WorkDir, cfg.Rain.WorkDir)
 
 	// 7. Build Brian orchestrator instance (Start deferred until after TUI
-	// is ready so its first inserts reach the TUI via OnMessage). Z-3:
-	// AutoStart still honored for backward-compat with single-session-
-	// today operation; future deprecation deferred to Z-4.
+	// is ready so its first inserts reach the TUI via OnMessage). Z-3a:
+	// AutoStart still honored for backward-compat — flip both flags to
+	// false in config.toml to enable Z-3 emma-only ambient mode (BRAIN-
+	// duo spawn-via-hub_session_open). Surfaced explicitly so the user
+	// sees which mode they're in.
 	var brianOrch *brian.Brian
 	log.Printf("[autostart] brian=%v rain=%v emma=%v", cfg.Brian.AutoStart, cfg.Rain.AutoStart, cfg.Emma.AutoStart)
+	if !cfg.Brian.AutoStart && !cfg.Rain.AutoStart && cfg.Emma.AutoStart {
+		log.Printf("[autostart] Z-3a emma-only ambient mode — BRAIN-duo spawns on hub_session_open")
+	} else if cfg.Brian.AutoStart || cfg.Rain.AutoStart {
+		log.Printf("[autostart] Z-3a legacy global-duo mode — flip [brian]/[rain].auto_start=false in config.toml for emma-only ambient")
+	}
 	if cfg.Brian.AutoStart {
 		brianOrch = brian.New(h.DB, cfg.Brian.WorkDir)
 	}
