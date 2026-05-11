@@ -33,7 +33,16 @@ const sessionStripMaxContentChars = 28
 // Returns a vertical string suitable for lipgloss horizontal-join with
 // the chat viewport.
 func renderSessionStrips(sessions []protocol.Session, messages []protocol.Message, width, height int) string {
-	if len(sessions) == 0 {
+	// Z-8 followup: active-only filter — matches Sessions tab default.
+	// Done/paused sessions belong in retrospective queries, not the
+	// live strip.
+	active := make([]protocol.Session, 0, len(sessions))
+	for _, sess := range sessions {
+		if sess.Status == protocol.SessionActive {
+			active = append(active, sess)
+		}
+	}
+	if len(active) == 0 {
 		emptyStyle := lipgloss.NewStyle().Foreground(ColorStatus).Width(width)
 		return emptyStyle.Render("No active sessions.\nOpen one via\nhub_session_open.")
 	}
@@ -49,11 +58,9 @@ func renderSessionStrips(sessions []protocol.Session, messages []protocol.Messag
 
 	// Sort sessions by most-recent-activity first so the user's eye
 	// hits the busiest sessions at the top.
-	sorted := make([]protocol.Session, len(sessions))
-	copy(sorted, sessions)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		iMsgs := bySession[sorted[i].ID]
-		jMsgs := bySession[sorted[j].ID]
+	sort.SliceStable(active, func(i, j int) bool {
+		iMsgs := bySession[active[i].ID]
+		jMsgs := bySession[active[j].ID]
 		var iLast, jLast time.Time
 		if len(iMsgs) > 0 {
 			iLast = iMsgs[len(iMsgs)-1].Created
@@ -65,7 +72,7 @@ func renderSessionStrips(sessions []protocol.Session, messages []protocol.Messag
 	})
 
 	var cards []string
-	for _, sess := range sorted {
+	for _, sess := range active {
 		cards = append(cards, renderSessionCard(sess, bySession[sess.ID], width))
 	}
 	return strings.Join(cards, "\n")
