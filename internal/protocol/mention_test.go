@@ -75,3 +75,50 @@ func TestMentionPatternBoundary(t *testing.T) {
 		t.Error("expected @brian. to match brian")
 	}
 }
+
+func TestMentionsAgentLenient(t *testing.T) {
+	tests := []struct {
+		name      string
+		content   string
+		agent     string
+		sessionID string
+		want      bool
+	}{
+		// strict @-path is unchanged
+		{"strict @emma main-hub", "@emma help", "emma", "", true},
+		{"strict @emma per-session", "@emma help", "emma", "cl-cleanup-x", true},
+		{"strict @brian main-hub", "@brian go", "brian", "", true},
+
+		// lenient: emma bare-name addressing in main-hub
+		{"hi emma", "hi emma", "emma", "", true},
+		{"hey Emma!", "hey Emma!", "emma", "", true},
+		{"bare emma?", "emma?", "emma", "", true},
+		{"bare emma with text", "emma what is the status", "emma", "", true},
+		{"hi, emma comma", "hi, emma", "emma", "", true},
+		{"hello emma", "hello emma there", "emma", "", true},
+		{"leading whitespace emma", "   emma can you help", "emma", "", true},
+
+		// lenient denied: per-session msgs stay strict
+		{"bare emma per-session denied", "emma can you help", "emma", "captain-hook-x", false},
+		{"hi emma per-session denied", "hi emma", "emma", "session-1", false},
+
+		// lenient denied: content reference, not address
+		{"midword content reference", "the emma binary works", "emma", "", false},
+		{"sentence with emma later", "we asked emma yesterday", "emma", "", false},
+
+		// lenient is emma-only (brian/rain stay strict)
+		{"hi brian not lenient", "hi brian", "brian", "", false},
+		{"bare rain not lenient", "rain?", "rain", "", false},
+
+		// empty content / empty agent
+		{"empty content", "", "emma", "", false},
+		{"empty agent", "hi emma", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MentionsAgentLenient(tt.content, tt.agent, tt.sessionID); got != tt.want {
+				t.Errorf("MentionsAgentLenient(%q, %q, %q) = %v, want %v", tt.content, tt.agent, tt.sessionID, got, tt.want)
+			}
+		})
+	}
+}

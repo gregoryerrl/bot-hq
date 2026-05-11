@@ -20,6 +20,13 @@ import "regexp"
 // agent token. Coder IDs match `coder-<hex>` form.
 var mentionPattern = regexp.MustCompile(`(?i)(?:^|\s)@(brian|rain|emma|coder-[a-f0-9]+)\b`)
 
+// emmaBareNamePattern accepts natural-language addressing of Emma at
+// the start of a message: bare "emma", optional greeting + "emma".
+// Only consulted for main-hub messages (session_id=="") to avoid
+// over-routing in busy session timelines where "the emma binary…" etc.
+// are content references, not addresses.
+var emmaBareNamePattern = regexp.MustCompile(`(?i)^\s*(?:(?:hi|hey|yo|hello|sup)\b[\s,!.]*)?emma\b`)
+
 // MentionsAgent reports whether content addresses the given agent ID
 // via @<agent> mention. agentID is matched case-insensitively;
 // coder-* IDs match exactly (full coder-<hex> string).
@@ -32,6 +39,21 @@ func MentionsAgent(content, agentID string) bool {
 		if len(m) >= 2 && equalFold(m[1], agentID) {
 			return true
 		}
+	}
+	return false
+}
+
+// MentionsAgentLenient is MentionsAgent with one carve-out: for Emma
+// in main-hub messages (sessionID==""), bare-name addressing at the
+// start of the message also counts (e.g. "hi emma", "emma?"). Per-
+// session messages stay strict to avoid over-routing on content
+// references. Z-5a.
+func MentionsAgentLenient(content, agentID, sessionID string) bool {
+	if MentionsAgent(content, agentID) {
+		return true
+	}
+	if sessionID == "" && equalFold(agentID, "emma") {
+		return emmaBareNamePattern.MatchString(content)
 	}
 	return false
 }
