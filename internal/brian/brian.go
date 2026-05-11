@@ -3,6 +3,7 @@ package brian
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -588,6 +589,7 @@ func (b *Brian) processNewMessages() {
 		// Z-3d-fix5 multi-session filter: when bound to a session, only
 		// forward messages from this session or untagged globals.
 		if b.sessionID != "" && msg.SessionID != "" && msg.SessionID != b.sessionID {
+			log.Printf("brian[%s]: Z-3d-fix5 filter-drop msg %d (session %q != self %q)", b.sessionID, msg.ID, msg.SessionID, b.sessionID)
 			continue
 		}
 		if !shouldForwardToBrian(msg) {

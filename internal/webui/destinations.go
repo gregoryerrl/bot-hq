@@ -120,6 +120,7 @@ func ProjectDestinations() []Destination {
 		{Name: "EOD", Section: "project", Resolver: resolveProjectEOD},
 		{Name: "Clips", Section: "project", Resolver: resolveProjectClips},
 		{Name: "Env", Section: "project", Resolver: resolveProjectEnv},
+		{Name: "Tasks", Section: "project", Resolver: resolveProjectTasks},
 		{Name: "Project docs", Section: "project", Resolver: resolveProjectExternalDocs},
 	}
 }
@@ -227,6 +228,69 @@ func dirFiles(root, relDir string, exts ...string) ([]TreeNode, error) {
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// dirFilesRecursive walks relDir + descendants, returning every file
+// matching exts (or all files if no exts). Display name shows the
+// subdir-relative path so the user sees the directory context (e.g.,
+// "34bafcb6-.../plan_doc.md"). Sort by display-name (subdir grouping
+// natural).
+func dirFilesRecursive(root, relDir string, exts ...string) ([]TreeNode, error) {
+	absRoot := filepath.Join(root, relDir)
+	if _, err := os.Stat(absRoot); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []TreeNode
+	err := filepath.Walk(absRoot, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return nil // skip unreadable entries
+		}
+		if info.IsDir() {
+			if strings.HasPrefix(info.Name(), ".") && p != absRoot {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := info.Name()
+		if strings.HasPrefix(name, ".") {
+			return nil
+		}
+		if len(exts) > 0 {
+			ext := filepath.Ext(name)
+			ok := false
+			for _, want := range exts {
+				if ext == want {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return nil
+			}
+		}
+		relFromAbs, err := filepath.Rel(absRoot, p)
+		if err != nil {
+			return nil
+		}
+		fullRel := relDir + "/" + relFromAbs
+		out = append(out, TreeNode{
+			Path:  fullRel,
+			Name:  relFromAbs, // shows "<task-uuid>/plan_doc.md"
+			Type:  "file",
+			Mtime: info.ModTime().UTC().Format("2006-01-02T15:04:05Z"),
+			Size:  info.Size(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Sort newest-first by mtime — most-recent IPAV activity surfaces at top.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Mtime > out[j].Mtime })
 	return out, nil
 }
 
@@ -450,6 +514,22 @@ func resolveProjectEnv(root, project string) ([]TreeNode, error) {
 		return nil, nil
 	}
 	return dirFiles(root, "projects/"+project+"/env", ".env")
+}
+
+// resolveProjectTasks surfaces IPAV task artifacts under
+// ~/.bot-hq/projects/<project>/tasks/<uuid>/*.md. Each task directory
+// holds investigation.md / plan_doc.md / plan_bilateral_a.md / plan_
+// bilateral_b.md / plan_merge_log.md / ipav-state.yaml. Surfaces all
+// .md files recursively under tasks/ so the per-project nav exposes
+// active + closed IPAV cycle work product (Z-3 sessions-as-containers
+// + Y-2 IPAV pipeline outputs). Without this, the only way to read
+// agent investigation / plan / merge-log files in webui was direct-
+// URL hand-navigation.
+func resolveProjectTasks(root, project string) ([]TreeNode, error) {
+	if project == "" {
+		return nil, nil
+	}
+	return dirFilesRecursive(root, "projects/"+project+"/tasks", ".md")
 }
 
 func resolveProjectEOD(root, project string) ([]TreeNode, error) {
