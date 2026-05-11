@@ -551,10 +551,10 @@ func (r *Rain) processNewMessages() {
 		if msg.ID > r.lastMsgID {
 			r.lastMsgID = msg.ID
 		}
-		// Z-3d-fix5 multi-session filter: when bound to a session, only
-		// forward messages from this session or untagged globals.
-		if r.sessionID != "" && msg.SessionID != "" && msg.SessionID != r.sessionID {
-			log.Printf("rain[%s]: Z-3d-fix5 filter-drop msg %d (session %q != self %q)", r.sessionID, msg.ID, msg.SessionID, r.sessionID)
+		// Z-5d single-chokepoint session filter (replaces Z-3d-fix5
+		// inline version). See protocol/session_filter.go.
+		if !protocol.FilterForSession(msg, r.sessionID) {
+			log.Printf("rain[%s]: Z-5d filter-drop msg %d (session %q != self %q)", r.sessionID, msg.ID, msg.SessionID, r.sessionID)
 			continue
 		}
 		if !shouldForwardToRain(msg) {
