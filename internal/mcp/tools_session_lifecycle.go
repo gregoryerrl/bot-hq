@@ -306,6 +306,24 @@ func hubSessionOpen(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("write manifest at %s (SessionsDir=%s): %v", sessions.ManifestPath(sessionID), sessions.SessionsDir(), mErr)), nil
 		}
 
+		// Z-3-followup: also insert into hub.db `sessions` table so the
+		// Sessions tab in the TUI surfaces Z-3 scope-keyed containers
+		// alongside legacy date-keyed entries. Without this, the TUI is
+		// blind to Z-3 sessions (manifest lives on FS; tab reads DB).
+		// Purpose = scope (human-readable); mode = "scope-keyed" to
+		// distinguish from legacy "implement" / "investigate" / etc.
+		purpose := scope
+		if purpose == "" {
+			purpose = sessionID
+		}
+		_ = db.CreateSession(protocol.Session{
+			ID:      sessionID,
+			Mode:    protocol.ModeImplement,
+			Purpose: purpose,
+			Agents:  []string{"brian", "rain"},
+			Status:  protocol.SessionActive,
+		})
+
 		// Dispatch to daemon-side hook for spawn + Discord thread. Two
 		// paths:
 		//   - In-daemon: hook is installed (mcp.SetSessionOpenHook called

@@ -539,6 +539,13 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 			return mcp.NewToolResultError(fmt.Sprintf("finalize: %v", err)), nil
 		}
 
+		// Z-3-followup: transition the sessions-table row to 'done'
+		// status so the TUI Sessions tab reflects the close. Z-3
+		// scope-keyed sessions have a corresponding row inserted at
+		// hub_session_open time; legacy date-keyed sessions may not,
+		// in which case UpdateSessionStatus is a no-op.
+		_ = db.UpdateSessionStatus(activeID, string(protocol.SessionDone))
+
 		// Z-3: append closing_state to manifest after Finalize did its
 		// auto-extraction. ReadManifest → set ClosingState → WriteManifest.
 		if len(closingState) > 0 {

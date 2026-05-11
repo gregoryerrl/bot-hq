@@ -145,3 +145,15 @@ func (db *DB) JoinSession(sessionID, agentID string) error {
 	)
 	return err
 }
+
+// UpdateSessionStatus transitions the sessions-table row to a new
+// status (active → done on finalize). Idempotent on no-op; ignored
+// when the session-id is absent (Z-3 hub_session_open writes a row
+// during open, but legacy paths may not — best-effort).
+func (db *DB) UpdateSessionStatus(sessionID, status string) error {
+	_, err := db.conn.Exec(
+		`UPDATE sessions SET status = ?, updated = ? WHERE id = ?`,
+		status, time.Now().UnixMilli(), sessionID,
+	)
+	return err
+}
