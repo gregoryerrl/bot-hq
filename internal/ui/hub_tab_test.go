@@ -66,62 +66,19 @@ func TestParseCommand(t *testing.T) {
 	}
 }
 
-// TestHubTabViewIncludesStrip verifies that View() output contains alive-agent
-// IDs after SetPane wires a populated panestate.Manager. Spec §5 commit 4 test.
-func TestHubTabViewIncludesStrip(t *testing.T) {
-	pane := newPaneWithAgents(t, []protocol.Agent{
-		{ID: "brian-test", Name: "Brian", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now()},
-		{ID: "rain-test", Name: "Rain", Type: protocol.AgentQA, Status: protocol.StatusOnline, LastSeen: time.Now()},
-	})
-	hub := NewHubTab()
-	hub.SetPane(pane)
-	hub.SetSize(120, 30)
+// Z-9a: TestHubTabViewIncludesStrip + TestHubTabViewShowsStaleHidesOffline
+// removed — the bottom agent-dot activity strip was dropped from Hub tab
+// View. Plan-usage moved to top tab bar (tested via the strip.go helper
+// renderPlanSegment, which is invoked from app.View now).
 
-	out := hub.View()
-	if !strings.Contains(out, "brian-test") {
-		t.Errorf("HubTab.View should contain brian-test in strip, got:\n%s", out)
-	}
-	if !strings.Contains(out, "rain-test") {
-		t.Errorf("HubTab.View should contain rain-test in strip, got:\n%s", out)
-	}
-}
-
-// TestHubTabViewWithoutPane verifies View() doesn't panic and produces no
-// strip content when SetPane was never called.
+// TestHubTabViewWithoutPane verifies View() doesn't panic and produces
+// scaffolding output when SetPane was never called.
 func TestHubTabViewWithoutPane(t *testing.T) {
 	hub := NewHubTab()
 	hub.SetSize(120, 30)
 	out := hub.View()
-	// View must not panic and must include the input bar / separator scaffolding.
 	if out == "" {
 		t.Error("View should produce non-empty output even without pane")
-	}
-}
-
-// TestHubTabViewShowsStaleHidesOffline verifies the post-strip-show-stale
-// behavior: stale agents (registered but quiet >60s) stay visible with the
-// dim Stale dot so they don't vanish during system-wide idle. Only agents
-// with Status=offline (routed to ActivityOffline) are filtered.
-func TestHubTabViewShowsStaleHidesOffline(t *testing.T) {
-	stale := time.Now().Add(-2 * time.Minute) // older than HeartbeatOnlineWindow (60s)
-	pane := newPaneWithAgents(t, []protocol.Agent{
-		{ID: "alive-agent", Name: "Alive", Type: protocol.AgentBrian, Status: protocol.StatusOnline, LastSeen: time.Now()},
-		{ID: "stale-agent", Name: "Stale", Type: protocol.AgentCoder, Status: protocol.StatusOnline, LastSeen: stale},
-		{ID: "offline-agent", Name: "Offline", Type: protocol.AgentCoder, Status: protocol.StatusOffline, LastSeen: time.Now()},
-	})
-	hub := NewHubTab()
-	hub.SetPane(pane)
-	hub.SetSize(120, 30)
-
-	out := hub.View()
-	if !strings.Contains(out, "alive-agent") {
-		t.Errorf("strip should contain alive-agent, got:\n%s", out)
-	}
-	if !strings.Contains(out, "stale-agent") {
-		t.Errorf("strip should contain stale-agent (visible after filter relax), got:\n%s", out)
-	}
-	if strings.Contains(out, "offline-agent") {
-		t.Errorf("strip should hide offline-agent, got:\n%s", out)
 	}
 }
 
@@ -207,6 +164,46 @@ func typeString(h HubTab, s string) HubTab {
 		h, _ = h.Update(runeKey(r))
 	}
 	return h
+}
+
+// TestHubTabColdInputCapturesFirstKey locks the Z-9c carry-forward
+// fix: when the input is unfocused and the user starts typing,
+// the FIRST key must land in the textarea (not get eaten by the
+// focus transition). Prior to the fix, "hi emma" rendered as "emma"
+// because the first 3 keystrokes were silently lost.
+func TestHubTabColdInputCapturesFirstKey(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	if h.focused {
+		t.Fatal("setup: HubTab should start unfocused")
+	}
+
+	h = typeString(h, "hi emma")
+
+	got := h.input.Value()
+	if got != "hi emma" {
+		t.Errorf("first key lost — input value = %q, want %q", got, "hi emma")
+	}
+}
+
+// TestHubTabColdInputBatchedRunes — tmux send-keys delivers a typed
+// string as a SINGLE KeyMsg with multiple runes, not one keystroke
+// per Update call. The cold-input transition must handle that batch
+// shape correctly so the entire batch isn't dropped on focus.
+func TestHubTabColdInputBatchedRunes(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	if h.focused {
+		t.Fatal("setup: HubTab should start unfocused")
+	}
+
+	// Single KeyMsg carrying multiple runes, mimicking tmux send-keys.
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi emma")})
+
+	got := h.input.Value()
+	if got != "hi emma" {
+		t.Errorf("batched cold input dropped — input value = %q, want %q", got, "hi emma")
+	}
 }
 
 // TestHubTabMultiLineSubmitOnEnter locks that ctrl+j (the universal

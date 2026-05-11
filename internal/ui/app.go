@@ -13,14 +13,17 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/tmux"
 )
 
-var tabNames = []string{"Hub", "Agents", "Sessions", "Settings"}
+// Z-9a: Agents tab dropped. Per-session BRAIN-duo state is already
+// visible in the Sessions tab container view; the always-on agents
+// (emma, discord, clive) didn't warrant a dedicated tab post-Z-3.
+// Plan-usage moved to the right end of the top tab bar.
+var tabNames = []string{"Hub", "Sessions", "Settings"}
 
 // Tab represents the active tab in the UI.
 type Tab int
 
 const (
 	TabHub Tab = iota
-	TabAgents
 	TabSessions
 	TabSettings
 )
@@ -34,7 +37,6 @@ type App struct {
 	width       int
 	height      int
 	hubTab      HubTab
-	agentsTab   AgentsTab
 	sessionsTab SessionsTab
 	settingsTab SettingsTab
 	db          *hub.DB
@@ -78,15 +80,12 @@ func NewApp(cfg hub.Config, db *hub.DB, b *brian.Brian) App {
 	if db != nil {
 		pane = panestate.NewManager(db, tmux.CapturePane)
 	}
-	agentsTab := NewAgentsTab(tmux.CapturePane)
 	if pane != nil {
 		hubTab.SetPane(pane)
-		agentsTab.SetPane(pane)
 	}
 	return App{
 		activeTab:   TabHub,
 		hubTab:      hubTab,
-		agentsTab:   agentsTab,
 		sessionsTab: sessionsTab,
 		settingsTab: NewSettingsTab(cfg, db),
 		db:          db,
@@ -128,13 +127,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tickMsg:
 		var cmds []tea.Cmd
-		// Refresh agent state via panestate (single source of truth) and dispatch
-		// the raw agent slice to AgentsTab so existing render paths see no change.
-		// Phase E commit 4 will switch tabs to read AgentSnapshot directly.
+		// Refresh agent state via panestate (single source of truth). Z-9a
+		// dropped the Agents tab; only the Hub tab's plan-usage segment
+		// in the top bar reads from panestate now.
 		if a.pane != nil {
-			if err := a.pane.Refresh(); err == nil {
-				a.agentsTab, _ = a.agentsTab.Update(AgentsUpdated{Agents: a.pane.Agents()})
-			}
+			_ = a.pane.Refresh()
 		}
 		if a.db != nil {
 			// Poll sessions — fan out to both Sessions tab (list +
@@ -168,7 +165,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		ch := a.contentHeight()
 		a.hubTab.SetSize(a.width, ch)
-		a.agentsTab.SetSize(a.width, ch)
 		a.sessionsTab.SetSize(a.width, ch)
 		a.settingsTab.SetSize(a.width, ch)
 		return a, nil
@@ -189,11 +185,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, cmd
 
-	case AgentsUpdated:
-		var cmd tea.Cmd
-		a.agentsTab, cmd = a.agentsTab.Update(msg)
-		return a, cmd
-
 	case SessionsUpdated:
 		// Z-8e: forward to both Hub (strip column) and Sessions tab (list).
 		var cmd tea.Cmd
@@ -202,10 +193,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case SessionSelected:
-		// Z-8e: SessionSelected stays as a tab-routing hint. Z-8f will
-		// land the Sessions-tab drilled-in container view; until then
-		// it's a no-op (Sessions tab handles its own selection state
-		// internally for Z-8f's container).
+		// Z-9c: seed the container view with the full session history
+		// from DB on drill-in, so older sessions show their messages
+		// even when the boot-time 100-message window doesn't reach
+		// back to them. Empty SessionID = drilled-out (no fetch).
+		if msg.SessionID != "" && a.db != nil {
+			if msgs, err := a.db.ReadMessagesForSession(msg.SessionID, 0); err == nil {
+				a.sessionsTab.SeedContainerHistory(msgs)
+			}
+		}
 		return a, nil
 
 	case CommandSubmitted:
@@ -288,11 +284,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.sessionsTab, cmd = a.sessionsTab.Update(msg)
 				return a, cmd
 			}
-			if a.activeTab == TabAgents {
-				var cmd tea.Cmd
-				a.agentsTab, cmd = a.agentsTab.Update(msg)
-				return a, cmd
-			}
 			if a.activeTab == TabSettings {
 				var cmd tea.Cmd
 				a.settingsTab, cmd = a.settingsTab.Update(msg)
@@ -315,7 +306,7 @@ func (a App) View() string {
 	if a.width == 0 || a.height == 0 {
 		return "Loading Bot-HQ..."
 	}
-	// Render tab bar
+	// Render tab bar with plan-usage at the right end (Z-9a).
 	var tabParts []string
 	for i, name := range tabNames {
 		if Tab(i) == a.activeTab {
@@ -325,6 +316,18 @@ func (a App) View() string {
 		}
 	}
 	tabLine := strings.Join(tabParts, "")
+	// Z-9a: plan-usage segment on the right end of the tab bar
+	// (was at the bottom of the Hub tab pre-Z-9a; the activity-dot
+	// strip below it was dropped entirely).
+	if a.pane != nil {
+		planSeg := renderPlanSegment(a.pane.HubSnapshot())
+		if planSeg != "" {
+			spacer := a.width - lipgloss.Width(tabLine) - lipgloss.Width(planSeg)
+			if spacer >= 2 {
+				tabLine += strings.Repeat(" ", spacer) + planSeg
+			}
+		}
+	}
 	border := lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).Render(strings.Repeat("─", a.width))
 	tabBar := tabLine + "\n" + border
 
@@ -333,8 +336,6 @@ func (a App) View() string {
 	switch a.activeTab {
 	case TabHub:
 		content = a.hubTab.View()
-	case TabAgents:
-		content = a.agentsTab.View()
 	case TabSessions:
 		content = a.sessionsTab.View()
 	case TabSettings:

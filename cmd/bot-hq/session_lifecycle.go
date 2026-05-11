@@ -14,6 +14,7 @@ import (
 	"github.com/gregoryerrl/bot-hq/internal/discord"
 	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/mcp"
+	"github.com/gregoryerrl/bot-hq/internal/protocol"
 	"github.com/gregoryerrl/bot-hq/internal/rain"
 )
 
@@ -132,27 +133,50 @@ func installSessionLifecycleHooks(h *hub.Hub, brianWorkDir, rainWorkDir string, 
 		}
 
 		pair, ok := reg.Get(req.SessionID)
-		if !ok {
-			// Session might have been opened in a previous daemon run.
-			// Best-effort: capture state.json files from sessions/<id>/
-			// even without an in-process duo pair.
-			capturePerAgentState(req.SessionID, result.ClosingState)
-			return result, nil
-		}
+
 		// Capture per-agent state.json BEFORE killing the duo (state may
 		// have been written by hub_session_close's SNAP-storage upstream).
 		capturePerAgentState(req.SessionID, result.ClosingState)
 
-		if pair.Brian != nil {
-			pair.Brian.Stop()
-			result.KilledTmux = append(result.KilledTmux, "brian")
+		// Z-9b: BRAIN-duo is transient. Whether the in-process registry
+		// remembers this session (live duo) or not (daemon restart
+		// happened mid-session), the close path now always:
+		//   1. Stops the in-process duo if present (kills tmux + flips
+		//      agent DB row to offline via b.Stop / r.Stop).
+		//   2. Kills any orphan tmux pane whose name matches the
+		//      Z-8h naming convention (bot-hq-{brian,rain}-<sid>).
+		//   3. Flips brian/rain DB agent rows to offline regardless —
+		//      defensive against stale "online" rows that survived an
+		//      orphan-cleanup at boot.
+		if ok {
+			if pair.Brian != nil {
+				pair.Brian.Stop()
+				result.KilledTmux = append(result.KilledTmux, "brian")
+			}
+			if pair.Rain != nil {
+				pair.Rain.Stop()
+				result.KilledTmux = append(result.KilledTmux, "rain")
+			}
+			reg.Remove(req.SessionID)
+		} else {
+			// No in-process duo. Kill any session-named panes that
+			// may still be alive (Z-8h naming convention).
+			for _, role := range []string{"brian", "rain"} {
+				paneName := "bot-hq-" + role + "-" + req.SessionID
+				if err := killTmuxSession(paneName); err == nil {
+					result.KilledTmux = append(result.KilledTmux, role)
+				}
+			}
 		}
-		if pair.Rain != nil {
-			pair.Rain.Stop()
-			result.KilledTmux = append(result.KilledTmux, "rain")
+
+		// Defensive: flip the DB agent rows offline for this session's
+		// roles regardless of registry state, so the post-close TUI
+		// stops showing them as online/stale-gen.
+		for _, role := range []string{"brian", "rain"} {
+			_ = h.DB.UpdateAgentStatus(role, protocol.StatusOffline)
 		}
-		reg.Remove(req.SessionID)
-		log.Printf("[session-finalize] killed brian+rain for session=%s (force=%v discord_archived=%v)", req.SessionID, req.Force, result.DiscordArchived)
+
+		log.Printf("[session-finalize] closed session=%s (registry=%v killed=%v force=%v discord_archived=%v)", req.SessionID, ok, result.KilledTmux, req.Force, result.DiscordArchived)
 		return result, nil
 	}
 

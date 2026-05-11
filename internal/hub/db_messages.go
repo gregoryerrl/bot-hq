@@ -71,6 +71,60 @@ func (db *DB) InsertMessage(msg protocol.Message) (int64, error) {
 	return id, nil
 }
 
+// ReadMessagesForSession returns all hub messages tagged with the given
+// session_id in chronological order. Used by the Sessions tab container
+// drill-in (Z-9c) to seed the viewport with full session history rather
+// than relying on the cold-boot 100-message window that may not reach
+// back far enough.
+//
+// limit<=0 → no row cap (the per-session message count is bounded by
+// session lifetime; sessions don't normally have 10k+ rows). Empty
+// sessionID returns nil, nil (caller never needs the broadcast stream
+// via this helper; use ReadMessages for that).
+func (db *DB) ReadMessagesForSession(sessionID string, limit int) ([]protocol.Message, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		rows, err = db.conn.Query(
+			`SELECT id, session_id, from_agent, to_agent, type, content, created
+			 FROM messages
+			 WHERE session_id = ?
+			 ORDER BY id ASC
+			 LIMIT ?`,
+			sessionID, limit,
+		)
+	} else {
+		rows, err = db.conn.Query(
+			`SELECT id, session_id, from_agent, to_agent, type, content, created
+			 FROM messages
+			 WHERE session_id = ?
+			 ORDER BY id ASC`,
+			sessionID,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []protocol.Message
+	for rows.Next() {
+		var m protocol.Message
+		var typ string
+		var created int64
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.FromAgent, &m.ToAgent, &typ, &m.Content, &created); err != nil {
+			return nil, err
+		}
+		m.Type = protocol.MessageType(typ)
+		m.Created = time.UnixMilli(created)
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
 // ReadMessages returns hub messages for an agent (or all if agentID="").
 // sinceID<=0 returns the latest N rows in chronological order (tail mode for
 // fresh-start callers). sinceID>0 returns rows with id>sinceID in chronological

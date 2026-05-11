@@ -152,14 +152,14 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 				h.viewport.GotoBottom()
 				h.followBottom = true
 			default:
-				// Auto-focus input on any printable character OR on a
-				// bracketed-paste delivery. Without the Paste branch a
-				// multi-rune paste arriving while unfocused would route to
-				// the viewport (silently dropped) instead of being captured
-				// as input — observably "bracketed paste didn't work" even
-				// though the bubbletea bracketed-paste path itself was fine.
-				printable := len(key) == 1 && key >= " " && key <= "~"
-				if printable || msg.Paste {
+				// Auto-focus input on any printable rune-bearing KeyMsg
+				// OR on a bracketed-paste delivery. Z-9c: the check is
+				// "msg carries at least one printable rune", NOT
+				// "msg.String() is a single printable char" — tmux
+				// send-keys (and fast typists) deliver multi-rune
+				// batches in a single KeyMsg, and the pre-fix
+				// `len(key)==1` test silently dropped them all.
+				if isPrintableRuneMsg(msg) || msg.Paste {
 					h.focused = true
 					cmds = append(cmds, h.input.Focus())
 					var cmd tea.Cmd
@@ -234,9 +234,10 @@ func (h HubTab) SessionFilter() string {
 // bottom after the resize so a terminal resize doesn't strand them mid-feed.
 // When the user has scrolled up, preserve their scroll position.
 func (h *HubTab) resize() {
-	// Reserve: 1 indicator + 1 strip top border + 1 strip + 1 strip bottom border + inputRows.
-	// Total = 4 + inputRows (unchanged from prior separator+indicator+strip+padding layout).
-	reserved := 4 + inputRows
+	// Reserve: 1 indicator + inputRows. Z-9a dropped the bottom
+	// activity-strip section (3 rows: top border + strip + bottom
+	// border), freeing those rows for the chat viewport.
+	reserved := 1 + inputRows
 	vpHeight := h.height - reserved
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -272,14 +273,13 @@ func (h *HubTab) resize() {
 //	│             │ (Z-8e col)  │
 //	├─────────────┴─────────────┤
 //	│ indicator (full-width)    │
-//	│ agent dots strip          │
 //	│ input textarea            │
 //	└───────────────────────────┘
 //
-// The session-strip column renders when terminal is wide enough
-// (sessionStripColumnWidth > 0); otherwise it collapses and the chat
-// takes full width. Bottom slots (indicator/strip/input) span the
-// full width regardless.
+// Z-9a: bottom agent-dots activity strip dropped (Agents tab gone;
+// plan-usage moved to top tab bar in app.View). The session-strip
+// column on the right renders when terminal is wide enough; otherwise
+// it collapses and the chat takes full width.
 func (h HubTab) View() string {
 	indicatorStyle := lipgloss.NewStyle().Width(h.width).Foreground(ColorStatus)
 	indicatorText := ""
@@ -288,25 +288,12 @@ func (h HubTab) View() string {
 	}
 	indicator := indicatorStyle.Render(indicatorText)
 
-	agentStripContent := ""
-	if h.pane != nil {
-		agentStripContent = renderStrip(h.pane.Snapshot(), h.pane.HubSnapshot(), h.width)
-	}
-	agentStripStyle := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), true, false, true, false).
-		BorderForeground(lipgloss.Color("#555555")).
-		Width(h.width).
-		Foreground(ColorStatus)
-	agentStrip := agentStripStyle.Render(agentStripContent)
-
 	// Z-8e: build the top-row split (chat viewport + session strip
 	// column). When terminal is too narrow the column collapses and
 	// chat takes full width.
 	stripW := h.sessionStripColumnWidth()
 	var topRow string
 	if stripW > 0 {
-		// Render the strip column with the same height as the chat
-		// viewport so the row aligns cleanly.
 		stripHeight := h.viewport.Height
 		stripColStyle := lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder(), false, false, false, true).
@@ -322,7 +309,6 @@ func (h HubTab) View() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		topRow,
 		indicator,
-		agentStrip,
 		h.input.View(),
 	)
 }
@@ -467,6 +453,27 @@ func (h HubTab) sessionTagFor(msg protocol.Message) string {
 		scopeShort = scopeShort[:4]
 	}
 	return "[" + scopeShort + "·" + uuid + "]"
+}
+
+// isPrintableRuneMsg reports whether the KeyMsg carries at least one
+// printable rune (i.e., user typed text). Used to discriminate
+// "typing into input" from control-key events like tab/escape/arrow
+// keys when deciding whether to auto-focus the textarea.
+//
+// Z-9c: previous heuristic checked `len(msg.String()) == 1` which
+// dropped any multi-rune KeyMsg batch (tmux send-keys, fast typing,
+// pastes-without-bracketed-paste-flag). Now we look at the actual
+// runes payload — any printable rune in the batch qualifies.
+func isPrintableRuneMsg(msg tea.KeyMsg) bool {
+	if msg.Type != tea.KeyRunes && msg.Type != tea.KeySpace {
+		return false
+	}
+	for _, r := range msg.Runes {
+		if r >= ' ' && r <= '~' {
+			return true
+		}
+	}
+	return false
 }
 
 // parseCommand extracts an @agent target from user input.
