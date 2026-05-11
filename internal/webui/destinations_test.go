@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -143,47 +142,10 @@ func TestHandleProjectsEndpoint(t *testing.T) {
 	}
 }
 
-// TestHandleDestinationsEndpoint covers the post-Phase-R3-R5 backward-
-// compat shim: the route stays alive returning an empty Destination list
-// until S5 atomic-deletion + frontend migration to /api/files?tree=1.
-func TestHandleDestinationsEndpoint(t *testing.T) {
-	root := t.TempDir()
-	fillCanonicalLayout(t, root)
-	s := newTestServer(t, root)
-
-	status, body := callRoute(t, s, "GET", "/api/destinations?project=bot-hq")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", status, body)
-	}
-	var p struct {
-		Project      string        `json:"project"`
-		Destinations []Destination `json:"destinations"`
-	}
-	if err := json.Unmarshal([]byte(body), &p); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if p.Project != "bot-hq" {
-		t.Errorf("project = %q, want bot-hq", p.Project)
-	}
-	// Post-S4: destinations list is empty until S5 deletes the route.
-	if len(p.Destinations) != 0 {
-		t.Errorf("destinations count = %d, want 0 (backward-compat shim); got %+v", len(p.Destinations), p.Destinations)
-	}
-}
-
-func TestHandleDestinationsEndpoint_DefaultBotHQ(t *testing.T) {
-	root := t.TempDir()
-	fillCanonicalLayout(t, root)
-	s := newTestServer(t, root)
-	// no project query param — should default to bot-hq
-	status, body := callRoute(t, s, "GET", "/api/destinations")
-	if status != http.StatusOK {
-		t.Fatalf("status = %d, body=%s", status, body)
-	}
-	if !strings.Contains(body, `"project": "bot-hq"`) {
-		t.Errorf("missing default bot-hq project; body=%s", body[:min(300, len(body))])
-	}
-}
+// TestHandleDestinationsEndpoint* + TestResolveDestinations_EmptyCanonicalStore
+// + TestDestination_JSONShape retired in Phase R3 R5 S5 — /api/destinations
+// route + Destination type + ResolveDestinations function all removed
+// atomically with the frontend migration to /api/files?tree=1.
 
 // HIDE-list verification — confirm runtime/code paths absent from any
 // destination output. Walks every destination's Nodes recursively.
@@ -268,35 +230,6 @@ func TestResolveCanonicalPath_StillRejectsEscape_v3x1(t *testing.T) {
 	}
 	if _, err := resolveCanonicalPath(root, "phase/../../etc/passwd"); err == nil {
 		t.Errorf("expected error for nested escape")
-	}
-}
-
-// Sanity: a brand-new install (no canonical-store dirs at all) should
-// not crash the backward-compat shim. Post-S4 returns an empty list.
-func TestResolveDestinations_EmptyCanonicalStore(t *testing.T) {
-	root := t.TempDir()
-	dests, err := ResolveDestinations(root, "bot-hq")
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	if len(dests) != 0 {
-		t.Errorf("expected 0 destinations (S4 backward-compat shim), got %d", len(dests))
-	}
-}
-
-// Sanity: the JSON marshalling round-trips with our struct shape.
-func TestDestination_JSONShape(t *testing.T) {
-	d := Destination{Name: "X", Section: "global", Nodes: []TreeNode{{Name: "a", Path: "a"}}}
-	b, err := json.Marshal(d)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(b), `"name":"X"`) || !strings.Contains(string(b), `"section":"global"`) {
-		t.Errorf("unexpected JSON: %s", b)
-	}
-	// Resolver should NOT serialize.
-	if strings.Contains(string(b), "Resolver") {
-		t.Errorf("Resolver leaked into JSON: %s", b)
 	}
 }
 

@@ -1,13 +1,18 @@
-// Package webui — Project registry + thin backward-compat shim for the
-// destination-allowlist nav model (Phase N v3.x-1 form Y).
+// Package webui — Project registry helper.
 //
-// Phase R3 R5 cl-uniformity-webui-nav-refactor migrated the per-project
-// nav to a yaml-driven tree-walker (treewalker.go + crossproject.go);
-// the 25+ resolveProject* functions previously in this file dropped.
-// /api/destinations route + handleDestinations stay alive as a thin
-// shim returning an empty Destination list — the route is removed by
-// S5 alongside the frontend migration (per plan §2.3 corrected
-// sequencing: deletion sequenced to S5 to avoid an S4-to-S5 404 window).
+// File historically owned the destination-allowlist nav model (Phase N
+// v3.x-1 form Y). Phase R3 R5 cl-uniformity-webui-nav-refactor migrated
+// the per-project nav to a yaml-driven tree-walker (treewalker.go +
+// crossproject.go); S4 dropped the resolveProject* fan-out and kept
+// /api/destinations as a thin backward-compat shim. S5 (this slice)
+// deletes the route + shim atomically alongside the frontend migration
+// to /api/files?tree=1 — `Destination` type + `ResolveDestinations`
+// helper went out with it.
+//
+// `Project` + `ListProjects` survive — they're still consumed by
+// /api/projects, /api/cross-project, register-project flow, and CL's
+// own ListProjects helper. Filename retained for blame-history continuity
+// (rename deferred to a follow-on cleanup).
 package webui
 
 import (
@@ -17,15 +22,6 @@ import (
 	"sort"
 	"strings"
 )
-
-// Destination is preserved for /api/destinations response-shape backward
-// compatibility. Post-S4 the Nodes field is always empty; consumers should
-// migrate to /api/files?tree=1 via S5.
-type Destination struct {
-	Name    string     `json:"name"`
-	Section string     `json:"section"`
-	Nodes   []TreeNode `json:"nodes,omitempty"`
-}
 
 // Project is a registered project key. bot-hq is always present; others
 // are discovered from projects/*.yaml.
@@ -66,13 +62,4 @@ func ListProjects(canonRoot string) ([]Project, error) {
 		out = append(out, Project{Name: k})
 	}
 	return out, nil
-}
-
-// ResolveDestinations is the backward-compat shim for /api/destinations.
-// Post-Phase-R3-R5 S4 returns an empty list — destination resolution
-// moved to BuildFilteredTree + handleCrossProject. The route is kept
-// alive through the S4-to-S5 window so the frontend doesn't 404 before
-// it migrates to /api/files?tree=1.
-func ResolveDestinations(_, _ string) ([]Destination, error) {
-	return []Destination{}, nil
 }

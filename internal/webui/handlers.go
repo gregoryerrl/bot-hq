@@ -163,30 +163,11 @@ func (s *Server) handleRecentEdits(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"edits": edits})
 }
 
-// handleDestinations responds to GET /api/destinations?project=<p> with
-// the curated destination-allowlist nav per scope-lock-v4.2: 8 global
-// destinations + 4 per-project destinations, each with TreeNode children
-// resolved live. The project query param is required (the per-project
-// section is project-scoped); pass "bot-hq" for the default project.
-func (s *Server) handleDestinations(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	project := strings.TrimSpace(r.URL.Query().Get("project"))
-	if project == "" {
-		project = "bot-hq"
-	}
-	dests, err := ResolveDestinations(s.canonicalRoot, project)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("resolve destinations: %v", err), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"project":      project,
-		"destinations": dests,
-	})
-}
+// handleDestinations + /api/destinations route retired in Phase R3 R5 S5
+// (cl-uniformity-webui-nav-refactor). The destination-allowlist nav was
+// replaced by the yaml-driven tree-walker; frontend migrated to
+// /api/files?tree=1 + /api/cross-project. See treewalker.go +
+// crossproject.go for the replacement surface.
 
 // handleFilesTree responds to GET /api/files with the canonical-store
 // tree. Two modes per Phase R3 R5 cl-uniformity-webui-nav-refactor:

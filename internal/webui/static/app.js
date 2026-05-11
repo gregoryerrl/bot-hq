@@ -1,21 +1,23 @@
-// bot-hq workspace — Phase N v3.x-1 curation frontend.
-// Replaces v3b file-tree-as-nav with destination-allowlist nav per
-// scope-lock-v4.2 (Form Y). Vanilla JS + fetch. marked.js (CDN) for
-// .md render. CodeMirror 5 (P-2 / phase-n.md:541) for raw editor with
-// yaml syntax-highlighting; falls back to plain textarea if CM unloaded.
+// bot-hq workspace — Phase R3 R5 cl-uniformity-webui-nav-refactor S5.
+// Replaces the destination-allowlist nav (v3.x-1 form Y) with a
+// VS-Code-style collapsible tree backed by /api/files?tree=1 + the
+// yaml-driven extensions classifier (treewalker.go). Vanilla JS +
+// fetch. marked.js (CDN) for .md render. CodeMirror 5 (P-2 /
+// phase-n.md:541) for raw editor with yaml syntax-highlighting; falls
+// back to plain textarea if CM unloaded.
 //
-// State machine: project-picker drives /api/destinations?project=<p>;
-// click on a destination's file loads /api/files/<path>?format=json into
-// the doc pane. Edit + Save + 409 conflict resolution preserved from v3c.
+// State machine: loadTree() fetches the full filtered tree once; the
+// top-level partitions into "Global" + one section per project (bot-hq
+// first). Each <details>-element folder collapses independently.
+// state.project is derived on file-open via inferProjectFromPath(path).
+// Click on a file link loads /api/files/<path>?format=json into the
+// doc pane. Edit + Save + 409 conflict resolution preserved.
 
 (function () {
   'use strict';
 
-  const projectPicker = document.getElementById('project-picker');
-  const activeChip = document.getElementById('active-project-chip');
   const navSearch = document.getElementById('nav-search');
-  const navGlobal = document.getElementById('nav-global-list');
-  const navProject = document.getElementById('nav-project-list');
+  const navTreeRoot = document.getElementById('nav-tree-root');
   const navRecent = document.getElementById('nav-recent-list');
   const docPath = document.getElementById('doc-path');
   const docMtime = document.getElementById('doc-mtime');
@@ -34,13 +36,16 @@
   const conflictServer = document.getElementById('conflict-server-content');
 
   const state = {
-    project: 'bot-hq',
+    // project is derived from currentPath via inferProjectFromPath on
+    // file-open; empty when no file selected. Surfaced to Clive via
+    // postWebuiContext so the voice handler knows ambient project scope.
+    project: '',
     currentPath: null,
     currentMtime: null,
     pristine: '',
     pendingConflict: null,
     viewMode: 'rendered', // 'rendered' or 'raw'
-    searchQuery: '', // project-scoped filename filter (lowercase)
+    searchQuery: '', // filename-substring filter (lowercase) over the tree
   };
 
   // editor: CodeMirror-or-textarea wrapper so the rest of the app stays
@@ -90,13 +95,6 @@
     };
   })();
 
-  projectPicker.addEventListener('change', () => {
-    state.project = projectPicker.value;
-    activeChip.textContent = state.project;
-    loadDestinations();
-    postWebuiContext();
-  });
-
   // postWebuiContext sends the user's current focus (project / file /
   // view-mode) to /api/webui-context so the voice handler can inject it
   // into Clive's Gemini systemInstruction. Fire-and-forget: failure is
@@ -143,7 +141,7 @@
     }
   });
 
-  loadProjects().then(loadDestinations);
+  loadTree();
   loadRecentEdits();
   refreshPendingActionsBadge();
   postWebuiContext();
@@ -159,123 +157,169 @@
     });
   });
 
-  async function loadProjects() {
+  // loadTree fetches the full filtered canonical-store tree from the
+  // S4 endpoint and re-renders the sidebar. The top-level partitions
+  // into Global (everything except `projects/`) and one section per
+  // project (bot-hq first, then alphabetical). Each project section
+  // unifies the per-project directory + its `<name>.yaml` config as
+  // siblings under one collapsible.
+  async function loadTree() {
+    navTreeRoot.innerHTML = '<em>Loading…</em>';
     try {
-      const res = await fetch('/api/projects');
+      const res = await fetch('/api/files?tree=1');
       const data = await res.json();
-      projectPicker.innerHTML = '';
-      for (const p of data.projects || []) {
-        const opt = document.createElement('option');
-        opt.value = p.name;
-        opt.textContent = p.name;
-        projectPicker.appendChild(opt);
-      }
-      if (projectPicker.options.length) {
-        projectPicker.value = state.project;
-        activeChip.textContent = state.project;
-      }
-    } catch (err) {
-      navGlobal.innerHTML = '<em class="error">Failed to load projects: ' + escapeHtml(err.message) + '</em>';
-    }
-  }
-
-  async function loadDestinations() {
-    navGlobal.innerHTML = '<em>Loading…</em>';
-    navProject.innerHTML = '<em>Loading…</em>';
-    try {
-      const res = await fetch('/api/destinations?project=' + encodeURIComponent(state.project));
-      const data = await res.json();
-      const dests = data.destinations || [];
-      navGlobal.innerHTML = '';
-      navProject.innerHTML = '';
-      for (const d of dests) {
-        const target = d.section === 'global' ? navGlobal : navProject;
-        target.appendChild(renderDestination(d));
-      }
+      renderTreeRoot(data.tree || []);
       applyNavFilter();
     } catch (err) {
-      navGlobal.innerHTML = '<em class="error">Failed to load destinations: ' + escapeHtml(err.message) + '</em>';
+      navTreeRoot.innerHTML = '<em class="error">Failed to load tree: ' + escapeHtml(err.message) + '</em>';
     }
   }
 
-  // applyNavFilter hides nav <li> entries whose file name doesn't match
-  // state.searchQuery (substring, case-insensitive). Empty query restores
-  // full visibility. Per-destination "(no matches)" hint shows when a
-  // destination's items all filter out so the destination header still
-  // surfaces context. Project-scoped per scope-lock-v4.2 affordance #2.
-  function applyNavFilter() {
-    const q = state.searchQuery;
-    const dests = document.querySelectorAll('.dest');
-    dests.forEach((dest) => {
-      const items = dest.querySelectorAll('.dest-list li');
-      let visibleCount = 0;
-      items.forEach((li) => {
-        if (li.classList.contains('empty') || li.classList.contains('no-match')) return;
-        const a = li.querySelector('a');
-        const name = a ? a.textContent.toLowerCase() : (li.textContent || '').toLowerCase();
-        const match = !q || name.includes(q);
-        li.classList.toggle('hidden', !match);
-        if (match) visibleCount++;
-      });
-      // Manage the dynamic "(no matches)" indicator.
-      let indicator = dest.querySelector('li.no-match');
-      const baseEmpty = dest.querySelector('li.empty');
-      if (q && visibleCount === 0 && !baseEmpty) {
-        if (!indicator) {
-          indicator = document.createElement('li');
-          indicator.classList.add('no-match');
-          indicator.textContent = '(no matches)';
-          dest.querySelector('.dest-list').appendChild(indicator);
-        }
-        indicator.classList.remove('hidden');
-      } else if (indicator) {
-        indicator.classList.add('hidden');
+  function renderTreeRoot(rootChildren) {
+    navTreeRoot.innerHTML = '';
+
+    // Partition: extract the `projects/` directory; everything else is Global.
+    let projectsNode = null;
+    const globalChildren = [];
+    for (const child of rootChildren) {
+      if (child.name === 'projects' && child.type === 'dir') {
+        projectsNode = child;
+      } else {
+        globalChildren.push(child);
       }
+    }
+
+    // Global section
+    navTreeRoot.appendChild(renderTopLevelSection('Global', globalChildren));
+
+    // Per-project sections — group `<p>/` dir + `<p>.yaml` config as
+    // siblings under one collapsible. bot-hq first, then alphabetical.
+    if (projectsNode && projectsNode.children) {
+      const projects = new Map(); // name -> {dir?, yamlFile?}
+      for (const c of projectsNode.children) {
+        if (c.type === 'dir') {
+          const slot = projects.get(c.name) || {};
+          slot.dir = c;
+          projects.set(c.name, slot);
+        } else if (c.type === 'file' && c.name.endsWith('.yaml')) {
+          const baseName = c.name.slice(0, -5);
+          const slot = projects.get(baseName) || {};
+          slot.yamlFile = c;
+          projects.set(baseName, slot);
+        }
+      }
+      const sortedNames = Array.from(projects.keys()).sort((a, b) => {
+        if (a === 'bot-hq') return -1;
+        if (b === 'bot-hq') return 1;
+        return a.localeCompare(b);
+      });
+      for (const name of sortedNames) {
+        const { dir, yamlFile } = projects.get(name);
+        const children = [];
+        if (yamlFile) children.push(yamlFile);
+        if (dir && dir.children) children.push(...dir.children);
+        navTreeRoot.appendChild(renderTopLevelSection(name, children));
+      }
+    }
+  }
+
+  function renderTopLevelSection(label, children) {
+    const details = document.createElement('details');
+    details.classList.add('nav-tree-folder', 'nav-tree-toplevel');
+    const summary = document.createElement('summary');
+    summary.classList.add('nav-tree-summary');
+    summary.textContent = label;
+    details.appendChild(summary);
+
+    const wrap = document.createElement('div');
+    wrap.classList.add('nav-tree-children');
+    for (const c of children) {
+      wrap.appendChild(c.type === 'dir' ? renderFolderNode(c) : renderFileNode(c));
+    }
+    details.appendChild(wrap);
+    return details;
+  }
+
+  function renderFolderNode(node) {
+    const details = document.createElement('details');
+    details.classList.add('nav-tree-folder');
+    if (node.class) details.classList.add('nav-tree-class-' + node.class);
+    const summary = document.createElement('summary');
+    summary.classList.add('nav-tree-summary');
+    summary.textContent = node.name;
+    details.appendChild(summary);
+
+    const wrap = document.createElement('div');
+    wrap.classList.add('nav-tree-children');
+    for (const c of (node.children || [])) {
+      wrap.appendChild(c.type === 'dir' ? renderFolderNode(c) : renderFileNode(c));
+    }
+    details.appendChild(wrap);
+    return details;
+  }
+
+  function renderFileNode(node) {
+    const a = document.createElement('a');
+    a.href = '#' + node.path;
+    a.classList.add('nav-tree-file');
+    if (node.class) a.classList.add('nav-tree-class-' + node.class);
+    a.dataset.path = node.path;
+    a.textContent = node.name;
+    a.title = (node.size != null ? node.size + ' B · ' : '') + (node.mtime || '');
+    a.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      if (state.currentPath && isDirty()) {
+        if (!confirm('You have unsaved changes. Discard and load new file?')) return;
+      }
+      loadFile(node.path);
+    });
+    return a;
+  }
+
+  // applyNavFilter hides .nav-tree-file links whose name doesn't match
+  // state.searchQuery (substring, case-insensitive). When filtering is
+  // active, ancestor <details> folders containing at least one visible
+  // file auto-expand; folders with no surviving descendants are hidden.
+  // Empty query restores full visibility + collapses everything back to
+  // the user's prior open/closed state? No — we just don't touch open/
+  // closed when q is empty.
+  function applyNavFilter() {
+    if (!navTreeRoot) return;
+    const q = state.searchQuery;
+
+    // First pass: file links visibility.
+    const files = navTreeRoot.querySelectorAll('.nav-tree-file');
+    files.forEach((a) => {
+      const name = (a.textContent || '').toLowerCase();
+      const match = !q || name.includes(q);
+      a.classList.toggle('hidden', !match);
+    });
+
+    // Second pass: folders — hide folders whose entire subtree is hidden;
+    // auto-expand ancestors of any visible match while filter is active.
+    const folders = navTreeRoot.querySelectorAll('.nav-tree-folder');
+    folders.forEach((d) => {
+      const hasVisibleFile = !!d.querySelector('.nav-tree-file:not(.hidden)');
+      d.classList.toggle('hidden', !!q && !hasVisibleFile);
+      if (q && hasVisibleFile) d.open = true;
     });
   }
 
-  function renderDestination(dest) {
-    const wrap = document.createElement('div');
-    wrap.classList.add('dest');
-    const head = document.createElement('div');
-    head.classList.add('dest-head');
-    head.textContent = dest.name;
-    wrap.appendChild(head);
-    const ul = document.createElement('ul');
-    ul.classList.add('dest-list');
-    const nodes = dest.nodes || [];
-    if (!nodes.length) {
-      const li = document.createElement('li');
-      li.classList.add('empty');
-      li.textContent = '(empty)';
-      ul.appendChild(li);
-    } else {
-      for (const n of nodes) {
-        const li = document.createElement('li');
-        if (n.missing) {
-          li.classList.add('missing');
-          li.textContent = n.name + ' (not yet authored)';
-        } else {
-          const a = document.createElement('a');
-          a.href = '#' + n.path;
-          a.classList.add('file-link');
-          a.dataset.path = n.path;
-          a.textContent = n.name;
-          a.title = (n.size != null ? n.size + ' B · ' : '') + (n.mtime || '');
-          a.addEventListener('click', (ev) => {
-            ev.preventDefault();
-            if (state.currentPath && isDirty()) {
-              if (!confirm('You have unsaved changes. Discard and load new file?')) return;
-            }
-            loadFile(n.path);
-          });
-          li.appendChild(a);
-        }
-        ul.appendChild(li);
-      }
+  // inferProjectFromPath derives the project key for state.project given
+  // a canonical-store-relative path. Returns "" for global files.
+  // - "projects/<p>/..."  → "<p>"
+  // - "projects/<p>.yaml" → "<p>"
+  // - anything else       → "" (global / unscoped)
+  function inferProjectFromPath(path) {
+    if (!path) return '';
+    if (path.startsWith('projects/')) {
+      const rest = path.slice('projects/'.length);
+      const slashIdx = rest.indexOf('/');
+      if (slashIdx > 0) return rest.slice(0, slashIdx);
+      if (rest.endsWith('.yaml')) return rest.slice(0, -5);
+      return rest;
     }
-    wrap.appendChild(ul);
-    return wrap;
+    return '';
   }
 
   async function loadFile(path) {
@@ -306,6 +350,10 @@
       state.currentPath = path;
       state.currentMtime = data.mtime || '';
       state.pristine = data.content || '';
+      // Z-CL-uniformity S5: state.project is now derived from the
+      // file path (no dropdown). postWebuiContext below fires with the
+      // updated project so Clive's ambient scope tracks the user's focus.
+      state.project = inferProjectFromPath(path);
       editor.setValue(state.pristine);
       editor.setModeForPath(path);
       // External (dual-root project-docs) entries are read-only — keep
@@ -665,7 +713,7 @@
       docStatus.textContent = 'Saved ' + (data.mtime || '') + sha + warns;
       updateDirtyState();
       // Refresh nav + recent-edits feed to pick up new mtimes.
-      loadDestinations();
+      loadTree();
       loadRecentEdits();
       // If rendered view active, refresh render with new content.
       if (state.viewMode === 'rendered' && isMarkdown(state.currentPath)) {
@@ -1121,12 +1169,10 @@
         statusEl.textContent = 'Failed: ' + text;
         return;
       }
-      statusEl.textContent = 'Registered. Switching to ' + name + '…';
-      await loadProjects();
-      projectPicker.value = name;
-      state.project = name;
-      activeChip.textContent = name;
-      await loadDestinations();
+      statusEl.textContent = 'Registered. Refreshing tree…';
+      // Z-CL-uniformity S5: no dropdown to update; just refresh the
+      // tree so the new project section appears in the sidebar.
+      await loadTree();
       closeRegisterModal();
     } catch (err) {
       statusEl.textContent = 'Network error: ' + err.message;
