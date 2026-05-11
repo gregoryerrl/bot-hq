@@ -48,6 +48,24 @@ func TestThreadRegistry_RegisterEmptyIsNoop(t *testing.T) {
 	}
 }
 
+func TestListensOnChannel_AcceptsRegisteredThreads(t *testing.T) {
+	b := &Bot{hubChannelID: "hub-1"}
+	if b.listensOnChannel("thread-x") {
+		t.Errorf("listensOnChannel(thread-x) before register=true, want false")
+	}
+	b.RegisterSessionThread("s-x", "thread-x")
+	if !b.listensOnChannel("thread-x") {
+		t.Errorf("listensOnChannel(thread-x) after register=false, want true")
+	}
+	if b.listensOnChannel("unknown-channel") {
+		t.Errorf("listensOnChannel(unknown-channel)=true, want false")
+	}
+	b.UnregisterSessionThread("s-x")
+	if b.listensOnChannel("thread-x") {
+		t.Errorf("listensOnChannel(thread-x) after unregister=true, want false")
+	}
+}
+
 func TestChannelForMessage_SessionRoutesToThread(t *testing.T) {
 	b := &Bot{hubChannelID: "hub-1"}
 	b.RegisterSessionThread("s-x", "thread-x")

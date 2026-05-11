@@ -126,11 +126,10 @@ func (b *Bot) channelForMessage(msg protocol.Message) string {
 }
 
 // listensOnChannel reports whether the bot's incoming-message filter
-// should accept messages from the given channel ID. Phase R R4 expands
-// from single-channel to {channelID, hubChannelID, flagsChannelID,
-// sessionsChannelID} — any non-empty channel-ID value the bot is
-// configured for. Pre-R4 single-channel deployments accept only
-// channelID. Pure helper — no I/O.
+// should accept messages from the given channel ID. Accepts any
+// configured top-level channel ({channelID, hubChannelID,
+// flagsChannelID, sessionsChannelID}) plus any registered
+// session-thread.
 func (b *Bot) listensOnChannel(id string) bool {
 	if id == "" {
 		return false
@@ -145,6 +144,10 @@ func (b *Bot) listensOnChannel(id string) bool {
 		return true
 	}
 	if id == b.sessionsChannelID && b.sessionsChannelID != "" {
+		return true
+	}
+	// Z-7: session-threads registered at open / discovered at startup.
+	if b.sessionForThread(id) != "" {
 		return true
 	}
 	return false
@@ -238,8 +241,14 @@ func (b *Bot) handleDiscordMessage(s *discordgo.Session, m *discordgo.MessageCre
 	// Format: include the Discord username for context
 	text := fmt.Sprintf("[%s] %s", m.Author.Username, content)
 
+	// Z-7: if the message came from a registered session-thread, tag
+	// the hub-row with that session_id so it surfaces in the right
+	// session stream (and not the global / cross-session feed).
+	sessionID := b.sessionForThread(m.ChannelID)
+
 	// Insert into hub DB as a message from the discord agent
 	if _, err := b.hub.DB.InsertMessage(protocol.Message{
+		SessionID: sessionID,
 		FromAgent: "discord",
 		Type:      protocol.MsgResponse,
 		Content:   text,
