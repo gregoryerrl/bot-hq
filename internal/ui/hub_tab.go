@@ -387,9 +387,15 @@ func (h HubTab) formatMessage(msg protocol.Message) string {
 //
 //   - filter set       → "" (no tag)
 //   - msg.SessionID==""→ "[main]"
-//   - else             → "[<short>]" where short is the first 6 chars of
-//     the session-id (matches the 4-char convention in sessions_tab.go
-//     with 2 extra chars for disambiguation across concurrent sessions)
+//   - else             → "[<scope4>·<uuid>]" — first 4 chars of the
+//     scope-slug + '·' + the trailing uuid-suffix (everything after the
+//     last '-'). Combining both halves keeps the tag readable (scope
+//     hint) and distinct (uuid-suffix has high entropy), avoiding
+//     collisions across sessions with shared scope-prefixes like
+//     "captain-hook-A-…" vs "captain-hook-B-…".
+//
+// Falls back to the raw id when no '-' is present (legacy date-keyed
+// IDs are rare post Z-3 but keep the path defensive).
 func (h HubTab) sessionTagFor(msg protocol.Message) string {
 	if h.sessionFilter != "" {
 		return ""
@@ -397,11 +403,22 @@ func (h HubTab) sessionTagFor(msg protocol.Message) string {
 	if msg.SessionID == "" {
 		return "[main]"
 	}
-	short := msg.SessionID
-	if len(short) > 6 {
-		short = short[:6]
+	id := msg.SessionID
+	idx := strings.LastIndex(id, "-")
+	if idx <= 0 || idx >= len(id)-1 {
+		// No '-' or trailing '-' — use first 6 chars as best-effort.
+		if len(id) > 6 {
+			return "[" + id[:6] + "]"
+		}
+		return "[" + id + "]"
 	}
-	return "[" + short + "]"
+	scope := id[:idx]
+	uuid := id[idx+1:]
+	scopeShort := scope
+	if len(scopeShort) > 4 {
+		scopeShort = scopeShort[:4]
+	}
+	return "[" + scopeShort + "·" + uuid + "]"
 }
 
 // parseCommand extracts an @agent target from user input.

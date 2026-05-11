@@ -611,8 +611,11 @@ func TestSessionTagAggregatedView(t *testing.T) {
 		wantTag      string
 	}{
 		{"aggregated tags main-hub", "", "", "[main]"},
-		{"aggregated tags session by short prefix", "", "captain-hook-duplicateadjob-z9sp6l", "[captai"},
-		{"aggregated short session unchanged", "", "abc", "[abc]"},
+		{"aggregated scope+uuid tag", "", "captain-hook-duplicateadjob-z9sp6l", "[capt·z9sp6l]"},
+		{"aggregated short id no dash", "", "abc", "[abc]"},
+		{"aggregated short id with dash", "", "a-b", "[a·b]"},
+		{"aggregated distinct on uuid suffix", "", "z5-test-sessionA-abc123", "[z5-t·abc123]"},
+		{"aggregated distinct on uuid suffix B", "", "z5-test-sessionB-def456", "[z5-t·def456]"},
 		{"filtered omits tag", "captain-hook-duplicateadjob-z9sp6l", "captain-hook-duplicateadjob-z9sp6l", ""},
 		{"filtered omits even when filter set", "session-A", "", ""},
 	}
@@ -652,14 +655,14 @@ func TestFormatMessageContainsSessionTag(t *testing.T) {
 	// Aggregated view → tag present.
 	h.SetSessionFilter("")
 	line := h.formatMessage(msg)
-	if !strings.Contains(line, "[captai") {
+	if !strings.Contains(line, "[capt·x]") {
 		t.Errorf("aggregated formatMessage missing session tag, got:\n%s", line)
 	}
 
 	// Filtered view → tag absent.
 	h.SetSessionFilter("captain-hook-x")
 	line = h.formatMessage(msg)
-	if strings.Contains(line, "[captai") {
+	if strings.Contains(line, "[capt·x]") {
 		t.Errorf("filtered formatMessage should omit session tag, got:\n%s", line)
 	}
 }
