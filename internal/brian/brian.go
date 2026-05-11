@@ -108,8 +108,16 @@ func (b *Brian) Start() error {
 		return fmt.Errorf("brian mcp config: %w", err)
 	}
 
-	// Generate a unique tmux session name
-	b.tmuxSession = fmt.Sprintf("bot-hq-brian-%d", time.Now().Unix())
+	// Z-8h: encode session-id in tmux pane name when bound to a Z-3
+	// session container so the daemon-restart orphan-cleanup can
+	// cross-reference active manifests and avoid killing panes that
+	// still belong to live sessions. Empty sessionID = legacy global-
+	// autostart mode; fall back to Unix-ts naming.
+	if b.sessionID != "" {
+		b.tmuxSession = fmt.Sprintf("bot-hq-brian-%s", b.sessionID)
+	} else {
+		b.tmuxSession = fmt.Sprintf("bot-hq-brian-%d", time.Now().Unix())
+	}
 
 	// Spawn tmux session with Claude Code
 	if err := b.spawnTmux(); err != nil {
@@ -675,8 +683,13 @@ func (b *Brian) restart() error {
 	// Kill old session if it exists
 	exec.Command("tmux", "kill-session", "-t", b.tmuxSession).Run()
 
-	// Respawn
-	b.tmuxSession = fmt.Sprintf("bot-hq-brian-%d", time.Now().Unix())
+	// Respawn — Z-8h: keep session-id naming on restart so orphan-
+	// cleanup continues to recognize the pane.
+	if b.sessionID != "" {
+		b.tmuxSession = fmt.Sprintf("bot-hq-brian-%s", b.sessionID)
+	} else {
+		b.tmuxSession = fmt.Sprintf("bot-hq-brian-%d", time.Now().Unix())
+	}
 	if err := b.spawnTmux(); err != nil {
 		return err
 	}

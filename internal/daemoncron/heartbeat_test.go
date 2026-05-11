@@ -82,13 +82,16 @@ func TestRunHeartbeatLedgerSurface_ThresholdCrossEmits(t *testing.T) {
 			heartbeatCount++
 		}
 	}
-	// Z-5h: single broadcast emit (ToAgent="") replaces per-recipient PMs.
+	// Z-5h / Z-8b: single broadcast emit (was per-recipient PM × 2).
 	if heartbeatCount != 1 {
-		t.Errorf("expected 1 broadcast heartbeat emit at threshold cross; got %d", heartbeatCount)
+		t.Errorf("expected 1 heartbeat broadcast at threshold cross; got %d", heartbeatCount)
 	}
 }
 
 func TestRunHeartbeatLedgerSurface_BroadcastNotPM(t *testing.T) {
+	// Z-5h / Z-8b: emits go out as broadcast (ToAgent="") so brian +
+	// rain both see them via their pollLoops. Recipients recognize the
+	// "[HEARTBEAT-LEDGER]" content prefix; from_agent="system".
 	ResetHeartbeatStateForTest()
 	db := setupTestDB(t)
 	c := New(db)
@@ -104,10 +107,10 @@ func TestRunHeartbeatLedgerSurface_BroadcastNotPM(t *testing.T) {
 	for _, m := range msgs {
 		if m.FromAgent == heartbeatAgentID && strings.HasPrefix(m.Content, "[HEARTBEAT-LEDGER]") {
 			if m.ToAgent != "" {
-				t.Errorf("Z-5h: expected heartbeat ToAgent='' (broadcast), got %q", m.ToAgent)
+				t.Errorf("heartbeat emit ToAgent=%q, want '' (broadcast)", m.ToAgent)
 			}
 			if m.FromAgent != "system" {
-				t.Errorf("Z-5h: expected heartbeat FromAgent='system', got %q", m.FromAgent)
+				t.Errorf("heartbeat from_agent=%q, want 'system'", m.FromAgent)
 			}
 		}
 	}
@@ -135,7 +138,7 @@ func TestRunHeartbeatLedgerSurface_DedupesWithinThreshold(t *testing.T) {
 		})
 	}
 	runHeartbeatLedgerSurface(c)
-	// Z-5h: 1 broadcast emit total (was 2 PM emits pre-Z-5h).
+	// Z-5h / Z-8b: single broadcast emit per threshold cross (was 2 PM emits).
 	msgs, _ := db.GetRecentMessages(100)
 	heartbeatCount := 0
 	for _, m := range msgs {
@@ -144,6 +147,6 @@ func TestRunHeartbeatLedgerSurface_DedupesWithinThreshold(t *testing.T) {
 		}
 	}
 	if heartbeatCount != 1 {
-		t.Errorf("expected dedupe to keep broadcast heartbeat count at 1 within threshold window; got %d", heartbeatCount)
+		t.Errorf("expected dedupe to keep heartbeat count at 1 within threshold window; got %d", heartbeatCount)
 	}
 }

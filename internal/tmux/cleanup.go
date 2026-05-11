@@ -1,16 +1,21 @@
-// Phase T T-14 cycle-3: tmux orphan-session cleanup.
+// Phase T T-14 cycle-3 + Z-8h: tmux orphan-session cleanup.
 //
-// On bot-hq daemon-restart, the new daemon spawns fresh agent tmux sessions
-// with new Unix-timestamp suffixes (e.g., bot-hq-brian-1778375059 → bot-hq-
-// brian-1778378XYZ). The OLD pre-restart sessions remain attached in tmux
-// but are orphaned from the new daemon's hub-coord routing — Rain msg 17419
-// push-back A documented this as user-confusion class (orphaned panes look
-// alive but won't receive new messages).
+// Pre-Z-3 design: every agent tmux pane was named with a Unix timestamp
+// (bot-hq-brian-<ts>); on daemon restart, all such panes were
+// orphaned-by-definition from the new daemon's routing, and
+// CleanupOrphanSessions killed them blindly at startup. Rain msg 17419
+// push-back A motivated this.
 //
-// CleanupOrphanSessions kills any tmux session whose name starts with a
-// known agent prefix BEFORE the daemon spawns fresh ones. Failure is
-// non-blocking (tmux may not be installed in CI / fresh install pre-ttyd):
-// a kill error is logged and the next prefix is tried.
+// Post-Z-8h: agent panes spawned inside a Z-3 session container are
+// named with the session-id (bot-hq-brian-<session-id>); the Unix-ts
+// naming remains only for legacy global-autostart-mode spawns. Orphan
+// cleanup now spares any pane whose name contains an ACTIVE session-id
+// (active = manifest with status=active). Truly-orphaned panes (Unix-ts
+// names or session-ids of finalized sessions) are still killed.
+//
+// Failure is non-blocking (tmux may not be installed in CI / fresh
+// install pre-ttyd): a kill error is logged and the next prefix is
+// tried.
 
 package tmux
 
@@ -22,8 +27,9 @@ import (
 )
 
 // AgentSessionPrefixes lists the canonical bot-hq agent tmux session
-// name-prefixes. Sessions matching any of these are orphan-class on
-// daemon-restart and safe to kill.
+// name-prefixes. Sessions matching any of these are eligible for
+// orphan-cleanup; the per-session active-id list narrows the kill set
+// further (Z-8h).
 var AgentSessionPrefixes = []string{
 	"bot-hq-brian-",
 	"bot-hq-rain-",
@@ -32,12 +38,16 @@ var AgentSessionPrefixes = []string{
 	"bot-hq-coder-",
 }
 
-// CleanupOrphanSessions kills any existing tmux session whose name has one
-// of the given prefixes. Returns the list of killed session names plus any
-// errors encountered (errors do NOT stop the loop — best-effort cleanup).
+// CleanupOrphanSessions kills tmux sessions whose name starts with a
+// known agent prefix UNLESS the suffix matches an active session-id
+// (Z-8h). Pass nil for prefixes to use AgentSessionPrefixes (default).
+// activeSessionIDs is the set of session-ids currently active (from
+// sessions/*/manifest.md status=active). Panes named
+// "<prefix><active-session-id>" are spared.
 //
-// Pass nil for prefixes to use AgentSessionPrefixes (the default set).
-func CleanupOrphanSessions(prefixes []string) ([]string, []error) {
+// Returns the list of killed session names plus errors (errors do NOT
+// stop the loop — best-effort).
+func CleanupOrphanSessions(prefixes []string, activeSessionIDs []string) ([]string, []error) {
 	if prefixes == nil {
 		prefixes = AgentSessionPrefixes
 	}
@@ -56,10 +66,22 @@ func CleanupOrphanSessions(prefixes []string) ([]string, []error) {
 		return nil, []error{fmt.Errorf("list sessions: %w", err)}
 	}
 
+	activeSet := make(map[string]struct{}, len(activeSessionIDs))
+	for _, id := range activeSessionIDs {
+		if id != "" {
+			activeSet[id] = struct{}{}
+		}
+	}
+
 	var killed []string
 	var errs []error
 	for _, sess := range sessions {
-		if !matchesAnyPrefix(sess.Name, prefixes) {
+		prefix, matched := matchedPrefix(sess.Name, prefixes)
+		if !matched {
+			continue
+		}
+		suffix := strings.TrimPrefix(sess.Name, prefix)
+		if _, isActive := activeSet[suffix]; isActive {
 			continue
 		}
 		if err := KillSession(sess.Name); err != nil {
@@ -71,11 +93,18 @@ func CleanupOrphanSessions(prefixes []string) ([]string, []error) {
 	return killed, errs
 }
 
-func matchesAnyPrefix(name string, prefixes []string) bool {
+func matchedPrefix(name string, prefixes []string) (string, bool) {
 	for _, p := range prefixes {
 		if strings.HasPrefix(name, p) {
-			return true
+			return p, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// matchesAnyPrefix is retained for backwards-compat with existing
+// callers/tests that only need the boolean result.
+func matchesAnyPrefix(name string, prefixes []string) bool {
+	_, ok := matchedPrefix(name, prefixes)
+	return ok
 }

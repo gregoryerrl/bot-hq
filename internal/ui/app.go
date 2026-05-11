@@ -161,6 +161,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		a.hubTab, cmd = a.hubTab.Update(msg)
+		// Z-8f: also forward to Sessions tab so the drilled-in
+		// container's stream stays in sync without a separate poller.
+		a.sessionsTab, _ = a.sessionsTab.Update(msg)
 		if msg.Message.ID > a.lastMsgID {
 			a.lastMsgID = msg.Message.ID
 		}
@@ -172,31 +175,34 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case SessionsUpdated:
+		// Z-8e: forward to both Hub (strip column) and Sessions tab (list).
 		var cmd tea.Cmd
 		a.sessionsTab, cmd = a.sessionsTab.Update(msg)
+		a.hubTab, _ = a.hubTab.Update(msg)
 		return a, cmd
 
 	case SessionSelected:
-		a.hubTab.SetSessionFilter(msg.SessionID)
-		if msg.SessionID != "" {
-			a.activeTab = TabHub
-		}
+		// Z-8e: SessionSelected stays as a tab-routing hint. Z-8f will
+		// land the Sessions-tab drilled-in container view; until then
+		// it's a no-op (Sessions tab handles its own selection state
+		// internally for Z-8f's container).
 		return a, nil
 
 	case CommandSubmitted:
-		// Handle slash commands
-		if strings.TrimSpace(msg.Text) == "/clear" {
+		// /clear only affects the Hub view (main-hub chat reset).
+		if strings.TrimSpace(msg.Text) == "/clear" && msg.SessionID == "" {
 			a.hubTab.messages = nil
 			a.hubTab.viewport.SetContent(a.hubTab.renderMessages())
 			return a, nil
 		}
 
-		// Handle commands from the Hub tab command bar.
-		// Z-5i: ToAgent setting removed. Phase S S-4 already dropped PM
+		// Z-5i + Z-8f: ToAgent setting removed (Phase S S-4 dropped PM
 		// semantics; @<target> mentions in content do the routing via
-		// MentionsAgent (the body is the full input as the user typed
-		// it, including the @<target> token, so emma's pollLoop +
-		// brian/rain's shouldForward* see the mention and route).
+		// MentionsAgent). SessionID comes from msg — main hub submits
+		// leave it "" (broadcast); Sessions tab container submits tag
+		// it with the drilled-in session-id so brian/rain pollLoops in
+		// that session see it and Discord forwarder routes it to the
+		// session's thread (Z-7b).
 		if a.db != nil {
 			content := strings.TrimSpace(msg.Text)
 			if content == "" {
@@ -206,10 +212,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				FromAgent: "user",
 				Type:      protocol.MsgCommand,
 				Content:   content,
-				// Z-5f: when the Hub is filtered to a session, tag the
-				// outbound message with that session_id so the reply
-				// lands IN the session.
-				SessionID: a.hubTab.SessionFilter(),
+				SessionID: msg.SessionID,
 			})
 		}
 		return a, nil
@@ -226,6 +229,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			a.hubTab, cmd = a.hubTab.Update(msg)
+			return a, cmd
+		}
+		// Z-8f: container input focused — capture keys for the
+		// Sessions tab so Tab-switch / typing don't escape mid-compose.
+		if a.activeTab == TabSessions && a.sessionsTab.ContainerFocused() {
+			if msg.String() == "ctrl+c" {
+				return a, tea.Quit
+			}
+			var cmd tea.Cmd
+			a.sessionsTab, cmd = a.sessionsTab.Update(msg)
 			return a, cmd
 		}
 		if a.activeTab == TabSettings && a.settingsTab.editing {

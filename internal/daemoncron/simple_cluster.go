@@ -28,8 +28,13 @@ import (
 )
 
 const (
-	// simpleClusterAgentID preserved from gemma pre-migration.
-	simpleClusterAgentID = "emma"
+	// simpleClusterAgentID is the FromAgent for daemon-fired audit
+	// events (context-cap CRITICAL, DELIVERY-GAP, EGRESS-GAP,
+	// ROSTER-PRUNE). Z-8b: changed from "emma" to "system" per
+	// hub-message-truth principle — these emits are threshold logic
+	// only, no LLM invocation. Recipients still match on the content
+	// prefix.
+	simpleClusterAgentID = "system"
 
 	// haltReasonPrefix mirrors gemma const value — locked literal
 	// substring brian/rain STARTUP prompts match against ("agent

@@ -38,14 +38,14 @@ const (
 	heartbeatTickInterval = 30 * time.Second
 
 	// heartbeatAgentID is the FromAgent identifier used on emits.
-	// Z-5h: was "emma" — the pre-Z-5h comment claimed daemon-side emit
-	// vs emma-side emit was "invisible to consumers." That violated the
-	// hub-messages-must-be-true principle: Emma's model was never
-	// invoked for these pings, so signing them as "emma" lied to the
-	// user reading the feed. Now "system" — accurate to the cadence-
-	// fire surface (daemoncron). Recipients (brian/rain) recognize the
-	// heartbeat via the unique "[HEARTBEAT-LEDGER]" content prefix, not
-	// via FromAgent.
+	// Z-5h / Z-8b: was "emma" — the pre-fix comment claimed daemon-side
+	// emit vs emma-side emit was "invisible to consumers." That violated
+	// the hub-messages-must-be-true principle (architecture/hub-message-
+	// truth.md): Emma's model was never invoked for these pings, so
+	// signing them as "emma" lied to the user reading the feed. Now
+	// "system" — accurate to the cadence-fire surface (daemoncron).
+	// Recipients (brian/rain) recognize the heartbeat via the unique
+	// "[HEARTBEAT-LEDGER]" content prefix, not via FromAgent.
 	heartbeatAgentID = "system"
 )
 
@@ -85,10 +85,10 @@ func runHeartbeatLedgerSurface(c *Cron) {
 	heartbeatStateMu.Unlock()
 
 	content := heartbeatContentTemplate(latestID)
-	// Z-5h: single broadcast emit (ToAgent="") replaces per-recipient
-	// PM emits. Phase S S-4 dropped PM; brian + rain both poll the
-	// broadcast channel and recognize the "[HEARTBEAT-LEDGER]" content
-	// prefix in their R20-bootstrap path.
+	// Z-5h / Z-8b: single broadcast emit (ToAgent="") replaces
+	// per-recipient PM emits. Phase S S-4 dropped PM; brian + rain
+	// both poll the broadcast channel and recognize the
+	// "[HEARTBEAT-LEDGER]" content prefix in their R20-bootstrap path.
 	if _, err := c.db.InsertMessage(protocol.Message{
 		FromAgent: heartbeatAgentID,
 		ToAgent:   "",

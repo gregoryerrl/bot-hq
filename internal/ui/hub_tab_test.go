@@ -600,37 +600,30 @@ func TestHubTabPlaceholderZ3EmmaTarget(t *testing.T) {
 	}
 }
 
-// TestSessionTagAggregatedView verifies Z-5e: when sessionFilter==""
-// (aggregated main-hub view), every rendered message has a session
-// attribution tag. Filtered view omits the tag (redundant).
+// TestSessionTagAggregatedView verifies Z-5e + Z-8e: the Hub tab
+// renders every message with a session-attribution tag so the user
+// can tell which session each line belongs to in the main-hub view.
+// (Z-8e dropped per-session filtering on the Hub tab — Container
+// views in the Sessions tab handle that — so all rows always carry
+// the tag.)
 func TestSessionTagAggregatedView(t *testing.T) {
 	cases := []struct {
 		name         string
-		filter       string
 		msgSessionID string
 		wantTag      string
 	}{
-		{"aggregated tags main-hub", "", "", "[main]"},
-		{"aggregated scope+uuid tag", "", "captain-hook-duplicateadjob-z9sp6l", "[capt·z9sp6l]"},
-		{"aggregated short id no dash", "", "abc", "[abc]"},
-		{"aggregated short id with dash", "", "a-b", "[a·b]"},
-		{"aggregated distinct on uuid suffix", "", "z5-test-sessionA-abc123", "[z5-t·abc123]"},
-		{"aggregated distinct on uuid suffix B", "", "z5-test-sessionB-def456", "[z5-t·def456]"},
-		{"filtered omits tag", "captain-hook-duplicateadjob-z9sp6l", "captain-hook-duplicateadjob-z9sp6l", ""},
-		{"filtered omits even when filter set", "session-A", "", ""},
+		{"tags main-hub", "", "[main]"},
+		{"scope+uuid tag", "captain-hook-duplicateadjob-z9sp6l", "[capt·z9sp6l]"},
+		{"short id no dash", "abc", "[abc]"},
+		{"short id with dash", "a-b", "[a·b]"},
+		{"distinct on uuid suffix", "z5-test-sessionA-abc123", "[z5-t·abc123]"},
+		{"distinct on uuid suffix B", "z5-test-sessionB-def456", "[z5-t·def456]"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			h := NewHubTab()
 			h.SetSize(120, 30)
-			h.SetSessionFilter(tt.filter)
 			got := h.sessionTagFor(protocol.Message{SessionID: tt.msgSessionID})
-			if tt.wantTag == "" {
-				if got != "" {
-					t.Errorf("sessionTagFor want empty, got %q", got)
-				}
-				return
-			}
 			if !strings.HasPrefix(got, tt.wantTag) {
 				t.Errorf("sessionTagFor = %q, want prefix %q", got, tt.wantTag)
 			}
@@ -638,8 +631,9 @@ func TestSessionTagAggregatedView(t *testing.T) {
 	}
 }
 
-// TestFormatMessageContainsSessionTag verifies that the rendered line
-// includes the session tag when aggregated, and omits it when filtered.
+// TestFormatMessageContainsSessionTag verifies the rendered line
+// includes the session tag for session-scoped messages and "[main]"
+// for broadcasts. Z-8e dropped the filter-suppression branch.
 func TestFormatMessageContainsSessionTag(t *testing.T) {
 	h := NewHubTab()
 	h.SetSize(200, 30)
@@ -652,34 +646,22 @@ func TestFormatMessageContainsSessionTag(t *testing.T) {
 		Created:   time.Now(),
 	}
 
-	// Aggregated view → tag present.
-	h.SetSessionFilter("")
 	line := h.formatMessage(msg)
 	if !strings.Contains(line, "[capt·x]") {
-		t.Errorf("aggregated formatMessage missing session tag, got:\n%s", line)
-	}
-
-	// Filtered view → tag absent.
-	h.SetSessionFilter("captain-hook-x")
-	line = h.formatMessage(msg)
-	if strings.Contains(line, "[capt·x]") {
-		t.Errorf("filtered formatMessage should omit session tag, got:\n%s", line)
+		t.Errorf("formatMessage missing session tag, got:\n%s", line)
 	}
 }
 
-// TestSessionFilterAccessor verifies Z-5f read-back of the current
-// filter so app.go can tag outbound user input.
-func TestSessionFilterAccessor(t *testing.T) {
+// TestSessionFilterIsNoOp verifies Z-8e back-compat shim: the
+// SetSessionFilter / SessionFilter pair are kept but inert. Hub tab
+// no longer filters by session; Container views own that surface.
+func TestSessionFilterIsNoOp(t *testing.T) {
 	h := NewHubTab()
 	if h.SessionFilter() != "" {
 		t.Errorf("initial filter = %q, want empty", h.SessionFilter())
 	}
 	h.SetSessionFilter("session-X")
-	if h.SessionFilter() != "session-X" {
-		t.Errorf("after SetSessionFilter, got %q want %q", h.SessionFilter(), "session-X")
-	}
-	h.SetSessionFilter("")
 	if h.SessionFilter() != "" {
-		t.Errorf("after clear, got %q want empty", h.SessionFilter())
+		t.Errorf("after SetSessionFilter, still want empty (Z-8e no-op), got %q", h.SessionFilter())
 	}
 }

@@ -33,7 +33,8 @@ func countEgressGapMsgs(t *testing.T, db *hub.DB) int {
 	}
 	n := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[EGRESS-GAP]") {
+		// Z-8b: daemon-cadence emits as "system" (was "emma").
+		if m.FromAgent == "system" && strings.Contains(m.Content, "[EGRESS-GAP]") {
 			n++
 		}
 	}

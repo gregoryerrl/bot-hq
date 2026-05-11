@@ -97,7 +97,14 @@ func (r *Rain) Start() error {
 		return fmt.Errorf("rain mcp config: %w", err)
 	}
 
-	r.tmuxSession = fmt.Sprintf("bot-hq-rain-%d", time.Now().Unix())
+	// Z-8h: encode session-id in tmux pane name when bound to a Z-3
+	// session so orphan-cleanup on daemon-restart can recognize the
+	// pane as belonging to an active session.
+	if r.sessionID != "" {
+		r.tmuxSession = fmt.Sprintf("bot-hq-rain-%s", r.sessionID)
+	} else {
+		r.tmuxSession = fmt.Sprintf("bot-hq-rain-%d", time.Now().Unix())
+	}
 
 	if err := r.spawnTmux(); err != nil {
 		return fmt.Errorf("rain tmux spawn: %w", err)
@@ -608,7 +615,12 @@ func (r *Rain) restart() error {
 
 	exec.Command("tmux", "kill-session", "-t", r.tmuxSession).Run()
 
-	r.tmuxSession = fmt.Sprintf("bot-hq-rain-%d", time.Now().Unix())
+	// Z-8h: keep session-id naming on respawn.
+	if r.sessionID != "" {
+		r.tmuxSession = fmt.Sprintf("bot-hq-rain-%s", r.sessionID)
+	} else {
+		r.tmuxSession = fmt.Sprintf("bot-hq-rain-%d", time.Now().Unix())
+	}
 	if err := r.spawnTmux(); err != nil {
 		return err
 	}

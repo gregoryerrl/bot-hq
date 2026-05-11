@@ -18,7 +18,7 @@ func countDeliveryGapMsgs(t *testing.T, db *hub.DB) int {
 	}
 	n := 0
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[DELIVERY-GAP]") {
+		if m.FromAgent == "system" && strings.Contains(m.Content, "[DELIVERY-GAP]") {
 			n++
 		}
 	}
@@ -225,7 +225,7 @@ func TestAuditDeliveryGapPositiveFireOnRealClock(t *testing.T) {
 	}
 	var alert string
 	for _, m := range msgs {
-		if m.FromAgent == agentID && strings.Contains(m.Content, "[DELIVERY-GAP]") {
+		if m.FromAgent == "system" && strings.Contains(m.Content, "[DELIVERY-GAP]") {
 			alert = m.Content
 			break
 		}
