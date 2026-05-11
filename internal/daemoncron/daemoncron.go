@@ -77,20 +77,15 @@ func New(db *hub.DB) *Cron {
 }
 
 // NewWithDefaults constructs a Cron and pre-registers the standard
-// surface set for Phase S S-1a. Registers heartbeat-ledger (S-1a-1)
-// + stale-coder (S-1a-2); subsequent sub-commits append plan-usage /
-// context-cap / delivery-gap / egress-audit / lifecycle / sentinel.
+// surface set. Z-8a dropped stale-coder (user-flagged as noise; no
+// model invocation so it was system-class anyway and the prefix-based
+// rule-text dispatch never earned its keep). Heartbeat-ledger stays.
 func NewWithDefaults(db *hub.DB) *Cron {
 	c := New(db)
 	c.Register(surface{
 		name: "heartbeat-ledger",
 		tick: heartbeatTickInterval,
 		fn:   runHeartbeatLedgerSurface,
-	})
-	c.Register(surface{
-		name: "stale-coder",
-		tick: staleTickInterval,
-		fn:   runStaleCoderSurface,
 	})
 	return c
 }
