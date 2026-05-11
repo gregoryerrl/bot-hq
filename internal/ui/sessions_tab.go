@@ -28,12 +28,33 @@ type SessionSelected struct {
 // MCP tools + bootstrap) and minimal UI awareness here; full TUI
 // retargeting (per-session input box, agents-strip, focused-session
 // state) is deferred to keep Z-3 within atomic-commit scope.
+//
+// Z-3-followup-2: default view shows only active sessions. Press 'a'
+// to toggle "all" mode (include done/paused). Closed sessions stay in
+// DB for retrospective query (hub_session_lookback / hub_session_summary)
+// but the live Sessions tab focuses on what's currently in-flight per
+// the user's expectation that "Sessions" = "current work."
 type SessionsTab struct {
-	sessions []protocol.Session
+	sessions []protocol.Session // raw list as received from SessionsUpdated
 	width    int
 	height   int
 	cursor   int
 	selected string // selected session ID for filtering
+	showAll  bool   // false = active-only (default); true = include done/paused
+}
+
+// visibleSessions returns the subset of s.sessions filtered per showAll.
+func (s SessionsTab) visibleSessions() []protocol.Session {
+	if s.showAll {
+		return s.sessions
+	}
+	out := make([]protocol.Session, 0, len(s.sessions))
+	for _, sess := range s.sessions {
+		if sess.Status == protocol.SessionActive {
+			out = append(out, sess)
+		}
+	}
+	return out
 }
 
 // NewSessionsTab creates a new SessionsTab.
@@ -52,26 +73,32 @@ func (s SessionsTab) Update(msg tea.Msg) (SessionsTab, tea.Cmd) {
 	switch msg := msg.(type) {
 	case SessionsUpdated:
 		s.sessions = msg.Sessions
-		// Clamp cursor to valid range when sessions list shrinks
-		if s.cursor >= len(s.sessions) {
-			s.cursor = len(s.sessions) - 1
+		// Clamp cursor to visible-list bounds (active-only default).
+		visible := s.visibleSessions()
+		if s.cursor >= len(visible) {
+			s.cursor = len(visible) - 1
 		}
 		if s.cursor < 0 {
 			s.cursor = 0
 		}
 	case tea.KeyMsg:
+		visible := s.visibleSessions()
 		switch msg.String() {
 		case "j", "down":
-			if s.cursor < len(s.sessions)-1 {
+			if s.cursor < len(visible)-1 {
 				s.cursor++
 			}
 		case "k", "up":
 			if s.cursor > 0 {
 				s.cursor--
 			}
+		case "a":
+			// Toggle active-only vs all (Z-3-followup-2).
+			s.showAll = !s.showAll
+			s.cursor = 0
 		case "enter":
-			if len(s.sessions) > 0 && s.cursor < len(s.sessions) {
-				sess := s.sessions[s.cursor]
+			if len(visible) > 0 && s.cursor < len(visible) {
+				sess := visible[s.cursor]
 				if s.selected == sess.ID {
 					s.selected = ""
 				} else {
@@ -93,12 +120,18 @@ func (s SessionsTab) Update(msg tea.Msg) (SessionsTab, tea.Cmd) {
 	return s, nil
 }
 
-// View renders the SessionsTab.
+// View renders the SessionsTab. Default view: active sessions only.
+// Press 'a' to toggle "all" mode (Z-3-followup-2).
 func (s SessionsTab) View() string {
-	if len(s.sessions) == 0 {
+	visible := s.visibleSessions()
+	if len(visible) == 0 {
+		msg := "No active sessions. Talk to emma or use `hub_session_open` to start one."
+		if s.showAll {
+			msg = "No sessions in the database."
+		}
 		return lipgloss.NewStyle().
 			Foreground(ColorStatus).
-			Render("No sessions yet.")
+			Render(msg)
 	}
 
 	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#BB77FF")).Bold(true)
@@ -109,7 +142,7 @@ func (s SessionsTab) View() string {
 	pausedCount := 0
 	doneCount := 0
 
-	for i, sess := range s.sessions {
+	for i, sess := range visible {
 		// Cursor indicator
 		cursor := "  "
 		if i == s.cursor {
@@ -192,10 +225,14 @@ func (s SessionsTab) View() string {
 	lines = append(lines, summary)
 
 	// Help line
+	mode := "active-only"
+	if s.showAll {
+		mode = "all sessions"
+	}
 	if s.selected != "" {
-		lines = append(lines, hint.Render("  ↑/↓: navigate  Enter: deselect  Esc: clear filter  Tab: switch tab"))
+		lines = append(lines, hint.Render(fmt.Sprintf("  ↑/↓: navigate  Enter: deselect  Esc: clear filter  a: toggle filter  Tab: switch tab  (showing: %s)", mode)))
 	} else {
-		lines = append(lines, hint.Render("  ↑/↓: navigate  Enter: filter hub by session  Tab: switch tab"))
+		lines = append(lines, hint.Render(fmt.Sprintf("  ↑/↓: navigate  Enter: filter hub by session  a: toggle %s  Tab: switch tab", mode)))
 	}
 
 	return strings.Join(lines, "\n")
