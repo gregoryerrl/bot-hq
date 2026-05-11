@@ -23,9 +23,13 @@ type MessageReceived struct {
 	Message protocol.Message
 }
 
-// CommandSubmitted is emitted when the user presses Enter in the command input.
+// CommandSubmitted is emitted when the user presses Enter in a
+// command input. Z-8f added SessionID so the container input in the
+// Sessions tab can tag its outbound message with the session-scope.
+// Empty SessionID = main hub submit (broadcast).
 type CommandSubmitted struct {
-	Text string
+	Text      string
+	SessionID string
 }
 
 // HubTab displays the main hub view: cross-session-relevant traffic on

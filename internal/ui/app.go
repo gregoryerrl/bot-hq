@@ -161,6 +161,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		a.hubTab, cmd = a.hubTab.Update(msg)
+		// Z-8f: also forward to Sessions tab so the drilled-in
+		// container's stream stays in sync without a separate poller.
+		a.sessionsTab, _ = a.sessionsTab.Update(msg)
 		if msg.Message.ID > a.lastMsgID {
 			a.lastMsgID = msg.Message.ID
 		}
@@ -186,14 +189,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case CommandSubmitted:
-		// Handle slash commands
-		if strings.TrimSpace(msg.Text) == "/clear" {
+		// /clear only affects the Hub view (main-hub chat reset).
+		if strings.TrimSpace(msg.Text) == "/clear" && msg.SessionID == "" {
 			a.hubTab.messages = nil
 			a.hubTab.viewport.SetContent(a.hubTab.renderMessages())
 			return a, nil
 		}
 
-		// Handle commands from the Hub tab command bar
 		if a.db != nil {
 			target, content := parseCommand(msg.Text)
 			if content == "" && target != "" {
@@ -203,6 +205,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				FromAgent: "user",
 				Type:      protocol.MsgCommand,
 				Content:   content,
+				// Z-8f: container submits tag the message with the
+				// session_id so brian/rain pollLoops in that session
+				// see it and Discord forwarder routes it to the
+				// session's thread (Z-7b).
+				SessionID: msg.SessionID,
 			}
 			if target != "" {
 				m.ToAgent = target
@@ -223,6 +230,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			a.hubTab, cmd = a.hubTab.Update(msg)
+			return a, cmd
+		}
+		// Z-8f: container input focused — capture keys for the
+		// Sessions tab so Tab-switch / typing don't escape mid-compose.
+		if a.activeTab == TabSessions && a.sessionsTab.ContainerFocused() {
+			if msg.String() == "ctrl+c" {
+				return a, tea.Quit
+			}
+			var cmd tea.Cmd
+			a.sessionsTab, cmd = a.sessionsTab.Update(msg)
 			return a, cmd
 		}
 		if a.activeTab == TabSettings && a.settingsTab.editing {
