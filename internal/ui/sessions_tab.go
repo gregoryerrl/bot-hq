@@ -221,9 +221,11 @@ func (s SessionsTab) updateContainer(msg tea.KeyMsg) (SessionsTab, tea.Cmd) {
 		s.containerVP.GotoBottom()
 		s.containerFollow = true
 	default:
-		key := msg.String()
-		printable := len(key) == 1 && key >= " " && key <= "~"
-		if printable || msg.Paste {
+		// Z-9c: detect printable via the runes payload, not via
+		// len(msg.String()) — tmux send-keys batches multiple runes
+		// into a single KeyMsg which the pre-fix check silently
+		// dropped (see hub_tab.go isPrintableRuneMsg comment).
+		if isPrintableRuneMsg(msg) || msg.Paste {
 			s.containerFocused = true
 			cmds = append(cmds, s.containerInput.Focus())
 			var cmd tea.Cmd
@@ -249,6 +251,32 @@ func (s SessionsTab) ContainerFocused() bool {
 // Drilled reports whether the tab is in drilled-in (container) mode.
 func (s SessionsTab) Drilled() bool {
 	return s.drilled
+}
+
+// SeedContainerHistory replaces any already-known messages for the
+// drilled session with the supplied DB-sourced list and re-renders
+// the viewport. Z-9c: app.go calls this on SessionSelected so the
+// container view shows full session history even when the boot-time
+// message-seed window didn't reach back to older sessions.
+//
+// Other-session rows in containerMessages are preserved (a tab may
+// have learned about them via MessageReceived fan-out).
+func (s *SessionsTab) SeedContainerHistory(msgs []protocol.Message) {
+	if !s.drilled || s.drilledSessionID == "" {
+		s.containerMessages = append(s.containerMessages, msgs...)
+		return
+	}
+	others := make([]protocol.Message, 0, len(s.containerMessages))
+	for _, m := range s.containerMessages {
+		if m.SessionID != s.drilledSessionID {
+			others = append(others, m)
+		}
+	}
+	s.containerMessages = append(others, msgs...)
+	s.containerVP.SetContent(s.renderContainerMessages())
+	if s.containerFollow {
+		s.containerVP.GotoBottom()
+	}
 }
 
 func (s *SessionsTab) enterContainer(sessionID string) {

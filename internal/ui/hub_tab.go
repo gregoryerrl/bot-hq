@@ -152,14 +152,14 @@ func (h HubTab) Update(msg tea.Msg) (HubTab, tea.Cmd) {
 				h.viewport.GotoBottom()
 				h.followBottom = true
 			default:
-				// Auto-focus input on any printable character OR on a
-				// bracketed-paste delivery. Without the Paste branch a
-				// multi-rune paste arriving while unfocused would route to
-				// the viewport (silently dropped) instead of being captured
-				// as input — observably "bracketed paste didn't work" even
-				// though the bubbletea bracketed-paste path itself was fine.
-				printable := len(key) == 1 && key >= " " && key <= "~"
-				if printable || msg.Paste {
+				// Auto-focus input on any printable rune-bearing KeyMsg
+				// OR on a bracketed-paste delivery. Z-9c: the check is
+				// "msg carries at least one printable rune", NOT
+				// "msg.String() is a single printable char" — tmux
+				// send-keys (and fast typists) deliver multi-rune
+				// batches in a single KeyMsg, and the pre-fix
+				// `len(key)==1` test silently dropped them all.
+				if isPrintableRuneMsg(msg) || msg.Paste {
 					h.focused = true
 					cmds = append(cmds, h.input.Focus())
 					var cmd tea.Cmd
@@ -453,6 +453,27 @@ func (h HubTab) sessionTagFor(msg protocol.Message) string {
 		scopeShort = scopeShort[:4]
 	}
 	return "[" + scopeShort + "·" + uuid + "]"
+}
+
+// isPrintableRuneMsg reports whether the KeyMsg carries at least one
+// printable rune (i.e., user typed text). Used to discriminate
+// "typing into input" from control-key events like tab/escape/arrow
+// keys when deciding whether to auto-focus the textarea.
+//
+// Z-9c: previous heuristic checked `len(msg.String()) == 1` which
+// dropped any multi-rune KeyMsg batch (tmux send-keys, fast typing,
+// pastes-without-bracketed-paste-flag). Now we look at the actual
+// runes payload — any printable rune in the batch qualifies.
+func isPrintableRuneMsg(msg tea.KeyMsg) bool {
+	if msg.Type != tea.KeyRunes && msg.Type != tea.KeySpace {
+		return false
+	}
+	for _, r := range msg.Runes {
+		if r >= ' ' && r <= '~' {
+			return true
+		}
+	}
+	return false
 }
 
 // parseCommand extracts an @agent target from user input.

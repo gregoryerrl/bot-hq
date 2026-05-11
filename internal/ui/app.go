@@ -193,10 +193,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 
 	case SessionSelected:
-		// Z-8e: SessionSelected stays as a tab-routing hint. Z-8f will
-		// land the Sessions-tab drilled-in container view; until then
-		// it's a no-op (Sessions tab handles its own selection state
-		// internally for Z-8f's container).
+		// Z-9c: seed the container view with the full session history
+		// from DB on drill-in, so older sessions show their messages
+		// even when the boot-time 100-message window doesn't reach
+		// back to them. Empty SessionID = drilled-out (no fetch).
+		if msg.SessionID != "" && a.db != nil {
+			if msgs, err := a.db.ReadMessagesForSession(msg.SessionID, 0); err == nil {
+				a.sessionsTab.SeedContainerHistory(msgs)
+			}
+		}
 		return a, nil
 
 	case CommandSubmitted:

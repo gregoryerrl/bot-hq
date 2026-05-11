@@ -166,6 +166,46 @@ func typeString(h HubTab, s string) HubTab {
 	return h
 }
 
+// TestHubTabColdInputCapturesFirstKey locks the Z-9c carry-forward
+// fix: when the input is unfocused and the user starts typing,
+// the FIRST key must land in the textarea (not get eaten by the
+// focus transition). Prior to the fix, "hi emma" rendered as "emma"
+// because the first 3 keystrokes were silently lost.
+func TestHubTabColdInputCapturesFirstKey(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	if h.focused {
+		t.Fatal("setup: HubTab should start unfocused")
+	}
+
+	h = typeString(h, "hi emma")
+
+	got := h.input.Value()
+	if got != "hi emma" {
+		t.Errorf("first key lost — input value = %q, want %q", got, "hi emma")
+	}
+}
+
+// TestHubTabColdInputBatchedRunes — tmux send-keys delivers a typed
+// string as a SINGLE KeyMsg with multiple runes, not one keystroke
+// per Update call. The cold-input transition must handle that batch
+// shape correctly so the entire batch isn't dropped on focus.
+func TestHubTabColdInputBatchedRunes(t *testing.T) {
+	h := NewHubTab()
+	h.SetSize(80, 24)
+	if h.focused {
+		t.Fatal("setup: HubTab should start unfocused")
+	}
+
+	// Single KeyMsg carrying multiple runes, mimicking tmux send-keys.
+	h, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi emma")})
+
+	got := h.input.Value()
+	if got != "hi emma" {
+		t.Errorf("batched cold input dropped — input value = %q, want %q", got, "hi emma")
+	}
+}
+
 // TestHubTabMultiLineSubmitOnEnter locks that ctrl+j (the universal
 // terminal-supported newline binding) inserts a newline into the input
 // buffer, then plain enter submits the full multi-line value via
