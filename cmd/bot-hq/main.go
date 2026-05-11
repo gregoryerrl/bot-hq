@@ -216,7 +216,6 @@ func runHub() {
 			cfg.Discord.ChannelID,
 			cfg.Discord.HubChannelID,
 			cfg.Discord.FlagsChannelID,
-			cfg.Discord.SessionsChannelID,
 			h,
 		)
 		if err == nil {

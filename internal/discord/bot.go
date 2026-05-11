@@ -14,22 +14,20 @@ import (
 
 // Bot bridges Discord messages to and from the hub.
 //
-// Phase R R4 multi-channel routing: when hubChannelID is populated,
-// hub messages route by class — MsgFlag → flagsChannelID; session-event
-// class (content prefix `[SESSION:` per R5 forward-compat) → sessionsChannelID;
-// everything else → hubChannelID. Empty class-specific IDs fall back to
-// hubChannelID. Empty hubChannelID falls back to legacy channelID.
+// Routing (Phase R R4 + Z-7): MsgFlag → flagsChannelID (or hub
+// fallback); session-scoped messages (msg.SessionID != "") → that
+// session's thread under hubChannelID (or hub fallback if no thread
+// registered); everything else → hubChannelID (or legacy channelID).
 type Bot struct {
 	session   *discordgo.Session
 	hub       *hub.Hub
 	channelID string // legacy single-channel (back-compat fallback)
 	// Phase R R4 multi-channel routing
-	hubChannelID      string // primary post-R4 channel for hub messages
-	flagsChannelID    string // MsgFlag class destination
-	sessionsChannelID string // session-event class destination ([SESSION: prefix)
-	botUserID         string
-	mu                sync.Mutex
-	stopCh            chan struct{}
+	hubChannelID   string // primary post-R4 channel for hub messages
+	flagsChannelID string // MsgFlag class destination
+	botUserID      string
+	mu             sync.Mutex
+	stopCh         chan struct{}
 
 	// Z-7: session_id↔thread_id registry. Populated by session-open
 	// hook + bootstrapThreadRegistry at Start. Outbound messages with
@@ -43,11 +41,10 @@ type Bot struct {
 // NewBot creates a new Discord bot. It validates the token and channel
 // configuration but does not open the Discord session until Start is called.
 //
-// Phase R R4 multi-channel: at least one of channelID OR hubChannelID
-// must be populated (legacy single-channel OR R4 multi-channel mode).
-// flagsChannelID + sessionsChannelID are optional — empty values fall
-// back to hubChannelID per partial-migration semantics.
-func NewBot(token, channelID, hubChannelID, flagsChannelID, sessionsChannelID string, h *hub.Hub) (*Bot, error) {
+// At least one of channelID OR hubChannelID must be populated (legacy
+// single-channel OR R4-era hub-channel mode). flagsChannelID is
+// optional — empty falls back to the hub channel.
+func NewBot(token, channelID, hubChannelID, flagsChannelID string, h *hub.Hub) (*Bot, error) {
 	if token == "" {
 		return nil, fmt.Errorf("discord bot token is required")
 	}
@@ -67,13 +64,12 @@ func NewBot(token, channelID, hubChannelID, flagsChannelID, sessionsChannelID st
 	sess.Identify.Intents = discordgo.IntentsGuildMessages
 
 	return &Bot{
-		session:           sess,
-		hub:               h,
-		channelID:         channelID,
-		hubChannelID:      hubChannelID,
-		flagsChannelID:    flagsChannelID,
-		sessionsChannelID: sessionsChannelID,
-		stopCh:            make(chan struct{}),
+		session:        sess,
+		hub:            h,
+		channelID:      channelID,
+		hubChannelID:   hubChannelID,
+		flagsChannelID: flagsChannelID,
+		stopCh:         make(chan struct{}),
 	}, nil
 }
 
@@ -94,10 +90,10 @@ func (b *Bot) resolveHubChannel() string {
 //     (flags are global signals, kept in the hub channel — not in a
 //     session's thread — so they surface across all session views).
 //  2. msg.SessionID != "" with a registered thread → that thread.
-//     Session-scoped chatter lands in the session's thread.
-//  3. content prefix "[SESSION:" → sessionsChannelID (Phase R R5
-//     forward-compat; falls back to hub-channel if empty).
-//  4. everything else → hub-channel (hubChannelID OR legacy channelID).
+//     Session-scoped chatter lands in the session's thread; an
+//     unknown session-id falls through to the hub channel (pre-Z-7
+//     session OR thread-create failed at open time).
+//  3. everything else → hub-channel (hubChannelID OR legacy channelID).
 //
 // Pre-R4 single-channel deployments (legacy channelID set, R4 fields
 // empty) still route everything to channelID via the hub fallback.
@@ -113,14 +109,6 @@ func (b *Bot) channelForMessage(msg protocol.Message) string {
 		if tid := b.threadForSession(msg.SessionID); tid != "" {
 			return tid
 		}
-		// Fall through — unknown session-id (pre-Z-7 session OR
-		// thread create failed) lands in the hub channel.
-	}
-	if strings.HasPrefix(msg.Content, "[SESSION:") {
-		if b.sessionsChannelID != "" {
-			return b.sessionsChannelID
-		}
-		return hub
 	}
 	return hub
 }
@@ -128,8 +116,7 @@ func (b *Bot) channelForMessage(msg protocol.Message) string {
 // listensOnChannel reports whether the bot's incoming-message filter
 // should accept messages from the given channel ID. Accepts any
 // configured top-level channel ({channelID, hubChannelID,
-// flagsChannelID, sessionsChannelID}) plus any registered
-// session-thread.
+// flagsChannelID}) plus any registered session-thread.
 func (b *Bot) listensOnChannel(id string) bool {
 	if id == "" {
 		return false
@@ -141,9 +128,6 @@ func (b *Bot) listensOnChannel(id string) bool {
 		return true
 	}
 	if id == b.flagsChannelID && b.flagsChannelID != "" {
-		return true
-	}
-	if id == b.sessionsChannelID && b.sessionsChannelID != "" {
 		return true
 	}
 	// Z-7: session-threads registered at open / discovered at startup.
