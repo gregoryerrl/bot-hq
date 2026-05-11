@@ -47,6 +47,8 @@ func TestSubprocessInitialPromptAnchorsRole(t *testing.T) {
 		{"DO NOT hold state", "boundary anchor (stateless)"},
 		{"DO NOT elevate", "boundary anchor (no [HR]/Flag)"},
 		{"Context Library", "CL terminology anchor"},
+		{"OUTPUT CONTRACT", "Z-9e-followup: emma must route every reply via hub_send"},
+		{"the user received silence", "OUTPUT CONTRACT consequence framing — silence is the failure mode"},
 	}
 	for _, c := range cases {
 		if !strings.Contains(prompt, c.needle) {
