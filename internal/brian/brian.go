@@ -159,11 +159,13 @@ func (b *Brian) Start() error {
 	go b.pollLoop()
 	go b.healthLoop()
 
-	// Announce
+	// Announce — Z-3d: tag with session_id so per-session views surface
+	// the spawn-time announcement.
 	b.db.InsertMessage(protocol.Message{
 		FromAgent: agentID,
 		Type:      protocol.MsgUpdate,
 		Content:   "Brian orchestrator online. Ready for commands.",
+		SessionID: b.sessionID,
 	})
 
 	return nil

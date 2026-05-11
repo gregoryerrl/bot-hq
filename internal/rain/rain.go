@@ -145,6 +145,7 @@ func (r *Rain) Start() error {
 		FromAgent: agentID,
 		Type:      protocol.MsgUpdate,
 		Content:   "Rain QA online. Watching.",
+		SessionID: r.sessionID,
 	})
 
 	return nil
