@@ -397,19 +397,146 @@ func hubSessionJoin(db *hub.DB) ToolDef {
 	return ToolDef{Tool: tool, Handler: handler}
 }
 
+// finalizeSession runs the full Phase W + Z-3 close-summary flow for
+// either explicit hub_session_finalize calls OR auto-finalize from
+// bot_hq_ipav_complete(verify=pass). Centralizes:
+//  1. Resolve session-id (explicit OR FindActiveForProject fallback).
+//  2. Read manifest.
+//  3. Fire daemon-side finalize hook when registered (in-daemon path)
+//     OR enqueue Z-3d session_lifecycle_queue op + poll for the
+//     subprocess-bridge response (in-subprocess path — brian/rain MCP
+//     servers). Either way, BRAIN-duo Stop() runs.
+//  4. Pull hub-message window for decision-extraction.
+//  5. sessions.Finalize() — write rich-payload manifest.
+//  6. UpdateSessionStatus → done.
+//  7. Append closing_state to manifest.
+//
+// Both hub_session_finalize and auto-finalize call this directly, so
+// the lifecycle invariants are identical regardless of trigger source.
+func finalizeSession(db *hub.DB, project, explicitSessionID, outcome, status, repoPath string, force bool) (map[string]any, error) {
+	var activeID string
+	if explicitSessionID != "" {
+		activeID = explicitSessionID
+	} else {
+		var err error
+		activeID, err = sessions.FindActiveForProject(project)
+		if err != nil {
+			return nil, fmt.Errorf("find active for %s: %w", project, err)
+		}
+		if activeID == "" {
+			return nil, fmt.Errorf("no active session found for project %q (Z-3 hint: pass session_id explicitly for scope-keyed sessions)", project)
+		}
+	}
+
+	manifest, err := sessions.ReadManifest(activeID)
+	if err != nil {
+		return nil, fmt.Errorf("read active manifest: %w", err)
+	}
+
+	// Z-3 daemon-side finalize: kill duo tmux + archive Discord +
+	// capture per-agent closing_state. In-daemon hook fires directly;
+	// subprocess MCPs route via session_lifecycle_queue (Z-3d bridge).
+	var closingState map[string]string
+	var killedTmux []string
+	var discordArchived bool
+	var hookErr string
+	if hook := getSessionFinalizeHook(); hook != nil {
+		r, hErr := hook(SessionFinalizeRequest{
+			SessionID:       activeID,
+			DiscordThreadID: manifest.DiscordThreadID,
+			Force:           force,
+		})
+		if hErr != nil {
+			hookErr = hErr.Error()
+		}
+		if r != nil {
+			closingState = r.ClosingState
+			killedTmux = r.KilledTmux
+			discordArchived = r.DiscordArchived
+		}
+	} else {
+		opID, qErr := db.EnqueueSessionOp(hub.SessionLifecycleOp{
+			Kind:            "finalize",
+			SessionID:       activeID,
+			Project:         project,
+			DiscordThreadID: manifest.DiscordThreadID,
+			Force:           force,
+		})
+		if qErr == nil {
+			resultJSON, pErr := pollSessionOp(db, opID, 30*time.Second)
+			if pErr == nil {
+				var r SessionFinalizeResult
+				if jErr := json.Unmarshal([]byte(resultJSON), &r); jErr == nil {
+					closingState = r.ClosingState
+					killedTmux = r.KilledTmux
+					discordArchived = r.DiscordArchived
+				}
+			} else {
+				hookErr = "queue-poll: " + pErr.Error()
+			}
+		} else {
+			hookErr = "enqueue: " + qErr.Error()
+		}
+	}
+	if hookErr != "" {
+		outcome = outcome + "\n\n[Z-3 finalize-hook err: " + hookErr + "]"
+	}
+
+	// Pull hub messages between [StartMsgID, latest] for decision extraction.
+	var msgs []protocol.Message
+	if manifest.StartMsgID > 0 {
+		msgs, err = db.ReadMessages("", int64(manifest.StartMsgID), 10000)
+		if err != nil {
+			return nil, fmt.Errorf("read messages: %w", err)
+		}
+	}
+
+	var latestMsgID int
+	recent, rerr := db.GetRecentMessages(1)
+	if rerr == nil && len(recent) > 0 {
+		latestMsgID = int(recent[0].ID)
+	}
+
+	closed, err := sessions.Finalize(activeID, sessions.FinalizeOptions{
+		Outcome:     outcome,
+		Status:      status,
+		Now:         time.Now().UTC(),
+		Messages:    msgs,
+		RepoPath:    repoPath,
+		LatestMsgID: latestMsgID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("finalize: %w", err)
+	}
+
+	_ = db.UpdateSessionStatus(activeID, string(protocol.SessionDone))
+
+	if len(closingState) > 0 {
+		if cur, rerr := sessions.ReadManifest(closed.ID); rerr == nil {
+			cur.ClosingState = closingState
+			_ = sessions.WriteManifest(cur)
+		}
+	}
+
+	return map[string]any{
+		"status":           "finalized",
+		"session_id":       closed.ID,
+		"project":          closed.Project,
+		"end_ts":           closed.EndTS.Format(time.RFC3339),
+		"msg_count":        closed.MsgCount,
+		"decisions_count":  len(closed.Decisions),
+		"commits_count":    len(closed.CommitsLanded),
+		"files_count":      len(closed.FilesTouched),
+		"killed_tmux":      killedTmux,
+		"discord_archived": discordArchived,
+	}, nil
+}
+
 // hubSessionFinalize implements Phase W close-summary writing for the
 // session-cluster manifest. Distinct from hub_session_close (which
 // stores per-agent SNAP into hub.DB for cold-start bootstrap context).
-//
-// Behavior:
-//  1. FindActiveForProject(project) — locates the active manifest.
-//  2. ReadMessages(agentID="", sinceID=StartMsgID, limit=10000) — pulls
-//     the hub message window for decision extraction.
-//  3. GetRecentMessages(1) — gets the latest msg-id for MsgCount cache.
-//  4. ExtractGitChanges(repo_path) — populates CommitsLanded +
-//     FilesTouched (skipped when repo_path is empty).
-//  5. sessions.Finalize(...) — writes the rich-payload manifest +
-//     rebuilds the index.
+// Thin wrapper over finalizeSession; same flow also drives auto-finalize
+// from bot_hq_ipav_complete(verify=pass).
 func hubSessionFinalize(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("hub_session_finalize",
 		mcp.WithDescription("Close a session-cluster manifest with rich retrospective payload (outcome narrative + auto-extracted CommitsLanded / FilesTouched / Decisions / MsgCount). Z-3 extension: kill duo tmux sessions, archive Discord thread, capture per-agent closing_state from session state.json slots. Z-3 sessions-as-containers: pass session_id to target a specific scope-keyed Z-3 session (recommended); legacy date-keyed callers can still omit and rely on FindActiveForProject. Phase W + Z-3 sessions hardening."),
@@ -435,137 +562,11 @@ func hubSessionFinalize(db *hub.DB) ToolDef {
 		force := req.GetBool("force", false)
 		explicitSessionID := req.GetString("session_id", "")
 
-		// Z-3: explicit session_id takes precedence (scope-keyed
-		// session). Fall back to FindActiveForProject for legacy
-		// date-keyed callers.
-		var activeID string
-		if explicitSessionID != "" {
-			activeID = explicitSessionID
-		} else {
-			activeID, err = sessions.FindActiveForProject(project)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("find active for %s: %v", project, err)), nil
-			}
-			if activeID == "" {
-				return mcp.NewToolResultError(fmt.Sprintf("no active session found for project %q (Z-3 hint: pass session_id explicitly for scope-keyed sessions)", project)), nil
-			}
-		}
-
-		manifest, err := sessions.ReadManifest(activeID)
+		payload, err := finalizeSession(db, project, explicitSessionID, outcome, status, repoPath, force)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("read active manifest: %v", err)), nil
+			return mcp.NewToolResultError(err.Error()), nil
 		}
-
-		// Z-3 daemon-side finalize hook: kill duo tmux + archive Discord
-		// thread + capture per-agent closing_state. Two paths:
-		//   - In-daemon: hook is installed; call directly.
-		//   - In-subprocess: hook is nil; enqueue + poll the
-		//     session_lifecycle_queue (Z-3d bridge symmetric to open).
-		// Best-effort — if the hook fails, the manifest still gets
-		// finalized but the daemon state may be partial (user can
-		// manually clean up tmux).
-		var closingState map[string]string
-		var killedTmux []string
-		var discordArchived bool
-		if hook := getSessionFinalizeHook(); hook != nil {
-			r, hErr := hook(SessionFinalizeRequest{
-				SessionID:       activeID,
-				DiscordThreadID: manifest.DiscordThreadID,
-				Force:           force,
-			})
-			if hErr != nil {
-				outcome = outcome + "\n\n[Z-3 finalize-hook err: " + hErr.Error() + "]"
-			}
-			if r != nil {
-				closingState = r.ClosingState
-				killedTmux = r.KilledTmux
-				discordArchived = r.DiscordArchived
-			}
-		} else {
-			// Z-3d subprocess bridge: enqueue finalize op + poll.
-			opID, qErr := db.EnqueueSessionOp(hub.SessionLifecycleOp{
-				Kind:            "finalize",
-				SessionID:       activeID,
-				Project:         project,
-				DiscordThreadID: manifest.DiscordThreadID,
-				Force:           force,
-			})
-			if qErr == nil {
-				resultJSON, pErr := pollSessionOp(db, opID, 30*time.Second)
-				if pErr == nil {
-					var r SessionFinalizeResult
-					if jErr := json.Unmarshal([]byte(resultJSON), &r); jErr == nil {
-						closingState = r.ClosingState
-						killedTmux = r.KilledTmux
-						discordArchived = r.DiscordArchived
-					}
-				} else {
-					outcome = outcome + "\n\n[Z-3d finalize-queue err: " + pErr.Error() + "]"
-				}
-			} else {
-				outcome = outcome + "\n\n[Z-3d enqueue err: " + qErr.Error() + "]"
-			}
-		}
-
-		// Pull hub messages between [StartMsgID, latest] for decision extraction.
-		// Empty agentID = no per-agent filter. Limit=10000 covers a generous
-		// session window without needing pagination for typical sessions.
-		var msgs []protocol.Message
-		if manifest.StartMsgID > 0 {
-			msgs, err = db.ReadMessages("", int64(manifest.StartMsgID), 10000)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("read messages: %v", err)), nil
-			}
-		}
-
-		// Latest msg-id for MsgCount cache + EndMsgID. GetRecentMessages(1)
-		// returns the most-recent row regardless of agent.
-		var latestMsgID int
-		recent, rerr := db.GetRecentMessages(1)
-		if rerr == nil && len(recent) > 0 {
-			latestMsgID = int(recent[0].ID)
-		}
-
-		closed, err := sessions.Finalize(activeID, sessions.FinalizeOptions{
-			Outcome:     outcome,
-			Status:      status,
-			Now:         time.Now().UTC(),
-			Messages:    msgs,
-			RepoPath:    repoPath,
-			LatestMsgID: latestMsgID,
-		})
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("finalize: %v", err)), nil
-		}
-
-		// Z-3-followup: transition the sessions-table row to 'done'
-		// status so the TUI Sessions tab reflects the close. Z-3
-		// scope-keyed sessions have a corresponding row inserted at
-		// hub_session_open time; legacy date-keyed sessions may not,
-		// in which case UpdateSessionStatus is a no-op.
-		_ = db.UpdateSessionStatus(activeID, string(protocol.SessionDone))
-
-		// Z-3: append closing_state to manifest after Finalize did its
-		// auto-extraction. ReadManifest → set ClosingState → WriteManifest.
-		if len(closingState) > 0 {
-			if cur, rerr := sessions.ReadManifest(closed.ID); rerr == nil {
-				cur.ClosingState = closingState
-				_ = sessions.WriteManifest(cur)
-			}
-		}
-
-		return mcp.NewToolResultText(toJSON(map[string]any{
-			"status":           "finalized",
-			"session_id":       closed.ID,
-			"project":          closed.Project,
-			"end_ts":           closed.EndTS.Format(time.RFC3339),
-			"msg_count":        closed.MsgCount,
-			"decisions_count":  len(closed.Decisions),
-			"commits_count":    len(closed.CommitsLanded),
-			"files_count":      len(closed.FilesTouched),
-			"killed_tmux":      killedTmux,
-			"discord_archived": discordArchived,
-		})), nil
+		return mcp.NewToolResultText(toJSON(payload)), nil
 	}
 
 	return ToolDef{Tool: tool, Handler: handler}
