@@ -368,7 +368,7 @@ session body
 		t.Fatal(err)
 	}
 
-	got, err := RenderSessionBootstrap(root, sid, agent)
+	got, err := RenderSessionBootstrap(root, sid, agent, "")
 	if err != nil {
 		t.Fatalf("RenderSessionBootstrap: %v", err)
 	}
@@ -415,7 +415,7 @@ func TestRenderSessionBootstrap_EnforcesCapWithTruncationMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := RenderSessionBootstrap(root, sid, agent)
+	got, err := RenderSessionBootstrap(root, sid, agent, "")
 	if err != nil {
 		t.Fatalf("RenderSessionBootstrap: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestRenderSessionBootstrap_RequiresArgs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := RenderSessionBootstrap(tc.root, tc.sid, tc.agent); err == nil {
+			if _, err := RenderSessionBootstrap(tc.root, tc.sid, tc.agent, ""); err == nil {
 				t.Errorf("expected error for %s", tc.name)
 			}
 		})
@@ -449,11 +449,152 @@ func TestRenderSessionBootstrap_AgnosticToMissingManifest(t *testing.T) {
 	// Edge: empty-session render (manifest doesn't exist yet). Returns
 	// minimal valid bootstrap with no project context. Fault-tree F16.
 	root := t.TempDir()
-	got, err := RenderSessionBootstrap(root, "fresh-session", "rain")
+	got, err := RenderSessionBootstrap(root, "fresh-session", "rain", "")
 	if err != nil {
 		t.Fatalf("RenderSessionBootstrap: %v", err)
 	}
 	if !strings.Contains(got, "id: fresh-session") {
 		t.Errorf("minimal-bootstrap missing session id; got %q", got)
 	}
+}
+
+// duo-resilience-bootstrap-recovery: surfaces the agent's cross-session
+// last_state.json so a respawned mid-implementation agent sees their
+// in_flight pointer + slices_done immediately, no hub-read recovery
+// hunt needed.
+func TestRenderSessionBootstrap_IncludesCrossSessionLastState(t *testing.T) {
+	root := t.TempDir()
+	sid := "duo-recovery-test"
+	agent := "brian"
+
+	// Manifest (minimal).
+	if err := os.MkdirAll(filepath.Join(root, "sessions", sid), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sessions", sid, "manifest.md"), []byte("---\nid: "+sid+"\nproject: bot-hq\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Cross-session last_state.json at <canonRoot>/<agent>/last_state.json
+	lastState := `{"in_flight":"IPAV 3b9900c5 S4 mid-impl","last_self_msg_id":18450,"slices_done":["S1@088b2a2","S2@2944c35"]}`
+	if err := os.MkdirAll(filepath.Join(root, agent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, agent, "last_state.json"), []byte(lastState), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := RenderSessionBootstrap(root, sid, agent, "")
+	if err != nil {
+		t.Fatalf("RenderSessionBootstrap: %v", err)
+	}
+
+	for _, want := range []string{
+		"## Cross-session resume anchor",
+		"`brian/last_state.json`",
+		`"in_flight":"IPAV 3b9900c5 S4 mid-impl"`,
+		`"last_self_msg_id":18450`,
+		`"slices_done":["S1@088b2a2","S2@2944c35"]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q from bootstrap; got:\n%s", want, got)
+		}
+	}
+}
+
+// duo-resilience-bootstrap-recovery: a workDir backed by a real git repo
+// surfaces `git status --short` + `git log --oneline -5` in the bootstrap
+// — the agent's "what was I in the middle of editing" view at spawn-time.
+func TestRenderSessionBootstrap_IncludesWorkingTreeStateWhenGit(t *testing.T) {
+	root := t.TempDir()
+	sid := "wt-test"
+	agent := "rain"
+
+	if err := os.MkdirAll(filepath.Join(root, "sessions", sid), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sessions", sid, "manifest.md"), []byte("---\nid: "+sid+"\nproject: bot-hq\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build a tiny git repo in a temp workDir.
+	workDir := t.TempDir()
+	if !runMustGit(t, workDir, "init", "-b", "main") {
+		t.Skip("git init failed — likely no git binary; skip git-dependent test")
+	}
+	runMustGit(t, workDir, "config", "user.email", "test@example.invalid")
+	runMustGit(t, workDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "first.txt"), []byte("first commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runMustGit(t, workDir, "add", "first.txt")
+	runMustGit(t, workDir, "commit", "-m", "first commit")
+
+	// Now create some staged + untracked WIP — the agent's mid-implementation state.
+	if err := os.WriteFile(filepath.Join(workDir, "wip-staged.go"), []byte("package wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, "wip-untracked.md"), []byte("# WIP\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runMustGit(t, workDir, "add", "wip-staged.go")
+
+	got, err := RenderSessionBootstrap(root, sid, agent, workDir)
+	if err != nil {
+		t.Fatalf("RenderSessionBootstrap: %v", err)
+	}
+
+	for _, want := range []string{
+		"## Working tree state",
+		"`git status --short`",
+		"wip-staged.go",
+		"wip-untracked.md",
+		"`git log --oneline -5`",
+		"first commit",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q from bootstrap; got:\n%s", want, got)
+		}
+	}
+}
+
+// renderWorkingTreeState degrades to "" (no section) when workDir is
+// not a git repo OR when workDir is empty. Bootstrap remains valid for
+// non-implementation scopes.
+func TestRenderSessionBootstrap_GracefulOnNonGitWorkDir(t *testing.T) {
+	root := t.TempDir()
+	sid := "non-git"
+	if err := os.MkdirAll(filepath.Join(root, "sessions", sid), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sessions", sid, "manifest.md"), []byte("---\nid: "+sid+"\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	nonGit := t.TempDir() // no .git inside
+	got, err := RenderSessionBootstrap(root, sid, "brian", nonGit)
+	if err != nil {
+		t.Fatalf("RenderSessionBootstrap: %v", err)
+	}
+	if strings.Contains(got, "## Working tree state") {
+		t.Errorf("non-git workDir should skip working-tree section, but it appeared; got:\n%s", got)
+	}
+	// Still must include the session header — the non-runtime sections
+	// keep working independent of the git-section's success.
+	if !strings.Contains(got, "id: non-git") {
+		t.Errorf("bootstrap should still include session header")
+	}
+}
+
+// runMustGit runs git in workDir, returning false (skipping the test)
+// if the command failed — useful for non-fatal git-binary-absent
+// environments.
+func runMustGit(t *testing.T, workDir string, args ...string) bool {
+	t.Helper()
+	out, ok := runGit(workDir, args...)
+	if !ok {
+		t.Logf("git %v failed in %s: %s", args, workDir, out)
+		return false
+	}
+	return true
 }

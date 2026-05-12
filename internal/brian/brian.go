@@ -305,7 +305,7 @@ func (b *Brian) spawnTmux() error {
 	prompt := b.initialPrompt()
 	if b.sessionID != "" {
 		canonRoot, _ := protocol.CanonRoot()
-		if bs, bsErr := contextload.RenderSessionBootstrap(canonRoot, b.sessionID, agentID); bsErr == nil && bs != "" {
+		if bs, bsErr := contextload.RenderSessionBootstrap(canonRoot, b.sessionID, agentID, b.workDir); bsErr == nil && bs != "" {
 			prompt = "# DAEMON-PASTE BOOTSTRAP (Z-3 sessions-as-containers)\n\n" + bs + "\n\n---\n\n" + prompt
 		}
 	}
