@@ -21,8 +21,10 @@
 package contextload
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -328,11 +330,26 @@ const SessionBootstrapCapBytes = 25 * 1024
 //     pointer_list, agents)
 //   - sessions/<sessionID>/<agent>/state.json — per-agent state slot
 //     (empty {} on fresh open is acceptable)
+//   - <agent>/last_state.json — R20 cross-session resume anchor with
+//     in_flight pointer, slices_done, last_self_msg_id, etc. (post-
+//     duo-resilience: surfaced near top so respawn sees prior work
+//     state without having to hunt for it)
 //   - <agent>/discipline-anchors.md — top-level per-agent (R24 cross-
 //     session mutual-halt anchor; stays at top-level per Z-3 substrate
 //     restructure)
 //   - projects/<project>/README.md + INDEX.md — project library overview
 //   - phase + ratchets at project-scoped paths (post-Z-1)
+//
+// When workDir is non-empty and points at a git working tree, two
+// post-duo-resilience runtime sections are appended:
+//
+//   - "Working tree state" — `git status --short` + `git log --oneline -5`
+//     so an agent respawned mid-implementation sees the uncommitted WIP
+//     and recent commits IMMEDIATELY (instead of having to discover
+//     them via hub-read or ad-hoc git invocations after orientation).
+//
+// Empty workDir or non-git dirs skip the runtime sections gracefully —
+// the bootstrap remains valid for non-implementing scopes.
 //
 // emma's pointer-list (paths in CL, not content) is rendered as a
 // section so BRAIN-duo can expand on those starting points.
@@ -344,7 +361,7 @@ const SessionBootstrapCapBytes = 25 * 1024
 //
 // Per architecture/sessions-as-containers.md "Bootstrap render structure
 // (post-cap)" — agent receives bootstrap; does not perform one.
-func RenderSessionBootstrap(canonRoot, sessionID, agent string) (string, error) {
+func RenderSessionBootstrap(canonRoot, sessionID, agent, workDir string) (string, error) {
 	if canonRoot == "" {
 		return "", fmt.Errorf("canonRoot required")
 	}
@@ -379,6 +396,33 @@ func RenderSessionBootstrap(canonRoot, sessionID, agent string) (string, error) 
 			fmt.Fprintf(&b, "- %s\n", p)
 		}
 		b.WriteString("\n")
+	}
+
+	// Cross-session last_state.json — R20 resume anchor. Surface near top
+	// (right after session header) so a respawned agent sees their prior
+	// in_flight pointer + slices_done + last_self_msg_id without hunting.
+	// duo-resilience-bootstrap-recovery: closes the recovery gap where
+	// agents respawned mid-implementation but lost their work-state
+	// pointer because the original bootstrap didn't include this file.
+	lspath := filepath.Join(canonRoot, agent, "last_state.json")
+	if data, err := os.ReadFile(lspath); err == nil && len(data) > 0 {
+		fmt.Fprintf(&b, "## Cross-session resume anchor — `%s/last_state.json`\n\n", agent)
+		b.WriteString("_Last R20 checkpoint you wrote. `in_flight` pointer + `last_self_msg_id` + `slices_done` indicate what you were doing before this spawn. If this disagrees with the working tree below, the working tree is the truth — last_state.json may be stale (not updated since last commit)._\n\n")
+		b.WriteString("```json\n")
+		b.WriteString(string(data))
+		if !strings.HasSuffix(string(data), "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("```\n\n")
+	}
+
+	// Working-tree state (git status + git log) — surface uncommitted WIP
+	// at a high-prominence position so a respawned mid-implementation
+	// agent sees it before any project-context noise.
+	if workDir != "" {
+		if section := renderWorkingTreeState(workDir); section != "" {
+			b.WriteString(section)
+		}
 	}
 
 	// Per-agent state slot
@@ -455,6 +499,92 @@ func RenderSessionBootstrap(canonRoot, sessionID, agent string) (string, error) 
 		return truncated, nil
 	}
 	return rendered, nil
+}
+
+// renderWorkingTreeState returns a markdown section summarizing the
+// working tree at workDir (git status --short + git log --oneline -5)
+// or "" if workDir isn't a git repo. Both commands have a 5s timeout
+// guard so a wedged git invocation can't stall the spawn-time bootstrap.
+//
+// Output stays small (capped at ~3 KB worst case): status truncated at
+// 50 lines; git log at 5 commits. Below the SessionBootstrapCapBytes
+// floor for any realistic working tree.
+//
+// Failure modes — all degrade silently to "" rather than erroring:
+//   - workDir doesn't exist
+//   - workDir isn't a git repo (`fatal: not a git repository`)
+//   - git binary missing
+//   - command times out (5s deadline)
+//
+// duo-resilience-bootstrap-recovery: provides the "what files am I in
+// the middle of" signal on respawn that was previously absent from the
+// daemon-paste bootstrap.
+func renderWorkingTreeState(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
+		return ""
+	}
+
+	var b strings.Builder
+	statusOut, statusOK := runGit(workDir, "status", "--short")
+	logOut, logOK := runGit(workDir, "log", "--oneline", "-5")
+	if !statusOK && !logOK {
+		return ""
+	}
+
+	b.WriteString("## Working tree state — `")
+	b.WriteString(workDir)
+	b.WriteString("`\n\n")
+	b.WriteString("_Live `git` snapshot at spawn-time. If you respawned mid-implementation, the staged + untracked files below are your in-flight work — read them with the Read tool, run `go test` to confirm health, then surface a staged diff to your peer before any commit fires. The cross-session resume anchor above may be stale (last_state.json only updates on agent-discretion R20 writes)._\n\n")
+
+	if statusOK {
+		trimmed := strings.TrimSpace(statusOut)
+		if trimmed == "" {
+			b.WriteString("**Working tree clean** (no uncommitted changes).\n\n")
+		} else {
+			lines := strings.Split(trimmed, "\n")
+			if len(lines) > 50 {
+				lines = lines[:50]
+				lines = append(lines, fmt.Sprintf("… (%d more lines; run `git status --short` for the full set)", len(strings.Split(trimmed, "\n"))-50))
+			}
+			b.WriteString("### `git status --short`\n\n```\n")
+			b.WriteString(strings.Join(lines, "\n"))
+			b.WriteString("\n```\n\n")
+		}
+	}
+
+	if logOK {
+		trimmed := strings.TrimSpace(logOut)
+		if trimmed != "" {
+			b.WriteString("### `git log --oneline -5`\n\n```\n")
+			b.WriteString(trimmed)
+			b.WriteString("\n```\n\n")
+		}
+	}
+
+	return b.String()
+}
+
+// runGit invokes `git <args...>` in workDir with a 5s deadline. Returns
+// (stdout, true) on success or ("", false) on any failure (including
+// non-zero exit, timeout, missing git binary). Stderr is discarded.
+//
+// Why os/exec rather than go-git: the bootstrap renders once per spawn,
+// 5s deadline puts a hard cap on cost, and the agent has plain text
+// in its prompt with no special handling needed. go-git would inflate
+// the binary + add API surface for marginal benefit.
+func runGit(workDir string, args ...string) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = workDir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
 }
 
 // parseSessionFrontmatter is a minimal YAML-frontmatter extractor for the

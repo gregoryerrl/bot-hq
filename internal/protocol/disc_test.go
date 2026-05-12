@@ -43,6 +43,33 @@ func TestDiscV2OutboundRule_HeaderAnchor(t *testing.T) {
 	}
 }
 
+// duo-resilience: lock the tightened R20 wording so prompt drift can't
+// silently weaken last_state.json discipline OR remove the
+// daemon-paste respawn-recovery anchors the bootstrap now ships.
+// Closes the cl-uniformity-webui-nav-refactor failure mode where
+// agents skipped R20 writes mid-slice and handshake-idled on respawn.
+func TestBootstrapOnResume_DuoResilienceSubstringLock(t *testing.T) {
+	must := []string{
+		"MANDATORY last_state.json writes (duo-resilience hardening)",
+		"every git commit you fire",
+		"BRAIN-2nd GREENFLAG you receive on a slice",
+		"every IPAV phase transition you initiate",
+		"cadence-gap observed in cl-uniformity-webui-nav-refactor",
+		"Daemon-paste-bootstrap respawn-recovery (post-duo-resilience)",
+		`"Cross-session resume anchor" section`,
+		`"Working tree state" section`,
+		"working tree is the truth",
+		"Never silently handshake-idle when working tree is dirty",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(PhaseIv1ProtocolHardening, lit) {
+				t.Errorf("R20 duo-resilience ratchet broken: missing literal %q in PhaseIv1ProtocolHardening", lit)
+			}
+		})
+	}
+}
+
 // Phase L L-1 ratchet: pin load-bearing recognition substrings of the
 // STAT-CLAIM-CITE (R31) rule. These tokens are what the agent prompt
 // uses to recognize numerical-claim discipline + cite verifiable
