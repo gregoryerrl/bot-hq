@@ -5,15 +5,14 @@ A native multi-agent communication hub. A single Go binary that lets AI agents (
 ## Quick Start
 
 ```bash
-# Build
-go build -o bot-hq ./cmd/bot-hq
+# Build + install to $GOPATH/bin (typically ~/go/bin)
+go install ./cmd/bot-hq
 
 # Run the hub (terminal UI + Live server)
-./bot-hq
-
-# Or install globally
-cp bot-hq /usr/local/bin/
+bot-hq
 ```
+
+Add `~/go/bin` to your `$PATH` if `bot-hq` isn't on it yet.
 
 Bot-HQ Live (voice interface) is available at `http://localhost:3847` when the hub is running.
 
@@ -193,10 +192,10 @@ bot-hq/
 # Run tests
 go test ./internal/... -v
 
-# Build
-go build -o bot-hq ./cmd/bot-hq
+# Build + install
+go install ./cmd/bot-hq
 
-# Run with race detector
+# Run with race detector (writes to current dir, run as ./bot-hq)
 go build -race -o bot-hq ./cmd/bot-hq
 ```
 
