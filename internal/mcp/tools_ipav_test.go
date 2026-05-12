@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gregoryerrl/bot-hq/internal/sessions"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -206,15 +208,27 @@ func TestIPAVComplete_passSetsClosedAt(t *testing.T) {
 }
 
 // session-lifecycle-cleanup: result=pass + task bound to a session
-// auto-fires the SessionFinalizeHook. The hook is daemon-installed at
-// startup; test stubs it to record the finalize call.
+// auto-fires the full finalizeSession flow (hook fires, manifest gets
+// written, sessions-table status flips to done). Test pre-writes a
+// minimal manifest so finalizeSession's sessions.ReadManifest succeeds.
 func TestIPAVComplete_passAutoFinalizesBoundSession(t *testing.T) {
 	db := setupTestDB(t)
 	tools := BuildTools(db)
 	open := findHandler(tools, "bot_hq_ipav_open")
 	complete := findHandler(tools, "bot_hq_ipav_complete")
 
-	// Stub the finalize hook to capture the request.
+	sessionID := "test-session-xyz"
+	if err := sessions.WriteManifest(sessions.Manifest{
+		ID:      sessionID,
+		Project: "test-project",
+		StartTS: time.Now().UTC(),
+		Status:  "active",
+		Agents:  []string{"brian", "rain"},
+	}); err != nil {
+		t.Fatalf("seed manifest: %v", err)
+	}
+
+	// Stub the finalize hook to capture the request (in-daemon path).
 	var captured SessionFinalizeRequest
 	hookFired := false
 	SetSessionFinalizeHook(func(req SessionFinalizeRequest) (*SessionFinalizeResult, error) {
@@ -224,11 +238,10 @@ func TestIPAVComplete_passAutoFinalizesBoundSession(t *testing.T) {
 	})
 	t.Cleanup(func() { SetSessionFinalizeHook(nil) })
 
-	// Open with explicit session_id (skip FindActiveForProject lookup).
 	parsed, _ := invokeTool(t, open, map[string]any{
 		"project":        "test-project",
 		"decision_class": "low",
-		"session_id":     "test-session-xyz",
+		"session_id":     sessionID,
 	})
 	taskID := parsed["task_id"].(string)
 
@@ -242,16 +255,31 @@ func TestIPAVComplete_passAutoFinalizesBoundSession(t *testing.T) {
 	if !hookFired {
 		t.Fatal("verify-pass on session-bound task must fire SessionFinalizeHook (session-lifecycle-cleanup invariant)")
 	}
-	if captured.SessionID != "test-session-xyz" {
-		t.Errorf("hook received SessionID=%q, want test-session-xyz", captured.SessionID)
+	if captured.SessionID != sessionID {
+		t.Errorf("hook received SessionID=%q, want %q", captured.SessionID, sessionID)
 	}
 	autoFinalize, _ := parsed["auto_finalize"].(map[string]any)
 	if autoFinalize == nil {
 		t.Errorf("response should include auto_finalize block when hook fires; got %v", parsed)
 	} else {
-		if autoFinalize["session_id"] != "test-session-xyz" {
-			t.Errorf("auto_finalize.session_id = %v, want test-session-xyz", autoFinalize["session_id"])
+		if autoFinalize["session_id"] != sessionID {
+			t.Errorf("auto_finalize.session_id = %v, want %q", autoFinalize["session_id"], sessionID)
 		}
+		fp, _ := autoFinalize["finalize_payload"].(map[string]any)
+		if fp == nil {
+			t.Errorf("auto_finalize should embed finalize_payload from sessions.Finalize; got %v", autoFinalize)
+		} else if fp["status"] != "finalized" {
+			t.Errorf("finalize_payload.status = %v, want finalized", fp["status"])
+		}
+	}
+
+	// Verify the manifest was updated to closed status with end_ts.
+	m, err := sessions.ReadManifest(sessionID)
+	if err != nil {
+		t.Fatalf("read manifest after finalize: %v", err)
+	}
+	if m.EndTS.IsZero() {
+		t.Error("manifest EndTS not set — sessions.Finalize did not run")
 	}
 }
 

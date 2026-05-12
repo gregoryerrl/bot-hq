@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/gregoryerrl/bot-hq/internal/cl"
+	"github.com/gregoryerrl/bot-hq/internal/hub"
 	"github.com/gregoryerrl/bot-hq/internal/mvt"
 	"github.com/gregoryerrl/bot-hq/internal/sessions"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -212,7 +213,7 @@ func hubIPAVSetArtifact() ToolDef {
 	return ToolDef{Tool: tool, Handler: handler}
 }
 
-func hubIPAVComplete() ToolDef {
+func hubIPAVComplete(db *hub.DB) ToolDef {
 	tool := mcp.NewTool("bot_hq_ipav_complete",
 		mcp.WithDescription("Close an IPAV task with a Verify result. Terminal results (pass / escalated) set ClosedAt; fail leaves the task open for the V→P loop-back and increments verify_loop_count. Per R-T-4: 3+ verify_loop_count escalates to user. Auto-regenerates the project INDEX so the closed task surfaces in 'recently closed'. session-lifecycle-cleanup: result=pass AND task.SessionID present auto-fires hub_session_finalize for the session — kills the duo cleanly so 'no active session → no BRAIN-duo' holds."),
 		mcp.WithString("project", mcp.Required(), mcp.Description("Project key")),
@@ -254,27 +255,26 @@ func hubIPAVComplete() ToolDef {
 		}
 
 		// session-lifecycle-cleanup: on verify-pass AND task is bound to
-		// a session, auto-fire hub_session_finalize so the duo stops
-		// cleanly (no zombie agents kept alive by daemon's healthLoop).
-		// The "no active session → no BRAIN-duo" invariant rides on
-		// this coupling. Other verify results (fail, escalated) preserve
-		// the existing loop-back / user-action paths and do NOT auto-
-		// finalize the session.
+		// a session, auto-fire the full hub_session_finalize flow via
+		// finalizeSession() — same path as the explicit MCP tool, so we
+		// get the daemon-hook-OR-subprocess-queue dance + manifest write
+		// + status update + closing_state capture. The "no active
+		// session → no BRAIN-duo" invariant rides on this coupling.
+		// Other verify results (fail, escalated) preserve the existing
+		// loop-back / user-action paths and do NOT auto-finalize.
 		autoFinalize := map[string]any{}
 		if result == mvt.VerifyPass && ts.SessionID != "" {
 			outcome := req.GetString("outcome", "")
 			if outcome == "" {
 				outcome = fmt.Sprintf("Auto-finalized on IPAV task %s verify=pass (no explicit outcome supplied).", taskID)
 			}
-			if hook := getSessionFinalizeHook(); hook != nil {
-				if _, hErr := hook(SessionFinalizeRequest{SessionID: ts.SessionID}); hErr != nil {
-					autoFinalize["error"] = hErr.Error()
-				} else {
-					autoFinalize["session_id"] = ts.SessionID
-					autoFinalize["outcome"] = outcome
-				}
+			payload, fErr := finalizeSession(db, project, ts.SessionID, outcome, "closed", "", false)
+			if fErr != nil {
+				autoFinalize["error"] = fErr.Error()
 			} else {
-				autoFinalize["error"] = "no SessionFinalizeHook registered (daemon-side hook unset)"
+				autoFinalize["session_id"] = ts.SessionID
+				autoFinalize["outcome"] = outcome
+				autoFinalize["finalize_payload"] = payload
 			}
 		}
 

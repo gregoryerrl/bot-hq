@@ -121,7 +121,7 @@ func BuildTools(db *hub.DB) []ToolDef {
 		hubIPAVOpen(),
 		hubIPAVTransition(),
 		hubIPAVSetArtifact(),
-		hubIPAVComplete(),
+		hubIPAVComplete(db),
 		hubIPAVList(),
 		claudeList(db),
 		claudeRead(db),
