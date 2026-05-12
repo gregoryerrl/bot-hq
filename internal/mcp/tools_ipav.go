@@ -21,6 +21,7 @@ import (
 
 	"github.com/gregoryerrl/bot-hq/internal/cl"
 	"github.com/gregoryerrl/bot-hq/internal/mvt"
+	"github.com/gregoryerrl/bot-hq/internal/sessions"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -54,9 +55,10 @@ func runtimeFor(project string) (*mvt.TaskState, *cl.IPAVRuntime, error) {
 
 func hubIPAVOpen() ToolDef {
 	tool := mcp.NewTool("bot_hq_ipav_open",
-		mcp.WithDescription("Open a new IPAV task for the given project. Required when the task is medium/high decision-class per IPAV-DISCIPLINE. Returns task_id (UUID) + initial state (CurrentPhase=Investigate). Auto-regenerates the project INDEX.md so the new task surfaces in the substrate immediately."),
+		mcp.WithDescription("Open a new IPAV task for the given project. Required when the task is medium/high decision-class per IPAV-DISCIPLINE. Returns task_id (UUID) + initial state (CurrentPhase=Investigate). Auto-regenerates the project INDEX.md so the new task surfaces in the substrate immediately. session_id binds the task to its session-cluster so bot_hq_ipav_complete(verify=pass) can auto-finalize the session per session-lifecycle-cleanup; when omitted, falls back to sessions.FindActiveForProject."),
 		mcp.WithString("project", mcp.Required(), mcp.Description("Project key (e.g., bot-hq, bcc-ad-manager)")),
 		mcp.WithString("decision_class", mcp.Required(), mcp.Description("Decision class: low | medium | high. Medium/high triggers bilateral mode auto-set in Investigate + Plan transitions per R44 expanded.")),
+		mcp.WithString("session_id", mcp.Description("Optional explicit session-cluster id (scope-keyed). When omitted, resolves via sessions.FindActiveForProject(project). Empty result = task opens without session binding; auto-finalize on verify-pass silently no-ops.")),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -73,11 +75,21 @@ func hubIPAVOpen() ToolDef {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
+		// session-lifecycle-cleanup: resolve session-id from explicit
+		// param OR fall back to sessions.FindActiveForProject. Empty
+		// result is permitted (degraded; auto-finalize won't wire).
+		sessionID := req.GetString("session_id", "")
+		if sessionID == "" {
+			if found, ferr := sessions.FindActiveForProject(project); ferr == nil && found != "" {
+				sessionID = found
+			}
+		}
+
 		_, r, err := runtimeFor(project)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
-		taskID, ts, err := r.OpenTask(dc)
+		taskID, ts, err := r.OpenTask(sessionID, dc)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("ipav_open: %v", err)), nil
 		}
@@ -202,10 +214,11 @@ func hubIPAVSetArtifact() ToolDef {
 
 func hubIPAVComplete() ToolDef {
 	tool := mcp.NewTool("bot_hq_ipav_complete",
-		mcp.WithDescription("Close an IPAV task with a Verify result. Terminal results (pass / escalated) set ClosedAt; fail leaves the task open for the V→P loop-back and increments verify_loop_count. Per R-T-4: 3+ verify_loop_count escalates to user. Auto-regenerates the project INDEX so the closed task surfaces in 'recently closed'."),
+		mcp.WithDescription("Close an IPAV task with a Verify result. Terminal results (pass / escalated) set ClosedAt; fail leaves the task open for the V→P loop-back and increments verify_loop_count. Per R-T-4: 3+ verify_loop_count escalates to user. Auto-regenerates the project INDEX so the closed task surfaces in 'recently closed'. session-lifecycle-cleanup: result=pass AND task.SessionID present auto-fires hub_session_finalize for the session — kills the duo cleanly so 'no active session → no BRAIN-duo' holds."),
 		mcp.WithString("project", mcp.Required(), mcp.Description("Project key")),
 		mcp.WithString("task_id", mcp.Required(), mcp.Description("Task UUID")),
 		mcp.WithString("result", mcp.Required(), mcp.Description("Verify result: pass | fail | escalated")),
+		mcp.WithString("outcome", mcp.Description("Agent-authored narrative for the auto-finalize when result=pass. Multi-paragraph fine; serves as the retrospective payload for the closed session. When omitted, a templated outcome is generated from the task id + verify result.")),
 	)
 
 	handler := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -240,17 +253,46 @@ func hubIPAVComplete() ToolDef {
 			_, _, _ = c.IndexProject(project)
 		}
 
+		// session-lifecycle-cleanup: on verify-pass AND task is bound to
+		// a session, auto-fire hub_session_finalize so the duo stops
+		// cleanly (no zombie agents kept alive by daemon's healthLoop).
+		// The "no active session → no BRAIN-duo" invariant rides on
+		// this coupling. Other verify results (fail, escalated) preserve
+		// the existing loop-back / user-action paths and do NOT auto-
+		// finalize the session.
+		autoFinalize := map[string]any{}
+		if result == mvt.VerifyPass && ts.SessionID != "" {
+			outcome := req.GetString("outcome", "")
+			if outcome == "" {
+				outcome = fmt.Sprintf("Auto-finalized on IPAV task %s verify=pass (no explicit outcome supplied).", taskID)
+			}
+			if hook := getSessionFinalizeHook(); hook != nil {
+				if _, hErr := hook(SessionFinalizeRequest{SessionID: ts.SessionID}); hErr != nil {
+					autoFinalize["error"] = hErr.Error()
+				} else {
+					autoFinalize["session_id"] = ts.SessionID
+					autoFinalize["outcome"] = outcome
+				}
+			} else {
+				autoFinalize["error"] = "no SessionFinalizeHook registered (daemon-side hook unset)"
+			}
+		}
+
 		closed := ""
 		if !ts.ClosedAt.IsZero() {
 			closed = ts.ClosedAt.Format("2006-01-02T15:04:05Z07:00")
 		}
-		return mcp.NewToolResultText(toJSON(map[string]any{
+		respPayload := map[string]any{
 			"status":            "completed",
 			"task_id":           taskID,
 			"verify_result":     string(ts.VerifyResult),
 			"verify_loop_count": ts.VerifyLoopCount,
 			"closed_at":         closed,
-		})), nil
+		}
+		if len(autoFinalize) > 0 {
+			respPayload["auto_finalize"] = autoFinalize
+		}
+		return mcp.NewToolResultText(toJSON(respPayload)), nil
 	}
 	return ToolDef{Tool: tool, Handler: handler}
 }

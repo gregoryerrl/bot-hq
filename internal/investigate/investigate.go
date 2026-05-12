@@ -82,7 +82,7 @@ func (o *Orchestrator) OpenInvestigation(decisionClass mvt.DecisionClass, agentA
 	if agentA == agentB {
 		return nil, errors.New("agentA and agentB must differ (R44 anti-cross)")
 	}
-	taskID, _, err := o.rt.OpenTask(decisionClass)
+	taskID, _, err := o.rt.OpenTask("", decisionClass)
 	if err != nil {
 		return nil, fmt.Errorf("OpenTask: %w", err)
 	}

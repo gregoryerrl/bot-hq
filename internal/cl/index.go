@@ -179,6 +179,19 @@ func (c *CL) renderProjectIndex(project, projDir string) (string, error) {
 	b.WriteString(project)
 	b.WriteString("`.\n\n")
 
+	// Project rules — load-bearing pointer for the BRAIN-duo. Read BEFORE any
+	// HANDS-class action; gates encoded here are how per-project rule-strictness
+	// gets resolved (e.g., bot-hq lenient vs bcc-ad-manager strict push gate).
+	fmt.Fprintf(&b, "## Project rules\n\n")
+	fmt.Fprintf(&b, "Canonical rules file: [`projects/%s.yaml`](../%s.yaml)\n\n", project, project)
+	b.WriteString("Read this BEFORE any HANDS-class action (commit / push / merge). Fields you need:\n\n")
+	b.WriteString("- `branch.{pattern, examples, patternHelp}` — branch naming convention\n")
+	b.WriteString("- `gates.push.requiresApproval` — when `false`, Rain BRAIN-2nd alone is sufficient for commit + push within session scope (e.g. bot-hq). When `true`, per-instance user verbatim still required (e.g. bcc-ad-manager).\n")
+	b.WriteString("- `gates.forcePush.{blocked, tokenFormat}` — force-push lock + user-token format\n")
+	b.WriteString("- `gates.coder.{toolsBlocked, perActionApproval}` — coder subagent constraints\n")
+	b.WriteString("- `commit.{style, requireIssueLink}` — commit message shape\n")
+	b.WriteString("- `project_feedback.*` — project-specific behavioral rules (load-bearing per-feedback cite-anchor)\n\n")
+
 	// Summary table
 	b.WriteString("## Summary\n\n")
 	b.WriteString("| Class | Count | Last activity |\n")

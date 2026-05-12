@@ -73,6 +73,37 @@ func TestIndexProject_writesFrontmatterAndBody(t *testing.T) {
 	}
 }
 
+// session-lifecycle-cleanup: every project's INDEX.md must point the
+// BRAIN-duo at projects/<p>.yaml as the canonical rules file with an
+// enumerated set of load-bearing fields. The duo's spawn-time bootstrap
+// includes INDEX.md content, so this is what makes "session open → read
+// CL → CL points at rules → read rules" work without explicit prompt
+// injection.
+func TestIndexProject_PointsAtProjectRulesFile(t *testing.T) {
+	_, c := setupIndexFixture(t)
+	rendered, _, err := c.IndexProject("myproj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"## Project rules",
+		"projects/myproj.yaml",
+		"Read this BEFORE any HANDS-class action",
+		"branch.{pattern, examples, patternHelp}",
+		"gates.push.requiresApproval",
+		"Rain BRAIN-2nd alone is sufficient",
+		"per-instance user verbatim still required",
+		"gates.forcePush.{blocked, tokenFormat}",
+		"gates.coder.{toolsBlocked, perActionApproval}",
+		"commit.{style, requireIssueLink}",
+		"project_feedback.*",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("INDEX.md missing required literal %q (the agent flow needs this to discover rules)", want)
+		}
+	}
+}
+
 func TestIndexProject_idempotent(t *testing.T) {
 	_, c := setupIndexFixture(t)
 	if _, _, err := c.IndexProject("myproj"); err != nil {

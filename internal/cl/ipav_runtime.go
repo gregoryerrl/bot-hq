@@ -49,11 +49,17 @@ func NewIPAVRuntime(c *CL, project string) (*IPAVRuntime, error) {
 // OpenTask creates a new IPAV per-task state with a generated UUID-based
 // task-id + the given decision-class. Returns the task-id + persisted state.
 //
+// sessionID binds the task to its containing session-cluster — populates
+// TaskState.SessionID so bot_hq_ipav_complete(verify=pass) can fire
+// hub_session_finalize on the right session per session-lifecycle-cleanup.
+// Empty sessionID is permitted (degraded mode; no auto-finalize wires —
+// agent must call hub_session_finalize manually).
+//
 // Per R44 expanded + R47 revised: medium/high decision-class triggers
 // bilateral-mode in subsequent Investigate + Plan transitions.
-func (r *IPAVRuntime) OpenTask(decisionClass mvt.DecisionClass) (string, *mvt.TaskState, error) {
+func (r *IPAVRuntime) OpenTask(sessionID string, decisionClass mvt.DecisionClass) (string, *mvt.TaskState, error) {
 	taskID := uuid.New().String()
-	ts := mvt.NewTaskState(taskID, decisionClass)
+	ts := mvt.NewTaskState(taskID, sessionID, decisionClass)
 	if err := r.cl.SaveIPAVState(r.project, ts); err != nil {
 		return "", nil, fmt.Errorf("save new task: %w", err)
 	}
