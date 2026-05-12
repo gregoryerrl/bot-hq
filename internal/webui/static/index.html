@@ -23,10 +23,6 @@
       <span id="pending-actions-count">0</span> pending
     </button>
     <span class="spacer"></span>
-    <label class="picker">
-      Project
-      <select id="project-picker"></select>
-    </label>
     <button id="register-project-open" type="button" title="Register a new project">+</button>
     <button id="search-open" type="button" title="Search canonical-store contents (Ctrl+K)">🔍</button>
     <button id="settings-open" type="button" title="Agent model settings">⚙</button>
@@ -37,19 +33,13 @@
       </svg>
     </button>
     <span id="voice-status" class="voice-status"></span>
-    <span class="active-project-chip" id="active-project-chip">bot-hq</span>
     <input type="search" id="nav-search" class="nav-search" placeholder="Search files…" autocomplete="off" />
   </header>
 
   <main>
     <aside class="sidebar">
-      <section class="nav-section" id="nav-global">
-        <h2>Global</h2>
-        <div class="nav-list" id="nav-global-list"><em>Loading…</em></div>
-      </section>
-      <section class="nav-section" id="nav-project">
-        <h2>Projects</h2>
-        <div class="nav-list" id="nav-project-list"><em>Loading…</em></div>
+      <section class="nav-section" id="nav-tree">
+        <div class="nav-list" id="nav-tree-root"><em>Loading…</em></div>
       </section>
       <section class="nav-section" id="nav-recent">
         <h2>Recent edits</h2>

@@ -9,45 +9,6 @@ import (
 	"testing"
 )
 
-// TestExternalDirFiles covers the resolver helper directly: missing dir
-// returns (nil, nil); present dir surfaces files with External=true and
-// the "external/<project>/<basename>" path scheme.
-func TestExternalDirFiles_MissingDirReturnsEmpty(t *testing.T) {
-	nodes, err := externalDirFiles("/nonexistent/path-1234", "myproj", ".md")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(nodes) != 0 {
-		t.Errorf("nodes = %d, want 0 for missing dir", len(nodes))
-	}
-}
-
-func TestExternalDirFiles_SurfacesWithExternalFlag(t *testing.T) {
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "alpha.md"), "alpha\n")
-	mustWrite(t, filepath.Join(dir, "beta.md"), "beta\n")
-	mustWrite(t, filepath.Join(dir, "skip.txt"), "skip\n") // ext filter
-
-	nodes, err := externalDirFiles(dir, "myproj", ".md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(nodes) != 2 {
-		t.Fatalf("nodes = %d, want 2; got %+v", len(nodes), nodes)
-	}
-	for _, n := range nodes {
-		if !n.External {
-			t.Errorf("node %s External=false, want true", n.Name)
-		}
-	}
-	if nodes[0].Path != "external/myproj/alpha.md" {
-		t.Errorf("path = %s, want external/myproj/alpha.md", nodes[0].Path)
-	}
-	if nodes[1].Path != "external/myproj/beta.md" {
-		t.Errorf("path = %s, want external/myproj/beta.md", nodes[1].Path)
-	}
-}
-
 // TestHandleExternalFile_RegisteredProjectReadOK and friends exercise the
 // /api/external-file endpoint behavior. We can't relocate $HOME for the
 // real on-disk read, so these tests use a sub-test approach with a
@@ -167,30 +128,3 @@ func TestHandleExternalFile_EndToEnd(t *testing.T) {
 	})
 }
 
-// TestResolveProjectExternalDocs_PicksUpDocsDir verifies the destination
-// resolver wires HOME → ~/Projects/<p>/docs/ correctly.
-func TestResolveProjectExternalDocs_PicksUpDocsDir(t *testing.T) {
-	homeTmp := t.TempDir()
-	t.Setenv("HOME", homeTmp)
-
-	docsDir := filepath.Join(homeTmp, "Projects", "myproj", "docs")
-	mustMkdir(t, docsDir)
-	mustWrite(t, filepath.Join(docsDir, "alpha.md"), "alpha\n")
-
-	nodes, err := resolveProjectExternalDocs("", "myproj")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(nodes) != 1 {
-		t.Fatalf("nodes = %d, want 1", len(nodes))
-	}
-	if !nodes[0].External {
-		t.Errorf("External = false, want true")
-	}
-	if nodes[0].Path != "external/myproj/alpha.md" {
-		t.Errorf("path = %s", nodes[0].Path)
-	}
-}
-
-// Suppress unused-import lint when running just this file in isolation.
-var _ = os.Stat

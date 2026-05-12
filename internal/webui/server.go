@@ -81,6 +81,12 @@ type Server struct {
 	// up 2026-05-07 "clive can't see the file that i'm looking at".
 	ctxSubsMu sync.Mutex
 	ctxSubs   map[chan WebuiContext]struct{}
+
+	// crossProjectCache memoizes /api/cross-project responses per class
+	// for crossProjectCacheTTL (PB-2 30s lazy-compute window). Created
+	// lazily on first cross-project request — zero-cost when the endpoint
+	// is never hit.
+	crossProjectCache *crossProjectCache
 }
 
 // WebuiContext describes what the user is currently looking at in the
@@ -244,7 +250,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/projects", s.handleProjects)
 	mux.HandleFunc("/api/recent-edits", s.handleRecentEdits)
 	mux.HandleFunc("/api/search", s.handleSearch)
-	mux.HandleFunc("/api/destinations", s.handleDestinations)
+	mux.HandleFunc("/api/cross-project", s.handleCrossProject)
 	mux.HandleFunc("/api/rules", s.handleRules)
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/clive/activity", s.handleCliveActivity)

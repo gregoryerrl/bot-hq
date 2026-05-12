@@ -37,32 +37,6 @@ body {
   font-family: ui-monospace, 'SFMono-Regular', monospace;
 }
 
-.picker {
-  font-size: 0.85rem;
-  color: #b0c4d4;
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.picker select {
-  background: #1e2b38;
-  color: white;
-  border: 1px solid #3a4a5a;
-  border-radius: 3px;
-  padding: 0.2rem 0.4rem;
-  font-size: 0.85rem;
-}
-
-.active-project-chip {
-  background: #2563eb;
-  color: white;
-  padding: 0.2rem 0.6rem;
-  border-radius: 999px;
-  font-size: 0.8rem;
-  font-weight: 600;
-}
-
 .nav-search {
   appearance: none;
   border: 1px solid #d1d5db;
@@ -113,48 +87,95 @@ main {
   color: #666;
 }
 
-.dest {
-  margin-bottom: 0.6rem;
-}
+/* Tree nav (Z-CL-uniformity S5): replaces .dest / .dest-list. Uses
+   native <details>/<summary> for collapsibility — no JS expand state.
+   Top-level sections (Global + per-project) get heavier emphasis;
+   nested folders share a lighter style. File class hint via
+   .nav-tree-class-* (universal_opt_in / external_docs_pointer /
+   brain_duo_operational / foundational_anchors / project_private). */
 
-.dest-head {
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: #2563eb;
-  margin: 0.4rem 0 0.2rem 0;
-}
-
-.dest-list {
-  list-style: none;
-  padding-left: 0.6rem;
-  margin: 0;
-}
-
-.dest-list li {
-  font-size: 0.82rem;
+.nav-tree-folder {
   margin: 0.1rem 0;
+}
+
+.nav-tree-summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 0.15rem 0.25rem;
+  border-radius: 3px;
+  user-select: none;
+  list-style: none; /* hide default disclosure triangle on Webkit */
+}
+
+.nav-tree-summary::-webkit-details-marker { display: none; }
+.nav-tree-summary::marker { content: ''; }
+
+.nav-tree-summary::before {
+  content: '\25B6'; /* ▶ */
+  display: inline-block;
+  width: 0.9rem;
+  font-size: 0.65rem;
+  color: #888;
+  transition: transform 0.1s ease;
+}
+
+.nav-tree-folder[open] > .nav-tree-summary::before {
+  transform: rotate(90deg);
+}
+
+.nav-tree-toplevel > .nav-tree-summary {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #2563eb;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.nav-tree-summary:hover {
+  background: #f0f4fa;
+}
+
+.nav-tree-children {
+  padding-left: 0.95rem;
+  border-left: 1px solid #eef0f4;
+  margin-left: 0.4rem;
+}
+
+.nav-tree-toplevel > .nav-tree-children {
+  border-left: none;
+  margin-left: 0;
+}
+
+.nav-tree-file {
+  display: block;
+  font-size: 0.82rem;
   font-family: ui-monospace, 'SFMono-Regular', monospace;
-}
-
-.dest-list li.empty {
-  color: #aaa;
-  font-style: italic;
-  font-family: inherit;
-}
-
-.dest-list li.missing {
-  color: #b88;
-  font-style: italic;
-  font-family: inherit;
-}
-
-.dest-list li a {
   color: #2563eb;
   text-decoration: none;
+  padding: 0.1rem 0.3rem 0.1rem 1.15rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.dest-list li a:hover {
+.nav-tree-file:hover {
+  background: #f0f4fa;
   text-decoration: underline;
+}
+
+/* Optional class-color hints. Subtle — left-border tint, not loud. */
+.nav-tree-file.nav-tree-class-foundational_anchors {
+  border-left: 2px solid #f59e0b;
+}
+.nav-tree-file.nav-tree-class-brain_duo_operational {
+  border-left: 2px solid #a855f7;
+}
+.nav-tree-file.nav-tree-class-external_docs_pointer {
+  border-left: 2px solid #14b8a6;
+}
+.nav-tree-file.nav-tree-class-universal_opt_in {
+  border-left: 2px solid #8b5cf6;
 }
 
 .doc {
