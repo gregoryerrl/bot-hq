@@ -31,7 +31,7 @@ func TestNewIPAVRuntime_validation(t *testing.T) {
 func TestOpenTask_generatesUUIDAndPersists(t *testing.T) {
 	rt := newTestRuntime(t)
 
-	taskID, ts, err := rt.OpenTask(mvt.DecisionHigh)
+	taskID, ts, err := rt.OpenTask("", mvt.DecisionHigh)
 	if err != nil {
 		t.Fatalf("OpenTask: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestGetTask_missing_returnsErrNotFound(t *testing.T) {
 
 func TestTransitionPhase_bilateralAutoSetForHighStakes(t *testing.T) {
 	rt := newTestRuntime(t)
-	taskID, _, err := rt.OpenTask(mvt.DecisionHigh)
+	taskID, _, err := rt.OpenTask("", mvt.DecisionHigh)
 	if err != nil {
 		t.Fatalf("OpenTask: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestTransitionPhase_bilateralAutoSetForHighStakes(t *testing.T) {
 
 func TestTransitionPhase_lowStakesSolo(t *testing.T) {
 	rt := newTestRuntime(t)
-	taskID, _, err := rt.OpenTask(mvt.DecisionLow)
+	taskID, _, err := rt.OpenTask("", mvt.DecisionLow)
 	if err != nil {
 		t.Fatalf("OpenTask: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestTransitionPhase_lowStakesSolo(t *testing.T) {
 
 func TestRecordPhaseUsage_aggregatesAcrossAgents(t *testing.T) {
 	rt := newTestRuntime(t)
-	taskID, _, err := rt.OpenTask(mvt.DecisionMedium)
+	taskID, _, err := rt.OpenTask("", mvt.DecisionMedium)
 	if err != nil {
 		t.Fatalf("OpenTask: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestRecordPhaseUsage_aggregatesAcrossAgents(t *testing.T) {
 
 func TestSetPhaseArtifact_validKeys(t *testing.T) {
 	rt := newTestRuntime(t)
-	taskID, _, _ := rt.OpenTask(mvt.DecisionMedium)
+	taskID, _, _ := rt.OpenTask("", mvt.DecisionMedium)
 
 	cases := []struct {
 		key, path string
@@ -169,7 +169,7 @@ func TestSetPhaseArtifact_validKeys(t *testing.T) {
 
 func TestSetPhaseArtifact_unknownKey_errors(t *testing.T) {
 	rt := newTestRuntime(t)
-	taskID, _, _ := rt.OpenTask(mvt.DecisionMedium)
+	taskID, _, _ := rt.OpenTask("", mvt.DecisionMedium)
 	if _, err := rt.SetPhaseArtifact(taskID, "nonsense_key", "/path"); err == nil {
 		t.Error("expected error for unknown key")
 	}
@@ -177,7 +177,7 @@ func TestSetPhaseArtifact_unknownKey_errors(t *testing.T) {
 
 func TestAddImplementCommit_appends(t *testing.T) {
 	rt := newTestRuntime(t)
-	taskID, _, _ := rt.OpenTask(mvt.DecisionMedium)
+	taskID, _, _ := rt.OpenTask("", mvt.DecisionMedium)
 
 	if _, err := rt.AddImplementCommit(taskID, "abc123"); err != nil {
 		t.Fatalf("AddImplementCommit: %v", err)
@@ -197,7 +197,7 @@ func TestAddImplementCommit_appends(t *testing.T) {
 
 func TestCompleteTask_passResult(t *testing.T) {
 	rt := newTestRuntime(t)
-	taskID, _, _ := rt.OpenTask(mvt.DecisionHigh)
+	taskID, _, _ := rt.OpenTask("", mvt.DecisionHigh)
 
 	ts, err := rt.CompleteTask(taskID, mvt.VerifyPass)
 	if err != nil {
@@ -213,7 +213,7 @@ func TestCompleteTask_passResult(t *testing.T) {
 
 func TestCompleteTask_failIncrementsLoopCount(t *testing.T) {
 	rt := newTestRuntime(t)
-	taskID, _, _ := rt.OpenTask(mvt.DecisionHigh)
+	taskID, _, _ := rt.OpenTask("", mvt.DecisionHigh)
 
 	for i := 1; i <= 3; i++ {
 		ts, err := rt.CompleteTask(taskID, mvt.VerifyFail)
@@ -230,7 +230,7 @@ func TestListTasks_multipleOpen(t *testing.T) {
 	rt := newTestRuntime(t)
 
 	for i := 0; i < 3; i++ {
-		if _, _, err := rt.OpenTask(mvt.DecisionMedium); err != nil {
+		if _, _, err := rt.OpenTask("", mvt.DecisionMedium); err != nil {
 			t.Fatalf("OpenTask iter %d: %v", i, err)
 		}
 	}
@@ -246,7 +246,7 @@ func TestListTasks_multipleOpen(t *testing.T) {
 
 func TestTaskAge_returnsSinceOpen(t *testing.T) {
 	rt := newTestRuntime(t)
-	_, ts, _ := rt.OpenTask(mvt.DecisionMedium)
+	_, ts, _ := rt.OpenTask("", mvt.DecisionMedium)
 	age := TaskAge(ts)
 	if age < 0 {
 		t.Errorf("age should be non-negative; got %v", age)

@@ -205,6 +205,120 @@ func TestIPAVComplete_passSetsClosedAt(t *testing.T) {
 	}
 }
 
+// session-lifecycle-cleanup: result=pass + task bound to a session
+// auto-fires the SessionFinalizeHook. The hook is daemon-installed at
+// startup; test stubs it to record the finalize call.
+func TestIPAVComplete_passAutoFinalizesBoundSession(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	open := findHandler(tools, "bot_hq_ipav_open")
+	complete := findHandler(tools, "bot_hq_ipav_complete")
+
+	// Stub the finalize hook to capture the request.
+	var captured SessionFinalizeRequest
+	hookFired := false
+	SetSessionFinalizeHook(func(req SessionFinalizeRequest) (*SessionFinalizeResult, error) {
+		hookFired = true
+		captured = req
+		return &SessionFinalizeResult{KilledTmux: []string{"brian", "rain"}}, nil
+	})
+	t.Cleanup(func() { SetSessionFinalizeHook(nil) })
+
+	// Open with explicit session_id (skip FindActiveForProject lookup).
+	parsed, _ := invokeTool(t, open, map[string]any{
+		"project":        "test-project",
+		"decision_class": "low",
+		"session_id":     "test-session-xyz",
+	})
+	taskID := parsed["task_id"].(string)
+
+	parsed, _ = invokeTool(t, complete, map[string]any{
+		"project": "test-project",
+		"task_id": taskID,
+		"result":  "pass",
+		"outcome": "tests pass; closing session",
+	})
+
+	if !hookFired {
+		t.Fatal("verify-pass on session-bound task must fire SessionFinalizeHook (session-lifecycle-cleanup invariant)")
+	}
+	if captured.SessionID != "test-session-xyz" {
+		t.Errorf("hook received SessionID=%q, want test-session-xyz", captured.SessionID)
+	}
+	autoFinalize, _ := parsed["auto_finalize"].(map[string]any)
+	if autoFinalize == nil {
+		t.Errorf("response should include auto_finalize block when hook fires; got %v", parsed)
+	} else {
+		if autoFinalize["session_id"] != "test-session-xyz" {
+			t.Errorf("auto_finalize.session_id = %v, want test-session-xyz", autoFinalize["session_id"])
+		}
+	}
+}
+
+// session-lifecycle-cleanup: result=fail does NOT auto-finalize, even
+// when task is session-bound. Preserves V→P / V→I loop-back paths.
+func TestIPAVComplete_failDoesNotAutoFinalize(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	open := findHandler(tools, "bot_hq_ipav_open")
+	complete := findHandler(tools, "bot_hq_ipav_complete")
+
+	hookFired := false
+	SetSessionFinalizeHook(func(req SessionFinalizeRequest) (*SessionFinalizeResult, error) {
+		hookFired = true
+		return &SessionFinalizeResult{}, nil
+	})
+	t.Cleanup(func() { SetSessionFinalizeHook(nil) })
+
+	parsed, _ := invokeTool(t, open, map[string]any{
+		"project":        "test-project",
+		"decision_class": "low",
+		"session_id":     "test-session-fail",
+	})
+	taskID := parsed["task_id"].(string)
+
+	_, _ = invokeTool(t, complete, map[string]any{
+		"project": "test-project",
+		"task_id": taskID,
+		"result":  "fail",
+	})
+	if hookFired {
+		t.Error("verify=fail must NOT auto-finalize the session (loop-back path preserved)")
+	}
+}
+
+// session-lifecycle-cleanup: result=pass on an unbound task (SessionID
+// empty — no session at open time) silently no-ops the auto-finalize.
+func TestIPAVComplete_passNoAutoFinalizeWithoutSessionBinding(t *testing.T) {
+	db := setupTestDB(t)
+	tools := BuildTools(db)
+	open := findHandler(tools, "bot_hq_ipav_open")
+	complete := findHandler(tools, "bot_hq_ipav_complete")
+
+	hookFired := false
+	SetSessionFinalizeHook(func(req SessionFinalizeRequest) (*SessionFinalizeResult, error) {
+		hookFired = true
+		return &SessionFinalizeResult{}, nil
+	})
+	t.Cleanup(func() { SetSessionFinalizeHook(nil) })
+
+	// Open WITHOUT session_id (no active session → SessionID="" on task).
+	parsed, _ := invokeTool(t, open, map[string]any{
+		"project":        "test-project-unbound",
+		"decision_class": "low",
+	})
+	taskID := parsed["task_id"].(string)
+
+	_, _ = invokeTool(t, complete, map[string]any{
+		"project": "test-project-unbound",
+		"task_id": taskID,
+		"result":  "pass",
+	})
+	if hookFired {
+		t.Error("verify=pass on unbound task must NOT auto-finalize (nothing to close)")
+	}
+}
+
 func TestIPAVComplete_failKeepsTaskOpen(t *testing.T) {
 	db := setupTestDB(t)
 	tools := BuildTools(db)

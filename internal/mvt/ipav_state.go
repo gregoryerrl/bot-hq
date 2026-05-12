@@ -81,7 +81,13 @@ const (
 // (including post-Verify-fail loop-backs); non-zero = terminal closure
 // (pass / escalated). Set by IPAVRuntime.CompleteTask on terminal result.
 type TaskState struct {
-	TaskID          string               `yaml:"task_id"`
+	TaskID    string `yaml:"task_id"`
+	// SessionID binds the task to the session-cluster it was opened
+	// within. Populated by IPAVRuntime.OpenTask. Empty for legacy tasks
+	// opened pre-session-lifecycle-cleanup OR when no active session
+	// existed at open-time (the auto-finalize on verify-pass path then
+	// silently no-ops; nothing to close).
+	SessionID       string               `yaml:"session_id,omitempty"`
 	OpenedAt        time.Time            `yaml:"opened_at"`
 	ClosedAt        time.Time            `yaml:"closed_at,omitempty"`
 	DecisionClass   DecisionClass        `yaml:"decision_class"`
@@ -201,17 +207,21 @@ func ValidateMode(stage Stage, mode Mode) error {
 }
 
 // NewTaskState creates a new task-state with defaults per phase-t.md v5.
-func NewTaskState(taskID string, decisionClass DecisionClass) *TaskState {
+// sessionID binds the task to its session-cluster for auto-finalize on
+// verify-pass per session-lifecycle-cleanup. Empty sessionID is permitted
+// (degraded mode; no auto-finalize wires).
+func NewTaskState(taskID, sessionID string, decisionClass DecisionClass) *TaskState {
 	return &TaskState{
-		TaskID:         taskID,
-		OpenedAt:       time.Now().UTC(),
-		DecisionClass:  decisionClass,
-		CurrentPhase:   StageInvestigate,
-		PhaseMode:      ModeInvestigateSolo, // default; bilateral-fires per R47 if medium/high-stakes
-		PhaseBudget:    DefaultPhaseBudget(),
-		PhaseUsed:      make(map[Stage]PhaseUsage),
-		PhaseHistory:   []PhaseHistoryEntry{},
-		VerifyResult:   VerifyPending,
+		TaskID:        taskID,
+		SessionID:     sessionID,
+		OpenedAt:      time.Now().UTC(),
+		DecisionClass: decisionClass,
+		CurrentPhase:  StageInvestigate,
+		PhaseMode:     ModeInvestigateSolo, // default; bilateral-fires per R47 if medium/high-stakes
+		PhaseBudget:   DefaultPhaseBudget(),
+		PhaseUsed:     make(map[Stage]PhaseUsage),
+		PhaseHistory:  []PhaseHistoryEntry{},
+		VerifyResult:  VerifyPending,
 	}
 }
 

@@ -11,7 +11,7 @@ import (
 func TestIPAVState_saveLoadRoundTrip(t *testing.T) {
 	cl := newTestCL(t)
 
-	original := mvt.NewTaskState("task-abc", mvt.DecisionHigh)
+	original := mvt.NewTaskState("task-abc", "", mvt.DecisionHigh)
 	original.PhaseArtifacts.InvestigationDoc = "/sim/inv.md"
 
 	if err := cl.SaveIPAVState("bot-hq", original); err != nil {
@@ -67,7 +67,7 @@ func TestListIPAVStates_multipleTasks(t *testing.T) {
 	cl := newTestCL(t)
 
 	for _, id := range []string{"task-1", "task-2", "task-3"} {
-		ts := mvt.NewTaskState(id, mvt.DecisionMedium)
+		ts := mvt.NewTaskState(id, "", mvt.DecisionMedium)
 		if err := cl.SaveIPAVState("bot-hq", ts); err != nil {
 			t.Fatalf("SaveIPAVState %s: %v", id, err)
 		}
@@ -98,7 +98,7 @@ func TestListProjectsWithIPAVTasks(t *testing.T) {
 
 	// Add IPAV task to bot-hq + 988 projects
 	for _, project := range []string{"bot-hq", "988"} {
-		ts := mvt.NewTaskState("task-init", mvt.DecisionLow)
+		ts := mvt.NewTaskState("task-init", "", mvt.DecisionLow)
 		if err := cl.SaveIPAVState(project, ts); err != nil {
 			t.Fatalf("SaveIPAVState %s: %v", project, err)
 		}

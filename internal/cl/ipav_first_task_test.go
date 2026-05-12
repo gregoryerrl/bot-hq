@@ -40,7 +40,7 @@ func TestIPAVFirstTask_endToEnd(t *testing.T) {
 	}
 
 	// === Phase: Open task with high-stakes (triggers R47 bilateral routing) ===
-	taskID, ts, err := rt.OpenTask(mvt.DecisionHigh)
+	taskID, ts, err := rt.OpenTask("", mvt.DecisionHigh)
 	if err != nil {
 		t.Fatalf("OpenTask: %v", err)
 	}

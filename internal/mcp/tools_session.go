@@ -121,15 +121,14 @@ func hubSessionCreate(db *hub.DB) ToolDef {
 			"session_id": sess.ID,
 		}
 		if project := strings.TrimSpace(req.GetString("project", "")); project != "" {
-			// Phase W pivot enforcement: detect active session for any
-			// other project and reject. Forces explicit hub_session_finalize
-			// before pivoting — preserves close-summary discipline.
-			if otherID, otherProject, ferr := sessions.FindActiveForAnyOtherProject(project); ferr == nil && otherID != "" {
-				return mcp.NewToolResultError(fmt.Sprintf(
-					"active session %q exists for project %q — call hub_session_finalize with project=%q + outcome before pivoting to %q",
-					otherID, otherProject, otherProject, project,
-				)), nil
-			}
+			// session-lifecycle-cleanup: Phase W pivot enforcement was
+			// removed. Pivot is deprecated — users open a separate
+			// session per task; concurrent sessions across projects
+			// are permitted. The old rejection ("active session for
+			// other project → finalize first") forced an unnecessary
+			// finalize ceremony for a workflow that no longer exists.
+			// FindActiveForAnyOtherProject helper retained for
+			// retrospective / diagnostic surfaces; not called here.
 
 			// Phase W multi-session-per-day support: NextAvailableSessionID
 			// returns "YYYY-MM-DD-<project>" for the first session of the

@@ -7,7 +7,7 @@ import (
 )
 
 func TestNewTaskState_defaults(t *testing.T) {
-	ts := NewTaskState("test-task-1", DecisionMedium)
+	ts := NewTaskState("test-task-1", "", DecisionMedium)
 
 	if ts.TaskID != "test-task-1" {
 		t.Errorf("TaskID = %q, want %q", ts.TaskID, "test-task-1")
@@ -99,7 +99,7 @@ func TestValidateMode_perStage(t *testing.T) {
 
 func TestTransition_bilateralAutoSet(t *testing.T) {
 	// Medium-stakes Investigate-Plan should set bilateral-mode
-	ts := NewTaskState("test-task-2", DecisionMedium)
+	ts := NewTaskState("test-task-2", "", DecisionMedium)
 	models := map[string]string{"brian": "claude-default", "rain": "deepseek-v4-pro"}
 
 	if err := ts.Transition(StagePlan, models); err != nil {
@@ -118,7 +118,7 @@ func TestTransition_bilateralAutoSet(t *testing.T) {
 
 func TestTransition_lowStakesSolo(t *testing.T) {
 	// Low-stakes Investigate-Plan should default solo
-	ts := NewTaskState("test-task-3", DecisionLow)
+	ts := NewTaskState("test-task-3", "", DecisionLow)
 	models := map[string]string{"brian": "claude-default"}
 
 	if err := ts.Transition(StagePlan, models); err != nil {
@@ -136,7 +136,7 @@ func TestSaveLoad_roundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ipav-state.yaml")
 
-	original := NewTaskState("test-task-4", DecisionHigh)
+	original := NewTaskState("test-task-4", "", DecisionHigh)
 	original.PhaseArtifacts.InvestigationDoc = "/path/to/inv.md"
 	original.PhaseArtifacts.FaultTree = "/path/to/ft.json"
 	original.PhaseUsed = map[Stage]PhaseUsage{
@@ -197,7 +197,7 @@ func TestEndToEndCycle_simulated(t *testing.T) {
 	models := map[string]string{"brian": "claude-default", "rain": "deepseek-v4-pro"}
 
 	// 1. Open task with high-stakes (triggers bilateral per R47 revised)
-	ts := NewTaskState("e2e-cycle-1", DecisionHigh)
+	ts := NewTaskState("e2e-cycle-1", "", DecisionHigh)
 	if ts.CurrentPhase != StageInvestigate || ts.PhaseMode != ModeInvestigateSolo {
 		t.Fatalf("init state: phase=%s mode=%s", ts.CurrentPhase, ts.PhaseMode)
 	}

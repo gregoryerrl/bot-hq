@@ -43,6 +43,29 @@ func TestDiscV2OutboundRule_HeaderAnchor(t *testing.T) {
 	}
 }
 
+// session-lifecycle-cleanup: lock the R28 per-project gate carve-out
+// so prompt drift can't silently re-strict bot-hq's lenient gate (or
+// over-loosen bcc-ad-manager's strict gate).
+func TestR28PerProjectGateCarveoutSubstringLock(t *testing.T) {
+	must := []string{
+		"PER-PROJECT GATE CARVE-OUT (session-lifecycle-cleanup)",
+		"projects/<p>.yaml gates.push.requiresApproval",
+		"requiresApproval: false",
+		"Rain BRAIN-2nd greenflag alone is sufficient",
+		"requiresApproval: true",
+		"per-instance user verbatim default above applies UNMODIFIED",
+		"Force-push (R29) AND merge (USER-ONLY-ABSOLUTE) are NEVER loosened",
+		"reads `projects/<p>.yaml` at session-open per the INDEX.md \"Project rules\" pointer",
+	}
+	for _, lit := range must {
+		t.Run(lit, func(t *testing.T) {
+			if !strings.Contains(R28PerInstanceFireGreenflag, lit) {
+				t.Errorf("R28 carve-out ratchet broken: missing literal %q", lit)
+			}
+		})
+	}
+}
+
 // duo-resilience: lock the tightened R20 wording so prompt drift can't
 // silently weaken last_state.json discipline OR remove the
 // daemon-paste respawn-recovery anchors the bootstrap now ships.
