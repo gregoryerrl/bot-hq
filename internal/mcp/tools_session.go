@@ -399,19 +399,25 @@ func hubSessionJoin(db *hub.DB) ToolDef {
 
 // finalizeSession runs the full Phase W + Z-3 close-summary flow for
 // either explicit hub_session_finalize calls OR auto-finalize from
-// bot_hq_ipav_complete(verify=pass). Centralizes:
-//  1. Resolve session-id (explicit OR FindActiveForProject fallback).
-//  2. Read manifest.
-//  3. Fire daemon-side finalize hook when registered (in-daemon path)
-//     OR enqueue Z-3d session_lifecycle_queue op + poll for the
-//     subprocess-bridge response (in-subprocess path — brian/rain MCP
-//     servers). Either way, BRAIN-duo Stop() runs.
-//  4. Pull hub-message window for decision-extraction.
-//  5. sessions.Finalize() — write rich-payload manifest.
-//  6. UpdateSessionStatus → done.
-//  7. Append closing_state to manifest.
+// bot_hq_ipav_complete(verify=pass).
 //
-// Both hub_session_finalize and auto-finalize call this directly, so
+// Ordering is load-bearing: data-write happens BEFORE the kill-panes
+// hook fires. The original kill-first ordering loses the manifest-write
+// race when the calling subprocess IS the one being killed (brian
+// auto-finalizing his own session). New order:
+//  1. Resolve session-id.
+//  2. Read manifest + hub-message window.
+//  3. sessions.Finalize() → write rich-payload manifest.
+//  4. UpdateSessionStatus → done.
+//  5. Fire hook (in-daemon) OR enqueue queue op (subprocess) — kills
+//     BRAIN-duo tmux, archives Discord, captures closing_state.
+//  6. Append closing_state to manifest (best-effort).
+//
+// In-daemon path: hook fires synchronously, all 6 steps complete.
+// Subprocess path: caller may be killed mid-step-5. Data through step 4
+// is durably persisted before any kill risk.
+//
+// Both hub_session_finalize and auto-finalize call this directly so
 // the lifecycle invariants are identical regardless of trigger source.
 func finalizeSession(db *hub.DB, project, explicitSessionID, outcome, status, repoPath string, force bool) (map[string]any, error) {
 	var activeID string
@@ -431,55 +437,6 @@ func finalizeSession(db *hub.DB, project, explicitSessionID, outcome, status, re
 	manifest, err := sessions.ReadManifest(activeID)
 	if err != nil {
 		return nil, fmt.Errorf("read active manifest: %w", err)
-	}
-
-	// Z-3 daemon-side finalize: kill duo tmux + archive Discord +
-	// capture per-agent closing_state. In-daemon hook fires directly;
-	// subprocess MCPs route via session_lifecycle_queue (Z-3d bridge).
-	var closingState map[string]string
-	var killedTmux []string
-	var discordArchived bool
-	var hookErr string
-	if hook := getSessionFinalizeHook(); hook != nil {
-		r, hErr := hook(SessionFinalizeRequest{
-			SessionID:       activeID,
-			DiscordThreadID: manifest.DiscordThreadID,
-			Force:           force,
-		})
-		if hErr != nil {
-			hookErr = hErr.Error()
-		}
-		if r != nil {
-			closingState = r.ClosingState
-			killedTmux = r.KilledTmux
-			discordArchived = r.DiscordArchived
-		}
-	} else {
-		opID, qErr := db.EnqueueSessionOp(hub.SessionLifecycleOp{
-			Kind:            "finalize",
-			SessionID:       activeID,
-			Project:         project,
-			DiscordThreadID: manifest.DiscordThreadID,
-			Force:           force,
-		})
-		if qErr == nil {
-			resultJSON, pErr := pollSessionOp(db, opID, 30*time.Second)
-			if pErr == nil {
-				var r SessionFinalizeResult
-				if jErr := json.Unmarshal([]byte(resultJSON), &r); jErr == nil {
-					closingState = r.ClosingState
-					killedTmux = r.KilledTmux
-					discordArchived = r.DiscordArchived
-				}
-			} else {
-				hookErr = "queue-poll: " + pErr.Error()
-			}
-		} else {
-			hookErr = "enqueue: " + qErr.Error()
-		}
-	}
-	if hookErr != "" {
-		outcome = outcome + "\n\n[Z-3 finalize-hook err: " + hookErr + "]"
 	}
 
 	// Pull hub messages between [StartMsgID, latest] for decision extraction.
@@ -510,6 +467,44 @@ func finalizeSession(db *hub.DB, project, explicitSessionID, outcome, status, re
 	}
 
 	_ = db.UpdateSessionStatus(activeID, string(protocol.SessionDone))
+
+	// Pane-kill hook fires LAST so manifest + status are durable before
+	// any subprocess-kill risk. In-daemon path runs synchronously and
+	// captures closing_state. Subprocess path enqueues; closing_state is
+	// best-effort (lost when caller is the one being killed).
+	var closingState map[string]string
+	var killedTmux []string
+	var discordArchived bool
+	if hook := getSessionFinalizeHook(); hook != nil {
+		r, hErr := hook(SessionFinalizeRequest{
+			SessionID:       activeID,
+			DiscordThreadID: manifest.DiscordThreadID,
+			Force:           force,
+		})
+		if hErr == nil && r != nil {
+			closingState = r.ClosingState
+			killedTmux = r.KilledTmux
+			discordArchived = r.DiscordArchived
+		}
+	} else {
+		opID, qErr := db.EnqueueSessionOp(hub.SessionLifecycleOp{
+			Kind:            "finalize",
+			SessionID:       activeID,
+			Project:         project,
+			DiscordThreadID: manifest.DiscordThreadID,
+			Force:           force,
+		})
+		if qErr == nil {
+			if resultJSON, pErr := pollSessionOp(db, opID, 30*time.Second); pErr == nil {
+				var r SessionFinalizeResult
+				if jErr := json.Unmarshal([]byte(resultJSON), &r); jErr == nil {
+					closingState = r.ClosingState
+					killedTmux = r.KilledTmux
+					discordArchived = r.DiscordArchived
+				}
+			}
+		}
+	}
 
 	if len(closingState) > 0 {
 		if cur, rerr := sessions.ReadManifest(closed.ID); rerr == nil {
