@@ -558,6 +558,51 @@ func TestRenderSessionBootstrap_IncludesWorkingTreeStateWhenGit(t *testing.T) {
 	}
 }
 
+// renderWorkingTreeState falls back to workDir/<project> when workDir
+// itself isn't a git repo — load-bearing because brian.workDir
+// defaults to ~/Projects (parent of the actual repo at ~/Projects/
+// bot-hq). Without this fallback the working-tree section silently
+// degrades to empty even when the agent's effective workdir is one
+// level down.
+func TestRenderSessionBootstrap_GitFallbackToProjectSubdir(t *testing.T) {
+	root := t.TempDir()
+	sid := "fallback-test"
+	if err := os.MkdirAll(filepath.Join(root, "sessions", sid), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sessions", sid, "manifest.md"), []byte("---\nid: "+sid+"\nproject: bot-hq\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// workDir parent — NOT a git repo. Subdir IS a git repo.
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "bot-hq")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !runMustGit(t, repo, "init", "-b", "main") {
+		t.Skip("git init failed; skip git-dependent test")
+	}
+	runMustGit(t, repo, "config", "user.email", "test@example.invalid")
+	runMustGit(t, repo, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# bot-hq\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runMustGit(t, repo, "add", ".")
+	runMustGit(t, repo, "commit", "-m", "bootstrap")
+
+	got, err := RenderSessionBootstrap(root, sid, "brian", parent)
+	if err != nil {
+		t.Fatalf("RenderSessionBootstrap: %v", err)
+	}
+	if !strings.Contains(got, "## Working tree state") {
+		t.Errorf("project-subdir fallback should find ~/Projects/bot-hq/.git but no section emitted; got:\n%s", got)
+	}
+	if !strings.Contains(got, "bootstrap") {
+		t.Errorf("git log should surface commit message via project-fallback path; got:\n%s", got)
+	}
+}
+
 // renderWorkingTreeState degrades to "" (no section) when workDir is
 // not a git repo OR when workDir is empty. Bootstrap remains valid for
 // non-implementation scopes.

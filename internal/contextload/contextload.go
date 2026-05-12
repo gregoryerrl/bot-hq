@@ -418,9 +418,11 @@ func RenderSessionBootstrap(canonRoot, sessionID, agent, workDir string) (string
 
 	// Working-tree state (git status + git log) — surface uncommitted WIP
 	// at a high-prominence position so a respawned mid-implementation
-	// agent sees it before any project-context noise.
+	// agent sees it before any project-context noise. Tries workDir
+	// first, then workDir/<project> (bot-hq's brian.workDir defaults to
+	// ~/Projects with the actual repo at ~/Projects/bot-hq).
 	if workDir != "" {
-		if section := renderWorkingTreeState(workDir); section != "" {
+		if section := renderWorkingTreeState(workDir, project); section != "" {
 			b.WriteString(section)
 		}
 	}
@@ -503,29 +505,46 @@ func RenderSessionBootstrap(canonRoot, sessionID, agent, workDir string) (string
 
 // renderWorkingTreeState returns a markdown section summarizing the
 // working tree at workDir (git status --short + git log --oneline -5)
-// or "" if workDir isn't a git repo. Both commands have a 5s timeout
+// or "" if no git repo can be located. Both commands have a 5s timeout
 // guard so a wedged git invocation can't stall the spawn-time bootstrap.
+//
+// Search order: workDir itself; then workDir/<project> if project is
+// non-empty. Bot-hq's default brian.workDir is ~/Projects (parent of
+// the actual repo at ~/Projects/bot-hq), so the project-fallback is
+// load-bearing — without it the section silently degrades to empty
+// even when the agent's effective git workdir is one level down.
 //
 // Output stays small (capped at ~3 KB worst case): status truncated at
 // 50 lines; git log at 5 commits. Below the SessionBootstrapCapBytes
 // floor for any realistic working tree.
 //
 // Failure modes — all degrade silently to "" rather than erroring:
-//   - workDir doesn't exist
-//   - workDir isn't a git repo (`fatal: not a git repository`)
+//   - no candidate is a git repo
 //   - git binary missing
 //   - command times out (5s deadline)
 //
 // duo-resilience-bootstrap-recovery: provides the "what files am I in
 // the middle of" signal on respawn that was previously absent from the
 // daemon-paste bootstrap.
-func renderWorkingTreeState(workDir string) string {
+func renderWorkingTreeState(workDir, project string) string {
 	if workDir == "" {
 		return ""
 	}
-	if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
+	candidates := []string{workDir}
+	if project != "" {
+		candidates = append(candidates, filepath.Join(workDir, project))
+	}
+	var gitDir string
+	for _, c := range candidates {
+		if _, err := os.Stat(filepath.Join(c, ".git")); err == nil {
+			gitDir = c
+			break
+		}
+	}
+	if gitDir == "" {
 		return ""
 	}
+	workDir = gitDir
 
 	var b strings.Builder
 	statusOut, statusOK := runGit(workDir, "status", "--short")
