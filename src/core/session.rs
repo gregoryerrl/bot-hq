@@ -326,14 +326,25 @@ pub fn read_system_prompt(paths: &Paths, agent: &str, project: Option<&str>) -> 
         }
     }
 
-    // 1b. CL location anchor — short reminder of where THIS install's CL
-    // lives so agents don't accidentally read a legacy archive (e.g.
-    // ~/.bot-hq-legacy-*/) and treat it as current state.
+    // 1b. CL location anchor + layout reminder. Without this, agents know
+    // the Read tool exists but don't proactively consult the CL when given
+    // a project task — and they wander into legacy archives by accident.
     out.push_str(&format!(
-        "## Context Library\n\nYour Context Library is at `{}`. \
-         Treat this as the single source of truth — never reason about any \
-         other `~/.bot-hq*` path as current state (those are archives).\n\n",
-        paths.data_dir.display()
+        "## Context Library\n\n\
+         Your Context Library is at `{cl}`. Single source of truth — never \
+         reason about any other `~/.bot-hq*` path as current state (those \
+         are archives from prior installs).\n\n\
+         Per-project layout at `{cl}projects/<project>/`:\n\
+         - `conventions.md` — repo, stack, commands, gates, disguise rules\n\
+         - `notes.md` — current state, recurring trouble, gotchas\n\
+         - `decisions.md` — chronological log of prior decisions (read this \
+         before proposing changes that touch the same area — avoids re-doing \
+         settled work)\n\
+         - `policy.yaml` — machine-enforced gates + forbidden-commit-word list\n\n\
+         **Before starting work on a project, Read `conventions.md` + \
+         `notes.md` for that project.** Don't ask the user for facts that \
+         live in the CL — Read them yourself.\n\n",
+        cl = paths.data_dir.display()
     ));
 
     // 2 + 3. CL slots — optional.
@@ -391,7 +402,7 @@ pub async fn spawn_emma_handle(
         .unwrap_or_else(default_agent_config("emma"));
     let agent = spawn_agent_for(
         "emma", // session_id matches the seeded row
-        "emma", // agent_name reads agents/emma/startup.md
+        "emma", // agent_name → hardcoded EMMA_ROLE + agents/emma/custom-instruction.md
         emma_cfg,
         paths,
         &None, // no project
