@@ -1,0 +1,2209 @@
+// bot-hq UI — Material 3 dark theme translated from the Stitch design exports
+// at ~/Downloads/stitch_bot_hq_desktop_rebuild/.
+//
+// Tokens (palette, type scale, spacing, radii) come from the Tailwind config
+// block embedded in the Stitch HTML. Layout primitives map Tailwind
+// flex/grid classes to Slint's HorizontalLayout / VerticalLayout.
+//
+// Icons: Unicode glyphs that approximate Material Symbols Outlined. Swap to
+// the Material Symbols font in a follow-up pass for pixel fidelity.
+
+import { LineEdit, ScrollView, TextEdit } from "std-widgets.slint";
+
+// Bundled font — Slint compiler embeds + registers at build time so we don't
+// depend on the user having JetBrains Mono installed system-wide.
+import "../fonts/JetBrainsMono-VariableFont_wght.ttf";
+
+// ---- Shared structs surfaced to Rust via include_modules!() ----------------
+
+export struct SessionTile {
+    id: string,
+    title: string,
+    phase: string,
+    last-activity: string,
+    awaiting: bool,
+    pending-choice: bool,
+    pending-question: string,
+    pending-options: [string],
+    pending-choice-id: string,
+    quickview: string,
+}
+
+export struct ChatMsg {
+    author: string,
+    kind: string,
+    content: string,
+    created-at: string,
+}
+
+export struct AgentConfigRow {
+    agent-name: string,
+    provider: string,
+    model-name: string,
+    base-url: string,
+    auth-token: string,
+}
+
+export struct CLFileEntry {
+    relative-path: string,
+    display-name: string,
+    is-dir: bool,
+    depth: int,
+}
+
+// ---- Design tokens ---------------------------------------------------------
+
+export global Theme {
+    // Canvas + 5-tier surface elevation.
+    out property <color> bg-canvas:        #0b1326;
+    out property <color> surface-lowest:   #060e20;
+    out property <color> surface-low:      #131b2e;
+    out property <color> surface:          #171f33;
+    out property <color> surface-high:     #222a3d;
+    out property <color> surface-highest:  #2d3449;
+    out property <color> surface-variant:  #2d3449;
+
+    // Primary (peach/orange).
+    out property <color> primary:           #ffb68b;
+    out property <color> primary-container: #ff7a00;
+    out property <color> on-primary:        #522300;
+    out property <color> primary-fixed:     #ffdbc8;
+
+    // Secondary (purple).
+    out property <color> secondary:           #ddb7ff;
+    out property <color> secondary-container: #6f00be;
+    out property <color> on-secondary:        #490080;
+
+    // Tertiary (blue).
+    out property <color> tertiary:           #adc6ff;
+    out property <color> tertiary-container: #6d9fff;
+    out property <color> on-tertiary:        #002e6a;
+
+    // Error.
+    out property <color> error:           #ffb4ab;
+    out property <color> error-container: #93000a;
+    out property <color> on-error:        #690005;
+
+    // Text + outlines.
+    out property <color> on-surface:         #dae2fd;
+    out property <color> on-surface-variant: #e0c0af;
+    out property <color> outline:            #a78b7c;
+    out property <color> outline-variant:    #584235;
+
+    // Status.
+    out property <color> status-online: #10b981;
+
+    // Phase mapping.
+    out property <color> phase-i: #adc6ff;
+    out property <color> phase-p: #ddb7ff;
+    out property <color> phase-a: #ffb68b;
+    out property <color> phase-v: #ffb68b;
+
+    // Author keys.
+    out property <color> author-user:  #adc6ff;
+    out property <color> author-brian: #ffb68b;
+    out property <color> author-rain:  #ddb7ff;
+    out property <color> author-emma:  #ffb68b;
+
+    // Typography (system fallback if not installed).
+    out property <string> font-display: "Hanken Grotesk";
+    out property <string> font-body:    "Inter";
+    out property <string> font-mono:    "JetBrains Mono";
+
+    // Type scale.
+    out property <length> font-label:    11px;
+    out property <length> font-code:     12px;
+    out property <length> font-body-md:  14px;
+    out property <length> font-head-md:  18px;
+    out property <length> font-head-lg:  24px;
+
+    // Letter-spacing.
+    out property <length> ls-label:     0.55px;
+    out property <length> ls-headline: -0.48px;
+
+    // Weights.
+    out property <int> w-regular: 400;
+    out property <int> w-medium:  500;
+    out property <int> w-semi:    600;
+    out property <int> w-bold:    700;
+
+    // Spacing.
+    out property <length> s-1: 4px;
+    out property <length> s-2: 8px;
+    out property <length> s-3: 12px;
+    out property <length> s-4: 16px;
+    out property <length> s-5: 20px;
+    out property <length> s-6: 24px;
+
+    // Radii.
+    out property <length> radius-default: 2px;
+    out property <length> radius-lg:      4px;
+    out property <length> radius-xl:      8px;
+
+    // Layout dims.
+    out property <length> topbar-h: 48px;
+    out property <length> footer-h: 32px;
+}
+
+// ---- Global state ----------------------------------------------------------
+
+export global AppState {
+    in-out property <int> current-tab;
+    in-out property <bool> emma-open;
+    in-out property <string> status-text;
+
+    in-out property <[SessionTile]> sessions;
+    in-out property <string> active-session-id;
+
+    in-out property <[ChatMsg]> session-msgs;
+    // Counter Rust increments after each set_session_msgs / set_emma_msgs.
+    // SessionView and EmmaPane watch their respective tick via a local property
+    // + `changed` handler, then scroll their ScrollView to the bottom. This
+    // decouples auto-scroll from layout-time `changed viewport-height`, which
+    // was unreliable on model swaps and recursed on EmmaPane's layout.
+    in-out property <int> session-scroll-tick;
+    in-out property <int> emma-scroll-tick;
+    in-out property <string> active-phase;
+    in-out property <string> active-title;
+    in-out property <bool>   active-awaiting;
+    in-out property <bool>   active-pending-choice;
+    in-out property <string> active-pending-question;
+    in-out property <[string]> active-pending-options;
+    in-out property <string> active-pending-choice-id;
+    // Frozen-at-spawn model names for this session's two agents. Header strip
+    // reads these so the user sees what's actually talking, not the (mutable)
+    // current agent_configs.model_name. Empty for pre-migration session rows.
+    in-out property <string> active-brian-model;
+    in-out property <string> active-rain-model;
+
+    in-out property <[ChatMsg]> emma-msgs;
+    // Emma has no dashboard tile + isn't an "active session" in the SessionView
+    // sense, so signaling events for session_id="emma" need a dedicated render
+    // surface in EmmaPane. Mirrors the active-pending-* / active-awaiting set.
+    in-out property <bool>   emma-awaiting;
+    in-out property <bool>   emma-pending-choice;
+    in-out property <string> emma-pending-question;
+    in-out property <[string]> emma-pending-options;
+    in-out property <string> emma-pending-choice-id;
+
+    in-out property <[CLFileEntry]> cl-tree;
+    in-out property <string> cl-current-path;
+    in-out property <string> cl-current-body;
+    in-out property <bool>   cl-dirty;
+
+    in-out property <[AgentConfigRow]> agent-configs;
+
+    // Transient bottom-center notification (e.g., "Changes will apply to new
+    // sessions" after agent config save). Auto-hidden by a 3s Timer in AppWindow.
+    in-out property <string> toast-text;
+    in-out property <bool>   toast-visible;
+
+    // Emma restart confirmation modal. Brian/Rain swaps apply on next session,
+    // so they don't need a restart path — but Emma is a singleton and would
+    // otherwise need a bot-hq restart to switch model.
+    in-out property <bool>   emma-restart-confirm-visible;
+    callback restart-emma();
+
+    callback open-session(string);
+    callback back-to-dashboard();
+    callback advance-phase(string);
+    callback broadcast(string);
+    callback emma-send(string);
+    callback choice-clicked(string, string);
+    callback create-session(string, string);
+    callback save-agent-config(AgentConfigRow);
+    callback cl-open-file(string);
+    callback cl-save-current();
+    callback cl-refresh();
+    callback toggle-emma();
+}
+
+// ---- Reusable primitives ---------------------------------------------------
+
+// Unicode glyph used as a Material-Symbols stand-in.
+component Icon inherits Text {
+    in property <string> glyph;
+    in property <length> size: 16px;
+    in property <color> tint: Theme.on-surface-variant;
+    text: glyph;
+    font-size: size;
+    color: tint;
+    vertical-alignment: center;
+    horizontal-alignment: center;
+}
+
+// Primary CTA — orange fill, dark text.
+component PrimaryButton inherits Rectangle {
+    in property <string> label;
+    in property <string> icon: "";
+    in property <length> btn-height: 30px;
+    callback clicked();
+    height: btn-height;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-lg;
+    background: ta.has-hover ? Theme.primary-container : Theme.primary;
+    animate background { duration: 80ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-3;
+        padding-right: Theme.s-3;
+        spacing: Theme.s-2;
+        alignment: center;
+        if root.icon != "":
+            Icon { glyph: root.icon; size: 14px; tint: Theme.on-primary; }
+        Text {
+            text: root.label;
+            color: Theme.on-primary;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Ghost (bordered) button — surface fill, on-surface text.
+component GhostButton inherits Rectangle {
+    in property <string> label;
+    in property <string> icon: "";
+    in property <length> btn-height: 30px;
+    callback clicked();
+    height: btn-height;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.outline-variant;
+    background: ta.has-hover ? Theme.surface-high : Theme.surface;
+    animate background { duration: 80ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-3;
+        padding-right: Theme.s-3;
+        spacing: Theme.s-2;
+        alignment: center;
+        if root.icon != "":
+            Icon { glyph: root.icon; size: 14px; tint: Theme.on-surface-variant; }
+        Text {
+            text: root.label;
+            color: Theme.on-surface;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Small icon-only button (topbar trailing actions).
+component IconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <length> size: 18px;
+    in property <color> tint: Theme.on-surface-variant;
+    callback clicked();
+    width: 28px;
+    height: 28px;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-lg;
+    background: ta.has-hover ? Theme.surface-high : transparent;
+    animate background { duration: 80ms; }
+    Icon { glyph: root.glyph; size: root.size; tint: root.tint; }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// Label chip — tinted bg + border + label-caps text.
+component LabelChip inherits Rectangle {
+    in property <string> label;
+    in property <color> tint;
+    in property <bool> dot: false;
+    border-radius: Theme.radius-default;
+    border-width: 1px;
+    border-color: root.tint.with-alpha(0.3);
+    background: root.tint.with-alpha(0.15);
+    height: 22px;
+    horizontal-stretch: 0;
+    HorizontalLayout {
+        padding-left: Theme.s-2;
+        padding-right: Theme.s-2;
+        spacing: Theme.s-2;
+        alignment: center;
+        if root.dot: Rectangle {
+            width: 6px; height: 6px;
+            border-radius: 3px;
+            background: root.tint;
+            vertical-stretch: 0;
+        }
+        Text {
+            text: root.label;
+            color: root.tint;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            letter-spacing: Theme.ls-label;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Phase chip — colored by IPAV letter.
+component PhaseChip inherits LabelChip {
+    in property <string> phase;
+    label:
+        phase == "I" ? "INVESTIGATE" :
+        phase == "P" ? "PLAN" :
+        phase == "A" ? "APPLY" :
+        phase == "V" ? "VERIFY" : "—";
+    tint:
+        phase == "I" ? Theme.phase-i :
+        phase == "P" ? Theme.phase-p :
+        phase == "A" ? Theme.phase-a :
+        phase == "V" ? Theme.phase-v :
+        Theme.on-surface-variant;
+}
+
+// Bordered text input — used everywhere except std LineEdit fallbacks.
+component CustomInput inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text;
+    in property <bool> password: false;
+    in property <length> input-height: 32px;
+    callback accepted(string);
+    height: input-height;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.primary : Theme.outline-variant;
+    background: Theme.surface-lowest;
+    animate border-color { duration: 100ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-3;
+        padding-right: Theme.s-3;
+        alignment: stretch;
+        input := TextInput {
+            text <=> root.text;
+            color: Theme.on-surface;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            vertical-alignment: center;
+            single-line: true;
+            input-type: root.password ? InputType.password : InputType.text;
+            selection-background-color: Theme.primary.with-alpha(0.4);
+            selection-foreground-color: Theme.on-surface;
+            accepted => { root.accepted(self.text); }
+        }
+    }
+    // Placeholder overlay (shown when empty + not focused).
+    if root.text == "" && !input.has-focus:
+        HorizontalLayout {
+            padding-left: Theme.s-3;
+            padding-right: Theme.s-3;
+            alignment: start;
+            Text {
+                text: root.placeholder;
+                color: Theme.on-surface-variant.with-alpha(0.5);
+                font-family: Theme.font-mono;
+                font-size: Theme.font-code;
+                vertical-alignment: center;
+            }
+        }
+}
+
+// ---- Topbar ----------------------------------------------------------------
+
+component TopbarTab inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: Theme.topbar-h;
+    horizontal-stretch: 0;
+    background: transparent;
+
+    HorizontalLayout {
+        padding-left: Theme.s-2;
+        padding-right: Theme.s-2;
+        alignment: center;
+        Text {
+            text: root.label;
+            color: root.selected ? Theme.primary
+                 : ta.has-hover ? Theme.on-surface
+                 : Theme.on-surface-variant;
+            font-family: Theme.font-display;
+            font-size: Theme.font-head-md;
+            font-weight: Theme.w-semi;
+            vertical-alignment: center;
+        }
+    }
+    // Underline indicator — orange when selected.
+    Rectangle {
+        x: Theme.s-2;
+        y: parent.height - 3px;
+        width: parent.width - Theme.s-2 * 2;
+        height: 2px;
+        background: root.selected ? Theme.primary : transparent;
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+component EmmaChip inherits Rectangle {
+    in property <bool> active;
+    callback clicked();
+    height: 28px;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: root.active ? Theme.primary : Theme.outline-variant;
+    background: root.active
+        ? Theme.primary-container.with-alpha(0.25)
+        : ta.has-hover ? Theme.surface-high : Theme.surface;
+    animate background, border-color { duration: 80ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-3;
+        padding-right: Theme.s-3;
+        spacing: Theme.s-2;
+        alignment: center;
+        Icon { glyph: "◉"; size: 12px; tint: Theme.primary; }
+        Text {
+            text: "Emma";
+            color: Theme.primary;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+component Topbar inherits Rectangle {
+    background: Theme.bg-canvas;
+    height: Theme.topbar-h;
+    // 1px bottom divider.
+    Rectangle {
+        x: 0; y: parent.height - 1px;
+        width: parent.width; height: 1px;
+        background: Theme.outline-variant;
+    }
+    HorizontalLayout {
+        padding-left: Theme.s-4;
+        padding-right: Theme.s-4;
+        spacing: Theme.s-5;
+        alignment: stretch;
+
+        // Wordmark + nav.
+        HorizontalLayout {
+            spacing: Theme.s-5;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "bot-hq";
+                    color: Theme.primary;
+                    font-family: Theme.font-display;
+                    font-size: Theme.font-head-lg;
+                    font-weight: Theme.w-bold;
+                    letter-spacing: Theme.ls-headline;
+                    vertical-alignment: center;
+                }
+            }
+            TopbarTab {
+                label: "Dashboard";
+                selected: AppState.current-tab == 0;
+                clicked => { AppState.current-tab = 0; AppState.active-session-id = ""; }
+            }
+            TopbarTab {
+                label: "Context Library";
+                selected: AppState.current-tab == 1;
+                clicked => { AppState.current-tab = 1; }
+            }
+            TopbarTab {
+                label: "Settings";
+                selected: AppState.current-tab == 2;
+                clicked => { AppState.current-tab = 2; }
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        // Search + actions + Emma.
+        HorizontalLayout {
+            spacing: Theme.s-3;
+            alignment: end;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 240px;
+                    height: 30px;
+                    border-radius: Theme.radius-lg;
+                    border-width: 1px;
+                    border-color: search.has-focus ? Theme.primary : Theme.outline-variant;
+                    background: Theme.surface;
+                    animate border-color { duration: 100ms; }
+                    HorizontalLayout {
+                        padding-left: Theme.s-2;
+                        padding-right: Theme.s-2;
+                        spacing: Theme.s-2;
+                        alignment: stretch;
+                        Icon { glyph: "⌕"; size: 16px; tint: Theme.on-surface-variant; }
+                        search := TextInput {
+                            color: Theme.on-surface;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-code;
+                            vertical-alignment: center;
+                            single-line: true;
+                            horizontal-stretch: 1;
+                            selection-background-color: Theme.primary.with-alpha(0.4);
+                            selection-foreground-color: Theme.on-surface;
+                        }
+                    }
+                    if search.text == "" && !search.has-focus:
+                        HorizontalLayout {
+                            padding-left: 32px;
+                            padding-right: Theme.s-2;
+                            alignment: start;
+                            Text {
+                                text: "Search sessions...";
+                                color: Theme.on-surface-variant.with-alpha(0.6);
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                vertical-alignment: center;
+                            }
+                        }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                EmmaChip {
+                    active: AppState.emma-open;
+                    clicked => { AppState.toggle-emma(); }
+                }
+            }
+        }
+    }
+}
+
+// ---- Footer ----------------------------------------------------------------
+
+component Footer inherits Rectangle {
+    background: Theme.surface-lowest;
+    height: Theme.footer-h;
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: 1px;
+        background: Theme.outline-variant;
+    }
+    HorizontalLayout {
+        padding-left: Theme.s-4;
+        padding-right: Theme.s-4;
+        alignment: stretch;
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: AppState.status-text == "" ? "bot-hq" : AppState.status-text;
+                color: Theme.primary;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-label;
+                letter-spacing: Theme.ls-label;
+                font-weight: Theme.w-bold;
+                vertical-alignment: center;
+            }
+        }
+        Rectangle { horizontal-stretch: 1; }
+        HorizontalLayout {
+            spacing: Theme.s-4;
+            alignment: end;
+            HorizontalLayout {
+                spacing: Theme.s-2;
+                alignment: center;
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 6px; height: 6px;
+                        border-radius: 3px;
+                        background: Theme.status-online;
+                    }
+                }
+                Text {
+                    text: "Status: Online";
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
+
+// ---- Dashboard -------------------------------------------------------------
+
+component AwaitingBadge inherits Rectangle {
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-default;
+    border-width: 1px;
+    border-color: Theme.error.with-alpha(0.3);
+    background: Theme.error-container.with-alpha(0.2);
+    height: 22px;
+    HorizontalLayout {
+        padding-left: Theme.s-2;
+        padding-right: Theme.s-2;
+        spacing: Theme.s-1;
+        alignment: center;
+        Icon { glyph: "!"; size: 11px; tint: Theme.error; }
+        Text {
+            text: "[Need User Input]";
+            color: Theme.error;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            letter-spacing: Theme.ls-label;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component ChoiceButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: ta.has-hover ? Theme.primary : Theme.outline-variant;
+    background: ta.has-hover ? Theme.surface-high : Theme.surface;
+    animate background, border-color { duration: 80ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-3;
+        padding-right: Theme.s-3;
+        spacing: Theme.s-2;
+        alignment: stretch;
+        Text {
+            text: root.label;
+            color: Theme.on-surface;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Icon {
+            glyph: "›";
+            size: 14px;
+            tint: ta.has-hover ? Theme.primary : Theme.on-surface-variant;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+component QuickviewRow inherits Rectangle {
+    in property <string> quickview;
+    background: Theme.surface-lowest;
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: 1px;
+        background: Theme.outline-variant.with-alpha(0.5);
+    }
+    VerticalLayout {
+        padding-top: Theme.s-2;
+        padding-bottom: Theme.s-2;
+        padding-left: Theme.s-3;
+        padding-right: Theme.s-3;
+        spacing: 2px;
+        Text {
+            text: "QUICKVIEW";
+            color: Theme.on-surface-variant;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            letter-spacing: Theme.ls-label;
+            font-weight: Theme.w-bold;
+        }
+        Text {
+            text: root.quickview == "" ? "—" : root.quickview;
+            color: Theme.on-surface;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            font-italic: true;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+    }
+}
+
+component SessionTileView inherits Rectangle {
+    in property <SessionTile> data;
+    callback clicked();
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    // Cap so a single tile (or a near-empty dashboard) doesn't stretch to fill
+    // the whole pane vertically. Tall content (long quickview / many pending
+    // options) clips because `clip: true` is set below.
+    max-height: 240px;
+    border-radius: Theme.radius-xl;
+    border-width: 1px;
+    border-color: data.awaiting
+        ? Theme.primary
+        : ta.has-hover ? Theme.primary-fixed.with-alpha(0.4) : Theme.outline-variant.with-alpha(0.6);
+    background: #0f172a;
+    clip: true;
+    animate border-color { duration: 100ms; }
+
+    VerticalLayout {
+        spacing: 0px;
+        alignment: start;
+
+        // Top accent stripe — orange when awaiting (clipped by outer radius).
+        if data.awaiting: Rectangle {
+            height: 3px;
+            background: Theme.primary;
+        }
+
+        // Body.
+        VerticalLayout {
+            padding-top: Theme.s-4;
+            padding-bottom: Theme.s-3;
+            padding-left: Theme.s-4;
+            padding-right: Theme.s-4;
+            spacing: Theme.s-3;
+
+            // Header: ID + phase chip / timestamp
+            HorizontalLayout {
+                spacing: Theme.s-2;
+                alignment: stretch;
+                Text {
+                    text: data.id;
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+                if data.phase != "":
+                    PhaseChip { phase: data.phase; }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: data.last-activity;
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    vertical-alignment: center;
+                    horizontal-alignment: right;
+                    overflow: elide;
+                    horizontal-stretch: 0;
+                }
+            }
+
+            // Title
+            Text {
+                text: data.title;
+                color: Theme.on-surface;
+                font-family: Theme.font-display;
+                font-size: Theme.font-head-md;
+                font-weight: Theme.w-semi;
+                wrap: word-wrap;
+            }
+
+            // Awaiting badge — shown for both awaiting-only and awaiting+choice
+            // variants, matching the Stitch design.
+            if data.awaiting:
+                HorizontalLayout {
+                    alignment: start;
+                    AwaitingBadge {}
+                }
+        }
+
+        // Pending choice section — divider + question + option buttons.
+        if data.pending-choice:
+            Rectangle {
+                background: Theme.surface-low;
+                Rectangle {
+                    x: 0; y: 0;
+                    width: parent.width; height: 1px;
+                    background: Theme.outline-variant.with-alpha(0.5);
+                }
+                VerticalLayout {
+                    padding: Theme.s-3;
+                    spacing: Theme.s-2;
+                    Text {
+                        text: data.pending-question;
+                        color: Theme.on-surface;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-code;
+                        wrap: word-wrap;
+                    }
+                    for opt in data.pending-options:
+                        ChoiceButton {
+                            label: opt;
+                            clicked => { AppState.choice-clicked(data.pending-choice-id, opt); }
+                        }
+                }
+            }
+
+        // Quickview footer — always present.
+        QuickviewRow { quickview: data.quickview; }
+    }
+
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+component DashboardEmptyState inherits Rectangle {
+    callback create();
+    background: transparent;
+    height: 240px;
+    horizontal-stretch: 1;
+    VerticalLayout {
+        padding: Theme.s-6;
+        spacing: Theme.s-3;
+        alignment: center;
+        Text {
+            text: "No sessions yet";
+            color: Theme.on-surface;
+            font-family: Theme.font-display;
+            font-size: Theme.font-head-md;
+            font-weight: Theme.w-semi;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: "A session pairs Brian and Rain on a task.";
+            color: Theme.on-surface-variant;
+            font-family: Theme.font-body;
+            font-size: Theme.font-body-md;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: center;
+            padding-top: Theme.s-2;
+            PrimaryButton {
+                label: "New Session";
+                icon: "+";
+                clicked => { root.create(); }
+            }
+        }
+    }
+}
+
+component DashboardPane inherits Rectangle {
+    background: Theme.bg-canvas;
+    VerticalLayout {
+        padding-left: Theme.s-6;
+        padding-right: Theme.s-6;
+        padding-top: Theme.s-6;
+        padding-bottom: Theme.s-4;
+        spacing: Theme.s-6;
+
+        // Header row.
+        HorizontalLayout {
+            spacing: Theme.s-3;
+            alignment: stretch;
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: "Active Sessions";
+                    color: Theme.on-surface;
+                    font-family: Theme.font-display;
+                    font-size: Theme.font-head-lg;
+                    font-weight: Theme.w-bold;
+                    letter-spacing: Theme.ls-headline;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    spacing: Theme.s-2;
+                    GhostButton {
+                        label: "Filter";
+                        icon: "≡";
+                        clicked => { /* TODO: filter dropdown */ }
+                    }
+                    PrimaryButton {
+                        label: "New Session";
+                        icon: "+";
+                        clicked => { AppState.create-session("New session", ""); }
+                    }
+                }
+            }
+        }
+
+        // Tile grid: 3 columns, each a VerticalLayout, filtered by mod(i,3).
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: Theme.s-3;
+                if AppState.sessions.length == 0:
+                    DashboardEmptyState {
+                        create => { AppState.create-session("New session", ""); }
+                    }
+                if AppState.sessions.length > 0:
+                    // Responsive grid — col-count steps with width like CSS
+                    // grid auto-fit. 4 cols on ≥1400px, 3 on ≥1000px, 2 on
+                    // ≥640px, 1 below. row/col are computed per-tile using the
+                    // index from `for tile[i]`. `vertical-stretch: 0` so the
+                    // grid sizes to its natural content height — otherwise the
+                    // outer ScrollView (which is v-stretch:1) hands all the
+                    // available height down and tiles balloon to fill.
+                    grid-wrap := Rectangle {
+                        property <int> col-count: root.width > 1400px ? 4
+                            : root.width > 1000px ? 3
+                            : root.width > 640px ? 2
+                            : 1;
+                        vertical-stretch: 0;
+                        GridLayout {
+                            spacing: Theme.s-3;
+                            for tile[i] in AppState.sessions:
+                                SessionTileView {
+                                    row: Math.floor(i / grid-wrap.col-count);
+                                    col: i - grid-wrap.col-count * Math.floor(i / grid-wrap.col-count);
+                                    data: tile;
+                                    clicked => { AppState.open-session(tile.id); }
+                                }
+                        }
+                    }
+            }
+        }
+    }
+}
+
+// ---- Session view ----------------------------------------------------------
+
+// One row in the chat stream. Three variants (user / agent / system) drive the
+// alignment + stripe placement.
+component ChatBubble inherits VerticalLayout {
+    in property <ChatMsg> msg;
+
+    property <bool> is-system: msg.kind == "phase_change";
+    property <bool> is-user: msg.author == "user";
+    property <bool> is-tool: msg.kind == "tool_use" || msg.kind == "tool_result";
+    property <color> author-color:
+        is-system               ? Theme.outline :
+        is-user                 ? Theme.tertiary :
+        msg.author == "brian"   ? Theme.primary :
+        msg.author == "rain"    ? Theme.secondary :
+        msg.author == "emma"    ? Theme.primary :
+        Theme.outline;
+    property <string> author-label:
+        is-system               ? "PHASE" :
+        is-user                 ? "USER" :
+        msg.author == "brian"   ? "BRIAN" :
+        msg.author == "rain"    ? "RAIN" :
+        msg.author == "emma"    ? "EMMA" :
+        msg.author;
+    property <string> author-glyph:
+        is-user               ? "◉" :
+        msg.author == "brian" ? "⚒" :
+        msg.author == "rain"  ? "◉" :
+        msg.author == "emma"  ? "◉" :
+        "·";
+
+    spacing: Theme.s-1;
+    horizontal-stretch: 1;
+    alignment: start;
+
+    // System banner — centered, bordered chip.
+    if is-system: HorizontalLayout {
+        alignment: center;
+        padding-top: Theme.s-2;
+        padding-bottom: Theme.s-2;
+        Rectangle {
+            horizontal-stretch: 0;
+            border-radius: Theme.radius-default;
+            border-width: 1px;
+            border-color: Theme.outline-variant;
+            background: Theme.surface;
+            HorizontalLayout {
+                padding-left: Theme.s-3;
+                padding-right: Theme.s-3;
+                padding-top: Theme.s-1;
+                padding-bottom: Theme.s-1;
+                spacing: Theme.s-2;
+                alignment: center;
+                Icon { glyph: "↻"; size: 12px; tint: Theme.secondary; }
+                Text {
+                    text: "PHASE SHIFT: " + msg.content;
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    font-weight: Theme.w-bold;
+                    letter-spacing: Theme.ls-label;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    // User/agent author row.
+    if !is-system: HorizontalLayout {
+        spacing: Theme.s-2;
+        alignment: is-user ? end : start;
+        if is-user: Text {
+            text: msg.created-at;
+            color: Theme.on-surface-variant;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            vertical-alignment: center;
+        }
+        if is-user: Text {
+            text: author-label;
+            color: author-color;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            font-weight: Theme.w-bold;
+            letter-spacing: Theme.ls-label;
+            vertical-alignment: center;
+        }
+        if is-user: Icon {
+            glyph: author-glyph; size: 12px; tint: author-color;
+        }
+        if !is-user: Icon {
+            glyph: author-glyph; size: 12px; tint: author-color;
+        }
+        if !is-user: Text {
+            text: author-label;
+            color: author-color;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            font-weight: Theme.w-bold;
+            letter-spacing: Theme.ls-label;
+            vertical-alignment: center;
+        }
+        if !is-user: Text {
+            text: msg.created-at;
+            color: Theme.on-surface-variant;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            vertical-alignment: center;
+        }
+    }
+
+    // User/agent message card.
+    if !is-system: HorizontalLayout {
+        alignment: is-user ? end : start;
+        Rectangle {
+            horizontal-stretch: 0;
+            max-width: 720px;
+            background: #0f172a;
+            border-width: 1px;
+            border-color: author-color.with-alpha(0.3);
+            border-radius: Theme.radius-default;
+            HorizontalLayout {
+                spacing: 0px;
+                // Left stripe for agents.
+                if !is-user: Rectangle {
+                    width: 3px;
+                    horizontal-stretch: 0;
+                    background: author-color;
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    padding: Theme.s-3;
+                    spacing: Theme.s-1;
+                    TextInput {
+                        text: msg.content;
+                        read-only: true;
+                        wrap: word-wrap;
+                        single-line: false;
+                        color: is-tool ? Theme.on-surface-variant : Theme.on-surface;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-code;
+                        horizontal-alignment: is-user ? right : left;
+                        selection-background-color: Theme.primary.with-alpha(0.4);
+                        selection-foreground-color: Theme.on-surface;
+                    }
+                }
+                // Right stripe for user.
+                if is-user: Rectangle {
+                    width: 3px;
+                    horizontal-stretch: 0;
+                    background: author-color;
+                }
+            }
+        }
+    }
+}
+
+// Need-User-Input banner — mirrors the dashboard tile's pending-input footer
+// so users see the same affordance whether they're at the dashboard or inside
+// the session.
+component AttentionBanner inherits Rectangle {
+    background: #0f172a;
+    border-radius: Theme.radius-xl;
+    border-width: 1px;
+    border-color: Theme.primary;
+    // Top accent stripe (matches dashboard tile awaiting style).
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width; height: 3px;
+        background: Theme.primary;
+        border-radius: Theme.radius-xl;
+    }
+    VerticalLayout {
+        padding: Theme.s-4;
+        spacing: Theme.s-3;
+        // Badge row.
+        HorizontalLayout {
+            alignment: start;
+            spacing: Theme.s-2;
+            AwaitingBadge {}
+        }
+        // Question / prompt.
+        Text {
+            text: AppState.active-pending-choice
+                ? AppState.active-pending-question
+                : "Agents are waiting for your input.";
+            color: Theme.on-surface;
+            font-family: Theme.font-display;
+            font-size: Theme.font-head-md;
+            font-weight: Theme.w-semi;
+            wrap: word-wrap;
+        }
+        // Choice buttons (if any).
+        if AppState.active-pending-choice:
+            VerticalLayout {
+                spacing: Theme.s-2;
+                for opt in AppState.active-pending-options:
+                    ChoiceButton {
+                        label: opt;
+                        clicked => {
+                            AppState.choice-clicked(AppState.active-pending-choice-id, opt);
+                        }
+                    }
+            }
+    }
+}
+
+// Inline IPAV phase selector — text-only tabs with underline indicator.
+component PhasePill inherits Rectangle {
+    in property <string> phase;
+    in property <string> letter;
+    in property <string> name;
+    in property <color> tint;
+    height: 28px;
+    horizontal-stretch: 0;
+    background: ta.has-hover ? Theme.surface-high : transparent;
+    animate background { duration: 60ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-3;
+        padding-right: Theme.s-3;
+        alignment: center;
+        spacing: Theme.s-1;
+        Text {
+            text: root.letter;
+            color: AppState.active-phase == root.letter ? root.tint : Theme.on-surface-variant;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            font-weight: AppState.active-phase == root.letter ? Theme.w-bold : Theme.w-regular;
+            vertical-alignment: center;
+        }
+    }
+    Rectangle {
+        x: Theme.s-2;
+        y: parent.height - 2px;
+        width: parent.width - Theme.s-2 * 2;
+        height: 2px;
+        background: AppState.active-phase == root.letter ? root.tint : transparent;
+    }
+    ta := TouchArea { clicked => { AppState.advance-phase(root.phase); } }
+}
+
+component PhaseSelector inherits HorizontalLayout {
+    spacing: 0px;
+    PhasePill { phase: "I"; letter: "I"; name: "Investigate"; tint: Theme.phase-i; }
+    PhasePill { phase: "P"; letter: "P"; name: "Plan";        tint: Theme.phase-p; }
+    PhasePill { phase: "A"; letter: "A"; name: "Apply";       tint: Theme.phase-a; }
+    PhasePill { phase: "V"; letter: "V"; name: "Verify";      tint: Theme.phase-v; }
+}
+
+// Clean chatbox input — NOT terminal-style (per user direction).
+component ChatInput inherits Rectangle {
+    in property <string> placeholder: "Type a message...";
+    callback submit(string);
+    background: transparent;
+    HorizontalLayout {
+        spacing: Theme.s-2;
+        alignment: stretch;
+        Rectangle {
+            horizontal-stretch: 1;
+            height: 36px;
+            border-radius: Theme.radius-lg;
+            border-width: 1px;
+            border-color: input.has-focus ? Theme.primary : Theme.outline-variant;
+            background: Theme.surface;
+            animate border-color { duration: 100ms; }
+            HorizontalLayout {
+                padding-left: Theme.s-3;
+                padding-right: Theme.s-3;
+                alignment: stretch;
+                input := TextInput {
+                    color: Theme.on-surface;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    vertical-alignment: center;
+                    single-line: true;
+                    horizontal-stretch: 1;
+                    selection-background-color: Theme.primary.with-alpha(0.4);
+                    selection-foreground-color: Theme.on-surface;
+                    accepted => {
+                        if (self.text != "") {
+                            root.submit(self.text);
+                            self.text = "";
+                        }
+                    }
+                }
+            }
+            if input.text == "" && !input.has-focus:
+                HorizontalLayout {
+                    padding-left: Theme.s-3;
+                    padding-right: Theme.s-3;
+                    alignment: start;
+                    Text {
+                        text: root.placeholder;
+                        color: Theme.on-surface-variant.with-alpha(0.55);
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-code;
+                        vertical-alignment: center;
+                    }
+                }
+        }
+        PrimaryButton {
+            label: "Send";
+            icon: "▶";
+            btn-height: 36px;
+            clicked => {
+                if (input.text != "") {
+                    root.submit(input.text);
+                    input.text = "";
+                }
+            }
+        }
+    }
+}
+
+component SessionView inherits Rectangle {
+    background: Theme.bg-canvas;
+    VerticalLayout {
+        spacing: 0px;
+        VerticalLayout {
+            vertical-stretch: 1;
+            padding-left: Theme.s-6;
+            padding-right: Theme.s-6;
+            padding-top: Theme.s-4;
+            padding-bottom: Theme.s-3;
+            spacing: Theme.s-4;
+
+                    // Session header — title + initialized line + status chip.
+                    Rectangle {
+                        Rectangle {
+                            x: 0; y: parent.height - 1px;
+                            width: parent.width; height: 1px;
+                            background: Theme.outline-variant;
+                        }
+                        HorizontalLayout {
+                            padding-bottom: Theme.s-3;
+                            spacing: Theme.s-3;
+                            alignment: stretch;
+                            VerticalLayout {
+                                spacing: 2px;
+                                horizontal-stretch: 1;
+                                HorizontalLayout {
+                                    spacing: Theme.s-2;
+                                    alignment: start;
+                                    GhostButton {
+                                        label: "Back";
+                                        icon: "←";
+                                        btn-height: 24px;
+                                        clicked => { AppState.back-to-dashboard(); }
+                                    }
+                                    Icon { glyph: "#"; size: 18px; tint: Theme.primary; }
+                                    Text {
+                                        text: AppState.active-title == "" ? AppState.active-session-id : AppState.active-title;
+                                        color: Theme.on-surface;
+                                        font-family: Theme.font-display;
+                                        font-size: Theme.font-head-md;
+                                        font-weight: Theme.w-semi;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                                Text {
+                                    text: "SESSION " + AppState.active-session-id;
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-code;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                            }
+                            VerticalLayout {
+                                alignment: end;
+                                spacing: Theme.s-2;
+                                horizontal-stretch: 0;
+                                if AppState.active-phase != "":
+                                    LabelChip {
+                                        label: AppState.active-phase == "I" ? "INVESTIGATING"
+                                            : AppState.active-phase == "P" ? "PLANNING"
+                                            : AppState.active-phase == "A" ? "APPLYING"
+                                            : AppState.active-phase == "V" ? "VERIFYING"
+                                            : "—";
+                                        tint:
+                                            AppState.active-phase == "I" ? Theme.phase-i :
+                                            AppState.active-phase == "P" ? Theme.phase-p :
+                                            AppState.active-phase == "A" ? Theme.phase-a :
+                                            AppState.active-phase == "V" ? Theme.phase-v :
+                                            Theme.on-surface-variant;
+                                        dot: true;
+                                    }
+                                VerticalLayout {
+                                    alignment: end;
+                                    PhaseSelector {}
+                                }
+                            }
+                        }
+                    }
+
+                    // Models actually running in this session — frozen at spawn,
+                    // so it reflects what's talking even if the user edited the
+                    // agent_configs row mid-session.
+                    if AppState.active-brian-model != "" || AppState.active-rain-model != "":
+                        HorizontalLayout {
+                            spacing: Theme.s-5;
+                            alignment: start;
+                            Text {
+                                text: "Brian · HANDS → " + (AppState.active-brian-model == "" ? "(unknown)" : AppState.active-brian-model);
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                            }
+                            Text {
+                                text: "Rain · EYES → " + (AppState.active-rain-model == "" ? "(unknown)" : AppState.active-rain-model);
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                            }
+                        }
+
+                    // Pending-input banner.
+                    if AppState.active-pending-choice || AppState.active-awaiting:
+                        AttentionBanner {}
+
+                    // Chat stream.
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: Theme.bg-canvas;
+                        session-sv := ScrollView {
+                            // Local alias on global tick. Slint maintainer's
+                            // formula from GH#2301: clamp to ≤ 0 since
+                            // viewport-y is non-positive when scrolled.
+                            property <int> scroll-tick: AppState.session-scroll-tick;
+                            changed scroll-tick => {
+                                session-sv.viewport-y = min(0px, -session-sv.viewport-height + session-sv.visible-height);
+                            }
+                            VerticalLayout {
+                                padding-bottom: Theme.s-4;
+                                spacing: Theme.s-4;
+                                alignment: start;
+                                for msg in AppState.session-msgs:
+                                    ChatBubble { msg: msg; }
+                                if AppState.session-msgs.length == 0:
+                                    Rectangle {
+                                        height: 160px;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Text {
+                                                text: "Session ready. Type a message to start.";
+                                                color: Theme.on-surface-variant;
+                                                font-family: Theme.font-mono;
+                                                font-size: Theme.font-code;
+                                                horizontal-alignment: center;
+                                            }
+                                        }
+                                    }
+                            }
+                        }
+                    }
+
+            // Chat input.
+            ChatInput {
+                placeholder: "Type a message...";
+                submit(t) => { AppState.broadcast(t); }
+            }
+        }
+    }
+}
+
+// ---- Context Library -------------------------------------------------------
+
+component CLTreeRow inherits Rectangle {
+    in property <CLFileEntry> entry;
+    in property <bool> active;
+    callback clicked();
+    height: 26px;
+    border-radius: Theme.radius-default;
+    background: root.active
+        ? Theme.primary-container.with-alpha(0.2)
+        : ta.has-hover ? Theme.surface-high
+        : transparent;
+    border-width: root.active ? 1px : 0px;
+    border-color: root.active ? Theme.primary.with-alpha(0.4) : transparent;
+    animate background, border-color { duration: 60ms; }
+    HorizontalLayout {
+        padding-left: entry.depth * Theme.s-3 + Theme.s-2;
+        padding-right: Theme.s-2;
+        spacing: Theme.s-2;
+        alignment: start;
+        Icon {
+            glyph: entry.is-dir ? "▸" : "·";
+            size: 12px;
+            tint: entry.is-dir ? Theme.on-surface-variant : Theme.on-surface-variant.with-alpha(0.6);
+        }
+        Text {
+            text: entry.display-name;
+            color: root.active
+                ? Theme.primary
+                : entry.is-dir ? Theme.on-surface : Theme.on-surface-variant;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            font-weight: entry.is-dir ? Theme.w-bold : Theme.w-regular;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+component ContextLibraryPane inherits Rectangle {
+    background: Theme.bg-canvas;
+    HorizontalLayout {
+        spacing: 0px;
+
+        // Sidebar.
+        Rectangle {
+            width: 220px;
+            background: Theme.surface-lowest;
+            Rectangle {
+                x: parent.width - 1px; y: 0;
+                width: 1px; height: parent.height;
+                background: Theme.outline-variant;
+            }
+            VerticalLayout {
+                padding-left: Theme.s-3;
+                padding-right: Theme.s-3;
+                padding-top: Theme.s-4;
+                padding-bottom: Theme.s-3;
+                spacing: Theme.s-3;
+                HorizontalLayout {
+                    spacing: Theme.s-2;
+                    Text {
+                        text: "WORKSPACE";
+                        color: Theme.on-surface-variant;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-label;
+                        letter-spacing: Theme.ls-label;
+                        font-weight: Theme.w-bold;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    IconButton {
+                        glyph: "↻";
+                        size: 14px;
+                        clicked => { AppState.cl-refresh(); }
+                    }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 1px;
+                        for entry in AppState.cl-tree:
+                            CLTreeRow {
+                                entry: entry;
+                                active: entry.relative-path == AppState.cl-current-path;
+                                clicked => {
+                                    if (!entry.is-dir) {
+                                        AppState.cl-open-file(entry.relative-path);
+                                    }
+                                }
+                            }
+                    }
+                }
+            }
+        }
+
+        // Editor.
+        Rectangle {
+            background: Theme.bg-canvas;
+            horizontal-stretch: 1;
+            VerticalLayout {
+                spacing: 0px;
+
+                // Tab bar.
+                Rectangle {
+                    background: Theme.surface-lowest;
+                    height: 40px;
+                    Rectangle {
+                        x: 0; y: parent.height - 1px;
+                        width: parent.width; height: 1px;
+                        background: Theme.outline-variant;
+                    }
+                    HorizontalLayout {
+                        padding-left: Theme.s-4;
+                        padding-right: Theme.s-4;
+                        spacing: Theme.s-3;
+                        alignment: stretch;
+                        HorizontalLayout {
+                            spacing: Theme.s-2;
+                            alignment: start;
+                            Icon { glyph: "·"; size: 12px; tint: Theme.primary; }
+                            Text {
+                                text: AppState.cl-current-path == "" ? "Select a file" : AppState.cl-current-path;
+                                color: Theme.on-surface;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                vertical-alignment: center;
+                            }
+                            if AppState.cl-dirty: Text {
+                                text: "*";
+                                color: Theme.primary;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-body-md;
+                                font-weight: Theme.w-bold;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        VerticalLayout {
+                            alignment: center;
+                            HorizontalLayout {
+                                spacing: Theme.s-3;
+                                alignment: end;
+                                if AppState.cl-dirty: Text {
+                                    text: "UNSAVED CHANGES";
+                                    color: Theme.primary;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    letter-spacing: Theme.ls-label;
+                                    font-weight: Theme.w-bold;
+                                    vertical-alignment: center;
+                                }
+                                PrimaryButton {
+                                    label: "Save Changes";
+                                    icon: "✓";
+                                    btn-height: 26px;
+                                    clicked => { AppState.cl-save-current(); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Editor area.
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: Theme.bg-canvas;
+                    VerticalLayout {
+                        padding: Theme.s-3;
+                        TextEdit {
+                            text <=> AppState.cl-current-body;
+                            edited => { AppState.cl-dirty = true; }
+                            font-size: Theme.font-code;
+                            font-family: Theme.font-mono;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- Settings --------------------------------------------------------------
+
+component SettingsField inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in-out property <string> text;
+    in property <bool> password: false;
+    spacing: Theme.s-1;
+    Text {
+        text: root.label;
+        color: Theme.on-surface-variant;
+        font-family: Theme.font-mono;
+        font-size: Theme.font-code;
+        font-weight: Theme.w-bold;
+    }
+    CustomInput {
+        text <=> root.text;
+        placeholder: root.placeholder;
+        password: root.password;
+    }
+}
+
+component AgentConfigCard inherits Rectangle {
+    in-out property <string> agent-name;
+    in-out property <string> provider;
+    in-out property <string> model-name;
+    in-out property <string> base-url;
+    in-out property <string> auth-token;
+    in property <bool> active: false;
+    callback save();
+    callback restart();
+
+    horizontal-stretch: 1;
+    background: #0f172a;
+    border-radius: Theme.radius-xl;
+    border-width: 1px;
+    border-color: root.active ? Theme.primary : Theme.outline-variant.with-alpha(0.6);
+
+    VerticalLayout {
+        padding: Theme.s-4;
+        spacing: Theme.s-4;
+
+        // Header — agent icon, name, status chip.
+        HorizontalLayout {
+            spacing: Theme.s-2;
+            alignment: stretch;
+            Icon {
+                glyph: root.agent-name == "emma" ? "◐"
+                    : root.agent-name == "brian" ? "⚒"
+                    : "◉";
+                size: 18px;
+                tint:
+                    root.agent-name == "emma" ? Theme.secondary :
+                    root.agent-name == "brian" ? Theme.primary :
+                    root.agent-name == "rain" ? Theme.tertiary :
+                    Theme.on-surface;
+            }
+            Text {
+                text: root.agent-name == "emma" ? "Emma"
+                    : root.agent-name == "brian" ? "Brian"
+                    : root.agent-name == "rain" ? "Rain"
+                    : root.agent-name;
+                color: Theme.on-surface;
+                font-family: Theme.font-display;
+                font-size: Theme.font-head-md;
+                font-weight: Theme.w-semi;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            // Role chip — describes what the agent DOES in bot-hq's trio,
+            // not whether it's "active". Each session spawns one Brian (exec)
+            // + one Rain (monitor); Emma is the always-on solo helper.
+            VerticalLayout {
+                alignment: center;
+                LabelChip {
+                    label:
+                        root.agent-name == "emma" ? "HELPER · SOLO" :
+                        root.agent-name == "brian" ? "EXEC · HANDS" :
+                        root.agent-name == "rain" ? "MONITOR · EYES" :
+                        "";
+                    tint:
+                        root.agent-name == "emma" ? Theme.secondary :
+                        root.agent-name == "brian" ? Theme.primary :
+                        root.agent-name == "rain" ? Theme.tertiary :
+                        Theme.on-surface-variant;
+                }
+            }
+        }
+
+        SettingsField {
+            label: "Provider";
+            placeholder: "OpenAI / Anthropic / Local";
+            text <=> root.provider;
+        }
+        SettingsField {
+            label: "Model Name";
+            placeholder: "claude-sonnet-4-6";
+            text <=> root.model-name;
+        }
+        SettingsField {
+            label: "Base URL";
+            placeholder: "https://api.anthropic.com/v1";
+            text <=> root.base-url;
+        }
+        SettingsField {
+            label: "Auth Token";
+            placeholder: "Optional for local";
+            text <=> root.auth-token;
+            password: true;
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: Theme.s-2;
+            if root.agent-name == "emma":
+                GhostButton {
+                    label: "Restart Emma";
+                    icon: "↻";
+                    clicked => { root.restart(); }
+                }
+            PrimaryButton {
+                label: "Save Configuration";
+                icon: "✓";
+                clicked => { root.save(); }
+            }
+        }
+    }
+}
+
+component SettingsPane inherits Rectangle {
+    background: Theme.bg-canvas;
+    ScrollView {
+        VerticalLayout {
+            padding-left: Theme.s-6;
+            padding-right: Theme.s-6;
+            padding-top: Theme.s-6;
+            padding-bottom: Theme.s-6;
+            spacing: Theme.s-6;
+
+            VerticalLayout {
+                spacing: Theme.s-1;
+                Text {
+                    text: "Agent Configuration";
+                    color: Theme.on-surface;
+                    font-family: Theme.font-display;
+                    font-size: Theme.font-head-lg;
+                    font-weight: Theme.w-bold;
+                    letter-spacing: Theme.ls-headline;
+                }
+                Text {
+                    text: "Manage connection parameters for individual orchestration agents.";
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Theme.s-4;
+                alignment: stretch;
+                for cfg in AppState.agent-configs:
+                    AgentConfigCard {
+                        init => {
+                            self.agent-name = cfg.agent-name;
+                            self.provider = cfg.provider;
+                            self.model-name = cfg.model-name;
+                            self.base-url = cfg.base-url;
+                            self.auth-token = cfg.auth-token;
+                        }
+                        save => {
+                            AppState.save-agent-config({
+                                agent-name: self.agent-name,
+                                provider: self.provider,
+                                model-name: self.model-name,
+                                base-url: self.base-url,
+                                auth-token: self.auth-token,
+                            });
+                        }
+                        restart => {
+                            AppState.emma-restart-confirm-visible = true;
+                        }
+                    }
+            }
+        }
+    }
+}
+
+// ---- Emma overlay (terminal-style per design) ------------------------------
+
+component EmmaMessage inherits VerticalLayout {
+    in property <ChatMsg> msg;
+    property <bool> is-user: msg.author == "user";
+    property <color> author-color:
+        is-user ? Theme.tertiary :
+        msg.author == "emma" ? Theme.primary :
+        msg.author == "brian" ? Theme.primary :
+        msg.author == "rain" ? Theme.secondary :
+        Theme.outline;
+    property <string> author-label:
+        is-user ? "USER" :
+        msg.author == "emma" ? "EMMA" :
+        msg.author == "brian" ? "BRIAN" :
+        msg.author == "rain" ? "RAIN" :
+        msg.author;
+
+    spacing: Theme.s-2;
+
+    HorizontalLayout {
+        spacing: Theme.s-2;
+        alignment: start;
+        Rectangle {
+            width: 24px;
+            height: 24px;
+            border-radius: Theme.radius-default;
+            background: author-color;
+            horizontal-stretch: 0;
+            Icon {
+                glyph: is-user ? "◉" : "▣";
+                size: 12px;
+                tint: Theme.on-primary;
+            }
+        }
+        Text {
+            text: author-label;
+            color: author-color;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            letter-spacing: Theme.ls-label;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+        Text {
+            text: msg.created-at;
+            color: Theme.on-surface-variant;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            vertical-alignment: center;
+        }
+    }
+
+    Rectangle {
+        background: Theme.surface-high;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.outline-variant.with-alpha(0.4);
+        VerticalLayout {
+            padding: Theme.s-3;
+            spacing: Theme.s-2;
+            TextInput {
+                text: msg.content;
+                read-only: true;
+                wrap: word-wrap;
+                single-line: false;
+                color: Theme.on-surface;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-code;
+                selection-background-color: Theme.primary.with-alpha(0.4);
+                selection-foreground-color: Theme.on-surface;
+            }
+        }
+    }
+}
+
+component EmmaPane inherits Rectangle {
+    background: Theme.surface-low;
+    Rectangle {
+        x: 0; y: 0;
+        width: 1px; height: parent.height;
+        background: Theme.outline-variant;
+    }
+    VerticalLayout {
+        spacing: 0px;
+
+        // Header.
+        Rectangle {
+            height: Theme.topbar-h;
+            background: Theme.surface;
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: Theme.outline-variant;
+            }
+            HorizontalLayout {
+                padding-left: Theme.s-4;
+                padding-right: Theme.s-2;
+                spacing: Theme.s-2;
+                alignment: stretch;
+                Icon { glyph: "▤"; size: 18px; tint: Theme.primary; }
+                Text {
+                    text: "Emma Terminal";
+                    color: Theme.on-surface;
+                    font-family: Theme.font-display;
+                    font-size: Theme.font-head-md;
+                    font-weight: Theme.w-semi;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                IconButton {
+                    glyph: "✕";
+                    clicked => { AppState.toggle-emma(); }
+                }
+            }
+        }
+
+        // Messages.
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.surface-low;
+            emma-sv := ScrollView {
+                // See session-sv — same pattern, maintainer's clamp formula.
+                property <int> scroll-tick: AppState.emma-scroll-tick;
+                changed scroll-tick => {
+                    emma-sv.viewport-y = min(0px, -emma-sv.viewport-height + emma-sv.visible-height);
+                }
+                VerticalLayout {
+                    padding: Theme.s-4;
+                    spacing: Theme.s-5;
+                    alignment: start;
+                    for msg in AppState.emma-msgs:
+                        EmmaMessage { msg: msg; }
+                    if AppState.emma-msgs.length == 0:
+                        VerticalLayout {
+                            padding: Theme.s-5;
+                            alignment: center;
+                            Text {
+                                text: "Ask Emma anything.";
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                horizontal-alignment: center;
+                            }
+                        }
+                }
+            }
+        }
+
+        // Pending choice + awaiting banner — Emma's signaling events go here
+        // (she's not a SessionView so active-pending-* doesn't apply to her).
+        if AppState.emma-pending-choice:
+            Rectangle {
+                background: Theme.surface;
+                Rectangle {
+                    x: 0; y: 0;
+                    width: parent.width; height: 1px;
+                    background: Theme.outline-variant;
+                }
+                VerticalLayout {
+                    padding: Theme.s-3;
+                    spacing: Theme.s-2;
+                    Text {
+                        text: AppState.emma-pending-question;
+                        color: Theme.on-surface;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-code;
+                        wrap: word-wrap;
+                    }
+                    for opt in AppState.emma-pending-options:
+                        ChoiceButton {
+                            label: opt;
+                            clicked => {
+                                AppState.choice-clicked(AppState.emma-pending-choice-id, opt);
+                            }
+                        }
+                }
+            }
+        if AppState.emma-awaiting && !AppState.emma-pending-choice:
+            Rectangle {
+                background: Theme.surface;
+                Rectangle {
+                    x: 0; y: 0;
+                    width: parent.width; height: 1px;
+                    background: Theme.outline-variant;
+                }
+                VerticalLayout {
+                    padding: Theme.s-3;
+                    Text {
+                        text: "Emma is waiting on you.";
+                        color: Theme.on-surface-variant;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-code;
+                    }
+                }
+            }
+
+        // Terminal-style command input (Emma IS terminal-y per design).
+        Rectangle {
+            background: Theme.surface;
+            Rectangle {
+                x: 0; y: 0;
+                width: parent.width; height: 1px;
+                background: Theme.outline-variant;
+            }
+            VerticalLayout {
+                padding: Theme.s-3;
+                Rectangle {
+                    height: 36px;
+                    border-radius: Theme.radius-lg;
+                    border-width: 1px;
+                    border-color: cmd.has-focus ? Theme.primary : Theme.outline-variant;
+                    background: Theme.surface-lowest;
+                    animate border-color { duration: 100ms; }
+                    HorizontalLayout {
+                        padding-left: Theme.s-3;
+                        padding-right: Theme.s-3;
+                        spacing: Theme.s-2;
+                        alignment: stretch;
+                        Text {
+                            text: "$";
+                            color: Theme.primary;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-code;
+                            font-weight: Theme.w-bold;
+                            vertical-alignment: center;
+                        }
+                        cmd := TextInput {
+                            color: Theme.on-surface;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-code;
+                            vertical-alignment: center;
+                            single-line: true;
+                            horizontal-stretch: 1;
+                            selection-background-color: Theme.primary.with-alpha(0.4);
+                            selection-foreground-color: Theme.on-surface;
+                            accepted => {
+                                if (self.text != "") {
+                                    AppState.emma-send(self.text);
+                                    self.text = "";
+                                }
+                            }
+                        }
+                        IconButton {
+                            glyph: "▶";
+                            size: 14px;
+                            tint: Theme.primary;
+                            clicked => {
+                                if (cmd.text != "") {
+                                    AppState.emma-send(cmd.text);
+                                    cmd.text = "";
+                                }
+                            }
+                        }
+                    }
+                    if cmd.text == "" && !cmd.has-focus:
+                        HorizontalLayout {
+                            padding-left: 28px;
+                            padding-right: Theme.s-3;
+                            alignment: start;
+                            Text {
+                                text: "Type command...";
+                                color: Theme.on-surface-variant.with-alpha(0.55);
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                vertical-alignment: center;
+                            }
+                        }
+                }
+            }
+        }
+    }
+}
+
+// ---- AppWindow -------------------------------------------------------------
+
+export component AppWindow inherits Window {
+    title: "bot-hq";
+    preferred-width: 1440px;
+    preferred-height: 900px;
+    min-width: 960px;
+    min-height: 600px;
+    background: Theme.bg-canvas;
+
+    VerticalLayout {
+        spacing: 0px;
+        Topbar {}
+
+        // Body — switches by current-tab + active-session-id. Emma overlay
+        // slides in on the right when open.
+        Rectangle {
+            vertical-stretch: 1;
+            HorizontalLayout {
+                spacing: 0px;
+                Rectangle {
+                    horizontal-stretch: 1;
+                    if AppState.current-tab == 0 && AppState.active-session-id == "" : DashboardPane {}
+                    if AppState.current-tab == 0 && AppState.active-session-id != "" : SessionView {}
+                    if AppState.current-tab == 1 : ContextLibraryPane {}
+                    if AppState.current-tab == 2 : SettingsPane {}
+                }
+                if AppState.emma-open: Rectangle {
+                    width: 480px;
+                    EmmaPane {}
+                }
+            }
+        }
+
+        Footer {}
+    }
+
+    // Toast overlay — bottom-center, layered above the main content.
+    if AppState.toast-visible:
+        Rectangle {
+            VerticalLayout {
+                alignment: end;
+                padding-bottom: 32px;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        background: Theme.surface-high;
+                        border-color: Theme.outline-variant;
+                        border-width: 1px;
+                        border-radius: 10px;
+                        min-height: 44px;
+                        HorizontalLayout {
+                            padding-left: Theme.s-5;
+                            padding-right: Theme.s-5;
+                            padding-top: Theme.s-3;
+                            padding-bottom: Theme.s-3;
+                            Text {
+                                text: AppState.toast-text;
+                                color: Theme.on-surface;
+                                font-size: Theme.font-body-md;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // Auto-dismiss toast after 3 seconds. Bound `running` keeps the timer
+    // dormant unless a toast is visible.
+    Timer {
+        interval: 3s;
+        running: AppState.toast-visible;
+        triggered => {
+            AppState.toast-visible = false;
+        }
+    }
+
+    // Emma restart confirmation modal. Singleton — only one can be visible.
+    // Center-anchored card over a dimmed backdrop. Backdrop swallows clicks so
+    // the user can't interact with the app behind it.
+    if AppState.emma-restart-confirm-visible:
+        Rectangle {
+            background: #00000088;
+            // Swallow clicks on the backdrop (no dismiss-on-outside-click for
+            // safety — kill-and-respawn is a real action, must be explicit).
+            TouchArea { }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 440px;
+                        background: Theme.surface-high;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Theme.outline-variant;
+                        VerticalLayout {
+                            padding: Theme.s-5;
+                            spacing: Theme.s-4;
+                            Text {
+                                text: "Restart Emma?";
+                                color: Theme.on-surface;
+                                font-family: Theme.font-display;
+                                font-size: Theme.font-head-md;
+                                font-weight: Theme.w-bold;
+                            }
+                            Text {
+                                text: "She'll re-spawn with the saved model. Her in-process context resets — earlier turns stay visible in the chat, but Emma herself won't remember them.";
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                alignment: end;
+                                spacing: Theme.s-2;
+                                GhostButton {
+                                    label: "Cancel";
+                                    clicked => {
+                                        AppState.emma-restart-confirm-visible = false;
+                                    }
+                                }
+                                PrimaryButton {
+                                    label: "Restart";
+                                    icon: "↻";
+                                    clicked => {
+                                        AppState.emma-restart-confirm-visible = false;
+                                        AppState.restart-emma();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+}

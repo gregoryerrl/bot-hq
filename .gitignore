@@ -13,6 +13,7 @@ bot-hq.db
 # Build output
 /out/
 /dist/
+/target/
 
 # Worktrees
 .worktrees/
@@ -23,3 +24,9 @@ bot-hq.db
 
 # Stale coder configs
 .bot-hq-coder-*-mcp.json
+
+# Transient debug + audit artifacts (not for commit)
+*.log
+/Screenshot*.png
+/phase-*-audit.csv
+/docs/commit-message-draft.md

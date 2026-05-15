@@ -1,0 +1,1215 @@
+//! Slint <-> core glue.
+//!
+//! `install_view_model` is the bottleneck called from `main.rs`. It:
+//! - subscribes to signaling events and pushes them into Slint models;
+//! - wires the Slint global callbacks (`broadcast`, `open-session`, etc.) to
+//!   `core::AppState` methods (running on a tokio runtime);
+//! - kicks off periodic refresh tasks for chat history.
+//!
+//! Slint's main-loop is on the OS main thread; tokio runs on its own thread.
+//! We use `slint::invoke_from_event_loop` to mutate Slint models from tokio.
+
+use crate::core::{AppState as CoreAppState, IpavPhase};
+use crate::signaling::SignalingEvent;
+use crate::storage::{AgentConfig as DbAgentConfig, Message};
+use crate::{
+    AgentConfigRow, AppState as SlintAppState, AppWindow, CLFileEntry, ChatMsg, SessionTile,
+};
+use once_cell::sync::Lazy;
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::runtime::Handle;
+use tokio::sync::broadcast;
+use tracing::warn;
+
+/// Per-session fingerprint of the last-rendered message list. Used to short-
+/// circuit `set_session_msgs` when no new messages arrived — replacing a
+/// ModelRc with identical content still tears down + rebuilds every row,
+/// which clears TextInput selection (you can't highlight text mid-poll).
+///
+/// Fingerprint = (count, last_msg_id). Cheap to compute; misses an edited
+/// middle message (rare and we don't edit messages in place anyway).
+static MSG_FINGERPRINTS: Lazy<Mutex<HashMap<String, (usize, i64)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Whichever session_id is currently rendered into `session-msgs`. We compare
+/// against the refresh target so a session-switch (A→B) force-reloads the
+/// model even if B's fingerprint is unchanged since the last visit. Without
+/// this, returning to a session you've seen before keeps the previous
+/// session's chat visible.
+static DISPLAYED_SESSION: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+
+fn fingerprint(msgs: &[Message]) -> (usize, i64) {
+    (msgs.len(), msgs.last().map(|m| m.id).unwrap_or(0))
+}
+
+/// Returns true iff the fingerprint changed and the cache was updated.
+fn fingerprint_changed(session_id: &str, fp: (usize, i64)) -> bool {
+    let mut cache = MSG_FINGERPRINTS.lock().expect("fingerprint cache poisoned");
+    if cache.get(session_id) == Some(&fp) {
+        false
+    } else {
+        cache.insert(session_id.to_string(), fp);
+        true
+    }
+}
+
+/// Returns true iff the refresh target session_id differs from whatever's
+/// currently displayed in `session-msgs`. Side-effect: updates the tracker.
+/// Use to force a session-switch reload regardless of fingerprint state.
+fn displayed_session_changed(session_id: &str) -> bool {
+    let mut current = DISPLAYED_SESSION.lock().expect("displayed session poisoned");
+    if *current != session_id {
+        *current = session_id.to_string();
+        true
+    } else {
+        false
+    }
+}
+
+// ---- Send-safe shadow types for cross-thread refreshes ---------------------
+
+#[derive(Clone)]
+struct TileData {
+    id: String,
+    title: String,
+    phase: String,
+    last_activity: String,
+    awaiting: bool,
+    pending_choice: bool,
+    pending_question: String,
+    pending_options: Vec<String>,
+    pending_choice_id: String,
+    quickview: String,
+}
+
+#[derive(Clone)]
+struct AgentConfigData {
+    agent_name: String,
+    provider: String,
+    model_name: String,
+    base_url: String,
+    auth_token: String,
+}
+
+#[derive(Clone)]
+struct CLEntryData {
+    relative_path: String,
+    display_name: String,
+    is_dir: bool,
+    depth: i32,
+}
+
+#[derive(Clone)]
+struct ChatMsgData {
+    author: String,
+    kind: String,
+    content: String,
+    created_at: String,
+}
+
+fn tile_from_data(d: TileData) -> SessionTile {
+    let opts: Vec<SharedString> = d
+        .pending_options
+        .into_iter()
+        .map(SharedString::from)
+        .collect();
+    SessionTile {
+        id: SharedString::from(d.id),
+        title: SharedString::from(d.title),
+        phase: SharedString::from(d.phase),
+        last_activity: SharedString::from(d.last_activity),
+        awaiting: d.awaiting,
+        pending_choice: d.pending_choice,
+        pending_question: SharedString::from(d.pending_question),
+        pending_options: ModelRc::new(VecModel::from(opts)),
+        pending_choice_id: SharedString::from(d.pending_choice_id),
+        quickview: SharedString::from(d.quickview),
+    }
+}
+
+fn agent_cfg_from_data(d: AgentConfigData) -> AgentConfigRow {
+    AgentConfigRow {
+        agent_name: SharedString::from(d.agent_name),
+        provider: SharedString::from(d.provider),
+        model_name: SharedString::from(d.model_name),
+        base_url: SharedString::from(d.base_url),
+        auth_token: SharedString::from(d.auth_token),
+    }
+}
+
+fn cl_entry_from_data(d: CLEntryData) -> CLFileEntry {
+    CLFileEntry {
+        relative_path: SharedString::from(d.relative_path),
+        display_name: SharedString::from(d.display_name),
+        is_dir: d.is_dir,
+        depth: d.depth,
+    }
+}
+
+fn chat_from_data(d: ChatMsgData) -> ChatMsg {
+    ChatMsg {
+        author: SharedString::from(d.author),
+        kind: SharedString::from(d.kind),
+        content: SharedString::from(d.content),
+        created_at: SharedString::from(d.created_at),
+    }
+}
+
+/// Install all callbacks + start background refresh tasks. Returns once the
+/// initial pull-from-storage finishes — callers can run the Slint event loop
+/// afterwards.
+pub async fn install_view_model(
+    window: &AppWindow,
+    core: Arc<CoreAppState>,
+    rt: Handle,
+) -> anyhow::Result<()> {
+    let weak = window.as_weak();
+
+    // ---- Initial state push --------------------------------------------
+    refresh_dashboard(&weak, &core).await;
+    refresh_agent_configs(&weak, &core).await;
+    refresh_cl_tree(&weak, &core).await;
+
+    // ---- Callbacks -----------------------------------------------------
+    let app = window.global::<SlintAppState>();
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_open_session(move |session_id| {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            let session_id = session_id.to_string();
+            rt.spawn(async move {
+                // Sessions persist in the DB across app restarts but their live
+                // subprocess handles do NOT. If the user clicks a session that
+                // existed before the current process, the `sessions` HashMap
+                // won't have it and broadcasts will fail with "no live session".
+                // Auto-respawn here so the session is live by the time the user
+                // tries to broadcast. Idempotent — no-op if already running.
+                if let Err(e) = core.ensure_session_started(&session_id).await {
+                    warn!(
+                        session_id = %session_id,
+                        ?e,
+                        "ensure_session_started failed — chat will be inactive (check claude auth)"
+                    );
+                }
+                let _ = refresh_session_view(&weak, &core, &session_id).await;
+                update_active_session_id(&weak, &session_id);
+                // Inherit awaiting/pending state from the tile we just opened.
+                // Without this, the active-* globals carry over from whichever
+                // session was previously active — "Need user input" showed on
+                // every session you switched to, even if only one needed it.
+                sync_active_from_tile(&weak, &session_id);
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        app.on_back_to_dashboard(move || {
+            update_active_session_id(&weak, "");
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_advance_phase(move |chip| {
+            let target = match chip.as_str() {
+                "I" => IpavPhase::Investigate,
+                "P" => IpavPhase::Plan,
+                "A" => IpavPhase::Apply,
+                "V" => IpavPhase::Verify,
+                _ => return,
+            };
+            // Read Slint state on the event-loop thread (we ARE here, in the
+            // callback). Calling current_session_id INSIDE rt.spawn would return
+            // "" because Weak::upgrade fails off-thread, and the broadcast/phase
+            // would silently no-op.
+            let session_id = current_session_id(&weak);
+            if session_id.is_empty() {
+                return;
+            }
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                if let Err(e) = core.advance_phase(&session_id, target).await {
+                    warn!(?e, "advance_phase failed");
+                }
+                let _ = refresh_session_view(&weak, &core, &session_id).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_broadcast(move |text| {
+            // See on_advance_phase: read session_id on the event-loop thread
+            // FIRST, then spawn the async work. Reading inside rt.spawn yields
+            // "" and the broadcast silently no-ops (the user's original bug).
+            let session_id = current_session_id(&weak);
+            let text = text.to_string();
+            if session_id.is_empty() || text.trim().is_empty() {
+                return;
+            }
+            // The user just answered — clear "Need user input" for this session.
+            // mark_awaiting_user set it; without an explicit clear, the banner
+            // stays sticky across sessions forever.
+            clear_awaiting_for(&weak, &session_id);
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                if let Err(e) = core.broadcast(&session_id, &text).await {
+                    warn!(?e, "broadcast failed");
+                }
+                let _ = refresh_session_view(&weak, &core, &session_id).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_emma_send(move |text| {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            let text = text.to_string();
+            // Same as on_broadcast: user reply clears Emma's awaiting flag.
+            clear_emma_awaiting(&weak);
+            rt.spawn(async move {
+                if text.trim().is_empty() {
+                    return;
+                }
+                if let Err(e) = core.broadcast("emma", &text).await {
+                    warn!(?e, "emma send failed");
+                }
+                let _ = refresh_emma(&weak, &core).await;
+            });
+        });
+    }
+
+    {
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_choice_clicked(move |choice_id, picked| {
+            let core = Arc::clone(&core);
+            let choice_id = choice_id.to_string();
+            let picked = picked.to_string();
+            rt.spawn(async move {
+                if let Err(e) = core.resolve_choice(&choice_id, picked).await {
+                    warn!(?e, "resolve_choice");
+                }
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_create_session(move |title, working_repo| {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            let title = title.to_string();
+            let path: Option<PathBuf> = if working_repo.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(working_repo.to_string()))
+            };
+            rt.spawn(async move {
+                match core.open_session(title, path).await {
+                    Ok(id) => {
+                        refresh_dashboard(&weak, &core).await;
+                        // refresh_session_view atomically sets session-msgs +
+                        // active-session-id in one slint invoke — calling
+                        // update_active_session_id separately before it caused
+                        // a flash: Slint rendered SessionView with active=new_id
+                        // but session-msgs still holding the previous session's
+                        // chat between the two invokes.
+                        let _ = refresh_session_view(&weak, &core, &id).await;
+                    }
+                    Err(e) => warn!(?e, "open_session failed"),
+                }
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_save_agent_config(move |row| {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            let cfg = DbAgentConfig {
+                agent_name: row.agent_name.to_string(),
+                provider: row.provider.to_string(),
+                model_name: row.model_name.to_string(),
+                base_url: optional(row.base_url.to_string()),
+                auth_token: optional(row.auth_token.to_string()),
+                updated_at: String::new(),
+            };
+            rt.spawn(async move {
+                match core.storage.upsert_agent_config(&cfg).await {
+                    Err(e) => warn!(?e, "upsert agent_config"),
+                    Ok(()) => {
+                        // Session agents (brian/rain) bake env vars at spawn, so a
+                        // config edit only affects the next-spawned session. Tell
+                        // the user so silent stale-config drift doesn't happen.
+                        // Emma has her own Restart button so we skip the toast.
+                        if cfg.agent_name == "brian" || cfg.agent_name == "rain" {
+                            show_toast(&weak, "Changes will apply to new sessions.");
+                        }
+                    }
+                }
+                refresh_agent_configs(&weak, &core).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_restart_emma(move || {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                match core.restart_emma().await {
+                    Ok(()) => {
+                        show_toast(&weak, "Emma restarted with the saved model.");
+                    }
+                    Err(e) => {
+                        warn!(?e, "restart_emma");
+                        show_toast(&weak, "Restart failed — check logs.");
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_open_file(move |relative| {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            let rel = relative.to_string();
+            rt.spawn(async move {
+                let path = core.paths.data_dir.join(&rel);
+                let body = std::fs::read_to_string(&path).unwrap_or_default();
+                update_cl_current(&weak, &rel, &body);
+                clear_cl_dirty(&weak);
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_save_current(move || {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                let (rel, body) = current_cl_state(&weak);
+                if rel.is_empty() {
+                    return;
+                }
+                let path = core.paths.data_dir.join(&rel);
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::write(&path, body) {
+                    Ok(()) => clear_cl_dirty(&weak),
+                    Err(e) => warn!(?e, "CL save"),
+                }
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        app.on_toggle_emma(move || {
+            if let Some(handle) = weak.upgrade() {
+                let app = handle.global::<SlintAppState>();
+                app.set_emma_open(!app.get_emma_open());
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_refresh(move || {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                refresh_cl_tree(&weak, &core).await;
+            });
+        });
+    }
+
+    // ---- Signaling event pump ------------------------------------------
+    let mut sub = core.subscribe_signaling();
+    let weak_for_sub = weak.clone();
+    let core_for_sub = Arc::clone(&core);
+    rt.spawn(async move {
+        loop {
+            match sub.recv().await {
+                Ok(ev) => handle_signaling_event(&weak_for_sub, &core_for_sub, ev).await,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    // ---- Periodic refresh (cheap; re-pulls active session, emma, dashboard, CL) ----
+    //
+    // CL tree refresh runs at 1/4 cadence (every 2s) — the tree changes rarely
+    // (user-edited files, occasional new project), and a full directory walk is
+    // costlier than a sqlite query. Counter is plain int because the closure
+    // owns it.
+    let weak_for_poll = weak.clone();
+    let core_for_poll = Arc::clone(&core);
+    rt.spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_millis(500));
+        let mut tick = 0u64;
+        loop {
+            ticker.tick().await;
+            tick = tick.wrapping_add(1);
+            // current_session_id needs the event-loop thread; use the async hop.
+            // Without this, the polling refresh would never fire because we'd
+            // always see session_id="".
+            let session_id = current_session_id_async(&weak_for_poll).await;
+            if !session_id.is_empty() {
+                let _ = refresh_session_view(&weak_for_poll, &core_for_poll, &session_id).await;
+            }
+            let _ = refresh_emma(&weak_for_poll, &core_for_poll).await;
+            refresh_dashboard(&weak_for_poll, &core_for_poll).await;
+            // CL tree refresh every 2 seconds (4 × 500ms).
+            if tick % 4 == 0 {
+                refresh_cl_tree(&weak_for_poll, &core_for_poll).await;
+            }
+        }
+    });
+
+    Ok(())
+}
+
+// ---- Helpers -----------------------------------------------------------
+
+fn optional(s: String) -> Option<String> {
+    if s.trim().is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Render a tool_use JSON blob as a friendly one-liner.
+/// Input shape: `{"tool_use_id":"...","name":"Bash","input":{...}}`.
+fn format_tool_use(raw: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("tool");
+    let input = v.get("input").cloned().unwrap_or(serde_json::Value::Null);
+    let snippet = tool_input_snippet(name, &input);
+    if snippet.is_empty() {
+        format!("🔧 {}", name)
+    } else {
+        format!("🔧 {} · {}", name, snippet)
+    }
+}
+
+/// Render a tool_result JSON blob as a friendly one-liner.
+/// Input shape: `{"tool_use_id":"...","content":"...","is_error":false}`.
+fn format_tool_result(raw: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
+    let is_error = v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false);
+    let body = match v.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    };
+    let icon = if is_error { "✗" } else { "✓" };
+    let preview = truncate(&body, 240);
+    if preview.is_empty() {
+        format!("{} result", icon)
+    } else {
+        format!("{} {}", icon, preview)
+    }
+}
+
+/// Pick a meaningful snippet from a tool's input. Per-tool heuristics where it
+/// helps; generic fall-through otherwise.
+fn tool_input_snippet(name: &str, input: &serde_json::Value) -> String {
+    let direct_field = match name {
+        "Bash" => input.get("command").and_then(|v| v.as_str()),
+        "Read" | "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
+            input.get("file_path").and_then(|v| v.as_str())
+        }
+        "Grep" | "Glob" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .or_else(|| input.get("path").and_then(|v| v.as_str())),
+        "WebFetch" | "WebSearch" => input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .or_else(|| input.get("query").and_then(|v| v.as_str())),
+        _ => None,
+    };
+    if let Some(s) = direct_field {
+        return truncate(s, 120);
+    }
+    // Generic fallback: compact JSON, trimmed.
+    truncate(&input.to_string(), 120)
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    let s = s.trim();
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max_chars).collect();
+        out.push('…');
+        out
+    }
+}
+
+async fn refresh_dashboard(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
+    let sessions = match core.list_active_sessions().await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(?e, "list_active_sessions");
+            return;
+        }
+    };
+    let mut tiles: Vec<TileData> = Vec::with_capacity(sessions.len());
+    for s in &sessions {
+        if s.id == "emma" {
+            continue; // emma handled separately in the half-pane.
+        }
+        let phase = core
+            .current_phase(&s.id)
+            .await
+            .map(|p| p.chip().to_string())
+            .unwrap_or_else(|| "".to_string());
+        // Quickview: last non-empty message rendered as "author: snippet…".
+        // Cheap query — storage already orders by (created_at, id).
+        let quickview = core
+            .storage
+            .messages_for_session(&s.id, None)
+            .await
+            .ok()
+            .and_then(|msgs| msgs.into_iter().rev().find(|m| !m.content.trim().is_empty()))
+            .map(|m| {
+                let body = match m.kind.as_str() {
+                    "tool_use" => format_tool_use(&m.content),
+                    "tool_result" => format_tool_result(&m.content),
+                    _ => m.content,
+                };
+                let first_line: String = body
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(72)
+                    .collect();
+                let suffix = if body.lines().count() > 1 || body.chars().count() > 72 {
+                    "…"
+                } else {
+                    ""
+                };
+                format!("{}: {}{}", m.author, first_line, suffix)
+            })
+            .unwrap_or_default();
+        tiles.push(TileData {
+            id: s.id.clone(),
+            title: s.title.clone(),
+            phase,
+            last_activity: s.created_at.clone(),
+            awaiting: false,
+            pending_choice: false,
+            pending_question: String::new(),
+            pending_options: Vec::new(),
+            pending_choice_id: String::new(),
+            quickview,
+        });
+    }
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            // Snapshot per-id pending/awaiting state from the EXISTING model
+            // before we rebuild. SignalingEvent::PendingChoice and AwaitingUser
+            // set these per-tile via update_tile_*; we don't want this 500ms
+            // rebuild to wipe them — that was making the choice dialog flicker
+            // away after a fraction of a second on the dashboard.
+            let existing = app.get_sessions();
+            let mut carry: std::collections::HashMap<String, SessionTile> =
+                std::collections::HashMap::new();
+            for i in 0..existing.row_count() {
+                if let Some(tile) = existing.row_data(i) {
+                    carry.insert(tile.id.to_string(), tile);
+                }
+            }
+            let rows: Vec<SessionTile> = tiles
+                .into_iter()
+                .map(|d| {
+                    let mut new_tile = tile_from_data(d);
+                    if let Some(prev) = carry.get(&new_tile.id.to_string()) {
+                        new_tile.awaiting = prev.awaiting;
+                        new_tile.pending_choice = prev.pending_choice;
+                        new_tile.pending_question = prev.pending_question.clone();
+                        new_tile.pending_options = prev.pending_options.clone();
+                        new_tile.pending_choice_id = prev.pending_choice_id.clone();
+                    }
+                    new_tile
+                })
+                .collect();
+            app.set_sessions(ModelRc::new(VecModel::from(rows)));
+        }
+    });
+}
+
+async fn refresh_agent_configs(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
+    let cfgs = match core.storage.list_agent_configs().await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(?e, "list_agent_configs");
+            return;
+        }
+    };
+    let data: Vec<AgentConfigData> = cfgs
+        .into_iter()
+        .map(|c| AgentConfigData {
+            agent_name: c.agent_name,
+            provider: c.provider,
+            model_name: c.model_name,
+            base_url: c.base_url.unwrap_or_default(),
+            auth_token: c.auth_token.unwrap_or_default(),
+        })
+        .collect();
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let rows: Vec<AgentConfigRow> = data.into_iter().map(agent_cfg_from_data).collect();
+            handle
+                .global::<SlintAppState>()
+                .set_agent_configs(ModelRc::new(VecModel::from(rows)));
+        }
+    });
+}
+
+async fn refresh_cl_tree(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
+    let root = core.paths.data_dir.clone();
+    let entries = walk_cl(&root);
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let rows: Vec<CLFileEntry> = entries.into_iter().map(cl_entry_from_data).collect();
+            handle
+                .global::<SlintAppState>()
+                .set_cl_tree(ModelRc::new(VecModel::from(rows)));
+        }
+    });
+}
+
+fn walk_cl(root: &std::path::Path) -> Vec<CLEntryData> {
+    fn recurse(out: &mut Vec<CLEntryData>, dir: &std::path::Path, root: &std::path::Path, depth: i32) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let mut sorted: Vec<_> = entries.flatten().collect();
+        // Directories first, then files; alphabetical within each group.
+        sorted.sort_by(|a, b| {
+            let ad = a.path().is_dir();
+            let bd = b.path().is_dir();
+            match (ad, bd) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.file_name().cmp(&b.file_name()),
+            }
+        });
+        for e in sorted {
+            let p = e.path();
+            // Skip dotfiles + the .local DB dir.
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
+            let is_dir = p.is_dir();
+            out.push(CLEntryData {
+                relative_path: rel,
+                display_name: name.to_string(),
+                is_dir,
+                depth,
+            });
+            if is_dir {
+                recurse(out, &p, root, depth + 1);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    recurse(&mut out, root, root, 0);
+    out
+}
+
+async fn refresh_session_view(
+    weak: &Weak<AppWindow>,
+    core: &Arc<CoreAppState>,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let msgs = core
+        .storage
+        .messages_for_session(session_id, None)
+        .await?;
+    // Short-circuit on no-change: avoid rebuilding the Slint model when nothing
+    // arrived since the last poll. Prevents the 500ms re-render from tearing
+    // down TextInput rows mid-selection (highlighting was being cleared).
+    //
+    // BUT: also force-reload on session switch. The fingerprint cache is keyed
+    // by session_id, so switching A→B→A would skip set_session_msgs when A's
+    // fingerprint hasn't changed — leaving B's chat visible in A's view.
+    let fp = fingerprint(&msgs);
+    let switched = displayed_session_changed(session_id);
+    let content_changed = switched || fingerprint_changed(session_id, fp);
+    let session_row = core.storage.get_session(session_id).await?;
+    let title = session_row
+        .as_ref()
+        .map(|s| s.title.clone())
+        .unwrap_or_default();
+    let brian_model = session_row
+        .as_ref()
+        .and_then(|s| s.brian_model_at_spawn.clone())
+        .unwrap_or_default();
+    let rain_model = session_row
+        .as_ref()
+        .and_then(|s| s.rain_model_at_spawn.clone())
+        .unwrap_or_default();
+    let phase = core
+        .current_phase(session_id)
+        .await
+        .map(|p| p.chip().to_string())
+        .unwrap_or_else(|| "".to_string());
+
+    // Single chronological projection — storage already returns rows ordered by
+    // (session_id, created_at, id). Everyone sees one feed: brian, rain, user,
+    // phase_change events all interleaved.
+    let chrono: Vec<ChatMsgData> = if content_changed {
+        msgs.iter().map(to_chat_data).collect()
+    } else {
+        Vec::new()
+    };
+
+    let weak = weak.clone();
+    let session_id = session_id.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            if content_changed {
+                let rows: Vec<ChatMsg> = chrono.into_iter().map(chat_from_data).collect();
+                app.set_session_msgs(ModelRc::new(VecModel::from(rows)));
+                // Tick the auto-scroll counter — slint side reacts and pins
+                // viewport to bottom. Only when content actually changed so
+                // we don't yank the user back to bottom on every 500ms poll.
+                app.set_session_scroll_tick(app.get_session_scroll_tick().wrapping_add(1));
+            }
+            app.set_active_title(SharedString::from(title));
+            app.set_active_phase(SharedString::from(phase));
+            app.set_active_session_id(SharedString::from(session_id));
+            app.set_active_brian_model(SharedString::from(brian_model));
+            app.set_active_rain_model(SharedString::from(rain_model));
+        }
+    });
+    Ok(())
+}
+
+async fn refresh_emma(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) -> anyhow::Result<()> {
+    let msgs = core.storage.messages_for_session("emma", None).await?;
+    // Same skip-if-unchanged as refresh_session_view — keep highlight alive.
+    let fp = fingerprint(&msgs);
+    if !fingerprint_changed("emma", fp) {
+        return Ok(());
+    }
+    let data: Vec<ChatMsgData> = msgs.iter().map(to_chat_data).collect();
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            let rows: Vec<ChatMsg> = data.into_iter().map(chat_from_data).collect();
+            app.set_emma_msgs(ModelRc::new(VecModel::from(rows)));
+            // Pin Emma's scroll to bottom on content change (see SessionView).
+            app.set_emma_scroll_tick(app.get_emma_scroll_tick().wrapping_add(1));
+        }
+    });
+    Ok(())
+}
+
+fn to_chat_data(m: &Message) -> ChatMsgData {
+    // Tool-use / tool-result rows are stored as JSON blobs (see core::duo +
+    // core::session::pump_emma_agent). The UI shouldn't see raw JSON; format
+    // friendly prose with an icon prefix here.
+    let content = match m.kind.as_str() {
+        "tool_use" => format_tool_use(&m.content),
+        "tool_result" => format_tool_result(&m.content),
+        _ => m.content.clone(),
+    };
+    ChatMsgData {
+        author: m.author.clone(),
+        kind: m.kind.clone(),
+        content,
+        created_at: m.created_at.clone(),
+    }
+}
+
+async fn handle_signaling_event(
+    weak: &Weak<AppWindow>,
+    _core: &Arc<CoreAppState>,
+    ev: SignalingEvent,
+) {
+    match ev {
+        SignalingEvent::SessionCloseRequest {
+            session_id,
+            agent,
+            archive,
+        } => {
+            tracing::info!(
+                session_id = %session_id,
+                agent = %agent,
+                archive,
+                "agent-initiated session close"
+            );
+            if let Err(e) = _core.close_session(&session_id, archive).await {
+                tracing::warn!(?e, %session_id, "agent-initiated close_session failed");
+                return;
+            }
+            // Refresh dashboard so the closed session disappears from tiles.
+            refresh_dashboard(weak, _core).await;
+            // If the closed session was the active one, kick back to dashboard.
+            let weak2 = weak.clone();
+            let closed_id = session_id.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(handle) = weak2.upgrade() {
+                    let app = handle.global::<SlintAppState>();
+                    if app.get_active_session_id().to_string() == closed_id {
+                        app.set_active_session_id(SharedString::new());
+                        app.set_active_awaiting(false);
+                        app.set_active_pending_choice(false);
+                    }
+                }
+            });
+        }
+        SignalingEvent::PendingChoice(p) => {
+            let weak = weak.clone();
+            let session_id = p.session_id.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(handle) = weak.upgrade() {
+                    let app = handle.global::<SlintAppState>();
+                    let opts: Vec<SharedString> =
+                        p.options.iter().map(|s| SharedString::from(s.clone())).collect();
+                    if session_id == "emma" {
+                        // Emma has its own panel — route through emma-pending-*.
+                        app.set_emma_pending_choice(true);
+                        app.set_emma_pending_question(SharedString::from(p.question.clone()));
+                        app.set_emma_pending_options(ModelRc::new(VecModel::from(opts)));
+                        app.set_emma_pending_choice_id(SharedString::from(p.choice_id.clone()));
+                        return;
+                    }
+                    let active = app.get_active_session_id().to_string();
+                    if active == session_id {
+                        app.set_active_pending_choice(true);
+                        app.set_active_pending_question(SharedString::from(p.question.clone()));
+                        app.set_active_pending_options(ModelRc::new(VecModel::from(opts)));
+                        app.set_active_pending_choice_id(SharedString::from(p.choice_id.clone()));
+                    }
+                    // Tile-level pending choice rendering (when not the active view).
+                    // The dashboard tile renders the same question + options
+                    // so the user can answer without opening the session.
+                    update_tile_pending_choice(&app, &p);
+                }
+            });
+        }
+        SignalingEvent::AwaitingUser {
+            session_id,
+            agent: _,
+            reason: _,
+        } => {
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(handle) = weak.upgrade() {
+                    let app = handle.global::<SlintAppState>();
+                    if session_id == "emma" {
+                        app.set_emma_awaiting(true);
+                        return;
+                    }
+                    if app.get_active_session_id().to_string() == session_id {
+                        app.set_active_awaiting(true);
+                    }
+                    update_tile_awaiting(&app, &session_id, true);
+                }
+            });
+        }
+        SignalingEvent::ChoiceResolved { .. } => {
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(handle) = weak.upgrade() {
+                    let app = handle.global::<SlintAppState>();
+                    // Clear BOTH active-* and emma-* — we don't have the
+                    // session_id on the resolve event (signaling::bridge
+                    // doesn't carry it forward), so blank both surfaces.
+                    // Also walk tiles to clear any matching tile state.
+                    app.set_active_pending_choice(false);
+                    app.set_active_pending_question(SharedString::new());
+                    app.set_active_pending_options(ModelRc::new(VecModel::from(
+                        Vec::<SharedString>::new(),
+                    )));
+                    app.set_active_pending_choice_id(SharedString::new());
+                    app.set_emma_pending_choice(false);
+                    app.set_emma_pending_question(SharedString::new());
+                    app.set_emma_pending_options(ModelRc::new(VecModel::from(
+                        Vec::<SharedString>::new(),
+                    )));
+                    app.set_emma_pending_choice_id(SharedString::new());
+                    // Clear pending state on whichever tile had it.
+                    let model = app.get_sessions();
+                    for i in 0..model.row_count() {
+                        if let Some(mut tile) = model.row_data(i) {
+                            if tile.pending_choice {
+                                tile.pending_choice = false;
+                                tile.pending_question = SharedString::new();
+                                tile.pending_options = ModelRc::new(VecModel::from(
+                                    Vec::<SharedString>::new(),
+                                ));
+                                tile.pending_choice_id = SharedString::new();
+                                model.set_row_data(i, tile);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Copy a session tile's (awaiting, pending_*) state into the global
+/// active-* properties. Called when the user opens a session so the
+/// AttentionBanner + choice prompt reflect THIS session's state, not
+/// whatever was active before.
+fn sync_active_from_tile(weak: &Weak<AppWindow>, session_id: &str) {
+    let weak = weak.clone();
+    let session_id = session_id.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            let model = app.get_sessions();
+            for i in 0..model.row_count() {
+                if let Some(tile) = model.row_data(i) {
+                    if tile.id.to_string() == session_id {
+                        app.set_active_awaiting(tile.awaiting);
+                        app.set_active_pending_choice(tile.pending_choice);
+                        app.set_active_pending_question(tile.pending_question.clone());
+                        app.set_active_pending_options(tile.pending_options.clone());
+                        app.set_active_pending_choice_id(tile.pending_choice_id.clone());
+                        return;
+                    }
+                }
+            }
+            // No matching tile (e.g., emma) → clear everything.
+            app.set_active_awaiting(false);
+            app.set_active_pending_choice(false);
+            app.set_active_pending_question(SharedString::new());
+            app.set_active_pending_options(ModelRc::new(VecModel::from(
+                Vec::<SharedString>::new(),
+            )));
+            app.set_active_pending_choice_id(SharedString::new());
+        }
+    });
+}
+
+/// Clear the awaiting-user flag for a session — both the global active-*
+/// pair (if it's the active session) and the matching dashboard tile.
+/// Called when the user sends a message answering the request.
+fn clear_awaiting_for(weak: &Weak<AppWindow>, session_id: &str) {
+    let weak = weak.clone();
+    let session_id = session_id.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            if app.get_active_session_id().to_string() == session_id {
+                app.set_active_awaiting(false);
+            }
+            let model = app.get_sessions();
+            for i in 0..model.row_count() {
+                if let Some(mut tile) = model.row_data(i) {
+                    if tile.id.to_string() == session_id {
+                        tile.awaiting = false;
+                        model.set_row_data(i, tile);
+                        break;
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Emma counterpart of clear_awaiting_for. Emma has no dashboard tile so we
+/// only clear the (future) emma-specific awaiting state. Today emma's
+/// awaiting flag lives on active-awaiting when emma is the active session,
+/// but emma is more typically the side panel. Clearing both is harmless.
+fn clear_emma_awaiting(weak: &Weak<AppWindow>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_emma_awaiting(false);
+            app.set_emma_pending_choice(false);
+            app.set_emma_pending_question(SharedString::new());
+            app.set_emma_pending_options(ModelRc::new(VecModel::from(
+                Vec::<SharedString>::new(),
+            )));
+            app.set_emma_pending_choice_id(SharedString::new());
+        }
+    });
+}
+
+fn update_tile_pending_choice(app: &SlintAppState, p: &crate::signaling::PendingChoice) {
+    // Always update the tile regardless of whether this session is the
+    // currently-active one. Earlier we skipped active sessions on the theory
+    // that active-* pair held the truth — but when the user returned to the
+    // dashboard, the badge vanished because the tile was never set. Tile is
+    // now the source of truth; active-* is a mirror populated on session open.
+    let model = app.get_sessions();
+    for i in 0..model.row_count() {
+        if let Some(mut tile) = model.row_data(i) {
+            if tile.id.to_string() == p.session_id {
+                let opts: Vec<SharedString> =
+                    p.options.iter().map(|s| SharedString::from(s.clone())).collect();
+                tile.pending_choice = true;
+                tile.pending_question = SharedString::from(p.question.clone());
+                tile.pending_options = ModelRc::new(VecModel::from(opts));
+                tile.pending_choice_id = SharedString::from(p.choice_id.clone());
+                model.set_row_data(i, tile);
+            }
+        }
+    }
+}
+
+fn update_tile_awaiting(app: &SlintAppState, session_id: &str, awaiting: bool) {
+    // See update_tile_pending_choice — tile is the source of truth.
+    let model = app.get_sessions();
+    for i in 0..model.row_count() {
+        if let Some(mut tile) = model.row_data(i) {
+            if tile.id.to_string() == session_id {
+                tile.awaiting = awaiting;
+                model.set_row_data(i, tile);
+            }
+        }
+    }
+}
+
+fn update_active_session_id(weak: &Weak<AppWindow>, id: &str) {
+    let weak = weak.clone();
+    let id = id.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            handle
+                .global::<SlintAppState>()
+                .set_active_session_id(SharedString::from(id));
+        }
+    });
+}
+
+fn show_toast(weak: &Weak<AppWindow>, text: &str) {
+    let weak = weak.clone();
+    let text = text.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_toast_text(SharedString::from(text));
+            app.set_toast_visible(true);
+        }
+    });
+}
+
+fn current_session_id(weak: &Weak<AppWindow>) -> String {
+    // Synchronous read — only valid on the event-loop thread. Returns "" off-
+    // thread (Weak::upgrade fails). Call from inside a Slint callback, BEFORE
+    // spawning the tokio task. For off-thread reads (e.g., the polling loop)
+    // use `current_session_id_async` which hops to the event loop.
+    weak.upgrade()
+        .map(|handle| {
+            handle
+                .global::<SlintAppState>()
+                .get_active_session_id()
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// Async-safe read of `active-session-id` from off the event loop. Hops via
+/// `invoke_from_event_loop` + oneshot. Use inside `rt.spawn` tasks.
+async fn current_session_id_async(weak: &Weak<AppWindow>) -> String {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let weak_clone = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let id = weak_clone
+            .upgrade()
+            .map(|h| {
+                h.global::<SlintAppState>()
+                    .get_active_session_id()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let _ = tx.send(id);
+    });
+    rx.await.unwrap_or_default()
+}
+
+fn current_cl_state(weak: &Weak<AppWindow>) -> (String, String) {
+    weak.upgrade()
+        .map(|handle| {
+            let app = handle.global::<SlintAppState>();
+            (
+                app.get_cl_current_path().to_string(),
+                app.get_cl_current_body().to_string(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn update_cl_current(weak: &Weak<AppWindow>, rel: &str, body: &str) {
+    let weak = weak.clone();
+    let rel = rel.to_string();
+    let body = body.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_cl_current_path(SharedString::from(rel));
+            app.set_cl_current_body(SharedString::from(body));
+        }
+    });
+}
+
+fn clear_cl_dirty(weak: &Weak<AppWindow>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            handle.global::<SlintAppState>().set_cl_dirty(false);
+        }
+    });
+}

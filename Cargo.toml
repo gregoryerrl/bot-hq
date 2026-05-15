@@ -1,0 +1,47 @@
+[package]
+name = "bot-hq"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop GUI for AI-assisted coding sessions (Rust + Slint rebuild)"
+license = "MIT"
+publish = false
+default-run = "bot-hq"
+
+[[bin]]
+name = "bot-hq"
+path = "src/main.rs"
+
+[dependencies]
+slint = "1.16"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate", "chrono"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+directories = "5"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+once_cell = "1"
+async-trait = "0.1"
+futures = "0.3"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+tempfile = "3"
+
+[build-dependencies]
+slint-build = "1.16"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
