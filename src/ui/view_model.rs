@@ -908,6 +908,11 @@ async fn handle_signaling_event(
     ev: SignalingEvent,
 ) {
     match ev {
+        SignalingEvent::MessagePersisted { .. } => {
+            // Slint UI polls storage on its own ticker — it doesn't need this
+            // event. Subscribers for `wait_for_change` come in via the
+            // external server's own broadcast::Receiver.
+        }
         SignalingEvent::SessionCloseRequest {
             session_id,
             agent,

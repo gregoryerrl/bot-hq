@@ -4,6 +4,7 @@
 use crate::agents::{AgentEvent, OutgoingUserMessage};
 use crate::core::broadcast::peer_forward_message;
 use crate::core::ipav::IpavState;
+use crate::signaling::SignalingBridge;
 use crate::storage::{Author, MessageKind, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use tracing::{debug, warn};
 /// Window during which I/P-phase prose chunks accumulate before forwarding.
 pub const BUFFER_WINDOW: Duration = Duration::from_millis(1500);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DuoConfig {
     pub session_id: String,
     pub author: Author,
@@ -27,6 +28,10 @@ pub struct DuoConfig {
     /// the Brian/Rain volley while we wait for the user. Cleared by
     /// core.broadcast when the user replies.
     pub awaiting: Option<Arc<AtomicBool>>,
+    /// Optional bridge for firing MessagePersisted events after every
+    /// successful storage.insert_message. None in tests that don't need
+    /// event-driven readers.
+    pub bridge: Option<Arc<SignalingBridge>>,
 }
 
 impl DuoConfig {
@@ -37,6 +42,7 @@ impl DuoConfig {
             peer_author,
             buffer_window: None,
             awaiting: None,
+            bridge: None,
         }
     }
 
@@ -49,6 +55,12 @@ impl DuoConfig {
             .as_ref()
             .map(|f| f.load(Ordering::Acquire))
             .unwrap_or(false)
+    }
+
+    fn notify_persisted(&self, message_id: i64) {
+        if let Some(bridge) = &self.bridge {
+            bridge.notify_message_persisted(self.session_id.clone(), message_id);
+        }
     }
 }
 
@@ -90,10 +102,13 @@ pub async fn pump_agent(
 
         match event {
             AgentEvent::Text(text) => {
-                let _ = storage
+                match storage
                     .insert_message(&cfg.session_id, cfg.author, MessageKind::Text, &text)
                     .await
-                    .map_err(|e| warn!(?e, "persisting text"));
+                {
+                    Ok(id) => cfg.notify_persisted(id),
+                    Err(e) => warn!(?e, "persisting text"),
+                }
 
                 let phase = ipav_state.lock().await.current_phase;
                 buffer.push_str(&text);
@@ -109,14 +124,18 @@ pub async fn pump_agent(
                     "name": name,
                     "input": input,
                 });
-                let _ = storage
+                match storage
                     .insert_message(
                         &cfg.session_id,
                         cfg.author,
                         MessageKind::ToolUse,
                         &payload.to_string(),
                     )
-                    .await;
+                    .await
+                {
+                    Ok(id) => cfg.notify_persisted(id),
+                    Err(e) => warn!(?e, "persisting tool_use"),
+                }
             }
             AgentEvent::ToolResult {
                 tool_use_id,
@@ -128,14 +147,18 @@ pub async fn pump_agent(
                     "content": content,
                     "is_error": is_error,
                 });
-                let _ = storage
+                match storage
                     .insert_message(
                         &cfg.session_id,
                         cfg.author,
                         MessageKind::ToolResult,
                         &payload.to_string(),
                     )
-                    .await;
+                    .await
+                {
+                    Ok(id) => cfg.notify_persisted(id),
+                    Err(e) => warn!(?e, "persisting tool_result"),
+                }
             }
             AgentEvent::TurnComplete { .. } => {
                 // Always flush on turn-complete, both phases.
@@ -202,6 +225,7 @@ mod tests {
             peer_author: peer,
             buffer_window: Some(Duration::from_millis(50)),
             awaiting: None,
+            bridge: None,
         }
     }
 

@@ -189,6 +189,8 @@ Restart that Claude Code; the bot-hq tools appear as `mcp__bot-hq__*`.
 | `get_agent_configs` | Read agent configs (auth_token redacted to last 4 chars) |
 | `set_agent_config(agent_name, …)` | Upsert a row; empty string clears a field |
 | `get_violations(limit?)` | Read recent violations.jsonl entries |
+| `wait_for_change(session_id, since_id?, timeout_ms?)` | Long-poll: blocks server-side until new messages arrive (via the bridge's MessagePersisted event) or timeout. Saves AI clients from busy-polling. |
+| `get_session_snapshot(session_id, msg_limit?)` | One-shot aggregate: session meta + last N messages + phase + awaiting + pending choices. Saves three round trips. |
 
 ### Configuration
 

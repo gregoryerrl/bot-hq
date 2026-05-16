@@ -32,6 +32,14 @@ pub enum SignalingEvent {
         choice_id: String,
         picked: String,
     },
+    /// A new message row was persisted to storage. Fired by the per-agent
+    /// pumps (duo + emma) after `storage.insert_message` returns. Lets the
+    /// external MCP's `wait_for_change` tool block server-side instead of
+    /// asking clients to poll.
+    MessagePersisted {
+        session_id: String,
+        message_id: i64,
+    },
     /// Agent asked to close its own session via the `close_session` MCP tool.
     /// AppState picks this up, kills the agent subprocesses, and marks the
     /// session closed/archived in storage. Fire-and-forget — the agent
@@ -305,6 +313,17 @@ impl SignalingBridge {
             }
             None => Err(anyhow::anyhow!("no pending choice with id {choice_id}")),
         }
+    }
+
+    /// Fire a `MessagePersisted` event. Called by the per-agent pumps + the
+    /// user-broadcast helper after `storage.insert_message` returns the new
+    /// row id. The external MCP's `wait_for_change` tool subscribes for these
+    /// so clients don't need to poll.
+    pub fn notify_message_persisted(&self, session_id: String, message_id: i64) {
+        let _ = self.event_tx.send(SignalingEvent::MessagePersisted {
+            session_id,
+            message_id,
+        });
     }
 
     /// Snapshot the currently-parked choices. Used by the external MCP driver

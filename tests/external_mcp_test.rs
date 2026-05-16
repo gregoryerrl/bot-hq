@@ -508,3 +508,180 @@ async fn get_violations_returns_empty_on_fresh_install() {
         "expected either 'not configured' (test fixture) or empty array (prod): {body}"
     );
 }
+
+// ---- iter 4 tools ---------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_list_includes_iter4_tools() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+    let (_status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+    )
+    .await;
+    for tool in &["wait_for_change", "get_session_snapshot"] {
+        assert!(body.contains(tool), "tool {tool} missing");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_change_returns_immediately_when_messages_exist() {
+    let env = setup().await;
+    // Insert a message before the call so storage has data > since_id=0.
+    use bot_hq::storage::{Author, MessageKind};
+    env._core
+        .storage
+        .insert_message("emma", Author::User, MessageKind::Text, "hello before")
+        .await
+        .unwrap();
+    let h = auth_header(&env.token);
+    let t0 = std::time::Instant::now();
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"emma","since_id":0,"timeout_ms":5000}}}"#,
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(status.contains("200"));
+    assert!(body.contains("hello before"), "body: {body}");
+    // Should return well under the timeout — fast path.
+    assert!(
+        elapsed < std::time::Duration::from_millis(1000),
+        "took too long: {elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_change_returns_empty_on_timeout() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+    let t0 = std::time::Instant::now();
+    // since_id huge so no messages match; short timeout.
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"emma","since_id":999999,"timeout_ms":300}}}"#,
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(status.contains("200"));
+    assert!(body.contains(r#"messages\":[]"#), "body: {body}");
+    assert!(
+        elapsed >= std::time::Duration::from_millis(280)
+            && elapsed < std::time::Duration::from_millis(1500),
+        "expected ~300ms wait, got: {elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_change_wakes_up_on_persisted_event() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+
+    // Concurrent task: insert + fire the bridge event ~100ms after we start waiting.
+    let core_clone = std::sync::Arc::clone(&env._core);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        use bot_hq::storage::{Author, MessageKind};
+        let id = core_clone
+            .storage
+            .insert_message("emma", Author::User, MessageKind::Text, "arrived late")
+            .await
+            .unwrap();
+        core_clone
+            .bridge
+            .notify_message_persisted("emma".into(), id);
+    });
+
+    let t0 = std::time::Instant::now();
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"emma","since_id":0,"timeout_ms":5000}}}"#,
+    )
+    .await;
+    let elapsed = t0.elapsed();
+    assert!(status.contains("200"));
+    assert!(body.contains("arrived late"), "body: {body}");
+    // Should wake up shortly after the 100ms insert — well below the 5s timeout.
+    assert!(
+        elapsed < std::time::Duration::from_millis(2000),
+        "wait_for_change didn't wake on event, took: {elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_session_snapshot_combines_everything() {
+    let env = setup().await;
+    use bot_hq::storage::{Author, MessageKind};
+    // Seed a few emma messages.
+    for body in ["msg1", "msg2", "msg3"] {
+        env._core
+            .storage
+            .insert_message("emma", Author::User, MessageKind::Text, body)
+            .await
+            .unwrap();
+    }
+
+    let h = auth_header(&env.token);
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"get_session_snapshot","arguments":{"session_id":"emma","msg_limit":10}}}"#,
+    )
+    .await;
+    assert!(status.contains("200"));
+    // Snapshot contains all 5 expected sections.
+    assert!(body.contains(r#"session\""#), "session block missing: {body}");
+    assert!(body.contains(r#"phase\""#), "phase field missing: {body}");
+    assert!(body.contains(r#"awaiting\""#), "awaiting field missing: {body}");
+    assert!(
+        body.contains(r#"pending_choices\""#),
+        "pending_choices field missing: {body}"
+    );
+    // All three seeded messages present.
+    for m in ["msg1", "msg2", "msg3"] {
+        assert!(body.contains(m), "{m} missing from snapshot: {body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_session_snapshot_msg_limit_keeps_most_recent() {
+    let env = setup().await;
+    use bot_hq::storage::{Author, MessageKind};
+    for i in 0..10 {
+        env._core
+            .storage
+            .insert_message(
+                "emma",
+                Author::User,
+                MessageKind::Text,
+                &format!("m{i}"),
+            )
+            .await
+            .unwrap();
+    }
+
+    let h = auth_header(&env.token);
+    let (_status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"get_session_snapshot","arguments":{"session_id":"emma","msg_limit":3}}}"#,
+    )
+    .await;
+    // Oldest three should be gone, newest three kept.
+    assert!(!body.contains(r#"\"content\":\"m0\""#), "m0 should be trimmed");
+    assert!(!body.contains(r#"\"content\":\"m6\""#), "m6 should be trimmed");
+    assert!(body.contains(r#"\"content\":\"m7\""#), "m7 kept: {body}");
+    assert!(body.contains(r#"\"content\":\"m8\""#), "m8 kept: {body}");
+    assert!(body.contains(r#"\"content\":\"m9\""#), "m9 kept: {body}");
+}

@@ -239,6 +239,7 @@ async fn spawn_session_handle(
     let session_id_clone = session.id.clone();
     let brian_cfg = DuoConfig {
         awaiting: Some(Arc::clone(&awaiting)),
+        bridge: Some(Arc::clone(&bridge)),
         ..DuoConfig::new(session_id_clone, Author::Brian, Author::Rain)
     };
     tokio::spawn(async move {
@@ -250,6 +251,7 @@ async fn spawn_session_handle(
     let session_id_clone = session.id.clone();
     let rain_cfg = DuoConfig {
         awaiting: Some(Arc::clone(&awaiting)),
+        bridge: Some(Arc::clone(&bridge)),
         ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
     };
     tokio::spawn(async move {
@@ -416,8 +418,9 @@ pub async fn spawn_emma_handle(
     let mut agent_handle = agent;
     let event_rx = std::mem::replace(&mut agent_handle.event_rx, tokio::sync::mpsc::channel(1).1);
     let storage_clone = storage.clone();
+    let bridge_clone = Arc::clone(&bridge);
     tokio::spawn(async move {
-        pump_emma_agent(event_rx, storage_clone).await;
+        pump_emma_agent(event_rx, storage_clone, bridge_clone).await;
     });
 
     info!("emma solo session spawned");
@@ -429,15 +432,24 @@ pub async fn spawn_emma_handle(
 }
 
 /// Persist-only pump for Emma's solo agent. No peer forwarding, no IPAV
-/// buffering — just stream events into the messages table.
-async fn pump_emma_agent(mut event_rx: mpsc::Receiver<AgentEvent>, storage: Storage) {
+/// buffering — just stream events into the messages table. Fires
+/// `MessagePersisted` events on the bridge so external `wait_for_change`
+/// callers wake up without polling.
+async fn pump_emma_agent(
+    mut event_rx: mpsc::Receiver<AgentEvent>,
+    storage: Storage,
+    bridge: Arc<SignalingBridge>,
+) {
     while let Some(event) = event_rx.recv().await {
         match event {
             AgentEvent::Text(text) => {
-                let _ = storage
+                match storage
                     .insert_message("emma", Author::Emma, MessageKind::Text, &text)
                     .await
-                    .map_err(|e| warn!(?e, "persisting emma text"));
+                {
+                    Ok(id) => bridge.notify_message_persisted("emma".into(), id),
+                    Err(e) => warn!(?e, "persisting emma text"),
+                }
             }
             AgentEvent::ToolUse { id, name, input } => {
                 let payload = serde_json::json!({
@@ -445,14 +457,18 @@ async fn pump_emma_agent(mut event_rx: mpsc::Receiver<AgentEvent>, storage: Stor
                     "name": name,
                     "input": input,
                 });
-                let _ = storage
+                match storage
                     .insert_message(
                         "emma",
                         Author::Emma,
                         MessageKind::ToolUse,
                         &payload.to_string(),
                     )
-                    .await;
+                    .await
+                {
+                    Ok(id) => bridge.notify_message_persisted("emma".into(), id),
+                    Err(e) => warn!(?e, "persisting emma tool_use"),
+                }
             }
             AgentEvent::ToolResult {
                 tool_use_id,
@@ -464,14 +480,18 @@ async fn pump_emma_agent(mut event_rx: mpsc::Receiver<AgentEvent>, storage: Stor
                     "content": content,
                     "is_error": is_error,
                 });
-                let _ = storage
+                match storage
                     .insert_message(
                         "emma",
                         Author::Emma,
                         MessageKind::ToolResult,
                         &payload.to_string(),
                     )
-                    .await;
+                    .await
+                {
+                    Ok(id) => bridge.notify_message_persisted("emma".into(), id),
+                    Err(e) => warn!(?e, "persisting emma tool_result"),
+                }
             }
             AgentEvent::TurnComplete { .. } | AgentEvent::Init { .. } => {}
             AgentEvent::Exited(msg) => {

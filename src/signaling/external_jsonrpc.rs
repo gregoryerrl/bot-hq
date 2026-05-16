@@ -8,12 +8,14 @@
 
 use crate::core::ipav::IpavPhase;
 use crate::core::AppState as CoreAppState;
+use crate::signaling::bridge::SignalingEvent;
 use crate::signaling::protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, ToolCallResult, ToolDescriptor,
 };
 use crate::storage::AgentConfig as DbAgentConfig;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Duration;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -201,7 +203,89 @@ pub fn external_tool_descriptors() -> Vec<ToolDescriptor> {
                 }
             }),
         },
+        ToolDescriptor {
+            name: "wait_for_change",
+            description: "Long-poll for new messages in a session. Returns immediately if storage already has messages with id > since_id; otherwise blocks server-side until a new message arrives (via the bridge's MessagePersisted event) or the timeout expires. Saves AI clients from busy-polling get_session_messages. Returns `{messages: [...]}` (possibly empty on timeout).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Session id (or \"emma\")." },
+                    "since_id": { "type": "integer", "description": "Wait for messages with id > this value. Omit to wait for any new message starting from current state." },
+                    "timeout_ms": { "type": "integer", "description": "Max time to block server-side, milliseconds. Default 30000, clamped to [100, 60000]." }
+                },
+                "required": ["session_id"]
+            }),
+        },
+        ToolDescriptor {
+            name: "get_session_snapshot",
+            description: "One-shot aggregate read: session metadata + last N messages + current IPAV phase + awaiting-user flag + pending choices for this session. Saves AI clients from chaining list_sessions + get_session_messages + get_pending_choices into a single round trip.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "msg_limit": { "type": "integer", "description": "Max messages returned, most-recent kept. Default 50, clamped to [1, 500]." }
+                },
+                "required": ["session_id"]
+            }),
+        },
     ]
+}
+
+/// Block server-side until the session has at least one new message past
+/// `since_id`, or `timeout_ms` elapses. On timeout returns an empty Vec.
+async fn wait_for_change(
+    core: &Arc<CoreAppState>,
+    session_id: &str,
+    since_id: Option<i64>,
+    timeout_ms: u64,
+) -> anyhow::Result<Vec<crate::storage::Message>> {
+    // Fast path: storage might already have new messages past since_id.
+    let initial = core
+        .storage
+        .messages_for_session(session_id, since_id)
+        .await?;
+    if !initial.is_empty() {
+        return Ok(initial);
+    }
+    // Subscribe BEFORE the post-subscribe re-check so we don't miss an event
+    // that fires between the initial query and the subscribe call.
+    let mut rx = core.bridge.subscribe();
+    let recheck = core
+        .storage
+        .messages_for_session(session_id, since_id)
+        .await?;
+    if !recheck.is_empty() {
+        return Ok(recheck);
+    }
+    let deadline = tokio::time::sleep(Duration::from_millis(timeout_ms));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return Ok(Vec::new()),
+            ev = rx.recv() => {
+                match ev {
+                    Ok(SignalingEvent::MessagePersisted { session_id: sid, .. }) if sid == session_id => {
+                        let msgs = core.storage.messages_for_session(session_id, since_id).await?;
+                        if !msgs.is_empty() {
+                            return Ok(msgs);
+                        }
+                    }
+                    // Receiver lag (broadcast channel full) is also a possible signal —
+                    // poll once to be safe.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let msgs = core.storage.messages_for_session(session_id, since_id).await?;
+                        if !msgs.is_empty() {
+                            return Ok(msgs);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Ok(Vec::new());
+                    }
+                    _ => {} // other event types — ignore, keep waiting
+                }
+            }
+        }
+    }
 }
 
 /// Redact an auth_token field for read-side display. Returns `<unset>` for
@@ -591,6 +675,130 @@ async fn call_external_tool(
                 serde_json::to_string(&json!({ "violations": records })).unwrap_or_default(),
             ))
         }
+        "wait_for_change" => {
+            let session_id = args
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing session_id")
+                })?
+                .to_string();
+            let since_id = args.get("since_id").and_then(Value::as_i64);
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(30_000)
+                .clamp(100, 60_000) as u64;
+            let messages = wait_for_change(core, &session_id, since_id, timeout_ms)
+                .await
+                .map_err(|e| {
+                    JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("wait_for_change: {e}"))
+                })?;
+            let arr: Vec<_> = messages
+                .into_iter()
+                .map(|m| {
+                    json!({
+                        "id": m.id,
+                        "author": m.author,
+                        "kind": m.kind,
+                        "content": m.content,
+                        "created_at": m.created_at,
+                    })
+                })
+                .collect();
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&json!({ "messages": arr })).unwrap_or_default(),
+            ))
+        }
+        "get_session_snapshot" => {
+            let session_id = args
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing session_id")
+                })?
+                .to_string();
+            let msg_limit = args
+                .get("msg_limit")
+                .and_then(Value::as_i64)
+                .unwrap_or(50)
+                .clamp(1, 500) as usize;
+
+            let session_row = core.storage.get_session(&session_id).await.map_err(|e| {
+                JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("get_session: {e}"))
+            })?;
+            let mut messages = core
+                .storage
+                .messages_for_session(&session_id, None)
+                .await
+                .map_err(|e| {
+                    JsonRpcError::new(
+                        JsonRpcError::INTERNAL_ERROR,
+                        format!("messages_for_session: {e}"),
+                    )
+                })?;
+            // Keep only last msg_limit entries (already in chronological order).
+            if messages.len() > msg_limit {
+                let drop = messages.len() - msg_limit;
+                messages.drain(0..drop);
+            }
+            let phase = core
+                .current_phase(&session_id)
+                .await
+                .map(|p| p.chip().to_string());
+            let awaiting = {
+                let sessions = core.sessions.lock().await;
+                sessions
+                    .get(&session_id)
+                    .map(|h| h.awaiting.load(std::sync::atomic::Ordering::Acquire))
+                    .unwrap_or(false)
+            };
+            let pending: Vec<_> = core
+                .bridge
+                .list_pending_choices()
+                .await
+                .into_iter()
+                .filter(|c| c.session_id == session_id)
+                .map(|c| {
+                    json!({
+                        "choice_id": c.choice_id,
+                        "agent": c.agent,
+                        "question": c.question,
+                        "options": c.options,
+                    })
+                })
+                .collect();
+            let msg_arr: Vec<_> = messages
+                .into_iter()
+                .map(|m| {
+                    json!({
+                        "id": m.id,
+                        "author": m.author,
+                        "kind": m.kind,
+                        "content": m.content,
+                        "created_at": m.created_at,
+                    })
+                })
+                .collect();
+            let snapshot = json!({
+                "session": session_row.map(|s| json!({
+                    "id": s.id,
+                    "title": s.title,
+                    "working_repo_path": s.working_repo_path,
+                    "created_at": s.created_at,
+                    "closed_at": s.closed_at,
+                    "brian_model_at_spawn": s.brian_model_at_spawn,
+                    "rain_model_at_spawn": s.rain_model_at_spawn,
+                })),
+                "phase": phase,
+                "awaiting": awaiting,
+                "pending_choices": pending,
+                "messages": msg_arr,
+            });
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&snapshot).unwrap_or_default(),
+            ))
+        }
         unknown => Err(JsonRpcError::new(
             JsonRpcError::METHOD_NOT_FOUND,
             format!("unknown tool {unknown}"),
@@ -625,7 +833,10 @@ mod tests {
         assert!(names.contains(&"get_agent_configs"));
         assert!(names.contains(&"set_agent_config"));
         assert!(names.contains(&"get_violations"));
-        assert_eq!(names.len(), 14);
+        // iter 4
+        assert!(names.contains(&"wait_for_change"));
+        assert!(names.contains(&"get_session_snapshot"));
+        assert_eq!(names.len(), 16);
     }
 
     #[test]

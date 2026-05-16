@@ -150,7 +150,8 @@ impl AppState {
             let handle = emma
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("emma not started"))?;
-            self.storage
+            let id = self
+                .storage
                 .insert_message(
                     "emma",
                     crate::storage::Author::User,
@@ -158,6 +159,8 @@ impl AppState {
                     text,
                 )
                 .await?;
+            self.bridge
+                .notify_message_persisted("emma".into(), id);
             let msg = crate::agents::OutgoingUserMessage::text(text);
             let _ = handle.agent.input_tx.send(msg).await;
             return Ok(());
@@ -174,7 +177,7 @@ impl AppState {
             .awaiting
             .store(false, std::sync::atomic::Ordering::Release);
         self.bridge.clear_session_awaiting(session_id).await;
-        broadcast_user_message(
+        let id = broadcast_user_message(
             &self.storage,
             session_id,
             text,
@@ -182,6 +185,8 @@ impl AppState {
             &handle.rain.input_tx,
         )
         .await?;
+        self.bridge
+            .notify_message_persisted(session_id.to_string(), id);
         Ok(())
     }
 
@@ -198,9 +203,12 @@ impl AppState {
         let notice = format!("phase advanced to {}", target.name());
 
         // Synthetic phase-change message in storage.
-        self.storage
+        let id = self
+            .storage
             .insert_message(session_id, Author::User, MessageKind::PhaseChange, &notice)
             .await?;
+        self.bridge
+            .notify_message_persisted(session_id.to_string(), id);
         // And fed to both agents' stdin so they pick it up as a natural prompt.
         let msg = OutgoingUserMessage::text(notice);
         let _ = handle.brian.input_tx.send(msg.clone()).await;
