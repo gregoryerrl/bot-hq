@@ -218,22 +218,33 @@ pub fn mcp_config_json(
         .unwrap_or_else(|_| "{}".into())
 }
 
+/// Names that must be filtered from the merged user MCP map before being
+/// written to a subagent's mcp-config.json.
+///
+/// - `bot-hq`: the user's top-level bot-hq MCP. Exposing it inside a
+///   bot-hq-spawned agent creates a recursive driver loop; the agent
+///   already has `bot-hq-signaling` for the per-(session,agent) channel.
+/// - `claude-in-chrome`: claude-code rejects this name as reserved when
+///   it appears in a `--mcp-config` file, so the whole subprocess exits
+///   on startup. (The capability is still available to the parent
+///   claude-code session via its own built-in path.)
+const RESERVED_MCP_KEYS: &[&str] = &["bot-hq", "claude-in-chrome"];
+
 /// Read the user's claude-code MCP server config (across both locations
 /// claude-code uses) and return the merged `mcpServers` map so spawned
 /// subagents inherit the same MCP surface as the user's own claude-code
 /// sessions.
 ///
 /// `paths` are searched in order; entries from later paths win on key
-/// collision. Production order: `~/.claude.json` (the live config that
-/// claude-code maintains) then `~/.claude/settings.json` (older
-/// per-user config). Claude-code's live config takes precedence because
-/// it's the source-of-truth claude-code itself uses — the `settings.json`
-/// copy is often stale (e.g. an older `--browser-url` port).
+/// collision. Production order: `~/.claude/settings.json` (older
+/// per-user config) then `~/.claude.json` (the live config that
+/// claude-code maintains). claude-code's live config takes precedence
+/// because it's the source-of-truth claude-code itself uses — the
+/// `settings.json` copy is often stale (e.g. an older `--browser-url`
+/// port).
 ///
-/// Filters out any entry whose key is `bot-hq` — exposing the user's own
-/// bot-hq MCP inside a bot-hq-spawned agent would create a recursive
-/// driver loop. The agent already has `bot-hq-signaling` for the
-/// per-(session,agent) channel it actually needs.
+/// Filters out any entry whose key is in [`RESERVED_MCP_KEYS`] — see that
+/// constant for the rationale.
 ///
 /// Missing files / parse errors / missing `mcpServers` keys are tolerated
 /// silently (with a debug log). We never fail spawn on this; the subagent
@@ -261,7 +272,7 @@ pub fn load_user_mcp_servers(
             continue;
         };
         for (k, v) in map {
-            if k == "bot-hq" {
+            if RESERVED_MCP_KEYS.contains(&k.as_str()) {
                 continue;
             }
             merged.insert(k.clone(), v.clone());
@@ -327,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn load_user_mcp_servers_filters_bot_hq_recursion() {
+    fn load_user_mcp_servers_filters_reserved_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
@@ -335,13 +346,18 @@ mod tests {
             r#"{
                 "mcpServers": {
                     "bot-hq": { "command": "/Users/u/go/bin/bot-hq", "args": ["mcp"] },
+                    "claude-in-chrome": { "command": "npx", "args": ["@anthropic-ai/claude-in-chrome-mcp"] },
                     "chrome-devtools": { "command": "node", "args": ["m.js"] }
                 }
             }"#,
         )
         .unwrap();
         let map = load_user_mcp_servers(&[path]);
-        assert!(!map.contains_key("bot-hq"));
+        assert!(!map.contains_key("bot-hq"), "bot-hq must be filtered to avoid recursion");
+        assert!(
+            !map.contains_key("claude-in-chrome"),
+            "claude-in-chrome is reserved by claude-code in --mcp-config files"
+        );
         assert!(map.contains_key("chrome-devtools"));
     }
 

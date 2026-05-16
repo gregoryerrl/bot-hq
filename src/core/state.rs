@@ -217,7 +217,42 @@ impl AppState {
     }
 
     pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<()> {
-        self.bridge.resolve_choice(choice_id, picked).await
+        use crate::signaling::ResolveOutcome;
+        match self.bridge.resolve_choice(choice_id, picked).await? {
+            ResolveOutcome::Delivered => Ok(()),
+            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } => {
+                // The OOB message is already in storage (bridge wrote it). To
+                // actually wake the duo subprocess so they read + act on it,
+                // also: (1) clear the awaiting-user halt so the duo pump
+                // resumes peer-forwarding, (2) push the body through both
+                // agents' input_tx so their stdin receives a wake message.
+                // We deliberately do NOT call broadcast_user_message (which
+                // re-inserts) — the storage row already exists.
+                if session_id == "emma" {
+                    let emma = self.emma.lock().await;
+                    if let Some(handle) = emma.as_ref() {
+                        let msg = crate::agents::OutgoingUserMessage::text(&body);
+                        let _ = handle.agent.input_tx.send(msg).await;
+                    }
+                    return Ok(());
+                }
+                let sessions = self.sessions.lock().await;
+                let Some(handle) = sessions.get(&session_id) else {
+                    // Session closed in the gap between resolve and wake —
+                    // the OOB message persists in storage either way, so
+                    // future re-opens of the session view will still see it.
+                    return Ok(());
+                };
+                handle
+                    .awaiting
+                    .store(false, std::sync::atomic::Ordering::Release);
+                self.bridge.clear_session_awaiting(&session_id).await;
+                let msg = crate::agents::OutgoingUserMessage::text(&body);
+                let _ = handle.brian.input_tx.send(msg.clone()).await;
+                let _ = handle.rain.input_tx.send(msg).await;
+                Ok(())
+            }
+        }
     }
 
     pub fn subscribe_signaling(&self) -> broadcast::Receiver<SignalingEvent> {

@@ -20,6 +20,23 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use uuid::Uuid;
 
+/// What happened when a parked choice was resolved.
+///
+/// The happy path (`Delivered`) means the agent's blocking tool call was
+/// still waiting and received the picked option synchronously. The
+/// fallback (`AgentReceiverDroppedFellBack`) means the agent's tool call
+/// already client-side timed out, so the bridge persisted an out-of-band
+/// `user` message into session storage; the caller (typically
+/// `CoreAppState::resolve_choice`) is responsible for **also** sending
+/// that body through the duo's input channels so the agent's subprocess
+/// wakes up and sees it (clearing the awaiting flag alone won't deliver
+/// — the agent is blocked on stdin and needs an actual stdin write).
+#[derive(Debug, Clone)]
+pub enum ResolveOutcome {
+    Delivered,
+    AgentReceiverDroppedFellBack { session_id: String, body: String },
+}
+
 #[derive(Debug, Clone)]
 pub enum SignalingEvent {
     PendingChoice(PendingChoice),
@@ -305,7 +322,7 @@ impl SignalingBridge {
     }
 
     /// Called by the UI when the user clicks a choice button.
-    pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<()> {
+    pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<ResolveOutcome> {
         let parked = self.pending.lock().await.remove(choice_id);
         match parked {
             Some(p) => {
@@ -360,18 +377,19 @@ impl SignalingBridge {
                     }
                 }
 
-                if let Err(picked) = p.tx.send(picked) {
-                    // The agent's blocking `ask_user_choice` tool call client-side
-                    // timed out before we got the user's pick. The answer is still
-                    // captured (violations log + remembered_approvals are already
-                    // written above) — surface it to the agent out-of-band so they
-                    // see the resolution on next message poll instead of waiting
-                    // forever on a tool result that will never arrive.
-                    let agent_label = p.choice.agent.clone();
-                    let question = p.choice.question.clone();
-                    let session_id = p.choice.session_id.clone();
-                    let storage_guard = self.storage.lock().await;
-                    if let Some(storage) = storage_guard.as_ref() {
+                match p.tx.send(picked) {
+                    Ok(()) => Ok(ResolveOutcome::Delivered),
+                    Err(picked) => {
+                        // The agent's blocking `ask_user_choice` tool call client-side
+                        // timed out before we got the user's pick. The answer is still
+                        // captured (violations log + remembered_approvals are already
+                        // written above) — persist an out-of-band synthetic user message
+                        // so the UI / message-poll callers see the resolution.
+                        // CoreAppState::resolve_choice is the one that ALSO routes the
+                        // body through the duo input channels to wake the subprocess.
+                        let agent_label = p.choice.agent.clone();
+                        let question = p.choice.question.clone();
+                        let session_id = p.choice.session_id.clone();
                         let body = format!(
                             "(out-of-band) Your earlier `ask_user_choice` for {agent_label} resolved while \
                              you were no longer waiting on the tool call.\n\n\
@@ -379,25 +397,33 @@ impl SignalingBridge {
                              **User picked:** {picked}\n\n\
                              Treat this as the user's reply. Continue from here."
                         );
-                        if let Err(e) = storage
-                            .insert_message(&session_id, Author::User, MessageKind::Text, &body)
-                            .await
-                        {
+                        let storage_guard = self.storage.lock().await;
+                        if let Some(storage) = storage_guard.as_ref() {
+                            if let Err(e) = storage
+                                .insert_message(
+                                    &session_id,
+                                    Author::User,
+                                    MessageKind::Text,
+                                    &body,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    ?e,
+                                    %session_id,
+                                    "out-of-band choice-resolution message failed to persist"
+                                );
+                            }
+                        } else {
                             tracing::warn!(
-                                ?e,
                                 %session_id,
-                                "out-of-band choice-resolution message failed to persist"
+                                "resolve_choice: agent receiver dropped AND no storage wired — \
+                                 pick recorded but not delivered"
                             );
                         }
-                    } else {
-                        tracing::warn!(
-                            %session_id,
-                            "resolve_choice: agent receiver dropped AND no storage wired — \
-                             pick recorded but not delivered"
-                        );
+                        Ok(ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body })
                     }
                 }
-                Ok(())
             }
             None => Err(anyhow::anyhow!("no pending choice with id {choice_id}")),
         }
@@ -609,12 +635,23 @@ mod tests {
         tokio::task::yield_now().await;
 
         // Orchestrator resolves the (now-orphaned) choice.
-        bridge
+        let outcome = bridge
             .resolve_choice(&choice_id, "A".into())
             .await
             .expect("resolve_choice should succeed even when agent receiver dropped");
 
-        // Verify the out-of-band message landed.
+        // Verify we surfaced the wake info to the caller so CoreAppState can
+        // route the body through input_tx and actually unblock the subprocess.
+        match outcome {
+            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } => {
+                assert_eq!(session_id, "s-fallback");
+                assert!(body.contains("User picked:"));
+                assert!(body.contains("A"));
+            }
+            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+        }
+
+        // Verify the out-of-band message also landed in storage (for UI + poll).
         let msgs = storage
             .messages_for_session("s-fallback", None)
             .await
@@ -626,6 +663,33 @@ mod tests {
         assert_eq!(oob.author, "user");
         assert!(oob.content.contains("User picked:"));
         assert!(oob.content.contains("A"));
+    }
+
+    #[tokio::test]
+    async fn delivered_outcome_when_agent_receives() {
+        let bridge = SignalingBridge::new();
+        let mut sub = bridge.subscribe();
+        let bridge_clone = Arc::clone(&bridge);
+        let ask = tokio::spawn(async move {
+            bridge_clone
+                .ask_user_choice(
+                    "s1".into(),
+                    "brian".into(),
+                    "pick".into(),
+                    vec!["a".into(), "b".into()],
+                )
+                .await
+                .unwrap()
+        });
+        let choice_id = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        let outcome = bridge.resolve_choice(&choice_id, "b".into()).await.unwrap();
+        let _ = ask.await.unwrap();
+        assert!(matches!(outcome, ResolveOutcome::Delivered));
     }
 
     #[tokio::test]

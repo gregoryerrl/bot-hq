@@ -30,3 +30,6 @@ bot-hq.db
 /Screenshot*.png
 /phase-*-audit.csv
 /docs/commit-message-draft.md
+
+# Test-run scratch (browser snapshots, screenshots, etc.)
+/tmp/
