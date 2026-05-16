@@ -26,6 +26,6 @@ mod server;
 pub use bridge::{PendingChoice, SignalingBridge, SignalingEvent};
 pub use external_server::{start_external_server, ExternalServer};
 pub use server::{
-    default_user_settings_path, load_user_mcp_servers, mcp_config_json, start_signaling_server,
+    default_user_settings_paths, load_user_mcp_servers, mcp_config_json, start_signaling_server,
     SignalingServer,
 };

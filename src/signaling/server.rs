@@ -218,48 +218,69 @@ pub fn mcp_config_json(
         .unwrap_or_else(|_| "{}".into())
 }
 
-/// Read the user's `~/.claude/settings.json` and return its `mcpServers`
-/// map so spawned subagents inherit the same MCP surface as the user's
-/// own claude-code sessions. Filters out any entry whose key is `bot-hq`
-/// (the old Go binary at `~/go/bin/bot-hq mcp` — exposing it inside fresh
-/// agents would create a recursive driver loop against the new bot-hq).
+/// Read the user's claude-code MCP server config (across both locations
+/// claude-code uses) and return the merged `mcpServers` map so spawned
+/// subagents inherit the same MCP surface as the user's own claude-code
+/// sessions.
 ///
-/// Missing file / parse error / missing `mcpServers` key → empty map +
-/// debug log. We never fail spawn on this; the subagent just falls back to
-/// `bot-hq-signaling` only (current behavior).
+/// `paths` are searched in order; entries from later paths win on key
+/// collision. Production order: `~/.claude.json` (the live config that
+/// claude-code maintains) then `~/.claude/settings.json` (older
+/// per-user config). Claude-code's live config takes precedence because
+/// it's the source-of-truth claude-code itself uses — the `settings.json`
+/// copy is often stale (e.g. an older `--browser-url` port).
+///
+/// Filters out any entry whose key is `bot-hq` — exposing the user's own
+/// bot-hq MCP inside a bot-hq-spawned agent would create a recursive
+/// driver loop. The agent already has `bot-hq-signaling` for the
+/// per-(session,agent) channel it actually needs.
+///
+/// Missing files / parse errors / missing `mcpServers` keys are tolerated
+/// silently (with a debug log). We never fail spawn on this; the subagent
+/// just falls back to `bot-hq-signaling` only.
 pub fn load_user_mcp_servers(
-    settings_path: &std::path::Path,
+    paths: &[std::path::PathBuf],
 ) -> serde_json::Map<String, serde_json::Value> {
-    let raw = match std::fs::read_to_string(settings_path) {
-        Ok(s) => s,
-        Err(e) => {
-            debug!(path = %settings_path.display(), %e, "user MCP settings absent — subagent gets bot-hq-signaling only");
-            return serde_json::Map::new();
+    let mut merged: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for path in paths {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                debug!(path = %path.display(), %e, "user MCP settings absent");
+                continue;
+            }
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(path = %path.display(), %e, "user MCP settings unparseable — skipping");
+                continue;
+            }
+        };
+        let Some(map) = parsed.get("mcpServers").and_then(|v| v.as_object()) else {
+            continue;
+        };
+        for (k, v) in map {
+            if k == "bot-hq" {
+                continue;
+            }
+            merged.insert(k.clone(), v.clone());
         }
-    };
-    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(path = %settings_path.display(), %e, "user MCP settings unparseable — subagent gets bot-hq-signaling only");
-            return serde_json::Map::new();
-        }
-    };
-    let Some(map) = parsed
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .cloned()
-    else {
-        return serde_json::Map::new();
-    };
-    map.into_iter()
-        .filter(|(k, _)| k != "bot-hq")
-        .collect()
+    }
+    merged
 }
 
-/// Default location for the user's claude-code settings: `~/.claude/settings.json`.
-/// Returns None if the home dir can't be resolved.
-pub fn default_user_settings_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".claude/settings.json"))
+/// Default locations for the user's claude-code MCP config, in
+/// least-to-most-trusted order. Later entries win on key collision.
+/// `~/.claude.json` is the live config claude-code maintains (most
+/// trusted); `~/.claude/settings.json` is the older per-user config
+/// (often a stale snapshot, so it gets seeded first then overwritten).
+pub fn default_user_settings_paths() -> Vec<std::path::PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let home = std::path::PathBuf::from(home);
+    vec![home.join(".claude/settings.json"), home.join(".claude.json")]
 }
 
 #[cfg(test)]
@@ -319,14 +340,16 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let map = load_user_mcp_servers(&path);
+        let map = load_user_mcp_servers(&[path]);
         assert!(!map.contains_key("bot-hq"));
         assert!(map.contains_key("chrome-devtools"));
     }
 
     #[test]
     fn load_user_mcp_servers_missing_file_returns_empty() {
-        let map = load_user_mcp_servers(std::path::Path::new("/nonexistent/path/settings.json"));
+        let map = load_user_mcp_servers(&[std::path::PathBuf::from(
+            "/nonexistent/path/settings.json",
+        )]);
         assert!(map.is_empty());
     }
 
@@ -335,7 +358,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, "{ not valid json").unwrap();
-        let map = load_user_mcp_servers(&path);
+        let map = load_user_mcp_servers(&[path]);
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn load_user_mcp_servers_later_path_wins_on_collision() {
+        // Simulates `~/.claude.json` correcting a stale entry in
+        // `~/.claude/settings.json` — claude-code's live config is the
+        // source of truth.
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("settings.json");
+        let live = dir.path().join("claude.json");
+        std::fs::write(
+            &stale,
+            r#"{ "mcpServers": {
+                "brave-devtools": { "args": ["--browser-url=http://127.0.0.1:9222"] }
+            } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &live,
+            r#"{ "mcpServers": {
+                "brave-devtools": { "args": ["--browser-url=http://127.0.0.1:9225"] }
+            } }"#,
+        )
+        .unwrap();
+        let map = load_user_mcp_servers(&[stale, live]);
+        let args = map["brave-devtools"]["args"][0].as_str().unwrap();
+        assert!(args.contains("9225"), "expected live config to win, got: {args}");
     }
 }
