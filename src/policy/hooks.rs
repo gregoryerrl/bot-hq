@@ -159,7 +159,8 @@ fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
         return Ok(0);
     }
     let diff = read_staged_diff().unwrap_or_default();
-    match policy.first_forbidden_word(&diff) {
+    let added_only = added_lines_only(&diff);
+    match policy.first_forbidden_word(&added_only) {
         None => Ok(0),
         Some(word) => {
             eprintln!(
@@ -179,6 +180,24 @@ fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     }
 }
 
+/// Extract just the added content from a unified diff. Filters out:
+/// - File headers (`+++ b/...`)
+/// - Hunk headers (`@@ -... +... @@`)
+/// - Context lines (no prefix or starting with ` `)
+/// - Deleted lines (starting with `-`)
+///
+/// This makes the forbidden-word scan reflect the comment's intent ("source
+/// code being committed"): legitimate cleanup that removes a forbidden word
+/// from a file should pass, even though the deleted line is still in the
+/// raw diff.
+fn added_lines_only(diff: &str) -> String {
+    diff.lines()
+        .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
+        .map(|l| &l[1..])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// post-commit verifier. Writes a violation if a forbidden word made it
 /// through pre-commit (e.g., via --amend, or pre-commit was bypassed).
 /// Always exits 0; the commit already happened.
@@ -196,7 +215,10 @@ fn run_post_commit(
     let diff = git_output(&["show", "--no-color", "HEAD"]).unwrap_or_default();
     let sha = git_output(&["rev-parse", "HEAD"]).unwrap_or_default();
     let sha_short = sha.trim().chars().take(8).collect::<String>();
-    let combined = format!("{msg}\n{diff}");
+    // Mirror pre-commit's added-only filter — otherwise removing a forbidden
+    // word from a file logs a spurious violation against the very commit that
+    // cleaned it up. The commit message stays in the scan as-is.
+    let combined = format!("{msg}\n{}", added_lines_only(&diff));
     if let Some(word) = policy.first_forbidden_word(&combined) {
         eprintln!(
             "bot-hq post-commit: forbidden word '{word}' slipped through \
@@ -554,6 +576,26 @@ mod tests {
         let rep = install_hooks(repo.path(), data.path(), Some("foo")).unwrap();
         assert_eq!(rep.unchanged.len(), 4, "second run should change nothing");
         assert!(rep.installed.is_empty());
+    }
+
+    #[test]
+    fn added_lines_only_strips_deletions_and_headers() {
+        // Uses a fixture word that's NOT in the real forbidden list so the
+        // test source itself doesn't trip the pre-commit hook scanning this
+        // very file.
+        let diff = "diff --git a/x b/x\n\
+                    index abc..def 100644\n\
+                    --- a/x\n\
+                    +++ b/x\n\
+                    @@ -1,3 +1,3 @@\n\
+                     context line\n\
+                    -old line with FORBID\n\
+                    +new line lowercase forbid\n";
+        let added = added_lines_only(diff);
+        assert!(!added.contains("FORBID"), "deletion must not be scanned: {added:?}");
+        assert!(added.contains("new line lowercase forbid"));
+        assert!(!added.contains("+++"), "+++ header must not appear: {added:?}");
+        assert!(!added.contains("context line"), "context must not appear: {added:?}");
     }
 
     #[test]
