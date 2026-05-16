@@ -41,6 +41,10 @@ pub struct Paths {
     pub db_path: PathBuf,
     pub lock_path: PathBuf,
     pub cl_version_path: PathBuf,
+    /// Bearer token for the external MCP server. Generated on first run as a
+    /// UUIDv4 with 0o600 perms. Persists across restarts; user can rotate by
+    /// editing the file and restarting bot-hq.
+    pub mcp_token_path: PathBuf,
 }
 
 impl Paths {
@@ -59,13 +63,25 @@ impl Paths {
         let db_path = local_dir.join("bot-hq.db");
         let lock_path = local_dir.join("lock");
         let cl_version_path = data_dir.join("cl-version.txt");
+        let mcp_token_path = data_dir.join("mcp-token");
         Self {
             data_dir,
             local_dir,
             db_path,
             lock_path,
             cl_version_path,
+            mcp_token_path,
         }
+    }
+
+    /// Read the persisted external-MCP bearer token. Trims trailing whitespace
+    /// so a UUID written with a trailing newline still matches incoming
+    /// `Authorization: Bearer <token>` headers. Returns an error if the file
+    /// is missing — call `init()` first.
+    pub fn read_mcp_token(&self) -> Result<String> {
+        let raw = fs::read_to_string(&self.mcp_token_path)
+            .with_context(|| format!("reading mcp-token at {}", self.mcp_token_path.display()))?;
+        Ok(raw.trim().to_string())
     }
 
     /// Idempotent. Creates the data dir + CL skeleton on first run, repairs
@@ -104,6 +120,26 @@ impl Paths {
                         repaired_slots.push(rel.display().to_string());
                     }
                 }
+            }
+        }
+
+        // mcp-token: generate UUIDv4 on first run / if missing. 0o600 perms on
+        // Unix so other users on the machine can't read it. Idempotent — if the
+        // file exists, leave it alone (user might have rotated).
+        if !self.mcp_token_path.exists() {
+            let token = uuid::Uuid::new_v4().to_string();
+            fs::write(&self.mcp_token_path, format!("{token}\n"))
+                .with_context(|| format!("writing mcp-token at {}", self.mcp_token_path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = fs::Permissions::from_mode(0o600);
+                fs::set_permissions(&self.mcp_token_path, perms).with_context(|| {
+                    format!("0o600 perms on {}", self.mcp_token_path.display())
+                })?;
+            }
+            if !first_run {
+                repaired_slots.push("mcp-token".to_string());
             }
         }
 

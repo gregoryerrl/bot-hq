@@ -8,7 +8,7 @@ use crate::core::session::{
     SessionHandle,
 };
 use crate::paths::Paths;
-use crate::signaling::{SignalingBridge, SignalingEvent, SignalingServer};
+use crate::signaling::{ExternalServer, SignalingBridge, SignalingEvent, SignalingServer};
 use crate::storage::{Author, MessageKind, Session, Storage};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -24,6 +24,9 @@ pub struct AppState {
     pub signaling_server: Mutex<Option<SignalingServer>>,
     pub sessions: Mutex<HashMap<String, SessionHandle>>,
     pub emma: Mutex<Option<EmmaHandle>>,
+    /// External MCP server handle. None when disabled or port-busy at startup;
+    /// the binary stays usable in that case (internal MCP keeps working).
+    pub external_server: Mutex<Option<ExternalServer>>,
 }
 
 impl AppState {
@@ -38,6 +41,7 @@ impl AppState {
             signaling_server: Mutex::new(Some(server)),
             sessions: Mutex::new(HashMap::new()),
             emma: Mutex::new(None),
+            external_server: Mutex::new(None),
         }
     }
 

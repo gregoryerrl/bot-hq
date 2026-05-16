@@ -33,6 +33,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 tempfile = "3"
+subtle = "2"
 
 [build-dependencies]
 slint-build = "1.16"

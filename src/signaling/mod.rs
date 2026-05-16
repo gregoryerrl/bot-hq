@@ -17,9 +17,12 @@
 //! decision doc itself flagged HTTP as the "promote if IPC gets hairy" fallback.
 
 mod bridge;
+pub mod external_jsonrpc;
+pub mod external_server;
 mod jsonrpc;
 pub mod protocol;
 mod server;
 
 pub use bridge::{PendingChoice, SignalingBridge, SignalingEvent};
+pub use external_server::{start_external_server, ExternalServer};
 pub use server::{mcp_config_json, start_signaling_server, SignalingServer};
