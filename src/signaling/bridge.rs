@@ -67,12 +67,11 @@ pub struct ApprovalContext {
 }
 
 /// Parked state for a pending choice. The oneshot resolves the agent's wait;
-/// the optional approval context is consumed on resolve to write the log.
+/// the cloned `choice` lets external readers (`list_pending_choices`) see the
+/// question + options without losing the resolve-time-only approval context.
 struct Parked {
     tx: oneshot::Sender<String>,
-    approval: Option<ApprovalContext>,
-    session_id: String,
-    agent: String,
+    choice: PendingChoice,
 }
 
 /// Shared signaling state.
@@ -242,13 +241,19 @@ impl SignalingBridge {
     ) -> Result<String> {
         let choice_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel::<String>();
+        let choice = PendingChoice {
+            choice_id: choice_id.clone(),
+            session_id: session_id.clone(),
+            agent,
+            question,
+            options,
+            approval,
+        };
         self.pending.lock().await.insert(
             choice_id.clone(),
             Parked {
                 tx,
-                approval: approval.clone(),
-                session_id: session_id.clone(),
-                agent: agent.clone(),
+                choice: choice.clone(),
             },
         );
 
@@ -258,14 +263,7 @@ impl SignalingBridge {
 
         // Best-effort broadcast. If no subscribers, the request still parks
         // until resolve_choice is called (mostly a concern for tests).
-        let _ = self.event_tx.send(SignalingEvent::PendingChoice(PendingChoice {
-            choice_id: choice_id.clone(),
-            session_id,
-            agent,
-            question,
-            options,
-            approval,
-        }));
+        let _ = self.event_tx.send(SignalingEvent::PendingChoice(choice));
 
         // Caller is the agent; block until UI resolves.
         let picked = rx.await.map_err(|_| {
@@ -286,15 +284,17 @@ impl SignalingBridge {
                 // Write violation record FIRST (before unblocking the agent)
                 // so the audit trail captures the decision even if the agent
                 // crashes immediately after receiving the result.
-                if let (Some(log), Some(ctx)) = (self.violations.as_ref(), &p.approval) {
+                if let (Some(log), Some(ctx)) =
+                    (self.violations.as_ref(), &p.choice.approval)
+                {
                     let outcome = outcome_from_picked(&picked);
                     let _ = log
                         .record(
-                            p.session_id.clone(),
-                            p.agent.clone(),
+                            p.choice.session_id.clone(),
+                            p.choice.agent.clone(),
                             ctx.kind,
                             ctx.action.clone(),
-                            outcome,
+                            outcome.clone(),
                             ctx.detail.clone(),
                         )
                         .await;
@@ -305,6 +305,18 @@ impl SignalingBridge {
             }
             None => Err(anyhow::anyhow!("no pending choice with id {choice_id}")),
         }
+    }
+
+    /// Snapshot the currently-parked choices. Used by the external MCP driver
+    /// so it can see what's waiting for user input + the choice_ids needed to
+    /// resolve them.
+    pub async fn list_pending_choices(&self) -> Vec<PendingChoice> {
+        self.pending
+            .lock()
+            .await
+            .values()
+            .map(|p| p.choice.clone())
+            .collect()
     }
 
     /// Called by the MCP `tools/call` handler for `mark_awaiting_user`. This
