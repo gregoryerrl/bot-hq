@@ -285,7 +285,7 @@ async fn spawn_agent_for(
 ) -> Result<AgentHandle> {
     let system_prompt = read_system_prompt(paths, agent_name, project.as_deref())?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
-    let user_servers = load_user_mcp_servers(&default_user_settings_paths());
+    let user_servers = user_mcp_servers_for_agent(agent_name);
     let json = mcp_config_json(signaling_addr, session_id, agent_name, &user_servers);
     std::fs::write(&mcp_config_path, json)
         .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
@@ -299,6 +299,31 @@ async fn spawn_agent_for(
         claude_bin: None,
     };
     spawn_agent(spawn_cfg).await
+}
+
+/// Decide which user MCP servers to expose to an agent at spawn time.
+///
+/// EYES (Rain) gets an empty map — only `bot-hq-signaling` will be in the
+/// generated mcp-config.json. Without external MCPs (`brave-devtools`,
+/// `chrome-devtools`, `discord`, etc.) Rain literally cannot drive
+/// side-effects: the role contract is enforced at the tool boundary
+/// instead of relying on prompt discipline the model rationalizes around
+/// when a "next step" looks obvious. Rain still has claude-code's
+/// built-in read-only tools (`Read`, `Grep`, `Glob`, `WebFetch`,
+/// `WebSearch`, `ToolSearch`, `TaskCreate`/`TaskUpdate`), which are what
+/// EYES needs to review HANDS' work.
+///
+/// HANDS (Brian) and the singleton Emma get the full merged set from the
+/// user's claude-code config so they can drive browsers, talk to Discord,
+/// etc.
+pub fn user_mcp_servers_for_agent(
+    agent_name: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    if agent_name == "rain" {
+        serde_json::Map::new()
+    } else {
+        load_user_mcp_servers(&default_user_settings_paths())
+    }
 }
 
 /// Assemble the system prompt for an agent at spawn time. Layers:
@@ -520,6 +545,22 @@ fn default_agent_config(name: &str) -> impl FnOnce() -> AgentConfig {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn rain_gets_no_user_mcps_brian_gets_inherited() {
+        // EYES enforcement: Rain must not have any external MCP servers
+        // beyond the bot-hq-signaling one added by mcp_config_json. Brian
+        // (HANDS) keeps whatever the user has in ~/.claude.json.
+        // Mocking the file isn't worth it — we just verify Rain's map is
+        // empty and Brian's matches what load_user_mcp_servers returns.
+        let rain = user_mcp_servers_for_agent("rain");
+        assert!(rain.is_empty(), "Rain must spawn with no external MCPs");
+        let brian = user_mcp_servers_for_agent("brian");
+        let expected_brian = load_user_mcp_servers(&default_user_settings_paths());
+        assert_eq!(brian, expected_brian);
+        let emma = user_mcp_servers_for_agent("emma");
+        assert_eq!(emma, expected_brian);
+    }
 
     #[test]
     fn prompt_starts_with_hardcoded_role() {

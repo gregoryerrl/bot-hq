@@ -200,10 +200,61 @@ async fn flush_buffer(
         *flush_at = None;
         return;
     }
+    // Heartbeat suppression: short ack-style chunks ("Holding.",
+    // "Standing by.", "[Silent — awaiting]", etc.) get persisted to storage
+    // for UI visibility but NOT forwarded to the peer. Forwarding them
+    // triggers the alternating-volley antipattern where Brian + Rain
+    // bounce content-free acknowledgments back to each other while idling
+    // between actions. Belt-and-suspenders with the prompt-side rule.
+    if is_heartbeat_ack(&body) {
+        debug!(agent = ?cfg.author, body = %body.trim(), "heartbeat ack; skipping peer forward");
+        *flush_at = None;
+        return;
+    }
     if let Err(e) = peer_forward_message(cfg.author, body.trim_end(), peer_input_tx).await {
         warn!(?e, "peer forward failed");
     }
     *flush_at = None;
+}
+
+/// Identify a short ack-style chunk that should NOT be forwarded to the
+/// peer (purely an idle "I'm here" volley). Stays conservative on purpose:
+/// substantive acks ("Confirmed. The data at line 1580 is correct.") read
+/// as long-enough or non-heartbeat-prefixed and slip through.
+///
+/// Patterns matched (case-insensitive, after trim, length ≤ 80 chars):
+/// - Starts with `[Silent`, `[Awaiting`, `[Holding` (bracketed status
+///   markers — always heartbeat by design).
+/// - Starts with `holding`, `standing by`, `silent hold`,
+///   `awaiting your`, `awaiting user`, `awaiting direction`.
+fn is_heartbeat_ack(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.len() > 80 {
+        return false;
+    }
+    // Bracketed status markers are always heartbeat — short or not.
+    let lower_brackets = trimmed.to_lowercase();
+    if lower_brackets.starts_with("[silent")
+        || lower_brackets.starts_with("[awaiting")
+        || lower_brackets.starts_with("[holding")
+    {
+        return true;
+    }
+    // Stem matches: the leading phrase tells us this is an ack-vibe message;
+    // length cap above ensures it can't carry real content too.
+    const HEARTBEAT_LEADS: &[&str] = &[
+        "holding",
+        "standing by",
+        "silent hold",
+        "silent —",
+        "silent.",
+        "awaiting your",
+        "awaiting user",
+        "awaiting direction",
+    ];
+    HEARTBEAT_LEADS
+        .iter()
+        .any(|lead| lower_brackets.starts_with(lead))
 }
 
 #[cfg(test)]
@@ -227,6 +278,76 @@ mod tests {
             awaiting: None,
             bridge: None,
         }
+    }
+
+    #[test]
+    fn heartbeat_ack_matches_observed_volleys() {
+        // Exact strings emitted by Rain in round-2 testing.
+        assert!(is_heartbeat_ack("Holding."));
+        assert!(is_heartbeat_ack("Standing by."));
+        assert!(is_heartbeat_ack("Holding. No browser actions from me this time."));
+        assert!(is_heartbeat_ack("Standing by for Brian's snapshot result."));
+        assert!(is_heartbeat_ack("[Silent — awaiting user]"));
+        assert!(is_heartbeat_ack("[Silent hold — awaiting END-SSO]"));
+        assert!(is_heartbeat_ack("[Awaiting END-SSO from the user driving Brave.]"));
+        assert!(is_heartbeat_ack("Awaiting your direction."));
+        assert!(is_heartbeat_ack("Holding silently."));
+    }
+
+    #[test]
+    fn heartbeat_ack_passes_substantive_messages() {
+        // These look ack-shaped but carry real content; must NOT be dropped.
+        assert!(!is_heartbeat_ack(
+            "Confirmed. The link at snapshot line 1580 points to mtu.edu/cs/undergraduate/software/what."
+        ));
+        assert!(!is_heartbeat_ack("Noted. The OOB message landed; testbuyer's row still needs restoring before we close."));
+        assert!(!is_heartbeat_ack("I think we should retry the SSO with the new password and then verify the role assignment in Entra."));
+        // Short but not in the heartbeat lead list:
+        assert!(!is_heartbeat_ack("Done."));
+        assert!(!is_heartbeat_ack("Confirmed."));
+        // Empty / whitespace.
+        assert!(!is_heartbeat_ack(""));
+        assert!(!is_heartbeat_ack("   \n  "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn heartbeat_chunks_are_not_forwarded_to_peer() {
+        // End-to-end: Rain emits "Holding. ..." while Brian is mid-work.
+        // Storage receives it (UI must show what Rain "said"), but peer-
+        // forwarding does NOT fire so Brian's input_tx stays clean.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let task = tokio::spawn(pump_agent(
+            fast_cfg(Author::Rain, Author::Brian),
+            ev_rx,
+            peer_tx,
+            storage.clone(),
+            state.clone(),
+        ));
+
+        ev_tx
+            .send(AgentEvent::Text(
+                "Holding. No browser actions from me this time.".into(),
+            ))
+            .await
+            .unwrap();
+        ev_tx.send(AgentEvent::TurnComplete { stop_reason: None, subtype: None }).await.unwrap();
+
+        // Give the pump a moment, then assert nothing landed in peer_rx.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "heartbeat ack should not have been forwarded to peer"
+        );
+
+        // Storage still has it (UI visibility preserved).
+        drop(ev_tx);
+        task.await.unwrap();
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].author, "rain");
+        assert!(msgs[0].content.contains("Holding."));
     }
 
     #[tokio::test(flavor = "current_thread")]
