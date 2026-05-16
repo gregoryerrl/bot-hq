@@ -292,10 +292,10 @@ impl SignalingBridge {
                 // Write violation record FIRST (before unblocking the agent)
                 // so the audit trail captures the decision even if the agent
                 // crashes immediately after receiving the result.
+                let outcome = outcome_from_picked(&picked);
                 if let (Some(log), Some(ctx)) =
                     (self.violations.as_ref(), &p.choice.approval)
                 {
-                    let outcome = outcome_from_picked(&picked);
                     let _ = log
                         .record(
                             p.choice.session_id.clone(),
@@ -307,6 +307,39 @@ impl SignalingBridge {
                         )
                         .await;
                 }
+
+                // Persist a push_gate approval to the `.remembered-approvals`
+                // side-file so the git pre-push hook (which calls
+                // `Policy::resolve` fresh on every push) sees the branch and
+                // lets subsequent pushes proceed. Without this step, the MCP
+                // approval is audit-only and the hook re-blocks indefinitely.
+                if let (Some(ctx), Some(data_dir)) = (&p.choice.approval, &self.data_dir) {
+                    if matches!(ctx.kind, crate::policy::ViolationKind::PushGate)
+                        && matches!(outcome, crate::policy::ViolationOutcome::Approved)
+                    {
+                        if let Some(branch) = parse_push_branch(&ctx.action) {
+                            let project = self
+                                .session_projects
+                                .lock()
+                                .await
+                                .get(&p.choice.session_id)
+                                .cloned()
+                                .flatten();
+                            if let Err(e) = crate::policy::Policy::append_remembered_approval(
+                                data_dir,
+                                project.as_deref(),
+                                &branch,
+                            ) {
+                                tracing::warn!(
+                                    ?e,
+                                    branch = %branch,
+                                    "append_remembered_approval failed; pre-push hook may re-block"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 p.tx.send(picked)
                     .map_err(|_| anyhow::anyhow!("agent receiver dropped before choice resolved"))?;
                 Ok(())
@@ -366,6 +399,50 @@ impl SignalingBridge {
     pub async fn pending_choice_count(&self) -> usize {
         self.pending.lock().await.len()
     }
+}
+
+/// Parse the branch from a push-gate `action` string. Accepts shapes like
+/// `"git push origin <branch>"`, `"git push --force origin <branch>"`, and
+/// `"git push origin <branch>:<remote-ref>"`. Returns None for unparseable
+/// inputs (no false-positive remembered approvals).
+fn parse_push_branch(action: &str) -> Option<String> {
+    let after_push = action.trim().strip_prefix("git push")?.trim_start();
+    let tokens: Vec<&str> = after_push.split_whitespace().collect();
+    // Refuse if the user is doing something other than "push this branch":
+    // --delete/-d removes a remote ref, which we don't want to silently
+    // remember as an approved push target.
+    if tokens.iter().any(|t| *t == "--delete" || *t == "-d") {
+        return None;
+    }
+    // Strip flag-shaped tokens. The first two remaining positional tokens are
+    // <remote> <ref>. If only one is present (e.g. `git push -u origin`), bail
+    // rather than guess.
+    let positionals: Vec<&str> = tokens.iter().copied().filter(|t| !t.starts_with('-')).collect();
+    let branch_arg = match positionals.as_slice() {
+        [_remote, branch, ..] => *branch,
+        _ => return None,
+    };
+    let branch = branch_arg.split(':').next().unwrap_or(branch_arg).trim();
+    if branch.is_empty() {
+        return None;
+    }
+    Some(branch.to_string())
+}
+
+#[cfg(test)]
+#[test]
+fn parse_push_branch_shapes() {
+    assert_eq!(
+        parse_push_branch("git push origin 346-streamline-onboarding-process"),
+        Some("346-streamline-onboarding-process".into())
+    );
+    assert_eq!(
+        parse_push_branch("git push origin main:release"),
+        Some("main".into())
+    );
+    assert_eq!(parse_push_branch("git push --force origin main"), Some("main".into()));
+    assert_eq!(parse_push_branch("not a push command"), None);
+    assert_eq!(parse_push_branch("git push origin --delete x"), None); // safety: refuse flag-looking branches
 }
 
 /// Map a picked option string to an outcome enum. Anything that starts with
@@ -479,6 +556,168 @@ mod tests {
         assert_eq!(recs[0].kind, ViolationKind::PushGate);
         assert_eq!(recs[0].outcome, ViolationOutcome::Approved);
         assert_eq!(recs[0].action, "git push origin main");
+    }
+
+    #[tokio::test]
+    async fn approved_push_gate_persists_branch_to_remembered_approvals() {
+        // Round-trip the bridge.resolve_choice → policy side-file → Policy::resolve
+        // path. After an approved push_gate, the branch must land in
+        // remembered_approvals so the pre-push hook stops blocking subsequent
+        // pushes.
+        let dir = tempfile::tempdir().unwrap();
+        let project = "test-project";
+        // Seed a project policy with per_branch_approval mode + no approvals yet
+        let proj_dir = dir.path().join("projects").join(project);
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        std::fs::write(
+            proj_dir.join("policy.yaml"),
+            "push_gate:\n  mode: per_branch_approval\n",
+        )
+        .unwrap();
+
+        let log = ViolationsLog::new(dir.path());
+        let bridge =
+            SignalingBridge::with_policy(log.clone(), dir.path().to_path_buf());
+        bridge
+            .register_session(
+                "session-A".to_string(),
+                Some(project.to_string()),
+            )
+            .await;
+
+        let mut sub = bridge.subscribe();
+        let bridge_clone = Arc::clone(&bridge);
+        let ask = tokio::spawn(async move {
+            bridge_clone
+                .request_approval(
+                    "session-A".into(),
+                    "brian".into(),
+                    "Approve push?".into(),
+                    vec!["Approve push".into(), "Deny".into()],
+                    ApprovalContext {
+                        kind: ViolationKind::PushGate,
+                        action: "git push origin 346-streamline-onboarding-process".into(),
+                        detail: Some("per_branch_approval".into()),
+                    },
+                )
+                .await
+                .unwrap()
+        });
+        let ev = sub.recv().await.unwrap();
+        let cid = match ev {
+            SignalingEvent::PendingChoice(p) => p.choice_id,
+            other => panic!("expected PendingChoice, got {other:?}"),
+        };
+        bridge
+            .resolve_choice(&cid, "Approve push".into())
+            .await
+            .unwrap();
+        let _ = ask.await.unwrap();
+
+        // Branch is now in the side-file.
+        let approvals = std::fs::read_to_string(
+            proj_dir.join(".remembered-approvals"),
+        )
+        .unwrap();
+        assert!(approvals.contains("346-streamline-onboarding-process"));
+
+        // Policy::resolve now picks it up.
+        let resolved = crate::policy::Policy::resolve(dir.path(), Some(project)).unwrap();
+        assert!(resolved
+            .push_gate
+            .remembered_approvals
+            .iter()
+            .any(|b| b == "346-streamline-onboarding-process"));
+
+        // Idempotent — second approval for the same branch doesn't duplicate.
+        let bridge_clone = Arc::clone(&bridge);
+        let ask2 = tokio::spawn(async move {
+            bridge_clone
+                .request_approval(
+                    "session-A".into(),
+                    "brian".into(),
+                    "Push again?".into(),
+                    vec!["Approve push".into(), "Deny".into()],
+                    ApprovalContext {
+                        kind: ViolationKind::PushGate,
+                        action: "git push origin 346-streamline-onboarding-process".into(),
+                        detail: None,
+                    },
+                )
+                .await
+                .unwrap()
+        });
+        // Drain any pending events (ChoiceResolved from the first round) until
+        // we land on the second PendingChoice.
+        let cid2 = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        bridge
+            .resolve_choice(&cid2, "Approve push".into())
+            .await
+            .unwrap();
+        let _ = ask2.await.unwrap();
+        let approvals_again =
+            std::fs::read_to_string(proj_dir.join(".remembered-approvals")).unwrap();
+        let occurrences = approvals_again
+            .lines()
+            .filter(|l| l.trim() == "346-streamline-onboarding-process")
+            .count();
+        assert_eq!(occurrences, 1, "branch should appear exactly once");
+    }
+
+    #[tokio::test]
+    async fn denied_push_gate_does_not_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = "deny-test";
+        let proj_dir = dir.path().join("projects").join(project);
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        std::fs::write(
+            proj_dir.join("policy.yaml"),
+            "push_gate:\n  mode: per_branch_approval\n",
+        )
+        .unwrap();
+
+        let log = ViolationsLog::new(dir.path());
+        let bridge = SignalingBridge::with_policy(log, dir.path().to_path_buf());
+        bridge
+            .register_session("s".to_string(), Some(project.to_string()))
+            .await;
+
+        let mut sub = bridge.subscribe();
+        let bridge_clone = Arc::clone(&bridge);
+        let ask = tokio::spawn(async move {
+            bridge_clone
+                .request_approval(
+                    "s".into(),
+                    "brian".into(),
+                    "?".into(),
+                    vec!["Approve push".into(), "Deny".into()],
+                    ApprovalContext {
+                        kind: ViolationKind::PushGate,
+                        action: "git push origin denied-branch".into(),
+                        detail: None,
+                    },
+                )
+                .await
+                .unwrap()
+        });
+        let ev = sub.recv().await.unwrap();
+        let cid = match ev {
+            SignalingEvent::PendingChoice(p) => p.choice_id,
+            other => panic!("expected PendingChoice, got {other:?}"),
+        };
+        bridge.resolve_choice(&cid, "Deny".into()).await.unwrap();
+        let _ = ask.await.unwrap();
+
+        let approvals_path = proj_dir.join(".remembered-approvals");
+        assert!(
+            !approvals_path.exists() || std::fs::read_to_string(&approvals_path).unwrap().is_empty(),
+            ".remembered-approvals should not contain denied branch"
+        );
     }
 
     #[tokio::test]
