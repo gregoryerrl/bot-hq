@@ -8,7 +8,7 @@ use crate::agents::{spawn_agent, AgentEvent, AgentHandle, SpawnConfig};
 use crate::core::duo::{pump_agent, DuoConfig};
 use crate::core::ipav::IpavState;
 use crate::paths::Paths;
-use crate::signaling::{mcp_config_json, SignalingBridge};
+use crate::signaling::{default_user_settings_path, load_user_mcp_servers, mcp_config_json, SignalingBridge};
 use crate::storage::{AgentConfig, Author, MessageKind, Session, Storage};
 use tokio::sync::mpsc;
 #[allow(unused_imports)]
@@ -285,7 +285,10 @@ async fn spawn_agent_for(
 ) -> Result<AgentHandle> {
     let system_prompt = read_system_prompt(paths, agent_name, project.as_deref())?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
-    let json = mcp_config_json(signaling_addr, session_id, agent_name);
+    let user_servers = default_user_settings_path()
+        .map(|p| load_user_mcp_servers(&p))
+        .unwrap_or_default();
+    let json = mcp_config_json(signaling_addr, session_id, agent_name, &user_servers);
     std::fs::write(&mcp_config_path, json)
         .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
 

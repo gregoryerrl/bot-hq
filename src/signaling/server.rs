@@ -187,20 +187,79 @@ fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<
 
 /// Render the mcp-config.json content claude-code expects for one agent.
 ///
-/// Single entry under `mcpServers`, type `"http"` pointing at the per-agent
-/// URL. The CLI passes through `env` to the subprocess — but since we use
-/// HTTP transport (not stdio), env is unused.
-pub fn mcp_config_json(server_addr: SocketAddr, session_id: &str, agent: &str) -> String {
+/// `bot-hq-signaling` (HTTP transport, per-agent URL) is always included.
+/// `extra_servers` is merged on top — typically the user's own
+/// `~/.claude/settings.json` `mcpServers` map, loaded by
+/// [`load_user_mcp_servers`]. The agent runs with `--strict-mcp-config`, so
+/// without this merge the subagent has no access to chrome-devtools /
+/// brave-devtools / playwright / etc. that the parent claude-code session
+/// has. The user's explicit intent when configuring those MCPs is that
+/// their claude sessions can use them — spawned bot-hq subagents are part
+/// of that intent.
+///
+/// `bot-hq-signaling` always wins on key collision (the user's settings
+/// could in principle contain a key by that name; ours is load-bearing).
+pub fn mcp_config_json(
+    server_addr: SocketAddr,
+    session_id: &str,
+    agent: &str,
+    extra_servers: &serde_json::Map<String, serde_json::Value>,
+) -> String {
     let url = format!("http://{}/sessions/{}/{}/mcp", server_addr, session_id, agent);
-    serde_json::to_string_pretty(&json!({
-        "mcpServers": {
-            "bot-hq-signaling": {
-                "type": "http",
-                "url": url
-            }
+    let mut servers = serde_json::Map::new();
+    for (name, val) in extra_servers {
+        servers.insert(name.clone(), val.clone());
+    }
+    servers.insert(
+        "bot-hq-signaling".to_string(),
+        json!({ "type": "http", "url": url }),
+    );
+    serde_json::to_string_pretty(&json!({ "mcpServers": servers }))
+        .unwrap_or_else(|_| "{}".into())
+}
+
+/// Read the user's `~/.claude/settings.json` and return its `mcpServers`
+/// map so spawned subagents inherit the same MCP surface as the user's
+/// own claude-code sessions. Filters out any entry whose key is `bot-hq`
+/// (the old Go binary at `~/go/bin/bot-hq mcp` — exposing it inside fresh
+/// agents would create a recursive driver loop against the new bot-hq).
+///
+/// Missing file / parse error / missing `mcpServers` key → empty map +
+/// debug log. We never fail spawn on this; the subagent just falls back to
+/// `bot-hq-signaling` only (current behavior).
+pub fn load_user_mcp_servers(
+    settings_path: &std::path::Path,
+) -> serde_json::Map<String, serde_json::Value> {
+    let raw = match std::fs::read_to_string(settings_path) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!(path = %settings_path.display(), %e, "user MCP settings absent — subagent gets bot-hq-signaling only");
+            return serde_json::Map::new();
         }
-    }))
-    .unwrap_or_else(|_| "{}".into())
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(path = %settings_path.display(), %e, "user MCP settings unparseable — subagent gets bot-hq-signaling only");
+            return serde_json::Map::new();
+        }
+    };
+    let Some(map) = parsed
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
+        .cloned()
+    else {
+        return serde_json::Map::new();
+    };
+    map.into_iter()
+        .filter(|(k, _)| k != "bot-hq")
+        .collect()
+}
+
+/// Default location for the user's claude-code settings: `~/.claude/settings.json`.
+/// Returns None if the home dir can't be resolved.
+pub fn default_user_settings_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".claude/settings.json"))
 }
 
 #[cfg(test)]
@@ -224,10 +283,59 @@ mod tests {
     #[test]
     fn mcp_config_shape() {
         let addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
-        let s = mcp_config_json(addr, "sess1", "brian");
+        let s = mcp_config_json(addr, "sess1", "brian", &serde_json::Map::new());
         assert!(s.contains("mcpServers"));
         assert!(s.contains("bot-hq-signaling"));
         assert!(s.contains("\"type\": \"http\""));
         assert!(s.contains("http://127.0.0.1:54321/sessions/sess1/brian/mcp"));
+    }
+
+    #[test]
+    fn mcp_config_merges_user_servers() {
+        let addr: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        let mut extras = serde_json::Map::new();
+        extras.insert(
+            "chrome-devtools".into(),
+            json!({ "command": "node", "args": ["main.js"] }),
+        );
+        let s = mcp_config_json(addr, "sess1", "brian", &extras);
+        let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let servers = parsed.get("mcpServers").and_then(|v| v.as_object()).unwrap();
+        assert!(servers.contains_key("bot-hq-signaling"));
+        assert!(servers.contains_key("chrome-devtools"));
+    }
+
+    #[test]
+    fn load_user_mcp_servers_filters_bot_hq_recursion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "mcpServers": {
+                    "bot-hq": { "command": "/Users/u/go/bin/bot-hq", "args": ["mcp"] },
+                    "chrome-devtools": { "command": "node", "args": ["m.js"] }
+                }
+            }"#,
+        )
+        .unwrap();
+        let map = load_user_mcp_servers(&path);
+        assert!(!map.contains_key("bot-hq"));
+        assert!(map.contains_key("chrome-devtools"));
+    }
+
+    #[test]
+    fn load_user_mcp_servers_missing_file_returns_empty() {
+        let map = load_user_mcp_servers(std::path::Path::new("/nonexistent/path/settings.json"));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn load_user_mcp_servers_malformed_json_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{ not valid json").unwrap();
+        let map = load_user_mcp_servers(&path);
+        assert!(map.is_empty());
     }
 }
