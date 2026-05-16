@@ -350,3 +350,161 @@ async fn close_session_on_inserted_row_succeeds() {
     assert!(status.contains("200"));
     assert!(body.contains(r#"ok\":true"#), "body: {body}");
 }
+
+// ---- iter 3 tools ---------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_list_returns_all_iter3_tools() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+    let (_status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+    )
+    .await;
+    for tool in &["get_agent_configs", "set_agent_config", "get_violations"] {
+        assert!(body.contains(tool), "tool {tool} missing from tools/list");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_agent_configs_redacts_auth_token() {
+    // Set a non-empty auth_token via storage so we can verify redaction.
+    let env = setup().await;
+    use bot_hq::storage::AgentConfig;
+    env._core
+        .storage
+        .upsert_agent_config(&AgentConfig {
+            agent_name: "brian".into(),
+            provider: "anthropic".into(),
+            model_name: "claude-opus-4-7".into(),
+            base_url: Some("https://api.anthropic.com/v1".into()),
+            auth_token: Some("sk-ant-api03-EXAMPLE-key-with-suffix-AB12".into()),
+            updated_at: String::new(),
+        })
+        .await
+        .unwrap();
+
+    let h = auth_header(&env.token);
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"get_agent_configs","arguments":{}}}"#,
+    )
+    .await;
+    assert!(status.contains("200"));
+    // Full token must NOT appear in the response.
+    assert!(
+        !body.contains("EXAMPLE-key-with-suffix"),
+        "auth_token leaked in response: {body}"
+    );
+    // Last-4 redaction must appear.
+    assert!(body.contains("****AB12"), "redacted suffix missing: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_agent_config_updates_and_keeps_unspecified_fields() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+
+    // Set only model_name; provider + auth_token stay at their seed defaults.
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"set_agent_config","arguments":{"agent_name":"emma","model_name":"claude-haiku-4-5-20251001"}}}"#,
+    )
+    .await;
+    assert!(status.contains("200"));
+    assert!(body.contains(r#"ok\":true"#), "body: {body}");
+
+    // Verify via storage.
+    let cfg = env
+        ._core
+        .storage
+        .get_agent_config("emma")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cfg.model_name, "claude-haiku-4-5-20251001");
+    // Provider stayed at seed default.
+    assert_eq!(cfg.provider, "anthropic");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_agent_config_rejects_unknown_agent_name() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"set_agent_config","arguments":{"agent_name":"bogus","model_name":"x"}}}"#,
+    )
+    .await;
+    assert!(status.contains("200"));
+    assert!(body.contains("must be emma/brian/rain"), "body: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_agent_config_empty_string_clears_field() {
+    let env = setup().await;
+    use bot_hq::storage::AgentConfig;
+    // Seed with a non-null auth_token.
+    env._core
+        .storage
+        .upsert_agent_config(&AgentConfig {
+            agent_name: "rain".into(),
+            provider: "anthropic".into(),
+            model_name: "claude-sonnet-4-6".into(),
+            base_url: Some("https://example.test".into()),
+            auth_token: Some("sk-rain-old".into()),
+            updated_at: String::new(),
+        })
+        .await
+        .unwrap();
+
+    let h = auth_header(&env.token);
+    let (_status, _body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"set_agent_config","arguments":{"agent_name":"rain","auth_token":""}}}"#,
+    )
+    .await;
+
+    let cfg = env
+        ._core
+        .storage
+        .get_agent_config("rain")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cfg.auth_token.is_none(), "auth_token should be cleared");
+    // Unspecified base_url unchanged.
+    assert_eq!(cfg.base_url.as_deref(), Some("https://example.test"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_violations_returns_empty_on_fresh_install() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"get_violations","arguments":{}}}"#,
+    )
+    .await;
+    assert!(status.contains("200"));
+    // The bridge in the test fixture is built via SignalingBridge::new() — no
+    // violations log attached, so we expect the "not configured" error. (A
+    // real bot-hq install uses with_policy() which attaches the log.)
+    assert!(
+        body.contains("not configured") || body.contains(r#"violations\":[]"#),
+        "expected either 'not configured' (test fixture) or empty array (prod): {body}"
+    );
+}

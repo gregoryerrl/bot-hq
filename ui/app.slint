@@ -204,6 +204,12 @@ export global AppState {
     in-out property <bool>   emma-restart-confirm-visible;
     callback restart-emma();
 
+    // External MCP — populated at startup by view_model. Empty when the
+    // external server failed to bind (port in use / disabled via env var).
+    in-out property <string> external-mcp-url;
+    in-out property <string> external-mcp-token;
+    in-out property <bool>   external-mcp-token-revealed;
+
     callback open-session(string);
     callback back-to-dashboard();
     callback advance-phase(string);
@@ -1790,6 +1796,151 @@ component SettingsPane inherits Rectangle {
                             AppState.emma-restart-confirm-visible = true;
                         }
                     }
+            }
+
+            // External MCP — let another agent drive bot-hq. Section appears
+            // even when external_mcp_url is empty (= server failed to bind);
+            // we just show a status row instead of the URL + token.
+            VerticalLayout {
+                spacing: Theme.s-1;
+                Text {
+                    text: "External MCP";
+                    color: Theme.on-surface;
+                    font-family: Theme.font-display;
+                    font-size: Theme.font-head-lg;
+                    font-weight: Theme.w-bold;
+                    letter-spacing: Theme.ls-headline;
+                }
+                Text {
+                    text: "Bearer-token-authed MCP server for driving bot-hq from another agent (Claude Code, custom tooling, tests). Localhost only.";
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle {
+                background: #0f172a;
+                border-radius: Theme.radius-xl;
+                border-width: 1px;
+                border-color: Theme.outline-variant.with-alpha(0.6);
+                VerticalLayout {
+                    padding: Theme.s-4;
+                    spacing: Theme.s-3;
+
+                    if AppState.external-mcp-url == "":
+                        Text {
+                            text: "External MCP unavailable — port busy or BOT_HQ_EXTERNAL_MCP_DISABLED=1 was set.";
+                            color: Theme.on-surface-variant;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-code;
+                            wrap: word-wrap;
+                        }
+
+                    if AppState.external-mcp-url != "":
+                        VerticalLayout {
+                            spacing: Theme.s-3;
+
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text {
+                                    text: "Endpoint URL";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                                Rectangle {
+                                    background: Theme.surface-lowest;
+                                    border-radius: Theme.radius-lg;
+                                    border-width: 1px;
+                                    border-color: Theme.outline-variant;
+                                    height: 36px;
+                                    HorizontalLayout {
+                                        padding-left: Theme.s-3;
+                                        padding-right: Theme.s-3;
+                                        TextInput {
+                                            text: AppState.external-mcp-url;
+                                            read-only: true;
+                                            color: Theme.on-surface;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-code;
+                                            vertical-alignment: center;
+                                            single-line: true;
+                                            horizontal-stretch: 1;
+                                            selection-background-color: Theme.primary.with-alpha(0.4);
+                                            selection-foreground-color: Theme.on-surface;
+                                        }
+                                    }
+                                }
+                            }
+
+                            VerticalLayout {
+                                spacing: 2px;
+                                HorizontalLayout {
+                                    spacing: Theme.s-2;
+                                    alignment: stretch;
+                                    Text {
+                                        text: "Bearer Token";
+                                        color: Theme.on-surface-variant;
+                                        font-family: Theme.font-mono;
+                                        font-size: Theme.font-label;
+                                        letter-spacing: Theme.ls-label;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    GhostButton {
+                                        label: AppState.external-mcp-token-revealed ? "Hide" : "Reveal";
+                                        btn-height: 22px;
+                                        clicked => {
+                                            AppState.external-mcp-token-revealed = !AppState.external-mcp-token-revealed;
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    background: Theme.surface-lowest;
+                                    border-radius: Theme.radius-lg;
+                                    border-width: 1px;
+                                    border-color: Theme.outline-variant;
+                                    height: 36px;
+                                    HorizontalLayout {
+                                        padding-left: Theme.s-3;
+                                        padding-right: Theme.s-3;
+                                        TextInput {
+                                            text: AppState.external-mcp-token-revealed
+                                                ? AppState.external-mcp-token
+                                                : "••••••••-••••-••••-••••-••••••••••••";
+                                            read-only: true;
+                                            color: Theme.on-surface;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-code;
+                                            vertical-alignment: center;
+                                            single-line: true;
+                                            horizontal-stretch: 1;
+                                            selection-background-color: Theme.primary.with-alpha(0.4);
+                                            selection-foreground-color: Theme.on-surface;
+                                        }
+                                    }
+                                }
+                                Text {
+                                    text: "Stored at ~/.bot-hq/mcp-token (mode 0600). Rotate by editing the file and restarting bot-hq.";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-code;
+                                    wrap: word-wrap;
+                                }
+                            }
+
+                            Text {
+                                text: "Override port via BOT_HQ_EXTERNAL_MCP_PORT. Disable entirely with BOT_HQ_EXTERNAL_MCP_DISABLED=1.";
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                wrap: word-wrap;
+                            }
+                        }
+                }
             }
         }
     }

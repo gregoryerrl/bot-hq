@@ -11,6 +11,7 @@ use crate::core::AppState as CoreAppState;
 use crate::signaling::protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, ToolCallResult, ToolDescriptor,
 };
+use crate::storage::AgentConfig as DbAgentConfig;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -64,10 +65,8 @@ pub async fn dispatch_external(
     }
 }
 
-/// Iter 1+2 toolset: enough to drive a session end-to-end (create, send,
-/// read, list) PLUS phase control, choice resolution, lifecycle (close,
-/// restart-emma), Emma read, pending-choices visibility, and status. Iter 3
-/// adds: get_violations, get/set_agent_configs.
+/// Full driver toolset: session lifecycle + phase control + choice resolution
+/// + Emma + status + admin (agent configs, violations log).
 pub fn external_tool_descriptors() -> Vec<ToolDescriptor> {
     vec![
         ToolDescriptor {
@@ -172,7 +171,50 @@ pub fn external_tool_descriptors() -> Vec<ToolDescriptor> {
             description: "Snapshot of bot-hq runtime state — version, signaling address, external MCP address, count of active duo sessions, whether Emma is spawned, and a millisecond-resolution wall-clock timestamp. Useful for client health checks.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
+        ToolDescriptor {
+            name: "get_agent_configs",
+            description: "List all three agent configs (emma, brian, rain) — provider, model_name, base_url, updated_at. The auth_token is REDACTED: returned as `<unset>` if empty, or `<set:****abcd>` showing only the last 4 chars to confirm which key is loaded. Full secret retrieval is intentionally not exposed.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDescriptor {
+            name: "set_agent_config",
+            description: "Upsert an agent config row. agent_name must be one of emma/brian/rain. Pass auth_token to set a new credential; pass empty string to clear. Other fields (provider, model_name, base_url) are optional — omit to keep the current value.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "agent_name": { "type": "string", "enum": ["emma", "brian", "rain"] },
+                    "provider": { "type": "string", "description": "Optional. e.g. 'anthropic'. Omit to keep current value." },
+                    "model_name": { "type": "string", "description": "Optional. e.g. 'claude-opus-4-7'. Omit to keep current value." },
+                    "base_url": { "type": "string", "description": "Optional. e.g. 'https://api.anthropic.com/v1'. Empty string clears. Omit to keep current value." },
+                    "auth_token": { "type": "string", "description": "Optional. Empty string clears. Omit to keep current value." }
+                },
+                "required": ["agent_name"]
+            }),
+        },
+        ToolDescriptor {
+            name: "get_violations",
+            description: "Read recent entries from violations.jsonl. Each record: ts (RFC 3339), session_id, agent, kind, action, outcome (Approved/Denied/Abandoned/Detected), detail. Use `limit` to cap response size; default 100 most-recent.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max records returned. Default 100. Most-recent first." }
+                }
+            }),
+        },
     ]
+}
+
+/// Redact an auth_token field for read-side display. Returns `<unset>` for
+/// empty/None, or `<set:****abcd>` showing only the last 4 chars so the user
+/// can verify which credential is loaded without exposing the full secret.
+fn redact_auth_token(t: &Option<String>) -> String {
+    match t.as_deref() {
+        None | Some("") => "<unset>".to_string(),
+        Some(s) => {
+            let suffix = if s.len() >= 4 { &s[s.len() - 4..] } else { s };
+            format!("<set:****{suffix}>")
+        }
+    }
 }
 
 async fn call_external_tool(
@@ -427,6 +469,128 @@ async fn call_external_tool(
                 serde_json::to_string(&payload).unwrap_or_default(),
             ))
         }
+        "get_agent_configs" => {
+            let cfgs = core.storage.list_agent_configs().await.map_err(|e| {
+                JsonRpcError::new(
+                    JsonRpcError::INTERNAL_ERROR,
+                    format!("list_agent_configs: {e}"),
+                )
+            })?;
+            let arr: Vec<_> = cfgs
+                .into_iter()
+                .map(|c| {
+                    json!({
+                        "agent_name": c.agent_name,
+                        "provider": c.provider,
+                        "model_name": c.model_name,
+                        "base_url": c.base_url,
+                        "auth_token": redact_auth_token(&c.auth_token),
+                        "updated_at": c.updated_at,
+                    })
+                })
+                .collect();
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&json!({ "agent_configs": arr })).unwrap_or_default(),
+            ))
+        }
+        "set_agent_config" => {
+            let agent_name = args
+                .get("agent_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing agent_name")
+                })?
+                .to_string();
+            if !["emma", "brian", "rain"].contains(&agent_name.as_str()) {
+                return Err(JsonRpcError::new(
+                    JsonRpcError::INVALID_PARAMS,
+                    format!("agent_name must be emma/brian/rain, got {agent_name}"),
+                ));
+            }
+            // Load current, then overlay any provided fields.
+            let current = core
+                .storage
+                .get_agent_config(&agent_name)
+                .await
+                .map_err(|e| {
+                    JsonRpcError::new(
+                        JsonRpcError::INTERNAL_ERROR,
+                        format!("get_agent_config: {e}"),
+                    )
+                })?
+                .unwrap_or_else(|| DbAgentConfig {
+                    agent_name: agent_name.clone(),
+                    provider: "anthropic".to_string(),
+                    model_name: String::new(),
+                    base_url: None,
+                    auth_token: None,
+                    updated_at: String::new(),
+                });
+            let provider = args
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .unwrap_or(current.provider);
+            let model_name = args
+                .get("model_name")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .unwrap_or(current.model_name);
+            // For base_url / auth_token: empty string clears (None), absent keeps
+            // the existing value. This matches the descriptor's documented semantics.
+            let base_url = match args.get("base_url").and_then(Value::as_str) {
+                Some("") => None,
+                Some(s) => Some(s.to_string()),
+                None => current.base_url,
+            };
+            let auth_token = match args.get("auth_token").and_then(Value::as_str) {
+                Some("") => None,
+                Some(s) => Some(s.to_string()),
+                None => current.auth_token,
+            };
+            let cfg = DbAgentConfig {
+                agent_name,
+                provider,
+                model_name,
+                base_url,
+                auth_token,
+                updated_at: String::new(), // upsert sets datetime('now')
+            };
+            core.storage.upsert_agent_config(&cfg).await.map_err(|e| {
+                JsonRpcError::new(
+                    JsonRpcError::INTERNAL_ERROR,
+                    format!("upsert_agent_config: {e}"),
+                )
+            })?;
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&json!({ "ok": true })).unwrap_or_default(),
+            ))
+        }
+        "get_violations" => {
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_i64)
+                .filter(|n| *n > 0)
+                .unwrap_or(100) as usize;
+            let log = core.bridge.violations_log().ok_or_else(|| {
+                JsonRpcError::new(
+                    JsonRpcError::INTERNAL_ERROR,
+                    "violations log not configured (bridge built without policy)",
+                )
+            })?;
+            let mut records = log.read_all().map_err(|e| {
+                JsonRpcError::new(
+                    JsonRpcError::INTERNAL_ERROR,
+                    format!("violations read_all: {e}"),
+                )
+            })?;
+            // Most-recent first; cap to `limit`.
+            records.reverse();
+            records.truncate(limit);
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&json!({ "violations": records })).unwrap_or_default(),
+            ))
+        }
         unknown => Err(JsonRpcError::new(
             JsonRpcError::METHOD_NOT_FOUND,
             format!("unknown tool {unknown}"),
@@ -439,7 +603,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn descriptors_include_iter1_and_iter2_tools() {
+    fn descriptors_include_all_iters() {
         let names: Vec<&str> = external_tool_descriptors()
             .iter()
             .map(|d| d.name)
@@ -457,6 +621,27 @@ mod tests {
         assert!(names.contains(&"get_emma_messages"));
         assert!(names.contains(&"get_pending_choices"));
         assert!(names.contains(&"get_status"));
-        assert_eq!(names.len(), 11);
+        // iter 3
+        assert!(names.contains(&"get_agent_configs"));
+        assert!(names.contains(&"set_agent_config"));
+        assert!(names.contains(&"get_violations"));
+        assert_eq!(names.len(), 14);
+    }
+
+    #[test]
+    fn redact_auth_token_unset() {
+        assert_eq!(redact_auth_token(&None), "<unset>");
+        assert_eq!(redact_auth_token(&Some(String::new())), "<unset>");
+    }
+
+    #[test]
+    fn redact_auth_token_shows_last_4() {
+        assert_eq!(
+            redact_auth_token(&Some("sk-ant-api03-abcdefghij1234".to_string())),
+            "<set:****1234>"
+        );
+        // Short token (< 4 chars) reveals the whole thing — acceptable, it's
+        // clearly not a real key.
+        assert_eq!(redact_auth_token(&Some("ab".to_string())), "<set:****ab>");
     }
 }

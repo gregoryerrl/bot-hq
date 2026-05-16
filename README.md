@@ -92,8 +92,12 @@ bot-hq-rebuild/
   `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL`.
 - **UI signaling:** in-process **HTTP MCP server** (hand-rolled minimal
   JSON-RPC over hyper 1.x — see Decisions Made Autonomously below). Two
-  tools: `ask_user_choice(question, options)` (blocking) and
-  `mark_awaiting_user(reason)` (non-blocking).
+  surfaces: (a) **internal** at `127.0.0.1:<ephemeral>` — UI-signaling tools
+  served to child agents (`ask_user_choice`, `mark_awaiting_user`,
+  `request_approval`, `check_commit_message`, `close_session`); (b)
+  **external** at `127.0.0.1:7892` — driver tools served to any
+  bearer-token-authenticated MCP client (see "Driving bot-hq from another
+  MCP client" below).
 - **Storage:** sqlite via sqlx, tables `messages` / `sessions` /
   `agent_configs`. Emma is a singleton session row (`id="emma"`).
 - **IPAV:** in-memory `HashMap<SessionId, IpavState>`. Phases I/P use a
@@ -135,6 +139,83 @@ human reviewer:
    installed toolchain was 1.84.1. `rustup update stable` is a user-scoped
    update (no system install) so we ran it — bumped to 1.95.0. Documented
    in this README so future maintainers know the MSRV came from Slint.
+
+## Driving bot-hq from another MCP client
+
+Bot-hq exposes a second MCP HTTP server so an external agent (another Claude
+Code session, a test driver, a custom tool) can list/create sessions, send
+messages, resolve choices, advance phases, read chat history, manage agent
+configs, and read the violations log — all without the GUI.
+
+**Endpoint:** `http://127.0.0.1:7892/mcp` (POST, JSON-RPC body)
+**Auth:** `Authorization: Bearer <token>` where token lives at
+`~/.bot-hq/mcp-token` (UUIDv4, 0600 perms, generated on first run)
+
+### Setup in another Claude Code session
+
+Add to your MCP config (typically `~/.claude.json` or per-project `mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "bot-hq": {
+      "type": "http",
+      "url": "http://127.0.0.1:7892/mcp",
+      "headers": {
+        "Authorization": "Bearer <paste contents of ~/.bot-hq/mcp-token>"
+      }
+    }
+  }
+}
+```
+
+Restart that Claude Code; the bot-hq tools appear as `mcp__bot-hq__*`.
+
+### Available tools
+
+| Tool | Purpose |
+|---|---|
+| `list_sessions` | Read active sessions (id, title, phase, models) |
+| `create_session(title, working_repo_path?)` | Spawn a Brian+Rain duo |
+| `send_message(session_id, text)` | Broadcast to a session (or `"emma"`) |
+| `get_session_messages(session_id, since_id?)` | Read chat in order |
+| `get_emma_messages(since_id?)` | Same, for Emma |
+| `advance_phase(session_id, phase)` | Move through I/P/A/V |
+| `resolve_choice(choice_id, picked)` | Answer a parked `ask_user_choice` |
+| `get_pending_choices` | List parked choices with their choice_ids |
+| `close_session(session_id, archive?)` | Kill duo + mark closed |
+| `restart_emma` | Kill+respawn Emma (e.g. after config swap) |
+| `get_status` | Version, addresses, session count, uptime |
+| `get_agent_configs` | Read agent configs (auth_token redacted to last 4 chars) |
+| `set_agent_config(agent_name, …)` | Upsert a row; empty string clears a field |
+| `get_violations(limit?)` | Read recent violations.jsonl entries |
+
+### Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BOT_HQ_EXTERNAL_MCP_PORT` | `7892` | Override the listen port |
+| `BOT_HQ_EXTERNAL_MCP_DISABLED` | unset | Set to `1` to skip external server startup |
+
+Port conflict: bot-hq soft-fails — internal MCP keeps working, the
+Settings → External MCP panel shows "unavailable", and the binary stays
+usable. Quickest fix is killing the conflicting process or setting a
+different `BOT_HQ_EXTERNAL_MCP_PORT`.
+
+### Security model
+
+- **Localhost-only bind** (`127.0.0.1`, not `0.0.0.0`) — refuses remote
+  connections at the bind layer.
+- **Bearer token** with constant-time comparison via the `subtle` crate.
+  Localhost is still the trust boundary, but the constant-time check
+  guards against timing attacks if you ever expose the port through a
+  reverse proxy.
+- **`auth_token` redaction** in `get_agent_configs` — returns
+  `<set:****abcd>` showing only the last 4 chars so an external client
+  can verify which credential is loaded without ever seeing the secret.
+  Writing a new value via `set_agent_config` still requires the full token.
+- **Rotation:** edit `~/.bot-hq/mcp-token` and restart bot-hq. The token
+  is read once at startup, never re-read.
 
 ## Security caveats (v1)
 
