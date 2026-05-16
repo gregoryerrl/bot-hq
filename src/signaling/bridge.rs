@@ -11,6 +11,7 @@
 //!    option. The result flows back to the agent as the tool's return value.
 
 use crate::policy::{Policy, ViolationKind, ViolationOutcome, ViolationsLog};
+use crate::storage::{Author, MessageKind, Storage};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -99,6 +100,15 @@ pub struct SignalingBridge {
     /// fires, the bridge sets the flag synchronously BEFORE returning so
     /// Brian's next chunk doesn't volley to Rain before the halt takes effect.
     session_awaiting: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Storage handle for out-of-band message injection. Set once via
+    /// `set_storage` at startup. When a `resolve_choice` lands after the
+    /// agent's blocking `ask_user_choice` tool call already client-side
+    /// timed out (claude-code's MCP tool timeout is shorter than typical
+    /// user-response latency), the answer is otherwise lost. We persist a
+    /// synthetic user message so the duo sees the resolution on its next
+    /// message poll. None on bridges constructed before storage is wired
+    /// (test bridges + the pre-storage window in main).
+    storage: Mutex<Option<Storage>>,
 }
 
 impl SignalingBridge {
@@ -111,6 +121,7 @@ impl SignalingBridge {
             data_dir: None,
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
+            storage: Mutex::new(None),
         })
     }
 
@@ -125,6 +136,7 @@ impl SignalingBridge {
             data_dir: None,
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
+            storage: Mutex::new(None),
         })
     }
 
@@ -140,6 +152,7 @@ impl SignalingBridge {
             data_dir: Some(data_dir),
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
+            storage: Mutex::new(None),
         })
     }
 
@@ -148,6 +161,13 @@ impl SignalingBridge {
     /// Idempotent — re-registering overwrites.
     pub async fn register_session(&self, session_id: String, project: Option<String>) {
         self.session_projects.lock().await.insert(session_id, project);
+    }
+
+    /// Wire the storage handle so the bridge can write out-of-band messages
+    /// when a `resolve_choice` arrives after the agent's tool call already
+    /// timed out. Called once at startup. Idempotent (overwrites).
+    pub async fn set_storage(&self, storage: Storage) {
+        *self.storage.lock().await = Some(storage);
     }
 
     /// Hand the bridge a shared awaiting-flag pointer owned by the SessionHandle.
@@ -340,8 +360,43 @@ impl SignalingBridge {
                     }
                 }
 
-                p.tx.send(picked)
-                    .map_err(|_| anyhow::anyhow!("agent receiver dropped before choice resolved"))?;
+                if let Err(picked) = p.tx.send(picked) {
+                    // The agent's blocking `ask_user_choice` tool call client-side
+                    // timed out before we got the user's pick. The answer is still
+                    // captured (violations log + remembered_approvals are already
+                    // written above) — surface it to the agent out-of-band so they
+                    // see the resolution on next message poll instead of waiting
+                    // forever on a tool result that will never arrive.
+                    let agent_label = p.choice.agent.clone();
+                    let question = p.choice.question.clone();
+                    let session_id = p.choice.session_id.clone();
+                    let storage_guard = self.storage.lock().await;
+                    if let Some(storage) = storage_guard.as_ref() {
+                        let body = format!(
+                            "(out-of-band) Your earlier `ask_user_choice` for {agent_label} resolved while \
+                             you were no longer waiting on the tool call.\n\n\
+                             **Question:** {question}\n\
+                             **User picked:** {picked}\n\n\
+                             Treat this as the user's reply. Continue from here."
+                        );
+                        if let Err(e) = storage
+                            .insert_message(&session_id, Author::User, MessageKind::Text, &body)
+                            .await
+                        {
+                            tracing::warn!(
+                                ?e,
+                                %session_id,
+                                "out-of-band choice-resolution message failed to persist"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            %session_id,
+                            "resolve_choice: agent receiver dropped AND no storage wired — \
+                             pick recorded but not delivered"
+                        );
+                    }
+                }
                 Ok(())
             }
             None => Err(anyhow::anyhow!("no pending choice with id {choice_id}")),
@@ -511,6 +566,66 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no pending choice"));
+    }
+
+    #[tokio::test]
+    async fn resolve_after_agent_drop_falls_back_to_message() {
+        // Simulates: agent calls ask_user_choice → claude-code MCP client
+        // times out → drops the receiver. Some time later the orchestrator
+        // calls resolve_choice. We expect Ok + a synthetic user message
+        // persisted to storage so the agent learns the answer on next poll.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        // Seed a session row so the FK in messages is satisfied.
+        storage
+            .create_session("s-fallback", "title", None)
+            .await
+            .unwrap();
+
+        let mut sub = bridge.subscribe();
+        let bridge_clone = Arc::clone(&bridge);
+        let asker = tokio::spawn(async move {
+            bridge_clone
+                .ask_user_choice(
+                    "s-fallback".into(),
+                    "brian".into(),
+                    "Pick something?".into(),
+                    vec!["A".into(), "B".into()],
+                )
+                .await
+        });
+        // Grab the choice_id from the broadcast event.
+        let choice_id = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        // Simulate client-side timeout: abort the agent's future, then yield
+        // so the drop runs and the oneshot::Receiver is gone.
+        asker.abort();
+        let _ = asker.await; // collect the JoinError; we expect Aborted.
+        tokio::task::yield_now().await;
+
+        // Orchestrator resolves the (now-orphaned) choice.
+        bridge
+            .resolve_choice(&choice_id, "A".into())
+            .await
+            .expect("resolve_choice should succeed even when agent receiver dropped");
+
+        // Verify the out-of-band message landed.
+        let msgs = storage
+            .messages_for_session("s-fallback", None)
+            .await
+            .unwrap();
+        let oob = msgs
+            .iter()
+            .find(|m| m.content.contains("(out-of-band)"))
+            .expect("expected synthetic out-of-band message");
+        assert_eq!(oob.author, "user");
+        assert!(oob.content.contains("User picked:"));
+        assert!(oob.content.contains("A"));
     }
 
     #[tokio::test]

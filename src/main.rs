@@ -49,6 +49,10 @@ fn main() -> Result<()> {
         let storage = Storage::open(&paths.db_path).await?;
         let violations = ViolationsLog::new(&paths.data_dir);
         let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
+        // Wire storage into the bridge so out-of-band choice resolutions (when
+        // the agent's blocking tool call already timed out client-side) can be
+        // surfaced as synthetic user messages.
+        bridge.set_storage(storage.clone()).await;
         let server = start_signaling_server(bridge).await?;
         tracing::info!(addr = %server.local_addr, "signaling server up");
         Ok::<_, anyhow::Error>(Arc::new(
