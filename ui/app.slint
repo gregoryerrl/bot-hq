@@ -65,6 +65,14 @@ export struct CLFileEntry {
     display-name: string,
     is-dir: bool,
     depth: int,
+    // True when this entry is a directory currently expanded in the tree.
+    // Chevron renders ▾ when true, ▸ when false. Files always false.
+    expanded: bool,
+    // True when the walker emitted this row as a placeholder for the in-flight
+    // inline create (new-file or new-folder under `relative-path`'s parent).
+    // The row renders a TextInput instead of static text. `relative-path`
+    // for ghost rows is the synthetic "<parent>/__ghost__" sentinel.
+    is-ghost: bool,
 }
 
 // ---- Design tokens ---------------------------------------------------------
@@ -241,6 +249,24 @@ export global AppState {
     callback cl-delete-file(string);          // (relative_path)
     callback cl-rescan();
     callback cl-autodescribe();               // generates description via Emma for current file
+
+    // VS Code-style tree state. Collapsed = folder paths the user has
+    // collapsed (in-memory, resets at restart). Editing = the single row
+    // currently being typed into (inline rename or new-file/folder).
+    in-out property <[string]> cl-tree-collapsed;
+    in-out property <string>   cl-tree-editing-path;
+    in-out property <string>   cl-tree-editing-name;
+    in-out property <string>   cl-tree-editing-mode;   // "" | "new-file" | "new-folder" | "rename"
+    in-out property <string>   cl-tree-context-menu-path;
+    in-out property <length>   cl-tree-context-menu-x;
+    in-out property <length>   cl-tree-context-menu-y;
+    callback cl-tree-toggle-collapse(string);            // (folder_path)
+    callback cl-tree-begin-create-file(string);          // (parent_dir)  "" = project root pick
+    callback cl-tree-begin-create-folder(string);        // (parent_dir)
+    callback cl-tree-begin-rename(string);               // (path)
+    callback cl-tree-commit-edit();                      // commits whatever editing-mode says
+    callback cl-tree-cancel-edit();                      // clears editing state
+    callback cl-tree-delete-path(string);                // (path) — file or folder, with confirm
 
     in-out property <[AgentConfigRow]> agent-configs;
 
@@ -1783,7 +1809,16 @@ component SessionView inherits Rectangle {
 component CLTreeRow inherits Rectangle {
     in property <CLFileEntry> entry;
     in property <bool> active;
+    in property <bool> editing;
     callback clicked();
+    callback toggle-collapse();
+    callback context-menu(length, length);            // (x, y) in window-relative coords
+    callback create-file-here();
+    callback create-folder-here();
+    callback rename-self();
+    callback delete-self();
+    callback commit-edit();
+    callback cancel-edit();
     height: 26px;
     border-radius: Theme.radius-default;
     background: root.active
@@ -1797,25 +1832,126 @@ component CLTreeRow inherits Rectangle {
         padding-left: entry.depth * Theme.s-3 + Theme.s-2;
         padding-right: Theme.s-2;
         spacing: Theme.s-2;
-        alignment: start;
-        Icon {
-            glyph: entry.is-dir ? "▸" : "·";
-            size: 12px;
-            tint: entry.is-dir ? Theme.on-surface-variant : Theme.on-surface-variant.with-alpha(0.6);
+        alignment: stretch;
+        // Chevron / file glyph. Folders get a clickable chevron that
+        // toggles collapse; files get a passive bullet.
+        Rectangle {
+            width: 14px;
+            horizontal-stretch: 0;
+            Icon {
+                // Folder uses pure-ASCII chevron pair (>/v) so it renders
+                // on any mono font; files just show "-".
+                glyph: entry.is-dir
+                    ? (entry.expanded ? "v" : ">")
+                    : "-";
+                size: 11px;
+                tint: entry.is-dir ? Theme.on-surface-variant : Theme.on-surface-variant.with-alpha(0.5);
+            }
+            if entry.is-dir && !entry.is-ghost: TouchArea {
+                clicked => { root.toggle-collapse(); }
+            }
         }
-        Text {
-            text: entry.display-name;
-            color: root.active
-                ? Theme.primary
-                : entry.is-dir ? Theme.on-surface : Theme.on-surface-variant;
-            font-family: Theme.font-mono;
-            font-size: Theme.font-code;
-            font-weight: entry.is-dir ? Theme.w-bold : Theme.w-regular;
-            vertical-alignment: center;
-            overflow: elide;
+        // Label OR inline edit input depending on mode.
+        Rectangle {
+            horizontal-stretch: 1;
+            if !root.editing: Text {
+                text: entry.display-name;
+                color: root.active
+                    ? Theme.primary
+                    : entry.is-dir ? Theme.on-surface : Theme.on-surface-variant;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-code;
+                font-weight: entry.is-dir ? Theme.w-bold : Theme.w-regular;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if root.editing: edit-input := TextInput {
+                text <=> AppState.cl-tree-editing-name;
+                color: Theme.on-surface;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-code;
+                vertical-alignment: center;
+                single-line: true;
+                selection-background-color: Theme.primary.with-alpha(0.4);
+                accepted => { root.commit-edit(); }
+                key-pressed(ev) => {
+                    if (ev.text == Key.Escape) {
+                        root.cancel-edit();
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+        // Hover action icons. Only on non-editing non-ghost rows.
+        if ta.has-hover && !root.editing && !entry.is-ghost:
+            HorizontalLayout {
+                spacing: Theme.s-1;
+                horizontal-stretch: 0;
+                if entry.is-dir:
+                    Rectangle {
+                        width: 18px; height: 18px;
+                        Text {
+                            text: "+";
+                            color: Theme.on-surface-variant;
+                            font-family: Theme.font-mono;
+                            font-size: 13px;
+                            font-weight: Theme.w-bold;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea { clicked => { root.create-file-here(); } }
+                    }
+                if entry.is-dir:
+                    Rectangle {
+                        width: 18px; height: 18px;
+                        Text {
+                            text: "F+";
+                            color: Theme.on-surface-variant;
+                            font-family: Theme.font-mono;
+                            font-size: 10px;
+                            font-weight: Theme.w-bold;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                        TouchArea { clicked => { root.create-folder-here(); } }
+                    }
+                Rectangle {
+                    width: 18px; height: 18px;
+                    Text {
+                        text: "R";
+                        color: Theme.on-surface-variant;
+                        font-family: Theme.font-mono;
+                        font-size: 10px;
+                        font-weight: Theme.w-bold;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea { clicked => { root.rename-self(); } }
+                }
+                Rectangle {
+                    width: 18px; height: 18px;
+                    Text {
+                        text: "x";
+                        color: Theme.error;
+                        font-family: Theme.font-mono;
+                        font-size: 12px;
+                        font-weight: Theme.w-bold;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea { clicked => { root.delete-self(); } }
+                }
+            }
+    }
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+        pointer-event(ev) => {
+            if (ev.button == PointerEventButton.right && ev.kind == PointerEventKind.up) {
+                root.context-menu(self.mouse-x, self.mouse-y);
+            }
         }
     }
-    ta := TouchArea { clicked => { root.clicked(); } }
 }
 
 component ContextLibraryPane inherits Rectangle {
@@ -1879,11 +2015,29 @@ component ContextLibraryPane inherits Rectangle {
                             CLTreeRow {
                                 entry: entry;
                                 active: entry.relative-path == AppState.cl-current-path;
+                                editing: entry.relative-path == AppState.cl-tree-editing-path
+                                          && AppState.cl-tree-editing-mode != "";
                                 clicked => {
-                                    if (!entry.is-dir) {
+                                    if (entry.is-ghost) {
+                                        // No-op — ghost rows are placeholders.
+                                    } else if (entry.is-dir) {
+                                        AppState.cl-tree-toggle-collapse(entry.relative-path);
+                                    } else {
                                         AppState.cl-open-file(entry.relative-path);
                                     }
                                 }
+                                toggle-collapse => { AppState.cl-tree-toggle-collapse(entry.relative-path); }
+                                context-menu(x, y) => {
+                                    AppState.cl-tree-context-menu-path = entry.relative-path;
+                                    AppState.cl-tree-context-menu-x = x;
+                                    AppState.cl-tree-context-menu-y = y;
+                                }
+                                create-file-here => { AppState.cl-tree-begin-create-file(entry.relative-path); }
+                                create-folder-here => { AppState.cl-tree-begin-create-folder(entry.relative-path); }
+                                rename-self => { AppState.cl-tree-begin-rename(entry.relative-path); }
+                                delete-self => { AppState.cl-tree-delete-path(entry.relative-path); }
+                                commit-edit => { AppState.cl-tree-commit-edit(); }
+                                cancel-edit => { AppState.cl-tree-cancel-edit(); }
                             }
                     }
                 }

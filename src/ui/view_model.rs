@@ -114,6 +114,11 @@ struct CLEntryData {
     display_name: String,
     is_dir: bool,
     depth: i32,
+    /// Directories: true when expanded (children listed below it). Files: false.
+    expanded: bool,
+    /// True when this is a synthetic "currently being typed" placeholder row
+    /// for inline new-file/new-folder creation.
+    is_ghost: bool,
 }
 
 #[derive(Clone)]
@@ -161,6 +166,8 @@ fn cl_entry_from_data(d: CLEntryData) -> CLFileEntry {
         display_name: SharedString::from(d.display_name),
         is_dir: d.is_dir,
         depth: d.depth,
+        expanded: d.expanded,
+        is_ghost: d.is_ghost,
     }
 }
 
@@ -652,10 +659,6 @@ pub async fn install_view_model(
                     show_toast(&weak, "File path required.");
                     return;
                 }
-                if description.trim().is_empty() {
-                    show_toast(&weak, "Description required.");
-                    return;
-                }
                 let path = core.paths.data_dir.join(name);
                 if path.exists() {
                     show_toast(&weak, "File already exists.");
@@ -668,9 +671,19 @@ pub async fn install_view_model(
                         return;
                     }
                 }
-                // Seed with an H1 so the auto-extracted description matches
-                // what the user picked.
-                let initial = format!("# {}\n\n", description.trim());
+                // Description defaults to the filename stem when blank — speed
+                // is the win, the user refines via the metadata strip later.
+                let stem = std::path::Path::new(name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(name)
+                    .to_string();
+                let final_desc = if description.trim().is_empty() {
+                    stem.clone()
+                } else {
+                    description.trim().to_string()
+                };
+                let initial = format!("# {}\n\n", final_desc);
                 if let Err(e) = std::fs::write(&path, &initial) {
                     warn!(?e, "CL create");
                     show_toast(&weak, "Could not write file.");
@@ -683,14 +696,14 @@ pub async fn install_view_model(
                     .await;
                 if let Err(e) = core
                     .storage
-                    .upsert_cl_index(&project, &file_path, description.trim(), None)
+                    .upsert_cl_index(&project, &file_path, &final_desc, None)
                     .await
                 {
                     warn!(?e, "CL create index");
                 }
                 refresh_cl_tree(&weak, &core).await;
                 update_cl_current(&weak, name, &initial);
-                update_cl_metadata(&weak, description.trim(), "");
+                update_cl_metadata(&weak, &final_desc, "");
                 clear_cl_dirty(&weak);
                 clear_cl_metadata_dirty(&weak);
             });
@@ -863,6 +876,312 @@ pub async fn install_view_model(
             rt.spawn(async move {
                 refresh_cl_tree(&weak, &core).await;
             });
+        });
+    }
+
+    // ---- VS Code-style inline tree CRUD --------------------------------
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_toggle_collapse(move |folder_path| {
+            let folder_path = folder_path.to_string();
+            // Read+mutate collapsed set on the event-loop thread.
+            if let Some(handle) = weak.upgrade() {
+                let app = handle.global::<SlintAppState>();
+                let cur = app.get_cl_tree_collapsed();
+                let mut set: Vec<SharedString> = Vec::with_capacity(cur.row_count() + 1);
+                let mut was_collapsed = false;
+                for i in 0..cur.row_count() {
+                    if let Some(p) = cur.row_data(i) {
+                        if p.to_string() == folder_path {
+                            was_collapsed = true; // dropping it = expand
+                        } else {
+                            set.push(p);
+                        }
+                    }
+                }
+                if !was_collapsed {
+                    set.push(SharedString::from(folder_path));
+                }
+                app.set_cl_tree_collapsed(ModelRc::new(VecModel::from(set)));
+            }
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                refresh_cl_tree(&weak, &core).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_begin_create_file(move |parent_dir| {
+            let parent_dir = parent_dir.to_string();
+            set_editing_state(&weak, "new-file", &parent_dir, "");
+            // The walker injects a ghost row at the create site — refresh
+            // the tree so the user sees the inline input immediately.
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                refresh_cl_tree(&weak, &core).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_begin_create_folder(move |parent_dir| {
+            let parent_dir = parent_dir.to_string();
+            set_editing_state(&weak, "new-folder", &parent_dir, "");
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                refresh_cl_tree(&weak, &core).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_begin_rename(move |path| {
+            let path = path.to_string();
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            set_editing_state(&weak, "rename", &path, &name);
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                refresh_cl_tree(&weak, &core).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        app.on_cl_tree_cancel_edit(move || {
+            clear_editing_state(&weak);
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_commit_edit(move || {
+            // Read editing state on the event-loop thread.
+            let (mode, target_path, name) = match weak.upgrade() {
+                Some(handle) => {
+                    let app = handle.global::<SlintAppState>();
+                    (
+                        app.get_cl_tree_editing_mode().to_string(),
+                        app.get_cl_tree_editing_path().to_string(),
+                        app.get_cl_tree_editing_name().to_string(),
+                    )
+                }
+                None => return,
+            };
+            let name = name.trim().trim_start_matches('/').to_string();
+            if name.is_empty() {
+                clear_editing_state(&weak);
+                return;
+            }
+            clear_editing_state(&weak);
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                match mode.as_str() {
+                    "new-file" => {
+                        // For files in `_globals` we don't auto-append .md;
+                        // user can type extension. For convenience, if no
+                        // extension and no slash, append .md.
+                        let final_name = if !name.contains('.') && !name.contains('/') {
+                            format!("{}.md", name)
+                        } else {
+                            name.clone()
+                        };
+                        let rel = if target_path.is_empty() {
+                            final_name.clone()
+                        } else {
+                            format!("{}/{}", target_path, final_name)
+                        };
+                        let path = core.paths.data_dir.join(&rel);
+                        if path.exists() {
+                            show_toast(&weak, "File already exists.");
+                            return;
+                        }
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        // Seed with an H1 derived from the filename stem so
+                        // rescan's auto-extracted description matches.
+                        let stem = std::path::Path::new(&final_name)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&final_name)
+                            .to_string();
+                        if let Err(e) = std::fs::write(&path, format!("# {}\n\n", stem)) {
+                            warn!(?e, "inline create");
+                            show_toast(&weak, "Could not create file.");
+                            return;
+                        }
+                        // Auto-register index with description = stem (user
+                        // refines via metadata strip later).
+                        let (project, file_path) = resolve_project_and_path(&rel);
+                        let _ = core
+                            .storage
+                            .upsert_project(&project, &project, None, None)
+                            .await;
+                        let _ = core
+                            .storage
+                            .upsert_cl_index(&project, &file_path, &stem, None)
+                            .await;
+                        refresh_cl_tree(&weak, &core).await;
+                        // Open the freshly-created file.
+                        update_cl_current(&weak, &rel, &format!("# {}\n\n", stem));
+                        update_cl_metadata(&weak, &stem, "");
+                        clear_cl_dirty(&weak);
+                        clear_cl_metadata_dirty(&weak);
+                    }
+                    "new-folder" => {
+                        let rel = if target_path.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{}/{}", target_path, name)
+                        };
+                        let path = core.paths.data_dir.join(&rel);
+                        if path.exists() {
+                            show_toast(&weak, "Folder already exists.");
+                            return;
+                        }
+                        if let Err(e) = std::fs::create_dir_all(&path) {
+                            warn!(?e, "inline mkdir");
+                            show_toast(&weak, "Could not create folder.");
+                            return;
+                        }
+                        refresh_cl_tree(&weak, &core).await;
+                    }
+                    "rename" => {
+                        let src = core.paths.data_dir.join(&target_path);
+                        let parent = std::path::Path::new(&target_path)
+                            .parent()
+                            .and_then(|p| p.to_str())
+                            .unwrap_or("");
+                        let dst_rel = if parent.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{}/{}", parent, name)
+                        };
+                        let dst = core.paths.data_dir.join(&dst_rel);
+                        if dst.exists() && dst != src {
+                            show_toast(&weak, "Target name already exists.");
+                            return;
+                        }
+                        if let Err(e) = std::fs::rename(&src, &dst) {
+                            warn!(?e, "rename");
+                            show_toast(&weak, "Could not rename.");
+                            return;
+                        }
+                        // If a file, update the index (keep same project).
+                        if dst.is_file() {
+                            let (project_old, file_old) =
+                                resolve_project_and_path(&target_path);
+                            let (project_new, file_new) =
+                                resolve_project_and_path(&dst_rel);
+                            // Read old description so we can re-insert under
+                            // the new path (delete + insert; no rename op).
+                            let desc = core
+                                .storage
+                                .get_cl_index(&project_old, &file_old)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|e| (e.description, e.tags))
+                                .unwrap_or((String::new(), None));
+                            let _ = core
+                                .storage
+                                .delete_cl_index(&project_old, &file_old)
+                                .await;
+                            if !desc.0.is_empty() {
+                                let _ = core
+                                    .storage
+                                    .upsert_cl_index(
+                                        &project_new,
+                                        &file_new,
+                                        &desc.0,
+                                        desc.1.as_deref(),
+                                    )
+                                    .await;
+                            }
+                            // If the renamed file was the open one, follow it.
+                            let (open_path, _) = current_cl_state(&weak);
+                            if open_path == target_path {
+                                update_cl_current(
+                                    &weak,
+                                    &dst_rel,
+                                    &std::fs::read_to_string(&dst).unwrap_or_default(),
+                                );
+                            }
+                        }
+                        // For folder renames, child rows update naturally
+                        // on the next refresh — no index touch (file paths
+                        // are relative-to-project; if the project name
+                        // changed because we renamed projects/<x>/, that's
+                        // a heavier op we don't try to handle inline.
+                        refresh_cl_tree(&weak, &core).await;
+                    }
+                    _ => {}
+                }
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_delete_path(move |path| {
+            // Files use the existing delete-confirm dialog (cl-delete-confirm-path).
+            // Folders delete immediately (with a soft confirm via toast).
+            let path = path.to_string();
+            let full = core.paths.data_dir.join(&path);
+            if full.is_dir() {
+                let weak = weak.clone();
+                let core = Arc::clone(&core);
+                rt.spawn(async move {
+                    if let Err(e) = std::fs::remove_dir_all(&full) {
+                        warn!(?e, "delete folder");
+                        show_toast(&weak, "Could not delete folder.");
+                        return;
+                    }
+                    // Drop every index row whose path starts with the
+                    // deleted folder. Use rescan to clean orphans; the
+                    // bridge.cl_rescan handles per-project sweeps.
+                    let projects = core.storage.list_projects().await.unwrap_or_default();
+                    for p in projects {
+                        let _ = core.bridge.cl_rescan(&p.name).await;
+                    }
+                    refresh_cl_tree(&weak, &core).await;
+                    show_toast(&weak, "Folder deleted.");
+                });
+            } else {
+                // Trigger the existing single-file confirm dialog.
+                if let Some(handle) = weak.upgrade() {
+                    handle
+                        .global::<SlintAppState>()
+                        .set_cl_delete_confirm_path(SharedString::from(path));
+                }
+            }
         });
     }
 
@@ -1128,7 +1447,10 @@ async fn refresh_agent_configs(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>)
 
 async fn refresh_cl_tree(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
     let root = core.paths.data_dir.clone();
-    let entries = walk_cl(&root);
+    // Snapshot collapsed-folder set + inline-edit state from Slint on the
+    // event-loop thread so the walker can honor them.
+    let snapshot = read_tree_state(weak).await;
+    let entries = walk_cl(&root, &snapshot);
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(handle) = weak.upgrade() {
@@ -1140,8 +1462,55 @@ async fn refresh_cl_tree(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
     });
 }
 
-fn walk_cl(root: &std::path::Path) -> Vec<CLEntryData> {
-    fn recurse(out: &mut Vec<CLEntryData>, dir: &std::path::Path, root: &std::path::Path, depth: i32) {
+#[derive(Default, Clone)]
+struct TreeState {
+    /// Folder relative-paths the user has collapsed in the UI.
+    collapsed: std::collections::HashSet<String>,
+    /// Current inline-edit mode + target. Drives ghost-row injection.
+    editing_mode: String,
+    editing_path: String,
+}
+
+async fn read_tree_state(weak: &Weak<AppWindow>) -> TreeState {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let weak_inner = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let mut state = TreeState::default();
+        if let Some(handle) = weak_inner.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            let collapsed = app.get_cl_tree_collapsed();
+            for i in 0..collapsed.row_count() {
+                if let Some(p) = collapsed.row_data(i) {
+                    state.collapsed.insert(p.to_string());
+                }
+            }
+            state.editing_mode = app.get_cl_tree_editing_mode().to_string();
+            state.editing_path = app.get_cl_tree_editing_path().to_string();
+        }
+        let _ = tx.send(state);
+    });
+    rx.await.unwrap_or_default()
+}
+
+/// Synthetic relative-path used for the inline new-file/new-folder placeholder
+/// row. Composed as `<parent>/__ghost__` (or just `__ghost__` at root). The
+/// Slint side checks `is_ghost: true` to swap to a TextInput.
+fn ghost_relative_path(parent: &str) -> String {
+    if parent.is_empty() {
+        "__ghost__".to_string()
+    } else {
+        format!("{}/__ghost__", parent)
+    }
+}
+
+fn walk_cl(root: &std::path::Path, state: &TreeState) -> Vec<CLEntryData> {
+    fn recurse(
+        out: &mut Vec<CLEntryData>,
+        dir: &std::path::Path,
+        root: &std::path::Path,
+        depth: i32,
+        state: &TreeState,
+    ) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return,
@@ -1159,26 +1528,59 @@ fn walk_cl(root: &std::path::Path) -> Vec<CLEntryData> {
         });
         for e in sorted {
             let p = e.path();
-            // Skip dotfiles + the .local DB dir.
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') {
                 continue;
             }
             let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
             let is_dir = p.is_dir();
+            let expanded = is_dir && !state.collapsed.contains(&rel);
             out.push(CLEntryData {
-                relative_path: rel,
+                relative_path: rel.clone(),
                 display_name: name.to_string(),
                 is_dir,
                 depth,
+                expanded,
+                is_ghost: false,
             });
-            if is_dir {
-                recurse(out, &p, root, depth + 1);
+            // Inject ghost row for inline create directly under this folder
+            // when the user is creating something there. Ghost row sits at
+            // depth+1, right after the folder header, BEFORE the recurse so
+            // it appears at the top of the listing (matches VS Code).
+            if is_dir
+                && matches!(state.editing_mode.as_str(), "new-file" | "new-folder")
+                && state.editing_path == rel
+            {
+                out.push(CLEntryData {
+                    relative_path: ghost_relative_path(&rel),
+                    display_name: String::new(),
+                    is_dir: state.editing_mode == "new-folder",
+                    depth: depth + 1,
+                    expanded: false,
+                    is_ghost: true,
+                });
+            }
+            if is_dir && expanded {
+                recurse(out, &p, root, depth + 1, state);
             }
         }
     }
     let mut out = Vec::new();
-    recurse(&mut out, root, root, 0);
+    // Root-level ghost row (when create-here was triggered at the bot-hq root
+    // — empty editing_path means "create at root").
+    if matches!(state.editing_mode.as_str(), "new-file" | "new-folder")
+        && state.editing_path.is_empty()
+    {
+        out.push(CLEntryData {
+            relative_path: ghost_relative_path(""),
+            display_name: String::new(),
+            is_dir: state.editing_mode == "new-folder",
+            depth: 0,
+            expanded: false,
+            is_ghost: true,
+        });
+    }
+    recurse(&mut out, root, root, 0, state);
     out
 }
 
@@ -1781,6 +2183,33 @@ fn clear_cl_metadata_dirty(weak: &Weak<AppWindow>) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(handle) = weak.upgrade() {
             handle.global::<SlintAppState>().set_cl_metadata_dirty(false);
+        }
+    });
+}
+
+fn set_editing_state(weak: &Weak<AppWindow>, mode: &str, path: &str, name: &str) {
+    let weak = weak.clone();
+    let mode = mode.to_string();
+    let path = path.to_string();
+    let name = name.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_cl_tree_editing_mode(SharedString::from(mode));
+            app.set_cl_tree_editing_path(SharedString::from(path));
+            app.set_cl_tree_editing_name(SharedString::from(name));
+        }
+    });
+}
+
+fn clear_editing_state(weak: &Weak<AppWindow>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_cl_tree_editing_mode(SharedString::new());
+            app.set_cl_tree_editing_path(SharedString::new());
+            app.set_cl_tree_editing_name(SharedString::new());
         }
     });
 }
