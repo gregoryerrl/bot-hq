@@ -13,7 +13,8 @@ use crate::core::{AppState as CoreAppState, IpavPhase};
 use crate::signaling::SignalingEvent;
 use crate::storage::{AgentConfig as DbAgentConfig, Message};
 use crate::{
-    AgentConfigRow, AppState as SlintAppState, AppWindow, CLFileEntry, ChatMsg, SessionTile,
+    AgentConfigRow, AppState as SlintAppState, AppWindow, CLFileEntry, ChatMsg, PendingQuestion,
+    SessionTile,
 };
 use once_cell::sync::Lazy;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
@@ -83,6 +84,9 @@ struct TileData {
     pending_question: String,
     pending_options: Vec<String>,
     pending_choice_id: String,
+    /// Live count of pending rows in `session_questions` for this session.
+    /// Powers the dashboard card's `[Need User Input · N]` chip.
+    pending_input_count: i32,
     quickview: String,
 }
 
@@ -127,6 +131,7 @@ fn tile_from_data(d: TileData) -> SessionTile {
         pending_question: SharedString::from(d.pending_question),
         pending_options: ModelRc::new(VecModel::from(opts)),
         pending_choice_id: SharedString::from(d.pending_choice_id),
+        pending_input_count: d.pending_input_count,
         quickview: SharedString::from(d.quickview),
     }
 }
@@ -207,6 +212,8 @@ pub async fn install_view_model(
                 // session was previously active — "Need user input" showed on
                 // every session you switched to, even if only one needed it.
                 sync_active_from_tile(&weak, &session_id);
+                // Populate the in-chat questions tray from durable storage.
+                refresh_active_questions(&weak, &core, &session_id);
             });
         });
     }
@@ -636,6 +643,11 @@ async fn refresh_dashboard(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
                 format!("{}: {}{}", m.author, first_line, suffix)
             })
             .unwrap_or_default();
+        let pending_input_count = core
+            .storage
+            .pending_question_count(&s.id)
+            .await
+            .unwrap_or(0) as i32;
         tiles.push(TileData {
             id: s.id.clone(),
             title: s.title.clone(),
@@ -646,6 +658,7 @@ async fn refresh_dashboard(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
             pending_question: String::new(),
             pending_options: Vec::new(),
             pending_choice_id: String::new(),
+            pending_input_count,
             quickview,
         });
     }
@@ -676,6 +689,9 @@ async fn refresh_dashboard(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
                         new_tile.pending_question = prev.pending_question.clone();
                         new_tile.pending_options = prev.pending_options.clone();
                         new_tile.pending_choice_id = prev.pending_choice_id.clone();
+                        // pending_input_count is sourced from storage on every
+                        // tile build, so we DON'T carry it from the prior tile —
+                        // the fresh sqlite count is the source of truth.
                     }
                     new_tile
                 })
@@ -904,7 +920,7 @@ fn to_chat_data(m: &Message) -> ChatMsgData {
 
 async fn handle_signaling_event(
     weak: &Weak<AppWindow>,
-    _core: &Arc<CoreAppState>,
+    core: &Arc<CoreAppState>,
     ev: SignalingEvent,
 ) {
     match ev {
@@ -924,12 +940,12 @@ async fn handle_signaling_event(
                 archive,
                 "agent-initiated session close"
             );
-            if let Err(e) = _core.close_session(&session_id, archive).await {
+            if let Err(e) = core.close_session(&session_id, archive).await {
                 tracing::warn!(?e, %session_id, "agent-initiated close_session failed");
                 return;
             }
             // Refresh dashboard so the closed session disappears from tiles.
-            refresh_dashboard(weak, _core).await;
+            refresh_dashboard(weak, core).await;
             // If the closed session was the active one, kick back to dashboard.
             let weak2 = weak.clone();
             let closed_id = session_id.clone();
@@ -945,8 +961,11 @@ async fn handle_signaling_event(
             });
         }
         SignalingEvent::PendingChoice(p) => {
+            let weak_for_tray = weak.clone();
             let weak = weak.clone();
             let session_id = p.session_id.clone();
+            let core_for_tray = Arc::clone(core);
+            let session_for_tray = session_id.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(handle) = weak.upgrade() {
                     let app = handle.global::<SlintAppState>();
@@ -973,13 +992,20 @@ async fn handle_signaling_event(
                     update_tile_pending_choice(&app, &p);
                 }
             });
+            // Refresh the durable-storage-backed questions tray when this is
+            // the active session. Storage write happens in the bridge BEFORE
+            // PendingChoice fires, so the read here sees the new row.
+            refresh_active_questions(&weak_for_tray, &core_for_tray, &session_for_tray);
         }
         SignalingEvent::AwaitingUser {
             session_id,
             agent: _,
             reason: _,
         } => {
+            let weak_for_tray = weak.clone();
             let weak = weak.clone();
+            let session_for_tray = session_id.clone();
+            let core_for_tray = Arc::clone(core);
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(handle) = weak.upgrade() {
                     let app = handle.global::<SlintAppState>();
@@ -993,9 +1019,14 @@ async fn handle_signaling_event(
                     update_tile_awaiting(&app, &session_id, true);
                 }
             });
+            // mark_awaiting_user writes a `halt` row that should appear in
+            // the tray too — refresh.
+            refresh_active_questions(&weak_for_tray, &core_for_tray, &session_for_tray);
         }
         SignalingEvent::ChoiceResolved { .. } => {
+            let weak_for_tray = weak.clone();
             let weak = weak.clone();
+            let core_for_tray = Arc::clone(core);
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(handle) = weak.upgrade() {
                     let app = handle.global::<SlintAppState>();
@@ -1032,8 +1063,110 @@ async fn handle_signaling_event(
                     }
                 }
             });
+            // ChoiceResolved doesn't carry session_id (bridge limitation), so
+            // refresh the tray for the currently-active session. The storage
+            // row was already updated to status=answered in resolve_choice
+            // BEFORE this event fires, so the next read drops the answered
+            // question from the pending list.
+            let weak_outer = weak_for_tray.clone();
+            let core_inner = Arc::clone(&core_for_tray);
+            Handle::current().spawn(async move {
+                let active = {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let weak_inner = weak_outer.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(handle) = weak_inner.upgrade() {
+                            let _ = tx.send(
+                                handle.global::<SlintAppState>().get_active_session_id().to_string(),
+                            );
+                        } else {
+                            let _ = tx.send(String::new());
+                        }
+                    });
+                    rx.await.unwrap_or_default()
+                };
+                if !active.is_empty() {
+                    refresh_active_questions(&weak_outer, &core_inner, &active);
+                }
+            });
         }
     }
+}
+
+/// Plain-Rust mirror of `PendingQuestion` — Send + 'static, safe to ship
+/// across the tokio→slint thread hop. Converted to the Slint struct inside
+/// the event-loop closure where ModelRc::new is safe to call.
+#[derive(Clone)]
+struct QuestionData {
+    choice_id: String,
+    kind: String,
+    agent: String,
+    prompt: String,
+    options: Vec<String>,
+    asked_at: String,
+}
+
+/// Refresh `AppState.active-questions` from the durable `session_questions`
+/// table. Called when the session view opens AND whenever a question-changing
+/// event fires (PendingChoice / ChoiceResolved / AwaitingUser) for the
+/// currently-active session. Filters to status=pending so the tray shows
+/// exactly what still needs the user.
+pub(crate) fn refresh_active_questions(
+    weak: &Weak<AppWindow>,
+    core: &Arc<CoreAppState>,
+    session_id: &str,
+) {
+    let weak = weak.clone();
+    let core = Arc::clone(core);
+    let session_id = session_id.to_string();
+    Handle::current().spawn(async move {
+        let rows = match core.storage.questions_for_session(&session_id).await {
+            Ok(rs) => rs,
+            Err(e) => {
+                warn!(?e, %session_id, "questions_for_session failed");
+                return;
+            }
+        };
+        let pending: Vec<QuestionData> = rows
+            .into_iter()
+            .filter(|r| r.status == "pending")
+            .map(|r| QuestionData {
+                options: r.options().unwrap_or_default(),
+                choice_id: r.choice_id,
+                kind: r.kind,
+                agent: r.agent,
+                prompt: r.prompt,
+                asked_at: r.asked_at,
+            })
+            .collect();
+        let weak = weak.clone();
+        let session_id_clone = session_id.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(handle) = weak.upgrade() {
+                let app = handle.global::<SlintAppState>();
+                // Only paint if this session is still the active one — guards
+                // against a late storage read landing after the user navigated.
+                if app.get_active_session_id().to_string() == session_id_clone {
+                    let mapped: Vec<PendingQuestion> = pending
+                        .into_iter()
+                        .map(|q| {
+                            let opts: Vec<SharedString> =
+                                q.options.into_iter().map(SharedString::from).collect();
+                            PendingQuestion {
+                                choice_id: SharedString::from(q.choice_id),
+                                kind: SharedString::from(q.kind),
+                                agent: SharedString::from(q.agent),
+                                prompt: SharedString::from(q.prompt),
+                                options: ModelRc::new(VecModel::from(opts)),
+                                asked_at: SharedString::from(q.asked_at),
+                            }
+                        })
+                        .collect();
+                    app.set_active_questions(ModelRc::new(VecModel::from(mapped)));
+                }
+            }
+        });
+    });
 }
 
 /// Copy a session tile's (awaiting, pending_*) state into the global

@@ -24,6 +24,16 @@ When the task is settled and there's nothing more to work on, ask the user to cl
 `ask_user_choice(\"Close session?\", [\"Close\", \"Keep working\"])`. \
 The user can override this via your custom-instruction.md.
 
+## Don't retry-duplicate questions
+
+If `ask_user_choice` errors with a client-side timeout, **do not just call it again**. The original question is still parked durably in the user's questions tray; retrying creates a duplicate that pollutes the tray and confuses the user. Before re-issuing on the same topic:
+
+1. Call `list_my_pending_questions` to see what's already parked for the user.
+2. If a pending question covers the same intent: do nothing — the user will see it.
+3. If you genuinely need to rephrase: call `withdraw_question(choice_id)` on the stale one first, then issue the new `ask_user_choice`.
+
+`list_my_pending_questions` returns a JSON array; pull each `choice_id` + `prompt` to decide. If the array is empty, your previous `ask_user_choice` likely never parked successfully — re-asking once is fine, but if it errors again, fall back to `mark_awaiting_user(\"<inline summary of the question>\")` and let the user type a free-text reply via the chat.
+
 ## Silence-on-hold
 
 When the user has paused you (\"hold\", \"stand by\", \"wait\") or you've called `mark_awaiting_user`, the bridge already keeps the duo halted until the next user message. **Stay silent until something new actually happens.** Do not emit \"Holding.\", \"Standing by.\", \"Confirmed.\", \"Awaiting direction.\", or other heartbeat-style acknowledgments to Rain. Every chunk you emit hits the hub and the user's UI — repeated empty acknowledgments are noise that buries real signal.
@@ -119,5 +129,15 @@ mod tests {
         // need an explicit instruction to stay silent on hold.
         assert!(BRIAN_ROLE.contains("Silence-on-hold"));
         assert!(RAIN_ROLE.contains("Silence-on-hold"));
+    }
+
+    #[test]
+    fn brian_teaches_question_introspection() {
+        // Retry-duplicate antipattern: on ask_user_choice timeout, Brian
+        // would just re-call ask_user_choice repeatedly, accumulating
+        // identical pending choices in the tray. Prompt must point him at
+        // list_my_pending_questions / withdraw_question before re-asking.
+        assert!(BRIAN_ROLE.contains("list_my_pending_questions"));
+        assert!(BRIAN_ROLE.contains("withdraw_question"));
     }
 }

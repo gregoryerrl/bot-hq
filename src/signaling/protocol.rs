@@ -183,6 +183,29 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                 "required": []
             }),
         },
+        ToolDescriptor {
+            name: "list_my_pending_questions",
+            description: "List the questions YOU (this agent) have currently parked for the user in this session. Includes ask_user_choice prompts, mark_awaiting_user halts, and request_approval gates that haven't been resolved yet. **Call this BEFORE issuing a new `ask_user_choice` to avoid duplicate retries** — if you already have a pending one on the same topic, supersede or withdraw it first. Returns a JSON array of { choice_id, kind, prompt, options, asked_at, supersedes_id }.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDescriptor {
+            name: "withdraw_question",
+            description: "Abandon a question you previously parked for the user (you figured it out, the context changed, or you want to rephrase it). Removes the prompt from the user's questions tray + the dashboard counter. If you intend to ask a fresh version, just call `ask_user_choice` again after withdrawing — don't accumulate duplicates.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "choice_id": {
+                        "type": "string",
+                        "description": "The choice_id from `list_my_pending_questions`."
+                    }
+                },
+                "required": ["choice_id"]
+            }),
+        },
     ]
 }
 

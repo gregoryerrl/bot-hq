@@ -289,9 +289,9 @@ impl SignalingBridge {
         let choice = PendingChoice {
             choice_id: choice_id.clone(),
             session_id: session_id.clone(),
-            agent,
-            question,
-            options,
+            agent: agent.clone(),
+            question: question.clone(),
+            options: options.clone(),
             approval,
         };
         self.pending.lock().await.insert(
@@ -301,6 +301,22 @@ impl SignalingBridge {
                 choice: choice.clone(),
             },
         );
+
+        // Mirror into the question cache for durable per-session state. The
+        // in-chat tray + dashboard counter read from this table, and the row
+        // survives restart even though the parked oneshot in `pending` does
+        // not. Best-effort: if storage isn't wired yet (test bridges built
+        // via ::new), continue without persisting.
+        self.persist_question(
+            &session_id,
+            &choice_id,
+            &agent,
+            crate::storage::QuestionKind::Choice,
+            &question,
+            Some(&options),
+            None,
+        )
+        .await;
 
         // Halt the duo BEFORE emitting the event — the agent's next chunk
         // shouldn't volley to its peer while we wait for the user.
@@ -321,8 +337,87 @@ impl SignalingBridge {
         Ok(picked)
     }
 
+    /// Best-effort write of a question row to storage. The bridge's in-memory
+    /// `pending` map is still the source of truth for the blocking oneshot,
+    /// but the storage row is what the UI tray reads. Failures are logged
+    /// and swallowed so the agent's tool call doesn't fail on a DB hiccup.
+    async fn persist_question(
+        &self,
+        session_id: &str,
+        choice_id: &str,
+        agent: &str,
+        kind: crate::storage::QuestionKind,
+        prompt: &str,
+        options: Option<&[String]>,
+        supersedes_id: Option<i64>,
+    ) {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return;
+        };
+        if let Err(e) = storage
+            .insert_question(session_id, choice_id, agent, kind, prompt, options, supersedes_id)
+            .await
+        {
+            tracing::warn!(?e, choice_id, "persist_question failed");
+        }
+    }
+
+    /// Withdraw a pending question (agent abandons it; no answer will arrive).
+    /// Removes the parked oneshot AND updates the storage row to status=withdrawn
+    /// so the UI tray drops it. Returns true if a question was actually withdrawn,
+    /// false if the choice_id was unknown or already resolved.
+    pub async fn withdraw_question(&self, choice_id: &str) -> bool {
+        let parked = self.pending.lock().await.remove(choice_id);
+        let was_parked = parked.is_some();
+        // Drop the oneshot — the agent's blocking caller (if any) gets the
+        // standard "canceled" error.
+        drop(parked);
+        let storage_guard = self.storage.lock().await;
+        if let Some(storage) = storage_guard.as_ref() {
+            if let Err(e) = storage.withdraw_question(choice_id).await {
+                tracing::warn!(?e, choice_id, "withdraw_question storage update failed");
+            }
+        }
+        was_parked
+    }
+
+    /// Snapshot the questions table for a session. Convenience for the UI
+    /// + the agent-facing `list_my_pending_questions` MCP tool.
+    pub async fn list_questions_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::storage::SessionQuestion>> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        storage.questions_for_session(session_id).await
+    }
+
+    /// Count pending questions for a session — drives the dashboard
+    /// `[Need User Input] · N` badge.
+    pub async fn pending_question_count(&self, session_id: &str) -> Result<i64> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(0);
+        };
+        storage.pending_question_count(session_id).await
+    }
+
     /// Called by the UI when the user clicks a choice button.
     pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<ResolveOutcome> {
+        // Mark the storage row answered first so the UI/tray updates even if
+        // the in-memory parked entry has already been cleaned up (e.g. after
+        // a restart that replays from the table).
+        {
+            let storage_guard = self.storage.lock().await;
+            if let Some(storage) = storage_guard.as_ref() {
+                if let Err(e) = storage.answer_question(choice_id, &picked).await {
+                    tracing::warn!(?e, choice_id, "answer_question storage update failed");
+                }
+            }
+        }
         let parked = self.pending.lock().await.remove(choice_id);
         match parked {
             Some(p) => {
@@ -455,8 +550,23 @@ impl SignalingBridge {
     /// Called by the MCP `tools/call` handler for `mark_awaiting_user`. This
     /// is async (was previously sync) because we need to set the halt flag
     /// before the agent's next chunk can volley.
+    ///
+    /// Also writes a `kind=halt` row to `session_questions` so the per-session
+    /// tray surfaces the wait alongside any actual choice/open-ask questions
+    /// and the dashboard `[Need User Input] · N` counter reflects it.
     pub async fn mark_awaiting_user(&self, session_id: String, agent: String, reason: String) {
         self.set_session_awaiting(&session_id).await;
+        let choice_id = Uuid::new_v4().to_string();
+        self.persist_question(
+            &session_id,
+            &choice_id,
+            &agent,
+            crate::storage::QuestionKind::Halt,
+            &reason,
+            None,
+            None,
+        )
+        .await;
         let _ = self.event_tx.send(SignalingEvent::AwaitingUser {
             session_id,
             agent,

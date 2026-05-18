@@ -265,6 +265,46 @@ async fn call_tool(
                 }
             }
         }
+        "list_my_pending_questions" => {
+            let rows = bridge
+                .list_questions_for_session(&caller.session_id)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            // Filter to this agent's still-pending questions and shape into
+            // the documented contract.
+            let mine: Vec<Value> = rows
+                .iter()
+                .filter(|r| r.agent == caller.agent && r.status == "pending")
+                .map(|r| {
+                    json!({
+                        "choice_id": r.choice_id,
+                        "kind": r.kind,
+                        "prompt": r.prompt,
+                        "options": r.options(),
+                        "asked_at": r.asked_at,
+                        "supersedes_id": r.supersedes_id,
+                    })
+                })
+                .collect();
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&mine).unwrap_or_else(|_| "[]".into()),
+            ))
+        }
+        "withdraw_question" => {
+            let choice_id = args
+                .get("choice_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing choice_id")
+                })?
+                .to_string();
+            let was_pending = bridge.withdraw_question(&choice_id).await;
+            Ok(ToolCallResult::text(if was_pending {
+                "withdrawn"
+            } else {
+                "no-op: choice_id was not pending"
+            }))
+        }
         other => Err(JsonRpcError::new(
             JsonRpcError::METHOD_NOT_FOUND,
             format!("unknown tool {other}"),
@@ -333,13 +373,16 @@ mod tests {
             .unwrap();
         let v = serde_json::to_value(&res).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"ask_user_choice"));
         assert!(names.contains(&"mark_awaiting_user"));
         assert!(names.contains(&"request_approval"));
         assert!(names.contains(&"check_commit_message"));
         assert!(names.contains(&"close_session"));
+        assert!(names.contains(&"list_my_pending_questions"));
+        assert!(names.contains(&"withdraw_question"));
+        assert_eq!(tools.len(), names.iter().collect::<std::collections::HashSet<_>>().len(),
+            "tool names should be unique");
     }
 
     #[tokio::test]

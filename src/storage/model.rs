@@ -109,3 +109,102 @@ pub struct AgentConfig {
     pub auth_token: Option<String>,
     pub updated_at: String,
 }
+
+/// Surface type of a question parked for the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionKind {
+    /// `ask_user_choice` — has a fixed set of options.
+    Choice,
+    /// Free-text open question — user types a reply via normal chat input.
+    OpenAsk,
+    /// `mark_awaiting_user` — informational halt; no user input needed,
+    /// the next chat message implicitly resumes.
+    Halt,
+}
+
+impl QuestionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QuestionKind::Choice => "choice",
+            QuestionKind::OpenAsk => "open_ask",
+            QuestionKind::Halt => "halt",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "choice" => QuestionKind::Choice,
+            "open_ask" => QuestionKind::OpenAsk,
+            "halt" => QuestionKind::Halt,
+            _ => return None,
+        })
+    }
+}
+
+/// Lifecycle status of a question row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionStatus {
+    Pending,
+    Answered,
+    Withdrawn,
+    Superseded,
+}
+
+impl QuestionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            QuestionStatus::Pending => "pending",
+            QuestionStatus::Answered => "answered",
+            QuestionStatus::Withdrawn => "withdrawn",
+            QuestionStatus::Superseded => "superseded",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "pending" => QuestionStatus::Pending,
+            "answered" => QuestionStatus::Answered,
+            "withdrawn" => QuestionStatus::Withdrawn,
+            "superseded" => QuestionStatus::Superseded,
+            _ => return None,
+        })
+    }
+}
+
+/// A row from the `session_questions` table. Mirrors a question the agent
+/// has surfaced to the user via the per-session questions tray.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct SessionQuestion {
+    pub id: i64,
+    pub session_id: String,
+    pub choice_id: String,
+    pub agent: String,
+    pub kind: String,
+    pub prompt: String,
+    /// JSON-encoded `Vec<String>` for kind=choice; NULL for open_ask / halt.
+    pub options_json: Option<String>,
+    pub status: String,
+    pub picked_option: Option<String>,
+    pub asked_at: String,
+    pub answered_at: Option<String>,
+    pub supersedes_id: Option<i64>,
+}
+
+impl SessionQuestion {
+    pub fn kind_typed(&self) -> Option<QuestionKind> {
+        QuestionKind::parse(&self.kind)
+    }
+
+    pub fn status_typed(&self) -> Option<QuestionStatus> {
+        QuestionStatus::parse(&self.status)
+    }
+
+    /// Decode `options_json` into a Vec<String>. Returns None for non-choice
+    /// kinds or when the column is null/empty.
+    pub fn options(&self) -> Option<Vec<String>> {
+        let raw = self.options_json.as_deref()?;
+        serde_json::from_str(raw).ok()
+    }
+}

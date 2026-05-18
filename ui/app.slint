@@ -26,7 +26,23 @@ export struct SessionTile {
     pending-question: string,
     pending-options: [string],
     pending-choice-id: string,
+    // How many pending user-input rows live in `session_questions` for this
+    // session — sum of pending choices + halts + open-asks. Drives the
+    // dashboard card's `[Need User Input · N]` chip. The full content lives
+    // inside the session's questions tray, not on the card.
+    pending-input-count: int,
     quickview: string,
+}
+
+/// One pending user-facing item rendered in the per-session questions tray.
+/// `kind` ∈ {"choice", "open_ask", "halt"}. `options` is empty for non-choice.
+export struct PendingQuestion {
+    choice-id: string,
+    kind: string,
+    agent: string,
+    prompt: string,
+    options: [string],
+    asked-at: string,
 }
 
 export struct ChatMsg {
@@ -170,6 +186,13 @@ export global AppState {
     in-out property <string> active-pending-question;
     in-out property <[string]> active-pending-options;
     in-out property <string> active-pending-choice-id;
+    // All currently-pending user-input items for the active session, sourced
+    // from the durable `session_questions` table. The in-chat questions tray
+    // reads this; the dashboard card reads only the count.
+    in-out property <[PendingQuestion]> active-questions;
+    // User-controlled toggle for the tray. Default closed (so the chat is
+    // unobstructed); clicking the header chip opens it.
+    in-out property <bool>   questions-tray-open;
     // Frozen-at-spawn model names for this session's two agents. Header strip
     // reads these so the user sees what's actually talking, not the (mutable)
     // current agent_configs.model_name. Empty for pre-migration session rows.
@@ -696,6 +719,158 @@ component ChoiceButton inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// Compact `[Need User Input · N]` chip — appears on a dashboard session card
+// when the session has pending user-input rows. Read-only on cards; the
+// session-view variant (QuestionsToggleChip) below is clickable.
+component NeedInputChip inherits Rectangle {
+    in property <int> count;
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-default;
+    border-width: 1px;
+    border-color: Theme.error.with-alpha(0.3);
+    background: Theme.error-container.with-alpha(0.2);
+    height: 22px;
+    HorizontalLayout {
+        padding-left: Theme.s-2;
+        padding-right: Theme.s-2;
+        spacing: Theme.s-1;
+        alignment: center;
+        Icon { glyph: "!"; size: 11px; tint: Theme.error; }
+        Text {
+            text: "[Need User Input · " + root.count + "]";
+            color: Theme.error;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            letter-spacing: Theme.ls-label;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Header chip in the SessionView that toggles the questions tray open/closed.
+// Shows the count + a chevron that flips with state.
+component QuestionsToggleChip inherits Rectangle {
+    in property <int> count;
+    in property <bool> open;
+    callback clicked();
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-default;
+    border-width: 1px;
+    border-color: count > 0
+        ? Theme.error.with-alpha(0.4)
+        : Theme.outline-variant.with-alpha(0.4);
+    background: count > 0
+        ? Theme.error-container.with-alpha(ta.has-hover ? 0.35 : 0.2)
+        : Theme.surface-low.with-alpha(ta.has-hover ? 0.8 : 0.5);
+    height: 26px;
+    animate border-color, background { duration: 100ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-2;
+        padding-right: Theme.s-2;
+        spacing: Theme.s-1;
+        alignment: center;
+        Icon {
+            glyph: "!";
+            size: 11px;
+            tint: count > 0 ? Theme.error : Theme.on-surface-variant;
+        }
+        Text {
+            text: count > 0
+                ? "Questions · " + count
+                : "Questions";
+            color: count > 0 ? Theme.error : Theme.on-surface-variant;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            letter-spacing: Theme.ls-label;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+        Text {
+            text: open ? "▴" : "▾";
+            color: count > 0 ? Theme.error : Theme.on-surface-variant;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// The expanded list of pending questions inside the SessionView. Renders one
+// "card" per question, with options as buttons for choice-kind. Halts and
+// open-asks show as info rows without buttons (the user resumes by typing a
+// chat message — same affordance as today's mark_awaiting_user halt).
+component QuestionsTray inherits Rectangle {
+    in property <[PendingQuestion]> questions;
+    border-radius: Theme.radius-default;
+    border-width: 1px;
+    border-color: Theme.outline-variant.with-alpha(0.4);
+    background: Theme.surface-low.with-alpha(0.4);
+    VerticalLayout {
+        padding: Theme.s-3;
+        spacing: Theme.s-3;
+        for q in root.questions: VerticalLayout {
+            spacing: Theme.s-2;
+            HorizontalLayout {
+                spacing: Theme.s-2;
+                alignment: stretch;
+                Text {
+                    text: q.kind == "choice" ? "❓ choice"
+                        : q.kind == "open_ask" ? "💬 open-ask"
+                        : q.kind == "halt" ? "⏸ awaiting" : q.kind;
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-label;
+                    letter-spacing: Theme.ls-label;
+                    font-weight: Theme.w-bold;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+                Text {
+                    text: q.agent;
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-label;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: q.asked-at;
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-label;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 0;
+                }
+            }
+            Text {
+                text: q.prompt;
+                color: Theme.on-surface;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-code;
+                wrap: word-wrap;
+            }
+            if q.kind == "choice": VerticalLayout {
+                spacing: Theme.s-1;
+                for opt in q.options:
+                    ChoiceButton {
+                        label: opt;
+                        clicked => { AppState.choice-clicked(q.choice-id, opt); }
+                    }
+            }
+            if q.kind == "halt": Text {
+                text: "(send any chat message below to resume)";
+                color: Theme.on-surface-variant;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-label;
+                font-italic: true;
+            }
+        }
+    }
+}
+
 component QuickviewRow inherits Rectangle {
     in property <string> quickview;
     background: Theme.surface-lowest;
@@ -804,17 +979,29 @@ component SessionTileView inherits Rectangle {
                 wrap: word-wrap;
             }
 
-            // Awaiting badge — shown for both awaiting-only and awaiting+choice
-            // variants, matching the Stitch design.
-            if data.awaiting:
+            // Need-input chip — replaces the older inline question + buttons.
+            // Card stays compact; full content (and answer buttons) live in
+            // the per-session questions tray inside SessionView. We show the
+            // count chip when there are any pending question rows; otherwise
+            // fall back to the static AwaitingBadge for plain awaiting state
+            // that wasn't backfilled into the questions table.
+            if data.pending-input-count > 0:
+                HorizontalLayout {
+                    alignment: start;
+                    NeedInputChip { count: data.pending-input-count; }
+                }
+            if data.pending-input-count == 0 && data.awaiting:
                 HorizontalLayout {
                     alignment: start;
                     AwaitingBadge {}
                 }
         }
 
-        // Pending choice section — divider + question + option buttons.
-        if data.pending-choice:
+        // Legacy inline pending-choice section — kept as a fallback for
+        // pre-migration session rows that didn't backfill the question cache.
+        // The new flow renders nothing here; the chip + tray-in-SessionView
+        // is the canonical surface.
+        if data.pending-choice && data.pending-input-count == 0:
             Rectangle {
                 background: Theme.surface-low;
                 Rectangle {
@@ -1338,21 +1525,35 @@ component SessionView inherits Rectangle {
                                 alignment: end;
                                 spacing: Theme.s-2;
                                 horizontal-stretch: 0;
-                                if AppState.active-phase != "":
-                                    LabelChip {
-                                        label: AppState.active-phase == "I" ? "INVESTIGATING"
-                                            : AppState.active-phase == "P" ? "PLANNING"
-                                            : AppState.active-phase == "A" ? "APPLYING"
-                                            : AppState.active-phase == "V" ? "VERIFYING"
-                                            : "—";
-                                        tint:
-                                            AppState.active-phase == "I" ? Theme.phase-i :
-                                            AppState.active-phase == "P" ? Theme.phase-p :
-                                            AppState.active-phase == "A" ? Theme.phase-a :
-                                            AppState.active-phase == "V" ? Theme.phase-v :
-                                            Theme.on-surface-variant;
-                                        dot: true;
+                                HorizontalLayout {
+                                    spacing: Theme.s-2;
+                                    alignment: end;
+                                    // Questions toggle — chip showing pending count + chevron.
+                                    // Always visible (even when count=0) so the user knows where
+                                    // to look if questions accumulate during the session.
+                                    QuestionsToggleChip {
+                                        count: AppState.active-questions.length;
+                                        open: AppState.questions-tray-open;
+                                        clicked => {
+                                            AppState.questions-tray-open = !AppState.questions-tray-open;
+                                        }
                                     }
+                                    if AppState.active-phase != "":
+                                        LabelChip {
+                                            label: AppState.active-phase == "I" ? "INVESTIGATING"
+                                                : AppState.active-phase == "P" ? "PLANNING"
+                                                : AppState.active-phase == "A" ? "APPLYING"
+                                                : AppState.active-phase == "V" ? "VERIFYING"
+                                                : "—";
+                                            tint:
+                                                AppState.active-phase == "I" ? Theme.phase-i :
+                                                AppState.active-phase == "P" ? Theme.phase-p :
+                                                AppState.active-phase == "A" ? Theme.phase-a :
+                                                AppState.active-phase == "V" ? Theme.phase-v :
+                                                Theme.on-surface-variant;
+                                            dot: true;
+                                        }
+                                }
                                 VerticalLayout {
                                     alignment: end;
                                     PhaseSelector {}
@@ -1382,9 +1583,17 @@ component SessionView inherits Rectangle {
                             }
                         }
 
-                    // Pending-input banner.
-                    if AppState.active-pending-choice || AppState.active-awaiting:
+                    // Pending-input banner — fires only when the new tray isn't
+                    // already surfacing the questions (the tray is the modern
+                    // surface; banner is fallback for pre-migration sessions).
+                    if (AppState.active-pending-choice || AppState.active-awaiting)
+                        && AppState.active-questions.length == 0:
                         AttentionBanner {}
+
+                    // Questions tray — collapsible. The chip in the header
+                    // toggles visibility. Renders nothing when no pending items.
+                    if AppState.questions-tray-open && AppState.active-questions.length > 0:
+                        QuestionsTray { questions: AppState.active-questions; }
 
                     // Chat stream.
                     Rectangle {
