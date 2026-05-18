@@ -206,6 +206,56 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                 "required": ["choice_id"]
             }),
         },
+        ToolDescriptor {
+            name: "cl_index_search",
+            description: "Search the Context Library (CL) index for relevant files BEFORE reading any CL file. The index returns lightweight {file_path, description, tags, updated_at} rows — read descriptions to decide which files are worth opening. This saves context vs eagerly reading everything. The `_globals` project holds cross-project system files (general-rules.md, etc.); for project-scoped work pass your session's working project name. Optional `query` does a case-insensitive substring match across file_path/description/tags.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project name. Use the session's project for project-scoped files, '_globals' for system-wide rules, or omit to search across all projects."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional case-insensitive substring filter. Matches file_path, description, and tags."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDescriptor {
+            name: "cl_register_read",
+            description: "Record that this agent read a CL file. Powers the audit trail (cl_reads) — answers 'what context did this agent see before making a decision?'. Optional but encouraged on important reads. Fire-and-forget; failures are silently logged.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project name the file belongs to."
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path relative to the project root (from cl_index_search results)."
+                    }
+                },
+                "required": ["project", "file_path"]
+            }),
+        },
+        ToolDescriptor {
+            name: "cl_rescan",
+            description: "Diff a project's filesystem against the index. Auto-registers new .md files (description = first H1 or first 80 chars), refreshes updated_at where mtime has moved, and removes orphan index rows for files that no longer exist. Use after creating CL files via Bash so the index stays in sync. Cheap to call.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project name to rescan. Required."
+                    }
+                },
+                "required": ["project"]
+            }),
+        },
     ]
 }
 

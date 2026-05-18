@@ -10,8 +10,8 @@ use std::str::FromStr;
 pub mod model;
 
 pub use model::{
-    AgentConfig, Author, Message, MessageKind, QuestionKind, QuestionStatus, Session,
-    SessionQuestion,
+    AgentConfig, Author, ClIndexEntry, ClRead, Message, MessageKind, Project, QuestionKind,
+    QuestionStatus, Session, SessionQuestion,
 };
 
 #[derive(Clone)]
@@ -369,6 +369,211 @@ impl Storage {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    // ---- Projects (cl_index foreign key) ---------------------------------
+
+    /// Upsert a project. Used by Emma's registration flow and by the
+    /// startup backfill (which auto-creates a row for every projects/<name>
+    /// directory it scans).
+    pub async fn upsert_project(
+        &self,
+        name: &str,
+        display_name: &str,
+        working_repo_path: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO projects (name, display_name, working_repo_path, description) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT(name) DO UPDATE SET \
+                display_name = excluded.display_name, \
+                working_repo_path = excluded.working_repo_path, \
+                description = excluded.description",
+        )
+        .bind(name)
+        .bind(display_name)
+        .bind(working_repo_path)
+        .bind(description)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("upserting project {name}"))?;
+        Ok(())
+    }
+
+    pub async fn list_projects(&self) -> Result<Vec<Project>> {
+        let rows = sqlx::query_as::<_, Project>(
+            "SELECT name, display_name, working_repo_path, description, created_at \
+             FROM projects ORDER BY name ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn get_project(&self, name: &str) -> Result<Option<Project>> {
+        let row = sqlx::query_as::<_, Project>(
+            "SELECT name, display_name, working_repo_path, description, created_at \
+             FROM projects WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // ---- cl_index --------------------------------------------------------
+
+    /// Upsert a CL index entry. Used by the backfill scan AND by the UI's
+    /// "save metadata" flow. Bumps updated_at on conflict.
+    pub async fn upsert_cl_index(
+        &self,
+        project_id: &str,
+        file_path: &str,
+        description: &str,
+        tags: Option<&str>,
+    ) -> Result<i64> {
+        let res = sqlx::query(
+            "INSERT INTO cl_index (project_id, file_path, description, tags) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT(project_id, file_path) DO UPDATE SET \
+                description = excluded.description, \
+                tags = excluded.tags, \
+                updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(project_id)
+        .bind(file_path)
+        .bind(description)
+        .bind(tags)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("upserting cl_index {project_id}/{file_path}"))?;
+        Ok(res.last_insert_rowid())
+    }
+
+    /// Update only the updated_at timestamp — used by lazy stat sync when
+    /// disk mtime is newer than stored. Does not touch description/tags.
+    pub async fn touch_cl_index(
+        &self,
+        project_id: &str,
+        file_path: &str,
+        updated_at: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE cl_index SET updated_at = ? \
+             WHERE project_id = ? AND file_path = ?",
+        )
+        .bind(updated_at)
+        .bind(project_id)
+        .bind(file_path)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_cl_index(&self, project_id: &str, file_path: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM cl_index WHERE project_id = ? AND file_path = ?",
+        )
+        .bind(project_id)
+        .bind(file_path)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// List index entries for a project (or all if project_id is None).
+    /// Optional `query`: when present, returned rows must contain it (case-
+    /// insensitive) in any of file_path / description / tags.
+    pub async fn cl_index_search(
+        &self,
+        project_id: Option<&str>,
+        query: Option<&str>,
+    ) -> Result<Vec<ClIndexEntry>> {
+        let like = query.map(|q| format!("%{}%", q.to_lowercase()));
+        let rows: Vec<ClIndexEntry> = match (project_id, like) {
+            (Some(pid), Some(q)) => sqlx::query_as::<_, ClIndexEntry>(
+                "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
+                 FROM cl_index \
+                 WHERE project_id = ? AND ( \
+                    LOWER(file_path) LIKE ? \
+                    OR LOWER(description) LIKE ? \
+                    OR LOWER(IFNULL(tags, '')) LIKE ?) \
+                 ORDER BY updated_at DESC",
+            )
+            .bind(pid)
+            .bind(&q)
+            .bind(&q)
+            .bind(&q)
+            .fetch_all(&self.pool)
+            .await?,
+            (Some(pid), None) => sqlx::query_as::<_, ClIndexEntry>(
+                "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
+                 FROM cl_index WHERE project_id = ? ORDER BY updated_at DESC",
+            )
+            .bind(pid)
+            .fetch_all(&self.pool)
+            .await?,
+            (None, Some(q)) => sqlx::query_as::<_, ClIndexEntry>(
+                "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
+                 FROM cl_index \
+                 WHERE LOWER(file_path) LIKE ? \
+                    OR LOWER(description) LIKE ? \
+                    OR LOWER(IFNULL(tags, '')) LIKE ? \
+                 ORDER BY updated_at DESC",
+            )
+            .bind(&q)
+            .bind(&q)
+            .bind(&q)
+            .fetch_all(&self.pool)
+            .await?,
+            (None, None) => sqlx::query_as::<_, ClIndexEntry>(
+                "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
+                 FROM cl_index ORDER BY updated_at DESC",
+            )
+            .fetch_all(&self.pool)
+            .await?,
+        };
+        Ok(rows)
+    }
+
+    /// Lookup by (project, path) — used for sync/touch and audit linking.
+    pub async fn get_cl_index(
+        &self,
+        project_id: &str,
+        file_path: &str,
+    ) -> Result<Option<ClIndexEntry>> {
+        let row = sqlx::query_as::<_, ClIndexEntry>(
+            "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
+             FROM cl_index WHERE project_id = ? AND file_path = ?",
+        )
+        .bind(project_id)
+        .bind(file_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    // ---- cl_reads (audit) ------------------------------------------------
+
+    /// Record that an agent read a CL file. Fire-and-forget; failures are
+    /// logged but don't bubble up so a flaky audit write can't break the
+    /// agent's read flow.
+    pub async fn record_cl_read(
+        &self,
+        cl_index_id: i64,
+        session_id: Option<&str>,
+        agent: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO cl_reads (cl_index_id, session_id, agent) VALUES (?, ?, ?)",
+        )
+        .bind(cl_index_id)
+        .bind(session_id)
+        .bind(agent)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
 

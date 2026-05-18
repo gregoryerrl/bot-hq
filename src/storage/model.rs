@@ -208,3 +208,45 @@ impl SessionQuestion {
         serde_json::from_str(raw).ok()
     }
 }
+
+/// A registered project. The special name `_globals` is the bot-hq root
+/// bucket (general-rules.md, etc.) and has NULL working_repo_path.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Project {
+    pub name: String,
+    pub display_name: String,
+    pub working_repo_path: Option<String>,
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+impl Project {
+    pub const GLOBALS: &'static str = "_globals";
+
+    pub fn is_globals(&self) -> bool {
+        self.name == Self::GLOBALS
+    }
+}
+
+/// A row in the CL index. Agents query this BEFORE reading files to decide
+/// what's relevant from descriptions alone.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ClIndexEntry {
+    pub id: i64,
+    pub project_id: String,
+    pub file_path: String,
+    pub description: String,
+    pub tags: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One audit row recorded each time an agent reads a CL file.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ClRead {
+    pub id: i64,
+    pub cl_index_id: i64,
+    pub session_id: Option<String>,
+    pub agent: String,
+    pub read_at: String,
+}

@@ -11,14 +11,25 @@
 //!    option. The result flows back to the agent as the tool's return value.
 
 use crate::policy::{Policy, ViolationKind, ViolationOutcome, ViolationsLog};
-use crate::storage::{Author, MessageKind, Storage};
+use crate::storage::{Author, ClIndexEntry, MessageKind, Project, Storage};
 use anyhow::Result;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot, Mutex};
 use uuid::Uuid;
+
+/// Summary of a single `cl_rescan` pass.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ClRescanReport {
+    /// Files newly discovered on disk and inserted into the index.
+    pub added: Vec<String>,
+    /// Existing index entries whose stored updated_at lagged disk mtime.
+    pub touched: Vec<String>,
+    /// Index entries pointing at files that no longer exist on disk.
+    pub orphaned: Vec<String>,
+}
 
 /// What happened when a parked choice was resolved.
 ///
@@ -590,6 +601,194 @@ impl SignalingBridge {
     pub async fn pending_choice_count(&self) -> usize {
         self.pending.lock().await.len()
     }
+
+    // ---- Context Library (CL) index ------------------------------------
+
+    /// Resolve the on-disk root for a project's CL files. `_globals` maps to
+    /// the bot-hq data dir itself; named projects map to `<data_dir>/projects/<name>`.
+    fn cl_project_root(&self, project: &str) -> Option<PathBuf> {
+        let data_dir = self.data_dir.as_ref()?;
+        if project == Project::GLOBALS {
+            Some(data_dir.clone())
+        } else {
+            Some(data_dir.join("projects").join(project))
+        }
+    }
+
+    /// Read-side discovery for agents. Wraps storage.cl_index_search.
+    pub async fn cl_index_search(
+        &self,
+        project: Option<&str>,
+        query: Option<&str>,
+    ) -> Result<Vec<ClIndexEntry>> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        storage.cl_index_search(project, query).await
+    }
+
+    /// Record an audit row: this agent (in this session) read this file.
+    /// Looks up the cl_index row by (project, file_path); silently no-ops
+    /// if the index doesn't know about the file yet.
+    pub async fn cl_register_read(
+        &self,
+        agent: &str,
+        session_id: Option<&str>,
+        project: &str,
+        file_path: &str,
+    ) -> Result<()> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(());
+        };
+        let Some(entry) = storage.get_cl_index(project, file_path).await? else {
+            tracing::debug!(
+                project,
+                file_path,
+                "cl_register_read: no index row for path; skipping audit insert"
+            );
+            return Ok(());
+        };
+        storage.record_cl_read(entry.id, session_id, agent).await
+    }
+
+    /// Diff a project's on-disk CL directory against the index. Three outcomes:
+    ///   - added:    file on disk, no index row → insert with auto-extracted description
+    ///   - touched:  index row exists, mtime newer than stored updated_at → bump
+    ///   - orphaned: index row exists, file gone → list (but DO NOT auto-delete; user decides)
+    pub async fn cl_rescan(&self, project: &str) -> Result<ClRescanReport> {
+        let mut report = ClRescanReport::default();
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(report);
+        };
+        let Some(root) = self.cl_project_root(project) else {
+            return Ok(report);
+        };
+        if !root.is_dir() {
+            return Ok(report);
+        }
+
+        // Walk disk; collect (relative_path, mtime_rfc3339, first_h1_or_snippet).
+        let mut on_disk: HashMap<String, (String, String)> = HashMap::new();
+        walk_cl_dir(&root, &root, project, &mut on_disk);
+
+        // Existing rows.
+        let existing = storage.cl_index_search(Some(project), None).await?;
+        let existing_paths: HashSet<String> =
+            existing.iter().map(|e| e.file_path.clone()).collect();
+
+        // Adds + touches.
+        for (rel, (mtime, snippet)) in &on_disk {
+            match existing.iter().find(|e| &e.file_path == rel) {
+                None => {
+                    storage
+                        .upsert_cl_index(project, rel, snippet, None)
+                        .await?;
+                    report.added.push(rel.clone());
+                }
+                Some(row) if row.updated_at.as_str() < mtime.as_str() => {
+                    storage.touch_cl_index(project, rel, mtime).await?;
+                    report.touched.push(rel.clone());
+                }
+                _ => {}
+            }
+        }
+
+        // Orphans (index has it, disk doesn't).
+        for path in &existing_paths {
+            if !on_disk.contains_key(path) {
+                report.orphaned.push(path.clone());
+            }
+        }
+        Ok(report)
+    }
+}
+
+/// Walk `dir` recursively; for each text-ish file (.md, .yaml, .txt) populate
+/// `out` with (relative_path, mtime_iso8601, description_snippet). Skips
+/// hidden files/dirs (anything starting with '.') and a few well-known noise
+/// directories (`projects` at the data_dir level is handled by per-project
+/// rescans, not here).
+fn walk_cl_dir(
+    dir: &Path,
+    root: &Path,
+    project: &str,
+    out: &mut HashMap<String, (String, String)>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        // At the _globals root, the per-project subdirectories show up under
+        // `projects/` — skip them; they'll be rescanned with their own
+        // project name. Same for `.local` (sqlite + per-project lock state).
+        if project == Project::GLOBALS && dir == root && (name == "projects" || name == ".local") {
+            continue;
+        }
+        if path.is_dir() {
+            walk_cl_dir(&path, root, project, out);
+            continue;
+        }
+        // Only index human-readable text-ish files. Binary / large data files
+        // don't belong in the agent's discovery surface.
+        let is_text = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("md" | "yaml" | "yml" | "txt" | "toml" | "json")
+        );
+        if !is_text {
+            continue;
+        }
+        let rel = match path.strip_prefix(root) {
+            Ok(r) => r.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+        let mtime = match entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(chrono::DateTime::<chrono::Utc>::from)
+        {
+            Some(t) => t.to_rfc3339(),
+            None => continue,
+        };
+        let snippet = extract_description(&path);
+        out.insert(rel, (mtime, snippet));
+    }
+}
+
+/// First H1 (`# ...`) line; failing that, the first non-empty line trimmed
+/// to 80 chars. Used to seed `cl_index.description` when an entry is auto-
+/// added during a rescan. User can edit later via the UI.
+fn extract_description(path: &Path) -> String {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            return rest.trim().to_string();
+        }
+    }
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.chars().count() <= 80 {
+            return trimmed.to_string();
+        }
+        return trimmed.chars().take(80).collect::<String>() + "…";
+    }
+    "(empty file)".to_string()
 }
 
 /// Parse the branch from a push-gate `action` string. Accepts shapes like

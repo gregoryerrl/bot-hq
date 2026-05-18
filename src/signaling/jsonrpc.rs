@@ -305,6 +305,71 @@ async fn call_tool(
                 "no-op: choice_id was not pending"
             }))
         }
+        "cl_index_search" => {
+            let project = args.get("project").and_then(Value::as_str);
+            let query = args.get("query").and_then(Value::as_str);
+            let rows = bridge
+                .cl_index_search(project, query)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            // Strip noisy fields; agents care about file_path, description,
+            // tags, updated_at. Return as a compact JSON array.
+            let trimmed: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "project": r.project_id,
+                        "file_path": r.file_path,
+                        "description": r.description,
+                        "tags": r.tags,
+                        "updated_at": r.updated_at,
+                    })
+                })
+                .collect();
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&trimmed).unwrap_or_else(|_| "[]".into()),
+            ))
+        }
+        "cl_register_read" => {
+            let project = args
+                .get("project")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing project"))?
+                .to_string();
+            let file_path = args
+                .get("file_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing file_path")
+                })?
+                .to_string();
+            // Fire-and-forget at the tool layer too — caller doesn't gain
+            // anything by waiting on an audit insert.
+            bridge
+                .cl_register_read(
+                    &caller.agent,
+                    Some(&caller.session_id),
+                    &project,
+                    &file_path,
+                )
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            Ok(ToolCallResult::text("recorded"))
+        }
+        "cl_rescan" => {
+            let project = args
+                .get("project")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing project"))?
+                .to_string();
+            let report = bridge
+                .cl_rescan(&project)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&report).unwrap_or_else(|_| "{}".into()),
+            ))
+        }
         other => Err(JsonRpcError::new(
             JsonRpcError::METHOD_NOT_FOUND,
             format!("unknown tool {other}"),

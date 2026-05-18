@@ -225,6 +225,22 @@ export global AppState {
     in-out property <string> cl-current-path;
     in-out property <string> cl-current-body;
     in-out property <bool>   cl-dirty;
+    // Index metadata for the currently open file. Edits set cl-metadata-dirty;
+    // saving (Save Changes) commits both body and metadata in one flush.
+    in-out property <string> cl-current-description;
+    in-out property <string> cl-current-tags;
+    in-out property <bool>   cl-metadata-dirty;
+    // New-file dialog state.
+    in-out property <bool>   cl-new-file-dialog-open;
+    in-out property <string> cl-new-file-name;
+    in-out property <string> cl-new-file-description;
+    // Delete confirmation state — empty when no dialog open; relative path when open.
+    in-out property <string> cl-delete-confirm-path;
+
+    callback cl-create-file(string, string);  // (relative_path, description)
+    callback cl-delete-file(string);          // (relative_path)
+    callback cl-rescan();
+    callback cl-autodescribe();               // generates description via Emma for current file
 
     in-out property <[AgentConfigRow]> agent-configs;
 
@@ -407,6 +423,7 @@ component CustomInput inherits Rectangle {
     in property <bool> password: false;
     in property <length> input-height: 32px;
     callback accepted(string);
+    callback edited();
     height: input-height;
     border-radius: Theme.radius-lg;
     border-width: 1px;
@@ -428,6 +445,7 @@ component CustomInput inherits Rectangle {
             selection-background-color: Theme.primary.with-alpha(0.4);
             selection-foreground-color: Theme.on-surface;
             accepted => { root.accepted(self.text); }
+            edited => { root.edited(); }
         }
     }
     // Placeholder overlay (shown when empty + not focused).
@@ -1833,6 +1851,20 @@ component ContextLibraryPane inherits Rectangle {
                     }
                     Rectangle { horizontal-stretch: 1; }
                     IconButton {
+                        glyph: "+";
+                        size: 14px;
+                        clicked => {
+                            AppState.cl-new-file-name = "";
+                            AppState.cl-new-file-description = "";
+                            AppState.cl-new-file-dialog-open = true;
+                        }
+                    }
+                    IconButton {
+                        glyph: "⟳";
+                        size: 14px;
+                        clicked => { AppState.cl-rescan(); }
+                    }
+                    IconButton {
                         glyph: "↻";
                         size: 14px;
                         clicked => { AppState.cl-refresh(); }
@@ -1904,7 +1936,7 @@ component ContextLibraryPane inherits Rectangle {
                             HorizontalLayout {
                                 spacing: Theme.s-3;
                                 alignment: end;
-                                if AppState.cl-dirty: Text {
+                                if AppState.cl-dirty || AppState.cl-metadata-dirty: Text {
                                     text: "UNSAVED CHANGES";
                                     color: Theme.primary;
                                     font-family: Theme.font-mono;
@@ -1913,6 +1945,14 @@ component ContextLibraryPane inherits Rectangle {
                                     font-weight: Theme.w-bold;
                                     vertical-alignment: center;
                                 }
+                                if AppState.cl-current-path != "":
+                                    IconButton {
+                                        glyph: "✕";
+                                        size: 14px;
+                                        clicked => {
+                                            AppState.cl-delete-confirm-path = AppState.cl-current-path;
+                                        }
+                                    }
                                 PrimaryButton {
                                     label: "Save Changes";
                                     icon: "✓";
@@ -1923,6 +1963,72 @@ component ContextLibraryPane inherits Rectangle {
                         }
                     }
                 }
+
+                // Metadata strip — index entry's description + tags. Edits here
+                // mark metadata-dirty; Save Changes commits body + metadata atomically.
+                if AppState.cl-current-path != "":
+                    Rectangle {
+                        background: Theme.surface-lowest;
+                        Rectangle {
+                            x: 0; y: parent.height - 1px;
+                            width: parent.width; height: 1px;
+                            background: Theme.outline-variant;
+                        }
+                        VerticalLayout {
+                            padding-left: Theme.s-4;
+                            padding-right: Theme.s-4;
+                            padding-top: Theme.s-2;
+                            padding-bottom: Theme.s-2;
+                            spacing: Theme.s-1;
+                            HorizontalLayout {
+                                spacing: Theme.s-2;
+                                alignment: stretch;
+                                Text {
+                                    text: "DESCRIPTION";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    letter-spacing: Theme.ls-label;
+                                    font-weight: Theme.w-bold;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                    width: 90px;
+                                }
+                                CustomInput {
+                                    text <=> AppState.cl-current-description;
+                                    placeholder: "what is this file about? agents read this to decide if relevant";
+                                    edited => { AppState.cl-metadata-dirty = true; }
+                                    horizontal-stretch: 1;
+                                }
+                                IconButton {
+                                    glyph: "✨";
+                                    size: 12px;
+                                    clicked => { AppState.cl-autodescribe(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: Theme.s-2;
+                                alignment: stretch;
+                                Text {
+                                    text: "TAGS";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    letter-spacing: Theme.ls-label;
+                                    font-weight: Theme.w-bold;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 0;
+                                    width: 90px;
+                                }
+                                CustomInput {
+                                    text <=> AppState.cl-current-tags;
+                                    placeholder: "optional. comma-separated hooks: PR-382, schema-v3";
+                                    edited => { AppState.cl-metadata-dirty = true; }
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
 
                 // Editor area.
                 Rectangle {
@@ -2678,6 +2784,157 @@ export component AppWindow inherits Window {
                                     clicked => {
                                         AppState.emma-restart-confirm-visible = false;
                                         AppState.restart-emma();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // New CL file dialog.
+    if AppState.cl-new-file-dialog-open:
+        Rectangle {
+            background: #00000088;
+            TouchArea { }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 520px;
+                        background: Theme.surface-high;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Theme.outline-variant;
+                        VerticalLayout {
+                            padding: Theme.s-5;
+                            spacing: Theme.s-3;
+                            Text {
+                                text: "New CL file";
+                                color: Theme.on-surface;
+                                font-family: Theme.font-display;
+                                font-size: Theme.font-head-md;
+                                font-weight: Theme.w-bold;
+                            }
+                            Text {
+                                text: "Path is relative to the active project root. Description goes into the index — keep it short; agents read it first to decide if the file is relevant.";
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                wrap: word-wrap;
+                            }
+                            VerticalLayout {
+                                spacing: Theme.s-1;
+                                Text {
+                                    text: "FILE PATH";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    font-weight: Theme.w-bold;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                                CustomInput {
+                                    text <=> AppState.cl-new-file-name;
+                                    placeholder: "notes/foo.md  (must end in .md)";
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: Theme.s-1;
+                                Text {
+                                    text: "DESCRIPTION";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    font-weight: Theme.w-bold;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                                CustomInput {
+                                    text <=> AppState.cl-new-file-description;
+                                    placeholder: "what this file is about (one sentence)";
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: end;
+                                spacing: Theme.s-2;
+                                GhostButton {
+                                    label: "Cancel";
+                                    clicked => {
+                                        AppState.cl-new-file-dialog-open = false;
+                                    }
+                                }
+                                PrimaryButton {
+                                    label: "Create";
+                                    icon: "+";
+                                    clicked => {
+                                        AppState.cl-create-file(
+                                            AppState.cl-new-file-name,
+                                            AppState.cl-new-file-description,
+                                        );
+                                        AppState.cl-new-file-dialog-open = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // Delete CL file confirmation.
+    if AppState.cl-delete-confirm-path != "":
+        Rectangle {
+            background: #00000088;
+            TouchArea { }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 440px;
+                        background: Theme.surface-high;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Theme.outline-variant;
+                        VerticalLayout {
+                            padding: Theme.s-5;
+                            spacing: Theme.s-3;
+                            Text {
+                                text: "Delete this file?";
+                                color: Theme.on-surface;
+                                font-family: Theme.font-display;
+                                font-size: Theme.font-head-md;
+                                font-weight: Theme.w-bold;
+                            }
+                            Text {
+                                text: AppState.cl-delete-confirm-path;
+                                color: Theme.primary;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                            }
+                            Text {
+                                text: "Removes the file from disk AND its index entry. Cannot be undone from the UI.";
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                alignment: end;
+                                spacing: Theme.s-2;
+                                GhostButton {
+                                    label: "Cancel";
+                                    clicked => {
+                                        AppState.cl-delete-confirm-path = "";
+                                    }
+                                }
+                                PrimaryButton {
+                                    label: "Delete";
+                                    icon: "✕";
+                                    clicked => {
+                                        AppState.cl-delete-file(AppState.cl-delete-confirm-path);
+                                        AppState.cl-delete-confirm-path = "";
                                     }
                                 }
                             }

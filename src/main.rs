@@ -53,6 +53,12 @@ fn main() -> Result<()> {
         // the agent's blocking tool call already timed out client-side) can be
         // surfaced as synthetic user messages.
         bridge.set_storage(storage.clone()).await;
+        // Initialize the CL index: scan projects on disk, upsert project rows,
+        // rescan each one so file metadata gets indexed. Also one-shot
+        // import of legacy bcc-ad-manager files. All idempotent.
+        if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {
+            tracing::warn!(?e, "cl startup init failed — index may be partial");
+        }
         let server = start_signaling_server(bridge).await?;
         tracing::info!(addr = %server.local_addr, "signaling server up");
         Ok::<_, anyhow::Error>(Arc::new(
@@ -201,6 +207,115 @@ fn run_install_hooks_cli(args: &[String]) -> Result<()> {
         report.installed, report.updated, report.sidecar, report.unchanged
     );
     Ok(())
+}
+
+/// Path of the legacy bot-hq CL root we offer a one-shot import from.
+/// Only `bcc-ad-manager` content is migrated; other legacy projects are
+/// considered superseded by their entries in the new CL or deliberately
+/// dropped.
+const LEGACY_CL_ROOT: &str = ".bot-hq-legacy-2026-05-15";
+
+/// Idempotent CL index initialization. Called once at startup, after storage
+/// is opened and the bridge has been wired with storage + data_dir.
+///
+/// Three jobs:
+///   1. Walk `<data_dir>/projects/<name>/` and register each subdirectory as
+///      a project row (best-effort display_name).
+///   2. Call `bridge.cl_rescan(<project>)` for every project + `_globals`,
+///      which auto-adds new files to `cl_index` with description seeded
+///      from the file's first H1.
+///   3. One-shot legacy import: copy missing files from
+///      `~/.bot-hq-legacy-2026-05-15/projects/bcc-ad-manager/` into
+///      `<data_dir>/projects/bcc-ad-manager/`. Non-destructive (skips
+///      files that already exist in the new CL).
+async fn cl_startup_init(
+    storage: &Storage,
+    bridge: &Arc<SignalingBridge>,
+    data_dir: &std::path::Path,
+) -> Result<()> {
+    let projects_dir = data_dir.join("projects");
+    if projects_dir.is_dir() {
+        for entry in std::fs::read_dir(&projects_dir)? .flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) if !n.starts_with('.') => n,
+                _ => continue,
+            };
+            storage
+                .upsert_project(name, name, None, None)
+                .await?;
+        }
+    }
+
+    // Legacy bcc-ad-manager import — one-shot, non-destructive.
+    if let Some(base) = directories::BaseDirs::new() {
+        let legacy_bcc = base
+            .home_dir()
+            .join(LEGACY_CL_ROOT)
+            .join("projects")
+            .join("bcc-ad-manager");
+        if legacy_bcc.is_dir() {
+            let target = data_dir.join("projects").join("bcc-ad-manager");
+            std::fs::create_dir_all(&target).ok();
+            let imported = mirror_dir_non_destructive(&legacy_bcc, &target)?;
+            if imported > 0 {
+                tracing::info!(
+                    imported,
+                    "imported {} new files from legacy bcc-ad-manager CL",
+                    imported
+                );
+                // Make sure the project row exists.
+                storage
+                    .upsert_project("bcc-ad-manager", "bcc-ad-manager", None, None)
+                    .await?;
+            }
+        }
+    }
+
+    // Rescan every project (including _globals) so the index sees the
+    // current filesystem.
+    let projects = storage.list_projects().await?;
+    for p in projects {
+        if let Err(e) = bridge.cl_rescan(&p.name).await {
+            tracing::warn!(?e, project = %p.name, "cl_rescan failed");
+        }
+    }
+    Ok(())
+}
+
+/// Copy every file from `src` to `dst` (recursively), preserving relative
+/// structure, BUT only when the target file doesn't already exist. Returns
+/// the count of files actually copied. The user can prune duplicates later
+/// via the UI; we never overwrite their newer content.
+fn mirror_dir_non_destructive(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> std::io::Result<usize> {
+    let mut copied = 0usize;
+    for entry in std::fs::read_dir(src)?.flatten() {
+        let src_path = entry.path();
+        let name = match src_path.file_name() {
+            Some(n) => n.to_os_string(),
+            None => continue,
+        };
+        // Skip hidden (.git, .local, etc.) — legacy CL had a lock file and
+        // sqlite db in the root we don't want to drag over.
+        if name.to_str().is_some_and(|n| n.starts_with('.')) {
+            continue;
+        }
+        let dst_path = dst.join(&name);
+        if src_path.is_dir() {
+            std::fs::create_dir_all(&dst_path)?;
+            copied += mirror_dir_non_destructive(&src_path, &dst_path)?;
+        } else if !dst_path.exists() {
+            std::fs::copy(&src_path, &dst_path)?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
 }
 
 /// Minimal .env loader. Mutates the process env. Lines that aren't `KEY=VALUE`

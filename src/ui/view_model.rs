@@ -566,8 +566,17 @@ pub async fn install_view_model(
             rt.spawn(async move {
                 let path = core.paths.data_dir.join(&rel);
                 let body = std::fs::read_to_string(&path).unwrap_or_default();
+                // Look up index metadata for this path so the description + tags
+                // strip above the editor reflects it.
+                let (project, file_path) = resolve_project_and_path(&rel);
+                let (desc, tags) = match core.storage.get_cl_index(&project, &file_path).await {
+                    Ok(Some(entry)) => (entry.description, entry.tags.unwrap_or_default()),
+                    _ => (String::new(), String::new()),
+                };
                 update_cl_current(&weak, &rel, &body);
+                update_cl_metadata(&weak, &desc, &tags);
                 clear_cl_dirty(&weak);
+                clear_cl_metadata_dirty(&weak);
             });
         });
     }
@@ -584,14 +593,243 @@ pub async fn install_view_model(
                 if rel.is_empty() {
                     return;
                 }
+                let (desc, tags) = current_cl_metadata(&weak);
                 let path = core.paths.data_dir.join(&rel);
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                match std::fs::write(&path, body) {
-                    Ok(()) => clear_cl_dirty(&weak),
-                    Err(e) => warn!(?e, "CL save"),
+                if let Err(e) = std::fs::write(&path, body) {
+                    warn!(?e, "CL save body");
+                    return;
                 }
+                // Persist metadata as part of the same flush. Description
+                // empty → keep whatever the index had (don't overwrite with
+                // emptiness; users may have content saved without metadata).
+                if !desc.trim().is_empty() {
+                    let (project, file_path) = resolve_project_and_path(&rel);
+                    // Ensure parent project row exists. Auto-create with a
+                    // bare-bones display name if missing — projects are
+                    // user-registered but file-system-driven sessions can
+                    // populate ahead of registration.
+                    let _ = core
+                        .storage
+                        .upsert_project(&project, &project, None, None)
+                        .await;
+                    let tag_opt = if tags.trim().is_empty() {
+                        None
+                    } else {
+                        Some(tags.trim())
+                    };
+                    if let Err(e) = core
+                        .storage
+                        .upsert_cl_index(&project, &file_path, desc.trim(), tag_opt)
+                        .await
+                    {
+                        warn!(?e, "CL save metadata");
+                    }
+                }
+                clear_cl_dirty(&weak);
+                clear_cl_metadata_dirty(&weak);
+                refresh_cl_tree(&weak, &core).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_create_file(move |name, description| {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            let name = name.to_string();
+            let description = description.to_string();
+            rt.spawn(async move {
+                let name = name.trim().trim_start_matches('/');
+                if name.is_empty() {
+                    show_toast(&weak, "File path required.");
+                    return;
+                }
+                if description.trim().is_empty() {
+                    show_toast(&weak, "Description required.");
+                    return;
+                }
+                let path = core.paths.data_dir.join(name);
+                if path.exists() {
+                    show_toast(&weak, "File already exists.");
+                    return;
+                }
+                if let Some(parent) = path.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        warn!(?e, "create_dir_all");
+                        show_toast(&weak, "Could not create parent directory.");
+                        return;
+                    }
+                }
+                // Seed with an H1 so the auto-extracted description matches
+                // what the user picked.
+                let initial = format!("# {}\n\n", description.trim());
+                if let Err(e) = std::fs::write(&path, &initial) {
+                    warn!(?e, "CL create");
+                    show_toast(&weak, "Could not write file.");
+                    return;
+                }
+                let (project, file_path) = resolve_project_and_path(name);
+                let _ = core
+                    .storage
+                    .upsert_project(&project, &project, None, None)
+                    .await;
+                if let Err(e) = core
+                    .storage
+                    .upsert_cl_index(&project, &file_path, description.trim(), None)
+                    .await
+                {
+                    warn!(?e, "CL create index");
+                }
+                refresh_cl_tree(&weak, &core).await;
+                update_cl_current(&weak, name, &initial);
+                update_cl_metadata(&weak, description.trim(), "");
+                clear_cl_dirty(&weak);
+                clear_cl_metadata_dirty(&weak);
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_delete_file(move |relative| {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            let rel = relative.to_string();
+            rt.spawn(async move {
+                let path = core.paths.data_dir.join(&rel);
+                if let Err(e) = std::fs::remove_file(&path) {
+                    warn!(?e, "CL delete");
+                    show_toast(&weak, "Could not delete file.");
+                    return;
+                }
+                let (project, file_path) = resolve_project_and_path(&rel);
+                let _ = core.storage.delete_cl_index(&project, &file_path).await;
+                refresh_cl_tree(&weak, &core).await;
+                // If the deleted file was open, clear the editor.
+                let was_open = current_cl_state(&weak).0 == rel;
+                if was_open {
+                    update_cl_current(&weak, "", "");
+                    update_cl_metadata(&weak, "", "");
+                    clear_cl_dirty(&weak);
+                    clear_cl_metadata_dirty(&weak);
+                }
+                show_toast(&weak, "File deleted.");
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_rescan(move || {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                // Rescan every known project + the globals bucket.
+                let projects = core.storage.list_projects().await.unwrap_or_default();
+                let mut added = 0usize;
+                let mut touched = 0usize;
+                let mut orphaned = 0usize;
+                for p in projects {
+                    if let Ok(report) = core.bridge.cl_rescan(&p.name).await {
+                        added += report.added.len();
+                        touched += report.touched.len();
+                        orphaned += report.orphaned.len();
+                    }
+                }
+                refresh_cl_tree(&weak, &core).await;
+                show_toast(
+                    &weak,
+                    &format!(
+                        "Rescan: +{added} new · {touched} touched · {orphaned} orphan(s)"
+                    ),
+                );
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_autodescribe(move || {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                let (rel, body) = current_cl_state(&weak);
+                if rel.is_empty() {
+                    show_toast(&weak, "Open a file first.");
+                    return;
+                }
+                if body.trim().is_empty() {
+                    show_toast(&weak, "File is empty — nothing to describe.");
+                    return;
+                }
+                // Use Emma as the describer. Send a focused prompt; poll her
+                // chat for the first new text reply. Pollutes Emma's chat
+                // with the request/response which is the v1 trade-off.
+                let last_id = core
+                    .storage
+                    .messages_for_session("emma", None)
+                    .await
+                    .ok()
+                    .and_then(|m| m.iter().map(|x| x.id).max())
+                    .unwrap_or(0);
+                let snippet: String = body.chars().take(4000).collect();
+                let brief = format!(
+                    "[bot-hq autodescribe] Summarize this CL file in ONE sentence (no preface, no quotes, plain prose). The summary goes into a searchable index — agents read it to decide if the file is relevant. File: {rel}\n\n---\n\n{snippet}"
+                );
+                if let Err(e) = core.broadcast("emma", &brief).await {
+                    warn!(?e, "autodescribe: send to emma");
+                    show_toast(&weak, "Emma is unreachable.");
+                    return;
+                }
+                // Poll for a new text message from Emma. Cap at ~30s.
+                let mut tries = 30;
+                while tries > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let msgs = match core.storage.messages_for_session("emma", Some(last_id)).await
+                    {
+                        Ok(m) => m,
+                        Err(_) => break,
+                    };
+                    if let Some(reply) = msgs
+                        .iter()
+                        .find(|m| m.author == "emma" && m.kind == "text" && !m.content.trim().is_empty())
+                    {
+                        // First line is usually the description (Emma might add a follow-up).
+                        let first_line = reply
+                            .content
+                            .lines()
+                            .find(|l| !l.trim().is_empty())
+                            .unwrap_or("")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                        update_cl_metadata(&weak, &first_line, "");
+                        // The CustomInput edited callback won't fire from
+                        // programmatic property changes, so flag dirty here.
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(handle) = weak2.upgrade() {
+                                handle.global::<SlintAppState>().set_cl_metadata_dirty(true);
+                            }
+                        });
+                        show_toast(&weak, "Description suggested by Emma.");
+                        return;
+                    }
+                    tries -= 1;
+                }
+                show_toast(&weak, "Timed out waiting for Emma.");
             });
         });
     }
@@ -1502,6 +1740,54 @@ fn current_cl_state(weak: &Weak<AppWindow>) -> (String, String) {
             )
         })
         .unwrap_or_default()
+}
+
+fn current_cl_metadata(weak: &Weak<AppWindow>) -> (String, String) {
+    weak.upgrade()
+        .map(|handle| {
+            let app = handle.global::<SlintAppState>();
+            (
+                app.get_cl_current_description().to_string(),
+                app.get_cl_current_tags().to_string(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn update_cl_metadata(weak: &Weak<AppWindow>, description: &str, tags: &str) {
+    let weak = weak.clone();
+    let description = description.to_string();
+    let tags = tags.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_cl_current_description(SharedString::from(description));
+            app.set_cl_current_tags(SharedString::from(tags));
+        }
+    });
+}
+
+fn clear_cl_metadata_dirty(weak: &Weak<AppWindow>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            handle.global::<SlintAppState>().set_cl_metadata_dirty(false);
+        }
+    });
+}
+
+/// Split a relative-to-data_dir path into (project_id, file_path_within_project).
+/// Anything under `projects/<name>/...` belongs to that project; everything
+/// else belongs to `_globals`.
+fn resolve_project_and_path(rel: &str) -> (String, String) {
+    let normalized = rel.trim_start_matches('/').to_string();
+    if let Some(rest) = normalized.strip_prefix("projects/") {
+        if let Some(slash) = rest.find('/') {
+            let (project, sub) = rest.split_at(slash);
+            return (project.to_string(), sub.trim_start_matches('/').to_string());
+        }
+    }
+    (crate::storage::Project::GLOBALS.to_string(), normalized)
 }
 
 fn update_cl_current(weak: &Weak<AppWindow>, rel: &str, body: &str) {
