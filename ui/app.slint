@@ -193,6 +193,18 @@ export global AppState {
     // User-controlled toggle for the tray. Default closed (so the chat is
     // unobstructed); clicking the header chip opens it.
     in-out property <bool>   questions-tray-open;
+    // Set true by view_model when at least one row in the tray has a
+    // user-supplied answer. Drives the "Send all" button enable state.
+    in-out property <bool>   submit-ready;
+    // Called every time the user picks a choice option or types into a
+    // halt/open-ask input. `value` is the picked option string (choice)
+    // or the typed text (open-ask/halt). view_model maintains the batch
+    // accumulator keyed by choice_id.
+    callback set-answer(string, string);
+    // Fires the batched submission: drains the accumulator, resolves each
+    // pending choice, marks halt rows answered, broadcasts a combined
+    // user message so the agent reads everything as one turn.
+    callback submit-questions-batch();
     // Frozen-at-spawn model names for this session's two agents. Header strip
     // reads these so the user sees what's actually talking, not the (mutable)
     // current agent_configs.model_name. Empty for pre-migration session rows.
@@ -796,12 +808,128 @@ component QuestionsToggleChip inherits Rectangle {
     ta := TouchArea { clicked => { root.clicked(); } }
 }
 
+// Selectable option chip — used inside QuestionCard for choice-kind. Shows a
+// visual selected state instead of immediately firing on click.
+component OptionChip inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked();
+    height: 28px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius-lg;
+    border-width: selected ? 2px : 1px;
+    border-color: selected
+        ? Theme.primary
+        : ta.has-hover ? Theme.primary.with-alpha(0.6) : Theme.outline-variant;
+    background: selected
+        ? Theme.primary-fixed.with-alpha(0.2)
+        : ta.has-hover ? Theme.surface-high : Theme.surface;
+    animate background, border-color, border-width { duration: 80ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-3;
+        padding-right: Theme.s-3;
+        spacing: Theme.s-2;
+        alignment: stretch;
+        Text {
+            text: selected ? "● " + root.label : "○ " + root.label;
+            color: selected ? Theme.primary : Theme.on-surface;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            font-weight: selected ? Theme.w-semi : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
+// One card in the tray — owns local `picked` (choice) / `reply` (text input)
+// state and notifies AppState via `set-answer` on every change. The tray
+// itself is dumb; view_model accumulates per-choice-id values and decides
+// when the Send button is enabled.
+component QuestionCard inherits Rectangle {
+    in property <PendingQuestion> q;
+    // Local edit state. `changed` handlers below push every transition to
+    // AppState so the Rust-side accumulator stays in sync.
+    in-out property <string> picked: "";
+    in-out property <string> reply: "";
+
+    changed picked => { AppState.set-answer(q.choice-id, picked); }
+    changed reply => { AppState.set-answer(q.choice-id, reply); }
+
+    border-radius: Theme.radius-default;
+    border-width: 1px;
+    border-color: Theme.outline-variant.with-alpha(0.3);
+    background: Theme.surface.with-alpha(0.3);
+
+    VerticalLayout {
+        padding: Theme.s-3;
+        spacing: Theme.s-2;
+        HorizontalLayout {
+            spacing: Theme.s-2;
+            alignment: stretch;
+            Text {
+                text: q.kind == "choice" ? "❓ choice"
+                    : q.kind == "open_ask" ? "💬 open-ask"
+                    : q.kind == "halt" ? "⏸ awaiting" : q.kind;
+                color: Theme.on-surface-variant;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-label;
+                letter-spacing: Theme.ls-label;
+                font-weight: Theme.w-bold;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+            Text {
+                text: q.agent;
+                color: Theme.on-surface-variant;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-label;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: q.asked-at;
+                color: Theme.on-surface-variant;
+                font-family: Theme.font-mono;
+                font-size: Theme.font-label;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 0;
+            }
+        }
+        Text {
+            text: q.prompt;
+            color: Theme.on-surface;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-code;
+            wrap: word-wrap;
+        }
+        if q.kind == "choice": VerticalLayout {
+            spacing: Theme.s-1;
+            for opt in q.options:
+                OptionChip {
+                    label: opt;
+                    selected: picked == opt;
+                    clicked => { picked = opt; }
+                }
+        }
+        if q.kind == "halt" || q.kind == "open_ask": CustomInput {
+            placeholder: q.kind == "halt"
+                ? "Type a reply (or leave empty to just resume)..."
+                : "Type your answer...";
+            text <=> reply;
+        }
+    }
+}
+
 // The expanded list of pending questions inside the SessionView. Renders one
-// "card" per question, with options as buttons for choice-kind. Halts and
-// open-asks show as info rows without buttons (the user resumes by typing a
-// chat message — same affordance as today's mark_awaiting_user halt).
+// QuestionCard per pending row + a Send All button that batches the inputs
+// and ships them to the agent as a single combined turn.
 component QuestionsTray inherits Rectangle {
     in property <[PendingQuestion]> questions;
+    in property <bool> submit-ready;
     border-radius: Theme.radius-default;
     border-width: 1px;
     border-color: Theme.outline-variant.with-alpha(0.4);
@@ -809,63 +937,52 @@ component QuestionsTray inherits Rectangle {
     VerticalLayout {
         padding: Theme.s-3;
         spacing: Theme.s-3;
-        for q in root.questions: VerticalLayout {
+        for q in root.questions:
+            QuestionCard { q: q; }
+        // Send-all bar.
+        HorizontalLayout {
             spacing: Theme.s-2;
-            HorizontalLayout {
-                spacing: Theme.s-2;
-                alignment: stretch;
-                Text {
-                    text: q.kind == "choice" ? "❓ choice"
-                        : q.kind == "open_ask" ? "💬 open-ask"
-                        : q.kind == "halt" ? "⏸ awaiting" : q.kind;
-                    color: Theme.on-surface-variant;
-                    font-family: Theme.font-mono;
-                    font-size: Theme.font-label;
-                    letter-spacing: Theme.ls-label;
-                    font-weight: Theme.w-bold;
-                    vertical-alignment: center;
-                    horizontal-stretch: 0;
-                }
-                Text {
-                    text: q.agent;
-                    color: Theme.on-surface-variant;
-                    font-family: Theme.font-mono;
-                    font-size: Theme.font-label;
-                    vertical-alignment: center;
-                    horizontal-stretch: 0;
-                }
-                Rectangle { horizontal-stretch: 1; }
-                Text {
-                    text: q.asked-at;
-                    color: Theme.on-surface-variant;
-                    font-family: Theme.font-mono;
-                    font-size: Theme.font-label;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    horizontal-stretch: 0;
-                }
-            }
+            alignment: end;
             Text {
-                text: q.prompt;
-                color: Theme.on-surface;
-                font-family: Theme.font-mono;
-                font-size: Theme.font-code;
-                wrap: word-wrap;
-            }
-            if q.kind == "choice": VerticalLayout {
-                spacing: Theme.s-1;
-                for opt in q.options:
-                    ChoiceButton {
-                        label: opt;
-                        clicked => { AppState.choice-clicked(q.choice-id, opt); }
-                    }
-            }
-            if q.kind == "halt": Text {
-                text: "(send any chat message below to resume)";
+                text: root.submit-ready
+                    ? "Submits answers + clears the tray."
+                    : "Pick an option / type a reply on at least one row to enable.";
                 color: Theme.on-surface-variant;
                 font-family: Theme.font-mono;
                 font-size: Theme.font-label;
-                font-italic: true;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            send-btn := Rectangle {
+                horizontal-stretch: 0;
+                height: 30px;
+                min-width: 110px;
+                border-radius: Theme.radius-lg;
+                border-width: 1px;
+                border-color: root.submit-ready
+                    ? Theme.primary
+                    : Theme.outline-variant.with-alpha(0.3);
+                background: root.submit-ready
+                    ? (send-ta.has-hover ? Theme.primary-fixed.with-alpha(0.3) : Theme.primary-fixed.with-alpha(0.2))
+                    : Theme.surface-low.with-alpha(0.3);
+                animate background, border-color { duration: 80ms; }
+                HorizontalLayout {
+                    padding-left: Theme.s-3;
+                    padding-right: Theme.s-3;
+                    alignment: center;
+                    Text {
+                        text: "↑ Send all";
+                        color: root.submit-ready ? Theme.primary : Theme.on-surface-variant.with-alpha(0.5);
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-code;
+                        font-weight: Theme.w-bold;
+                        vertical-alignment: center;
+                    }
+                }
+                send-ta := TouchArea {
+                    enabled: root.submit-ready;
+                    clicked => { AppState.submit-questions-batch(); }
+                }
             }
         }
     }
@@ -1593,7 +1710,10 @@ component SessionView inherits Rectangle {
                     // Questions tray — collapsible. The chip in the header
                     // toggles visibility. Renders nothing when no pending items.
                     if AppState.questions-tray-open && AppState.active-questions.length > 0:
-                        QuestionsTray { questions: AppState.active-questions; }
+                        QuestionsTray {
+                            questions: AppState.active-questions;
+                            submit-ready: AppState.submit-ready;
+                        }
 
                     // Chat stream.
                     Rectangle {

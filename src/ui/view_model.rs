@@ -26,6 +26,15 @@ use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tracing::warn;
 
+/// In-memory accumulator for the questions-tray "Send all" form. Keyed by
+/// `choice_id`. The Slint side fires `set-answer(cid, value)` on every
+/// change to a card's input; on `submit-questions-batch` we drain this and
+/// route each row to its destination (bridge.resolve_choice for choices,
+/// storage.answer_question for halts) + broadcast a single combined chat
+/// message so the agent sees one turn instead of N.
+static ANSWER_ACCUMULATOR: Lazy<std::sync::Mutex<HashMap<String, String>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// Per-session fingerprint of the last-rendered message list. Used to short-
 /// circuit `set_session_msgs` when no new messages arrived — replacing a
 /// ModelRc with identical content still tears down + rebuilds every row,
@@ -317,6 +326,128 @@ pub async fn install_view_model(
                 if let Err(e) = core.resolve_choice(&choice_id, picked).await {
                     warn!(?e, "resolve_choice");
                 }
+            });
+        });
+    }
+
+    // Tray "Send all" — per-card change handler.
+    // Each QuestionCard's `changed picked => …` / `changed reply => …` fires
+    // this. We mirror it into ANSWER_ACCUMULATOR and recompute submit-ready.
+    {
+        let weak = weak.clone();
+        app.on_set_answer(move |choice_id, value| {
+            let cid = choice_id.to_string();
+            let val = value.to_string();
+            {
+                let mut acc = ANSWER_ACCUMULATOR.lock().unwrap();
+                if val.is_empty() {
+                    acc.remove(&cid);
+                } else {
+                    acc.insert(cid, val);
+                }
+            }
+            let ready = !ANSWER_ACCUMULATOR.lock().unwrap().is_empty();
+            let weak2 = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(handle) = weak2.upgrade() {
+                    handle.global::<SlintAppState>().set_submit_ready(ready);
+                }
+            });
+        });
+    }
+
+    // Tray "Send all" — submission. Drains ANSWER_ACCUMULATOR, routes each
+    // row, then broadcasts a combined user chat message so the agent reads
+    // everything as a single turn (also clears the awaiting flag).
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_submit_questions_batch(move || {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                let answers: Vec<(String, String)> = {
+                    let mut acc = ANSWER_ACCUMULATOR.lock().unwrap();
+                    acc.drain().collect()
+                };
+                if answers.is_empty() {
+                    return;
+                }
+                // Read the active session id from the Slint thread.
+                let session_id: String = {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let weak_inner = weak.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(handle) = weak_inner.upgrade() {
+                            let _ = tx.send(
+                                handle
+                                    .global::<SlintAppState>()
+                                    .get_active_session_id()
+                                    .to_string(),
+                            );
+                        } else {
+                            let _ = tx.send(String::new());
+                        }
+                    });
+                    rx.await.unwrap_or_default()
+                };
+                if session_id.is_empty() {
+                    warn!("submit-questions-batch fired with no active session");
+                    return;
+                }
+                let mut lines: Vec<String> = Vec::with_capacity(answers.len());
+                for (cid, value) in &answers {
+                    let q = match core.storage.get_question(cid).await {
+                        Ok(Some(q)) => q,
+                        Ok(None) => {
+                            warn!(%cid, "submit batch: question missing");
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(?e, %cid, "submit batch: get_question failed");
+                            continue;
+                        }
+                    };
+                    let label = match q.kind.as_str() {
+                        "choice" => "[choice]",
+                        "halt" => "[halt]",
+                        "open_ask" => "[open-ask]",
+                        _ => "[?]",
+                    };
+                    lines.push(format!("{label} \"{}\" → {}", q.prompt, value));
+                    match q.kind.as_str() {
+                        "choice" => {
+                            if let Err(e) = core.resolve_choice(cid, value.clone()).await {
+                                warn!(?e, %cid, "submit batch: resolve_choice");
+                            }
+                        }
+                        _ => {
+                            if let Err(e) = core.storage.answer_question(cid, value).await {
+                                warn!(?e, %cid, "submit batch: answer_question");
+                            }
+                        }
+                    }
+                }
+                // Clear the Send-ready flag now that the accumulator is drained.
+                let weak_btn = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(handle) = weak_btn.upgrade() {
+                        handle.global::<SlintAppState>().set_submit_ready(false);
+                    }
+                });
+                // Broadcast a single user message containing the answers so
+                // the agent processes everything in one turn (and the
+                // awaiting flag clears via the normal broadcast path).
+                let body = format!(
+                    "Answers submitted from the questions tray:\n\n{}",
+                    lines.join("\n")
+                );
+                if let Err(e) = core.broadcast(&session_id, &body).await {
+                    warn!(?e, %session_id, "submit batch: broadcast");
+                }
+                // Refresh the tray so the answered/withdrawn rows drop out.
+                refresh_active_questions(&weak, &core, &session_id);
             });
         });
     }
