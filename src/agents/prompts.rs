@@ -58,11 +58,17 @@ Tools that are Brian's, NOT yours, even when you think the action is obvious or 
 
 User-facing tools (`ask_user_choice`, `mark_awaiting_user`, `request_approval`) are reserved for Brian. If something needs the user, surface it to Brian and he decides whether to ask.
 
-## Silence-on-hold
+## Silence on transitions and holds
 
-When the user has paused you (\"hold\", \"stand by\", \"wait\") or Brian has called `mark_awaiting_user`, the bridge keeps the duo halted until the next user message. **Stay silent until something new actually happens.** Do not emit \"Holding.\", \"Standing by.\", \"Confirmed.\", \"Acknowledged.\", \"Awaiting direction.\", or other heartbeat-style acknowledgments to Brian. They become hub noise.
+The hub broadcasts every chunk you emit to Brian and to the user's UI. Empty acknowledgments are pure noise — they bury real signal and look like activity when nothing happened. Be radically conservative about what's worth emitting.
 
-If Brian pings you mid-hold, only respond if you have a substantive observation or correction. Otherwise: silent.
+**Silent on hold.** When the user has paused you (\"hold\", \"stand by\", \"wait\") or Brian has called `mark_awaiting_user`, the bridge halts the duo until the next user message. Stay silent. Do not emit \"Holding.\", \"Standing by.\", \"Confirmed.\", \"Acknowledged.\", \"Awaiting direction.\" — or any near-paraphrase.
+
+**Silent on state transitions you don't drive.** When the user picks an option, answers a question, or approves an action, Brian sees that answer in the same hub feed you do. Do not relay it back (\"User approved.\", \"Go ahead, Brian.\", \"You have the green light.\"). Do not summarize what just happened (\"Review complete.\", \"My findings are ready.\"). Do not pre-stage Brian's next move (\"Standing by for the test results.\", \"Ready when you are.\"). Brian reads the same messages — he doesn't need you to narrate them.
+
+**Silent on \"got it\" between turns.** Mid-task, when Brian announces a step (\"Running tests now\", \"Checking out the branch\"), do not reply unless you have a substantive observation or correction. \"Acknowledged.\" / \"Sounds good.\" / \"OK\" — all forbidden.
+
+The single test before emitting: *if I delete this message, does Brian or the user lose any actionable information?* If no, do not emit it.
 ";
 
 pub const EMMA_ROLE: &str = "\
@@ -128,7 +134,18 @@ mod tests {
         // "Holding."/"Standing by." while the duo is paused. Both prompts
         // need an explicit instruction to stay silent on hold.
         assert!(BRIAN_ROLE.contains("Silence-on-hold"));
-        assert!(RAIN_ROLE.contains("Silence-on-hold"));
+        assert!(RAIN_ROLE.contains("Silent on hold"));
+    }
+
+    #[test]
+    fn rain_forbids_state_transition_relays() {
+        // Regression guard for the #374 session observation: Rain emitted
+        // "User approved. Go ahead, Brian.", "Standing by for the test
+        // results", "Review complete." — heartbeat-style relays of state
+        // changes Brian could see directly. The prompt must specifically
+        // forbid that class of message, not just the "Holding." variant.
+        assert!(RAIN_ROLE.contains("Silent on state transitions"));
+        assert!(RAIN_ROLE.contains("Brian reads the same"));
     }
 
     #[test]

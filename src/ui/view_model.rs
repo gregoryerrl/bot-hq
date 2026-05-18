@@ -396,7 +396,13 @@ pub async fn install_view_model(
                     warn!("submit-questions-batch fired with no active session");
                     return;
                 }
-                let mut lines: Vec<String> = Vec::with_capacity(answers.len());
+                // Split rows by kind. Choice rows route through resolve_choice
+                // which delivers the picked option to the agent directly (via
+                // oneshot or — when the agent's tool call timed out — an OOB
+                // synthetic user message + input_tx wake). Halt/open_ask rows
+                // have no built-in delivery channel; they ride out via the
+                // broadcast below as the unified "user replied" message.
+                let mut non_choice_lines: Vec<String> = Vec::new();
                 for (cid, value) in &answers {
                     let q = match core.storage.get_question(cid).await {
                         Ok(Some(q)) => q,
@@ -409,40 +415,52 @@ pub async fn install_view_model(
                             continue;
                         }
                     };
-                    let label = match q.kind.as_str() {
-                        "choice" => "[choice]",
-                        "halt" => "[halt]",
-                        "open_ask" => "[open-ask]",
-                        _ => "[?]",
-                    };
-                    lines.push(format!("{label} \"{}\" → {}", q.prompt, value));
                     match q.kind.as_str() {
                         "choice" => {
+                            // resolve_choice handles delivery — don't duplicate
+                            // the answer in the broadcast body.
                             if let Err(e) = core.resolve_choice(cid, value.clone()).await {
                                 warn!(?e, %cid, "submit batch: resolve_choice");
                             }
                         }
-                        _ => {
+                        kind => {
                             if let Err(e) = core.storage.answer_question(cid, value).await {
                                 warn!(?e, %cid, "submit batch: answer_question");
                             }
+                            let label = if kind == "halt" { "[halt]" } else { "[open-ask]" };
+                            non_choice_lines
+                                .push(format!("{label} \"{}\" → {}", q.prompt, value));
                         }
                     }
                 }
-                // Clear the Send-ready flag now that the accumulator is drained.
+                // Clear the Send-ready flag AND close the tray now that the
+                // accumulator is drained. Closing the tray is the user-visible
+                // "I'm done" signal; the conditional in app.slint also hides
+                // it once active-questions is empty, but force-closing here
+                // makes the dismiss happen synchronously instead of waiting
+                // for a refresh round-trip.
                 let weak_btn = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(handle) = weak_btn.upgrade() {
-                        handle.global::<SlintAppState>().set_submit_ready(false);
+                        let app = handle.global::<SlintAppState>();
+                        app.set_submit_ready(false);
+                        app.set_questions_tray_open(false);
                     }
                 });
-                // Broadcast a single user message containing the answers so
-                // the agent processes everything in one turn (and the
-                // awaiting flag clears via the normal broadcast path).
-                let body = format!(
-                    "Answers submitted from the questions tray:\n\n{}",
-                    lines.join("\n")
-                );
+                // Broadcast the residual non-choice answers (halt + open_ask
+                // replies) as one combined user message — this is also what
+                // clears the bridge's awaiting flag for the session. When the
+                // batch was choice-only we still broadcast a minimal "user
+                // replied" message so awaiting clears and peer-forwarding
+                // resumes without anyone reading a stale halt.
+                let body = if non_choice_lines.is_empty() {
+                    "Answers submitted from the questions tray.".to_string()
+                } else {
+                    format!(
+                        "Answers submitted from the questions tray:\n\n{}",
+                        non_choice_lines.join("\n")
+                    )
+                };
                 if let Err(e) = core.broadcast(&session_id, &body).await {
                     warn!(?e, %session_id, "submit batch: broadcast");
                 }
