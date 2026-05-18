@@ -696,9 +696,13 @@ impl SignalingBridge {
             }
         }
 
-        // Orphans (index has it, disk doesn't).
+        // Orphans (index has it, disk doesn't): the file was deleted on disk
+        // OUTSIDE bot-hq (via `rm`, an editor, or a user cleanup). The index
+        // pointer is now pointing at /dev/null; auto-purge so cl_index_search
+        // never returns a row the agent can't actually read.
         for path in &existing_paths {
             if !on_disk.contains_key(path) {
+                let _ = storage.delete_cl_index(project, path).await;
                 report.orphaned.push(path.clone());
             }
         }

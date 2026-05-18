@@ -1859,15 +1859,16 @@ component ContextLibraryPane inherits Rectangle {
                             AppState.cl-new-file-dialog-open = true;
                         }
                     }
+                    // Single Refresh button = rescan disk + repaint tree.
+                    // ASCII "R" so it renders even when the icon-font glyphs
+                    // (↻, ⟳) fall back to .notdef boxes on the host system.
                     IconButton {
-                        glyph: "⟳";
-                        size: 14px;
-                        clicked => { AppState.cl-rescan(); }
-                    }
-                    IconButton {
-                        glyph: "↻";
-                        size: 14px;
-                        clicked => { AppState.cl-refresh(); }
+                        glyph: "R";
+                        size: 11px;
+                        clicked => {
+                            AppState.cl-rescan();
+                            AppState.cl-refresh();
+                        }
                     }
                 }
                 ScrollView {
@@ -1947,8 +1948,11 @@ component ContextLibraryPane inherits Rectangle {
                                 }
                                 if AppState.cl-current-path != "":
                                     IconButton {
-                                        glyph: "✕";
-                                        size: 14px;
+                                        // ASCII "x" — drag-net glyph "✕" was
+                                        // showing as a .notdef box on some
+                                        // host fonts.
+                                        glyph: "x";
+                                        size: 12px;
                                         clicked => {
                                             AppState.cl-delete-confirm-path = AppState.cl-current-path;
                                         }
@@ -2001,7 +2005,10 @@ component ContextLibraryPane inherits Rectangle {
                                     horizontal-stretch: 1;
                                 }
                                 IconButton {
-                                    glyph: "✨";
+                                    // ASCII "?" — sparkles "✨" missing in
+                                    // most non-emoji mono fonts. "?" reads
+                                    // as "ask AI to describe".
+                                    glyph: "?";
                                     size: 12px;
                                     clicked => { AppState.cl-autodescribe(); }
                                 }
@@ -2931,7 +2938,7 @@ export component AppWindow inherits Window {
                                 }
                                 PrimaryButton {
                                     label: "Delete";
-                                    icon: "✕";
+                                    icon: "x";
                                     clicked => {
                                         AppState.cl-delete-file(AppState.cl-delete-confirm-path);
                                         AppState.cl-delete-confirm-path = "";

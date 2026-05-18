@@ -586,14 +586,16 @@ pub async fn install_view_model(
         let core = Arc::clone(&core);
         let rt = rt.clone();
         app.on_cl_save_current(move || {
+            // Read state on the event-loop thread (we're in a Slint callback)
+            // before spawning. Off-thread reads return empty silently.
+            let (rel, body) = current_cl_state(&weak);
+            let (desc, tags) = current_cl_metadata(&weak);
             let weak = weak.clone();
             let core = Arc::clone(&core);
             rt.spawn(async move {
-                let (rel, body) = current_cl_state(&weak);
                 if rel.is_empty() {
                     return;
                 }
-                let (desc, tags) = current_cl_metadata(&weak);
                 let path = core.paths.data_dir.join(&rel);
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -700,9 +702,12 @@ pub async fn install_view_model(
         let core = Arc::clone(&core);
         let rt = rt.clone();
         app.on_cl_delete_file(move |relative| {
+            let rel = relative.to_string();
+            // Capture current-path here on the event-loop thread so the post-
+            // delete check correctly detects whether the deleted file was open.
+            let currently_open = current_cl_state(&weak).0;
             let weak = weak.clone();
             let core = Arc::clone(&core);
-            let rel = relative.to_string();
             rt.spawn(async move {
                 let path = core.paths.data_dir.join(&rel);
                 if let Err(e) = std::fs::remove_file(&path) {
@@ -713,8 +718,7 @@ pub async fn install_view_model(
                 let (project, file_path) = resolve_project_and_path(&rel);
                 let _ = core.storage.delete_cl_index(&project, &file_path).await;
                 refresh_cl_tree(&weak, &core).await;
-                // If the deleted file was open, clear the editor.
-                let was_open = current_cl_state(&weak).0 == rel;
+                let was_open = currently_open == rel;
                 if was_open {
                     update_cl_current(&weak, "", "");
                     update_cl_metadata(&weak, "", "");
@@ -762,10 +766,15 @@ pub async fn install_view_model(
         let core = Arc::clone(&core);
         let rt = rt.clone();
         app.on_cl_autodescribe(move || {
+            // Slint property reads only return the live value on the event-
+            // loop thread. The callback fires here ON that thread, so capture
+            // (rel, body) NOW and move them into the tokio task — otherwise
+            // current_cl_state inside rt.spawn returns empty and the user
+            // sees "Open a file first" with a file plainly open.
+            let (rel, body) = current_cl_state(&weak);
             let weak = weak.clone();
             let core = Arc::clone(&core);
             rt.spawn(async move {
-                let (rel, body) = current_cl_state(&weak);
                 if rel.is_empty() {
                     show_toast(&weak, "Open a file first.");
                     return;
