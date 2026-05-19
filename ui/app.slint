@@ -1959,8 +1959,15 @@ component CLTreeRow inherits Rectangle {
                     vertical-alignment: center;
                     single-line: true;
                     selection-background-color: Theme.primary.with-alpha(0.4);
-                    accepted => { root.commit-edit(); }
+                    // Handle Enter + Escape explicitly here. Relying on the
+                    // built-in `accepted` callback was flaky because the
+                    // `key-pressed` handler intercepts Enter first; returning
+                    // reject didn't reliably route to accepted afterwards.
                     key-pressed(ev) => {
+                        if (ev.text == Key.Return) {
+                            root.commit-edit();
+                            return accept;
+                        }
                         if (ev.text == Key.Escape) {
                             root.cancel-edit();
                             return accept;

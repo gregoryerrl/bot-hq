@@ -1228,9 +1228,17 @@ pub async fn install_view_model(
             }
             let _ = refresh_emma(&weak_for_poll, &core_for_poll).await;
             refresh_dashboard(&weak_for_poll, &core_for_poll).await;
-            // CL tree refresh every 2 seconds (4 × 500ms).
+            // CL tree refresh every 2 seconds (4 × 500ms). Skip while
+            // the user is inline-editing — rebuilding the cl-tree model
+            // destroys the row instance (and its focused TextInput),
+            // yanking focus out from under the user mid-type. Explicit
+            // refreshes (after create / delete / rename) still happen
+            // from the action handlers.
             if tick % 4 == 0 {
-                refresh_cl_tree(&weak_for_poll, &core_for_poll).await;
+                let editing = read_tree_state(&weak_for_poll).await.editing_mode;
+                if editing.is_empty() {
+                    refresh_cl_tree(&weak_for_poll, &core_for_poll).await;
+                }
             }
         }
     });
