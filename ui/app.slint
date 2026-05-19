@@ -2249,22 +2249,26 @@ component ContextLibraryPane inherits Rectangle {
                                     font-size: Theme.font-label;
                                     letter-spacing: Theme.ls-label;
                                     font-weight: Theme.w-bold;
-                                    vertical-alignment: center;
+                                    vertical-alignment: top;
                                     horizontal-stretch: 0;
                                     width: 90px;
                                 }
-                                // Same shape as CustomInput, but explicitly
-                                // wraps a TextInput inside its own layout so
-                                // the TextInput's hit-area is layout-driven
-                                // (the previous version positioned the
-                                // TextEdit absolutely with parent.width math
-                                // and clicks weren't landing). Single-line
-                                // TextInput auto-scrolls horizontally on
-                                // cursor movement; long descriptions stay
-                                // accessible via arrow keys / home / end.
+                                // Multi-line wrapped TextInput. Width is
+                                // layout-driven (horizontal-stretch: 1 inside
+                                // the parent HorizontalLayout); height grows
+                                // with content from 32px up to 96px, then
+                                // scrolls. `clip: true` on the container
+                                // prevents the inner input from ever pushing
+                                // its parent layout wider, which previously
+                                // shoved the Save button off-screen on long
+                                // descriptions. `wrap: word-wrap` requires
+                                // `single-line: false`.
                                 desc-input := Rectangle {
                                     horizontal-stretch: 1;
-                                    height: 32px;
+                                    min-height: 32px;
+                                    max-height: 96px;
+                                    vertical-stretch: 0;
+                                    clip: true;
                                     border-radius: Theme.radius-lg;
                                     border-width: 1px;
                                     border-color: desc-edit.has-focus ? Theme.primary : Theme.outline-variant;
@@ -2274,14 +2278,17 @@ component ContextLibraryPane inherits Rectangle {
                                     HorizontalLayout {
                                         padding-left: Theme.s-3;
                                         padding-right: Theme.s-3;
+                                        padding-top: Theme.s-1;
+                                        padding-bottom: Theme.s-1;
                                         alignment: stretch;
                                         desc-edit := TextInput {
                                             text <=> AppState.cl-current-description;
                                             color: Theme.on-surface;
                                             font-family: Theme.font-mono;
                                             font-size: Theme.font-code;
-                                            vertical-alignment: center;
-                                            single-line: true;
+                                            vertical-alignment: top;
+                                            single-line: false;
+                                            wrap: word-wrap;
                                             selection-background-color: Theme.primary.with-alpha(0.4);
                                             edited => { AppState.cl-metadata-dirty = true; }
                                         }
@@ -2290,13 +2297,14 @@ component ContextLibraryPane inherits Rectangle {
                                         HorizontalLayout {
                                             padding-left: Theme.s-3;
                                             padding-right: Theme.s-3;
+                                            padding-top: Theme.s-2;
                                             alignment: start;
                                             Text {
                                                 text: "what is this file about? agents read this to decide if relevant";
                                                 color: Theme.on-surface-variant.with-alpha(0.5);
                                                 font-family: Theme.font-mono;
                                                 font-size: Theme.font-code;
-                                                vertical-alignment: center;
+                                                vertical-alignment: top;
                                             }
                                         }
                                 }
