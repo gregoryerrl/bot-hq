@@ -12,7 +12,7 @@ name = "bot-hq"
 path = "src/main.rs"
 
 [dependencies]
-slint = "1.16"
+slint = { version = "1.16", features = ["unstable-fontique-08"] }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate", "chrono"] }
 serde = { version = "1", features = ["derive"] }

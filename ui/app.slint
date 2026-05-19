@@ -305,12 +305,45 @@ export global AppState {
 
 // ---- Reusable primitives ---------------------------------------------------
 
-// Unicode glyph used as a Material-Symbols stand-in.
+// Lucide icon codepoint registry. Use `Icons.<name>` as the glyph value
+// for the Icon component (the component force-loads the lucide font).
+// Names align with the source lucide icon (commented). Extend as we
+// adopt more icons.
+export global Icons {
+    out property <string> plus:          "\u{E13D}";   // lucide:plus
+    out property <string> folder-plus:   "\u{E0D9}";   // lucide:folder-plus
+    out property <string> x:             "\u{E1B2}";   // lucide:x
+    out property <string> trash:         "\u{E18E}";   // lucide:trash-2
+    out property <string> edit:          "\u{E1F9}";   // lucide:pencil
+    out property <string> check:         "\u{E06C}";   // lucide:check
+    out property <string> arrow-left:    "\u{E048}";   // lucide:arrow-left
+    out property <string> chevron-right: "\u{E06F}";   // lucide:chevron-right
+    out property <string> chevron-down:  "\u{E06D}";   // lucide:chevron-down
+    out property <string> refresh:       "\u{E145}";   // lucide:refresh-cw
+    out property <string> search:        "\u{E151}";   // lucide:search
+    out property <string> file:          "\u{E0C0}";   // lucide:file
+    out property <string> folder:        "\u{E0D7}";   // lucide:folder
+    out property <string> menu:          "\u{E115}";   // lucide:menu
+    out property <string> list:          "\u{E106}";   // lucide:list
+    out property <string> play:          "\u{E13C}";   // lucide:play
+    out property <string> hash:          "\u{E0EF}";   // lucide:hash
+    out property <string> warning:       "\u{E193}";   // lucide:triangle-alert
+    out property <string> info:          "\u{E0F9}";   // lucide:info
+    out property <string> dot:           "\u{E076}";   // lucide:circle
+    out property <string> sparkles:      "\u{E412}";   // lucide:sparkles
+    out property <string> settings:      "\u{E154}";   // lucide:settings
+    out property <string> wand:          "\u{E357}";   // lucide:wand-2
+    out property <string> target:        "\u{E180}";   // lucide:target
+}
+
+// Lucide icon. Renders any string with the embedded `lucide` font; pair
+// with `Icons.<name>` for a stable codepoint reference.
 component Icon inherits Text {
     in property <string> glyph;
     in property <length> size: 16px;
     in property <color> tint: Theme.on-surface-variant;
     text: glyph;
+    font-family: "lucide";
     font-size: size;
     color: tint;
     vertical-alignment: center;
@@ -545,7 +578,7 @@ component EmmaChip inherits Rectangle {
         padding-right: Theme.s-3;
         spacing: Theme.s-2;
         alignment: center;
-        Icon { glyph: "◉"; size: 12px; tint: Theme.primary; }
+        Icon { glyph: Icons.target; size: 12px; tint: Theme.primary; }
         Text {
             text: "Emma";
             color: Theme.primary;
@@ -627,7 +660,7 @@ component Topbar inherits Rectangle {
                         padding-right: Theme.s-2;
                         spacing: Theme.s-2;
                         alignment: stretch;
-                        Icon { glyph: "⌕"; size: 16px; tint: Theme.on-surface-variant; }
+                        Icon { glyph: Icons.search; size: 16px; tint: Theme.on-surface-variant; }
                         search := TextInput {
                             color: Theme.on-surface;
                             font-family: Theme.font-mono;
@@ -732,7 +765,7 @@ component AwaitingBadge inherits Rectangle {
         padding-right: Theme.s-2;
         spacing: Theme.s-1;
         alignment: center;
-        Icon { glyph: "!"; size: 11px; tint: Theme.error; }
+        Icon { glyph: Icons.warning; size: 11px; tint: Theme.error; }
         Text {
             text: "[Need User Input]";
             color: Theme.error;
@@ -769,7 +802,7 @@ component ChoiceButton inherits Rectangle {
             horizontal-stretch: 1;
         }
         Icon {
-            glyph: "›";
+            glyph: Icons.chevron-right;
             size: 14px;
             tint: ta.has-hover ? Theme.primary : Theme.on-surface-variant;
         }
@@ -793,7 +826,7 @@ component NeedInputChip inherits Rectangle {
         padding-right: Theme.s-2;
         spacing: Theme.s-1;
         alignment: center;
-        Icon { glyph: "!"; size: 11px; tint: Theme.error; }
+        Icon { glyph: Icons.warning; size: 11px; tint: Theme.error; }
         Text {
             text: "[Need User Input · " + root.count + "]";
             color: Theme.error;
@@ -829,7 +862,7 @@ component QuestionsToggleChip inherits Rectangle {
         spacing: Theme.s-1;
         alignment: center;
         Icon {
-            glyph: "!";
+            glyph: Icons.warning;
             size: 11px;
             tint: count > 0 ? Theme.error : Theme.on-surface-variant;
         }
@@ -1227,7 +1260,7 @@ component DashboardEmptyState inherits Rectangle {
             padding-top: Theme.s-2;
             PrimaryButton {
                 label: "New Session";
-                icon: "+";
+                icon: Icons.plus;
                 clicked => { root.create(); }
             }
         }
@@ -1265,12 +1298,12 @@ component DashboardPane inherits Rectangle {
                     spacing: Theme.s-2;
                     GhostButton {
                         label: "Filter";
-                        icon: "≡";
+                        icon: Icons.menu;
                         clicked => { /* TODO: filter dropdown */ }
                     }
                     PrimaryButton {
                         label: "New Session";
-                        icon: "+";
+                        icon: Icons.plus;
                         clicked => { AppState.create-session("New session", ""); }
                     }
                 }
@@ -1341,11 +1374,11 @@ component ChatBubble inherits VerticalLayout {
         msg.author == "emma"    ? "EMMA" :
         msg.author;
     property <string> author-glyph:
-        is-user               ? "◉" :
-        msg.author == "brian" ? "⚒" :
-        msg.author == "rain"  ? "◉" :
-        msg.author == "emma"  ? "◉" :
-        "·";
+        is-user               ? Icons.target :
+        msg.author == "brian" ? Icons.settings :
+        msg.author == "rain"  ? Icons.target :
+        msg.author == "emma"  ? Icons.target :
+        Icons.dot;
 
     spacing: Theme.s-1;
     horizontal-stretch: 1;
@@ -1369,7 +1402,7 @@ component ChatBubble inherits VerticalLayout {
                 padding-bottom: Theme.s-1;
                 spacing: Theme.s-2;
                 alignment: center;
-                Icon { glyph: "↻"; size: 12px; tint: Theme.secondary; }
+                Icon { glyph: Icons.refresh; size: 12px; tint: Theme.secondary; }
                 Text {
                     text: "PHASE SHIFT: " + msg.content;
                     color: Theme.on-surface-variant;
@@ -1618,7 +1651,7 @@ component ChatInput inherits Rectangle {
         }
         PrimaryButton {
             label: "Send";
-            icon: "▶";
+            icon: Icons.play;
             btn-height: 36px;
             clicked => {
                 if (input.text != "") {
@@ -1661,11 +1694,11 @@ component SessionView inherits Rectangle {
                                     alignment: start;
                                     GhostButton {
                                         label: "Back";
-                                        icon: "←";
+                                        icon: Icons.arrow-left;
                                         btn-height: 24px;
                                         clicked => { AppState.back-to-dashboard(); }
                                     }
-                                    Icon { glyph: "#"; size: 18px; tint: Theme.primary; }
+                                    Icon { glyph: Icons.hash; size: 18px; tint: Theme.primary; }
                                     Text {
                                         text: AppState.active-title == "" ? AppState.active-session-id : AppState.active-title;
                                         color: Theme.on-surface;
@@ -1875,8 +1908,8 @@ component CLTreeRow inherits Rectangle {
                     // Folder uses pure-ASCII chevron pair (>/v) so it renders
                     // on any mono font; files just show "-".
                     glyph: entry.is-dir
-                        ? (entry.expanded ? "v" : ">")
-                        : "-";
+                        ? (entry.expanded ? Icons.chevron-down : Icons.chevron-right)
+                        : Icons.dot;
                     size: 11px;
                     tint: entry.is-dir ? Theme.on-surface-variant : Theme.on-surface-variant.with-alpha(0.5);
                 }
@@ -1992,7 +2025,7 @@ component ContextLibraryPane inherits Rectangle {
                     }
                     Rectangle { horizontal-stretch: 1; }
                     IconButton {
-                        glyph: "+";
+                        glyph: Icons.plus;
                         size: 14px;
                         clicked => {
                             AppState.cl-new-file-name = "";
@@ -2004,7 +2037,7 @@ component ContextLibraryPane inherits Rectangle {
                     // ASCII "R" so it renders even when the icon-font glyphs
                     // (↻, ⟳) fall back to .notdef boxes on the host system.
                     IconButton {
-                        glyph: "R";
+                        glyph: Icons.refresh;
                         size: 11px;
                         clicked => {
                             AppState.cl-rescan();
@@ -2068,7 +2101,7 @@ component ContextLibraryPane inherits Rectangle {
                         HorizontalLayout {
                             spacing: Theme.s-2;
                             alignment: start;
-                            Icon { glyph: "·"; size: 12px; tint: Theme.primary; }
+                            Icon { glyph: Icons.dot; size: 12px; tint: Theme.primary; }
                             Text {
                                 text: AppState.cl-current-path == "" ? "Select a file" : AppState.cl-current-path;
                                 color: Theme.on-surface;
@@ -2105,7 +2138,7 @@ component ContextLibraryPane inherits Rectangle {
                                         // ASCII "x" — drag-net glyph "✕" was
                                         // showing as a .notdef box on some
                                         // host fonts.
-                                        glyph: "x";
+                                        glyph: Icons.x;
                                         size: 12px;
                                         clicked => {
                                             AppState.cl-delete-confirm-path = AppState.cl-current-path;
@@ -2113,7 +2146,7 @@ component ContextLibraryPane inherits Rectangle {
                                     }
                                 PrimaryButton {
                                     label: "Save Changes";
-                                    icon: "✓";
+                                    icon: Icons.check;
                                     btn-height: 26px;
                                     clicked => { AppState.cl-save-current(); }
                                 }
@@ -2190,7 +2223,7 @@ component ContextLibraryPane inherits Rectangle {
                                     // ASCII "?" — sparkles "✨" missing in
                                     // most non-emoji mono fonts. "?" reads
                                     // as "ask AI to describe".
-                                    glyph: "?";
+                                    glyph: Icons.sparkles;
                                     size: 12px;
                                     clicked => { AppState.cl-autodescribe(); }
                                 }
@@ -2285,9 +2318,9 @@ component AgentConfigCard inherits Rectangle {
             spacing: Theme.s-2;
             alignment: stretch;
             Icon {
-                glyph: root.agent-name == "emma" ? "◐"
-                    : root.agent-name == "brian" ? "⚒"
-                    : "◉";
+                glyph: root.agent-name == "emma" ? Icons.target
+                    : root.agent-name == "brian" ? Icons.settings
+                    : Icons.target;
                 size: 18px;
                 tint:
                     root.agent-name == "emma" ? Theme.secondary :
@@ -2355,12 +2388,12 @@ component AgentConfigCard inherits Rectangle {
             if root.agent-name == "emma":
                 GhostButton {
                     label: "Restart Emma";
-                    icon: "↻";
+                    icon: Icons.refresh;
                     clicked => { root.restart(); }
                 }
             PrimaryButton {
                 label: "Save Configuration";
-                icon: "✓";
+                icon: Icons.check;
                 clicked => { root.save(); }
             }
         }
@@ -2600,7 +2633,7 @@ component EmmaMessage inherits VerticalLayout {
             background: author-color;
             horizontal-stretch: 0;
             Icon {
-                glyph: is-user ? "◉" : "▣";
+                glyph: is-user ? Icons.target : Icons.dot;
                 size: 12px;
                 tint: Theme.on-primary;
             }
@@ -2670,7 +2703,7 @@ component EmmaPane inherits Rectangle {
                 padding-right: Theme.s-2;
                 spacing: Theme.s-2;
                 alignment: stretch;
-                Icon { glyph: "▤"; size: 18px; tint: Theme.primary; }
+                Icon { glyph: Icons.list; size: 18px; tint: Theme.primary; }
                 Text {
                     text: "Emma Terminal";
                     color: Theme.on-surface;
@@ -2681,7 +2714,7 @@ component EmmaPane inherits Rectangle {
                     horizontal-stretch: 1;
                 }
                 IconButton {
-                    glyph: "✕";
+                    glyph: Icons.x;
                     clicked => { AppState.toggle-emma(); }
                 }
             }
@@ -2814,7 +2847,7 @@ component EmmaPane inherits Rectangle {
                             }
                         }
                         IconButton {
-                            glyph: "▶";
+                            glyph: Icons.play;
                             size: 14px;
                             tint: Theme.primary;
                             clicked => {
@@ -2969,7 +3002,7 @@ export component AppWindow inherits Window {
                                 }
                                 PrimaryButton {
                                     label: "Restart";
-                                    icon: "↻";
+                                    icon: Icons.refresh;
                                     clicked => {
                                         AppState.emma-restart-confirm-visible = false;
                                         AppState.restart-emma();
@@ -3055,7 +3088,7 @@ export component AppWindow inherits Window {
                                 }
                                 PrimaryButton {
                                     label: "Create";
-                                    icon: "+";
+                                    icon: Icons.plus;
                                     clicked => {
                                         AppState.cl-create-file(
                                             AppState.cl-new-file-name,
@@ -3120,7 +3153,7 @@ export component AppWindow inherits Window {
                                 }
                                 PrimaryButton {
                                     label: "Delete";
-                                    icon: "x";
+                                    icon: Icons.x;
                                     clicked => {
                                         AppState.cl-delete-file(AppState.cl-delete-confirm-path);
                                         AppState.cl-delete-confirm-path = "";

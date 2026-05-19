@@ -110,6 +110,19 @@ fn main() -> Result<()> {
     });
 
     let window = AppWindow::new()?;
+    // Register the embedded Lucide icon font with the shared font
+    // collection. Must happen AFTER AppWindow::new() because that's what
+    // initializes the slint platform (the fontique collection lives on
+    // the platform context). Failure is non-fatal — icons fall back to
+    // .notdef boxes if registration trips, but the UI still works.
+    {
+        use slint::fontique_08::fontique;
+        let bytes: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
+        let blob = fontique::Blob::new(std::sync::Arc::new(bytes.to_vec()));
+        let mut collection = slint::fontique_08::shared_collection();
+        let fonts = collection.register_fonts(blob, None);
+        tracing::info!(font_count = fonts.len(), "lucide.ttf registered");
+    }
     let state = window.global::<AppState>();
     apply_init_outcome(&state, &paths, &init_outcome);
 
