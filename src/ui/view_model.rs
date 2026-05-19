@@ -193,7 +193,12 @@ pub async fn install_view_model(
     // ---- Initial state push --------------------------------------------
     refresh_dashboard(&weak, &core).await;
     refresh_agent_configs(&weak, &core).await;
-    refresh_cl_tree(&weak, &core).await;
+    // Use the no-hop variant: the Slint event loop is not running yet —
+    // window.run() is called by main.rs AFTER install_view_model returns —
+    // so anything that awaits an invoke_from_event_loop hop will deadlock
+    // here. TreeState::default() is correct at startup: no folders are
+    // collapsed and no inline-edit is in progress.
+    refresh_cl_tree_with_state(&weak, &core, &TreeState::default());
     seed_external_mcp_panel(&weak, &core).await;
 
     // ---- Callbacks -----------------------------------------------------
@@ -1446,11 +1451,27 @@ async fn refresh_agent_configs(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>)
 }
 
 async fn refresh_cl_tree(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
-    let root = core.paths.data_dir.clone();
     // Snapshot collapsed-folder set + inline-edit state from Slint on the
-    // event-loop thread so the walker can honor them.
+    // event-loop thread so the walker can honor them. read_tree_state itself
+    // requires the event loop to be RUNNING (it hops in via
+    // invoke_from_event_loop + oneshot). For callers that may be invoked
+    // before window.run() — i.e., the initial install_view_model pull —
+    // use refresh_cl_tree_with_state(TreeState::default()) instead, or you
+    // will deadlock waiting for a hop that can never complete.
     let snapshot = read_tree_state(weak).await;
-    let entries = walk_cl(&root, &snapshot);
+    refresh_cl_tree_with_state(weak, core, &snapshot);
+}
+
+/// Worker variant: skips the event-loop hop for state. Callers that already
+/// have a TreeState (or know it's the default — e.g., startup, before the
+/// event loop runs) should call this directly to avoid the deadlock.
+fn refresh_cl_tree_with_state(
+    weak: &Weak<AppWindow>,
+    core: &Arc<CoreAppState>,
+    state: &TreeState,
+) {
+    let root = core.paths.data_dir.clone();
+    let entries = walk_cl(&root, state);
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(handle) = weak.upgrade() {
