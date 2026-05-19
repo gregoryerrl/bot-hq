@@ -812,8 +812,18 @@ pub async fn install_view_model(
                     .and_then(|m| m.iter().map(|x| x.id).max())
                     .unwrap_or(0);
                 let snippet: String = body.chars().take(4000).collect();
+                // Sharpened brief: lead with the content itself so Emma's
+                // first read is the file (not a meta instruction), forbid
+                // "I need to read the file" explicitly (her usual reflex),
+                // give a fallback for stub files so empty/placeholder
+                // files still get a useful one-liner.
                 let brief = format!(
-                    "[bot-hq autodescribe] Summarize this CL file in ONE sentence (no preface, no quotes, plain prose). The summary goes into a searchable index — agents read it to decide if the file is relevant. File: {rel}\n\n---\n\n{snippet}"
+                    "Below between the ===FILE-START=== / ===FILE-END=== markers is the ENTIRE content of a CL (context library) file. The content is already in this message — you do NOT need to call any tool or ask me to share the file. Reply with exactly ONE plain sentence summarizing what the file is about. No preface, no quotes, no \"let me\" or \"I'll\" — just the sentence.\n\n\
+                     The sentence will be saved into a searchable index that other agents read to decide whether the file is relevant to their task; specific is better than generic.\n\n\
+                     If the file is empty or only contains a heading stub (e.g. just `# Title` with nothing else), describe it as a placeholder for what the heading suggests — for example, an empty file titled `# Auth notes` becomes \"Placeholder for auth-related notes (no body yet).\"\n\n\
+                     File path: {rel}\n\n\
+                     ===FILE-START===\n{snippet}\n===FILE-END===\n\n\
+                     One sentence. Plain prose. Reply now."
                 );
                 if let Err(e) = core.broadcast("emma", &brief).await {
                     warn!(?e, "autodescribe: send to emma");
