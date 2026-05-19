@@ -262,6 +262,11 @@ export global AppState {
     // CL sidebar width. Drag-resizable via the divider; persists across
     // tab switches but resets at app restart.
     in-out property <length>   cl-sidebar-width: 220px;
+    // Monotonic counter bumped by view_model whenever the description
+    // field should grab focus (e.g. right after inline file creation,
+    // so the user can describe in one fluid flow without clicking).
+    // Slint side watches `changed` and arms a Timer to call focus().
+    in-out property <int>      cl-description-focus-trigger;
     callback cl-tree-toggle-collapse(string);            // (folder_path)
     callback cl-tree-begin-create-file(string);          // (parent_dir)  "" = project root pick
     callback cl-tree-begin-create-folder(string);        // (parent_dir)
@@ -1866,13 +1871,28 @@ component CLTreeRow inherits Rectangle {
         ? Theme.primary
         : root.active ? Theme.primary.with-alpha(0.4) : transparent;
     animate background, border-color { duration: 60ms; }
-    // Auto-focus the inline TextInput when this row flips into edit
-    // mode. `changed` fires AFTER the scene has been rebuilt — calling
-    // focus() from `init` panicked the window adapter (RefCell borrowed
-    // mid-build), but `changed` runs in a later phase and is safe.
+    // Auto-focus the inline TextInput when this row enters edit mode.
+    // `init => focus()` panics Slint (RefCell borrowed during scene
+    // build). `changed editing` doesn't fire on freshly-created rows
+    // (no prior value). The Timer pattern bridges both: init flips the
+    // Timer on, Timer fires AFTER scene build settles, calls focus, then
+    // clears itself.
+    init => {
+        if (root.editing) {
+            focus-timer.running = true;
+        }
+    }
     changed editing => {
         if (root.editing) {
+            focus-timer.running = true;
+        }
+    }
+    focus-timer := Timer {
+        interval: 0ms;
+        running: false;
+        triggered => {
             edit-input.focus();
+            self.running = false;
         }
     }
     // Native context menu. Slint's ContextMenuArea normally opens on
@@ -2041,36 +2061,66 @@ component ContextLibraryPane inherits Rectangle {
                 padding-top: Theme.s-4;
                 padding-bottom: Theme.s-3;
                 spacing: Theme.s-3;
-                HorizontalLayout {
-                    spacing: Theme.s-2;
-                    Text {
-                        text: "LIBRARY TREE";
-                        color: Theme.on-surface-variant;
-                        font-family: Theme.font-mono;
-                        font-size: Theme.font-label;
-                        letter-spacing: Theme.ls-label;
-                        font-weight: Theme.w-bold;
-                        vertical-alignment: center;
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    IconButton {
-                        glyph: Icons.plus;
-                        size: 14px;
-                        clicked => {
-                            AppState.cl-new-file-name = "";
-                            AppState.cl-new-file-description = "";
-                            AppState.cl-new-file-dialog-open = true;
+                // Right-click on this header → root-level context menu.
+                // Lets the user create files/folders at the bot-hq root
+                // (e.g. alongside general-rules.md) without needing to
+                // right-click on an existing folder.
+                header-cm := ContextMenuArea {
+                    Menu {
+                        MenuItem {
+                            title: "New file at root";
+                            activated => { AppState.cl-tree-begin-create-file(""); }
+                        }
+                        MenuItem {
+                            title: "New folder at root";
+                            activated => { AppState.cl-tree-begin-create-folder(""); }
+                        }
+                        MenuItem {
+                            title: "Refresh";
+                            activated => {
+                                AppState.cl-rescan();
+                                AppState.cl-refresh();
+                            }
                         }
                     }
-                    // Single Refresh button = rescan disk + repaint tree.
-                    // ASCII "R" so it renders even when the icon-font glyphs
-                    // (↻, ⟳) fall back to .notdef boxes on the host system.
-                    IconButton {
-                        glyph: Icons.refresh;
-                        size: 11px;
-                        clicked => {
-                            AppState.cl-rescan();
-                            AppState.cl-refresh();
+                    HorizontalLayout {
+                        spacing: Theme.s-2;
+                        Text {
+                            text: "LIBRARY TREE";
+                            color: Theme.on-surface-variant;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-label;
+                            letter-spacing: Theme.ls-label;
+                            font-weight: Theme.w-bold;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        IconButton {
+                            glyph: Icons.plus;
+                            size: 14px;
+                            clicked => {
+                                AppState.cl-tree-begin-create-file("");
+                            }
+                        }
+                        // Single Refresh button = rescan disk + repaint tree.
+                        IconButton {
+                            glyph: Icons.refresh;
+                            size: 11px;
+                            clicked => {
+                                AppState.cl-rescan();
+                                AppState.cl-refresh();
+                            }
+                        }
+                    }
+                    // ContextMenuArea also needs a TouchArea sibling to dispatch
+                    // right-click manually — same pattern as the row, the
+                    // surrounding layout otherwise consumes the pointer event
+                    // before ContextMenuArea's native handler sees it.
+                    TouchArea {
+                        pointer-event(ev) => {
+                            if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                                header-cm.show({ x: self.mouse-x, y: self.mouse-y });
+                            }
                         }
                     }
                 }
@@ -2238,6 +2288,12 @@ component ContextLibraryPane inherits Rectangle {
                                     border-color: desc-edit.has-focus ? Theme.primary : Theme.outline-variant;
                                     background: Theme.surface-lowest;
                                     animate border-color { duration: 100ms; }
+                                    // `changed` works on local properties only,
+                                    // so bridge the global trigger here.
+                                    property <int> focus-trigger: AppState.cl-description-focus-trigger;
+                                    changed focus-trigger => {
+                                        desc-focus-timer.running = true;
+                                    }
                                     desc-edit := TextEdit {
                                         x: Theme.s-3;
                                         y: Theme.s-1;
@@ -2257,6 +2313,17 @@ component ContextLibraryPane inherits Rectangle {
                                             font-family: Theme.font-mono;
                                             font-size: Theme.font-code;
                                         }
+                                    // Bridge above runs `changed focus-trigger`
+                                    // which arms this Timer. Timer fires after
+                                    // scene build and calls focus() safely.
+                                    desc-focus-timer := Timer {
+                                        interval: 0ms;
+                                        running: false;
+                                        triggered => {
+                                            desc-edit.focus();
+                                            self.running = false;
+                                        }
+                                    }
                                 }
                                 IconButton {
                                     // ASCII "?" — sparkles "✨" missing in
