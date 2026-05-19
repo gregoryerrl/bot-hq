@@ -2253,20 +2253,23 @@ component ContextLibraryPane inherits Rectangle {
                                     horizontal-stretch: 0;
                                     width: 90px;
                                 }
-                                // Single-line TextInput with `clip: true` on
-                                // the container. Width is layout-driven via
-                                // horizontal-stretch from the parent layout;
-                                // when the content is longer than the visible
-                                // width, the TextInput auto-scrolls
-                                // horizontally to keep the cursor visible
-                                // (same as a browser URL bar). `clip: true`
-                                // prevents the TextInput's preferred-width
-                                // from pushing the parent layout wider —
-                                // that was previously shoving the Save
-                                // button off-screen.
+                                // Layout-bounded single-line input. The
+                                // TextInput must NOT report content as its
+                                // preferred-width — otherwise long text
+                                // grows the layout chain all the way up
+                                // through the metadata strip and shoves the
+                                // Save button off-screen. min-width: 0 +
+                                // explicit absolute width bound (parent.width
+                                // - padding) prevents that and lets Slint's
+                                // built-in cursor-driven horizontal scroll
+                                // kick in (URL-bar behavior).
+                                //
+                                // clip: true is the belt-and-braces visual
+                                // guard against any residual overflow.
                                 desc-input := Rectangle {
                                     horizontal-stretch: 1;
                                     height: 32px;
+                                    min-width: 1px;
                                     clip: true;
                                     border-radius: Theme.radius-lg;
                                     border-width: 1px;
@@ -2274,33 +2277,39 @@ component ContextLibraryPane inherits Rectangle {
                                     background: Theme.surface-lowest;
                                     animate border-color { duration: 100ms; }
                                     forward-focus: desc-edit;
-                                    HorizontalLayout {
-                                        padding-left: Theme.s-3;
-                                        padding-right: Theme.s-3;
-                                        alignment: stretch;
-                                        desc-edit := TextInput {
-                                            text <=> AppState.cl-current-description;
-                                            color: Theme.on-surface;
+                                    desc-edit := TextInput {
+                                        x: Theme.s-3;
+                                        y: 0;
+                                        // Explicit width bound: the input's
+                                        // visible area is exactly parent
+                                        // minus horizontal padding. Slint's
+                                        // single-line TextInput auto-scrolls
+                                        // its content horizontally to keep
+                                        // the cursor inside this rectangle.
+                                        width: parent.width - 2 * Theme.s-3;
+                                        height: parent.height;
+                                        min-width: 0;
+                                        text <=> AppState.cl-current-description;
+                                        color: Theme.on-surface;
+                                        font-family: Theme.font-mono;
+                                        font-size: Theme.font-code;
+                                        vertical-alignment: center;
+                                        single-line: true;
+                                        selection-background-color: Theme.primary.with-alpha(0.4);
+                                        edited => { AppState.cl-metadata-dirty = true; }
+                                    }
+                                    if AppState.cl-current-description == "" && !desc-edit.has-focus:
+                                        Text {
+                                            x: Theme.s-3;
+                                            y: 0;
+                                            width: parent.width - 2 * Theme.s-3;
+                                            height: parent.height;
+                                            text: "what is this file about? agents read this to decide if relevant";
+                                            color: Theme.on-surface-variant.with-alpha(0.5);
                                             font-family: Theme.font-mono;
                                             font-size: Theme.font-code;
                                             vertical-alignment: center;
-                                            single-line: true;
-                                            selection-background-color: Theme.primary.with-alpha(0.4);
-                                            edited => { AppState.cl-metadata-dirty = true; }
-                                        }
-                                    }
-                                    if AppState.cl-current-description == "" && !desc-edit.has-focus:
-                                        HorizontalLayout {
-                                            padding-left: Theme.s-3;
-                                            padding-right: Theme.s-3;
-                                            alignment: start;
-                                            Text {
-                                                text: "what is this file about? agents read this to decide if relevant";
-                                                color: Theme.on-surface-variant.with-alpha(0.5);
-                                                font-family: Theme.font-mono;
-                                                font-size: Theme.font-code;
-                                                vertical-alignment: center;
-                                            }
+                                            overflow: elide;
                                         }
                                 }
                                 IconButton {
