@@ -2249,25 +2249,24 @@ component ContextLibraryPane inherits Rectangle {
                                     font-size: Theme.font-label;
                                     letter-spacing: Theme.ls-label;
                                     font-weight: Theme.w-bold;
-                                    vertical-alignment: top;
+                                    vertical-alignment: center;
                                     horizontal-stretch: 0;
                                     width: 90px;
                                 }
-                                // Multi-line wrapped TextInput. Width is
-                                // layout-driven (horizontal-stretch: 1 inside
-                                // the parent HorizontalLayout); height grows
-                                // with content from 32px up to 96px, then
-                                // scrolls. `clip: true` on the container
-                                // prevents the inner input from ever pushing
-                                // its parent layout wider, which previously
-                                // shoved the Save button off-screen on long
-                                // descriptions. `wrap: word-wrap` requires
-                                // `single-line: false`.
+                                // Single-line TextInput with `clip: true` on
+                                // the container. Width is layout-driven via
+                                // horizontal-stretch from the parent layout;
+                                // when the content is longer than the visible
+                                // width, the TextInput auto-scrolls
+                                // horizontally to keep the cursor visible
+                                // (same as a browser URL bar). `clip: true`
+                                // prevents the TextInput's preferred-width
+                                // from pushing the parent layout wider —
+                                // that was previously shoving the Save
+                                // button off-screen.
                                 desc-input := Rectangle {
                                     horizontal-stretch: 1;
-                                    min-height: 32px;
-                                    max-height: 96px;
-                                    vertical-stretch: 0;
+                                    height: 32px;
                                     clip: true;
                                     border-radius: Theme.radius-lg;
                                     border-width: 1px;
@@ -2278,17 +2277,14 @@ component ContextLibraryPane inherits Rectangle {
                                     HorizontalLayout {
                                         padding-left: Theme.s-3;
                                         padding-right: Theme.s-3;
-                                        padding-top: Theme.s-1;
-                                        padding-bottom: Theme.s-1;
                                         alignment: stretch;
                                         desc-edit := TextInput {
                                             text <=> AppState.cl-current-description;
                                             color: Theme.on-surface;
                                             font-family: Theme.font-mono;
                                             font-size: Theme.font-code;
-                                            vertical-alignment: top;
-                                            single-line: false;
-                                            wrap: word-wrap;
+                                            vertical-alignment: center;
+                                            single-line: true;
                                             selection-background-color: Theme.primary.with-alpha(0.4);
                                             edited => { AppState.cl-metadata-dirty = true; }
                                         }
@@ -2297,14 +2293,13 @@ component ContextLibraryPane inherits Rectangle {
                                         HorizontalLayout {
                                             padding-left: Theme.s-3;
                                             padding-right: Theme.s-3;
-                                            padding-top: Theme.s-2;
                                             alignment: start;
                                             Text {
                                                 text: "what is this file about? agents read this to decide if relevant";
                                                 color: Theme.on-surface-variant.with-alpha(0.5);
                                                 font-family: Theme.font-mono;
                                                 font-size: Theme.font-code;
-                                                vertical-alignment: top;
+                                                vertical-alignment: center;
                                             }
                                         }
                                 }
