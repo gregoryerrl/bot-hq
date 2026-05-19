@@ -1829,9 +1829,11 @@ component CLTreeRow inherits Rectangle {
     border-width: root.active ? 1px : 0px;
     border-color: root.active ? Theme.primary.with-alpha(0.4) : transparent;
     animate background, border-color { duration: 60ms; }
-    // Native context menu (right-click). Renders OS-native on macOS/Win/X11.
-    // The Menu inherits its items from MenuItem children; their visibility
-    // is gated by row kind so files don't show "New file in folder".
+    // Native context menu. Slint's ContextMenuArea normally opens on
+    // right-click automatically, but a nested TouchArea consumes the
+    // pointer event before ContextMenuArea sees it. Workaround: TouchArea
+    // dispatches the right-click itself via cm.show(coord). Left-click
+    // still goes through the `clicked` path normally.
     cm := ContextMenuArea {
         Menu {
             MenuItem {
@@ -1915,7 +1917,19 @@ component CLTreeRow inherits Rectangle {
                 }
             }
         }
-        ta := TouchArea { clicked => { root.clicked(); } }
+        ta := TouchArea {
+            // Dispatch both buttons here so the right-click can reach the
+            // ContextMenuArea (a nested TouchArea consumes events that
+            // would otherwise bubble up to ContextMenuArea's own listener).
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
+                    root.clicked();
+                }
+                if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                    cm.show({ x: self.mouse-x, y: self.mouse-y });
+                }
+            }
+        }
     }
 }
 
