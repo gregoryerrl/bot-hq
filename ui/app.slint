@@ -1855,13 +1855,26 @@ component CLTreeRow inherits Rectangle {
     callback cancel-edit();
     height: 26px;
     border-radius: Theme.radius-default;
-    background: root.active
-        ? Theme.primary-container.with-alpha(0.2)
-        : ta.has-hover ? Theme.surface-high
-        : transparent;
-    border-width: root.active ? 1px : 0px;
-    border-color: root.active ? Theme.primary.with-alpha(0.4) : transparent;
+    background: root.editing
+        ? Theme.primary-container.with-alpha(0.35)
+        : root.active
+            ? Theme.primary-container.with-alpha(0.2)
+            : ta.has-hover ? Theme.surface-high
+            : transparent;
+    border-width: root.editing || root.active ? 1px : 0px;
+    border-color: root.editing
+        ? Theme.primary
+        : root.active ? Theme.primary.with-alpha(0.4) : transparent;
     animate background, border-color { duration: 60ms; }
+    // Auto-focus the inline TextInput when this row flips into edit
+    // mode. `changed` fires AFTER the scene has been rebuilt — calling
+    // focus() from `init` panicked the window adapter (RefCell borrowed
+    // mid-build), but `changed` runs in a later phase and is safe.
+    changed editing => {
+        if (root.editing) {
+            edit-input.focus();
+        }
+    }
     // Native context menu. Slint's ContextMenuArea normally opens on
     // right-click automatically, but a nested TouchArea consumes the
     // pointer event before ContextMenuArea sees it. Workaround: TouchArea
@@ -1917,9 +1930,15 @@ component CLTreeRow inherits Rectangle {
                     clicked => { root.toggle-collapse(); }
                 }
             }
-            // Label OR inline edit input depending on mode.
+            // Label OR inline edit input depending on mode. TextInput is
+            // ALWAYS rendered (just hidden when not editing) so:
+            //   1. `forward-focus` always has a valid target — clicks on
+            //      this Rectangle delegate focus to the input
+            //   2. Slint's LineEdit-style focus dispatch works
+            //      (matches the std widget pattern in lineedit-base.slint)
             Rectangle {
                 horizontal-stretch: 1;
+                forward-focus: edit-input;
                 if !root.editing: Text {
                     text: entry.display-name;
                     color: root.active
@@ -1931,7 +1950,8 @@ component CLTreeRow inherits Rectangle {
                     vertical-alignment: center;
                     overflow: elide;
                 }
-                if root.editing: edit-input := TextInput {
+                edit-input := TextInput {
+                    visible: root.editing;
                     text <=> AppState.cl-tree-editing-name;
                     color: Theme.on-surface;
                     font-family: Theme.font-mono;
@@ -1939,10 +1959,6 @@ component CLTreeRow inherits Rectangle {
                     vertical-alignment: center;
                     single-line: true;
                     selection-background-color: Theme.primary.with-alpha(0.4);
-                    // Auto-focus from `init => self.focus()` panics Slint's
-                    // window adapter (RefCell-borrowed during scene build).
-                    // The user clicks once to focus for now; a Timer-based
-                    // deferred focus is the proper follow-up.
                     accepted => { root.commit-edit(); }
                     key-pressed(ev) => {
                         if (ev.text == Key.Escape) {
@@ -1955,9 +1971,11 @@ component CLTreeRow inherits Rectangle {
             }
         }
         ta := TouchArea {
-            // Dispatch both buttons here so the right-click can reach the
-            // ContextMenuArea (a nested TouchArea consumes events that
-            // would otherwise bubble up to ContextMenuArea's own listener).
+            // Step aside when the inline editor is up — otherwise this
+            // sibling sits on top of the HorizontalLayout, swallows the
+            // user's click before the TextInput can focus, and the row
+            // looks inert.
+            enabled: !root.editing;
             pointer-event(ev) => {
                 if (ev.kind == PointerEventKind.up && ev.button == PointerEventButton.left) {
                     root.clicked();
