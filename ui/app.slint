@@ -262,9 +262,6 @@ export global AppState {
     // CL sidebar width. Drag-resizable via the divider; persists across
     // tab switches but resets at app restart.
     in-out property <length>   cl-sidebar-width: 220px;
-    // Whole LIBRARY TREE section collapsed (hides the entire file tree
-    // ScrollView). The user clicks the section header to toggle.
-    in-out property <bool>     cl-tree-section-collapsed;
     callback cl-tree-toggle-collapse(string);            // (folder_path)
     callback cl-tree-begin-create-file(string);          // (parent_dir)  "" = project root pick
     callback cl-tree-begin-create-folder(string);        // (parent_dir)
@@ -2067,37 +2064,14 @@ component ContextLibraryPane inherits Rectangle {
                     }
                     HorizontalLayout {
                         spacing: Theme.s-2;
-                        // Section chevron + label: click anywhere on the
-                        // label/chevron block collapses or expands the whole
-                        // tree section. Right-click still opens the menu via
-                        // the wrapping ContextMenuArea.
-                        Rectangle {
-                            horizontal-stretch: 0;
-                            HorizontalLayout {
-                                spacing: Theme.s-1;
-                                alignment: start;
-                                Icon {
-                                    glyph: AppState.cl-tree-section-collapsed
-                                        ? Icons.chevron-right
-                                        : Icons.chevron-down;
-                                    size: 11px;
-                                    tint: Theme.on-surface-variant;
-                                }
-                                Text {
-                                    text: "LIBRARY TREE";
-                                    color: Theme.on-surface-variant;
-                                    font-family: Theme.font-mono;
-                                    font-size: Theme.font-label;
-                                    letter-spacing: Theme.ls-label;
-                                    font-weight: Theme.w-bold;
-                                    vertical-alignment: center;
-                                }
-                            }
-                            TouchArea {
-                                clicked => {
-                                    AppState.cl-tree-section-collapsed = !AppState.cl-tree-section-collapsed;
-                                }
-                            }
+                        Text {
+                            text: "LIBRARY TREE";
+                            color: Theme.on-surface-variant;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-label;
+                            letter-spacing: Theme.ls-label;
+                            font-weight: Theme.w-bold;
+                            vertical-alignment: center;
                         }
                         Rectangle { horizontal-stretch: 1; }
                         IconButton {
@@ -2129,9 +2103,7 @@ component ContextLibraryPane inherits Rectangle {
                         }
                     }
                 }
-                // Hide the file list when the whole tree section is
-                // collapsed via the header click.
-                if !AppState.cl-tree-section-collapsed: ScrollView {
+                ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
                         spacing: 1px;
@@ -2277,48 +2249,55 @@ component ContextLibraryPane inherits Rectangle {
                                     font-size: Theme.font-label;
                                     letter-spacing: Theme.ls-label;
                                     font-weight: Theme.w-bold;
-                                    vertical-alignment: top;
+                                    vertical-alignment: center;
                                     horizontal-stretch: 0;
                                     width: 90px;
-                                    y: Theme.s-2;
                                 }
-                                // Multi-line wrap+scroll so long descriptions
-                                // stay fully accessible. min-height matches a
-                                // single-line input; grows up to max-height
-                                // and then scrolls.
+                                // Same shape as CustomInput, but explicitly
+                                // wraps a TextInput inside its own layout so
+                                // the TextInput's hit-area is layout-driven
+                                // (the previous version positioned the
+                                // TextEdit absolutely with parent.width math
+                                // and clicks weren't landing). Single-line
+                                // TextInput auto-scrolls horizontally on
+                                // cursor movement; long descriptions stay
+                                // accessible via arrow keys / home / end.
                                 desc-input := Rectangle {
                                     horizontal-stretch: 1;
-                                    min-height: 32px;
-                                    max-height: 96px;
+                                    height: 32px;
                                     border-radius: Theme.radius-lg;
                                     border-width: 1px;
                                     border-color: desc-edit.has-focus ? Theme.primary : Theme.outline-variant;
                                     background: Theme.surface-lowest;
                                     animate border-color { duration: 100ms; }
-                                    // Description auto-focus on inline file
-                                    // create was tried via Timer + a bumped
-                                    // trigger property; combined with the
-                                    // accesskit crash on row destruction it
-                                    // got tangled. User clicks the
-                                    // description field to focus for now.
-                                    desc-edit := TextEdit {
-                                        x: Theme.s-3;
-                                        y: Theme.s-1;
-                                        width: parent.width - 2 * Theme.s-3;
-                                        height: parent.height - 2 * Theme.s-1;
-                                        text <=> AppState.cl-current-description;
-                                        font-size: Theme.font-code;
-                                        wrap: word-wrap;
-                                        edited => { AppState.cl-metadata-dirty = true; }
-                                    }
-                                    if AppState.cl-current-description == "" && !desc-edit.has-focus:
-                                        Text {
-                                            x: Theme.s-3;
-                                            y: Theme.s-2;
-                                            text: "what is this file about? agents read this to decide if relevant";
-                                            color: Theme.on-surface-variant.with-alpha(0.5);
+                                    forward-focus: desc-edit;
+                                    HorizontalLayout {
+                                        padding-left: Theme.s-3;
+                                        padding-right: Theme.s-3;
+                                        alignment: stretch;
+                                        desc-edit := TextInput {
+                                            text <=> AppState.cl-current-description;
+                                            color: Theme.on-surface;
                                             font-family: Theme.font-mono;
                                             font-size: Theme.font-code;
+                                            vertical-alignment: center;
+                                            single-line: true;
+                                            selection-background-color: Theme.primary.with-alpha(0.4);
+                                            edited => { AppState.cl-metadata-dirty = true; }
+                                        }
+                                    }
+                                    if AppState.cl-current-description == "" && !desc-edit.has-focus:
+                                        HorizontalLayout {
+                                            padding-left: Theme.s-3;
+                                            padding-right: Theme.s-3;
+                                            alignment: start;
+                                            Text {
+                                                text: "what is this file about? agents read this to decide if relevant";
+                                                color: Theme.on-surface-variant.with-alpha(0.5);
+                                                font-family: Theme.font-mono;
+                                                font-size: Theme.font-code;
+                                                vertical-alignment: center;
+                                            }
                                         }
                                 }
                                 IconButton {
