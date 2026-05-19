@@ -892,25 +892,26 @@ pub async fn install_view_model(
         let rt = rt.clone();
         app.on_cl_tree_toggle_collapse(move |folder_path| {
             let folder_path = folder_path.to_string();
-            // Read+mutate collapsed set on the event-loop thread.
+            // Read+mutate expanded set on the event-loop thread. Folders
+            // default to COLLAPSED; presence in the set means user-expanded.
             if let Some(handle) = weak.upgrade() {
                 let app = handle.global::<SlintAppState>();
-                let cur = app.get_cl_tree_collapsed();
+                let cur = app.get_cl_tree_expanded();
                 let mut set: Vec<SharedString> = Vec::with_capacity(cur.row_count() + 1);
-                let mut was_collapsed = false;
+                let mut was_expanded = false;
                 for i in 0..cur.row_count() {
                     if let Some(p) = cur.row_data(i) {
                         if p.to_string() == folder_path {
-                            was_collapsed = true; // dropping it = expand
+                            was_expanded = true; // dropping it = collapse
                         } else {
                             set.push(p);
                         }
                     }
                 }
-                if !was_collapsed {
+                if !was_expanded {
                     set.push(SharedString::from(folder_path));
                 }
-                app.set_cl_tree_collapsed(ModelRc::new(VecModel::from(set)));
+                app.set_cl_tree_expanded(ModelRc::new(VecModel::from(set)));
             }
             let weak = weak.clone();
             let core = Arc::clone(&core);
@@ -1485,8 +1486,11 @@ fn refresh_cl_tree_with_state(
 
 #[derive(Default, Clone)]
 struct TreeState {
-    /// Folder relative-paths the user has collapsed in the UI.
-    collapsed: std::collections::HashSet<String>,
+    /// Folder relative-paths the user has EXPLICITLY EXPANDED this session.
+    /// Folders default to collapsed at startup; presence here means "the
+    /// user clicked to open this folder during the current session". The
+    /// property persists across tab switches but resets on app restart.
+    expanded: std::collections::HashSet<String>,
     /// Current inline-edit mode + target. Drives ghost-row injection.
     editing_mode: String,
     editing_path: String,
@@ -1499,10 +1503,10 @@ async fn read_tree_state(weak: &Weak<AppWindow>) -> TreeState {
         let mut state = TreeState::default();
         if let Some(handle) = weak_inner.upgrade() {
             let app = handle.global::<SlintAppState>();
-            let collapsed = app.get_cl_tree_collapsed();
-            for i in 0..collapsed.row_count() {
-                if let Some(p) = collapsed.row_data(i) {
-                    state.collapsed.insert(p.to_string());
+            let expanded = app.get_cl_tree_expanded();
+            for i in 0..expanded.row_count() {
+                if let Some(p) = expanded.row_data(i) {
+                    state.expanded.insert(p.to_string());
                 }
             }
             state.editing_mode = app.get_cl_tree_editing_mode().to_string();
@@ -1555,7 +1559,9 @@ fn walk_cl(root: &std::path::Path, state: &TreeState) -> Vec<CLEntryData> {
             }
             let rel = p.strip_prefix(root).unwrap_or(&p).display().to_string();
             let is_dir = p.is_dir();
-            let expanded = is_dir && !state.collapsed.contains(&rel);
+            // Folders default to collapsed; only show children if the user
+            // has explicitly expanded this folder during the session.
+            let expanded = is_dir && state.expanded.contains(&rel);
             out.push(CLEntryData {
                 relative_path: rel.clone(),
                 display_name: name.to_string(),

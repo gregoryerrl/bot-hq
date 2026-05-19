@@ -250,16 +250,18 @@ export global AppState {
     callback cl-rescan();
     callback cl-autodescribe();               // generates description via Emma for current file
 
-    // VS Code-style tree state. Collapsed = folder paths the user has
-    // collapsed (in-memory, resets at restart). Editing = the single row
-    // currently being typed into (inline rename or new-file/folder).
-    in-out property <[string]> cl-tree-collapsed;
+    // VS Code-style tree state. Expanded = folder paths the user has
+    // explicitly expanded this session. Folders default to collapsed at
+    // startup; opening one adds it to this set and persists in-memory
+    // across tab switches but resets at restart. Editing = the single
+    // row currently being typed into (inline rename or new-file/folder).
+    in-out property <[string]> cl-tree-expanded;
     in-out property <string>   cl-tree-editing-path;
     in-out property <string>   cl-tree-editing-name;
     in-out property <string>   cl-tree-editing-mode;   // "" | "new-file" | "new-folder" | "rename"
-    in-out property <string>   cl-tree-context-menu-path;
-    in-out property <length>   cl-tree-context-menu-x;
-    in-out property <length>   cl-tree-context-menu-y;
+    // CL sidebar width. Drag-resizable via the divider; persists across
+    // tab switches but resets at app restart.
+    in-out property <length>   cl-sidebar-width: 220px;
     callback cl-tree-toggle-collapse(string);            // (folder_path)
     callback cl-tree-begin-create-file(string);          // (parent_dir)  "" = project root pick
     callback cl-tree-begin-create-folder(string);        // (parent_dir)
@@ -1812,7 +1814,6 @@ component CLTreeRow inherits Rectangle {
     in property <bool> editing;
     callback clicked();
     callback toggle-collapse();
-    callback context-menu(length, length);            // (x, y) in window-relative coords
     callback create-file-here();
     callback create-folder-here();
     callback rename-self();
@@ -1828,129 +1829,93 @@ component CLTreeRow inherits Rectangle {
     border-width: root.active ? 1px : 0px;
     border-color: root.active ? Theme.primary.with-alpha(0.4) : transparent;
     animate background, border-color { duration: 60ms; }
-    HorizontalLayout {
-        padding-left: entry.depth * Theme.s-3 + Theme.s-2;
-        padding-right: Theme.s-2;
-        spacing: Theme.s-2;
-        alignment: stretch;
-        // Chevron / file glyph. Folders get a clickable chevron that
-        // toggles collapse; files get a passive bullet.
-        Rectangle {
-            width: 14px;
-            horizontal-stretch: 0;
-            Icon {
-                // Folder uses pure-ASCII chevron pair (>/v) so it renders
-                // on any mono font; files just show "-".
-                glyph: entry.is-dir
-                    ? (entry.expanded ? "v" : ">")
-                    : "-";
-                size: 11px;
-                tint: entry.is-dir ? Theme.on-surface-variant : Theme.on-surface-variant.with-alpha(0.5);
+    // Native context menu (right-click). Renders OS-native on macOS/Win/X11.
+    // The Menu inherits its items from MenuItem children; their visibility
+    // is gated by row kind so files don't show "New file in folder".
+    cm := ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: entry.is-dir ? "Toggle expand" : "Open";
+                activated => { root.clicked(); }
             }
-            if entry.is-dir && !entry.is-ghost: TouchArea {
-                clicked => { root.toggle-collapse(); }
+            MenuItem {
+                title: "New file here";
+                enabled: entry.is-dir && !entry.is-ghost;
+                activated => { root.create-file-here(); }
             }
-        }
-        // Label OR inline edit input depending on mode.
-        Rectangle {
-            horizontal-stretch: 1;
-            if !root.editing: Text {
-                text: entry.display-name;
-                color: root.active
-                    ? Theme.primary
-                    : entry.is-dir ? Theme.on-surface : Theme.on-surface-variant;
-                font-family: Theme.font-mono;
-                font-size: Theme.font-code;
-                font-weight: entry.is-dir ? Theme.w-bold : Theme.w-regular;
-                vertical-alignment: center;
-                overflow: elide;
+            MenuItem {
+                title: "New folder here";
+                enabled: entry.is-dir && !entry.is-ghost;
+                activated => { root.create-folder-here(); }
             }
-            if root.editing: edit-input := TextInput {
-                text <=> AppState.cl-tree-editing-name;
-                color: Theme.on-surface;
-                font-family: Theme.font-mono;
-                font-size: Theme.font-code;
-                vertical-alignment: center;
-                single-line: true;
-                selection-background-color: Theme.primary.with-alpha(0.4);
-                accepted => { root.commit-edit(); }
-                key-pressed(ev) => {
-                    if (ev.text == Key.Escape) {
-                        root.cancel-edit();
-                        return accept;
-                    }
-                    return reject;
-                }
+            MenuItem {
+                title: "Rename";
+                enabled: !entry.is-ghost;
+                activated => { root.rename-self(); }
+            }
+            MenuItem {
+                title: "Delete";
+                enabled: !entry.is-ghost;
+                activated => { root.delete-self(); }
             }
         }
-        // Hover action icons. Only on non-editing non-ghost rows.
-        if ta.has-hover && !root.editing && !entry.is-ghost:
-            HorizontalLayout {
-                spacing: Theme.s-1;
+        HorizontalLayout {
+            padding-left: entry.depth * Theme.s-3 + Theme.s-2;
+            padding-right: Theme.s-2;
+            spacing: Theme.s-2;
+            alignment: stretch;
+            // Chevron / file glyph. Folders get a clickable chevron that
+            // toggles collapse; files get a passive bullet.
+            Rectangle {
+                width: 14px;
                 horizontal-stretch: 0;
-                if entry.is-dir:
-                    Rectangle {
-                        width: 18px; height: 18px;
-                        Text {
-                            text: "+";
-                            color: Theme.on-surface-variant;
-                            font-family: Theme.font-mono;
-                            font-size: 13px;
-                            font-weight: Theme.w-bold;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        TouchArea { clicked => { root.create-file-here(); } }
-                    }
-                if entry.is-dir:
-                    Rectangle {
-                        width: 18px; height: 18px;
-                        Text {
-                            text: "F+";
-                            color: Theme.on-surface-variant;
-                            font-family: Theme.font-mono;
-                            font-size: 10px;
-                            font-weight: Theme.w-bold;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                        TouchArea { clicked => { root.create-folder-here(); } }
-                    }
-                Rectangle {
-                    width: 18px; height: 18px;
-                    Text {
-                        text: "R";
-                        color: Theme.on-surface-variant;
-                        font-family: Theme.font-mono;
-                        font-size: 10px;
-                        font-weight: Theme.w-bold;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    TouchArea { clicked => { root.rename-self(); } }
+                Icon {
+                    // Folder uses pure-ASCII chevron pair (>/v) so it renders
+                    // on any mono font; files just show "-".
+                    glyph: entry.is-dir
+                        ? (entry.expanded ? "v" : ">")
+                        : "-";
+                    size: 11px;
+                    tint: entry.is-dir ? Theme.on-surface-variant : Theme.on-surface-variant.with-alpha(0.5);
                 }
-                Rectangle {
-                    width: 18px; height: 18px;
-                    Text {
-                        text: "x";
-                        color: Theme.error;
-                        font-family: Theme.font-mono;
-                        font-size: 12px;
-                        font-weight: Theme.w-bold;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    TouchArea { clicked => { root.delete-self(); } }
+                if entry.is-dir && !entry.is-ghost: TouchArea {
+                    clicked => { root.toggle-collapse(); }
                 }
             }
-    }
-    ta := TouchArea {
-        clicked => { root.clicked(); }
-        pointer-event(ev) => {
-            if (ev.button == PointerEventButton.right && ev.kind == PointerEventKind.up) {
-                root.context-menu(self.mouse-x, self.mouse-y);
+            // Label OR inline edit input depending on mode.
+            Rectangle {
+                horizontal-stretch: 1;
+                if !root.editing: Text {
+                    text: entry.display-name;
+                    color: root.active
+                        ? Theme.primary
+                        : entry.is-dir ? Theme.on-surface : Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    font-weight: entry.is-dir ? Theme.w-bold : Theme.w-regular;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if root.editing: edit-input := TextInput {
+                    text <=> AppState.cl-tree-editing-name;
+                    color: Theme.on-surface;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    vertical-alignment: center;
+                    single-line: true;
+                    selection-background-color: Theme.primary.with-alpha(0.4);
+                    accepted => { root.commit-edit(); }
+                    key-pressed(ev) => {
+                        if (ev.text == Key.Escape) {
+                            root.cancel-edit();
+                            return accept;
+                        }
+                        return reject;
+                    }
+                }
             }
         }
+        ta := TouchArea { clicked => { root.clicked(); } }
     }
 }
 
@@ -1959,14 +1924,40 @@ component ContextLibraryPane inherits Rectangle {
     HorizontalLayout {
         spacing: 0px;
 
-        // Sidebar.
-        Rectangle {
-            width: 220px;
+        // Sidebar — width is drag-resizable via the handle on its right edge.
+        // Clamped to [180px, 600px] so the user can't shrink it past usability
+        // or balloon it to fill the screen.
+        sidebar := Rectangle {
+            width: AppState.cl-sidebar-width;
             background: Theme.surface-lowest;
             Rectangle {
                 x: parent.width - 1px; y: 0;
                 width: 1px; height: parent.height;
                 background: Theme.outline-variant;
+            }
+            // Drag handle. Sits on top of the divider, 6px wide for an easy
+            // grab target. ew-resize cursor signals it's draggable. Width
+            // mutates `cl-sidebar-width` during drag.
+            Rectangle {
+                x: parent.width - 3px; y: 0;
+                width: 6px; height: parent.height;
+                background: resize-ta.has-hover || resize-ta.pressed
+                    ? Theme.primary.with-alpha(0.4)
+                    : transparent;
+                animate background { duration: 80ms; }
+                resize-ta := TouchArea {
+                    mouse-cursor: ew-resize;
+                    moved => {
+                        if (self.pressed) {
+                            // delta = mouse-x minus pressed-x; both relative
+                            // to this handle Rectangle. Apply to width and
+                            // clamp.
+                            AppState.cl-sidebar-width = max(180px,
+                                min(600px,
+                                    AppState.cl-sidebar-width + (self.mouse-x - self.pressed-x)));
+                        }
+                    }
+                }
             }
             VerticalLayout {
                 padding-left: Theme.s-3;
@@ -1977,7 +1968,7 @@ component ContextLibraryPane inherits Rectangle {
                 HorizontalLayout {
                     spacing: Theme.s-2;
                     Text {
-                        text: "WORKSPACE";
+                        text: "LIBRARY TREE";
                         color: Theme.on-surface-variant;
                         font-family: Theme.font-mono;
                         font-size: Theme.font-label;
@@ -2027,11 +2018,6 @@ component ContextLibraryPane inherits Rectangle {
                                     }
                                 }
                                 toggle-collapse => { AppState.cl-tree-toggle-collapse(entry.relative-path); }
-                                context-menu(x, y) => {
-                                    AppState.cl-tree-context-menu-path = entry.relative-path;
-                                    AppState.cl-tree-context-menu-x = x;
-                                    AppState.cl-tree-context-menu-y = y;
-                                }
                                 create-file-here => { AppState.cl-tree-begin-create-file(entry.relative-path); }
                                 create-folder-here => { AppState.cl-tree-begin-create-folder(entry.relative-path); }
                                 rename-self => { AppState.cl-tree-begin-rename(entry.relative-path); }
@@ -2148,15 +2134,43 @@ component ContextLibraryPane inherits Rectangle {
                                     font-size: Theme.font-label;
                                     letter-spacing: Theme.ls-label;
                                     font-weight: Theme.w-bold;
-                                    vertical-alignment: center;
+                                    vertical-alignment: top;
                                     horizontal-stretch: 0;
                                     width: 90px;
+                                    y: Theme.s-2;
                                 }
-                                CustomInput {
-                                    text <=> AppState.cl-current-description;
-                                    placeholder: "what is this file about? agents read this to decide if relevant";
-                                    edited => { AppState.cl-metadata-dirty = true; }
+                                // Multi-line wrap+scroll so long descriptions
+                                // stay fully accessible. min-height matches a
+                                // single-line input; grows up to max-height
+                                // and then scrolls.
+                                desc-input := Rectangle {
                                     horizontal-stretch: 1;
+                                    min-height: 32px;
+                                    max-height: 96px;
+                                    border-radius: Theme.radius-lg;
+                                    border-width: 1px;
+                                    border-color: desc-edit.has-focus ? Theme.primary : Theme.outline-variant;
+                                    background: Theme.surface-lowest;
+                                    animate border-color { duration: 100ms; }
+                                    desc-edit := TextEdit {
+                                        x: Theme.s-3;
+                                        y: Theme.s-1;
+                                        width: parent.width - 2 * Theme.s-3;
+                                        height: parent.height - 2 * Theme.s-1;
+                                        text <=> AppState.cl-current-description;
+                                        font-size: Theme.font-code;
+                                        wrap: word-wrap;
+                                        edited => { AppState.cl-metadata-dirty = true; }
+                                    }
+                                    if AppState.cl-current-description == "" && !desc-edit.has-focus:
+                                        Text {
+                                            x: Theme.s-3;
+                                            y: Theme.s-2;
+                                            text: "what is this file about? agents read this to decide if relevant";
+                                            color: Theme.on-surface-variant.with-alpha(0.5);
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-code;
+                                        }
                                 }
                                 IconButton {
                                     // ASCII "?" — sparkles "✨" missing in
