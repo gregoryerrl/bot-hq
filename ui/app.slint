@@ -1939,10 +1939,10 @@ component CLTreeRow inherits Rectangle {
                     vertical-alignment: center;
                     single-line: true;
                     selection-background-color: Theme.primary.with-alpha(0.4);
-                    // Grab keyboard focus the moment the input lands so the
-                    // user can type immediately — without this, Slint
-                    // requires a click to focus the freshly-created input.
-                    init => { self.focus(); }
+                    // Auto-focus from `init => self.focus()` panics Slint's
+                    // window adapter (RefCell-borrowed during scene build).
+                    // The user clicks once to focus for now; a Timer-based
+                    // deferred focus is the proper follow-up.
                     accepted => { root.commit-edit(); }
                     key-pressed(ev) => {
                         if (ev.text == Key.Escape) {
