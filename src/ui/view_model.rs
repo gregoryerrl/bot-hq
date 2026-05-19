@@ -1058,11 +1058,6 @@ pub async fn install_view_model(
                         update_cl_metadata(&weak, &stem, "");
                         clear_cl_dirty(&weak);
                         clear_cl_metadata_dirty(&weak);
-                        // Bump the focus-trigger so the metadata strip's
-                        // description input grabs focus next tick — user can
-                        // refine "test-file" into a real description without
-                        // a separate click.
-                        bump_description_focus(&weak);
                     }
                     "new-folder" => {
                         let rel = if target_path.is_empty() {
@@ -2254,21 +2249,6 @@ fn clear_editing_state(weak: &Weak<AppWindow>) {
     });
 }
 
-/// Bump `cl-description-focus-trigger` by 1. The slint side watches for
-/// changes on this property and arms a Timer to focus the description
-/// TextEdit — direct focus calls from Rust to a specific Slint element
-/// inside a `for` loop aren't supported, so we route through a counter.
-fn bump_description_focus(weak: &Weak<AppWindow>) {
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_cl_description_focus_trigger(
-                app.get_cl_description_focus_trigger().wrapping_add(1),
-            );
-        }
-    });
-}
 
 /// Split a relative-to-data_dir path into (project_id, file_path_within_project).
 /// Anything under `projects/<name>/...` belongs to that project; everything

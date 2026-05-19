@@ -262,11 +262,9 @@ export global AppState {
     // CL sidebar width. Drag-resizable via the divider; persists across
     // tab switches but resets at app restart.
     in-out property <length>   cl-sidebar-width: 220px;
-    // Monotonic counter bumped by view_model whenever the description
-    // field should grab focus (e.g. right after inline file creation,
-    // so the user can describe in one fluid flow without clicking).
-    // Slint side watches `changed` and arms a Timer to call focus().
-    in-out property <int>      cl-description-focus-trigger;
+    // Whole LIBRARY TREE section collapsed (hides the entire file tree
+    // ScrollView). The user clicks the section header to toggle.
+    in-out property <bool>     cl-tree-section-collapsed;
     callback cl-tree-toggle-collapse(string);            // (folder_path)
     callback cl-tree-begin-create-file(string);          // (parent_dir)  "" = project root pick
     callback cl-tree-begin-create-folder(string);        // (parent_dir)
@@ -1871,30 +1869,14 @@ component CLTreeRow inherits Rectangle {
         ? Theme.primary
         : root.active ? Theme.primary.with-alpha(0.4) : transparent;
     animate background, border-color { duration: 60ms; }
-    // Auto-focus the inline TextInput when this row enters edit mode.
-    // `init => focus()` panics Slint (RefCell borrowed during scene
-    // build). `changed editing` doesn't fire on freshly-created rows
-    // (no prior value). The Timer pattern bridges both: init flips the
-    // Timer on, Timer fires AFTER scene build settles, calls focus, then
-    // clears itself.
-    init => {
-        if (root.editing) {
-            focus-timer.running = true;
-        }
-    }
-    changed editing => {
-        if (root.editing) {
-            focus-timer.running = true;
-        }
-    }
-    focus-timer := Timer {
-        interval: 0ms;
-        running: false;
-        triggered => {
-            edit-input.focus();
-            self.running = false;
-        }
-    }
+    // Auto-focus for the inline edit-input was attempted via Timer but
+    // crashed accesskit on commit: when the user hits Enter the ghost
+    // row is destroyed (walker no longer emits it once editing-mode
+    // clears), and the accesskit consumer panics because the focused
+    // node has vanished from the tree. User clicks once to focus the
+    // input; finding a safe auto-focus pattern is a follow-up — likely
+    // requires explicitly transferring focus to a stable element
+    // BEFORE the row gets removed.
     // Native context menu. Slint's ContextMenuArea normally opens on
     // right-click automatically, but a nested TouchArea consumes the
     // pointer event before ContextMenuArea sees it. Workaround: TouchArea
@@ -2085,14 +2067,37 @@ component ContextLibraryPane inherits Rectangle {
                     }
                     HorizontalLayout {
                         spacing: Theme.s-2;
-                        Text {
-                            text: "LIBRARY TREE";
-                            color: Theme.on-surface-variant;
-                            font-family: Theme.font-mono;
-                            font-size: Theme.font-label;
-                            letter-spacing: Theme.ls-label;
-                            font-weight: Theme.w-bold;
-                            vertical-alignment: center;
+                        // Section chevron + label: click anywhere on the
+                        // label/chevron block collapses or expands the whole
+                        // tree section. Right-click still opens the menu via
+                        // the wrapping ContextMenuArea.
+                        Rectangle {
+                            horizontal-stretch: 0;
+                            HorizontalLayout {
+                                spacing: Theme.s-1;
+                                alignment: start;
+                                Icon {
+                                    glyph: AppState.cl-tree-section-collapsed
+                                        ? Icons.chevron-right
+                                        : Icons.chevron-down;
+                                    size: 11px;
+                                    tint: Theme.on-surface-variant;
+                                }
+                                Text {
+                                    text: "LIBRARY TREE";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    letter-spacing: Theme.ls-label;
+                                    font-weight: Theme.w-bold;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            TouchArea {
+                                clicked => {
+                                    AppState.cl-tree-section-collapsed = !AppState.cl-tree-section-collapsed;
+                                }
+                            }
                         }
                         Rectangle { horizontal-stretch: 1; }
                         IconButton {
@@ -2124,7 +2129,9 @@ component ContextLibraryPane inherits Rectangle {
                         }
                     }
                 }
-                ScrollView {
+                // Hide the file list when the whole tree section is
+                // collapsed via the header click.
+                if !AppState.cl-tree-section-collapsed: ScrollView {
                     vertical-stretch: 1;
                     VerticalLayout {
                         spacing: 1px;
@@ -2288,12 +2295,12 @@ component ContextLibraryPane inherits Rectangle {
                                     border-color: desc-edit.has-focus ? Theme.primary : Theme.outline-variant;
                                     background: Theme.surface-lowest;
                                     animate border-color { duration: 100ms; }
-                                    // `changed` works on local properties only,
-                                    // so bridge the global trigger here.
-                                    property <int> focus-trigger: AppState.cl-description-focus-trigger;
-                                    changed focus-trigger => {
-                                        desc-focus-timer.running = true;
-                                    }
+                                    // Description auto-focus on inline file
+                                    // create was tried via Timer + a bumped
+                                    // trigger property; combined with the
+                                    // accesskit crash on row destruction it
+                                    // got tangled. User clicks the
+                                    // description field to focus for now.
                                     desc-edit := TextEdit {
                                         x: Theme.s-3;
                                         y: Theme.s-1;
@@ -2313,17 +2320,6 @@ component ContextLibraryPane inherits Rectangle {
                                             font-family: Theme.font-mono;
                                             font-size: Theme.font-code;
                                         }
-                                    // Bridge above runs `changed focus-trigger`
-                                    // which arms this Timer. Timer fires after
-                                    // scene build and calls focus() safely.
-                                    desc-focus-timer := Timer {
-                                        interval: 0ms;
-                                        running: false;
-                                        triggered => {
-                                            desc-edit.focus();
-                                            self.running = false;
-                                        }
-                                    }
                                 }
                                 IconButton {
                                     // ASCII "?" — sparkles "✨" missing in
