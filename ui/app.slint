@@ -2253,19 +2253,24 @@ component ContextLibraryPane inherits Rectangle {
                                     horizontal-stretch: 0;
                                     width: 90px;
                                 }
-                                // Layout-bounded single-line input. The
-                                // TextInput must NOT report content as its
-                                // preferred-width — otherwise long text
-                                // grows the layout chain all the way up
-                                // through the metadata strip and shoves the
-                                // Save button off-screen. min-width: 0 +
-                                // explicit absolute width bound (parent.width
-                                // - padding) prevents that and lets Slint's
-                                // built-in cursor-driven horizontal scroll
-                                // kick in (URL-bar behavior).
-                                //
-                                // clip: true is the belt-and-braces visual
-                                // guard against any residual overflow.
+                                // URL-bar style single-line input with
+                                // cursor-driven horizontal auto-scroll.
+                                // Pattern lifted from Slint stdlib
+                                // LineEditBase (widgets/common/lineedit-base.slint):
+                                // - TextInput.width grows with content
+                                //   (preferred-width) but never below the
+                                //   visible area. This is what enables the
+                                //   internal scroll — pegging width to the
+                                //   visible area kills auto-scroll because
+                                //   the TextInput has no overflow to chase.
+                                // - TextInput.x is clamped so the right edge
+                                //   never exits the right padding inset.
+                                // - computed-x is updated by
+                                //   cursor-position-changed to slide the
+                                //   visible window onto the cursor.
+                                // - Outer Rectangle has clip: true so the
+                                //   overflowing TextInput is masked to its
+                                //   visible area.
                                 desc-input := Rectangle {
                                     horizontal-stretch: 1;
                                     height: 32px;
@@ -2278,15 +2283,11 @@ component ContextLibraryPane inherits Rectangle {
                                     animate border-color { duration: 100ms; }
                                     forward-focus: desc-edit;
                                     desc-edit := TextInput {
-                                        x: Theme.s-3;
+                                        property <length> computed-x;
+
+                                        x: Theme.s-3 + min(0px, max(parent.width - 2 * Theme.s-3 - self.width - self.text-cursor-width, self.computed-x));
                                         y: 0;
-                                        // Explicit width bound: the input's
-                                        // visible area is exactly parent
-                                        // minus horizontal padding. Slint's
-                                        // single-line TextInput auto-scrolls
-                                        // its content horizontally to keep
-                                        // the cursor inside this rectangle.
-                                        width: parent.width - 2 * Theme.s-3;
+                                        width: max(parent.width - 2 * Theme.s-3 - self.text-cursor-width, self.preferred-width);
                                         height: parent.height;
                                         min-width: 0;
                                         text <=> AppState.cl-current-description;
@@ -2297,6 +2298,13 @@ component ContextLibraryPane inherits Rectangle {
                                         single-line: true;
                                         selection-background-color: Theme.primary.with-alpha(0.4);
                                         edited => { AppState.cl-metadata-dirty = true; }
+                                        cursor-position-changed(cursor-position) => {
+                                            if cursor-position.x + self.computed-x < 0 {
+                                                self.computed-x = -cursor-position.x;
+                                            } else if cursor-position.x + self.computed-x > parent.width - 2 * Theme.s-3 - self.text-cursor-width {
+                                                self.computed-x = parent.width - 2 * Theme.s-3 - self.text-cursor-width - cursor-position.x;
+                                            }
+                                        }
                                     }
                                     if AppState.cl-current-description == "" && !desc-edit.has-focus:
                                         Text {
