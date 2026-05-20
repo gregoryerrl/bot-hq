@@ -76,6 +76,14 @@ export struct CLFileEntry {
     // The row renders a TextInput instead of static text. `relative-path`
     // for ghost rows is the synthetic "<parent>/__ghost__" sentinel.
     is-ghost: bool,
+    // True when this directory's absolute path matches a `projects.cl_path`
+    // (or the default `<data_dir>/projects/<name>/` convention). Drives the
+    // registered-project visual differentiation in CLTreeRow.
+    is-registered-project: bool,
+    // Folder description (from `cl_folders`). Empty for files and for folders
+    // with no description on record. Populated so the row can surface a hint
+    // without a separate DB round-trip.
+    description: string,
 }
 
 // ---- Design tokens ---------------------------------------------------------
@@ -237,6 +245,26 @@ export global AppState {
     in-out property <string> cl-current-description;
     in-out property <string> cl-current-tags;
     in-out property <bool>   cl-metadata-dirty;
+    // Folder-view state. When cl-current-folder != "" the right pane swaps
+    // from the file editor to CLFolderView; both views are mutually exclusive
+    // — opening a file clears cl-current-folder, opening a folder clears
+    // cl-current-path. Used to describe folders + (optionally) register them
+    // as first-class projects. `cl-current-folder-project-name` is the
+    // registered project's name when is-project=true (lets Unregister find
+    // the right row even if the user later renamed the folder on disk).
+    in-out property <string> cl-current-folder;
+    in-out property <string> cl-current-folder-description;
+    in-out property <bool>   cl-current-folder-is-project;
+    in-out property <string> cl-current-folder-project-name;
+    in-out property <string> cl-current-folder-working-repo;
+    in-out property <bool>   cl-current-folder-dirty;
+    // Register-project modal state. Defaults populated by view-model when the
+    // user clicks "Register as Project" — cl_path defaults to the folder's
+    // absolute path; working_repo_path also defaults to it but is optional.
+    in-out property <bool>   cl-register-dialog-open;
+    in-out property <string> cl-register-name;
+    in-out property <string> cl-register-cl-path;
+    in-out property <string> cl-register-working-repo;
     // New-file dialog state.
     in-out property <bool>   cl-new-file-dialog-open;
     in-out property <string> cl-new-file-name;
@@ -263,6 +291,16 @@ export global AppState {
     callback cl-delete-file(string);          // (relative_path)
     callback cl-rescan();
     callback cl-autodescribe();               // generates description via Emma for current file
+    // Folder-view callbacks. View-model loads description + project metadata
+    // when cl-open-folder fires; save/register/unregister/autodescribe mirror
+    // the file-view pattern. All take the folder's tree-relative path
+    // (mirrors cl-current-path); empty string is the bot-hq root.
+    callback cl-open-folder(string);
+    callback cl-save-folder-description();
+    callback cl-register-project-open();
+    callback cl-register-project-submit();
+    callback cl-unregister-project();
+    callback cl-autodescribe-folder();
 
     // VS Code-style tree state. Expanded = folder paths the user has
     // explicitly expanded this session. Folders default to collapsed at
@@ -348,6 +386,7 @@ export global Icons {
     out property <string> settings:      "\u{E154}";   // lucide:settings
     out property <string> wand:          "\u{E357}";   // lucide:wand-2
     out property <string> target:        "\u{E180}";   // lucide:target
+    out property <string> lightbulb:     "\u{E1C2}";   // lucide:lightbulb
 }
 
 // Lucide icon. Renders any string with the embedded `lucide` font; pair
@@ -1938,6 +1977,15 @@ component CLTreeRow inherits Rectangle {
                     clicked => { root.toggle-collapse(); }
                 }
             }
+            // Registered-project marker. Renders before the label for folders
+            // that are project CL roots (matching `projects.cl_path` or the
+            // default convention). Paired with the accent text color below so
+            // the row reads as "this folder is a project" at a glance.
+            if entry.is-dir && entry.is-registered-project: Icon {
+                glyph: Icons.lightbulb;
+                size: 12px;
+                tint: Theme.primary;
+            }
             // Label OR inline edit input depending on mode. TextInput is
             // ALWAYS rendered (just hidden when not editing) so:
             //   1. `forward-focus` always has a valid target — clicks on
@@ -1951,7 +1999,9 @@ component CLTreeRow inherits Rectangle {
                     text: entry.display-name;
                     color: root.active
                         ? Theme.primary
-                        : entry.is-dir ? Theme.on-surface : Theme.on-surface-variant;
+                        : entry.is-dir && entry.is-registered-project
+                            ? Theme.primary
+                            : entry.is-dir ? Theme.on-surface : Theme.on-surface-variant;
                     font-family: Theme.font-mono;
                     font-size: Theme.font-code;
                     font-weight: entry.is-dir ? Theme.w-bold : Theme.w-regular;
@@ -2136,7 +2186,15 @@ component ContextLibraryPane inherits Rectangle {
                                     if (entry.is-ghost) {
                                         // No-op — ghost rows are placeholders.
                                     } else if (entry.is-dir) {
+                                        // Folders toggle their tree expansion
+                                        // AND open the folder-view in the
+                                        // right pane. The two surfaces are
+                                        // independent: the tree shows what's
+                                        // inside, the right pane shows the
+                                        // folder's description + project
+                                        // metadata.
                                         AppState.cl-tree-toggle-collapse(entry.relative-path);
+                                        AppState.cl-open-folder(entry.relative-path);
                                     } else {
                                         AppState.cl-open-file(entry.relative-path);
                                     }
@@ -2154,10 +2212,236 @@ component ContextLibraryPane inherits Rectangle {
             }
         }
 
-        // Editor.
+        // Editor / folder-view. Mutually exclusive: a non-empty
+        // cl-current-folder hides the file editor and renders CLFolderView;
+        // opening a file (cl-open-file) clears cl-current-folder + vice versa
+        // in the view-model handlers so the two never overlap.
         Rectangle {
             background: Theme.bg-canvas;
             horizontal-stretch: 1;
+            // ---- Folder view ----
+            if AppState.cl-current-folder != "":
+                VerticalLayout {
+                    spacing: 0px;
+
+                    // Header strip — folder name + path + lightbulb if it's
+                    // a registered project. Mirrors the file editor's tab
+                    // bar layout so the right pane stays visually consistent.
+                    Rectangle {
+                        background: Theme.surface-lowest;
+                        height: 40px;
+                        Rectangle {
+                            x: 0; y: parent.height - 1px;
+                            width: parent.width; height: 1px;
+                            background: Theme.outline-variant;
+                        }
+                        HorizontalLayout {
+                            padding-left: Theme.s-4;
+                            padding-right: Theme.s-4;
+                            spacing: Theme.s-3;
+                            alignment: stretch;
+                            HorizontalLayout {
+                                spacing: Theme.s-2;
+                                alignment: start;
+                                Icon {
+                                    glyph: AppState.cl-current-folder-is-project
+                                        ? Icons.lightbulb
+                                        : Icons.folder;
+                                    size: 14px;
+                                    tint: AppState.cl-current-folder-is-project
+                                        ? Theme.primary
+                                        : Theme.on-surface-variant;
+                                }
+                                Text {
+                                    text: AppState.cl-current-folder;
+                                    color: AppState.cl-current-folder-is-project
+                                        ? Theme.primary
+                                        : Theme.on-surface;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-code;
+                                    font-weight: Theme.w-bold;
+                                    vertical-alignment: center;
+                                }
+                                if AppState.cl-current-folder-dirty: Text {
+                                    text: "*";
+                                    color: Theme.primary;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-body-md;
+                                    font-weight: Theme.w-bold;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                            VerticalLayout {
+                                alignment: center;
+                                HorizontalLayout {
+                                    spacing: Theme.s-3;
+                                    alignment: end;
+                                    if AppState.cl-current-folder-dirty: Text {
+                                        text: "UNSAVED CHANGES";
+                                        color: Theme.primary;
+                                        font-family: Theme.font-mono;
+                                        font-size: Theme.font-label;
+                                        letter-spacing: Theme.ls-label;
+                                        font-weight: Theme.w-bold;
+                                        vertical-alignment: center;
+                                    }
+                                    PrimaryButton {
+                                        label: "Save Description";
+                                        icon: Icons.check;
+                                        btn-height: 26px;
+                                        clicked => {
+                                            AppState.cl-save-folder-description();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Body — description editor + register/unregister panel.
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: Theme.bg-canvas;
+                        VerticalLayout {
+                            padding: Theme.s-4;
+                            spacing: Theme.s-4;
+                            // Description editor.
+                            VerticalLayout {
+                                spacing: Theme.s-2;
+                                HorizontalLayout {
+                                    spacing: Theme.s-2;
+                                    Text {
+                                        text: "DESCRIPTION";
+                                        color: Theme.on-surface-variant;
+                                        font-family: Theme.font-mono;
+                                        font-size: Theme.font-label;
+                                        letter-spacing: Theme.ls-label;
+                                        font-weight: Theme.w-bold;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    IconButton {
+                                        glyph: Icons.sparkles;
+                                        size: 12px;
+                                        clicked => { AppState.cl-autodescribe-folder(); }
+                                    }
+                                }
+                                Rectangle {
+                                    height: 140px;
+                                    border-radius: Theme.radius-lg;
+                                    border-width: 1px;
+                                    border-color: folder-desc-edit.has-focus
+                                        ? Theme.primary
+                                        : Theme.outline-variant;
+                                    background: Theme.surface-lowest;
+                                    animate border-color { duration: 100ms; }
+                                    forward-focus: folder-desc-edit;
+                                    VerticalLayout {
+                                        padding: Theme.s-3;
+                                        folder-desc-edit := TextEdit {
+                                            text <=> AppState.cl-current-folder-description;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-code;
+                                            edited => {
+                                                AppState.cl-current-folder-dirty = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Project registration panel.
+                            Rectangle {
+                                border-radius: Theme.radius-lg;
+                                border-width: 1px;
+                                border-color: AppState.cl-current-folder-is-project
+                                    ? Theme.primary.with-alpha(0.5)
+                                    : Theme.outline-variant;
+                                background: Theme.surface-lowest;
+                                VerticalLayout {
+                                    padding: Theme.s-4;
+                                    spacing: Theme.s-3;
+                                    HorizontalLayout {
+                                        spacing: Theme.s-2;
+                                        alignment: start;
+                                        Icon {
+                                            glyph: Icons.lightbulb;
+                                            size: 14px;
+                                            tint: AppState.cl-current-folder-is-project
+                                                ? Theme.primary
+                                                : Theme.on-surface-variant;
+                                        }
+                                        Text {
+                                            text: AppState.cl-current-folder-is-project
+                                                ? "REGISTERED PROJECT"
+                                                : "NOT A PROJECT";
+                                            color: AppState.cl-current-folder-is-project
+                                                ? Theme.primary
+                                                : Theme.on-surface-variant;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-label;
+                                            letter-spacing: Theme.ls-label;
+                                            font-weight: Theme.w-bold;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+                                    if AppState.cl-current-folder-is-project:
+                                        VerticalLayout {
+                                            spacing: Theme.s-1;
+                                            Text {
+                                                text: "name · " + AppState.cl-current-folder-project-name;
+                                                color: Theme.on-surface;
+                                                font-family: Theme.font-mono;
+                                                font-size: Theme.font-code;
+                                            }
+                                            Text {
+                                                text: AppState.cl-current-folder-working-repo == ""
+                                                    ? "working repo · (unset)"
+                                                    : "working repo · " + AppState.cl-current-folder-working-repo;
+                                                color: Theme.on-surface-variant;
+                                                font-family: Theme.font-mono;
+                                                font-size: Theme.font-code;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    if !AppState.cl-current-folder-is-project:
+                                        Text {
+                                            text: "Promote this folder to a first-class project so it shows up in the New Session picker and gets its own CL annotations + policy slot.";
+                                            color: Theme.on-surface-variant;
+                                            font-family: Theme.font-mono;
+                                            font-size: Theme.font-code;
+                                            wrap: word-wrap;
+                                        }
+                                    HorizontalLayout {
+                                        alignment: end;
+                                        spacing: Theme.s-2;
+                                        if AppState.cl-current-folder-is-project:
+                                            GhostButton {
+                                                label: "Unregister";
+                                                icon: Icons.x;
+                                                clicked => {
+                                                    AppState.cl-unregister-project();
+                                                }
+                                            }
+                                        if !AppState.cl-current-folder-is-project:
+                                            PrimaryButton {
+                                                label: "Register as Project";
+                                                icon: Icons.lightbulb;
+                                                btn-height: 30px;
+                                                clicked => {
+                                                    AppState.cl-register-project-open();
+                                                }
+                                            }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            // ---- File view (existing) ----
+            if AppState.cl-current-folder == "":
             VerticalLayout {
                 spacing: 0px;
 
@@ -3185,7 +3469,7 @@ export component AppWindow inherits Window {
                                 }
                                 if AppState.new-session-projects.length == 0:
                                     Text {
-                                        text: "No projects have a working_repo_path set. Backfill the `projects` table or set one via the CL.";
+                                        text: "No projects with a working repo are registered yet. Open the CL tab, click a folder, and use 'Register as Project' to set one up.";
                                         color: Theme.on-surface-variant.with-alpha(0.7);
                                         font-family: Theme.font-mono;
                                         font-size: Theme.font-code;
@@ -3351,6 +3635,114 @@ export component AppWindow inherits Window {
                                             AppState.cl-new-file-description,
                                         );
                                         AppState.cl-new-file-dialog-open = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // Register-as-project modal. Defaults populated by view-model when the
+    // user clicks "Register as Project" in CLFolderView. cl_path is required
+    // (it's where the project's CL lives — defaults to the folder's absolute
+    // path); working_repo_path is optional.
+    if AppState.cl-register-dialog-open:
+        Rectangle {
+            background: #00000088;
+            TouchArea { }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 560px;
+                        background: Theme.surface-high;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Theme.outline-variant;
+                        VerticalLayout {
+                            padding: Theme.s-5;
+                            spacing: Theme.s-3;
+                            Text {
+                                text: "Register as project";
+                                color: Theme.on-surface;
+                                font-family: Theme.font-display;
+                                font-size: Theme.font-head-md;
+                                font-weight: Theme.w-bold;
+                            }
+                            Text {
+                                text: "Promote this folder to a first-class project. The CL path is where index + policy + folder descriptions live; the working repo is the git checkout sessions operate on.";
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                wrap: word-wrap;
+                            }
+                            VerticalLayout {
+                                spacing: Theme.s-1;
+                                Text {
+                                    text: "NAME";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    font-weight: Theme.w-bold;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                                CustomInput {
+                                    text <=> AppState.cl-register-name;
+                                    placeholder: "folder name (used as project id)";
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: Theme.s-1;
+                                Text {
+                                    text: "CL PATH";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    font-weight: Theme.w-bold;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                                CustomInput {
+                                    text <=> AppState.cl-register-cl-path;
+                                    placeholder: "absolute path where CL lives";
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: Theme.s-1;
+                                Text {
+                                    text: "WORKING REPO (optional)";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    font-weight: Theme.w-bold;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                                CustomInput {
+                                    text <=> AppState.cl-register-working-repo;
+                                    placeholder: "absolute path to the git checkout sessions operate on";
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: end;
+                                spacing: Theme.s-2;
+                                GhostButton {
+                                    label: "Cancel";
+                                    clicked => {
+                                        AppState.cl-register-dialog-open = false;
+                                    }
+                                }
+                                PrimaryButton {
+                                    label: "Register";
+                                    icon: Icons.lightbulb;
+                                    opacity: AppState.cl-register-name == "" || AppState.cl-register-cl-path == ""
+                                        ? 0.5 : 1.0;
+                                    clicked => {
+                                        if (AppState.cl-register-name != ""
+                                            && AppState.cl-register-cl-path != "") {
+                                            AppState.cl-register-project-submit();
+                                        }
                                     }
                                 }
                             }

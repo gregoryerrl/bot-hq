@@ -115,6 +115,12 @@ struct CLEntryData {
     /// True when this is a synthetic "currently being typed" placeholder row
     /// for inline new-file/new-folder creation.
     is_ghost: bool,
+    /// True when this directory is the on-disk CL root of a registered
+    /// project (cl_path override OR default convention). Files always false.
+    is_registered_project: bool,
+    /// Folder description from `cl_folders`. Empty for files and for folders
+    /// without a description on record.
+    description: String,
 }
 
 #[derive(Clone)]
@@ -155,6 +161,8 @@ fn cl_entry_from_data(d: CLEntryData) -> CLFileEntry {
         depth: d.depth,
         expanded: d.expanded,
         is_ghost: d.is_ghost,
+        is_registered_project: d.is_registered_project,
+        description: SharedString::from(d.description),
     }
 }
 
@@ -186,7 +194,7 @@ pub async fn install_view_model(
     // so anything that awaits an invoke_from_event_loop hop will deadlock
     // here. TreeState::default() is correct at startup: no folders are
     // collapsed and no inline-edit is in progress.
-    refresh_cl_tree_with_state(&weak, &core, &TreeState::default());
+    refresh_cl_tree_with_state(&weak, &core, &TreeState::default()).await;
     seed_external_mcp_panel(&weak, &core).await;
 
     // ---- Callbacks -----------------------------------------------------
@@ -663,7 +671,7 @@ pub async fn install_view_model(
                     // populate ahead of registration.
                     let _ = core
                         .storage
-                        .upsert_project(&project, &project, None, None)
+                        .upsert_project(&project, &project, None, None, None)
                         .await;
                     let tag_opt = if tags.trim().is_empty() {
                         None
@@ -733,7 +741,7 @@ pub async fn install_view_model(
                 let (project, file_path) = resolve_project_and_path(name);
                 let _ = core
                     .storage
-                    .upsert_project(&project, &project, None, None)
+                    .upsert_project(&project, &project, None, None, None)
                     .await;
                 if let Err(e) = core
                     .storage
@@ -895,6 +903,326 @@ pub async fn install_view_model(
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(handle) = weak2.upgrade() {
                                 handle.global::<SlintAppState>().set_cl_metadata_dirty(true);
+                            }
+                        });
+                        show_toast(&weak, "Description suggested by Emma.");
+                        return;
+                    }
+                    tries -= 1;
+                }
+                show_toast(&weak, "Timed out waiting for Emma.");
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_open_folder(move |folder| {
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            let rel = folder.to_string();
+            rt.spawn(async move {
+                let folder_abs = core.paths.data_dir.join(&rel);
+                let (owner, folder_path) =
+                    resolve_folder_owner(&core.storage, &core.paths.data_dir, &rel).await;
+                let description = core
+                    .storage
+                    .get_folder(&owner, &folder_path)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|f| f.description)
+                    .unwrap_or_default();
+                // Folder is a registered project when its absolute path
+                // matches some project's `cl_path` (or the default
+                // convention). Pull the project row so we can show
+                // working_repo + the canonical name.
+                let mut is_project = false;
+                let mut project_name = String::new();
+                let mut working_repo = String::new();
+                if let Ok(projects) = core.storage.list_projects().await {
+                    for proj in projects {
+                        if proj.name == crate::storage::Project::GLOBALS {
+                            continue;
+                        }
+                        let abs = match proj.cl_path.as_deref() {
+                            Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+                            _ => core.paths.data_dir.join("projects").join(&proj.name),
+                        };
+                        if abs == folder_abs {
+                            is_project = true;
+                            project_name = proj.name.clone();
+                            working_repo = proj.working_repo_path.unwrap_or_default();
+                            break;
+                        }
+                    }
+                }
+                update_cl_folder(
+                    &weak,
+                    &rel,
+                    &description,
+                    is_project,
+                    &project_name,
+                    &working_repo,
+                );
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_save_folder_description(move || {
+            let (folder, description, _is_project, _project_name) =
+                current_cl_folder_state(&weak);
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                if folder.is_empty() {
+                    return;
+                }
+                let (owner, folder_path) =
+                    resolve_folder_owner(&core.storage, &core.paths.data_dir, &folder).await;
+                // Ensure the owning project row exists. _globals is bootstrapped
+                // by the migration; named projects without a row get an empty
+                // shell so the FK doesn't break.
+                if owner != crate::storage::Project::GLOBALS {
+                    let _ = core
+                        .storage
+                        .upsert_project(&owner, &owner, None, None, None)
+                        .await;
+                }
+                if let Err(e) = core
+                    .storage
+                    .upsert_folder_description(&owner, &folder_path, description.trim(), None)
+                    .await
+                {
+                    warn!(?e, "save folder description");
+                    show_toast(&weak, "Could not save folder description.");
+                    return;
+                }
+                // Clear dirty + refresh tree so the row's `description` field
+                // reflects the latest write.
+                let weak2 = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(handle) = weak2.upgrade() {
+                        handle
+                            .global::<SlintAppState>()
+                            .set_cl_current_folder_dirty(false);
+                    }
+                });
+                refresh_cl_tree(&weak, &core).await;
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_register_project_open(move || {
+            let (folder, _description, _is_project, _project_name) =
+                current_cl_folder_state(&weak);
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                if folder.is_empty() {
+                    return;
+                }
+                let folder_abs = core.paths.data_dir.join(&folder);
+                let default_name = folder_abs
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&folder)
+                    .to_string();
+                let abs = folder_abs.display().to_string();
+                open_register_dialog(&weak, &default_name, &abs, &abs);
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_register_project_submit(move || {
+            let (name, cl_path, working_repo) = current_register_dialog(&weak);
+            let folder = weak
+                .upgrade()
+                .map(|h| h.global::<SlintAppState>().get_cl_current_folder().to_string())
+                .unwrap_or_default();
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                let name = name.trim().to_string();
+                let cl_path = cl_path.trim().to_string();
+                let working = working_repo.trim().to_string();
+                if name.is_empty() || cl_path.is_empty() {
+                    show_toast(&weak, "Name and CL path are required.");
+                    return;
+                }
+                let working_opt = if working.is_empty() {
+                    None
+                } else {
+                    Some(working.as_str())
+                };
+                if let Err(e) = core
+                    .storage
+                    .upsert_project(&name, &name, working_opt, None, Some(&cl_path))
+                    .await
+                {
+                    warn!(?e, "register project");
+                    show_toast(&weak, "Could not register project.");
+                    return;
+                }
+                close_register_dialog(&weak);
+                refresh_new_session_projects(&weak, &core).await;
+                refresh_cl_tree(&weak, &core).await;
+                // Re-open the folder view so the panel reflects registered
+                // state without a manual click.
+                if !folder.is_empty() {
+                    if let Some(handle) = weak.upgrade() {
+                        handle.global::<SlintAppState>().invoke_cl_open_folder(
+                            SharedString::from(folder.clone()),
+                        );
+                    }
+                }
+                show_toast(&weak, "Project registered.");
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_unregister_project(move || {
+            let (folder, _description, _is_project, project_name) =
+                current_cl_folder_state(&weak);
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                if project_name.is_empty() {
+                    return;
+                }
+                if let Err(e) = core.storage.unregister_project(&project_name).await {
+                    warn!(?e, "unregister project");
+                    show_toast(&weak, "Could not unregister project.");
+                    return;
+                }
+                refresh_new_session_projects(&weak, &core).await;
+                refresh_cl_tree(&weak, &core).await;
+                if !folder.is_empty() {
+                    if let Some(handle) = weak.upgrade() {
+                        handle.global::<SlintAppState>().invoke_cl_open_folder(
+                            SharedString::from(folder.clone()),
+                        );
+                    }
+                }
+                show_toast(&weak, "Project unregistered.");
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_autodescribe_folder(move || {
+            let (folder, _description, _is_project, _project_name) =
+                current_cl_folder_state(&weak);
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                if folder.is_empty() {
+                    show_toast(&weak, "Open a folder first.");
+                    return;
+                }
+                let folder_abs = core.paths.data_dir.join(&folder);
+                // Build a snapshot of the folder's immediate contents +
+                // first ~200 chars of each .md inside. Emma reads this to
+                // draft a one-sentence description.
+                let mut listing = String::new();
+                let mut snippets = String::new();
+                if let Ok(entries) = std::fs::read_dir(&folder_abs) {
+                    let mut paths: Vec<_> = entries.flatten().collect();
+                    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+                    for e in paths.iter().take(40) {
+                        let p = e.path();
+                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if name.starts_with('.') {
+                            continue;
+                        }
+                        if p.is_dir() {
+                            listing.push_str(&format!("- {name}/\n"));
+                        } else {
+                            listing.push_str(&format!("- {name}\n"));
+                            if name.ends_with(".md") {
+                                if let Ok(body) = std::fs::read_to_string(&p) {
+                                    let head: String = body.chars().take(200).collect();
+                                    snippets.push_str(&format!(
+                                        "--- {name} ---\n{head}\n\n"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                let last_id = core
+                    .storage
+                    .messages_for_session("emma", None)
+                    .await
+                    .ok()
+                    .and_then(|m| m.iter().map(|x| x.id).max())
+                    .unwrap_or(0);
+                let brief = format!(
+                    "Below between the ===FOLDER-START=== / ===FOLDER-END=== markers is a snapshot of a CL (context library) folder's immediate contents. Reply with exactly ONE plain sentence describing what the folder is for. No preface, no quotes, no \"let me\" or \"I'll\" — just the sentence.\n\n\
+                     The sentence will be saved into a searchable index that other agents read to decide whether the folder is relevant; specific is better than generic.\n\n\
+                     Folder path: {folder}\n\n\
+                     ===FOLDER-START===\n\
+                     Listing:\n{listing}\n\
+                     Snippets:\n{snippets}\
+                     ===FOLDER-END===\n\n\
+                     One sentence. Plain prose. Reply now."
+                );
+                if let Err(e) = core.broadcast("emma", &brief).await {
+                    warn!(?e, "autodescribe-folder: send to emma");
+                    show_toast(&weak, "Emma is unreachable.");
+                    return;
+                }
+                let mut tries = 30;
+                while tries > 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let msgs = match core
+                        .storage
+                        .messages_for_session("emma", Some(last_id))
+                        .await
+                    {
+                        Ok(m) => m,
+                        Err(_) => break,
+                    };
+                    if let Some(reply) = msgs.iter().find(|m| {
+                        m.author == "emma" && m.kind == "text" && !m.content.trim().is_empty()
+                    }) {
+                        let first_line = reply
+                            .content
+                            .lines()
+                            .find(|l| !l.trim().is_empty())
+                            .unwrap_or("")
+                            .trim()
+                            .trim_matches('"')
+                            .to_string();
+                        let weak2 = weak.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(handle) = weak2.upgrade() {
+                                let app = handle.global::<SlintAppState>();
+                                app.set_cl_current_folder_description(SharedString::from(
+                                    first_line,
+                                ));
+                                app.set_cl_current_folder_dirty(true);
                             }
                         });
                         show_toast(&weak, "Description suggested by Emma.");
@@ -1092,7 +1420,7 @@ pub async fn install_view_model(
                         let (project, file_path) = resolve_project_and_path(&rel);
                         let _ = core
                             .storage
-                            .upsert_project(&project, &project, None, None)
+                            .upsert_project(&project, &project, None, None, None)
                             .await;
                         let _ = core
                             .storage
@@ -1558,19 +1886,20 @@ async fn refresh_cl_tree(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
     // use refresh_cl_tree_with_state(TreeState::default()) instead, or you
     // will deadlock waiting for a hop that can never complete.
     let snapshot = read_tree_state(weak).await;
-    refresh_cl_tree_with_state(weak, core, &snapshot);
+    refresh_cl_tree_with_state(weak, core, &snapshot).await;
 }
 
 /// Worker variant: skips the event-loop hop for state. Callers that already
 /// have a TreeState (or know it's the default — e.g., startup, before the
 /// event loop runs) should call this directly to avoid the deadlock.
-fn refresh_cl_tree_with_state(
+async fn refresh_cl_tree_with_state(
     weak: &Weak<AppWindow>,
     core: &Arc<CoreAppState>,
     state: &TreeState,
 ) {
     let root = core.paths.data_dir.clone();
-    let entries = walk_cl(&root, state);
+    let lookups = load_cl_lookups(core, &root).await;
+    let entries = walk_cl(&root, state, &lookups);
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(handle) = weak.upgrade() {
@@ -1580,6 +1909,53 @@ fn refresh_cl_tree_with_state(
                 .set_cl_tree(ModelRc::new(VecModel::from(rows)));
         }
     });
+}
+
+/// Snapshot the storage facts the tree walker needs: which absolute paths
+/// are registered-project CL roots, and which (project, folder_path) pairs
+/// have a stored description. Loaded once per refresh so the walker stays
+/// sync + cheap.
+#[derive(Default)]
+struct ClTreeLookups {
+    /// abs_path → project name. Includes both `cl_path` overrides and
+    /// default-convention `<data_dir>/projects/<name>/` paths. Excludes
+    /// `_globals` (it's the data_dir itself, never a "registered folder").
+    project_roots: HashMap<std::path::PathBuf, String>,
+    /// (project, folder_path-relative-to-cl-root) → description.
+    folder_descs: HashMap<(String, String), String>,
+}
+
+async fn load_cl_lookups(core: &Arc<CoreAppState>, data_dir: &std::path::Path) -> ClTreeLookups {
+    let mut out = ClTreeLookups::default();
+    let projects = match core.storage.list_projects().await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(?e, "list_projects failed during CL tree refresh");
+            return out;
+        }
+    };
+    for proj in &projects {
+        if proj.name == crate::storage::Project::GLOBALS {
+            continue;
+        }
+        let abs = match proj.cl_path.as_deref() {
+            Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+            _ => data_dir.join("projects").join(&proj.name),
+        };
+        out.project_roots.insert(abs, proj.name.clone());
+    }
+    let folders = match core.storage.cl_folder_search(None, None).await {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(?e, "cl_folder_search failed during CL tree refresh");
+            return out;
+        }
+    };
+    for f in folders {
+        out.folder_descs
+            .insert((f.project_id, f.folder_path), f.description);
+    }
+    out
 }
 
 #[derive(Default, Clone)]
@@ -1626,13 +2002,18 @@ fn ghost_relative_path(parent: &str) -> String {
     }
 }
 
-fn walk_cl(root: &std::path::Path, state: &TreeState) -> Vec<CLEntryData> {
+fn walk_cl(
+    root: &std::path::Path,
+    state: &TreeState,
+    lookups: &ClTreeLookups,
+) -> Vec<CLEntryData> {
     fn recurse(
         out: &mut Vec<CLEntryData>,
         dir: &std::path::Path,
         root: &std::path::Path,
         depth: i32,
         state: &TreeState,
+        lookups: &ClTreeLookups,
     ) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
@@ -1660,6 +2041,11 @@ fn walk_cl(root: &std::path::Path, state: &TreeState) -> Vec<CLEntryData> {
             // Folders default to collapsed; only show children if the user
             // has explicitly expanded this folder during the session.
             let expanded = is_dir && state.expanded.contains(&rel);
+            let (is_registered_project, description) = if is_dir {
+                resolve_folder_metadata(&p, root, lookups)
+            } else {
+                (false, String::new())
+            };
             out.push(CLEntryData {
                 relative_path: rel.clone(),
                 display_name: name.to_string(),
@@ -1667,6 +2053,8 @@ fn walk_cl(root: &std::path::Path, state: &TreeState) -> Vec<CLEntryData> {
                 depth,
                 expanded,
                 is_ghost: false,
+                is_registered_project,
+                description,
             });
             // Inject ghost row for inline create directly under this folder
             // when the user is creating something there. Ghost row sits at
@@ -1683,10 +2071,12 @@ fn walk_cl(root: &std::path::Path, state: &TreeState) -> Vec<CLEntryData> {
                     depth: depth + 1,
                     expanded: false,
                     is_ghost: true,
+                    is_registered_project: false,
+                    description: String::new(),
                 });
             }
             if is_dir && expanded {
-                recurse(out, &p, root, depth + 1, state);
+                recurse(out, &p, root, depth + 1, state, lookups);
             }
         }
     }
@@ -1703,10 +2093,59 @@ fn walk_cl(root: &std::path::Path, state: &TreeState) -> Vec<CLEntryData> {
             depth: 0,
             expanded: false,
             is_ghost: true,
+            is_registered_project: false,
+            description: String::new(),
         });
     }
-    recurse(&mut out, root, root, 0, state);
+    recurse(&mut out, root, root, 0, state, lookups);
     out
+}
+
+/// For a folder at `abs_path`, decide:
+/// - whether it's a registered project's CL root (its absolute path matches
+///   some `projects.cl_path` or default convention)
+/// - the stored description (from `cl_folders`) — looked up against the
+///   owning project + relative folder path. Folders outside any registered
+///   project map to `_globals` (the data-dir itself) so descriptions for
+///   shared CL slots (`agents/`, etc.) still surface.
+fn resolve_folder_metadata(
+    abs_path: &std::path::Path,
+    root: &std::path::Path,
+    lookups: &ClTreeLookups,
+) -> (bool, String) {
+    let is_registered = lookups.project_roots.contains_key(abs_path);
+    let (project_id, folder_path) = if let Some(pid) = lookups.project_roots.get(abs_path) {
+        (pid.clone(), String::new())
+    } else if let Some((pid, owning_root)) = lookups
+        .project_roots
+        .iter()
+        .filter(|(pr, _)| abs_path.starts_with(pr))
+        .max_by_key(|(pr, _)| pr.as_os_str().len())
+        .map(|(pr, pid)| (pid.clone(), pr.clone()))
+    {
+        let rel = abs_path
+            .strip_prefix(&owning_root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        (pid, rel)
+    } else {
+        // Falls under the bot-hq root with no enclosing registered project
+        // → attribute to _globals so agents can describe shared slots.
+        let rel = abs_path
+            .strip_prefix(root)
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        (
+            crate::storage::Project::GLOBALS.to_string(),
+            rel,
+        )
+    };
+    let description = lookups
+        .folder_descs
+        .get(&(project_id, folder_path))
+        .cloned()
+        .unwrap_or_default();
+    (is_registered, description)
 }
 
 async fn refresh_session_view(
@@ -2310,8 +2749,168 @@ fn update_cl_current(weak: &Weak<AppWindow>, rel: &str, body: &str) {
             let app = handle.global::<SlintAppState>();
             app.set_cl_current_path(SharedString::from(rel));
             app.set_cl_current_body(SharedString::from(body));
+            // Mutual exclusivity with the folder view — opening a file
+            // closes any open folder view in the right pane.
+            app.set_cl_current_folder(SharedString::new());
+            app.set_cl_current_folder_description(SharedString::new());
+            app.set_cl_current_folder_is_project(false);
+            app.set_cl_current_folder_project_name(SharedString::new());
+            app.set_cl_current_folder_working_repo(SharedString::new());
+            app.set_cl_current_folder_dirty(false);
         }
     });
+}
+
+/// Push folder-view state onto the right pane. Mutually exclusive with
+/// `update_cl_current` — clears the file-view state so only one pane is
+/// visible at a time.
+#[allow(clippy::too_many_arguments)]
+fn update_cl_folder(
+    weak: &Weak<AppWindow>,
+    folder: &str,
+    description: &str,
+    is_project: bool,
+    project_name: &str,
+    working_repo: &str,
+) {
+    let weak = weak.clone();
+    let folder = folder.to_string();
+    let description = description.to_string();
+    let project_name = project_name.to_string();
+    let working_repo = working_repo.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_cl_current_folder(SharedString::from(folder));
+            app.set_cl_current_folder_description(SharedString::from(description));
+            app.set_cl_current_folder_is_project(is_project);
+            app.set_cl_current_folder_project_name(SharedString::from(project_name));
+            app.set_cl_current_folder_working_repo(SharedString::from(working_repo));
+            app.set_cl_current_folder_dirty(false);
+            // Mutual exclusivity with the file view.
+            app.set_cl_current_path(SharedString::new());
+            app.set_cl_current_body(SharedString::new());
+            app.set_cl_current_description(SharedString::new());
+            app.set_cl_current_tags(SharedString::new());
+            app.set_cl_dirty(false);
+            app.set_cl_metadata_dirty(false);
+        }
+    });
+}
+
+fn current_cl_folder_state(
+    weak: &Weak<AppWindow>,
+) -> (String, String, bool, String) {
+    weak.upgrade()
+        .map(|handle| {
+            let app = handle.global::<SlintAppState>();
+            (
+                app.get_cl_current_folder().to_string(),
+                app.get_cl_current_folder_description().to_string(),
+                app.get_cl_current_folder_is_project(),
+                app.get_cl_current_folder_project_name().to_string(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn open_register_dialog(
+    weak: &Weak<AppWindow>,
+    name: &str,
+    cl_path: &str,
+    working_repo: &str,
+) {
+    let weak = weak.clone();
+    let name = name.to_string();
+    let cl_path = cl_path.to_string();
+    let working_repo = working_repo.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_cl_register_name(SharedString::from(name));
+            app.set_cl_register_cl_path(SharedString::from(cl_path));
+            app.set_cl_register_working_repo(SharedString::from(working_repo));
+            app.set_cl_register_dialog_open(true);
+        }
+    });
+}
+
+fn close_register_dialog(weak: &Weak<AppWindow>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_cl_register_dialog_open(false);
+            app.set_cl_register_name(SharedString::new());
+            app.set_cl_register_cl_path(SharedString::new());
+            app.set_cl_register_working_repo(SharedString::new());
+        }
+    });
+}
+
+fn current_register_dialog(weak: &Weak<AppWindow>) -> (String, String, String) {
+    weak.upgrade()
+        .map(|handle| {
+            let app = handle.global::<SlintAppState>();
+            (
+                app.get_cl_register_name().to_string(),
+                app.get_cl_register_cl_path().to_string(),
+                app.get_cl_register_working_repo().to_string(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+/// Resolve the owning project + folder_path for a tree-relative path. Tree
+/// rows are relative to `data_dir`; this finds the registered project whose
+/// `cl_path` (or default convention) is the longest prefix of the folder's
+/// absolute path. Falls back to `_globals` when no registered project owns
+/// the folder — so shared CL slots (e.g. `agents/`) still get described.
+async fn resolve_folder_owner(
+    storage: &crate::storage::Storage,
+    data_dir: &std::path::Path,
+    rel_to_data_dir: &str,
+) -> (String, String) {
+    let folder_abs = data_dir.join(rel_to_data_dir);
+    let projects = match storage.list_projects().await {
+        Ok(p) => p,
+        Err(_) => return (
+            crate::storage::Project::GLOBALS.to_string(),
+            rel_to_data_dir.to_string(),
+        ),
+    };
+    let mut best: Option<(std::path::PathBuf, String)> = None;
+    for proj in projects {
+        if proj.name == crate::storage::Project::GLOBALS {
+            continue;
+        }
+        let abs = match proj.cl_path.as_deref() {
+            Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+            _ => data_dir.join("projects").join(&proj.name),
+        };
+        if folder_abs.starts_with(&abs) {
+            let take = best
+                .as_ref()
+                .map(|(p, _)| abs.as_os_str().len() > p.as_os_str().len())
+                .unwrap_or(true);
+            if take {
+                best = Some((abs, proj.name));
+            }
+        }
+    }
+    match best {
+        Some((root, name)) => {
+            let rel = folder_abs
+                .strip_prefix(&root)
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            (name, rel)
+        }
+        None => (
+            crate::storage::Project::GLOBALS.to_string(),
+            rel_to_data_dir.to_string(),
+        ),
+    }
 }
 
 fn clear_cl_dirty(weak: &Weak<AppWindow>) {
