@@ -1,72 +1,134 @@
-# bot-hq — Project Instructions (for Claude Code)
+# bot-hq — Project Instructions (for claude-code)
 
-You are working on the **bot-hq rebuild** — a from-scratch Rust + Slint reimagining of an existing Go/tmux/MCP daemon. The user is running this autonomously across multiple Claude Code sessions and needs you to work continuously and pick up where prior sessions left off.
+You are working on **bot-hq**, a Rust + Slint desktop GUI app for
+driving AI-assisted coding sessions through a bilateral-duo agent model
+(Brian = HANDS, Rain = EYES) with policy enforcement. Emma is an
+optional solo helper agent.
+
+The original from-scratch rebuild shipped at v0.1.0; subsequent work
+added a UI redesign, an external driver MCP server, and a two-layer
+policy enforcement layer (MCP tools + git hooks). Current work is
+maintenance + feature-extension on the existing system.
 
 ## Read these files FIRST, in order:
 
-1. **`ARCHITECTURE.md`** — single source of truth for architectural decisions. Don't re-litigate decisions documented here.
-2. **`PLAN.md`** — phased implementation roadmap with verifications per phase.
-3. **`PROGRESS.md`** — current status, what's done, what's blocked, where to resume.
+1. **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — what bot-hq IS right now
+   (process model, both MCP servers, policy layer, session permissions,
+   storage schema, glossary).
+2. **[`PLAN.md`](PLAN.md)** — what's planned next (in-flight work,
+   backlog, deferred plugins).
+3. **[`PROGRESS.md`](PROGRESS.md)** — recent change log,
+   newest-first.
 
-These three are the canonical docs. Anything else is supplementary.
+These three are the canonical docs. The original rebuild design +
+roadmap + Phase 0 research are preserved under
+[`docs/rebuild-archive/`](docs/rebuild-archive/) for historical
+reference — do not treat them as current.
 
 ---
 
 ## Operating mode
 
-You are the **orchestrator** for this build. Primary mode: dispatch sub-agents (via the `Agent` tool) to do parallel, well-scoped work; integrate results yourself.
+This is **maintenance + feature-extension** mode. The big build is
+done; work is now incremental.
 
-- **Sub-agent dispatch is the primary work mechanism.** Tasks marked `[P]` in PLAN.md within the same phase can be dispatched in parallel (single message, multiple `Agent` tool calls). Brief each sub-agent per PLAN.md "Sub-agent dispatch guidance": goal, files, interface, tests, definition of done.
-- **Integration is your job.** Sub-agents return work; you review, integrate, run tests, decide next steps. Log each dispatch + outcome in PROGRESS.md "Sub-agent dispatch log".
-- **Take work in small testable chunks.** Compile + test after each integration. Catch issues early.
-- **Don't wait for user approvals on routine choices that fall within decided architecture** — the user is offline. Default + log under "Decisions made autonomously" in PROGRESS.md.
-- **When blocked,** mark in PROGRESS.md with: specific blocker, file/task affected, what info would unblock you. Then move to non-blocked work.
-- **Don't commit / don't push.** Terminal state is **READY FOR HUMAN REVIEW** — leave the working tree dirty, document state, stop.
-
-**Fallback if context fills:** if orchestrator context exhausts before completion, use PROGRESS.md as a handoff baton. The next fresh `claude-code` session reads CLAUDE.md → ARCHITECTURE.md → PLAN.md → PROGRESS.md and continues. This is contingency only — design for single-session completion.
+- **Take work in small testable chunks.** Compile + test after each
+  change.
+- **For non-trivial multi-step features,** spawn the `Agent` tool for
+  parallel work on independent sub-tasks. Brief each sub-agent with:
+  goal, files, interface, tests, definition of done.
+- **Don't litigate decisions already shipped** in `ARCHITECTURE.md`
+  (e.g., HTTP MCP not stdio+UDS, hand-rolled JSON-RPC, hardcoded role
+  prompts, two-layer policy enforcement). Reopen only with a clear
+  reason.
+- **When unsure about scope or direction,** ask the user via the
+  bot-hq `ask_user_choice` MCP tool (don't write prose questions —
+  they don't surface cleanly in the UI).
 
 ---
 
 ## Critical rules
 
-- **NEVER add `Co-Authored-By:` or any AI watermark** to commit messages or generated content. No attribution to Claude / AI / Anthropic in commits.
-- **Working tree state:** existing Go-code files appear as unstaged deletions. Do NOT stage or revert them. They commit alongside the new Rust code at Phase 9.5 (human-driven).
-- **Data paths during dev:** set `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` in `.env`. The default `~/.bot-hq/` would collide with the still-running current bot-hq.
+- **NEVER add AI co-author trailers or watermarks** (footer lines
+  attributing the commit to an AI model) to commit messages or
+  generated content. The forbidden phrase list is enforced by the
+  `commit-msg` git hook + `check_commit_message` MCP tool — call the
+  MCP tool with the proposed message before every commit.
 - **No `--no-verify` or hook-skipping.** Fix root causes.
-- **Sub-agents:** tasks marked `[P]` in PLAN.md can be dispatched to sub-agents in parallel. See PLAN.md "Sub-agent dispatch guidance" for the briefing template.
+- **Imperative-mood commit subjects, ≤72 chars** (`fix: foo`, `add:
+  bar`, NOT `Added foo`). One logical change per commit.
+- **Only push when the user explicitly authorizes it.** Per-action
+  authorization OR a session-level grant via
+  `grant_session_permission(action="push", scope="all")` recorded
+  earlier in the conversation. Don't push because permission feels
+  implicit.
 
 ---
 
-## Handling ambiguity
+## Data paths during dev
 
-If something is genuinely ambiguous and NOT decided in ARCHITECTURE.md or PLAN.md:
+Keep `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` in `.env`. The default
+`~/.bot-hq/` collides with any running production bot-hq.
 
-1. Default to the simplest reasonable choice consistent with the documented direction.
-2. Note your choice + rationale in PROGRESS.md under **Decisions made autonomously**.
-3. Continue. The user will review on return; choices are revisable later.
-
-If the ambiguity is genuinely blocking and you can't proceed without an answer, document it as a blocker in PROGRESS.md and move to non-blocked work.
-
----
-
-## Prerequisites
-
-The project assumes:
-- Rust stable toolchain installed (`rustup`, latest stable)
-- `claude-code` CLI installed and authed (used as subprocess + needed for live tests)
-- macOS (initial target; cross-platform later)
-
-If a prerequisite is missing, document it in PROGRESS.md as a blocker (don't try to install system-wide tools yourself).
+`<data_dir>` layout (see ARCHITECTURE.md for the full list):
+- `.local/bot-hq.db` — sqlite
+- `.local/lock` — single-instance lock
+- `.local/session-permissions/<sid>.json` — per-session grant mirrors
+- `mcp-token` — external MCP bearer token (UUIDv4, 0600)
+- `violations.jsonl` — policy audit trail
+- `agents/<name>/custom-instruction.md`, `general-rules.md`,
+  `projects/<p>/{conventions,notes,policy.yaml,…}.md` — CL content
 
 ---
 
 ## How a typical session looks
 
-1. Read ARCHITECTURE.md, PLAN.md, PROGRESS.md (in that order).
-2. Look at PROGRESS.md "Currently working on" and "Session handoff log" to know where to resume.
-3. Pick up the next pending task (or continue an in-flight one).
-4. Work in compile-test-commit-to-progress-md cycles.
-5. When context is filling, do a final PROGRESS.md update with a clear resume hint for the next session.
-6. Stop.
+1. Read ARCHITECTURE.md, PLAN.md, PROGRESS.md (in that order) to
+   refresh context.
+2. Identify the task. If it's in-flight per PROGRESS.md / PLAN.md,
+   pick up where it left off. Otherwise scope it.
+3. Write code in small chunks. Run `cargo test` + `cargo build` after
+   each chunk.
+4. For multi-file or multi-day work, update PROGRESS.md with a
+   newest-first entry summarizing what changed and why.
+5. When the work is ready for the user to see, mark the task complete
+   and surface a summary.
 
-Trust the plan. Trust prior sessions' notes in PROGRESS.md. Build forward.
+---
+
+## Working tree state
+
+The working tree is normal. The original autonomous-build commit landed
+long ago; Go-file deletions from the rebuild are already in history.
+Don't expect "unstaged deletions" from a prior architecture — that was
+the rebuild milestone state, not current.
+
+In-flight work appears as standard staged/unstaged changes plus
+untracked files. If you encounter an unexpected file or branch,
+investigate before deleting (it might be the user's WIP from another
+session).
+
+---
+
+## Handling ambiguity
+
+If something is genuinely ambiguous and NOT decided in ARCHITECTURE.md
+or PLAN.md:
+
+1. Ask the user via `ask_user_choice` with 2–4 concrete options.
+2. If the user is offline / unresponsive, default to the simplest
+   reasonable choice consistent with the documented direction and
+   note your call in PROGRESS.md.
+3. Don't block on minor choices the user can revise later.
+
+---
+
+## Prerequisites
+
+- Rust stable toolchain (rustup, latest stable; MSRV 1.92 per slint).
+- `claude-code` CLI installed and authed (used as subprocess by each
+  agent + needed for live tests).
+- macOS (initial target; Linux + Windows tracked in PLAN.md).
+
+If a prerequisite is missing, document it and continue with
+non-blocked work.

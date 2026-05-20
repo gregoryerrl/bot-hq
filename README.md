@@ -1,44 +1,39 @@
-# bot-hq — Rust + Slint rebuild
+# bot-hq
 
 Desktop GUI for driving AI-assisted coding sessions through a bilateral-duo
-agent model (**Brian** = HANDS, **Rain** = EYES) with an optional helper
-(**Emma**). The user is the orchestrator; the app is the conductor between
+agent model: **Brian** (HANDS — edits, commits, runs commands) and **Rain**
+(EYES — adversarial review). Optional solo helper **Emma** for one-off
+questions. The user is the orchestrator; the app is the conductor between
 user and agents.
 
-This is a **from-scratch Rust + Slint rebuild** of the current Go-daemon /
-tmux / MCP-hub bot-hq. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the
-single source of truth on architectural decisions and [`PLAN.md`](PLAN.md)
-for the phased roadmap.
+Each agent runs as a `claude-code` subprocess. The app wires bidirectional
+stream-json between subprocesses, persists chat history to sqlite, and
+exposes two MCP servers — one internal (UI signaling) and one external
+(driver tools for other claude-code sessions).
 
-## Status
-
-This is **v0.1.0**, an autonomous rebuild milestone. The binary builds, all
-test suites pass (42 lib + 5 HTTP integration + 9 storage = 56 tests), and
-the UI launches and runs without crashing. The full agent lifecycle (spawn
-claude-code subprocesses, drive duo coordination, render real chat
-streams) requires manual end-to-end verification on a machine with a
-display + an authed `claude` CLI. See [PROGRESS.md](PROGRESS.md) for the
-status banner + what's verified vs. caveated.
+For architectural detail see [`ARCHITECTURE.md`](ARCHITECTURE.md); for
+planned work see [`PLAN.md`](PLAN.md); for recent change log see
+[`PROGRESS.md`](PROGRESS.md). The original rebuild design + roadmap are
+preserved under [`docs/rebuild-archive/`](docs/rebuild-archive/).
 
 ## Prerequisites
 
 - **Rust stable** (≥ 1.92 — slint 1.16.1 MSRV). `rustup update stable`.
-- **`claude-code` CLI** installed and authed (used as subprocess by each
-  agent). `claude --version` should print `2.x` or newer; `claude auth
-  status` should be healthy.
-- **macOS** for the initial target. Cross-platform later (Slint covers
-  Linux + Windows but the build & smoke testing happened on macOS).
+- **`claude-code` CLI** installed and authed. `claude --version` should
+  print `2.x` or newer; `claude auth status` should be healthy.
+- **macOS** is the primary target. Slint covers Linux + Windows; builds
+  and smoke testing happen on macOS.
 
 ## Quickstart
 
 ```bash
-git clone <repo>           # this is the bot-hq repo, on the rebuild path
-cd bot-hq-rebuild
+git clone <repo>
+cd bot-hq
 cp .env.example .env       # contains BOT_HQ_DATA_DIR=~/.bot-hq-dev/
 cargo run                  # opens the desktop window
 ```
 
-For a release build:
+Release build:
 
 ```bash
 cargo build --release
@@ -47,39 +42,43 @@ cargo build --release
 
 ## Configuration
 
-bot-hq reads the following env vars at startup:
+Env vars read at startup:
 
-| Var                | Default        | Purpose                                    |
-| ------------------ | -------------- | ------------------------------------------ |
-| `BOT_HQ_DATA_DIR`  | `~/.bot-hq/`   | Context Library + sqlite DB location       |
-| `RUN_LIVE_TESTS`   | unset          | Set to `1` to include subprocess tests     |
-| `RUST_LOG`         | `info,bot_hq=debug` | tracing-subscriber EnvFilter          |
+| Var                          | Default             | Purpose                                             |
+| ---------------------------- | ------------------- | --------------------------------------------------- |
+| `BOT_HQ_DATA_DIR`            | `~/.bot-hq/`        | Context Library + sqlite DB location                |
+| `BOT_HQ_EXTERNAL_MCP_PORT`   | `7892`              | External driver MCP server port                     |
+| `BOT_HQ_EXTERNAL_MCP_DISABLED` | unset             | Set to `1` to skip external MCP server startup      |
+| `RUN_LIVE_TESTS`             | unset               | Set to `1` to include subprocess tests              |
+| `RUST_LOG`                   | `info,bot_hq=debug` | tracing-subscriber EnvFilter                        |
 
 **During development** keep `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` in `.env` so
-you don't collide with the still-running current bot-hq's `~/.bot-hq/`.
+you don't collide with a running production bot-hq at `~/.bot-hq/`.
 
 ## Layout
 
 ```
-bot-hq-rebuild/
+bot-hq/
 ├── Cargo.toml
-├── CLAUDE.md / ARCHITECTURE.md / PLAN.md / PROGRESS.md  ← canonical docs
-├── ui/app.slint                              ← all Slint UI
+├── CLAUDE.md / ARCHITECTURE.md / PLAN.md / PROGRESS.md   ← canonical docs
+├── ui/app.slint                                          ← all Slint UI
 ├── src/
-│   ├── main.rs            ← entry point, tokio runtime + Slint loop
-│   ├── lib.rs             ← module exports + slint::include_modules!()
-│   ├── paths.rs           ← data-dir + first-run + single-instance lock
-│   ├── storage/           ← sqlite (messages, sessions, agent_configs)
-│   ├── cl/                ← Context Library (Phase 8 placeholder)
-│   ├── agents/            ← claude-code subprocess + stream-json I/O
-│   ├── signaling/         ← in-process MCP HTTP server (2 tools)
-│   ├── core/              ← sessions, IPAV, duo coordination
-│   └── ui/view_model.rs   ← Slint↔core bridge
-├── migrations/0001_init.sql
-├── templates/cl/          ← baked-in default CL (used on first run)
+│   ├── main.rs            entry point — tokio runtime, Slint loop, CLI dispatch
+│   ├── lib.rs             module exports + slint::include_modules!()
+│   ├── app.rs             top-level AppState (single Arc shared across threads)
+│   ├── paths.rs           data-dir resolution + first-run init + single-instance lock
+│   ├── storage/           sqlite (messages, sessions, agent_configs, questions, cl_index)
+│   ├── cl/                Context Library reader + SQLite-backed index
+│   ├── agents/            claude-code subprocess + stream-json I/O + hardcoded role prompts
+│   ├── signaling/         in-process MCP HTTP server — internal (UI tools) + external (driver tools)
+│   ├── policy/            Policy resolution, git-hook installer, session-permission grants, violations log
+│   ├── core/              sessions, IPAV cache, duo coordination, broadcast
+│   └── ui/view_model.rs   Slint ↔ core bridge
+├── migrations/0001_init.sql + later migrations
+├── templates/cl/          baked-in default CL (used on first run)
 └── docs/
-    ├── decisions.md
-    └── stream-json-events.md
+    ├── stream-json-events.md     claude-code CLI event schema (empirical)
+    └── rebuild-archive/          original rebuild design + roadmap + decisions
 ```
 
 ## Architecture in 60 seconds
@@ -88,72 +87,118 @@ bot-hq-rebuild/
   multi-thread runtime for I/O.
 - **Per-agent subprocess:** spawned via `claude -p --input-format
   stream-json --output-format stream-json --verbose --append-system-prompt
-  <text> --mcp-config <file>`. Model swap per agent via
+  <text> --mcp-config <file> --strict-mcp-config
+  --dangerously-skip-permissions`. Model swap per agent via
   `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL`.
-- **UI signaling:** in-process **HTTP MCP server** (hand-rolled minimal
-  JSON-RPC over hyper 1.x — see Decisions Made Autonomously below). Two
-  surfaces: (a) **internal** at `127.0.0.1:<ephemeral>` — UI-signaling tools
-  served to child agents (`ask_user_choice`, `mark_awaiting_user`,
-  `request_approval`, `check_commit_message`, `close_session`); (b)
-  **external** at `127.0.0.1:7892` — driver tools served to any
-  bearer-token-authenticated MCP client (see "Driving bot-hq from another
-  MCP client" below).
-- **Storage:** sqlite via sqlx, tables `messages` / `sessions` /
-  `agent_configs`. Emma is a singleton session row (`id="emma"`).
+  `BOT_HQ_SESSION_ID` is set so git hooks can find the session's policy
+  state.
+- **Two MCP servers:**
+  - **Internal** at `127.0.0.1:<ephemeral>` — UI-signaling tools served
+    to child agents (13 tools — see "Internal MCP tools" below).
+  - **External** at `127.0.0.1:7892` — driver tools served to any
+    bearer-token-authenticated MCP client (see "Driving bot-hq from
+    another MCP client" below).
+- **Storage:** sqlite via sqlx. Tables: `messages`, `sessions`,
+  `agent_configs`, `questions` (per-session question tray),
+  `cl_index` (searchable CL file index). Emma is a singleton session row
+  (`id="emma"`).
 - **IPAV:** in-memory `HashMap<SessionId, IpavState>`. Phases I/P use a
   1.5s buffered peer-forward; A/V is pure turn-based.
+- **Policy enforcement (`src/policy/`):** two-layer enforcement of
+  per-project rules (forbidden words, push gate, force-push, tool
+  blocklist, branch pattern). Layer 1: MCP tool calls
+  (`check_commit_message`, `request_approval`, …) — probabilistic primary
+  path, audited via `violations.jsonl`. Layer 2: git hooks
+  (`commit-msg`, `pre-commit`, `post-commit`, `pre-push`) installed in
+  the working repo — deterministic backstop catching cases where the
+  agent context drifted. See "Policy enforcement" below.
 
-## Decisions made autonomously
+## Internal MCP tools (served to child agents)
 
-These differ from `docs/decisions.md` recommendations; logged here for the
-human reviewer:
+Bot-hq exposes these to each spawned agent via the per-agent
+`mcp-config.json` (written to a temp file, points at
+`http://127.0.0.1:<port>/sessions/<id>/<agent>/mcp`).
 
-1. **MCP transport: in-process HTTP, not stdio + UDS bridge.** The
-   decision-doc sketch had Claude Code spawning our binary as an MCP child
-   process and bridging back to the parent via UDS. That's two
-   subprocesses per agent and ~150 LOC of IPC framing. Instead we run a
-   single HTTP MCP server in the parent process and write per-agent
-   `mcp-config.json` files pointing at
-   `http://127.0.0.1:<port>/sessions/<id>/<agent>/mcp`. Direct AppState
-   access, no IPC layer. Decision-doc itself flagged this as the
-   "promote-if-IPC-gets-hairy" alternative.
-2. **MCP server: hand-rolled, not `rmcp`.** `rmcp` 1.7.0 compiles fine but
-   the macro surface kept adding indirection for what's ~200 lines of
-   JSON-RPC dispatch. The hand-rolled version sits in
-   `src/signaling/{jsonrpc,server,protocol}.rs` and only handles
-   `initialize`, `tools/list`, `tools/call`, `ping`. Drop-in replacement
-   with `rmcp` later is straightforward if we add more tools.
-3. **`claude --append-system-prompt` is a string, not a file.** The PLAN
-   originally said `--append-system-prompt-file` but the CLI only accepts
-   inline `--append-system-prompt <prompt>`. We read the CL slot files in
-   `src/core/session.rs::read_system_prompt` and pass the concatenated
-   text inline. Total system prompt size is bounded (~3-5kB) so command-
-   line length isn't a concern.
-4. **`--verbose` is required with `-p --output-format stream-json`.**
-   Empirically discovered in Phase 0.5 — without it the CLI errors out
-   with `When using --print, --output-format=stream-json requires
-   --verbose`. The spawn command in `src/agents/spawn.rs` includes
-   `--verbose` accordingly.
-5. **`rustup update stable` was run during build.** Cargo's lockfile
-   resolved deps requiring `edition2024` (Rust ≥ 1.85). The user's
-   installed toolchain was 1.84.1. `rustup update stable` is a user-scoped
-   update (no system install) so we ran it — bumped to 1.95.0. Documented
-   in this README so future maintainers know the MSRV came from Slint.
+| Tool | Purpose |
+|---|---|
+| `ask_user_choice(question, options)` | Park a structured question for the user. Blocks the agent's turn until the user picks. |
+| `mark_awaiting_user(reason)` | Flag the session's `[Need User Input]` badge. Non-blocking. |
+| `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, tool blocklist, per-action approval. |
+| `check_commit_message(message)` | Pre-commit grep for forbidden words. Returns `ok` or `forbidden_word:<word>`. |
+| `close_session()` | Ask the host to close this session. |
+| `list_my_pending_questions()` | List questions THIS agent has parked but haven't been answered. Used to avoid duplicate retries. |
+| `withdraw_question(choice_id)` | Withdraw a stale parked question. |
+| `cl_index_search(project, query?)` | Search the SQLite-backed Context Library index. |
+| `cl_register_read(project, file_path)` | Audit insert recording which CL file the agent read. |
+| `cl_rescan(project)` | Re-stat a project's CL directory after creating new files. |
+| `grant_session_permission(action, scope, branches?)` | Record a session-level commit/push grant so subsequent ops skip approval. |
+| `revoke_session_permission(action)` | Revoke a previously granted commit/push permission. |
+| `list_session_permissions()` | List the current session's commit/push grants. |
+
+Role boundary: Rain (EYES) is blocked from `ask_user_choice`,
+`mark_awaiting_user`, `request_approval`, `grant_session_permission`,
+`revoke_session_permission`. Tool calls from Rain return a
+`HANDS_ONLY_TOOLS` error. Brian (HANDS) and Emma get the full set.
+
+## Policy enforcement
+
+Each project (matched by `working_repo_path` basename) can carry a
+`policy.yaml` under `<data_dir>/projects/<project>/`. The file is layered
+over `<data_dir>/general-policy.yaml`. Policy fields:
+
+- `forbidden_in_commits: [string]` — words/phrases that must not appear
+  in commit messages or staged diffs.
+- `push_gate.mode: auto | per_branch_approval | always_ask` — controls
+  whether agents must call `request_approval` before `git push`.
+- `force_push.mode: blocked | token_required | allowed` — controls
+  `git push --force`. `token_required` accepts a user-typed token
+  matching `force_push.token_format` (supports `{branch}`, `{sha}`).
+- `tool_blocklist: [prefix]` — bash command prefixes that require
+  approval. Matched as a prefix on the full command string.
+- `per_action_approval: [prefix]` — bash commands that always ask, no
+  remembered approval.
+- `branch_pattern: regex` — regex branch names must match. Empty = no
+  constraint.
+- `commit_style: text` — free-form note surfaced in the agent's system
+  prompt.
+
+**Session-level grants** ride alongside this. When the user types
+"you can push" / "you can commit" in chat, the agent calls
+`grant_session_permission` which mirrors a JSON file to
+`<data_dir>/.local/session-permissions/<session_id>.json`. The
+`pre-push` git hook reads this file (via `BOT_HQ_SESSION_ID` env var) to
+decide whether to allow the push without re-prompting. Grants are wiped
+on session close and on bot-hq startup.
+
+**Two-layer enforcement:**
+1. MCP tools (`check_commit_message`, `request_approval`, …) — agents
+   call them before the corresponding bash op. Skipping logs a
+   `Denied` violation to `violations.jsonl`.
+2. Git hooks (`commit-msg`, `pre-commit`, `post-commit`, `pre-push`) —
+   `bot-hq install-hooks` writes them into `.git/hooks/` of the working
+   repo. Each hook execs `bot-hq policy-check <sub> --data-dir …
+   --project … --session …` which re-resolves the policy and decides
+   exit code. Hooks are idempotent and respect foreign hooks (write
+   `.bot-hq` sidecar instead of clobbering).
+
+`violations.jsonl` lives at `<data_dir>/violations.jsonl`. UI exposes a
+viewer (Settings → Violations).
 
 ## Driving bot-hq from another MCP client
 
-Bot-hq exposes a second MCP HTTP server so an external agent (another Claude
-Code session, a test driver, a custom tool) can list/create sessions, send
-messages, resolve choices, advance phases, read chat history, manage agent
-configs, and read the violations log — all without the GUI.
+Bot-hq exposes a second MCP HTTP server so an external agent (another
+claude-code session, a test driver, a custom tool) can manage sessions
+without the GUI.
 
 **Endpoint:** `http://127.0.0.1:7892/mcp` (POST, JSON-RPC body)
 **Auth:** `Authorization: Bearer <token>` where token lives at
-`~/.bot-hq/mcp-token` (UUIDv4, 0600 perms, generated on first run)
+`<data_dir>/mcp-token` (UUIDv4, `0600` perms, auto-generated on first
+run)
 
-### Setup in another Claude Code session
+### Setup in another claude-code session
 
-Add to your MCP config (typically `~/.claude.json` or per-project `mcp.json`):
+Add to your MCP config (typically `~/.claude.json` or per-project
+`mcp.json`):
 
 ```json
 {
@@ -169,79 +214,63 @@ Add to your MCP config (typically `~/.claude.json` or per-project `mcp.json`):
 }
 ```
 
-Restart that Claude Code; the bot-hq tools appear as `mcp__bot-hq__*`.
+Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 
-### Available tools
+### Available external tools
 
 | Tool | Purpose |
 |---|---|
-| `list_sessions` | Read active sessions (id, title, phase, models) |
-| `create_session(title, working_repo_path?)` | Spawn a Brian+Rain duo |
-| `send_message(session_id, text)` | Broadcast to a session (or `"emma"`) |
-| `get_session_messages(session_id, since_id?)` | Read chat in order |
-| `get_emma_messages(since_id?)` | Same, for Emma |
-| `advance_phase(session_id, phase)` | Move through I/P/A/V |
-| `resolve_choice(choice_id, picked)` | Answer a parked `ask_user_choice` |
-| `get_pending_choices` | List parked choices with their choice_ids |
-| `close_session(session_id, archive?)` | Kill duo + mark closed |
-| `restart_emma` | Kill+respawn Emma (e.g. after config swap) |
-| `get_status` | Version, addresses, session count, uptime |
-| `get_agent_configs` | Read agent configs (auth_token redacted to last 4 chars) |
-| `set_agent_config(agent_name, …)` | Upsert a row; empty string clears a field |
-| `get_violations(limit?)` | Read recent violations.jsonl entries |
-| `wait_for_change(session_id, since_id?, timeout_ms?)` | Long-poll: blocks server-side until new messages arrive (via the bridge's MessagePersisted event) or timeout. Saves AI clients from busy-polling. |
-| `get_session_snapshot(session_id, msg_limit?)` | One-shot aggregate: session meta + last N messages + phase + awaiting + pending choices. Saves three round trips. |
-
-### Configuration
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `BOT_HQ_EXTERNAL_MCP_PORT` | `7892` | Override the listen port |
-| `BOT_HQ_EXTERNAL_MCP_DISABLED` | unset | Set to `1` to skip external server startup |
-
-Port conflict: bot-hq soft-fails — internal MCP keeps working, the
-Settings → External MCP panel shows "unavailable", and the binary stays
-usable. Quickest fix is killing the conflicting process or setting a
-different `BOT_HQ_EXTERNAL_MCP_PORT`.
+| `list_sessions` | Read active sessions (id, title, phase, models). |
+| `create_session(title, working_repo_path?)` | Spawn a Brian+Rain duo. |
+| `send_message(session_id, text)` | Broadcast to a session (or `"emma"`). |
+| `get_session_messages(session_id, since_id?)` | Read chat in order. |
+| `get_emma_messages(since_id?)` | Same, for Emma. |
+| `advance_phase(session_id, phase)` | Move through I/P/A/V. |
+| `resolve_choice(choice_id, picked)` | Answer a parked `ask_user_choice`. |
+| `get_pending_choices` | List parked choices with their choice_ids. |
+| `close_session(session_id, archive?)` | Kill duo + mark closed. |
+| `restart_emma` | Kill + respawn Emma (e.g. after config swap). |
+| `get_status` | Version, addresses, session count, uptime. |
+| `get_agent_configs` | Read agent configs (auth_token redacted to last 4 chars). |
+| `set_agent_config(agent_name, …)` | Upsert a row; empty string clears a field. |
+| `get_violations(limit?)` | Read recent `violations.jsonl` entries. |
+| `wait_for_change(session_id, since_id?, timeout_ms?)` | Long-poll: blocks server-side until new messages arrive or timeout. |
+| `get_session_snapshot(session_id, msg_limit?)` | One-shot aggregate: session meta + last N messages + phase + awaiting + pending choices. |
 
 ### Security model
 
-- **Localhost-only bind** (`127.0.0.1`, not `0.0.0.0`) — refuses remote
+- **Localhost-only bind** (`127.0.0.1`, not `0.0.0.0`). Refuses remote
   connections at the bind layer.
 - **Bearer token** with constant-time comparison via the `subtle` crate.
-  Localhost is still the trust boundary, but the constant-time check
-  guards against timing attacks if you ever expose the port through a
-  reverse proxy.
-- **`auth_token` redaction** in `get_agent_configs` — returns
-  `<set:****abcd>` showing only the last 4 chars so an external client
-  can verify which credential is loaded without ever seeing the secret.
-  Writing a new value via `set_agent_config` still requires the full token.
-- **Rotation:** edit `~/.bot-hq/mcp-token` and restart bot-hq. The token
-  is read once at startup, never re-read.
+  Guards against timing attacks if you ever expose the port via reverse
+  proxy.
+- **`auth_token` redaction** in `get_agent_configs`. Returns
+  `<set:****abcd>` showing only the last 4 chars. Writing a new value
+  via `set_agent_config` still requires the full token.
+- **Port conflict:** soft-fails — internal MCP keeps working, Settings →
+  External MCP shows "unavailable". Quickest fix: kill the conflicting
+  process or set `BOT_HQ_EXTERNAL_MCP_PORT`.
+- **Rotation:** edit `<data_dir>/mcp-token` and restart bot-hq. The
+  token is read once at startup.
 
 ## Security caveats (v1)
 
 - **Plaintext auth tokens.** `agent_configs.auth_token` is stored as
-  plaintext sqlite. Any backup of `~/.bot-hq/` (Time Machine, cloud sync,
-  rsync) captures these. The DB file is at
-  `<data_dir>/.local/bot-hq.db` and gets default user-only mode bits.
-  v2 will move to the OS keychain (`keyring-core`) — see
-  `docs/decisions.md#auth-storage` for migration plan.
+  plaintext sqlite. Any backup of `<data_dir>` (Time Machine, cloud
+  sync, rsync) captures these. The DB file is at
+  `<data_dir>/.local/bot-hq.db` with default user-only mode bits.
+  v2 will move to the OS keychain (`keyring-core`) — see PLAN.md.
+- **Policy audit is local-only.** `violations.jsonl` is an append-only
+  audit trail; nothing ships it off-host. If you need it shipped to a
+  central log store, hook it via a sidecar reader.
 
 ## Testing
 
 ```bash
-cargo test                          # 56 tests, all non-live
+cargo test                          # 165 tests
 RUN_LIVE_TESTS=1 cargo test         # includes claude-code subprocess smoke
 cargo build --release               # production binary
 ```
 
-## What's NOT done yet
-
-- **Manual end-to-end smoke** (Phase 9.1). The build runs, the UI renders,
-  but driving a real session through Investigate→Plan→Apply→Verify with
-  live claude-code subprocesses on a screen-attached machine is the human
-  step.
-- **UX polish** (Phase 9.2): keyboard shortcuts, scroll-to-bottom,
-  empty-state copy.
-- **Discord + Clive plugins** (Phases 10–11). Deferred per PLAN.md.
+Breakdown: 121 lib unit tests + 29 signaling integration + 5 external
+MCP integration + 10 storage integration.

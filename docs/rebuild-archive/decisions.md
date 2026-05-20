@@ -103,7 +103,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
 **Pick:** `rmcp` v1.7.0 (official `modelcontextprotocol/rust-sdk`, released 2026-05-13).
 
-**Rationale.** `rmcp` is Anthropic's officially-maintained Rust SDK (repo: `modelcontextprotocol/rust-sdk`), actively shipping with v1.7.0 cut the day before this decision. It meets every criterion: (1) maintained — fresh release yesterday, 4.7M+ downloads; (2) first-class server mode via `ServerHandler` + `#[tool]`/`#[tool_router]` macros; (3) ships both stdio (`rmcp::transport::stdio()`) and Streamable HTTP (`StreamableHttpService`) transports — Claude Code's `--mcp-config` consumes both via `type: "stdio"` / `type: "http"` shapes; (4) Rust edition 2021 compatible (works on stable 1.95); (5) lean dep tree under feature gates — we pull `server + transport-io + macros` only, no reqwest/TLS bloat. Hand-rolling JSON-RPC would duplicate work the SDK already covers (initialize handshake, `tools/list`, `tools/call`, schema generation via `schemars`, error frames). Chosen transport: **stdio, one MCP child process per claude-code agent**. Rationale: `--mcp-config` files declaring `type: "stdio"` cause Claude Code to spawn the binary as a subprocess; our app re-execs its own binary with a `--mcp-server` subcommand flag and bridges the stdio handlers back into `AppState` via a Unix-domain socket. (HTTP would let one server serve all agents, but stdio keeps lifetimes 1:1 with the owning agent and avoids opening a local port.)
+**Rationale.** `rmcp` is the upstream vendor's officially-maintained Rust SDK (repo: `modelcontextprotocol/rust-sdk`), actively shipping with v1.7.0 cut the day before this decision. It meets every criterion: (1) maintained — fresh release yesterday, 4.7M+ downloads; (2) first-class server mode via `ServerHandler` + `#[tool]`/`#[tool_router]` macros; (3) ships both stdio (`rmcp::transport::stdio()`) and Streamable HTTP (`StreamableHttpService`) transports — claude-code's `--mcp-config` consumes both via `type: "stdio"` / `type: "http"` shapes; (4) Rust edition 2021 compatible (works on stable 1.95); (5) lean dep tree under feature gates — we pull `server + transport-io + macros` only, no reqwest/TLS bloat. Hand-rolling JSON-RPC would duplicate work the SDK already covers (initialize handshake, `tools/list`, `tools/call`, schema generation via `schemars`, error frames). Chosen transport: **stdio, one MCP child process per claude-code agent**. Rationale: `--mcp-config` files declaring `type: "stdio"` cause claude-code to spawn the binary as a subprocess; our app re-execs its own binary with a `--mcp-server` subcommand flag and bridges the stdio handlers back into `AppState` via a Unix-domain socket. (HTTP would let one server serve all agents, but stdio keeps lifetimes 1:1 with the owning agent and avoids opening a local port.)
 
 **Cargo.toml dep line:**
 
@@ -173,10 +173,10 @@ Under the hood `rmcp` handles the standard JSON-RPC methods (`initialize`, `noti
 
 **Gotchas:**
 - **Never `println!` from the MCP subprocess.** Stdout is the JSON-RPC channel; all logging must use `tracing-subscriber` with `.with_writer(std::io::stderr)`. Install a panic hook that routes to stderr too.
-- **Subprocess <-> AppState bridge.** Because the MCP server runs in a *separate process* (Claude Code spawns it as a child), `SignalingBridge` cannot be a plain in-memory `Arc<AppState>`. Two options: (a) Unix-domain socket at `BOT_HQ_IPC_SOCKET` carrying a tiny request/response protocol the parent GUI listens on; (b) switch to in-process HTTP transport on `127.0.0.1:<rand>` so the GUI process *is* the MCP server and agents connect via `type: "http"`. Phase 3 should re-evaluate — HTTP avoids the IPC layer at the cost of a localhost port and per-agent URL bookkeeping. Default: start with stdio + UDS bridge; promote to HTTP if the IPC layer grows hairy.
-- **`type: "stdio"` is the literal JSON value Claude Code expects.** `"sse"` is deprecated; `"streamable-http"` is an alias for `"http"`. Stick to `"stdio"` / `"http"`.
+- **Subprocess <-> AppState bridge.** Because the MCP server runs in a *separate process* (claude-code spawns it as a child), `SignalingBridge` cannot be a plain in-memory `Arc<AppState>`. Two options: (a) Unix-domain socket at `BOT_HQ_IPC_SOCKET` carrying a tiny request/response protocol the parent GUI listens on; (b) switch to in-process HTTP transport on `127.0.0.1:<rand>` so the GUI process *is* the MCP server and agents connect via `type: "http"`. Phase 3 should re-evaluate — HTTP avoids the IPC layer at the cost of a localhost port and per-agent URL bookkeeping. Default: start with stdio + UDS bridge; promote to HTTP if the IPC layer grows hairy.
+- **`type: "stdio"` is the literal JSON value claude-code expects.** `"sse"` is deprecated; `"streamable-http"` is an alias for `"http"`. Stick to `"stdio"` / `"http"`.
 - **`MCP_TIMEOUT` env var** governs startup timeout — set generously (e.g. `30000`) during dev since cold-start of our binary may be slow.
-- **Tool output cap:** Claude Code warns past 10k tokens and truncates at `MAX_MCP_OUTPUT_TOKENS`. Our two tools return tiny strings, so non-issue, but worth noting if we add tools later.
+- **Tool output cap:** claude-code warns past 10k tokens and truncates at `MAX_MCP_OUTPUT_TOKENS`. Our two tools return tiny strings, so non-issue, but worth noting if we add tools later.
 - **rmcp version churn.** SDK is 1.x and shipping fast (1.7.0 yesterday); pin `rmcp = "=1.7.0"` initially and bump deliberately. Macro syntax changed between 0.x and 1.x — do not copy older blog-post examples without verifying they match 1.7.
 
 ## auth-storage
@@ -187,7 +187,7 @@ Under the hood `rmcp` handles the standard JSON-RPC methods (`initialize`, `noti
 
 - Speed of development. We ship single-binary install with one SQL migration; no platform-specific code paths in v1.
 - No new runtime dependencies. The OS keychain story differs per platform (macOS Security framework, Windows wincred, Linux dbus + Secret Service daemon), and each pulls C ABI / dbus into the build matrix.
-- Mirrors how most Anthropic-API tooling stores keys today (env var or dotfile). Users already accept that risk on dev machines.
+- Mirrors how most upstream-API tooling stores keys today (env var or dotfile). Users already accept that risk on dev machines.
 
 ### v1 risks (documented, accepted)
 
