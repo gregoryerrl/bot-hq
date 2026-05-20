@@ -182,6 +182,12 @@ impl AppState {
             .awaiting
             .store(false, std::sync::atomic::Ordering::Release);
         self.bridge.clear_session_awaiting(session_id).await;
+        // Flip every pending `mark_awaiting_user` row to 'answered' — the
+        // user's reply IS the answer to a halt. `choice` rows stay pending
+        // until the user actually picks an option.
+        if let Err(e) = self.storage.clear_pending_halts(session_id).await {
+            tracing::warn!(?e, session_id, "clear_pending_halts failed");
+        }
         let id = broadcast_user_message(
             &self.storage,
             session_id,
