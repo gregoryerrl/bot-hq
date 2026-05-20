@@ -211,6 +211,9 @@ impl SessionQuestion {
 
 /// A registered project. The special name `_globals` is the bot-hq root
 /// bucket (general-rules.md, etc.) and has NULL working_repo_path.
+///
+/// `cl_path` overrides the default CL root convention
+/// `<data_dir>/projects/<name>/`. NULL means use the convention.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -218,6 +221,7 @@ pub struct Project {
     pub working_repo_path: Option<String>,
     pub description: Option<String>,
     pub created_at: String,
+    pub cl_path: Option<String>,
 }
 
 impl Project {
@@ -226,6 +230,20 @@ impl Project {
     pub fn is_globals(&self) -> bool {
         self.name == Self::GLOBALS
     }
+}
+
+/// Per-folder description (parallel to ClIndexEntry but for directories).
+/// `folder_path` is relative to the project's CL root; `''` is the project
+/// root itself.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ClFolder {
+    pub id: i64,
+    pub project_id: String,
+    pub folder_path: String,
+    pub description: String,
+    pub tags: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// A row in the CL index. Agents query this BEFORE reading files to decide

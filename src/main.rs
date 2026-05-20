@@ -266,7 +266,7 @@ async fn cl_startup_init(
                 _ => continue,
             };
             storage
-                .upsert_project(name, name, None, None)
+                .upsert_project(name, name, None, None, None)
                 .await?;
         }
     }
@@ -290,7 +290,7 @@ async fn cl_startup_init(
                 );
                 // Make sure the project row exists.
                 storage
-                    .upsert_project("bcc-ad-manager", "bcc-ad-manager", None, None)
+                    .upsert_project("bcc-ad-manager", "bcc-ad-manager", None, None, None)
                     .await?;
             }
         }
