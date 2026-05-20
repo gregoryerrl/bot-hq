@@ -400,6 +400,12 @@ impl SignalingBridge {
 
     /// Called by the MCP `tools/call` handler for `ask_user_choice`.
     /// Awaits a response from the UI.
+    ///
+    /// Auto-supersedes the most recent pending question from this same
+    /// `(session_id, agent)` — the new ask replaces the old one in the tray,
+    /// the old gets `status='superseded'`, and the new row's `supersedes_id`
+    /// points at the old. This kills the client-side-timeout-retry-duplicate
+    /// cascade without relying on agent discipline.
     pub async fn ask_user_choice(
         &self,
         session_id: String,
@@ -407,12 +413,16 @@ impl SignalingBridge {
         question: String,
         options: Vec<String>,
     ) -> Result<String> {
-        self.ask_user_choice_inner(session_id, agent, question, options, None)
+        let supersedes_id = self
+            .auto_supersede_prior_pending(&session_id, &agent)
+            .await;
+        self.ask_user_choice_inner(session_id, agent, question, options, None, supersedes_id)
             .await
     }
 
     /// Policy-initiated approval request. Same machinery as `ask_user_choice`
-    /// but carries an [`ApprovalContext`] so the resolve path can write a
+    /// (including auto-supersede of the latest pending from this agent) but
+    /// carries an [`ApprovalContext`] so the resolve path can write a
     /// violation record.
     pub async fn request_approval(
         &self,
@@ -422,8 +432,109 @@ impl SignalingBridge {
         options: Vec<String>,
         ctx: ApprovalContext,
     ) -> Result<String> {
-        self.ask_user_choice_inner(session_id, agent, question, options, Some(ctx))
-            .await
+        let supersedes_id = self
+            .auto_supersede_prior_pending(&session_id, &agent)
+            .await;
+        self.ask_user_choice_inner(
+            session_id,
+            agent,
+            question,
+            options,
+            Some(ctx),
+            supersedes_id,
+        )
+        .await
+    }
+
+    /// Explicit supersede: agent passes the choice_id of a stale question
+    /// they want to replace + the new question text/options. Same effect as
+    /// `ask_user_choice` from the user's perspective (blocking call returning
+    /// the eventual pick) but the linkage to a SPECIFIC stale row is
+    /// deterministic (vs the auto-supersede heuristic which only catches the
+    /// latest). Returns the picked option from the new question.
+    pub async fn supersede_question_with_new(
+        &self,
+        session_id: String,
+        agent: String,
+        stale_choice_id: String,
+        question: String,
+        options: Vec<String>,
+    ) -> Result<String> {
+        // Look up the stale row by choice_id to capture its internal id (for
+        // the new row's supersedes_id FK) BEFORE marking it superseded.
+        let stale_internal_id = {
+            let storage_guard = self.storage.lock().await;
+            match storage_guard.as_ref() {
+                Some(storage) => storage
+                    .get_question(&stale_choice_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|q| q.id),
+                None => None,
+            }
+        };
+        // Flip status + drop parked oneshot + fire ChoiceResolved for the UI.
+        {
+            let storage_guard = self.storage.lock().await;
+            if let Some(storage) = storage_guard.as_ref() {
+                let _ = storage.supersede_question(&stale_choice_id).await;
+            }
+        }
+        self.pending.lock().await.remove(&stale_choice_id);
+        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+            choice_id: stale_choice_id,
+            picked: "(superseded)".to_string(),
+        });
+        // Post the new question with the supersedes_id link in place, then
+        // block on its oneshot like a normal ask_user_choice would.
+        self.ask_user_choice_inner(
+            session_id,
+            agent,
+            question,
+            options,
+            None,
+            stale_internal_id,
+        )
+        .await
+    }
+
+    /// Mark the latest pending question from `(session_id, agent)` as
+    /// superseded + remove it from `pending`. Returns the internal id of the
+    /// superseded row so the caller can link the new question via
+    /// `supersedes_id`. None means no prior pending was found.
+    ///
+    /// Used by `ask_user_choice` / `request_approval` to auto-deduplicate
+    /// when the same agent re-asks (G2 in the per-session-question-cache
+    /// design — kills the timeout-retry-duplicate cascade at the bridge
+    /// layer regardless of whether the agent remembered to call
+    /// `withdraw_question` first).
+    async fn auto_supersede_prior_pending(
+        &self,
+        session_id: &str,
+        agent: &str,
+    ) -> Option<i64> {
+        let storage_guard = self.storage.lock().await;
+        let storage = storage_guard.as_ref()?;
+        let rows = storage.questions_for_session(session_id).await.ok()?;
+        let latest = rows
+            .into_iter()
+            .rev()
+            .find(|q| q.agent == agent && q.status == "pending")?;
+        let stale_choice_id = latest.choice_id.clone();
+        let stale_internal_id = latest.id;
+        // Mark in storage first so the UI tray drops it on its next poll.
+        let _ = storage.supersede_question(&stale_choice_id).await;
+        drop(storage_guard);
+        // Drop the parked oneshot so any (rare) still-listening client gets
+        // the standard cancellation.
+        self.pending.lock().await.remove(&stale_choice_id);
+        // Tell the UI to clear its inline state for this choice.
+        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+            choice_id: stale_choice_id,
+            picked: "(superseded)".to_string(),
+        });
+        Some(stale_internal_id)
     }
 
     async fn ask_user_choice_inner(
@@ -433,6 +544,7 @@ impl SignalingBridge {
         question: String,
         options: Vec<String>,
         approval: Option<ApprovalContext>,
+        supersedes_id: Option<i64>,
     ) -> Result<String> {
         let choice_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel::<String>();
@@ -464,7 +576,7 @@ impl SignalingBridge {
             crate::storage::QuestionKind::Choice,
             &question,
             Some(&options),
-            None,
+            supersedes_id,
         )
         .await;
 
@@ -1386,5 +1498,130 @@ mod tests {
         ask.await.unwrap();
         let recs = log.read_all().unwrap();
         assert!(recs.is_empty(), "plain ask_user_choice should not log");
+    }
+
+    #[tokio::test]
+    async fn ask_user_choice_auto_supersedes_prior_pending() {
+        // G2: when the same agent re-asks in the same session, the prior
+        // pending question gets flipped to 'superseded' automatically and
+        // the new row links back via supersedes_id. Without this, a
+        // timed-out re-ask would accumulate duplicates in the tray.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("test.db")).await.unwrap();
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+
+        let bridge_clone = Arc::clone(&bridge);
+        let first = tokio::spawn(async move {
+            bridge_clone
+                .ask_user_choice(
+                    "s1".into(),
+                    "brian".into(),
+                    "first".into(),
+                    vec!["a".into(), "b".into()],
+                )
+                .await
+        });
+        // Give the first ask a moment to land in storage.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Second ask from same agent should auto-supersede the first.
+        let bridge_clone = Arc::clone(&bridge);
+        let second = tokio::spawn(async move {
+            bridge_clone
+                .ask_user_choice(
+                    "s1".into(),
+                    "brian".into(),
+                    "second".into(),
+                    vec!["x".into(), "y".into()],
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let rows = storage.questions_for_session("s1").await.unwrap();
+        assert_eq!(rows.len(), 2, "two question rows expected");
+        let first_row = &rows[0];
+        let second_row = &rows[1];
+        assert_eq!(first_row.prompt, "first");
+        assert_eq!(first_row.status, "superseded");
+        assert_eq!(second_row.prompt, "second");
+        assert_eq!(second_row.status, "pending");
+        assert_eq!(
+            second_row.supersedes_id,
+            Some(first_row.id),
+            "new row should link back to the superseded row"
+        );
+
+        // The first ask's oneshot was dropped by auto-supersede; its task
+        // will resolve with an error. The second task is still parked —
+        // resolve it so the test cleans up.
+        bridge
+            .resolve_choice(&second_row.choice_id, "x".into())
+            .await
+            .unwrap();
+        let _ = first.await.unwrap();
+        let _ = second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn supersede_question_links_old_to_new() {
+        // G1: the explicit supersede tool replaces a SPECIFIC stale by
+        // choice_id and links the new row to it via supersedes_id.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("test.db")).await.unwrap();
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+
+        // Seed a stale question directly via storage (skip the auto-
+        // supersede path so we have a clean "stale exists, nothing else
+        // pending" state for the explicit tool to target).
+        storage
+            .insert_question(
+                "s1",
+                "stale-cid",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "stale prompt",
+                Some(&["a".to_string(), "b".to_string()]),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let bridge_clone = Arc::clone(&bridge);
+        let supersede = tokio::spawn(async move {
+            bridge_clone
+                .supersede_question_with_new(
+                    "s1".into(),
+                    "brian".into(),
+                    "stale-cid".into(),
+                    "rephrased".into(),
+                    vec!["x".into(), "y".into()],
+                )
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let rows = storage.questions_for_session("s1").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let stale = &rows[0];
+        let fresh = &rows[1];
+        assert_eq!(stale.choice_id, "stale-cid");
+        assert_eq!(stale.status, "superseded");
+        assert_eq!(fresh.prompt, "rephrased");
+        assert_eq!(fresh.status, "pending");
+        assert_eq!(fresh.supersedes_id, Some(stale.id));
+
+        bridge
+            .resolve_choice(&fresh.choice_id, "x".into())
+            .await
+            .unwrap();
+        let picked = supersede.await.unwrap().unwrap();
+        assert_eq!(picked, "x");
     }
 }

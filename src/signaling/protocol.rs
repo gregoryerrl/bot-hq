@@ -194,7 +194,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         },
         ToolDescriptor {
             name: "withdraw_question",
-            description: "Abandon a question you previously parked for the user (you figured it out, the context changed, or you want to rephrase it). Removes the prompt from the user's questions tray + the dashboard counter. If you intend to ask a fresh version, just call `ask_user_choice` again after withdrawing — don't accumulate duplicates.",
+            description: "Abandon a question you previously parked for the user (you figured it out, the context changed). Removes the prompt from the user's questions tray + the dashboard counter. If you want to REPLACE the question with a rephrased version, prefer `supersede_question` over withdraw+ask — the former is one tool call AND links the old row to the new via `supersedes_id` so the history is traceable.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -204,6 +204,30 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     }
                 },
                 "required": ["choice_id"]
+            }),
+        },
+        ToolDescriptor {
+            name: "supersede_question",
+            description: "Replace a stale question you parked for the user with a rephrased version. The old row gets status='superseded' (drops from the tray); the new row links to it via `supersedes_id` so the history is traceable. Same blocking semantics as `ask_user_choice` — returns the user's pick of an option from the NEW question.\n\nNote: `ask_user_choice` and `request_approval` already auto-supersede the MOST RECENT pending question from this agent in this session. Use `supersede_question` when you need to explicitly target a SPECIFIC stale row that isn't the most recent (e.g. multiple pending choices from different topics, and you want to rephrase a particular one without disturbing others).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "stale_choice_id": {
+                        "type": "string",
+                        "description": "The choice_id of the question being replaced (from `list_my_pending_questions`)."
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "The rephrased question."
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "Concrete options the user can pick on the new question."
+                    }
+                },
+                "required": ["stale_choice_id", "question", "options"]
             }),
         },
         ToolDescriptor {

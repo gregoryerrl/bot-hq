@@ -91,6 +91,7 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     "ask_user_choice",
     "mark_awaiting_user",
     "request_approval",
+    "supersede_question",
     "grant_session_permission",
     "revoke_session_permission",
 ];
@@ -310,6 +311,48 @@ async fn call_tool(
             } else {
                 "no-op: choice_id was not pending"
             }))
+        }
+        "supersede_question" => {
+            let stale_choice_id = args
+                .get("stale_choice_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing stale_choice_id")
+                })?
+                .to_string();
+            let question = args
+                .get("question")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing question")
+                })?
+                .to_string();
+            let options: Vec<String> = args
+                .get("options")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing options")
+                })?
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            if options.len() < 1 {
+                return Err(JsonRpcError::new(
+                    JsonRpcError::INVALID_PARAMS,
+                    "options must have at least 1 entry",
+                ));
+            }
+            let picked = bridge
+                .supersede_question_with_new(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    stale_choice_id,
+                    question,
+                    options,
+                )
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            Ok(ToolCallResult::text(picked))
         }
         "cl_index_search" => {
             let project = args.get("project").and_then(Value::as_str);
