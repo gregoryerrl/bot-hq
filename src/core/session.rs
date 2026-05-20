@@ -297,6 +297,7 @@ async fn spawn_agent_for(
         mcp_config_path: Some(mcp_config_path),
         working_dir,
         claude_bin: None,
+        session_id: session_id.to_string(),
     };
     spawn_agent(spawn_cfg).await
 }
@@ -354,24 +355,41 @@ pub fn read_system_prompt(paths: &Paths, agent: &str, project: Option<&str>) -> 
         }
     }
 
-    // 1b. CL location anchor + layout reminder. Without this, agents know
-    // the Read tool exists but don't proactively consult the CL when given
-    // a project task — and they wander into legacy archives by accident.
+    // 1b. CL location anchor + index-first workflow. Without this, agents
+    // wander into legacy archives by accident OR blind-Read a fixed set of
+    // filenames and miss the rest of the CL. The full tool signatures for
+    // cl_index_search / cl_register_read / cl_rescan live in general-rules.md
+    // (layer 2 below) — here we just establish the orientation.
     out.push_str(&format!(
         "## Context Library\n\n\
-         Your Context Library is at `{cl}`. Single source of truth — never \
-         reason about any other `~/.bot-hq*` path as current state (those \
-         are archives from prior installs).\n\n\
-         Per-project layout at `{cl}projects/<project>/`:\n\
+         Your Context Library lives at `{cl}`. Single source of truth — \
+         other `~/.bot-hq*` paths are archives from prior installs, ignore \
+         them.\n\n\
+         **Index-first.** The CL is indexed in SQLite; each file has a \
+         description so you can decide what's worth opening without burning \
+         context on irrelevant files. Call `cl_index_search(project=<your \
+         project>)` BEFORE reaching for `Read` on any CL path. Pass \
+         `\"_globals\"` for system-level / cross-project notes, your \
+         session's project name for project-scoped notes, or omit `project` \
+         to search everything. Tool signatures for `cl_index_search`, \
+         `cl_register_read`, `cl_rescan` are in the general-rules section \
+         below.\n\n\
+         **Bare-filename heuristic.** If the user references a bare \
+         filename (e.g. \"work on task 1 from tasks.md\", \"check eod.md\") \
+         and it's NOT in your working repo, do NOT keep `Glob`-searching \
+         broader paths. Try `cl_index_search(project=\"_globals\", \
+         query=<name>)` next — common cross-project files like `tasks.md` \
+         and `eod.md` live at the CL root and surface as `_globals` rows. \
+         Only fall back to `ask_user_choice` if `_globals` also misses.\n\n\
+         Per-project conventional files at `{cl}projects/<project>/` \
+         (the index covers everything under this path, not just these):\n\
          - `conventions.md` — repo, stack, commands, gates, disguise rules\n\
          - `notes.md` — current state, recurring trouble, gotchas\n\
-         - `decisions.md` — chronological log of prior decisions (read this \
-         before proposing changes that touch the same area — avoids re-doing \
-         settled work)\n\
-         - `policy.yaml` — machine-enforced gates + forbidden-commit-word list\n\n\
-         **Before starting work on a project, Read `conventions.md` + \
-         `notes.md` for that project.** Don't ask the user for facts that \
-         live in the CL — Read them yourself.\n\n",
+         - `decisions.md` — chronological log of prior decisions\n\
+         - `policy.yaml` — machine-enforced gates (already rendered into \
+         this prompt if the project has one)\n\n\
+         Trust the index over a hardcoded filename list. Don't ask the user \
+         for facts that live in the CL.\n\n",
         cl = paths.data_dir.display()
     ));
 
@@ -397,7 +415,7 @@ pub fn read_system_prompt(paths: &Paths, agent: &str, project: Option<&str>) -> 
     }
 
     // 4. Policy directive block — project-aware.
-    let policy = crate::policy::Policy::resolve(&paths.data_dir, project)
+    let policy = crate::policy::Policy::resolve(&paths.data_dir, project, None)
         .context("resolving project policy")?;
     let block = policy.render_system_prompt_block();
     if !block.is_empty() {
@@ -608,6 +626,26 @@ mod tests {
         assert!(!prompt.contains("FOO_CONVENTIONS_M1"));
         assert!(!prompt.contains("FOO_NOTES_M1"));
         assert!(!prompt.contains("FOO_DECISIONS_M1"));
+    }
+
+    #[test]
+    fn prompt_points_at_cl_index_first() {
+        // Regression: layer 1b used to tell agents to Read conventions.md +
+        // notes.md directly. After the CL index landed (commit e13e8e4),
+        // the canonical entry point is cl_index_search. If this assertion
+        // ever fails, layer 1b has drifted back to the old "blind Read"
+        // workflow.
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None).unwrap();
+        assert!(prompt.contains("cl_index_search"));
+        assert!(prompt.contains("Index-first"));
+        // Regression: when the user mentions a bare filename (tasks.md,
+        // eod.md), agents should head to _globals before falling back to
+        // ask_user_choice or broad Glob sweeps.
+        assert!(prompt.contains("Bare-filename heuristic"));
+        assert!(prompt.contains("_globals"));
     }
 
     #[test]
