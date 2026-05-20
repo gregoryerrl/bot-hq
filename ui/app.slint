@@ -1267,36 +1267,6 @@ component SessionTileView inherits Rectangle {
                 }
         }
 
-        // Legacy inline pending-choice section — kept as a fallback for
-        // pre-migration session rows that didn't backfill the question cache.
-        // The new flow renders nothing here; the chip + tray-in-SessionView
-        // is the canonical surface.
-        if data.pending-choice && data.pending-input-count == 0:
-            Rectangle {
-                background: Theme.surface-low;
-                Rectangle {
-                    x: 0; y: 0;
-                    width: parent.width; height: 1px;
-                    background: Theme.outline-variant.with-alpha(0.5);
-                }
-                VerticalLayout {
-                    padding: Theme.s-3;
-                    spacing: Theme.s-2;
-                    Text {
-                        text: data.pending-question;
-                        color: Theme.on-surface;
-                        font-family: Theme.font-mono;
-                        font-size: Theme.font-code;
-                        wrap: word-wrap;
-                    }
-                    for opt in data.pending-options:
-                        ChoiceButton {
-                            label: opt;
-                            clicked => { AppState.choice-clicked(data.pending-choice-id, opt); }
-                        }
-                }
-            }
-
         // Quickview footer — always present.
         QuickviewRow { quickview: data.quickview; }
     }
@@ -1593,53 +1563,6 @@ component ChatBubble inherits VerticalLayout {
 // Need-User-Input banner — mirrors the dashboard tile's pending-input footer
 // so users see the same affordance whether they're at the dashboard or inside
 // the session.
-component AttentionBanner inherits Rectangle {
-    background: #0f172a;
-    border-radius: Theme.radius-xl;
-    border-width: 1px;
-    border-color: Theme.primary;
-    // Top accent stripe (matches dashboard tile awaiting style).
-    Rectangle {
-        x: 0; y: 0;
-        width: parent.width; height: 3px;
-        background: Theme.primary;
-        border-radius: Theme.radius-xl;
-    }
-    VerticalLayout {
-        padding: Theme.s-4;
-        spacing: Theme.s-3;
-        // Badge row.
-        HorizontalLayout {
-            alignment: start;
-            spacing: Theme.s-2;
-            AwaitingBadge {}
-        }
-        // Question / prompt.
-        Text {
-            text: AppState.active-pending-choice
-                ? AppState.active-pending-question
-                : "Agents are waiting for your input.";
-            color: Theme.on-surface;
-            font-family: Theme.font-display;
-            font-size: Theme.font-head-md;
-            font-weight: Theme.w-semi;
-            wrap: word-wrap;
-        }
-        // Choice buttons (if any).
-        if AppState.active-pending-choice:
-            VerticalLayout {
-                spacing: Theme.s-2;
-                for opt in AppState.active-pending-options:
-                    ChoiceButton {
-                        label: opt;
-                        clicked => {
-                            AppState.choice-clicked(AppState.active-pending-choice-id, opt);
-                        }
-                    }
-            }
-    }
-}
-
 // Inline IPAV phase selector — text-only tabs with underline indicator.
 component PhasePill inherits Rectangle {
     in property <string> phase;
@@ -1880,15 +1803,8 @@ component SessionView inherits Rectangle {
                             }
                         }
 
-                    // Pending-input banner — fires only when the new tray isn't
-                    // already surfacing the questions (the tray is the modern
-                    // surface; banner is fallback for pre-migration sessions).
-                    if (AppState.active-pending-choice || AppState.active-awaiting)
-                        && AppState.active-questions.length == 0:
-                        AttentionBanner {}
-
-                    // Questions tray — collapsible. The chip in the header
-                    // toggles visibility. Renders nothing when no pending items.
+                    // Questions tray — sole source of truth for ALL questions
+                    // (choice + halt + open_ask). Toggle via the header chip.
                     if AppState.questions-tray-open && AppState.active-questions.length > 0:
                         QuestionsTray {
                             questions: AppState.active-questions;
