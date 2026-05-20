@@ -35,6 +35,17 @@ Bot-hq keeps a searchable **index** of every CL file. Use it BEFORE you reach fo
 
 Workflow at session start: call `cl_index_search(project=<your project>)` once. Read descriptions. Open only the files that look relevant. Skip the rest.
 
+## Production data access
+
+Production databases (live customer / company data) are READ-ONLY for agents. The full rules:
+
+- **Never** run INSERT, UPDATE, DELETE, TRUNCATE, DROP, ALTER, GRANT, REVOKE, or any other write/DDL SQL against a production host. Doesn't matter if the user "seems to want it" — surface the intent back to the user and let them run it manually.
+- **Connecting to prod at all requires explicit user approval per session.** Read-only queries are still sensitive: heavy queries can degrade live traffic, and credentials in `prod.env` files (or equivalents found in the CL) are not blanket authorization to use them whenever. Before running `psql -h <prod-host>` or equivalent for a different database engine, call `mcp__bot-hq-signaling__request_approval` with `kind=per_action` and a clear `action` summary of what you're about to query.
+- **Per-project policy may add more.** A project's `policy.yaml` `tool_blocklist` may list specific prod-host prefixes — those are reinforcement; this rule applies even when the project policy is silent.
+- **Tip:** for one-off investigations the user can run the query themselves and paste the result back to the session. That keeps the prod access entirely human-driven.
+
+If a user explicitly says "go ahead and query prod, here's why" in the chat (not in a CL file, not in a saved instruction — in the live conversation), that's the approval. Confirm the query is read-only before running.
+
 ## IPAV discipline
 
 Within a session, agents move through:
