@@ -22,10 +22,6 @@ export struct SessionTile {
     phase: string,
     last-activity: string,
     awaiting: bool,
-    pending-choice: bool,
-    pending-question: string,
-    pending-options: [string],
-    pending-choice-id: string,
     // How many pending user-input rows live in `session_questions` for this
     // session — sum of pending choices + halts + open-asks. Drives the
     // dashboard card's `[Need User Input · N]` chip. The full content lives
@@ -197,10 +193,6 @@ export global AppState {
     in-out property <string> active-phase;
     in-out property <string> active-title;
     in-out property <bool>   active-awaiting;
-    in-out property <bool>   active-pending-choice;
-    in-out property <string> active-pending-question;
-    in-out property <[string]> active-pending-options;
-    in-out property <string> active-pending-choice-id;
     // All currently-pending user-input items for the active session, sourced
     // from the durable `session_questions` table. The in-chat questions tray
     // reads this; the dashboard card reads only the count.

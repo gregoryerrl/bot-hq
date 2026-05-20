@@ -89,10 +89,6 @@ struct TileData {
     phase: String,
     last_activity: String,
     awaiting: bool,
-    pending_choice: bool,
-    pending_question: String,
-    pending_options: Vec<String>,
-    pending_choice_id: String,
     /// Live count of pending rows in `session_questions` for this session.
     /// Powers the dashboard card's `[Need User Input · N]` chip.
     pending_input_count: i32,
@@ -130,21 +126,12 @@ struct ChatMsgData {
 }
 
 fn tile_from_data(d: TileData) -> SessionTile {
-    let opts: Vec<SharedString> = d
-        .pending_options
-        .into_iter()
-        .map(SharedString::from)
-        .collect();
     SessionTile {
         id: SharedString::from(d.id),
         title: SharedString::from(d.title),
         phase: SharedString::from(d.phase),
         last_activity: SharedString::from(d.last_activity),
         awaiting: d.awaiting,
-        pending_choice: d.pending_choice,
-        pending_question: SharedString::from(d.pending_question),
-        pending_options: ModelRc::new(VecModel::from(opts)),
-        pending_choice_id: SharedString::from(d.pending_choice_id),
         pending_input_count: d.pending_input_count,
         quickview: SharedString::from(d.quickview),
     }
@@ -1442,10 +1429,6 @@ async fn refresh_dashboard(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
             phase,
             last_activity: s.created_at.clone(),
             awaiting: false,
-            pending_choice: false,
-            pending_question: String::new(),
-            pending_options: Vec::new(),
-            pending_choice_id: String::new(),
             pending_input_count,
             quickview,
         });
@@ -1472,14 +1455,9 @@ async fn refresh_dashboard(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
                 .map(|d| {
                     let mut new_tile = tile_from_data(d);
                     if let Some(prev) = carry.get(&new_tile.id.to_string()) {
+                        // Awaiting state survives across rebuilds; pending_input_count
+                        // is rebuilt fresh from storage on every tile build.
                         new_tile.awaiting = prev.awaiting;
-                        new_tile.pending_choice = prev.pending_choice;
-                        new_tile.pending_question = prev.pending_question.clone();
-                        new_tile.pending_options = prev.pending_options.clone();
-                        new_tile.pending_choice_id = prev.pending_choice_id.clone();
-                        // pending_input_count is sourced from storage on every
-                        // tile build, so we DON'T carry it from the prior tile —
-                        // the fresh sqlite count is the source of truth.
                     }
                     new_tile
                 })
@@ -1909,7 +1887,6 @@ async fn handle_signaling_event(
                     if app.get_active_session_id().to_string() == closed_id {
                         app.set_active_session_id(SharedString::new());
                         app.set_active_awaiting(false);
-                        app.set_active_pending_choice(false);
                     }
                 }
             });
@@ -1923,27 +1900,18 @@ async fn handle_signaling_event(
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(handle) = weak.upgrade() {
                     let app = handle.global::<SlintAppState>();
-                    let opts: Vec<SharedString> =
-                        p.options.iter().map(|s| SharedString::from(s.clone())).collect();
+                    // Emma has its own inline panel surface — populate the
+                    // emma-pending-* properties she still renders from.
                     if session_id == "emma" {
-                        // Emma has its own panel — route through emma-pending-*.
+                        let opts: Vec<SharedString> =
+                            p.options.iter().map(|s| SharedString::from(s.clone())).collect();
                         app.set_emma_pending_choice(true);
                         app.set_emma_pending_question(SharedString::from(p.question.clone()));
                         app.set_emma_pending_options(ModelRc::new(VecModel::from(opts)));
                         app.set_emma_pending_choice_id(SharedString::from(p.choice_id.clone()));
-                        return;
                     }
-                    let active = app.get_active_session_id().to_string();
-                    if active == session_id {
-                        app.set_active_pending_choice(true);
-                        app.set_active_pending_question(SharedString::from(p.question.clone()));
-                        app.set_active_pending_options(ModelRc::new(VecModel::from(opts)));
-                        app.set_active_pending_choice_id(SharedString::from(p.choice_id.clone()));
-                    }
-                    // Tile-level pending choice rendering (when not the active view).
-                    // The dashboard tile renders the same question + options
-                    // so the user can answer without opening the session.
-                    update_tile_pending_choice(&app, &p);
+                    // Duo sessions (brian + rain) render through the tray
+                    // exclusively — refresh handled below.
                 }
             });
             // Refresh the durable-storage-backed questions tray when this is
@@ -1984,37 +1952,14 @@ async fn handle_signaling_event(
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(handle) = weak.upgrade() {
                     let app = handle.global::<SlintAppState>();
-                    // Clear BOTH active-* and emma-* — we don't have the
-                    // session_id on the resolve event (signaling::bridge
-                    // doesn't carry it forward), so blank both surfaces.
-                    // Also walk tiles to clear any matching tile state.
-                    app.set_active_pending_choice(false);
-                    app.set_active_pending_question(SharedString::new());
-                    app.set_active_pending_options(ModelRc::new(VecModel::from(
-                        Vec::<SharedString>::new(),
-                    )));
-                    app.set_active_pending_choice_id(SharedString::new());
+                    // Clear Emma's inline panel state. Duo sessions render
+                    // through the tray, which refreshes from storage below.
                     app.set_emma_pending_choice(false);
                     app.set_emma_pending_question(SharedString::new());
                     app.set_emma_pending_options(ModelRc::new(VecModel::from(
                         Vec::<SharedString>::new(),
                     )));
                     app.set_emma_pending_choice_id(SharedString::new());
-                    // Clear pending state on whichever tile had it.
-                    let model = app.get_sessions();
-                    for i in 0..model.row_count() {
-                        if let Some(mut tile) = model.row_data(i) {
-                            if tile.pending_choice {
-                                tile.pending_choice = false;
-                                tile.pending_question = SharedString::new();
-                                tile.pending_options = ModelRc::new(VecModel::from(
-                                    Vec::<SharedString>::new(),
-                                ));
-                                tile.pending_choice_id = SharedString::new();
-                                model.set_row_data(i, tile);
-                            }
-                        }
-                    }
                 }
             });
             // ChoiceResolved doesn't carry session_id (bridge limitation), so
@@ -2138,22 +2083,12 @@ fn sync_active_from_tile(weak: &Weak<AppWindow>, session_id: &str) {
                 if let Some(tile) = model.row_data(i) {
                     if tile.id.to_string() == session_id {
                         app.set_active_awaiting(tile.awaiting);
-                        app.set_active_pending_choice(tile.pending_choice);
-                        app.set_active_pending_question(tile.pending_question.clone());
-                        app.set_active_pending_options(tile.pending_options.clone());
-                        app.set_active_pending_choice_id(tile.pending_choice_id.clone());
                         return;
                     }
                 }
             }
-            // No matching tile (e.g., emma) → clear everything.
+            // No matching tile (e.g., emma) → clear awaiting.
             app.set_active_awaiting(false);
-            app.set_active_pending_choice(false);
-            app.set_active_pending_question(SharedString::new());
-            app.set_active_pending_options(ModelRc::new(VecModel::from(
-                Vec::<SharedString>::new(),
-            )));
-            app.set_active_pending_choice_id(SharedString::new());
         }
     });
 }
@@ -2204,30 +2139,11 @@ fn clear_emma_awaiting(weak: &Weak<AppWindow>) {
     });
 }
 
-fn update_tile_pending_choice(app: &SlintAppState, p: &crate::signaling::PendingChoice) {
-    // Always update the tile regardless of whether this session is the
-    // currently-active one. Earlier we skipped active sessions on the theory
-    // that active-* pair held the truth — but when the user returned to the
-    // dashboard, the badge vanished because the tile was never set. Tile is
-    // now the source of truth; active-* is a mirror populated on session open.
-    let model = app.get_sessions();
-    for i in 0..model.row_count() {
-        if let Some(mut tile) = model.row_data(i) {
-            if tile.id.to_string() == p.session_id {
-                let opts: Vec<SharedString> =
-                    p.options.iter().map(|s| SharedString::from(s.clone())).collect();
-                tile.pending_choice = true;
-                tile.pending_question = SharedString::from(p.question.clone());
-                tile.pending_options = ModelRc::new(VecModel::from(opts));
-                tile.pending_choice_id = SharedString::from(p.choice_id.clone());
-                model.set_row_data(i, tile);
-            }
-        }
-    }
-}
-
 fn update_tile_awaiting(app: &SlintAppState, session_id: &str, awaiting: bool) {
-    // See update_tile_pending_choice — tile is the source of truth.
+    // The dashboard tile's awaiting flag is set here on AwaitingUser events
+    // and cleared by clear_awaiting_for when the user replies. pending_input_count
+    // is independently rebuilt from storage every refresh and drives the
+    // tile's [Need User Input · N] chip.
     let model = app.get_sessions();
     for i in 0..model.row_count() {
         if let Some(mut tile) = model.row_data(i) {
