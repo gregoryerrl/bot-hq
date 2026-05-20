@@ -81,9 +81,34 @@ pub fn audit_policy_files(
     caller_session: &str,
     caller_agent: &str,
 ) -> Result<Vec<(PathBuf, MutationOutcome)>> {
+    audit_policy_files_at_root(
+        data_dir,
+        project,
+        None,
+        log,
+        caller_session,
+        caller_agent,
+    )
+}
+
+/// Like [`audit_policy_files`] but accepts an explicit `project_root` so
+/// in-process callers that have already resolved `cl_path` don't duplicate the
+/// DB lookup. `None` falls back to the default convention.
+pub fn audit_policy_files_at_root(
+    data_dir: &Path,
+    project: Option<&str>,
+    project_root: Option<&Path>,
+    log: Option<&ViolationsLog>,
+    caller_session: &str,
+    caller_agent: &str,
+) -> Result<Vec<(PathBuf, MutationOutcome)>> {
     let mut targets: Vec<PathBuf> = vec![data_dir.join("general-policy.yaml")];
     if let Some(p) = project {
-        targets.push(data_dir.join("projects").join(p).join("policy.yaml"));
+        let proj_dir = match project_root {
+            Some(root) => root.to_path_buf(),
+            None => data_dir.join("projects").join(p),
+        };
+        targets.push(proj_dir.join("policy.yaml"));
     }
     let mut cache = HashCache::load(data_dir)?;
     let mut cache_dirty = false;

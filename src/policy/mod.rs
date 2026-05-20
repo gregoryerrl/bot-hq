@@ -24,7 +24,7 @@ pub mod hooks;
 pub mod session_permissions;
 pub mod violations;
 
-pub use audit::{audit_policy_files, MutationOutcome};
+pub use audit::{audit_policy_files, audit_policy_files_at_root, MutationOutcome};
 pub use hooks::{install_hooks, HookInstallReport};
 pub use session_permissions::{GrantScope, PermissionAction, SessionPermissions};
 pub use violations::{ViolationKind, ViolationOutcome, ViolationsLog};
@@ -138,6 +138,21 @@ impl Policy {
     pub fn resolve(
         data_dir: &Path,
         project: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<Self> {
+        Self::resolve_at_root(data_dir, project, None, session_id)
+    }
+
+    /// Like [`resolve`] but accepts an explicit `project_root` override so
+    /// callers that have already resolved a project's `cl_path` (via
+    /// [`Storage::cl_path_for_project`](crate::storage::Storage::cl_path_for_project))
+    /// don't pay a second DB lookup. `None` for `project_root` reverts to the
+    /// default convention (`<data_dir>/projects/<name>/`), which is what the
+    /// CLI hook context uses (no storage handle available).
+    pub fn resolve_at_root(
+        data_dir: &Path,
+        project: Option<&str>,
+        project_root: Option<&Path>,
         _session_id: Option<&str>,
     ) -> Result<Self> {
         let general_path = data_dir.join("general-policy.yaml");
@@ -145,7 +160,10 @@ impl Policy {
 
         let overlay = match project {
             Some(p) => {
-                let proj_path = data_dir.join("projects").join(p).join("policy.yaml");
+                let proj_path = match project_root {
+                    Some(root) => root.join("policy.yaml"),
+                    None => data_dir.join("projects").join(p).join("policy.yaml"),
+                };
                 load_one(&proj_path)?
             }
             None => None,

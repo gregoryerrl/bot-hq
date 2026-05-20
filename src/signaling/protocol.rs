@@ -281,6 +281,50 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
             }),
         },
         ToolDescriptor {
+            name: "cl_folder_search",
+            description: "Parallel to cl_index_search but for FOLDERS (directories) instead of files. Returns {project, folder_path, description, tags, updated_at} rows so agents can decide whether a folder is worth exploring without reading every file inside. `folder_path = \"\"` means the project root itself (the project-level description). Filter by project and/or substring query just like cl_index_search.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project name. Use the session's project for project-scoped folders, '_globals' for system-wide directories under the bot-hq root, or omit to search across all projects."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Optional case-insensitive substring filter over folder_path/description/tags."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDescriptor {
+            name: "cl_register_folder_description",
+            description: "Upsert a description for a CL folder. Mirrors cl_register_read's role for files but writes a stored description instead of an audit row. HANDS (brian) + Emma can call this; Rain (EYES) is denied — Rain reviews via cl_folder_search. `folder_path = \"\"` writes the project-root description.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project the folder belongs to (use '_globals' for the bot-hq root tree)."
+                    },
+                    "folder_path": {
+                        "type": "string",
+                        "description": "Folder path relative to the project's CL root. Empty string targets the project root itself."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "One-sentence description. Saved as-is into cl_folders.description."
+                    },
+                    "tags": {
+                        "type": "string",
+                        "description": "Optional comma-separated search hooks (e.g. 'PR-382, schema-v3')."
+                    }
+                },
+                "required": ["project", "folder_path", "description"]
+            }),
+        },
+        ToolDescriptor {
             name: "grant_session_permission",
             description: "Record a SESSION-LEVEL grant so subsequent commits or pushes don't have to ask for approval. Call this when the user says something like 'you can commit', 'you can push', 'you can commit and push', or 'you can push on this branch'. The grant lives in the bridge's in-memory cache + a mirrored JSON file the git hooks read. It is wiped when the session closes (next session starts fresh). For permanent grants across sessions, the user has to hand-edit policy.yaml — there's no tool for that yet. `scope` controls breadth: 'all' grants every branch for the rest of the session; 'specific' grants only the listed branches.",
             input_schema: serde_json::json!({

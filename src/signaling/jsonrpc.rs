@@ -96,6 +96,11 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     "revoke_session_permission",
 ];
 
+/// Tools that mutate CL annotations (folder descriptions, etc.). Brian (HANDS)
+/// and Emma (solo helper) own mutations; Rain (EYES) reviews via the read
+/// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
+const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
+
 async fn call_tool(
     name: &str,
     args: Value,
@@ -106,6 +111,11 @@ async fn call_tool(
         return Ok(ToolCallResult::error(format!(
             "tool '{name}' is reserved for the HANDS agent (brian); {} is the EYES role and should not invoke user-facing tools",
             caller.agent
+        )));
+    }
+    if CL_MUTATE_TOOLS.contains(&name) && caller.agent == "rain" {
+        return Ok(ToolCallResult::error(format!(
+            "tool '{name}' is reserved for HANDS (brian) and the solo helper (emma); rain is EYES — read folder descriptions via cl_folder_search instead",
         )));
     }
     match name {
@@ -235,16 +245,9 @@ async fn call_tool(
             // quietly modified policy.yaml to remove forbidden words,
             // PolicyMutation gets logged and the user sees it post-hoc.
             // v1 is audit-only; the check below still uses the new content.
-            if let Some(data_dir) = bridge.data_dir() {
-                let project = bridge.project_for_session(&caller.session_id).await;
-                let _ = crate::policy::audit_policy_files(
-                    data_dir,
-                    project.as_deref(),
-                    bridge.violations_log(),
-                    &caller.session_id,
-                    &caller.agent,
-                );
-            }
+            let _ = bridge
+                .audit_policy_files_for_session(&caller.session_id, &caller.agent)
+                .await;
             let policy = bridge
                 .resolve_policy_for(&caller.session_id)
                 .await
@@ -404,6 +407,64 @@ async fn call_tool(
                 .await
                 .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
             Ok(ToolCallResult::text("recorded"))
+        }
+        "cl_folder_search" => {
+            let project = args.get("project").and_then(Value::as_str);
+            let query = args.get("query").and_then(Value::as_str);
+            let rows = bridge
+                .cl_folder_search(project, query)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            let trimmed: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "project": r.project_id,
+                        "folder_path": r.folder_path,
+                        "description": r.description,
+                        "tags": r.tags,
+                        "updated_at": r.updated_at,
+                    })
+                })
+                .collect();
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&trimmed).unwrap_or_else(|_| "[]".into()),
+            ))
+        }
+        "cl_register_folder_description" => {
+            let project = args
+                .get("project")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing project"))?
+                .to_string();
+            let folder_path = args
+                .get("folder_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing folder_path")
+                })?
+                .to_string();
+            let description = args
+                .get("description")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing description")
+                })?
+                .to_string();
+            let tags = args
+                .get("tags")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            bridge
+                .cl_register_folder_description(
+                    &project,
+                    &folder_path,
+                    &description,
+                    tags.as_deref(),
+                )
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            Ok(ToolCallResult::text("ok"))
         }
         "cl_rescan" => {
             let project = args

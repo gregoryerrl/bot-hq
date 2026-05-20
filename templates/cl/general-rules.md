@@ -28,7 +28,9 @@ Prose questions to the user are detectable but discouraged; always prefer the st
 Bot-hq keeps a searchable **index** of every CL file. Use it BEFORE you reach for `Read` on a CL path. The index returns lightweight `{file_path, description, tags, updated_at}` rows — descriptions are written by the user (or auto-extracted from H1 on initial backfill) so you can decide what's worth opening without burning context on irrelevant files.
 
 - `cl_index_search(project, query?)` — list relevant CL files. Pass your session's working project name (e.g. `"bcc-ad-manager"`) for project-scoped notes. Pass `"_globals"` for system rules + cross-project files. Omit `project` to search everything. Optional `query` does a case-insensitive substring filter across file_path/description/tags.
+- `cl_folder_search(project, query?)` — parallel to `cl_index_search` but for FOLDERS instead of files. Returns `{folder_path, description, tags, updated_at}` so you can scope a sweep before pulling individual files. `folder_path = ""` rows are project-root descriptions.
 - `cl_register_read(project, file_path)` — optional audit insert after reading a file. Powers a future "what context did this agent have?" view. Fire-and-forget.
+- `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. HANDS (brian) and Emma can call this; Rain is denied (read folder descriptions via `cl_folder_search`).
 - `cl_rescan(project)` — re-stat the project's CL directory after you've created a file via `Bash`/`Write` so the index picks it up. Cheap, idempotent.
 
 **`_globals` is not a real working project** — it's a bucket for system-level CL (general-rules.md, agent custom instructions). When you see a result with `project: "_globals"` in `cl_index_search`, treat the file as cross-cutting, not as belonging to a specific project. Don't `working_repo_path`-style reasoning about it.

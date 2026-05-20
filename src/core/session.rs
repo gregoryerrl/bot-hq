@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use crate::core::ipav::IpavPhase;
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -121,12 +121,22 @@ async fn spawn_session_handle(
         .register_session(session.id.clone(), project.clone())
         .await;
 
+    // Resolve the project's on-disk CL root once. Honors `projects.cl_path`
+    // (folder-view registration with non-default location) and falls back to
+    // the convention `<data_dir>/projects/<name>/`. Used for both the policy
+    // audit and the per-agent system prompt below.
+    let project_root: Option<PathBuf> = match project.as_deref() {
+        Some(p) => storage.cl_path_for_project(&paths.data_dir, p).await.ok(),
+        None => None,
+    };
+
     // Audit policy.yaml files for mutations BEFORE we load them into the
     // system prompt. If the agent (or some other process) modified a policy
     // file between sessions, we want it logged. v1 is audit-only.
-    if let Err(err) = crate::policy::audit_policy_files(
+    if let Err(err) = crate::policy::audit_policy_files_at_root(
         &paths.data_dir,
         project.as_deref(),
+        project_root.as_deref(),
         bridge.violations_log(),
         &session.id,
         "<session-spawn>",
@@ -194,6 +204,7 @@ async fn spawn_session_handle(
         brian_cfg,
         paths,
         &project,
+        project_root.as_deref(),
         signaling_addr,
         mcp_temp.path(),
         working_repo_path.clone(),
@@ -205,6 +216,7 @@ async fn spawn_session_handle(
         rain_cfg,
         paths,
         &project,
+        project_root.as_deref(),
         signaling_addr,
         mcp_temp.path(),
         working_repo_path.clone(),
@@ -279,11 +291,13 @@ async fn spawn_agent_for(
     config: AgentConfig,
     paths: &Paths,
     project: &Option<String>,
+    project_root: Option<&Path>,
     signaling_addr: SocketAddr,
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
 ) -> Result<AgentHandle> {
-    let system_prompt = read_system_prompt(paths, agent_name, project.as_deref())?;
+    let system_prompt =
+        read_system_prompt(paths, agent_name, project.as_deref(), project_root)?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
     let user_servers = user_mcp_servers_for_agent(agent_name);
     let json = mcp_config_json(signaling_addr, session_id, agent_name, &user_servers);
@@ -343,7 +357,12 @@ pub fn user_mcp_servers_for_agent(
 ///
 /// Missing optional files are logged at debug and skipped. Policy parse
 /// errors propagate — broken YAML should surface loudly.
-pub fn read_system_prompt(paths: &Paths, agent: &str, project: Option<&str>) -> Result<String> {
+pub fn read_system_prompt(
+    paths: &Paths,
+    agent: &str,
+    project: Option<&str>,
+    project_root: Option<&Path>,
+) -> Result<String> {
     let mut out = String::new();
 
     // 1. Hardcoded role.
@@ -371,9 +390,12 @@ pub fn read_system_prompt(paths: &Paths, agent: &str, project: Option<&str>) -> 
          project>)` BEFORE reaching for `Read` on any CL path. Pass \
          `\"_globals\"` for system-level / cross-project notes, your \
          session's project name for project-scoped notes, or omit `project` \
-         to search everything. Tool signatures for `cl_index_search`, \
-         `cl_register_read`, `cl_rescan` are in the general-rules section \
-         below.\n\n\
+         to search everything. Folders carry their own descriptions in \
+         `cl_folders` — `cl_folder_search(project=<your project>)` returns \
+         folder-level summaries so you can scope a sweep before opening \
+         individual files. Tool signatures for `cl_index_search`, \
+         `cl_folder_search`, `cl_register_read`, `cl_rescan` are in the \
+         general-rules section below.\n\n\
          **Bare-filename heuristic.** If the user references a bare \
          filename (e.g. \"work on task 1 from tasks.md\", \"check eod.md\") \
          and it's NOT in your working repo, do NOT keep `Glob`-searching \
@@ -414,9 +436,12 @@ pub fn read_system_prompt(paths: &Paths, agent: &str, project: Option<&str>) -> 
         }
     }
 
-    // 4. Policy directive block — project-aware.
-    let policy = crate::policy::Policy::resolve(&paths.data_dir, project, None)
-        .context("resolving project policy")?;
+    // 4. Policy directive block — project-aware. Honors a non-default
+    // `projects.cl_path` when the caller resolved one (folder-view
+    // registration with an off-convention location).
+    let policy =
+        crate::policy::Policy::resolve_at_root(&paths.data_dir, project, project_root, None)
+            .context("resolving project policy")?;
     let block = policy.render_system_prompt_block();
     if !block.is_empty() {
         out.push_str(&block);
@@ -452,6 +477,7 @@ pub async fn spawn_emma_handle(
         emma_cfg,
         paths,
         &None, // no project
+        None,  // no project_root
         signaling_addr,
         mcp_temp.path(),
         None, // no working dir
@@ -585,7 +611,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
         // Hardcoded role from agents::prompts — identity + duo + ask-close.
         assert!(prompt.contains("HANDS"));
         assert!(prompt.contains("BRAIN"));
@@ -604,7 +630,7 @@ mod tests {
             "BRIAN_CUSTOM_PREFS_X9Q",
         )
         .unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
         assert!(prompt.contains("BRIAN_CUSTOM_PREFS_X9Q"));
     }
 
@@ -622,7 +648,7 @@ mod tests {
         std::fs::write(pdir.join("notes.md"), "FOO_NOTES_M1").unwrap();
         std::fs::write(pdir.join("decisions.md"), "FOO_DECISIONS_M1").unwrap();
 
-        let prompt = read_system_prompt(&paths, "brian", Some("foo")).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", Some("foo"), None).unwrap();
         assert!(!prompt.contains("FOO_CONVENTIONS_M1"));
         assert!(!prompt.contains("FOO_NOTES_M1"));
         assert!(!prompt.contains("FOO_DECISIONS_M1"));
@@ -638,7 +664,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
         assert!(prompt.contains("cl_index_search"));
         assert!(prompt.contains("Index-first"));
         // Regression: when the user mentions a bare filename (tasks.md,
@@ -655,7 +681,7 @@ mod tests {
         paths.init().unwrap();
         // Nothing in agents/<name>/, no general-rules.md — should still produce
         // a prompt with at minimum the hardcoded role.
-        let prompt = read_system_prompt(&paths, "rain", Some("nonexistent")).unwrap();
+        let prompt = read_system_prompt(&paths, "rain", Some("nonexistent"), None).unwrap();
         assert!(prompt.contains("EYES"));
     }
 }

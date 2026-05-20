@@ -378,13 +378,63 @@ impl SignalingBridge {
             return Ok(Policy::default());
         };
         let project = self.project_for_session(session_id).await;
-        Policy::resolve(data_dir, project.as_deref(), Some(session_id))
+        let project_root = match project.as_deref() {
+            Some(p) => {
+                let guard = self.storage.lock().await;
+                match guard.as_ref() {
+                    Some(storage) => storage.cl_path_for_project(data_dir, p).await.ok(),
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        Policy::resolve_at_root(
+            data_dir,
+            project.as_deref(),
+            project_root.as_deref(),
+            Some(session_id),
+        )
     }
 
     /// Direct access to the violations log (e.g., for the UI's recent-events
     /// panel). None when the bridge was constructed without a log.
     pub fn violations_log(&self) -> Option<&ViolationsLog> {
         self.violations.as_ref()
+    }
+
+    /// Audit `<data_dir>/general-policy.yaml` + the project's policy.yaml for
+    /// mutations, honoring a non-default `projects.cl_path` when set. Wraps
+    /// [`crate::policy::audit_policy_files_at_root`] for callers that only
+    /// have a `(session_id, agent)` pair and don't want to thread storage
+    /// through themselves. No-ops silently when the bridge has no `data_dir`.
+    pub async fn audit_policy_files_for_session(
+        &self,
+        session_id: &str,
+        caller_agent: &str,
+    ) -> Result<()> {
+        let Some(data_dir) = self.data_dir.as_ref() else {
+            return Ok(());
+        };
+        let project = self.project_for_session(session_id).await;
+        let project_root = match project.as_deref() {
+            Some(p) => {
+                let guard = self.storage.lock().await;
+                match guard.as_ref() {
+                    Some(storage) => storage.cl_path_for_project(data_dir, p).await.ok(),
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        crate::policy::audit_policy_files_at_root(
+            data_dir,
+            project.as_deref(),
+            project_root.as_deref(),
+            self.violations.as_ref(),
+            session_id,
+            caller_agent,
+        )?;
+        Ok(())
     }
 
     /// CL root path — used by callers that need to read auxiliary files
@@ -853,13 +903,22 @@ impl SignalingBridge {
     // ---- Context Library (CL) index ------------------------------------
 
     /// Resolve the on-disk root for a project's CL files. `_globals` maps to
-    /// the bot-hq data dir itself; named projects map to `<data_dir>/projects/<name>`.
-    fn cl_project_root(&self, project: &str) -> Option<PathBuf> {
-        let data_dir = self.data_dir.as_ref()?;
+    /// the bot-hq data dir itself; named projects honor `projects.cl_path`
+    /// when set, otherwise fall back to `<data_dir>/projects/<name>`.
+    /// Returns None only when the bridge has no `data_dir` configured (test
+    /// bridges built via `new()`).
+    async fn cl_project_root(&self, project: &str) -> Option<PathBuf> {
+        let data_dir = self.data_dir.as_ref()?.clone();
         if project == Project::GLOBALS {
-            Some(data_dir.clone())
-        } else {
-            Some(data_dir.join("projects").join(project))
+            return Some(data_dir);
+        }
+        let storage_guard = self.storage.lock().await;
+        match storage_guard.as_ref() {
+            Some(storage) => storage
+                .cl_path_for_project(&data_dir, project)
+                .await
+                .ok(),
+            None => Some(data_dir.join("projects").join(project)),
         }
     }
 
@@ -874,6 +933,47 @@ impl SignalingBridge {
             return Ok(Vec::new());
         };
         storage.cl_index_search(project, query).await
+    }
+
+    /// Read-side discovery for FOLDER descriptions. Parallel to
+    /// [`cl_index_search`]. Returns lightweight rows; empty list when storage
+    /// isn't configured (test bridges).
+    pub async fn cl_folder_search(
+        &self,
+        project: Option<&str>,
+        query: Option<&str>,
+    ) -> Result<Vec<crate::storage::ClFolder>> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        storage.cl_folder_search(project, query).await
+    }
+
+    /// Write-side for agents: upsert a folder description. The jsonrpc layer
+    /// gates this to HANDS (brian) + Emma; Rain is denied.
+    pub async fn cl_register_folder_description(
+        &self,
+        project: &str,
+        folder_path: &str,
+        description: &str,
+        tags: Option<&str>,
+    ) -> Result<()> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(());
+        };
+        // Ensure the project row exists. _globals is bootstrapped by the
+        // initial migration; named projects might not have an upsert yet.
+        if project != Project::GLOBALS {
+            storage
+                .upsert_project(project, project, None, None, None)
+                .await?;
+        }
+        storage
+            .upsert_folder_description(project, folder_path, description, tags)
+            .await?;
+        Ok(())
     }
 
     /// Record an audit row: this agent (in this session) read this file.
@@ -911,7 +1011,7 @@ impl SignalingBridge {
         let Some(storage) = storage_guard.as_ref() else {
             return Ok(report);
         };
-        let Some(root) = self.cl_project_root(project) else {
+        let Some(root) = self.cl_project_root(project).await else {
             return Ok(report);
         };
         if !root.is_dir() {
