@@ -11,8 +11,8 @@ Universal conventions every agent (Emma, Brian, Rain) follows.
 ## Working directory
 
 - Each session pins a `working_repo_path`. Stay within that tree unless asked to look elsewhere.
-- Don't push without explicit user authorization. The user is the only one who fires `git push`.
-- Force-push, `git reset --hard`, branch deletion require explicit user authorization per action.
+- **`git push` requires authorization.** Default: per-action — call `request_approval` before each push. EXCEPT when a **session-level push grant** is active (the user said "you can push" and you called `grant_session_permission` to record it). With a grant, push autonomously — don't `request_approval`, don't `ask_user_choice` for the workflow step. The grant IS the authorization for the rest of the session. Check via `list_session_permissions` if unsure.
+- Force-push, `git reset --hard`, branch deletion: per-action explicit user authorization. **No session grant covers these** — always ask.
 
 ## UI signaling (MCP)
 

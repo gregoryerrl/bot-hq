@@ -38,6 +38,16 @@ use std::process::Command;
 /// re-install / detect manual edits.
 const MANAGED_MARKER: &str = "# managed-by: bot-hq policy-check";
 
+/// Session id surfaced by the agent's subprocess env (set by `spawn.rs`).
+/// Used by `Policy::resolve` to overlay session-scoped approvals so the
+/// pre-push hook sees the branch that was approved during this session.
+fn hook_session_id() -> Option<String> {
+    std::env::var("BOT_HQ_SESSION_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// CLI entrypoint. Dispatches `bot-hq policy-check <sub> ...`.
 /// Returns the desired process exit code.
 pub fn run_cli(args: &[String]) -> Result<i32> {
@@ -119,7 +129,7 @@ fn run_commit_msg(
     msg_path: &Path,
 ) -> Result<i32> {
     audit_at_hook(data_dir, project, "commit-msg");
-    let policy = Policy::resolve(data_dir, project)?;
+    let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
@@ -154,7 +164,7 @@ fn run_commit_msg(
 /// commit-msg because pre-commit fires before git parses `-m`.
 fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-commit");
-    let policy = Policy::resolve(data_dir, project)?;
+    let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
@@ -207,7 +217,7 @@ fn run_post_commit(
     session: Option<&str>,
 ) -> Result<i32> {
     audit_at_hook(data_dir, project, "post-commit");
-    let policy = Policy::resolve(data_dir, project)?;
+    let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
     }
@@ -248,17 +258,33 @@ fn run_post_commit(
     Ok(0)
 }
 
-/// pre-push handler. If push_gate is enabled and the current branch is not
-/// in `remembered_approvals`, block with a message telling the agent to
-/// call `request_approval` first.
+/// pre-push handler. Allows the push if:
+///   1. push_gate.mode == auto, OR
+///   2. the session has a session-level push grant covering this branch
+///      (read from `.local/session-permissions/<sid>.json`), OR
+///   3. the branch is in the static `remembered_approvals` list in policy.yaml.
+/// Otherwise blocks with a message telling the agent how to ask for a grant.
 fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-push");
-    let policy = Policy::resolve(data_dir, project)?;
+    let session_id = hook_session_id();
+    let policy = Policy::resolve(data_dir, project, session_id.as_deref())?;
     use crate::policy::PushGateMode;
     if matches!(policy.push_gate.mode, PushGateMode::Auto) {
         return Ok(0);
     }
     let branch = current_branch().unwrap_or_else(|| "<detached>".into());
+
+    // Session-level grant: read the mirrored permissions file (if any).
+    if let Some(sid) = session_id.as_deref() {
+        if let Ok(Some(perm)) =
+            crate::policy::session_permissions::read_session_permission(data_dir, sid)
+        {
+            if perm.allows_push(&branch) {
+                return Ok(0);
+            }
+        }
+    }
+
     if matches!(policy.push_gate.mode, PushGateMode::PerBranchApproval)
         && policy.push_gate.remembered_approvals.contains(&branch)
     {
@@ -271,10 +297,16 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
          Branch '{branch}' is not approved for push (policy.push_gate.mode={mode}).\n\
          \n\
-         Agent: call `mcp__bot-hq-signaling__request_approval` with\n\
-         kind=\"push_gate\", action=\"git push origin {branch}\".\n\
-         User clicks Approve in the bot-hq UI → branch is added to\n\
-         remembered_approvals; next push proceeds.\n",
+         Two ways to unblock:\n\
+         1. Per-push approval: agent calls \
+         `mcp__bot-hq-signaling__request_approval` with\n\
+            kind=\"push_gate\", action=\"git push origin {branch}\". User \
+         clicks Approve.\n\
+         2. Session-wide grant: user says \"you can push\" in chat → agent \
+         calls\n\
+            `mcp__bot-hq-signaling__grant_session_permission` with \
+         action=\"push\".\n\
+            All subsequent pushes in this session are auto-allowed.\n",
         mode = policy.push_gate.mode.label_str()
     );
     Ok(1)

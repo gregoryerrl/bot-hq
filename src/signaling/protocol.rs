@@ -256,6 +256,55 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                 "required": ["project"]
             }),
         },
+        ToolDescriptor {
+            name: "grant_session_permission",
+            description: "Record a SESSION-LEVEL grant so subsequent commits or pushes don't have to ask for approval. Call this when the user says something like 'you can commit', 'you can push', 'you can commit and push', or 'you can push on this branch'. The grant lives in the bridge's in-memory cache + a mirrored JSON file the git hooks read. It is wiped when the session closes (next session starts fresh). For permanent grants across sessions, the user has to hand-edit policy.yaml — there's no tool for that yet. `scope` controls breadth: 'all' grants every branch for the rest of the session; 'specific' grants only the listed branches.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["commit", "push"],
+                        "description": "Which action the grant applies to."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["all", "specific"],
+                        "description": "'all' = any branch in this session; 'specific' = only the branches in `branches`."
+                    },
+                    "branches": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Required when scope='specific'. List of branch names to grant. Ignored when scope='all'."
+                    }
+                },
+                "required": ["action", "scope"]
+            }),
+        },
+        ToolDescriptor {
+            name: "revoke_session_permission",
+            description: "Reset a session-level grant back to None — subsequent commits/pushes for `action` will require approval again. Call this when the user explicitly takes back permission ('stop pushing on your own', 'ask before committing').",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["commit", "push"],
+                        "description": "Which action to revoke."
+                    }
+                },
+                "required": ["action"]
+            }),
+        },
+        ToolDescriptor {
+            name: "list_session_permissions",
+            description: "Return the current session permissions (commit + push grant scopes). Useful for the agent to introspect before deciding whether to call `request_approval`. Returns { commit: {kind, branches?}, push: {kind, branches?} }.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
     ]
 }
 

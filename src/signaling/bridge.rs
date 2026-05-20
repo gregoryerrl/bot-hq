@@ -137,6 +137,13 @@ pub struct SignalingBridge {
     /// message poll. None on bridges constructed before storage is wired
     /// (test bridges + the pre-storage window in main).
     storage: Mutex<Option<Storage>>,
+    /// session_id → granted permissions (commit / push grant scopes). The
+    /// in-memory cache is the source of truth; we mirror to a JSON file under
+    /// `<data_dir>/.local/session-permissions/<session_id>.json` so the git
+    /// pre-push hook (a separate subprocess) can read the grant without an
+    /// HTTP roundtrip. Dropped + file deleted by `cleanup_session_permissions`
+    /// on session close.
+    session_permissions: Mutex<HashMap<String, crate::policy::SessionPermissions>>,
 }
 
 impl SignalingBridge {
@@ -150,6 +157,7 @@ impl SignalingBridge {
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
+            session_permissions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -165,6 +173,7 @@ impl SignalingBridge {
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
+            session_permissions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -181,6 +190,7 @@ impl SignalingBridge {
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
+            session_permissions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -220,6 +230,135 @@ impl SignalingBridge {
         }
     }
 
+    // ---- Session permissions ----------------------------------------
+
+    /// Set the grant scope for `action` on this session. Overwrites any prior
+    /// grant for the same action. Mirrors the new cache state to
+    /// `<data_dir>/.local/session-permissions/<session_id>.json` so the
+    /// pre-push hook can see it.
+    pub async fn grant_session_permission(
+        &self,
+        session_id: &str,
+        action: crate::policy::PermissionAction,
+        scope: crate::policy::GrantScope,
+    ) -> Result<()> {
+        let mut map = self.session_permissions.lock().await;
+        let perm = map
+            .entry(session_id.to_string())
+            .or_insert_with(crate::policy::SessionPermissions::default);
+        perm.set(action, scope);
+        let snapshot = perm.clone();
+        drop(map);
+        if let Some(data_dir) = &self.data_dir {
+            crate::policy::session_permissions::write_session_permission(
+                data_dir,
+                session_id,
+                &snapshot,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Revoke (reset to None) the grant for `action`. Idempotent on absent
+    /// grants. Re-mirrors the file.
+    pub async fn revoke_session_permission(
+        &self,
+        session_id: &str,
+        action: crate::policy::PermissionAction,
+    ) -> Result<()> {
+        let mut map = self.session_permissions.lock().await;
+        let perm = map
+            .entry(session_id.to_string())
+            .or_insert_with(crate::policy::SessionPermissions::default);
+        perm.set(action, crate::policy::GrantScope::None);
+        let snapshot = perm.clone();
+        drop(map);
+        if let Some(data_dir) = &self.data_dir {
+            crate::policy::session_permissions::write_session_permission(
+                data_dir,
+                session_id,
+                &snapshot,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Read the current permissions for this session. Returns the default
+    /// (no grants) if nothing has been recorded.
+    pub async fn list_session_permissions(
+        &self,
+        session_id: &str,
+    ) -> crate::policy::SessionPermissions {
+        self.session_permissions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Drop the cache entry + delete the mirrored file. Called by
+    /// `core::state::close_session` when the session closes.
+    pub async fn cleanup_session_permissions(&self, session_id: &str) -> Result<()> {
+        self.session_permissions
+            .lock()
+            .await
+            .remove(session_id);
+        if let Some(data_dir) = &self.data_dir {
+            crate::policy::session_permissions::delete_session_permission(
+                data_dir,
+                session_id,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Internal helper: add `branch` to the existing push grant's Specific
+    /// branch list, or upgrade None → Specific{[branch]}. AllBranches is left
+    /// untouched (no point narrowing). Used by `resolve_choice` to record
+    /// per-push approvals as a session-level grant.
+    async fn add_branch_to_session_grant(
+        &self,
+        session_id: &str,
+        action: crate::policy::PermissionAction,
+        branch: String,
+    ) -> Result<()> {
+        use crate::policy::GrantScope;
+        let mut map = self.session_permissions.lock().await;
+        let perm = map
+            .entry(session_id.to_string())
+            .or_insert_with(crate::policy::SessionPermissions::default);
+        let current = match action {
+            crate::policy::PermissionAction::Commit => &mut perm.commit,
+            crate::policy::PermissionAction::Push => &mut perm.push,
+        };
+        match current {
+            GrantScope::None => {
+                *current = GrantScope::Specific {
+                    branches: vec![branch],
+                };
+            }
+            GrantScope::Specific { branches } => {
+                if !branches.iter().any(|b| b == &branch) {
+                    branches.push(branch);
+                }
+            }
+            GrantScope::AllBranches => { /* already broader */ }
+        }
+        let snapshot = perm.clone();
+        drop(map);
+        if let Some(data_dir) = &self.data_dir {
+            crate::policy::session_permissions::write_session_permission(
+                data_dir,
+                session_id,
+                &snapshot,
+            )?;
+        }
+        Ok(())
+    }
+
+    // ---- Project helpers --------------------------------------------
+
     /// Best-effort lookup. Returns the registered project (if any) or None
     /// if the session isn't registered yet (e.g., the seeded `"emma"` row).
     pub async fn project_for_session(&self, session_id: &str) -> Option<String> {
@@ -239,7 +378,7 @@ impl SignalingBridge {
             return Ok(Policy::default());
         };
         let project = self.project_for_session(session_id).await;
-        Policy::resolve(data_dir, project.as_deref())
+        Policy::resolve(data_dir, project.as_deref(), Some(session_id))
     }
 
     /// Direct access to the violations log (e.g., for the UI's recent-events
@@ -451,32 +590,29 @@ impl SignalingBridge {
                         .await;
                 }
 
-                // Persist a push_gate approval to the `.remembered-approvals`
-                // side-file so the git pre-push hook (which calls
-                // `Policy::resolve` fresh on every push) sees the branch and
-                // lets subsequent pushes proceed. Without this step, the MCP
-                // approval is audit-only and the hook re-blocks indefinitely.
-                if let (Some(ctx), Some(data_dir)) = (&p.choice.approval, &self.data_dir) {
+                // Approved push_gate via `request_approval` ALSO records a
+                // session-level push grant for the branch — so a second push to
+                // the same branch in this session won't re-prompt. The grant
+                // persists in the in-memory cache + mirrored JSON file; it is
+                // wiped on session close + on bot-hq restart.
+                if let (Some(ctx), Some(_)) = (&p.choice.approval, &self.data_dir) {
                     if matches!(ctx.kind, crate::policy::ViolationKind::PushGate)
                         && matches!(outcome, crate::policy::ViolationOutcome::Approved)
                     {
                         if let Some(branch) = parse_push_branch(&ctx.action) {
-                            let project = self
-                                .session_projects
-                                .lock()
+                            if let Err(e) = self
+                                .add_branch_to_session_grant(
+                                    &p.choice.session_id,
+                                    crate::policy::PermissionAction::Push,
+                                    branch.clone(),
+                                )
                                 .await
-                                .get(&p.choice.session_id)
-                                .cloned()
-                                .flatten();
-                            if let Err(e) = crate::policy::Policy::append_remembered_approval(
-                                data_dir,
-                                project.as_deref(),
-                                &branch,
-                            ) {
+                            {
                                 tracing::warn!(
                                     ?e,
                                     branch = %branch,
-                                    "append_remembered_approval failed; pre-push hook may re-block"
+                                    session_id = %p.choice.session_id,
+                                    "session-grant update failed; pre-push hook may re-block"
                                 );
                             }
                         }
@@ -1051,14 +1187,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approved_push_gate_persists_branch_to_remembered_approvals() {
-        // Round-trip the bridge.resolve_choice → policy side-file → Policy::resolve
-        // path. After an approved push_gate, the branch must land in
-        // remembered_approvals so the pre-push hook stops blocking subsequent
-        // pushes.
+    async fn approved_push_gate_records_session_grant() {
+        // After an approved push_gate via request_approval, the bridge records
+        // a session-level push grant for that branch — so a second push to the
+        // same branch in this session won't re-prompt. The grant lives in the
+        // in-memory cache + a mirrored JSON file the hook can read.
         let dir = tempfile::tempdir().unwrap();
         let project = "test-project";
-        // Seed a project policy with per_branch_approval mode + no approvals yet
+        let session_id = "session-A";
         let proj_dir = dir.path().join("projects").join(project);
         std::fs::create_dir_all(&proj_dir).unwrap();
         std::fs::write(
@@ -1068,13 +1204,9 @@ mod tests {
         .unwrap();
 
         let log = ViolationsLog::new(dir.path());
-        let bridge =
-            SignalingBridge::with_policy(log.clone(), dir.path().to_path_buf());
+        let bridge = SignalingBridge::with_policy(log, dir.path().to_path_buf());
         bridge
-            .register_session(
-                "session-A".to_string(),
-                Some(project.to_string()),
-            )
+            .register_session(session_id.to_string(), Some(project.to_string()))
             .await;
 
         let mut sub = bridge.subscribe();
@@ -1082,7 +1214,7 @@ mod tests {
         let ask = tokio::spawn(async move {
             bridge_clone
                 .request_approval(
-                    "session-A".into(),
+                    session_id.into(),
                     "brian".into(),
                     "Approve push?".into(),
                     vec!["Approve push".into(), "Deny".into()],
@@ -1106,59 +1238,30 @@ mod tests {
             .unwrap();
         let _ = ask.await.unwrap();
 
-        // Branch is now in the side-file.
-        let approvals = std::fs::read_to_string(
-            proj_dir.join(".remembered-approvals"),
+        // Cache: push grant now includes the branch.
+        let perm = bridge.list_session_permissions(session_id).await;
+        assert!(perm.allows_push("346-streamline-onboarding-process"));
+        assert!(!perm.allows_push("some-other-branch"));
+
+        // File mirror: the hook can read the same grant.
+        let mirrored = crate::policy::session_permissions::read_session_permission(
+            dir.path(),
+            session_id,
         )
+        .unwrap()
         .unwrap();
-        assert!(approvals.contains("346-streamline-onboarding-process"));
+        assert!(mirrored.allows_push("346-streamline-onboarding-process"));
 
-        // Policy::resolve now picks it up.
-        let resolved = crate::policy::Policy::resolve(dir.path(), Some(project)).unwrap();
-        assert!(resolved
-            .push_gate
-            .remembered_approvals
-            .iter()
-            .any(|b| b == "346-streamline-onboarding-process"));
-
-        // Idempotent — second approval for the same branch doesn't duplicate.
-        let bridge_clone = Arc::clone(&bridge);
-        let ask2 = tokio::spawn(async move {
-            bridge_clone
-                .request_approval(
-                    "session-A".into(),
-                    "brian".into(),
-                    "Push again?".into(),
-                    vec!["Approve push".into(), "Deny".into()],
-                    ApprovalContext {
-                        kind: ViolationKind::PushGate,
-                        action: "git push origin 346-streamline-onboarding-process".into(),
-                        detail: None,
-                    },
-                )
-                .await
-                .unwrap()
-        });
-        // Drain any pending events (ChoiceResolved from the first round) until
-        // we land on the second PendingChoice.
-        let cid2 = loop {
-            match sub.recv().await.unwrap() {
-                SignalingEvent::PendingChoice(p) => break p.choice_id,
-                _ => continue,
-            }
-        };
-        bridge
-            .resolve_choice(&cid2, "Approve push".into())
-            .await
-            .unwrap();
-        let _ = ask2.await.unwrap();
-        let approvals_again =
-            std::fs::read_to_string(proj_dir.join(".remembered-approvals")).unwrap();
-        let occurrences = approvals_again
-            .lines()
-            .filter(|l| l.trim() == "346-streamline-onboarding-process")
-            .count();
-        assert_eq!(occurrences, 1, "branch should appear exactly once");
+        // cleanup_session_permissions wipes both cache + file.
+        bridge.cleanup_session_permissions(session_id).await.unwrap();
+        let after = bridge.list_session_permissions(session_id).await;
+        assert!(!after.allows_push("346-streamline-onboarding-process"));
+        assert!(crate::policy::session_permissions::read_session_permission(
+            dir.path(),
+            session_id,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[tokio::test]
@@ -1205,10 +1308,17 @@ mod tests {
         bridge.resolve_choice(&cid, "Deny".into()).await.unwrap();
         let _ = ask.await.unwrap();
 
-        let approvals_path = proj_dir.join(".remembered-approvals");
+        // No session grant should have been recorded for the denied branch.
+        let perm = bridge.list_session_permissions("s").await;
+        assert!(!perm.allows_push("denied-branch"));
         assert!(
-            !approvals_path.exists() || std::fs::read_to_string(&approvals_path).unwrap().is_empty(),
-            ".remembered-approvals should not contain denied branch"
+            crate::policy::session_permissions::read_session_permission(
+                dir.path(),
+                "s",
+            )
+            .unwrap()
+            .is_none(),
+            "no permission file should be written for a denied push"
         );
     }
 

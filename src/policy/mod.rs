@@ -21,10 +21,12 @@ use std::path::Path;
 
 pub mod audit;
 pub mod hooks;
+pub mod session_permissions;
 pub mod violations;
 
 pub use audit::{audit_policy_files, MutationOutcome};
 pub use hooks::{install_hooks, HookInstallReport};
+pub use session_permissions::{GrantScope, PermissionAction, SessionPermissions};
 pub use violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 
 /// Resolved policy for a (general + per-project) overlay.
@@ -129,12 +131,15 @@ impl Policy {
     /// - Either missing → contribute nothing (no error).
     /// - Parse errors return Err (loud — the user needs to know their YAML is broken).
     ///
-    /// Branches added at runtime via [`Policy::append_remembered_approval`]
-    /// land in a side-file (`.remembered-approvals`, one branch per line) and
-    /// are unioned into `push_gate.remembered_approvals` here. This keeps the
-    /// human-editable `policy.yaml` (with comments, formatting) untouched while
-    /// still letting the MCP layer persist runtime approvals.
-    pub fn resolve(data_dir: &Path, project: Option<&str>) -> Result<Self> {
+    /// `remembered_approvals` from `policy.yaml` are PERMANENT (user-curated).
+    /// `_session_id` is reserved for a future permanent-permissions-per-session
+    /// overlay; today it's unused. Session-level grants live in a separate
+    /// module ([`crate::policy::session_permissions`]).
+    pub fn resolve(
+        data_dir: &Path,
+        project: Option<&str>,
+        _session_id: Option<&str>,
+    ) -> Result<Self> {
         let general_path = data_dir.join("general-policy.yaml");
         let base = load_one(&general_path)?.unwrap_or_default();
 
@@ -146,62 +151,7 @@ impl Policy {
             None => None,
         };
 
-        let mut merged = merge(base, overlay);
-
-        let approvals_path = remembered_approvals_path(data_dir, project);
-        if let Ok(body) = std::fs::read_to_string(&approvals_path) {
-            for line in body.lines() {
-                let b = line.trim();
-                if !b.is_empty()
-                    && !merged
-                        .push_gate
-                        .remembered_approvals
-                        .iter()
-                        .any(|x| x == b)
-                {
-                    merged.push_gate.remembered_approvals.push(b.to_string());
-                }
-            }
-        }
-
-        Ok(merged)
-    }
-
-    /// Persist a branch to the `.remembered-approvals` side-file so that
-    /// subsequent `Policy::resolve` calls see it in `push_gate.remembered_approvals`.
-    /// Idempotent — already-present branches are a no-op. Atomic via append.
-    ///
-    /// Called by the bridge after an approved `push_gate` MCP approval so the
-    /// git pre-push hook (which calls `Policy::resolve` fresh on every push)
-    /// finds the branch and lets the push through.
-    pub fn append_remembered_approval(
-        data_dir: &Path,
-        project: Option<&str>,
-        branch: &str,
-    ) -> Result<()> {
-        use std::io::Write;
-        let path = remembered_approvals_path(data_dir, project);
-        let branch = branch.trim();
-        if branch.is_empty() {
-            return Ok(());
-        }
-        if let Ok(body) = std::fs::read_to_string(&path) {
-            if body.lines().any(|l| l.trim() == branch) {
-                return Ok(());
-            }
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating parent dir for {}", path.display()))?;
-        }
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
-        writeln!(f, "{branch}")
-            .with_context(|| format!("writing to {}", path.display()))?;
-        Ok(())
+        Ok(merge(base, overlay))
     }
 
     /// Returns true if `command` matches any prefix in `tool_blocklist`.
@@ -350,18 +300,6 @@ impl PushGateMode {
     }
 }
 
-/// Path for the runtime `.remembered-approvals` side-file. One branch per line.
-/// Per-project when `project` is Some; otherwise lives at the data-dir root for
-/// session-less callers (rare — sessions normally have a project).
-fn remembered_approvals_path(data_dir: &Path, project: Option<&str>) -> std::path::PathBuf {
-    match project {
-        Some(p) => data_dir
-            .join("projects")
-            .join(p)
-            .join(".remembered-approvals"),
-        None => data_dir.join(".remembered-approvals"),
-    }
-}
 
 fn load_one(path: &Path) -> Result<Option<Policy>> {
     let body = match std::fs::read_to_string(path) {
@@ -437,7 +375,7 @@ mod tests {
     #[test]
     fn missing_files_resolve_to_default() {
         let dir = tempdir().unwrap();
-        let p = Policy::resolve(dir.path(), Some("nope")).unwrap();
+        let p = Policy::resolve(dir.path(), Some("nope"), None).unwrap();
         assert_eq!(p, Policy::default());
         assert!(p.is_effectively_empty());
     }
@@ -453,7 +391,7 @@ mod tests {
             &dir.path().join("projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - bot-hq\n  - brian\n",
         );
-        let p = Policy::resolve(dir.path(), Some("foo")).unwrap();
+        let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
         // overlay replaces (not merges): only project list wins
         assert_eq!(p.forbidden_in_commits, vec!["bot-hq", "brian"]);
     }
@@ -465,7 +403,7 @@ mod tests {
             &dir.path().join("general-policy.yaml"),
             "forbidden_in_commits:\n  - Claude\n",
         );
-        let p = Policy::resolve(dir.path(), Some("nope")).unwrap();
+        let p = Policy::resolve(dir.path(), Some("nope"), None).unwrap();
         assert_eq!(p.forbidden_in_commits, vec!["Claude"]);
     }
 
@@ -476,7 +414,7 @@ mod tests {
             &dir.path().join("general-policy.yaml"),
             "this: is\n  :: not valid yaml\n  - mixed\n",
         );
-        let err = Policy::resolve(dir.path(), None).unwrap_err();
+        let err = Policy::resolve(dir.path(), None, None).unwrap_err();
         assert!(err.to_string().contains("parsing"));
     }
 

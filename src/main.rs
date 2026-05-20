@@ -48,6 +48,14 @@ fn main() -> Result<()> {
     let core: Arc<CoreAppState> = runtime.block_on(async {
         let storage = Storage::open(&paths.db_path).await?;
         let violations = ViolationsLog::new(&paths.data_dir);
+        // Bridge in-memory state is gone after a restart; any leftover
+        // session-permission JSON files would let a fresh session inherit
+        // grants it never earned. Wipe them all.
+        if let Err(e) =
+            bot_hq::policy::session_permissions::purge_all_session_permissions(&paths.data_dir)
+        {
+            tracing::warn!(?e, "purge_all_session_permissions failed at startup");
+        }
         let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
         // Wire storage into the bridge so out-of-band choice resolutions (when
         // the agent's blocking tool call already timed out client-side) can be

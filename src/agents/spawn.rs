@@ -57,6 +57,9 @@ pub struct SpawnConfig {
     pub working_dir: Option<PathBuf>,
     /// Override the claude binary (for tests). Defaults to `"claude"`.
     pub claude_bin: Option<String>,
+    /// Session this agent belongs to. Exported as `BOT_HQ_SESSION_ID` so
+    /// the git pre-push hook can resolve session-scoped approvals.
+    pub session_id: String,
 }
 
 /// Driver handle for one running agent subprocess.
@@ -167,6 +170,9 @@ fn build_command(cfg: &SpawnConfig) -> Command {
 
     // Env-vars per ARCHITECTURE.md "Agents" section.
     cmd.env("ANTHROPIC_MODEL", &cfg.config.model_name);
+    // BOT_HQ_SESSION_ID is read by the git pre-push hook to overlay
+    // session-scoped approvals onto the resolved policy.
+    cmd.env("BOT_HQ_SESSION_ID", &cfg.session_id);
     if let Some(token) = &cfg.config.auth_token {
         if !token.is_empty() {
             cmd.env("ANTHROPIC_AUTH_TOKEN", token);
@@ -218,6 +224,7 @@ mod tests {
             mcp_config_path: Some(Path::new("/tmp/mcp.json").to_path_buf()),
             working_dir: Some(Path::new("/tmp/repo").to_path_buf()),
             claude_bin: Some("claude".into()),
+            session_id: "test-session".into(),
         }
     }
 

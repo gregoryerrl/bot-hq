@@ -87,7 +87,13 @@ pub async fn dispatch(
 /// request approval) must come from Brian — the HANDS role. Rain is EYES, a
 /// read-only reviewer. Letting both agents race on these tools produced
 /// duplicate prompts and bounced awaiting state.
-const HANDS_ONLY_TOOLS: &[&str] = &["ask_user_choice", "mark_awaiting_user", "request_approval"];
+const HANDS_ONLY_TOOLS: &[&str] = &[
+    "ask_user_choice",
+    "mark_awaiting_user",
+    "request_approval",
+    "grant_session_permission",
+    "revoke_session_permission",
+];
 
 async fn call_tool(
     name: &str,
@@ -370,9 +376,76 @@ async fn call_tool(
                 serde_json::to_string(&report).unwrap_or_else(|_| "{}".into()),
             ))
         }
+        "grant_session_permission" => {
+            let action = parse_permission_action(args.get("action"))?;
+            let scope_str = args
+                .get("scope")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing scope"))?;
+            let scope = match scope_str {
+                "all" => crate::policy::GrantScope::AllBranches,
+                "specific" => {
+                    let branches: Vec<String> = args
+                        .get("branches")
+                        .and_then(Value::as_array)
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if branches.is_empty() {
+                        return Err(JsonRpcError::new(
+                            JsonRpcError::INVALID_PARAMS,
+                            "scope='specific' requires a non-empty `branches` array",
+                        ));
+                    }
+                    crate::policy::GrantScope::Specific { branches }
+                }
+                other => {
+                    return Err(JsonRpcError::new(
+                        JsonRpcError::INVALID_PARAMS,
+                        format!("unknown scope '{other}' (expected 'all' or 'specific')"),
+                    ));
+                }
+            };
+            bridge
+                .grant_session_permission(&caller.session_id, action, scope)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            Ok(ToolCallResult::text("granted"))
+        }
+        "revoke_session_permission" => {
+            let action = parse_permission_action(args.get("action"))?;
+            bridge
+                .revoke_session_permission(&caller.session_id, action)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            Ok(ToolCallResult::text("revoked"))
+        }
+        "list_session_permissions" => {
+            let perm = bridge.list_session_permissions(&caller.session_id).await;
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&perm).unwrap_or_else(|_| "{}".into()),
+            ))
+        }
         other => Err(JsonRpcError::new(
             JsonRpcError::METHOD_NOT_FOUND,
             format!("unknown tool {other}"),
+        )),
+    }
+}
+
+fn parse_permission_action(v: Option<&Value>) -> Result<crate::policy::PermissionAction, JsonRpcError> {
+    let s = v
+        .and_then(Value::as_str)
+        .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing action"))?;
+    match s {
+        "commit" => Ok(crate::policy::PermissionAction::Commit),
+        "push" => Ok(crate::policy::PermissionAction::Push),
+        other => Err(JsonRpcError::new(
+            JsonRpcError::INVALID_PARAMS,
+            format!("unknown action '{other}' (expected 'commit' or 'push')"),
         )),
     }
 }

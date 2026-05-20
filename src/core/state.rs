@@ -136,6 +136,11 @@ impl AppState {
             handle.rain.kill();
         }
         self.storage.close_session(id, archive).await?;
+        // Wipe any session-level permission grants. Grants don't carry into
+        // the next session this user opens — they have to be re-issued.
+        if let Err(e) = self.bridge.cleanup_session_permissions(id).await {
+            tracing::warn!(?e, session_id = %id, "cleanup_session_permissions failed");
+        }
         Ok(())
     }
 
