@@ -60,6 +60,13 @@ export struct AgentConfigRow {
     auth-token: string,
 }
 
+export struct NewSessionProject {
+    name: string,
+    // Working repo path from the CL `projects` table. Used as
+    // `working_repo_path` when the session is created.
+    path: string,
+}
+
 export struct CLFileEntry {
     relative-path: string,
     display-name: string,
@@ -242,6 +249,21 @@ export global AppState {
     in-out property <bool>   cl-new-file-dialog-open;
     in-out property <string> cl-new-file-name;
     in-out property <string> cl-new-file-description;
+    // New-session dialog state. Populated by view_model on dashboard refresh.
+    // Each entry: { name, path }. Projects without a working_repo_path are
+    // filtered out by view_model — the dialog only shows pickable projects.
+    in-out property <bool>   new-session-dialog-open;
+    in-out property <string> new-session-title;
+    in-out property <string> new-session-project-name;
+    in-out property <string> new-session-project-path;
+    in     property <[NewSessionProject]> new-session-projects;
+    // Active session's permission grants (commit / push). View-model refreshes
+    // these on signaling tick. Chip click → toggle via set-session-permission.
+    in-out property <bool> active-commit-granted;
+    in-out property <bool> active-push-granted;
+    // (action, granted) — action is "commit" or "push", granted is the
+    // NEW desired state. View-model calls bridge.grant/revoke accordingly.
+    callback set-session-permission(string, bool);
     // Delete confirmation state — empty when no dialog open; relative path when open.
     in-out property <string> cl-delete-confirm-path;
 
@@ -839,6 +861,58 @@ component NeedInputChip inherits Rectangle {
     }
 }
 
+// Session-permission grant indicator + toggle.
+// Click → flip grant state. Visual: filled when granted, outlined when not.
+// Specific-branch grants render the same as AllBranches for now (binary chip);
+// `branches` text shown as tooltip would need richer hover state.
+component GrantToggleChip inherits Rectangle {
+    in property <string> label;          // "commit" or "push"
+    in property <bool>   granted;        // current state from bridge cache
+    in property <string> icon: "";
+    callback clicked();
+    horizontal-stretch: 0;
+    border-radius: Theme.radius-default;
+    border-width: 1px;
+    border-color: granted
+        ? Theme.primary.with-alpha(0.5)
+        : Theme.outline-variant.with-alpha(0.4);
+    background: granted
+        ? Theme.primary-container.with-alpha(ta.has-hover ? 0.45 : 0.3)
+        : Theme.surface-low.with-alpha(ta.has-hover ? 0.8 : 0.5);
+    height: 26px;
+    animate border-color, background { duration: 100ms; }
+    HorizontalLayout {
+        padding-left: Theme.s-2;
+        padding-right: Theme.s-2;
+        spacing: Theme.s-1;
+        alignment: center;
+        if root.icon != "":
+            Icon {
+                glyph: root.icon;
+                size: 11px;
+                tint: granted ? Theme.primary : Theme.on-surface-variant;
+            }
+        Text {
+            text: root.label;
+            color: granted ? Theme.primary : Theme.on-surface-variant;
+            font-family: Theme.font-mono;
+            font-size: Theme.font-label;
+            letter-spacing: Theme.ls-label;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+        Text {
+            text: granted ? "ON" : "OFF";
+            color: granted ? Theme.primary : Theme.on-surface-variant.with-alpha(0.6);
+            font-family: Theme.font-mono;
+            font-size: 9px;
+            font-weight: Theme.w-bold;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea { clicked => { root.clicked(); } }
+}
+
 // Header chip in the SessionView that toggles the questions tray open/closed.
 // Shows the count + a chevron that flips with state.
 component QuestionsToggleChip inherits Rectangle {
@@ -1304,7 +1378,12 @@ component DashboardPane inherits Rectangle {
                     PrimaryButton {
                         label: "New Session";
                         icon: Icons.plus;
-                        clicked => { AppState.create-session("New session", ""); }
+                        clicked => {
+                            AppState.new-session-title = "";
+                            AppState.new-session-project-name = "";
+                            AppState.new-session-project-path = "";
+                            AppState.new-session-dialog-open = true;
+                        }
                     }
                 }
             }
@@ -1317,7 +1396,12 @@ component DashboardPane inherits Rectangle {
                 spacing: Theme.s-3;
                 if AppState.sessions.length == 0:
                     DashboardEmptyState {
-                        create => { AppState.create-session("New session", ""); }
+                        create => {
+                            AppState.new-session-title = "";
+                            AppState.new-session-project-name = "";
+                            AppState.new-session-project-path = "";
+                            AppState.new-session-dialog-open = true;
+                        }
                     }
                 if AppState.sessions.length > 0:
                     // Responsive grid — col-count steps with width like CSS
@@ -1724,6 +1808,23 @@ component SessionView inherits Rectangle {
                                 HorizontalLayout {
                                     spacing: Theme.s-2;
                                     alignment: end;
+                                    // Commit / push session-grant chips. Click toggles. ON =
+                                    // agents skip request_approval for that action; OFF =
+                                    // default per-action gate.
+                                    GrantToggleChip {
+                                        label: "COMMIT";
+                                        granted: AppState.active-commit-granted;
+                                        clicked => {
+                                            AppState.set-session-permission("commit", !AppState.active-commit-granted);
+                                        }
+                                    }
+                                    GrantToggleChip {
+                                        label: "PUSH";
+                                        granted: AppState.active-push-granted;
+                                        clicked => {
+                                            AppState.set-session-permission("push", !AppState.active-push-granted);
+                                        }
+                                    }
                                     // Questions toggle — chip showing pending count + chevron.
                                     // Always visible (even when count=0) so the user knows where
                                     // to look if questions accumulate during the session.
@@ -3107,6 +3208,152 @@ export component AppWindow inherits Window {
                                     clicked => {
                                         AppState.emma-restart-confirm-visible = false;
                                         AppState.restart-emma();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    // New session dialog: title + project picker.
+    // Project selection auto-fills working_repo_path (from CL projects table).
+    if AppState.new-session-dialog-open:
+        Rectangle {
+            background: #00000088;
+            TouchArea { }
+            VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 560px;
+                        background: Theme.surface-high;
+                        border-radius: 12px;
+                        border-width: 1px;
+                        border-color: Theme.outline-variant;
+                        VerticalLayout {
+                            padding: Theme.s-5;
+                            spacing: Theme.s-3;
+                            Text {
+                                text: "New session";
+                                color: Theme.on-surface;
+                                font-family: Theme.font-display;
+                                font-size: Theme.font-head-md;
+                                font-weight: Theme.w-bold;
+                            }
+                            Text {
+                                text: "Pick a project — the working repo path is filled in from the CL. Title is what the session tile shows on the dashboard.";
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                wrap: word-wrap;
+                            }
+                            VerticalLayout {
+                                spacing: Theme.s-1;
+                                Text {
+                                    text: "TITLE";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    font-weight: Theme.w-bold;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                                CustomInput {
+                                    text <=> AppState.new-session-title;
+                                    placeholder: "what's this session for?";
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: Theme.s-1;
+                                Text {
+                                    text: "PROJECT";
+                                    color: Theme.on-surface-variant;
+                                    font-family: Theme.font-mono;
+                                    font-size: Theme.font-label;
+                                    font-weight: Theme.w-bold;
+                                    letter-spacing: Theme.ls-label;
+                                }
+                                if AppState.new-session-projects.length == 0:
+                                    Text {
+                                        text: "No projects have a working_repo_path set. Backfill the `projects` table or set one via the CL.";
+                                        color: Theme.on-surface-variant.with-alpha(0.7);
+                                        font-family: Theme.font-mono;
+                                        font-size: Theme.font-code;
+                                        wrap: word-wrap;
+                                    }
+                                if AppState.new-session-projects.length > 0:
+                                    Rectangle {
+                                        height: 220px;
+                                        border-radius: Theme.radius-lg;
+                                        border-width: 1px;
+                                        border-color: Theme.outline-variant;
+                                        background: Theme.surface-lowest;
+                                        clip: true;
+                                        ScrollView {
+                                            VerticalLayout {
+                                                spacing: 0px;
+                                                for proj in AppState.new-session-projects: Rectangle {
+                                                    height: 44px;
+                                                    background: AppState.new-session-project-name == proj.name ? Theme.primary.with-alpha(0.15) : transparent;
+                                                    border-width: 0px;
+                                                    TouchArea {
+                                                        clicked => {
+                                                            AppState.new-session-project-name = proj.name;
+                                                            AppState.new-session-project-path = proj.path;
+                                                        }
+                                                    }
+                                                    HorizontalLayout {
+                                                        padding-left: Theme.s-3;
+                                                        padding-right: Theme.s-3;
+                                                        spacing: Theme.s-3;
+                                                        alignment: start;
+                                                        VerticalLayout {
+                                                            alignment: center;
+                                                            horizontal-stretch: 1;
+                                                            Text {
+                                                                text: proj.name;
+                                                                color: Theme.on-surface;
+                                                                font-family: Theme.font-mono;
+                                                                font-size: Theme.font-body-md;
+                                                                font-weight: AppState.new-session-project-name == proj.name ? Theme.w-bold : Theme.w-regular;
+                                                            }
+                                                            Text {
+                                                                text: proj.path;
+                                                                color: Theme.on-surface-variant.with-alpha(0.7);
+                                                                font-family: Theme.font-mono;
+                                                                font-size: Theme.font-code;
+                                                                overflow: elide;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                            }
+                            HorizontalLayout {
+                                alignment: end;
+                                spacing: Theme.s-2;
+                                GhostButton {
+                                    label: "Cancel";
+                                    clicked => {
+                                        AppState.new-session-dialog-open = false;
+                                    }
+                                }
+                                PrimaryButton {
+                                    label: "Create";
+                                    icon: Icons.plus;
+                                    opacity: AppState.new-session-project-path == "" ? 0.5 : 1.0;
+                                    clicked => {
+                                        if (AppState.new-session-project-path != "") {
+                                            AppState.create-session(
+                                                AppState.new-session-title == "" ? AppState.new-session-project-name : AppState.new-session-title,
+                                                AppState.new-session-project-path,
+                                            );
+                                            AppState.new-session-dialog-open = false;
+                                        }
                                     }
                                 }
                             }

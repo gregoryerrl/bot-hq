@@ -300,6 +300,25 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
+    /// Mark every pending `kind='halt'` row for this session as answered.
+    /// Called when the user broadcasts a message to the session — the message
+    /// IS the answer to a `mark_awaiting_user` halt, so the tray should clear.
+    /// `choice` and other kinds are NOT touched (they wait on a real pick).
+    pub async fn clear_pending_halts(&self, session_id: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE session_questions \
+             SET status = 'answered', \
+                 answered_at = datetime('now'), \
+                 picked_option = '(user replied)' \
+             WHERE session_id = ? AND status = 'pending' AND kind = 'halt'",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("clearing halts for session {session_id}"))?;
+        Ok(res.rows_affected())
+    }
+
     /// Mark a question as withdrawn (agent abandons it; never to be answered).
     pub async fn withdraw_question(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
@@ -376,6 +395,11 @@ impl Storage {
     /// Upsert a project. Used by Emma's registration flow and by the
     /// startup backfill (which auto-creates a row for every projects/<name>
     /// directory it scans).
+    ///
+    /// `None` for `working_repo_path` or `description` PRESERVES the existing
+    /// value on conflict (via COALESCE). Pass `Some("")` to explicitly clear.
+    /// `display_name` is always overwritten because the startup loop passes
+    /// the directory name and that's the truth post-rename.
     pub async fn upsert_project(
         &self,
         name: &str,
@@ -388,8 +412,8 @@ impl Storage {
              VALUES (?, ?, ?, ?) \
              ON CONFLICT(name) DO UPDATE SET \
                 display_name = excluded.display_name, \
-                working_repo_path = excluded.working_repo_path, \
-                description = excluded.description",
+                working_repo_path = COALESCE(excluded.working_repo_path, projects.working_repo_path), \
+                description = COALESCE(excluded.description, projects.description)",
         )
         .bind(name)
         .bind(display_name)
@@ -398,6 +422,27 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("upserting project {name}"))?;
+        Ok(())
+    }
+
+    /// Set `working_repo_path` for a project ONLY if it's currently NULL or
+    /// empty. Used by startup backfill so the convention (`~/Projects/<name>`)
+    /// can populate previously-unset projects without clobbering a value the
+    /// user (or a future UI editor) deliberately set to something else.
+    pub async fn set_project_working_repo_path_if_unset(
+        &self,
+        name: &str,
+        path: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE projects SET working_repo_path = ? \
+             WHERE name = ? AND (working_repo_path IS NULL OR working_repo_path = '')",
+        )
+        .bind(path)
+        .bind(name)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("setting working_repo_path for {name}"))?;
         Ok(())
     }
 

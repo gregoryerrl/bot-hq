@@ -13,8 +13,8 @@ use crate::core::{AppState as CoreAppState, IpavPhase};
 use crate::signaling::SignalingEvent;
 use crate::storage::{AgentConfig as DbAgentConfig, Message};
 use crate::{
-    AgentConfigRow, AppState as SlintAppState, AppWindow, CLFileEntry, ChatMsg, PendingQuestion,
-    SessionTile,
+    AgentConfigRow, AppState as SlintAppState, AppWindow, CLFileEntry, ChatMsg, NewSessionProject,
+    PendingQuestion, SessionTile,
 };
 use once_cell::sync::Lazy;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
@@ -193,6 +193,7 @@ pub async fn install_view_model(
     // ---- Initial state push --------------------------------------------
     refresh_dashboard(&weak, &core).await;
     refresh_agent_configs(&weak, &core).await;
+    refresh_new_session_projects(&weak, &core).await;
     // Use the no-hop variant: the Slint event loop is not running yet —
     // window.run() is called by main.rs AFTER install_view_model returns —
     // so anything that awaits an invoke_from_event_loop hop will deadlock
@@ -509,6 +510,54 @@ pub async fn install_view_model(
                     }
                     Err(e) => warn!(?e, "open_session failed"),
                 }
+            });
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_set_session_permission(move |action, granted| {
+            // Read active session id on the event-loop thread BEFORE spawning
+            // — Slint property reads from a tokio task return empty.
+            let session_id = weak
+                .upgrade()
+                .map(|h| h.global::<SlintAppState>().get_active_session_id().to_string())
+                .unwrap_or_default();
+            if session_id.is_empty() {
+                return;
+            }
+            let action_str = action.to_string();
+            let weak = weak.clone();
+            let core = Arc::clone(&core);
+            rt.spawn(async move {
+                let parsed = match action_str.as_str() {
+                    "commit" => crate::policy::PermissionAction::Commit,
+                    "push" => crate::policy::PermissionAction::Push,
+                    other => {
+                        warn!(action = %other, "set_session_permission: unknown action");
+                        return;
+                    }
+                };
+                let result = if granted {
+                    core.bridge
+                        .grant_session_permission(
+                            &session_id,
+                            parsed,
+                            crate::policy::GrantScope::AllBranches,
+                        )
+                        .await
+                } else {
+                    core.bridge
+                        .revoke_session_permission(&session_id, parsed)
+                        .await
+                };
+                if let Err(e) = result {
+                    warn!(?e, "set_session_permission failed");
+                    return;
+                }
+                refresh_session_permissions(&weak, &core, &session_id).await;
             });
         });
     }
@@ -1440,6 +1489,59 @@ async fn refresh_dashboard(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
     });
 }
 
+async fn refresh_session_permissions(
+    weak: &Weak<AppWindow>,
+    core: &Arc<CoreAppState>,
+    session_id: &str,
+) {
+    let perms = core.bridge.list_session_permissions(session_id).await;
+    let commit_granted = !matches!(perms.commit, crate::policy::GrantScope::None);
+    let push_granted = !matches!(perms.push, crate::policy::GrantScope::None);
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let app = handle.global::<SlintAppState>();
+            app.set_active_commit_granted(commit_granted);
+            app.set_active_push_granted(push_granted);
+        }
+    });
+}
+
+async fn refresh_new_session_projects(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
+    let projects = match core.storage.list_projects().await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(?e, "list_projects");
+            return;
+        }
+    };
+    // Only surface projects that actually have a working_repo_path. _globals
+    // is synthetic (no repo) and unset rows can't drive a useful session.
+    let entries: Vec<(String, String)> = projects
+        .into_iter()
+        .filter_map(|p| {
+            p.working_repo_path
+                .filter(|s| !s.trim().is_empty())
+                .map(|path| (p.name, path))
+        })
+        .collect();
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(handle) = weak.upgrade() {
+            let rows: Vec<NewSessionProject> = entries
+                .into_iter()
+                .map(|(name, path)| NewSessionProject {
+                    name: name.into(),
+                    path: path.into(),
+                })
+                .collect();
+            handle
+                .global::<SlintAppState>()
+                .set_new_session_projects(ModelRc::new(VecModel::from(rows)));
+        }
+    });
+}
+
 async fn refresh_agent_configs(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
     let cfgs = match core.storage.list_agent_configs().await {
         Ok(v) => v,
@@ -1676,6 +1778,13 @@ async fn refresh_session_view(
         Vec::new()
     };
 
+    // Read live session permissions for the chips. AllBranches/Specific both
+    // count as "granted" — the chip is binary; the user can narrow via chat
+    // ("you can push on main") but the chip click toggles AllBranches/None.
+    let perms = core.bridge.list_session_permissions(session_id).await;
+    let commit_granted = !matches!(perms.commit, crate::policy::GrantScope::None);
+    let push_granted = !matches!(perms.push, crate::policy::GrantScope::None);
+
     let weak = weak.clone();
     let session_id = session_id.to_string();
     let _ = slint::invoke_from_event_loop(move || {
@@ -1694,6 +1803,8 @@ async fn refresh_session_view(
             app.set_active_session_id(SharedString::from(session_id));
             app.set_active_brian_model(SharedString::from(brian_model));
             app.set_active_rain_model(SharedString::from(rain_model));
+            app.set_active_commit_granted(commit_granted);
+            app.set_active_push_granted(push_granted);
         }
     });
     Ok(())
