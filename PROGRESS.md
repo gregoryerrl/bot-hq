@@ -12,16 +12,16 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 189 tests passing (145 lib + 29 external MCP + 10 storage + 5 server).
-Release build clean. Five audit-cleanup commits landed and pushed
+Release build clean. Six audit-cleanup commits landed and pushed
 today (2026-05-21).
 
 ---
 
-## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5, F11 landed)
+## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5, F11, F6 landed)
 
 Acted on `~/.bot-hq/projects/bot-hq/investigations/audit-round-2-2026-05-21.md`
 — the Brian+Rain adversarial codebase audit produced earlier in the
-session. Five findings shipped, three remain queued.
+session. Six findings shipped, two remain queued.
 
 **Landed:**
 
@@ -64,11 +64,19 @@ session. Five findings shipped, three remain queued.
   build; collapsed the 3 public fns to thin wrappers. Zero call-site
   changes across the ~41 callers (1 prod in `main.rs:59`, ~40 in
   tests). Doc comments preserved on the public wrappers. Net -13 LOC.
+- **F6 — `8ef5203`** — `JsonRpcError::new(INTERNAL_ERROR,
+  format!("op: {e}"))` was repeated 16× across `external_jsonrpc.rs`
+  (audit counted 8 single-line sites; rediscovered 8 more in 4-line
+  rustfmt-wrapped form at deeper nesting). Added file-private
+  `internal_err(op: &str, e: impl Display) -> JsonRpcError`. Each
+  multi-line site collapses 4 lines → 1; single-line sites get
+  shorter. Internal `jsonrpc.rs` uses a different shape
+  (`e.to_string()`, no op prefix) — helper stays external-only. One
+  static-message site (line 558, "violations log not configured...")
+  left untouched as it doesn't fit the helper signature. Net -20 LOC.
 
 **Queued for next session (audit recommended order):**
 
-- F6 — `internal_err(op, e)` helper for the 8× repeated
-  `JsonRpcError::new(INTERNAL_ERROR, format!("{op}: {e}"))` shape.
 - F13 — `LazyLock<Vec<ToolDescriptor>>` for both `tool_descriptors()`
   fns (pure perf; static data currently re-allocated per
   `tools/list`).
@@ -82,8 +90,8 @@ session. Five findings shipped, three remain queued.
 savings), F10 (per-table storage split — import sprawl without
 discoverability gain). See the audit file for re-open triggers.
 
-**Resume point:** last F-series code commit `6a423c9` (F11); next
-finding is F6. The audit file at
+**Resume point:** last F-series code commit `8ef5203` (F6); next
+finding is F13. The audit file at
 `investigations/audit-round-2-2026-05-21.md` has the exact line
 numbers and proposed diffs.
 
