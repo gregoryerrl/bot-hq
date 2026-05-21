@@ -947,6 +947,20 @@ pub async fn install_view_model(
                         if proj.name == crate::storage::Project::GLOBALS {
                             continue;
                         }
+                        // Match the walker's stricter definition: only
+                        // user-bound projects (cl_path or working_repo set)
+                        // count as registered. Auto-scanned subdirs do not.
+                        let configured = proj
+                            .cl_path
+                            .as_deref()
+                            .is_some_and(|s| !s.is_empty())
+                            || proj
+                                .working_repo_path
+                                .as_deref()
+                                .is_some_and(|s| !s.is_empty());
+                        if !configured {
+                            continue;
+                        }
                         let abs = match proj.cl_path.as_deref() {
                             Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
                             _ => core.paths.data_dir.join("projects").join(&proj.name),
@@ -1082,13 +1096,19 @@ pub async fn install_view_model(
                 refresh_new_session_projects(&weak, &core).await;
                 refresh_cl_tree(&weak, &core).await;
                 // Re-open the folder view so the panel reflects registered
-                // state without a manual click.
+                // state without a manual click. invoke_cl_open_folder MUST
+                // be dispatched on the Slint event loop — calling it from
+                // this tokio task silently no-ops.
                 if !folder.is_empty() {
-                    if let Some(handle) = weak.upgrade() {
-                        handle.global::<SlintAppState>().invoke_cl_open_folder(
-                            SharedString::from(folder.clone()),
-                        );
-                    }
+                    let weak2 = weak.clone();
+                    let folder_clone = folder.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(handle) = weak2.upgrade() {
+                            handle.global::<SlintAppState>().invoke_cl_open_folder(
+                                SharedString::from(folder_clone),
+                            );
+                        }
+                    });
                 }
                 show_toast(&weak, "Project registered.");
             });
@@ -1116,11 +1136,15 @@ pub async fn install_view_model(
                 refresh_new_session_projects(&weak, &core).await;
                 refresh_cl_tree(&weak, &core).await;
                 if !folder.is_empty() {
-                    if let Some(handle) = weak.upgrade() {
-                        handle.global::<SlintAppState>().invoke_cl_open_folder(
-                            SharedString::from(folder.clone()),
-                        );
-                    }
+                    let weak2 = weak.clone();
+                    let folder_clone = folder.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(handle) = weak2.upgrade() {
+                            handle.global::<SlintAppState>().invoke_cl_open_folder(
+                                SharedString::from(folder_clone),
+                            );
+                        }
+                    });
                 }
                 show_toast(&weak, "Project unregistered.");
             });
@@ -1936,6 +1960,22 @@ async fn load_cl_lookups(core: &Arc<CoreAppState>, data_dir: &std::path::Path) -
     };
     for proj in &projects {
         if proj.name == crate::storage::Project::GLOBALS {
+            continue;
+        }
+        // "Registered" means the user actively bound this project via the
+        // UI (cl_path or working_repo_path set). Auto-scanned subdirs from
+        // startup_init that the user never touched have both NULL and are
+        // NOT considered registered — Unregister clears both fields so the
+        // visual reverts cleanly without a hard DELETE.
+        let configured = proj
+            .cl_path
+            .as_deref()
+            .is_some_and(|s| !s.is_empty())
+            || proj
+                .working_repo_path
+                .as_deref()
+                .is_some_and(|s| !s.is_empty());
+        if !configured {
             continue;
         }
         let abs = match proj.cl_path.as_deref() {
