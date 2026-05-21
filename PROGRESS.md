@@ -12,16 +12,16 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 189 tests passing (145 lib + 29 external MCP + 10 storage + 5 server).
-Release build clean. Three audit-cleanup commits landed and pushed
-today (2026-05-21).
+Release build clean. Four audit-cleanup commits landed today
+(2026-05-21); F12 + F2 + F1 pushed, F5 awaiting authorization.
 
 ---
 
-## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1 landed)
+## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5 landed)
 
 Acted on `~/.bot-hq/projects/bot-hq/investigations/audit-round-2-2026-05-21.md`
 — the Brian+Rain adversarial codebase audit produced earlier in the
-session. Three findings shipped, five remain queued.
+session. Four findings shipped, four remain queued.
 
 **Landed:**
 
@@ -45,11 +45,19 @@ session. Three findings shipped, five remain queued.
   `pub(super)`; replaced all 16 sites. Net -26 LOC. Intentional
   behavior diff: serialize failures now return `"{}"` instead of
   `""` — valid JSON shape, matches the existing internal pattern.
+- **F5 — `5e46844`** — `Message → json!({...})` projection was
+  copy-pasted 4× across `external_jsonrpc.rs`
+  (`get_session_messages`, `get_emma_messages`, `wait_for_change`,
+  `get_session_snapshot`). Extracted file-private
+  `message_to_json(&Message) -> Value` near the top; all 4 sites
+  collapsed to `.iter().map(message_to_json).collect()`. Switched
+  `.into_iter()` → `.iter()` per-site after verifying none reuse the
+  source vec. Internal `jsonrpc.rs` has zero matching sites — F5 is
+  external-only. Net -22 LOC. Same 5-field shape preserved;
+  `session_id` stays dropped (DB-only, not MCP view).
 
 **Queued for next session (audit recommended order):**
 
-- F5 — extract `message_to_json` helper (~24 LOC, message-to-JSON
-  shape repeated 4× in `external_jsonrpc.rs`).
 - F11 — collapse `bridge.rs:160-205` constructor triplication into one
   `new_with(violations, data_dir)` (~25 LOC).
 - F6 — `internal_err(op, e)` helper for the 8× repeated
@@ -67,8 +75,8 @@ session. Three findings shipped, five remain queued.
 savings), F10 (per-table storage split — import sprawl without
 discoverability gain). See the audit file for re-open triggers.
 
-**Resume point:** `git log --oneline -1` → `39efd51`. Next finding is
-F5; the audit file at `investigations/audit-round-2-2026-05-21.md`
+**Resume point:** `git log --oneline -1` → `5e46844`. Next finding is
+F11; the audit file at `investigations/audit-round-2-2026-05-21.md`
 has the exact line numbers and proposed diffs.
 
 ---
