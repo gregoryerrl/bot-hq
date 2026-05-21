@@ -52,7 +52,7 @@ pub async fn dispatch(
         ))),
         "ping" => Ok(Some(JsonRpcResponse::ok(id, json!({})))),
         "tools/list" => {
-            let tools: Vec<_> = tool_descriptors();
+            let tools = tool_descriptors();
             Ok(Some(JsonRpcResponse::ok(
                 id,
                 json!({ "tools": tools }),

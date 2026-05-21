@@ -55,7 +55,7 @@ pub async fn dispatch_external(
         ))),
         m if m.starts_with("notifications/") => Ok(None),
         "tools/list" => {
-            let tools: Vec<_> = external_tool_descriptors();
+            let tools = external_tool_descriptors();
             Ok(Some(JsonRpcResponse::ok(id, json!({ "tools": tools }))))
         }
         "tools/call" => {
@@ -84,8 +84,9 @@ pub async fn dispatch_external(
 
 /// Full driver toolset: session lifecycle + phase control + choice resolution
 /// + Emma + status + admin (agent configs, violations log).
-pub fn external_tool_descriptors() -> Vec<ToolDescriptor> {
-    vec![
+pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
+    use std::sync::LazyLock;
+    static TOOLS: LazyLock<Vec<ToolDescriptor>> = LazyLock::new(|| vec![
         ToolDescriptor {
             name: "list_sessions",
             description: "List active bot-hq sessions (not archived, not closed). Each entry includes id, title, working_repo_path, created_at, and the brian_model_at_spawn / rain_model_at_spawn fields if recorded.",
@@ -243,7 +244,8 @@ pub fn external_tool_descriptors() -> Vec<ToolDescriptor> {
                 "required": ["session_id"]
             }),
         },
-    ]
+    ]);
+    &*TOOLS
 }
 
 /// Block server-side until the session has at least one new message past

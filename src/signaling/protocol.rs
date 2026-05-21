@@ -84,8 +84,9 @@ pub struct ToolDescriptor {
 }
 
 /// Hand-built JSON Schemas for our tools. We don't pull in `schemars`.
-pub fn tool_descriptors() -> Vec<ToolDescriptor> {
-    vec![
+pub fn tool_descriptors() -> &'static [ToolDescriptor] {
+    use std::sync::LazyLock;
+    static TOOLS: LazyLock<Vec<ToolDescriptor>> = LazyLock::new(|| vec![
         ToolDescriptor {
             name: "ask_user_choice",
             description: "Ask the user to pick one option from a list. Blocks the agent's turn until the user picks. Use this whenever a decision belongs to the user.",
@@ -453,7 +454,8 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                 "required": []
             }),
         },
-    ]
+    ]);
+    &*TOOLS
 }
 
 /// What an MCP server returns from `tools/call`.
