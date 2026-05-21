@@ -127,6 +127,34 @@ async fn auth_rejects_bad_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parse_error_returns_jsonrpc_envelope() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+    let (status, body) = http_post(env.addr(), "/mcp", &[(h.0, &h.1)], "{ not valid json").await;
+    assert!(status.contains("200"), "got: {status}");
+    assert!(
+        body.contains(r#""code":-32700"#),
+        "expected JSON-RPC PARSE_ERROR envelope: {body}"
+    );
+    assert!(body.contains("invalid JSON"), "body: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn notification_returns_202_accepted() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    )
+    .await;
+    assert!(status.contains("202"), "got: {status}");
+    assert!(body.is_empty(), "expected empty body for 202, got: {body:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn initialize_round_trip() {
     let env = setup().await;
     let h = auth_header(&env.token);
