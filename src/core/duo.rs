@@ -82,7 +82,7 @@ pub async fn pump_agent(
             Some(deadline) => {
                 let now = Instant::now();
                 if deadline <= now {
-                    flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at).await;
+                    flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
                     continue;
                 }
                 let remaining = deadline - now;
@@ -90,7 +90,7 @@ pub async fn pump_agent(
                     biased;
                     ev = event_rx.recv() => ev,
                     _ = tokio::time::sleep(remaining) => {
-                        flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at).await;
+                        flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
                         continue;
                     }
                 }
@@ -162,14 +162,14 @@ pub async fn pump_agent(
             }
             AgentEvent::TurnComplete { .. } => {
                 // Always flush on turn-complete, both phases.
-                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at).await;
+                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
             }
             AgentEvent::Init { .. } => {
                 debug!(agent = ?cfg.author, "init received");
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");
-                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at).await;
+                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
                 break;
             }
             AgentEvent::Error(msg) => {
@@ -184,6 +184,7 @@ async fn flush_buffer(
     buffer: &mut String,
     peer_input_tx: &mpsc::Sender<OutgoingUserMessage>,
     flush_at: &mut Option<Instant>,
+    ipav_state: &Arc<Mutex<IpavState>>,
 ) {
     if buffer.trim().is_empty() {
         *flush_at = None;
@@ -211,7 +212,8 @@ async fn flush_buffer(
         *flush_at = None;
         return;
     }
-    if let Err(e) = peer_forward_message(cfg.author, body.trim_end(), peer_input_tx).await {
+    let phase = ipav_state.lock().await.current_phase;
+    if let Err(e) = peer_forward_message(cfg.author, body.trim_end(), phase, peer_input_tx).await {
         warn!(?e, "peer forward failed");
     }
     *flush_at = None;

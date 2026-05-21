@@ -3,22 +3,32 @@
 //! Lives separately so it can be mocked in tests.
 
 use crate::agents::OutgoingUserMessage;
+use crate::core::ipav::IpavPhase;
 use crate::storage::{Author, MessageKind, Storage};
 use anyhow::Result;
 use tokio::sync::mpsc;
+
+/// Prefix every outgoing stdin payload with the active IPAV phase so the
+/// agent re-encounters it on each turn. Storage keeps the raw text — the
+/// envelope is wire-only.
+pub fn with_phase_envelope(phase: IpavPhase, body: &str) -> String {
+    format!("[PHASE: {}]\n{body}", phase.name())
+}
 
 /// Persist a user-originated message and fan it out to both agents.
 pub async fn broadcast_user_message(
     storage: &Storage,
     session_id: &str,
     text: &str,
+    phase: IpavPhase,
     brian_input: &mpsc::Sender<OutgoingUserMessage>,
     rain_input: &mpsc::Sender<OutgoingUserMessage>,
 ) -> Result<i64> {
     let id = storage
         .insert_message(session_id, Author::User, MessageKind::Text, text)
         .await?;
-    let msg = OutgoingUserMessage::text(text);
+    let wire = with_phase_envelope(phase, text);
+    let msg = OutgoingUserMessage::text(wire);
     // Best-effort: if one channel is closed, persist still happens.
     let _ = brian_input.send(msg.clone()).await;
     let _ = rain_input.send(msg).await;
@@ -31,6 +41,7 @@ pub async fn broadcast_user_message(
 pub async fn peer_forward_message(
     peer_author: Author,
     text: &str,
+    phase: IpavPhase,
     input_tx: &mpsc::Sender<OutgoingUserMessage>,
 ) -> Result<()> {
     let prefix = match peer_author {
@@ -39,8 +50,9 @@ pub async fn peer_forward_message(
         Author::Emma => "[Emma]\n",
         Author::User => "",
     };
-    let body = format!("{prefix}{text}");
-    let _ = input_tx.send(OutgoingUserMessage::text(body)).await;
+    let inner = format!("{prefix}{text}");
+    let wire = with_phase_envelope(phase, &inner);
+    let _ = input_tx.send(OutgoingUserMessage::text(wire)).await;
     Ok(())
 }
 
@@ -49,21 +61,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn broadcast_persists_and_fans_out() {
+    async fn broadcast_persists_raw_and_envelopes_wire() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "test", None).await.unwrap();
         let (btx, mut brx) = mpsc::channel(8);
         let (rtx, mut rrx) = mpsc::channel(8);
-        broadcast_user_message(&s, "s1", "hello", &btx, &rtx)
+        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, &btx, &rtx)
             .await
             .unwrap();
         let bm = brx.recv().await.unwrap();
         let rm = rrx.recv().await.unwrap();
-        assert_eq!(bm.message.content, "hello");
-        assert_eq!(rm.message.content, "hello");
+        assert_eq!(bm.message.content, "[PHASE: Apply]\nhello");
+        assert_eq!(rm.message.content, "[PHASE: Apply]\nhello");
         let msgs = s.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].content, "hello");
+        assert_eq!(msgs[0].content, "hello", "storage keeps raw text, no envelope");
         assert_eq!(msgs[0].author, "user");
     }
 
@@ -77,7 +89,7 @@ mod tests {
         s.create_session("sess-b", "b", None).await.unwrap();
         let (btx, _brx) = mpsc::channel(8);
         let (rtx, _rrx) = mpsc::channel(8);
-        broadcast_user_message(&s, "sess-a", "msg-into-a", &btx, &rtx)
+        broadcast_user_message(&s, "sess-a", "msg-into-a", IpavPhase::Investigate, &btx, &rtx)
             .await
             .unwrap();
 
@@ -89,13 +101,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_forward_prefixes_author() {
+    async fn peer_forward_envelopes_then_author_tags() {
         let (tx, mut rx) = mpsc::channel(8);
-        peer_forward_message(Author::Rain, "concerns?", &tx)
+        peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, &tx)
             .await
             .unwrap();
         let m = rx.recv().await.unwrap();
-        assert!(m.message.content.starts_with("[Rain]"));
+        assert!(
+            m.message.content.starts_with("[PHASE: Plan]\n[Rain]\n"),
+            "expected phase envelope wrapping author tag, got: {}",
+            m.message.content
+        );
         assert!(m.message.content.contains("concerns?"));
     }
 }

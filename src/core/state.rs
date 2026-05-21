@@ -1,7 +1,7 @@
 //! `AppState`: top-level handle the UI layer holds.
 
 use crate::agents::OutgoingUserMessage;
-use crate::core::broadcast::broadcast_user_message;
+use crate::core::broadcast::{broadcast_user_message, with_phase_envelope};
 use crate::core::ipav::IpavPhase;
 use crate::core::session::{
     open_session, spawn_emma_handle, spawn_existing_session, EmmaHandle, OpenSessionRequest,
@@ -188,10 +188,12 @@ impl AppState {
         if let Err(e) = self.storage.clear_pending_halts(session_id).await {
             tracing::warn!(?e, session_id, "clear_pending_halts failed");
         }
+        let phase = handle.ipav.lock().await.current_phase;
         let id = broadcast_user_message(
             &self.storage,
             session_id,
             text,
+            phase,
             &handle.brian.input_tx,
             &handle.rain.input_tx,
         )
@@ -242,6 +244,7 @@ impl AppState {
                 if session_id == "emma" {
                     let emma = self.emma.lock().await;
                     if let Some(handle) = emma.as_ref() {
+                        // Emma is solo — no IPAV phase tracked; send raw.
                         let msg = crate::agents::OutgoingUserMessage::text(&body);
                         let _ = handle.agent.input_tx.send(msg).await;
                     }
@@ -258,7 +261,9 @@ impl AppState {
                     .awaiting
                     .store(false, std::sync::atomic::Ordering::Release);
                 self.bridge.clear_session_awaiting(&session_id).await;
-                let msg = crate::agents::OutgoingUserMessage::text(&body);
+                let phase = handle.ipav.lock().await.current_phase;
+                let wire = with_phase_envelope(phase, &body);
+                let msg = crate::agents::OutgoingUserMessage::text(wire);
                 let _ = handle.brian.input_tx.send(msg.clone()).await;
                 let _ = handle.rain.input_tx.send(msg).await;
                 Ok(())
