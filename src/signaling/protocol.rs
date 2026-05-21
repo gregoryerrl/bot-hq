@@ -115,6 +115,25 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
             }),
         },
         ToolDescriptor {
+            name: "request_phase_advance",
+            description: "Ask the user to move the IPAV phase chip. Call this when your next action would cross a phase boundary (e.g., investigation done and you want to draft changes; plan written and you want to apply; changes made and you want to verify). Adds a chat message + halt row; the duo's peer-forward halts until the user advances the chip OR replies in chat (implicit decline). Use exact phase names: Investigate, Plan, Apply, Verify.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["Investigate", "Plan", "Apply", "Verify"],
+                        "description": "The phase you want to move to."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Short reason — what you finished, what you want to start. E.g. 'plan written, ready to apply'."
+                    }
+                },
+                "required": ["target", "reason"]
+            }),
+        },
+        ToolDescriptor {
             name: "request_approval",
             description: "Request user approval for a policy-gated action (push_gate, force_push, tool_blocklist, per_action). Blocks until the user approves or denies in the bot-hq UI. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before `git push`).",
             input_schema: serde_json::json!({

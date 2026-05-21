@@ -160,6 +160,40 @@ async fn call_tool(
                 .await;
             Ok(ToolCallResult::text("ok"))
         }
+        "request_phase_advance" => {
+            let target = args
+                .get("target")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing target"))?
+                .to_string();
+            if !matches!(
+                target.as_str(),
+                "Investigate" | "Plan" | "Apply" | "Verify"
+            ) {
+                return Err(JsonRpcError::new(
+                    JsonRpcError::INVALID_PARAMS,
+                    format!(
+                        "unknown target '{target}' (expected Investigate|Plan|Apply|Verify)"
+                    ),
+                ));
+            }
+            let reason = args
+                .get("reason")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing reason"))?
+                .to_string();
+            bridge
+                .request_phase_advance(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    target,
+                    reason,
+                )
+                .await;
+            Ok(ToolCallResult::text(
+                "request submitted — awaiting user. They will advance the phase chip or reply.",
+            ))
+        }
         "request_approval" => {
             let kind_str = args
                 .get("kind")
@@ -726,6 +760,89 @@ mod tests {
             .contains("ok"));
         let ev = sub.recv().await.unwrap();
         assert!(matches!(ev, SignalingEvent::AwaitingUser { reason, .. } if reason == "wait"));
+    }
+
+    #[tokio::test]
+    async fn request_phase_advance_dispatch_emits_event() {
+        let bridge = SignalingBridge::new();
+        let mut sub = bridge.subscribe();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "request_phase_advance",
+                    "arguments": {"target": "Apply", "reason": "plan done"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert!(v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("awaiting user"));
+        let ev = sub.recv().await.unwrap();
+        match ev {
+            SignalingEvent::AwaitingUser { reason, .. } => {
+                assert!(reason.contains("PHASE REQUEST -> Apply"), "reason: {reason}");
+                assert!(reason.contains("plan done"), "reason: {reason}");
+            }
+            other => panic!("expected AwaitingUser, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_phase_advance_rejects_bogus_target() {
+        let bridge = SignalingBridge::new();
+        let err = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "request_phase_advance",
+                    "arguments": {"target": "Coffee", "reason": "x"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("unknown target"));
+    }
+
+    #[tokio::test]
+    async fn rain_can_call_request_phase_advance() {
+        // Phase requests are not HANDS-only — Rain (EYES) should also be able
+        // to ask the user to back off to Investigate when Brian is about to
+        // mutate without a plan.
+        let bridge = SignalingBridge::new();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "request_phase_advance",
+                    "arguments": {"target": "Investigate", "reason": "need to reassess"}
+                }),
+                1,
+            ),
+            &rain_caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(
+            v["result"]["isError"], json!(false),
+            "rain should be allowed to call request_phase_advance"
+        );
     }
 
     #[tokio::test]

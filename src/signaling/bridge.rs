@@ -883,6 +883,59 @@ impl SignalingBridge {
         });
     }
 
+    /// Agent-initiated IPAV phase advance request. Persists a chat message
+    /// authored by the requesting agent (so the scroll shows the ask inline)
+    /// + a halt question (so the tray + dashboard counter reflect it) + sets
+    /// the awaiting flag so the duo's peer-forward halts until the user acts.
+    ///
+    /// The user has two response paths, both clear the halt:
+    ///   1. Click the phase chip → `AppState::advance_phase` (which also
+    ///      clears awaiting + answers pending halt rows).
+    ///   2. Type a reply → `AppState::broadcast` (which always clears halt
+    ///      on user input). Implicit decline — phase stays put.
+    pub async fn request_phase_advance(
+        &self,
+        session_id: String,
+        agent: String,
+        target: String,
+        reason: String,
+    ) {
+        let body = format!("[PHASE REQUEST -> {target}] {reason}");
+        {
+            let storage_guard = self.storage.lock().await;
+            if let Some(storage) = storage_guard.as_ref() {
+                let author = crate::storage::Author::parse(&agent)
+                    .unwrap_or(crate::storage::Author::User);
+                match storage
+                    .insert_message(&session_id, author, crate::storage::MessageKind::Text, &body)
+                    .await
+                {
+                    Ok(id) => self.notify_message_persisted(session_id.clone(), id),
+                    Err(e) => {
+                        tracing::warn!(?e, "request_phase_advance insert_message failed")
+                    }
+                }
+            }
+        }
+        self.set_session_awaiting(&session_id).await;
+        let choice_id = Uuid::new_v4().to_string();
+        self.persist_question(
+            &session_id,
+            &choice_id,
+            &agent,
+            crate::storage::QuestionKind::Halt,
+            &body,
+            None,
+            None,
+        )
+        .await;
+        let _ = self.event_tx.send(SignalingEvent::AwaitingUser {
+            session_id,
+            agent,
+            reason: body,
+        });
+    }
+
     /// Called by the MCP `tools/call` handler for `close_session`. Broadcasts
     /// a request; AppState's signaling subscriber processes it (kills agents,
     /// marks closed in storage). Fire-and-forget — by the time the agent

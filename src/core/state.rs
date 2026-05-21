@@ -204,12 +204,22 @@ impl AppState {
     }
 
     /// Set IPAV phase + emit a synthetic user "phase advanced to X" message so
-    /// both agents see the transition naturally.
+    /// both agents see the transition naturally. Also clears any awaiting-user
+    /// halt — an agent that fired `request_phase_advance` has effectively been
+    /// answered by the chip click, so the duo should resume.
     pub async fn advance_phase(&self, session_id: &str, target: IpavPhase) -> Result<()> {
         let sessions = self.sessions.lock().await;
         let handle = sessions
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
+
+        handle
+            .awaiting
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.bridge.clear_session_awaiting(session_id).await;
+        if let Err(e) = self.storage.clear_pending_halts(session_id).await {
+            tracing::warn!(?e, session_id, "clear_pending_halts (advance_phase) failed");
+        }
 
         let ts = chrono::Utc::now().to_rfc3339();
         handle.ipav.lock().await.advance(target, ts);
