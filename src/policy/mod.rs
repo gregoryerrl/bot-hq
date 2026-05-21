@@ -309,7 +309,7 @@ impl Policy {
 }
 
 impl PushGateMode {
-    fn label(&self) -> &'static str {
+    pub(crate) fn label(&self) -> &'static str {
         match self {
             PushGateMode::Auto => "auto",
             PushGateMode::PerBranchApproval => "per_branch_approval",

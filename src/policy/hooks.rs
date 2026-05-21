@@ -307,7 +307,7 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
             `mcp__bot-hq-signaling__grant_session_permission` with \
          action=\"push\".\n\
             All subsequent pushes in this session are auto-allowed.\n",
-        mode = policy.push_gate.mode.label_str()
+        mode = policy.push_gate.mode.label()
     );
     Ok(1)
 }
@@ -526,22 +526,6 @@ fn expand_tilde(s: &str) -> Result<PathBuf> {
         Ok(PathBuf::from(home))
     } else {
         Ok(PathBuf::from(s))
-    }
-}
-
-// PushGateMode is in mod.rs but its `label()` is pub(crate)-not — add a tiny
-// shim here to avoid widening the surface of the public API.
-trait PushGateModeLabel {
-    fn label_str(&self) -> &'static str;
-}
-impl PushGateModeLabel for crate::policy::PushGateMode {
-    fn label_str(&self) -> &'static str {
-        use crate::policy::PushGateMode;
-        match self {
-            PushGateMode::Auto => "auto",
-            PushGateMode::PerBranchApproval => "per_branch_approval",
-            PushGateMode::AlwaysAsk => "always_ask",
-        }
     }
 }
 
