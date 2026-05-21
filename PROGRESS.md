@@ -12,16 +12,16 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 189 tests passing (145 lib + 29 external MCP + 10 storage + 5 server).
-Release build clean. Six audit-cleanup commits landed and pushed
+Release build clean. Seven audit-cleanup commits landed and pushed
 today (2026-05-21).
 
 ---
 
-## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5, F11, F6 landed)
+## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5, F11, F6, F13 landed)
 
 Acted on `~/.bot-hq/projects/bot-hq/investigations/audit-round-2-2026-05-21.md`
 — the Brian+Rain adversarial codebase audit produced earlier in the
-session. Six findings shipped, two remain queued.
+session. Seven findings shipped, one remains queued.
 
 **Landed:**
 
@@ -74,12 +74,20 @@ session. Six findings shipped, two remain queued.
   (`e.to_string()`, no op prefix) — helper stays external-only. One
   static-message site (line 558, "violations log not configured...")
   left untouched as it doesn't fit the helper signature. Net -20 LOC.
+- **F13 — `136e924`** — `tool_descriptors()` (19 internal tools,
+  `protocol.rs`) and `external_tool_descriptors()` (16 external
+  tools, `external_jsonrpc.rs`) rebuilt their full
+  `Vec<ToolDescriptor>` — including all the `serde_json::json!`
+  schema trees — on every MCP `tools/list` handshake. Wrapped each
+  in `static LazyLock<Vec<ToolDescriptor>>`, returning
+  `&'static [ToolDescriptor]`. Three caller sites updated (drop
+  `: Vec<_>` annotation; slice serializes through `json!` the same
+  as the owned Vec). Rain caught that `&TOOLS` would lean on a
+  multi-step `Deref` coercion — switched to explicit `&*TOOLS`. Net
+  +4 LOC; perf win is one alloc per process instead of per call.
 
 **Queued for next session (audit recommended order):**
 
-- F13 — `LazyLock<Vec<ToolDescriptor>>` for both `tool_descriptors()`
-  fns (pure perf; static data currently re-allocated per
-  `tools/list`).
 - F4 — extract HTTP `handle_request` body-decode + response shaping
   from `server.rs` + `external_server.rs`. Rain flagged that
   `external_server.rs` has zero tests today; an external HTTP smoke
@@ -90,8 +98,9 @@ session. Six findings shipped, two remain queued.
 savings), F10 (per-table storage split — import sprawl without
 discoverability gain). See the audit file for re-open triggers.
 
-**Resume point:** last F-series code commit `8ef5203` (F6); next
-finding is F13. The audit file at
+**Resume point:** last F-series code commit `136e924` (F13); next
+finding is F4 (needs external_server.rs smoke tests first per Rain's
+flag). The audit file at
 `investigations/audit-round-2-2026-05-21.md` has the exact line
 numbers and proposed diffs.
 
