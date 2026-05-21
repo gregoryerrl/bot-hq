@@ -18,6 +18,7 @@
 use crate::core::AppState as CoreAppState;
 use crate::signaling::external_jsonrpc::dispatch_external;
 use crate::signaling::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::signaling::response::{json_response, text_response};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -188,19 +189,3 @@ async fn handle_request(
     }
 }
 
-fn text_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(status)
-        .header("content-type", "text/plain")
-        .body(Full::new(Bytes::from(body.to_owned())))
-        .expect("static response")
-}
-
-fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<Full<Bytes>> {
-    let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(bytes)))
-        .expect("static response")
-}

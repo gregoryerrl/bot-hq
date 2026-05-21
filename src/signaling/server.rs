@@ -13,6 +13,7 @@
 use crate::signaling::bridge::SignalingBridge;
 use crate::signaling::jsonrpc::{dispatch, CallerIdentity};
 use crate::signaling::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::signaling::response::{json_response, text_response};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -166,23 +167,6 @@ fn parse_path(path: &str) -> Option<CallerIdentity> {
         session_id: parts[1].to_string(),
         agent: parts[2].to_string(),
     })
-}
-
-fn text_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
-    Response::builder()
-        .status(status)
-        .header("content-type", "text/plain")
-        .body(Full::new(Bytes::from(body.to_owned())))
-        .expect("static response")
-}
-
-fn json_response<T: serde::Serialize>(status: StatusCode, body: &T) -> Response<Full<Bytes>> {
-    let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
-    Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(bytes)))
-        .expect("static response")
 }
 
 /// Render the mcp-config.json content claude-code expects for one agent.
