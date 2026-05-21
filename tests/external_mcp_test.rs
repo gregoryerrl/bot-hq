@@ -295,7 +295,11 @@ async fn advance_phase_invalid_phase_errors() {
     )
     .await;
     assert!(status.contains("200"));
-    assert!(body.contains("phase must be one of"), "body: {body}");
+    assert!(body.contains("unknown phase 'X'"), "body: {body}");
+    assert!(
+        body.contains("I/P/A/V or Investigate/Plan/Apply/Verify"),
+        "body: {body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

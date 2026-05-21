@@ -394,7 +394,10 @@ async fn call_external_tool(
             let phase = IpavPhase::parse(&phase_str).ok_or_else(|| {
                 JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
-                    format!("phase must be one of I/P/A/V, got {phase_str}"),
+                    format!(
+                        "unknown phase '{phase_str}' (expected {})",
+                        IpavPhase::error_hint()
+                    ),
                 )
             })?;
             core.advance_phase(&session_id, phase).await.map_err(|e| {

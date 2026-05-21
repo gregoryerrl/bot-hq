@@ -164,7 +164,8 @@ async fn call_tool(
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
                     format!(
-                        "unknown target '{target}' (expected Investigate|Plan|Apply|Verify)"
+                        "unknown target '{target}' (expected {})",
+                        crate::core::ipav::IpavPhase::error_hint()
                     ),
                 ));
             }
@@ -177,14 +178,12 @@ async fn call_tool(
         }
         "request_phase_advance" => {
             let target = arg_required_str(&args, "target")?;
-            if !matches!(
-                target.as_str(),
-                "Investigate" | "Plan" | "Apply" | "Verify"
-            ) {
+            if crate::core::ipav::IpavPhase::parse(&target).is_none() {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
                     format!(
-                        "unknown target '{target}' (expected Investigate|Plan|Apply|Verify)"
+                        "unknown target '{target}' (expected {})",
+                        crate::core::ipav::IpavPhase::error_hint()
                     ),
                 ));
             }
@@ -884,6 +883,56 @@ mod tests {
             v["result"]["isError"], json!(false),
             "rain should be allowed to call request_phase_advance"
         );
+    }
+
+    #[tokio::test]
+    async fn request_phase_advance_accepts_chip_form() {
+        // F12 regression guard: chip-form targets (I/P/A/V) must reach the
+        // bridge — same leniency `advance_phase` already had. Previously
+        // request_phase_advance used a hardcoded matches!() against full
+        // names only and returned INVALID_PARAMS for "A".
+        let bridge = SignalingBridge::new();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "request_phase_advance",
+                    "arguments": {"target": "A", "reason": "ready to mutate"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn advance_phase_self_accepts_chip_form() {
+        // Parity with request_phase_advance_accepts_chip_form — both paths
+        // route through IpavPhase::parse so chip form should work here too.
+        let bridge = SignalingBridge::new();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "advance_phase",
+                    "arguments": {"target": "A"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["content"][0]["text"], "phase advanced");
     }
 
     #[tokio::test]

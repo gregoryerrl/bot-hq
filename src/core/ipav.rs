@@ -42,6 +42,13 @@ impl IpavPhase {
         })
     }
 
+    /// Canonical hint for INVALID_PARAMS error messages when `parse` rejects
+    /// a target. Single source of truth so internal + external MCP dispatch
+    /// can't drift apart on what they tell agents is acceptable.
+    pub fn error_hint() -> &'static str {
+        "I/P/A/V or Investigate/Plan/Apply/Verify"
+    }
+
     /// Whether peer-forward buffering uses the 1.5s window (I/P) or pure
     /// turn-based forwarding on `message_stop` (A/V).
     pub fn uses_buffered_interleave(&self) -> bool {

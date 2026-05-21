@@ -247,12 +247,8 @@ pub async fn install_view_model(
         let core = Arc::clone(&core);
         let rt = rt.clone();
         app.on_advance_phase(move |chip| {
-            let target = match chip.as_str() {
-                "I" => IpavPhase::Investigate,
-                "P" => IpavPhase::Plan,
-                "A" => IpavPhase::Apply,
-                "V" => IpavPhase::Verify,
-                _ => return,
+            let Some(target) = IpavPhase::parse(&chip) else {
+                return;
             };
             // Read Slint state on the event-loop thread (we ARE here, in the
             // callback). Calling current_session_id INSIDE rt.spawn would return
