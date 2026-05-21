@@ -2340,6 +2340,22 @@ async fn handle_signaling_event(
             // event. Subscribers for `wait_for_change` come in via the
             // external server's own broadcast::Receiver.
         }
+        SignalingEvent::AgentAdvancePhase {
+            session_id,
+            agent,
+            target,
+        } => {
+            let Some(phase) = crate::core::ipav::IpavPhase::parse(&target) else {
+                tracing::warn!(%session_id, %agent, %target, "agent advance_phase: bad target");
+                return;
+            };
+            tracing::info!(%session_id, %agent, %target, "agent self-advanced phase");
+            if let Err(e) = core.advance_phase(&session_id, phase).await {
+                tracing::warn!(?e, %session_id, "agent self-advance_phase failed");
+                return;
+            }
+            refresh_dashboard(weak, core).await;
+        }
         SignalingEvent::SessionCloseRequest {
             session_id,
             agent,

@@ -28,6 +28,20 @@ impl IpavPhase {
         }
     }
 
+    /// Accept either single-letter chips (`I`/`P`/`A`/`V`) or full names
+    /// (`Investigate`/`Plan`/`Apply`/`Verify`). Used by both the external
+    /// driver MCP (chips) and the internal agent-callable advance_phase
+    /// (full names — matches what agents see in `[PHASE: …]` envelopes).
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "I" | "Investigate" => IpavPhase::Investigate,
+            "P" | "Plan" => IpavPhase::Plan,
+            "A" | "Apply" => IpavPhase::Apply,
+            "V" | "Verify" => IpavPhase::Verify,
+            _ => return None,
+        })
+    }
+
     /// Whether peer-forward buffering uses the 1.5s window (I/P) or pure
     /// turn-based forwarding on `message_stop` (A/V).
     pub fn uses_buffered_interleave(&self) -> bool {
@@ -90,6 +104,20 @@ mod tests {
         assert!(IpavPhase::Plan.uses_buffered_interleave());
         assert!(!IpavPhase::Apply.uses_buffered_interleave());
         assert!(!IpavPhase::Verify.uses_buffered_interleave());
+    }
+
+    #[test]
+    fn parse_accepts_chips_and_full_names() {
+        assert_eq!(IpavPhase::parse("I"), Some(IpavPhase::Investigate));
+        assert_eq!(IpavPhase::parse("Investigate"), Some(IpavPhase::Investigate));
+        assert_eq!(IpavPhase::parse("P"), Some(IpavPhase::Plan));
+        assert_eq!(IpavPhase::parse("Plan"), Some(IpavPhase::Plan));
+        assert_eq!(IpavPhase::parse("A"), Some(IpavPhase::Apply));
+        assert_eq!(IpavPhase::parse("Apply"), Some(IpavPhase::Apply));
+        assert_eq!(IpavPhase::parse("V"), Some(IpavPhase::Verify));
+        assert_eq!(IpavPhase::parse("Verify"), Some(IpavPhase::Verify));
+        assert_eq!(IpavPhase::parse("apply"), None, "case-sensitive");
+        assert_eq!(IpavPhase::parse("Coffee"), None);
     }
 
     #[test]

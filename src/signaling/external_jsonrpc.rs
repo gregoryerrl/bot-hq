@@ -421,18 +421,12 @@ async fn call_external_tool(
                 .ok_or_else(|| {
                     JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing phase")
                 })?;
-            let phase = match phase_str {
-                "I" => IpavPhase::Investigate,
-                "P" => IpavPhase::Plan,
-                "A" => IpavPhase::Apply,
-                "V" => IpavPhase::Verify,
-                other => {
-                    return Err(JsonRpcError::new(
-                        JsonRpcError::INVALID_PARAMS,
-                        format!("phase must be one of I/P/A/V, got {other}"),
-                    ))
-                }
-            };
+            let phase = IpavPhase::parse(phase_str).ok_or_else(|| {
+                JsonRpcError::new(
+                    JsonRpcError::INVALID_PARAMS,
+                    format!("phase must be one of I/P/A/V, got {phase_str}"),
+                )
+            })?;
             core.advance_phase(&session_id, phase).await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("advance_phase: {e}"))
             })?;

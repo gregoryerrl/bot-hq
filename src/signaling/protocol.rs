@@ -115,8 +115,23 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
             }),
         },
         ToolDescriptor {
+            name: "advance_phase",
+            description: "Move the IPAV phase chip yourself (no user gate). Use this whenever your work crosses a phase boundary during a substantive task — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify. The dashboard chip updates; both agents receive a [PHASE: X] transition notice on stdin. Phase is a self-discipline signal, not a permission gate. Use exact phase names: Investigate, Plan, Apply, Verify.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": ["Investigate", "Plan", "Apply", "Verify"],
+                        "description": "The phase you're moving to."
+                    }
+                },
+                "required": ["target"]
+            }),
+        },
+        ToolDescriptor {
             name: "request_phase_advance",
-            description: "Ask the user to move the IPAV phase chip. Call this when your next action would cross a phase boundary (e.g., investigation done and you want to draft changes; plan written and you want to apply; changes made and you want to verify). Adds a chat message + halt row; the duo's peer-forward halts until the user advances the chip OR replies in chat (implicit decline). Use exact phase names: Investigate, Plan, Apply, Verify.",
+            description: "OPT-IN gated phase advance — use ONLY when you want to pause for explicit user acknowledgment before crossing a boundary. Most phase transitions should use `advance_phase` (self-advance, no gate). Reserve this for irreversible / destructive Apply work (force-push, prod writes, large rewrites). Adds a chat message + halt row; the duo's peer-forward halts until the user advances the chip OR replies in chat (implicit decline).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -127,7 +142,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
                     },
                     "reason": {
                         "type": "string",
-                        "description": "Short reason — what you finished, what you want to start. E.g. 'plan written, ready to apply'."
+                        "description": "Why this transition needs explicit user ack (e.g., 'about to force-push to main')."
                     }
                 },
                 "required": ["target", "reason"]

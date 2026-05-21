@@ -79,6 +79,16 @@ pub enum SignalingEvent {
         agent: String,
         archive: bool,
     },
+    /// Agent self-advanced the IPAV phase via the `advance_phase` MCP tool.
+    /// AppState's signaling subscriber parses `target` and calls
+    /// `core.advance_phase` so the IpavState updates, transition_notice
+    /// fires, and the dashboard chip moves. `target` accepts full names
+    /// or single-letter chips (see `IpavPhase::parse`).
+    AgentAdvancePhase {
+        session_id: String,
+        agent: String,
+        target: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -945,6 +955,20 @@ impl SignalingBridge {
             session_id,
             agent,
             archive,
+        });
+    }
+
+    /// Called by the MCP `tools/call` handler for `advance_phase`. Broadcasts
+    /// the request; AppState's subscriber routes to `core.advance_phase`
+    /// which updates IpavState, fires transition_notice into both agents,
+    /// and clears any awaiting halt. Fire-and-forget — the agent's tool
+    /// call returns immediately; the phase update lands on the next event
+    /// loop tick.
+    pub fn agent_advance_phase(&self, session_id: String, agent: String, target: String) {
+        let _ = self.event_tx.send(SignalingEvent::AgentAdvancePhase {
+            session_id,
+            agent,
+            target,
         });
     }
 

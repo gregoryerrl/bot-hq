@@ -160,6 +160,27 @@ async fn call_tool(
                 .await;
             Ok(ToolCallResult::text("ok"))
         }
+        "advance_phase" => {
+            let target = args
+                .get("target")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing target"))?
+                .to_string();
+            if crate::core::ipav::IpavPhase::parse(&target).is_none() {
+                return Err(JsonRpcError::new(
+                    JsonRpcError::INVALID_PARAMS,
+                    format!(
+                        "unknown target '{target}' (expected Investigate|Plan|Apply|Verify)"
+                    ),
+                ));
+            }
+            bridge.agent_advance_phase(
+                caller.session_id.clone(),
+                caller.agent.clone(),
+                target,
+            );
+            Ok(ToolCallResult::text("phase advanced"))
+        }
         "request_phase_advance" => {
             let target = args
                 .get("target")
@@ -760,6 +781,85 @@ mod tests {
             .contains("ok"));
         let ev = sub.recv().await.unwrap();
         assert!(matches!(ev, SignalingEvent::AwaitingUser { reason, .. } if reason == "wait"));
+    }
+
+    #[tokio::test]
+    async fn advance_phase_self_dispatch_emits_event() {
+        // Self-advance path: agent moves the chip without user gate. Bridge
+        // fires AgentAdvancePhase; AppState's subscriber routes to
+        // core.advance_phase. We only assert the event here.
+        let bridge = SignalingBridge::new();
+        let mut sub = bridge.subscribe();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "advance_phase",
+                    "arguments": {"target": "Apply"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["content"][0]["text"], "phase advanced");
+        let ev = sub.recv().await.unwrap();
+        match ev {
+            SignalingEvent::AgentAdvancePhase { target, agent, .. } => {
+                assert_eq!(target, "Apply");
+                assert_eq!(agent, "brian");
+            }
+            other => panic!("expected AgentAdvancePhase, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn advance_phase_self_rejects_bogus_target() {
+        let bridge = SignalingBridge::new();
+        let err = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "advance_phase",
+                    "arguments": {"target": "Wander"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("unknown target"));
+    }
+
+    #[tokio::test]
+    async fn rain_can_self_advance_phase() {
+        // Self-advance is not HANDS-only — either agent can move the chip.
+        // The user retains override via the dashboard chip click.
+        let bridge = SignalingBridge::new();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "advance_phase",
+                    "arguments": {"target": "Plan"}
+                }),
+                1,
+            ),
+            &rain_caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(false));
     }
 
     #[tokio::test]
