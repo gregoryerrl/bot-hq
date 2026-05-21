@@ -663,6 +663,7 @@ impl SignalingBridge {
     /// `pending` map is still the source of truth for the blocking oneshot,
     /// but the storage row is what the UI tray reads. Failures are logged
     /// and swallowed so the agent's tool call doesn't fail on a DB hiccup.
+    #[allow(clippy::too_many_arguments)]
     async fn persist_question(
         &self,
         session_id: &str,
@@ -756,7 +757,7 @@ impl SignalingBridge {
                             p.choice.agent.clone(),
                             ctx.kind,
                             ctx.action.clone(),
-                            outcome.clone(),
+                            outcome,
                             ctx.detail.clone(),
                         )
                         .await;
@@ -895,8 +896,8 @@ impl SignalingBridge {
 
     /// Agent-initiated IPAV phase advance request. Persists a chat message
     /// authored by the requesting agent (so the scroll shows the ask inline)
-    /// + a halt question (so the tray + dashboard counter reflect it) + sets
-    /// the awaiting flag so the duo's peer-forward halts until the user acts.
+    /// and a halt question (so the tray + dashboard counter reflect it), then
+    /// sets the awaiting flag so the duo's peer-forward halts until the user acts.
     ///
     /// The user has two response paths, both clear the halt:
     ///   1. Click the phase chip → `AppState::advance_phase` (which also

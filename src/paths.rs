@@ -117,7 +117,7 @@ impl Paths {
                 fs::write(&path, body)
                     .with_context(|| format!("writing default CL slot at {}", path.display()))?;
                 if !first_run {
-                    if let Some(rel) = path.strip_prefix(&self.data_dir).ok() {
+                    if let Ok(rel) = path.strip_prefix(&self.data_dir) {
                         repaired_slots.push(rel.display().to_string());
                     }
                 }
@@ -239,7 +239,7 @@ impl LockGuard {
             if let Ok(mut f) = fs::File::open(path) {
                 let _ = f.read_to_string(&mut existing);
             }
-            if let Some(pid) = existing.trim().parse::<i32>().ok() {
+            if let Ok(pid) = existing.trim().parse::<i32>() {
                 if pid_alive(pid) {
                     anyhow::bail!(
                         "bot-hq is already running (pid {pid}, lockfile {}). \
@@ -258,7 +258,7 @@ impl LockGuard {
             .open(path)
             .with_context(|| format!("opening lockfile {}", path.display()))?;
         let pid = std::process::id();
-        write!(f, "{pid}\n").with_context(|| format!("writing pid to {}", path.display()))?;
+        writeln!(f, "{pid}").with_context(|| format!("writing pid to {}", path.display()))?;
         Ok(Self {
             path: path.to_path_buf(),
         })

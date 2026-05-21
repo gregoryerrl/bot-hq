@@ -263,6 +263,7 @@ fn run_post_commit(
 ///   2. the session has a session-level push grant covering this branch
 ///      (read from `.local/session-permissions/<sid>.json`), OR
 ///   3. the branch is in the static `remembered_approvals` list in policy.yaml.
+///
 /// Otherwise blocks with a message telling the agent how to ask for a grant.
 fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-push");

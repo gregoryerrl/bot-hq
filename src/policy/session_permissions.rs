@@ -27,21 +27,16 @@ pub struct SessionPermissions {
 }
 
 /// How broadly a grant applies. `None` is the default — ask every time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GrantScope {
     /// No grant — agent must call `request_approval`.
+    #[default]
     None,
     /// Granted for any branch in this session.
     AllBranches,
     /// Granted only for the listed branches.
     Specific { branches: Vec<String> },
-}
-
-impl Default for GrantScope {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl GrantScope {

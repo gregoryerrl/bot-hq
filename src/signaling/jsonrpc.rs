@@ -394,7 +394,7 @@ async fn call_tool(
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect();
-            if options.len() < 1 {
+            if options.is_empty() {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
                     "options must have at least 1 entry",

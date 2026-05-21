@@ -1182,7 +1182,7 @@ pub async fn install_view_model(
                 let mut snippets = String::new();
                 if let Ok(entries) = std::fs::read_dir(&folder_abs) {
                     let mut paths: Vec<_> = entries.flatten().collect();
-                    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+                    paths.sort_by_key(|a| a.file_name());
                     for e in paths.iter().take(40) {
                         let p = e.path();
                         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1308,7 +1308,7 @@ pub async fn install_view_model(
                 let mut was_expanded = false;
                 for i in 0..cur.row_count() {
                     if let Some(p) = cur.row_data(i) {
-                        if p.to_string() == folder_path {
+                        if p == folder_path {
                             was_expanded = true; // dropping it = collapse
                         } else {
                             set.push(p);
@@ -1641,7 +1641,7 @@ pub async fn install_view_model(
             // yanking focus out from under the user mid-type. Explicit
             // refreshes (after create / delete / rename) still happen
             // from the action handlers.
-            if tick % 4 == 0 {
+            if tick.is_multiple_of(4) {
                 let editing = read_tree_state(&weak_for_poll).await.editing_mode;
                 if editing.is_empty() {
                     refresh_cl_tree(&weak_for_poll, &core_for_poll).await;
@@ -2388,7 +2388,7 @@ async fn handle_signaling_event(
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(handle) = weak2.upgrade() {
                     let app = handle.global::<SlintAppState>();
-                    if app.get_active_session_id().to_string() == closed_id {
+                    if app.get_active_session_id() == closed_id {
                         app.set_active_session_id(SharedString::new());
                         app.set_active_awaiting(false);
                     }
@@ -2439,7 +2439,7 @@ async fn handle_signaling_event(
                         app.set_emma_awaiting(true);
                         return;
                     }
-                    if app.get_active_session_id().to_string() == session_id {
+                    if app.get_active_session_id() == session_id {
                         app.set_active_awaiting(true);
                     }
                     update_tile_awaiting(&app, &session_id, true);
@@ -2549,7 +2549,7 @@ pub(crate) fn refresh_active_questions(
                 let app = handle.global::<SlintAppState>();
                 // Only paint if this session is still the active one — guards
                 // against a late storage read landing after the user navigated.
-                if app.get_active_session_id().to_string() == session_id_clone {
+                if app.get_active_session_id() == session_id_clone {
                     let mapped: Vec<PendingQuestion> = pending
                         .into_iter()
                         .map(|q| {
@@ -2585,7 +2585,7 @@ fn sync_active_from_tile(weak: &Weak<AppWindow>, session_id: &str) {
             let model = app.get_sessions();
             for i in 0..model.row_count() {
                 if let Some(tile) = model.row_data(i) {
-                    if tile.id.to_string() == session_id {
+                    if tile.id == session_id {
                         app.set_active_awaiting(tile.awaiting);
                         return;
                     }
@@ -2606,13 +2606,13 @@ fn clear_awaiting_for(weak: &Weak<AppWindow>, session_id: &str) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(handle) = weak.upgrade() {
             let app = handle.global::<SlintAppState>();
-            if app.get_active_session_id().to_string() == session_id {
+            if app.get_active_session_id() == session_id {
                 app.set_active_awaiting(false);
             }
             let model = app.get_sessions();
             for i in 0..model.row_count() {
                 if let Some(mut tile) = model.row_data(i) {
-                    if tile.id.to_string() == session_id {
+                    if tile.id == session_id {
                         tile.awaiting = false;
                         model.set_row_data(i, tile);
                         break;
@@ -2651,7 +2651,7 @@ fn update_tile_awaiting(app: &SlintAppState, session_id: &str, awaiting: bool) {
     let model = app.get_sessions();
     for i in 0..model.row_count() {
         if let Some(mut tile) = model.row_data(i) {
-            if tile.id.to_string() == session_id {
+            if tile.id == session_id {
                 tile.awaiting = awaiting;
                 model.set_row_data(i, tile);
             }

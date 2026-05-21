@@ -438,8 +438,10 @@ mod tests {
 
     #[test]
     fn is_blocked_command_prefix_match() {
-        let mut p = Policy::default();
-        p.tool_blocklist = vec!["git push".into(), "rm -rf".into()];
+        let p = Policy {
+            tool_blocklist: vec!["git push".into(), "rm -rf".into()],
+            ..Policy::default()
+        };
         assert!(p.is_blocked_command("git push origin main"));
         assert!(p.is_blocked_command("rm -rf /tmp/foo"));
         assert!(!p.is_blocked_command("git status"));
@@ -447,6 +449,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn first_forbidden_word_finds_match() {
         let mut p = Policy::default();
         p.forbidden_in_commits = vec!["bot-hq".into(), "Claude".into()];
@@ -462,8 +465,10 @@ mod tests {
 
     #[test]
     fn render_system_prompt_block_includes_forbidden_words() {
-        let mut p = Policy::default();
-        p.forbidden_in_commits = vec!["bot-hq".into()];
+        let p = Policy {
+            forbidden_in_commits: vec!["bot-hq".into()],
+            ..Policy::default()
+        };
         let block = p.render_system_prompt_block();
         assert!(block.contains("check_commit_message"));
         assert!(block.contains("bot-hq"));
