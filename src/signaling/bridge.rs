@@ -380,8 +380,8 @@ impl SignalingBridge {
         let project = self.project_for_session(session_id).await;
         let project_root = match project.as_deref() {
             Some(p) => {
-                let guard = self.storage.lock().await;
-                match guard.as_ref() {
+                let storage = self.storage.lock().await.clone();
+                match storage {
                     Some(storage) => storage.cl_path_for_project(data_dir, p).await.ok(),
                     None => None,
                 }
@@ -418,8 +418,8 @@ impl SignalingBridge {
         let project = self.project_for_session(session_id).await;
         let project_root = match project.as_deref() {
             Some(p) => {
-                let guard = self.storage.lock().await;
-                match guard.as_ref() {
+                let storage = self.storage.lock().await.clone();
+                match storage {
                     Some(storage) => storage.cl_path_for_project(data_dir, p).await.ok(),
                     None => None,
                 }
@@ -907,13 +907,17 @@ impl SignalingBridge {
     /// when set, otherwise fall back to `<data_dir>/projects/<name>`.
     /// Returns None only when the bridge has no `data_dir` configured (test
     /// bridges built via `new()`).
+    ///
+    /// Clones the Storage handle out of the mutex before awaiting so callers
+    /// holding the bridge mutex (e.g. `cl_rescan`) don't deadlock when this
+    /// method tries to re-lock for its own lookup.
     async fn cl_project_root(&self, project: &str) -> Option<PathBuf> {
         let data_dir = self.data_dir.as_ref()?.clone();
         if project == Project::GLOBALS {
             return Some(data_dir);
         }
-        let storage_guard = self.storage.lock().await;
-        match storage_guard.as_ref() {
+        let storage = self.storage.lock().await.clone();
+        match storage {
             Some(storage) => storage
                 .cl_path_for_project(&data_dir, project)
                 .await
@@ -1007,9 +1011,12 @@ impl SignalingBridge {
     ///   - orphaned: index row exists, file gone → list (but DO NOT auto-delete; user decides)
     pub async fn cl_rescan(&self, project: &str) -> Result<ClRescanReport> {
         let mut report = ClRescanReport::default();
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
-            return Ok(report);
+        // Clone the Storage handle out of the bridge mutex BEFORE calling
+        // cl_project_root, which also acquires the same mutex. tokio's Mutex
+        // is not reentrant — holding the guard across that call deadlocks.
+        let storage = match self.storage.lock().await.clone() {
+            Some(s) => s,
+            None => return Ok(report),
         };
         let Some(root) = self.cl_project_root(project).await else {
             return Ok(report);
