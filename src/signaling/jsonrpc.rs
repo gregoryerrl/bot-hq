@@ -412,6 +412,71 @@ async fn call_tool(
                 .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
             Ok(ToolCallResult::text(picked))
         }
+        "session_doc_write" => {
+            let slug = args
+                .get("slug")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing slug"))?
+                .to_string();
+            let body = args
+                .get("body")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing body"))?
+                .to_string();
+            let id = bridge
+                .session_doc_write(&caller.session_id, &slug, &body)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            Ok(ToolCallResult::text(
+                json!({"id": id, "slug": slug}).to_string(),
+            ))
+        }
+        "session_doc_search" => {
+            let query = args.get("query").and_then(Value::as_str);
+            let rows = bridge
+                .session_doc_search(&caller.session_id, query)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            let trimmed: Vec<Value> = rows
+                .into_iter()
+                .map(|d| {
+                    json!({
+                        "id": d.id,
+                        "slug": d.slug,
+                        "body": d.body,
+                        "created_at": d.created_at,
+                        "updated_at": d.updated_at,
+                    })
+                })
+                .collect();
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&trimmed).unwrap_or_else(|_| "[]".into()),
+            ))
+        }
+        "session_doc_read" => {
+            let slug = args
+                .get("slug")
+                .and_then(Value::as_str)
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing slug"))?
+                .to_string();
+            let row = bridge
+                .session_doc_read(&caller.session_id, &slug)
+                .await
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+            match row {
+                Some(d) => Ok(ToolCallResult::text(
+                    json!({
+                        "id": d.id,
+                        "slug": d.slug,
+                        "body": d.body,
+                        "created_at": d.created_at,
+                        "updated_at": d.updated_at,
+                    })
+                    .to_string(),
+                )),
+                None => Ok(ToolCallResult::text("null".to_string())),
+            }
+        }
         "cl_index_search" => {
             let project = args.get("project").and_then(Value::as_str);
             let query = args.get("query").and_then(Value::as_str);
@@ -986,6 +1051,77 @@ mod tests {
         r.id = None;
         let out = dispatch(r, &caller(), &bridge).await.unwrap();
         assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_doc_write_then_read_round_trip() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        let write_res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_write",
+                    "arguments": {"slug": "plan-v1", "body": "the plan body"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&write_res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("plan-v1"), "write returned: {text}");
+
+        let read_res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_read",
+                    "arguments": {"slug": "plan-v1"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&read_res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"body\":\"the plan body\""), "read returned: {text}");
+    }
+
+    #[tokio::test]
+    async fn session_doc_read_unknown_slug_returns_null() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_read",
+                    "arguments": {"slug": "nope"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["content"][0]["text"], "null");
     }
 
     #[tokio::test]

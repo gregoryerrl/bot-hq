@@ -265,6 +265,52 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
             }),
         },
         ToolDescriptor {
+            name: "session_doc_write",
+            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. Idempotent on (session_id, slug) — re-writing the same slug overwrites. Use slugs that read well later (e.g. 'plan-v1', 'findings-broadcast'). Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Stable identifier within this session (e.g. 'plan-v1')."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "The document body, free-form markdown / text."
+                    }
+                },
+                "required": ["slug", "body"]
+            }),
+        },
+        ToolDescriptor {
+            name: "session_doc_search",
+            description: "List this session's scratch documents (slug + body substring filter). Returns lightweight rows {id, slug, body, updated_at} ordered newest-first. Use BEFORE session_doc_read to find what's worth opening.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Optional case-insensitive substring filter over slug + body."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDescriptor {
+            name: "session_doc_read",
+            description: "Fetch one session-scratch document by slug. Returns {id, slug, body, created_at, updated_at} or null when the slug isn't in this session.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "slug": {
+                        "type": "string",
+                        "description": "Slug from session_doc_search."
+                    }
+                },
+                "required": ["slug"]
+            }),
+        },
+        ToolDescriptor {
             name: "cl_index_search",
             description: "Search the Context Library (CL) index for relevant files BEFORE reading any CL file. The index returns lightweight {file_path, description, tags, updated_at} rows — read descriptions to decide which files are worth opening. This saves context vs eagerly reading everything. The `_globals` project holds cross-project system files (general-rules.md, etc.); for project-scoped work pass your session's working project name. Optional `query` does a case-insensitive substring match across file_path/description/tags.",
             input_schema: serde_json::json!({

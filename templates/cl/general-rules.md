@@ -37,6 +37,12 @@ Bot-hq keeps a searchable **index** of every CL file. Use it BEFORE you reach fo
 
 Workflow at session start: call `cl_index_search(project=<your project>)` once. Read descriptions. Open only the files that look relevant. Skip the rest.
 
+## Session-scoped documents
+
+Use `session_doc_write(slug, body)` for plans, investigation findings, and any scratch info that's useful within the session but shouldn't pollute the CL. Docs are isolated per session, archived with the session on close, and discoverable via `session_doc_search(query?)` + `session_doc_read(slug)`. Pick slugs that read well later (e.g. `plan-v1`, `findings-broadcast`).
+
+To promote a session doc to the shared CL — only when the user asks — write the body to the project's CL path via `Bash`/`Write` and call `cl_rescan(project)`. There's no dedicated promote tool; the CL write IS the promotion.
+
 ## Production data access
 
 Production databases (live customer / company data) are READ-ONLY for agents. The full rules:

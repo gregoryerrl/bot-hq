@@ -11,7 +11,7 @@ pub mod model;
 
 pub use model::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Project,
-    QuestionKind, QuestionStatus, Session, SessionQuestion,
+    QuestionKind, QuestionStatus, Session, SessionDocument, SessionQuestion,
 };
 
 #[derive(Clone)]
@@ -792,6 +792,195 @@ impl Storage {
             .await?,
         };
         Ok(rows)
+    }
+
+    // ---- session_documents ---------------------------------------------
+
+    /// Upsert a per-session document by (session_id, slug). On conflict the
+    /// body is overwritten and updated_at refreshed; created_at preserved.
+    /// Returns the row id.
+    pub async fn upsert_session_document(
+        &self,
+        session_id: &str,
+        slug: &str,
+        body: &str,
+    ) -> Result<i64> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let res = sqlx::query(
+            "INSERT INTO session_documents (session_id, slug, body, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(session_id, slug) DO UPDATE SET \
+               body = excluded.body, \
+               updated_at = excluded.updated_at",
+        )
+        .bind(session_id)
+        .bind(slug)
+        .bind(body)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("upsert session_documents session={session_id} slug={slug}"))?;
+        // last_insert_rowid is 0 on the UPDATE branch; re-fetch when needed.
+        let id = if res.last_insert_rowid() != 0 {
+            res.last_insert_rowid()
+        } else {
+            let row: (i64,) = sqlx::query_as(
+                "SELECT id FROM session_documents WHERE session_id = ? AND slug = ?",
+            )
+            .bind(session_id)
+            .bind(slug)
+            .fetch_one(&self.pool)
+            .await?;
+            row.0
+        };
+        Ok(id)
+    }
+
+    /// Search a session's documents. Optional `query` is a case-insensitive
+    /// substring filter across slug + body. Ordered newest-first.
+    pub async fn session_documents_for(
+        &self,
+        session_id: &str,
+        query: Option<&str>,
+    ) -> Result<Vec<SessionDocument>> {
+        let rows = match query.map(|q| format!("%{}%", q.to_lowercase())) {
+            Some(like) => sqlx::query_as::<_, SessionDocument>(
+                "SELECT id, session_id, slug, body, created_at, updated_at \
+                 FROM session_documents \
+                 WHERE session_id = ? AND ( \
+                    LOWER(slug) LIKE ? OR LOWER(body) LIKE ?) \
+                 ORDER BY updated_at DESC",
+            )
+            .bind(session_id)
+            .bind(&like)
+            .bind(&like)
+            .fetch_all(&self.pool)
+            .await?,
+            None => sqlx::query_as::<_, SessionDocument>(
+                "SELECT id, session_id, slug, body, created_at, updated_at \
+                 FROM session_documents \
+                 WHERE session_id = ? \
+                 ORDER BY updated_at DESC",
+            )
+            .bind(session_id)
+            .fetch_all(&self.pool)
+            .await?,
+        };
+        Ok(rows)
+    }
+
+    /// Fetch one document by (session_id, slug). None when not found.
+    pub async fn session_document_by_slug(
+        &self,
+        session_id: &str,
+        slug: &str,
+    ) -> Result<Option<SessionDocument>> {
+        let row = sqlx::query_as::<_, SessionDocument>(
+            "SELECT id, session_id, slug, body, created_at, updated_at \
+             FROM session_documents \
+             WHERE session_id = ? AND slug = ?",
+        )
+        .bind(session_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+}
+
+#[cfg(test)]
+mod session_doc_tests {
+    use super::*;
+
+    async fn seeded() -> (Storage, &'static str, &'static str) {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("sess-a", "a", None).await.unwrap();
+        s.create_session("sess-b", "b", None).await.unwrap();
+        (s, "sess-a", "sess-b")
+    }
+
+    #[tokio::test]
+    async fn upsert_then_read_by_slug() {
+        let (s, a, _) = seeded().await;
+        let id = s
+            .upsert_session_document(a, "plan-v1", "first body")
+            .await
+            .unwrap();
+        assert!(id > 0);
+        let doc = s
+            .session_document_by_slug(a, "plan-v1")
+            .await
+            .unwrap()
+            .expect("doc should exist");
+        assert_eq!(doc.slug, "plan-v1");
+        assert_eq!(doc.body, "first body");
+        assert_eq!(doc.session_id, "sess-a");
+    }
+
+    #[tokio::test]
+    async fn upsert_is_idempotent_overwrites_body() {
+        let (s, a, _) = seeded().await;
+        let id1 = s
+            .upsert_session_document(a, "findings", "v1")
+            .await
+            .unwrap();
+        let id2 = s
+            .upsert_session_document(a, "findings", "v2")
+            .await
+            .unwrap();
+        assert_eq!(id1, id2, "same slug should return same row id");
+        let doc = s
+            .session_document_by_slug(a, "findings")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.body, "v2");
+        // Only one row total for this slug.
+        let all = s.session_documents_for(a, None).await.unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_filters_by_query_across_slug_and_body() {
+        let (s, a, _) = seeded().await;
+        s.upsert_session_document(a, "plan-v1", "rewrites broadcast.rs")
+            .await
+            .unwrap();
+        s.upsert_session_document(a, "findings-perf", "irrelevant")
+            .await
+            .unwrap();
+        let hits_slug = s.session_documents_for(a, Some("plan")).await.unwrap();
+        assert_eq!(hits_slug.len(), 1);
+        assert_eq!(hits_slug[0].slug, "plan-v1");
+        let hits_body = s
+            .session_documents_for(a, Some("broadcast"))
+            .await
+            .unwrap();
+        assert_eq!(hits_body.len(), 1);
+        assert_eq!(hits_body[0].slug, "plan-v1");
+        let no_query = s.session_documents_for(a, None).await.unwrap();
+        assert_eq!(no_query.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn docs_are_isolated_per_session() {
+        let (s, a, b) = seeded().await;
+        s.upsert_session_document(a, "plan", "for a").await.unwrap();
+        let in_b = s.session_documents_for(b, None).await.unwrap();
+        assert!(in_b.is_empty(), "session B sees no docs from A: {in_b:?}");
+        let read_in_b = s.session_document_by_slug(b, "plan").await.unwrap();
+        assert!(read_in_b.is_none(), "session B can't read A's slug");
+    }
+
+    #[tokio::test]
+    async fn unknown_slug_returns_none() {
+        let (s, a, _) = seeded().await;
+        let row = s
+            .session_document_by_slug(a, "nope")
+            .await
+            .unwrap();
+        assert!(row.is_none());
     }
 }
 

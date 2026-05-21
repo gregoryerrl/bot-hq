@@ -268,3 +268,17 @@ pub struct ClRead {
     pub agent: String,
     pub read_at: String,
 }
+
+/// Per-session free-form document. Agents use this for plans, investigation
+/// findings, and scratch notes that should NOT pollute the CL. Isolated per
+/// session; archived with the session row on close. `slug` is the agent-
+/// chosen identifier; UNIQUE per (session_id, slug) so writes are idempotent.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct SessionDocument {
+    pub id: i64,
+    pub session_id: String,
+    pub slug: String,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+}

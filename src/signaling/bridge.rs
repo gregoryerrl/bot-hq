@@ -1016,6 +1016,48 @@ impl SignalingBridge {
         storage.cl_index_search(project, query).await
     }
 
+    // ---- session_documents -----------------------------------------
+
+    /// Agent-callable: upsert a per-session scratch document by slug.
+    pub async fn session_doc_write(
+        &self,
+        session_id: &str,
+        slug: &str,
+        body: &str,
+    ) -> Result<i64> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Err(anyhow::anyhow!("storage not configured"));
+        };
+        storage.upsert_session_document(session_id, slug, body).await
+    }
+
+    /// Agent-callable: search this session's docs (slug + body substring).
+    pub async fn session_doc_search(
+        &self,
+        session_id: &str,
+        query: Option<&str>,
+    ) -> Result<Vec<crate::storage::SessionDocument>> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        storage.session_documents_for(session_id, query).await
+    }
+
+    /// Agent-callable: read one session doc by slug.
+    pub async fn session_doc_read(
+        &self,
+        session_id: &str,
+        slug: &str,
+    ) -> Result<Option<crate::storage::SessionDocument>> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(None);
+        };
+        storage.session_document_by_slug(session_id, slug).await
+    }
+
     /// Read-side discovery for FOLDER descriptions. Parallel to
     /// [`cl_index_search`]. Returns lightweight rows; empty list when storage
     /// isn't configured (test bridges).
