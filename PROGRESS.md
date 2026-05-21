@@ -12,16 +12,16 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 189 tests passing (145 lib + 29 external MCP + 10 storage + 5 server).
-Release build clean. Four audit-cleanup commits landed and pushed
+Release build clean. Five audit-cleanup commits landed and pushed
 today (2026-05-21).
 
 ---
 
-## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5 landed)
+## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5, F11 landed)
 
 Acted on `~/.bot-hq/projects/bot-hq/investigations/audit-round-2-2026-05-21.md`
 — the Brian+Rain adversarial codebase audit produced earlier in the
-session. Four findings shipped, four remain queued.
+session. Five findings shipped, three remain queued.
 
 **Landed:**
 
@@ -55,11 +55,18 @@ session. Four findings shipped, four remain queued.
   source vec. Internal `jsonrpc.rs` has zero matching sites — F5 is
   external-only. Net -22 LOC. Same 5-field shape preserved;
   `session_id` stays dropped (DB-only, not MCP view).
+- **F11 — `6a423c9`** — `SignalingBridge` had 3 constructors
+  (`new` / `with_violations_log` / `with_policy`) each copy-pasting
+  the same 9-field `Arc::new(Self {...})` struct literal, differing
+  only in `violations: Option<ViolationsLog>` and
+  `data_dir: Option<PathBuf>`. Added private
+  `new_with(Option, Option)` containing the single struct-literal
+  build; collapsed the 3 public fns to thin wrappers. Zero call-site
+  changes across the ~41 callers (1 prod in `main.rs:59`, ~40 in
+  tests). Doc comments preserved on the public wrappers. Net -13 LOC.
 
 **Queued for next session (audit recommended order):**
 
-- F11 — collapse `bridge.rs:160-205` constructor triplication into one
-  `new_with(violations, data_dir)` (~25 LOC).
 - F6 — `internal_err(op, e)` helper for the 8× repeated
   `JsonRpcError::new(INTERNAL_ERROR, format!("{op}: {e}"))` shape.
 - F13 — `LazyLock<Vec<ToolDescriptor>>` for both `tool_descriptors()`
@@ -75,8 +82,8 @@ session. Four findings shipped, four remain queued.
 savings), F10 (per-table storage split — import sprawl without
 discoverability gain). See the audit file for re-open triggers.
 
-**Resume point:** last F-series code commit `5e46844` (F5); next
-finding is F11. The audit file at
+**Resume point:** last F-series code commit `6a423c9` (F11); next
+finding is F6. The audit file at
 `investigations/audit-round-2-2026-05-21.md` has the exact line
 numbers and proposed diffs.
 
