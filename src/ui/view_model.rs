@@ -848,13 +848,6 @@ pub async fn install_view_model(
                 // Use Emma as the describer. Send a focused prompt; poll her
                 // chat for the first new text reply. Pollutes Emma's chat
                 // with the request/response which is the v1 trade-off.
-                let last_id = core
-                    .storage
-                    .messages_for_session("emma", None)
-                    .await
-                    .ok()
-                    .and_then(|m| m.iter().map(|x| x.id).max())
-                    .unwrap_or(0);
                 let snippet: String = body.chars().take(4000).collect();
                 // Sharpened brief: lead with the content itself so Emma's
                 // first read is the file (not a meta instruction), forbid
@@ -869,48 +862,19 @@ pub async fn install_view_model(
                      ===FILE-START===\n{snippet}\n===FILE-END===\n\n\
                      One sentence. Plain prose. Reply now."
                 );
-                if let Err(e) = core.broadcast("emma", &brief).await {
-                    warn!(?e, "autodescribe: send to emma");
-                    show_toast(&weak, "Emma is unreachable.");
-                    return;
-                }
-                // Poll for a new text message from Emma. Cap at ~30s.
-                let mut tries = 30;
-                while tries > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    let msgs = match core.storage.messages_for_session("emma", Some(last_id)).await
-                    {
-                        Ok(m) => m,
-                        Err(_) => break,
-                    };
-                    if let Some(reply) = msgs
-                        .iter()
-                        .find(|m| m.author == "emma" && m.kind == "text" && !m.content.trim().is_empty())
-                    {
-                        // First line is usually the description (Emma might add a follow-up).
-                        let first_line = reply
-                            .content
-                            .lines()
-                            .find(|l| !l.trim().is_empty())
-                            .unwrap_or("")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                        update_cl_metadata(&weak, &first_line, "");
-                        // The CustomInput edited callback won't fire from
-                        // programmatic property changes, so flag dirty here.
-                        let weak2 = weak.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(handle) = weak2.upgrade() {
-                                handle.global::<SlintAppState>().set_cl_metadata_dirty(true);
-                            }
-                        });
-                        show_toast(&weak, "Description suggested by Emma.");
-                        return;
-                    }
-                    tries -= 1;
-                }
-                show_toast(&weak, "Timed out waiting for Emma.");
+                let weak_apply = weak.clone();
+                poll_emma_description(&core, &weak, "autodescribe", &brief, move |first_line| {
+                    update_cl_metadata(&weak_apply, &first_line, "");
+                    // The CustomInput edited callback won't fire from
+                    // programmatic property changes, so flag dirty here.
+                    let weak2 = weak_apply.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(handle) = weak2.upgrade() {
+                            handle.global::<SlintAppState>().set_cl_metadata_dirty(true);
+                        }
+                    });
+                })
+                .await;
             });
         });
     }
@@ -1204,13 +1168,6 @@ pub async fn install_view_model(
                         }
                     }
                 }
-                let last_id = core
-                    .storage
-                    .messages_for_session("emma", None)
-                    .await
-                    .ok()
-                    .and_then(|m| m.iter().map(|x| x.id).max())
-                    .unwrap_or(0);
                 let brief = format!(
                     "Below between the ===FOLDER-START=== / ===FOLDER-END=== markers is a snapshot of a CL (context library) folder's immediate contents. Reply with exactly ONE plain sentence describing what the folder is for. No preface, no quotes, no \"let me\" or \"I'll\" — just the sentence.\n\n\
                      The sentence will be saved into a searchable index that other agents read to decide whether the folder is relevant; specific is better than generic.\n\n\
@@ -1221,49 +1178,18 @@ pub async fn install_view_model(
                      ===FOLDER-END===\n\n\
                      One sentence. Plain prose. Reply now."
                 );
-                if let Err(e) = core.broadcast("emma", &brief).await {
-                    warn!(?e, "autodescribe-folder: send to emma");
-                    show_toast(&weak, "Emma is unreachable.");
-                    return;
-                }
-                let mut tries = 30;
-                while tries > 0 {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    let msgs = match core
-                        .storage
-                        .messages_for_session("emma", Some(last_id))
-                        .await
-                    {
-                        Ok(m) => m,
-                        Err(_) => break,
-                    };
-                    if let Some(reply) = msgs.iter().find(|m| {
-                        m.author == "emma" && m.kind == "text" && !m.content.trim().is_empty()
-                    }) {
-                        let first_line = reply
-                            .content
-                            .lines()
-                            .find(|l| !l.trim().is_empty())
-                            .unwrap_or("")
-                            .trim()
-                            .trim_matches('"')
-                            .to_string();
-                        let weak2 = weak.clone();
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(handle) = weak2.upgrade() {
-                                let app = handle.global::<SlintAppState>();
-                                app.set_cl_current_folder_description(SharedString::from(
-                                    first_line,
-                                ));
-                                app.set_cl_current_folder_dirty(true);
-                            }
-                        });
-                        show_toast(&weak, "Description suggested by Emma.");
-                        return;
-                    }
-                    tries -= 1;
-                }
-                show_toast(&weak, "Timed out waiting for Emma.");
+                let weak_apply = weak.clone();
+                poll_emma_description(&core, &weak, "autodescribe-folder", &brief, move |first_line| {
+                    let weak2 = weak_apply.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(handle) = weak2.upgrade() {
+                            let app = handle.global::<SlintAppState>();
+                            app.set_cl_current_folder_description(SharedString::from(first_line));
+                            app.set_cl_current_folder_dirty(true);
+                        }
+                    });
+                })
+                .await;
             });
         });
     }
@@ -2319,6 +2245,62 @@ async fn refresh_emma(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) -> anyho
         }
     });
     Ok(())
+}
+
+/// Poll Emma's chat for the first new text reply after broadcasting a brief
+/// asking for a one-line description. Used by autodescribe (file + folder).
+/// `context` tags failure-mode log messages.
+async fn poll_emma_description<F>(
+    core: &Arc<CoreAppState>,
+    weak: &Weak<AppWindow>,
+    context: &str,
+    brief: &str,
+    apply: F,
+) where
+    F: FnOnce(String) + Send + 'static,
+{
+    let last_id = core
+        .storage
+        .messages_for_session("emma", None)
+        .await
+        .ok()
+        .and_then(|m| m.iter().map(|x| x.id).max())
+        .unwrap_or(0);
+    if let Err(e) = core.broadcast("emma", brief).await {
+        warn!(?e, "{context}: send to emma");
+        show_toast(weak, "Emma is unreachable.");
+        return;
+    }
+    // Poll for a new text message. Cap at ~30s.
+    let mut tries = 30;
+    while tries > 0 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let msgs = match core
+            .storage
+            .messages_for_session("emma", Some(last_id))
+            .await
+        {
+            Ok(m) => m,
+            Err(_) => break,
+        };
+        if let Some(reply) = msgs.iter().find(|m| {
+            m.author == "emma" && m.kind == "text" && !m.content.trim().is_empty()
+        }) {
+            let first_line = reply
+                .content
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"')
+                .to_string();
+            apply(first_line);
+            show_toast(weak, "Description suggested by Emma.");
+            return;
+        }
+        tries -= 1;
+    }
+    show_toast(weak, "Timed out waiting for Emma.");
 }
 
 fn to_chat_data(m: &Message) -> ChatMsgData {
