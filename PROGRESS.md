@@ -12,8 +12,8 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 189 tests passing (145 lib + 29 external MCP + 10 storage + 5 server).
-Release build clean. Four audit-cleanup commits landed today
-(2026-05-21); F12 + F2 + F1 pushed, F5 awaiting authorization.
+Release build clean. Four audit-cleanup commits landed and pushed
+today (2026-05-21).
 
 ---
 
@@ -75,9 +75,10 @@ session. Four findings shipped, four remain queued.
 savings), F10 (per-table storage split — import sprawl without
 discoverability gain). See the audit file for re-open triggers.
 
-**Resume point:** `git log --oneline -1` → `5e46844`. Next finding is
-F11; the audit file at `investigations/audit-round-2-2026-05-21.md`
-has the exact line numbers and proposed diffs.
+**Resume point:** last F-series code commit `5e46844` (F5); next
+finding is F11. The audit file at
+`investigations/audit-round-2-2026-05-21.md` has the exact line
+numbers and proposed diffs.
 
 ---
 
