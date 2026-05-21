@@ -2,8 +2,6 @@
 //! can import them via `use bot_hq::storage::...`.
 
 pub mod agents;
-pub mod app;
-pub mod cl;
 pub mod core;
 pub mod paths;
 pub mod policy;
