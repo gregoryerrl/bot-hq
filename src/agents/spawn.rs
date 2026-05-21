@@ -193,6 +193,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
 
 /// Build the path-string form of the claude command for diagnostics / logging.
 /// Not used by spawn; tests use it to assert flag set.
+#[cfg(test)]
 pub fn debug_command(cfg: &SpawnConfig) -> Vec<String> {
     let cmd = build_command(cfg);
     let std_cmd = cmd.as_std();

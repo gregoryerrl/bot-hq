@@ -11,8 +11,6 @@ use crate::paths::Paths;
 use crate::signaling::{default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge};
 use crate::storage::{AgentConfig, Author, MessageKind, Session, Storage};
 use tokio::sync::mpsc;
-#[allow(unused_imports)]
-use crate::core::ipav::IpavPhase;
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -449,7 +447,7 @@ pub fn read_system_prompt(
         }
     }
 
-    // 4. Policy directive block — project-aware. Honors a non-default
+    // 6. Policy directive block — project-aware. Honors a non-default
     // `projects.cl_path` when the caller resolved one (folder-view
     // registration with an off-convention location).
     let policy =
