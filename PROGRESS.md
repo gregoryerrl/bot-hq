@@ -11,9 +11,65 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-165 tests passing (121 lib + 29 signaling + 5 external MCP + 10
-storage). Release build clean. The session-permission grant subsystem
-is in flight (functional, uncommitted in working tree).
+189 tests passing (145 lib + 29 external MCP + 10 storage + 5 server).
+Release build clean. Three audit-cleanup commits landed and pushed
+today (2026-05-21).
+
+---
+
+## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1 landed)
+
+Acted on `~/.bot-hq/projects/bot-hq/investigations/audit-round-2-2026-05-21.md`
+— the Brian+Rain adversarial codebase audit produced earlier in the
+session. Three findings shipped, five remain queued.
+
+**Landed:**
+
+- **F12 — `05249b8`** — `request_phase_advance` used a hardcoded
+  `matches!()` against full names, rejecting chip-form targets while
+  `advance_phase` accepted both via `IpavPhase::parse`. Real behavioral
+  bug — `request_phase_advance(target="I")` returned INVALID_PARAMS.
+  Same SSOT issue in `view_model.rs:250-255` (manual chip-to-phase
+  reimplementation). Added `IpavPhase::error_hint()` so internal +
+  external MCP dispatch quote the canonical
+  `"I/P/A/V or Investigate/Plan/Apply/Verify"` string instead of three
+  divergent ones. Two regression tests lock in chip-form acceptance.
+- **F2 — `ac4db22`** — `PROTOCOL_VERSION` was duplicated in
+  `external_jsonrpc.rs:21` alongside the public const in
+  `protocol.rs:11`. Silent-desync risk on MCP version bumps. Deleted
+  the local copy; imported the public const.
+- **F1 — `39efd51`** — `result_json()` helper from `jsonrpc.rs:108`
+  was never propagated to `external_jsonrpc.rs`, which inlined the same
+  `serde_json::to_string(...).unwrap_or_default()` shape at 16 call
+  sites. Lifted the helper into `signaling/response.rs` as
+  `pub(super)`; replaced all 16 sites. Net -26 LOC. Intentional
+  behavior diff: serialize failures now return `"{}"` instead of
+  `""` — valid JSON shape, matches the existing internal pattern.
+
+**Queued for next session (audit recommended order):**
+
+- F5 — extract `message_to_json` helper (~24 LOC, message-to-JSON
+  shape repeated 4× in `external_jsonrpc.rs`).
+- F11 — collapse `bridge.rs:160-205` constructor triplication into one
+  `new_with(violations, data_dir)` (~25 LOC).
+- F6 — `internal_err(op, e)` helper for the 8× repeated
+  `JsonRpcError::new(INTERNAL_ERROR, format!("{op}: {e}"))` shape.
+- F13 — `LazyLock<Vec<ToolDescriptor>>` for both `tool_descriptors()`
+  fns (pure perf; static data currently re-allocated per
+  `tools/list`).
+- F4 — extract HTTP `handle_request` body-decode + response shaping
+  from `server.rs` + `external_server.rs`. Rain flagged that
+  `external_server.rs` has zero tests today; an external HTTP smoke
+  test should precede the refactor.
+
+**Rejected (recorded for future re-evaluation):** F3 (generic
+`dispatch_jsonrpc<F>` extraction — async closure overhead exceeds
+savings), F10 (per-table storage split — import sprawl without
+discoverability gain). See the audit file for re-open triggers.
+
+**Resume point:** `git log --oneline -1` → `39efd51`. Next finding is
+F5; the audit file at `investigations/audit-round-2-2026-05-21.md`
+has the exact line numbers and proposed diffs.
 
 ---
 
