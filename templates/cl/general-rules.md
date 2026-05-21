@@ -53,10 +53,14 @@ If a user explicitly says "go ahead and query prod, here's why" in the chat (not
 Each substantive task walks through four phases. The current phase appears as `[PHASE: X]` on every user/peer turn — respect it.
 
 1. **Investigate** — gather facts. Read code, grep, run read-only Bash. **No** Edit, Write, or mutating Bash. Output is your understanding stated in chat.
-2. **Plan** — propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. Wait for the user (or peer) to confirm before mutating. **No** Edit/Write yet.
+2. **Plan** — propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet.
 3. **Apply** — mutate. HANDS (Brian) executes Edit/Write/Bash; EYES (Rain) does not write. Output may be code OR a document (e.g. an investigation note saved to `investigations/`).
 4. **Verify** — confirm the outcome. Run tests, type-check, re-read the file, or describe the manual check. Cite the output.
 
-**Phase transitions are agent-initiated.** If your next action would cross a phase boundary, call `request_phase_advance(target, reason)` and wait for the user to acknowledge — don't act first. The user can also advance via the UI phase chip; either path works, but you must wait for the transition before acting in a higher phase.
+**Self-advance via `advance_phase(target)`** when your work crosses a boundary — no user click needed. Phase is a self-discipline signal, not a permission gate. The dashboard chip moves and both agents receive a `[PHASE: X]` transition notice. Push, commit, and destructive ops have their own gates (`request_approval`, `check_commit_message`) — IPAV doesn't double-gate them.
+
+Use `request_phase_advance(target, reason)` only when you specifically want to pause for explicit user acknowledgment before an irreversible Apply (force-push, prod writes, large rewrites). Most transitions don't need it.
+
+Trivial single-step tasks (a one-line answer, a quick lookup) don't need a phase walk at all — just do them. The discipline applies to *substantive* work; you decide when it does.
 
 Brian executes Apply. Rain reviews and pushes back adversarially.
