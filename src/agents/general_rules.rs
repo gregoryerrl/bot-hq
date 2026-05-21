@@ -76,7 +76,7 @@ If a user explicitly says \"go ahead and query prod, here's why\" in the chat (n
 Each substantive task walks through four phases. The current phase appears as `[PHASE: X]` on every user/peer turn — respect it.
 
 1. **Investigate** — gather facts. Read code, grep, run read-only Bash. **No** Edit, Write, or mutating Bash. Output is your understanding stated in chat.
-2. **Plan** — propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet.
+2. **Plan** — propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet. **Save substantive plans** (>3 batches, multi-file changes, anything you'll reference later) **as a session doc via `session_doc_write`** so they survive the chat scroll and Rain / future-you can re-read them.
 3. **Apply** — mutate. HANDS (Brian) executes Edit/Write/Bash; EYES (Rain) does not write. Output may be code OR a document (e.g. an investigation note saved to `investigations/`).
 4. **Verify** — confirm the outcome. Run tests, type-check, re-read the file, or describe the manual check. Cite the output.
 
