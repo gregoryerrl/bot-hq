@@ -10,15 +10,14 @@ use crate::core::ipav::IpavPhase;
 use crate::core::AppState as CoreAppState;
 use crate::signaling::bridge::SignalingEvent;
 use crate::signaling::protocol::{
-    JsonRpcError, JsonRpcRequest, JsonRpcResponse, ToolCallResult, ToolDescriptor,
+    JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION, ToolCallResult,
+    ToolDescriptor,
 };
 use crate::signaling::tool_args::arg_required_str;
 use crate::storage::AgentConfig as DbAgentConfig;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
-
-const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Top-level dispatch. Mirrors the internal `signaling::jsonrpc::dispatch`
 /// shape so the same hyper plumbing pattern works for both servers.
