@@ -584,6 +584,66 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
+    /// Internal: parameterized 4-way search over cl_index / cl_folders.
+    /// `path_column` is the column name varying between tables
+    /// (`file_path` for cl_index, `folder_path` for cl_folders). Both
+    /// `table` and `path_column` are caller-controlled const strings —
+    /// no user input, no injection surface.
+    async fn cl_search_table<T>(
+        &self,
+        table: &str,
+        path_column: &str,
+        project_id: Option<&str>,
+        query: Option<&str>,
+    ) -> Result<Vec<T>>
+    where
+        T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
+    {
+        let like = query.map(|q| format!("%{}%", q.to_lowercase()));
+        let select = format!(
+            "SELECT id, project_id, {path_column}, description, tags, created_at, updated_at \
+             FROM {table}"
+        );
+        let rows: Vec<T> = match (project_id, like) {
+            (Some(pid), Some(q)) => sqlx::query_as::<_, T>(&format!(
+                "{select} WHERE project_id = ? AND ( \
+                    LOWER({path_column}) LIKE ? \
+                    OR LOWER(description) LIKE ? \
+                    OR LOWER(IFNULL(tags, '')) LIKE ?) \
+                 ORDER BY updated_at DESC"
+            ))
+            .bind(pid)
+            .bind(&q)
+            .bind(&q)
+            .bind(&q)
+            .fetch_all(&self.pool)
+            .await?,
+            (Some(pid), None) => sqlx::query_as::<_, T>(&format!(
+                "{select} WHERE project_id = ? ORDER BY updated_at DESC"
+            ))
+            .bind(pid)
+            .fetch_all(&self.pool)
+            .await?,
+            (None, Some(q)) => sqlx::query_as::<_, T>(&format!(
+                "{select} WHERE LOWER({path_column}) LIKE ? \
+                    OR LOWER(description) LIKE ? \
+                    OR LOWER(IFNULL(tags, '')) LIKE ? \
+                 ORDER BY updated_at DESC"
+            ))
+            .bind(&q)
+            .bind(&q)
+            .bind(&q)
+            .fetch_all(&self.pool)
+            .await?,
+            (None, None) => sqlx::query_as::<_, T>(&format!(
+                "{select} ORDER BY updated_at DESC"
+            ))
+            .fetch_all(&self.pool)
+            .await?,
+        };
+        Ok(rows)
+    }
+
     /// List index entries for a project (or all if project_id is None).
     /// Optional `query`: when present, returned rows must contain it (case-
     /// insensitive) in any of file_path / description / tags.
@@ -592,51 +652,8 @@ impl Storage {
         project_id: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<ClIndexEntry>> {
-        let like = query.map(|q| format!("%{}%", q.to_lowercase()));
-        let rows: Vec<ClIndexEntry> = match (project_id, like) {
-            (Some(pid), Some(q)) => sqlx::query_as::<_, ClIndexEntry>(
-                "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
-                 FROM cl_index \
-                 WHERE project_id = ? AND ( \
-                    LOWER(file_path) LIKE ? \
-                    OR LOWER(description) LIKE ? \
-                    OR LOWER(IFNULL(tags, '')) LIKE ?) \
-                 ORDER BY updated_at DESC",
-            )
-            .bind(pid)
-            .bind(&q)
-            .bind(&q)
-            .bind(&q)
-            .fetch_all(&self.pool)
-            .await?,
-            (Some(pid), None) => sqlx::query_as::<_, ClIndexEntry>(
-                "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
-                 FROM cl_index WHERE project_id = ? ORDER BY updated_at DESC",
-            )
-            .bind(pid)
-            .fetch_all(&self.pool)
-            .await?,
-            (None, Some(q)) => sqlx::query_as::<_, ClIndexEntry>(
-                "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
-                 FROM cl_index \
-                 WHERE LOWER(file_path) LIKE ? \
-                    OR LOWER(description) LIKE ? \
-                    OR LOWER(IFNULL(tags, '')) LIKE ? \
-                 ORDER BY updated_at DESC",
-            )
-            .bind(&q)
-            .bind(&q)
-            .bind(&q)
-            .fetch_all(&self.pool)
-            .await?,
-            (None, None) => sqlx::query_as::<_, ClIndexEntry>(
-                "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
-                 FROM cl_index ORDER BY updated_at DESC",
-            )
-            .fetch_all(&self.pool)
-            .await?,
-        };
-        Ok(rows)
+        self.cl_search_table("cl_index", "file_path", project_id, query)
+            .await
     }
 
     /// Lookup by (project, path) — used for sync/touch and audit linking.
@@ -747,51 +764,8 @@ impl Storage {
         project: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<ClFolder>> {
-        let like = query.map(|q| format!("%{}%", q.to_lowercase()));
-        let rows: Vec<ClFolder> = match (project, like) {
-            (Some(pid), Some(q)) => sqlx::query_as::<_, ClFolder>(
-                "SELECT id, project_id, folder_path, description, tags, created_at, updated_at \
-                 FROM cl_folders \
-                 WHERE project_id = ? AND ( \
-                    LOWER(folder_path) LIKE ? \
-                    OR LOWER(description) LIKE ? \
-                    OR LOWER(IFNULL(tags, '')) LIKE ?) \
-                 ORDER BY updated_at DESC",
-            )
-            .bind(pid)
-            .bind(&q)
-            .bind(&q)
-            .bind(&q)
-            .fetch_all(&self.pool)
-            .await?,
-            (Some(pid), None) => sqlx::query_as::<_, ClFolder>(
-                "SELECT id, project_id, folder_path, description, tags, created_at, updated_at \
-                 FROM cl_folders WHERE project_id = ? ORDER BY updated_at DESC",
-            )
-            .bind(pid)
-            .fetch_all(&self.pool)
-            .await?,
-            (None, Some(q)) => sqlx::query_as::<_, ClFolder>(
-                "SELECT id, project_id, folder_path, description, tags, created_at, updated_at \
-                 FROM cl_folders \
-                 WHERE LOWER(folder_path) LIKE ? \
-                    OR LOWER(description) LIKE ? \
-                    OR LOWER(IFNULL(tags, '')) LIKE ? \
-                 ORDER BY updated_at DESC",
-            )
-            .bind(&q)
-            .bind(&q)
-            .bind(&q)
-            .fetch_all(&self.pool)
-            .await?,
-            (None, None) => sqlx::query_as::<_, ClFolder>(
-                "SELECT id, project_id, folder_path, description, tags, created_at, updated_at \
-                 FROM cl_folders ORDER BY updated_at DESC",
-            )
-            .fetch_all(&self.pool)
-            .await?,
-        };
-        Ok(rows)
+        self.cl_search_table("cl_folders", "folder_path", project, query)
+            .await
     }
 
     // ---- session_documents ---------------------------------------------
