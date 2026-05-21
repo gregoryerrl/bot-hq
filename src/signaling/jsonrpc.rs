@@ -101,6 +101,36 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
 /// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
 const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
 
+/// Extract a required string argument. Returns INVALID_PARAMS if absent or non-string.
+fn arg_required_str(args: &Value, key: &str) -> Result<String, JsonRpcError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("missing {key}")))
+}
+
+/// Extract an optional string argument. None if absent or non-string.
+fn arg_opt_str(args: &Value, key: &str) -> Option<String> {
+    args.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Extract a required array-of-strings argument. Returns INVALID_PARAMS if absent or
+/// non-array; non-string entries are silently dropped.
+fn arg_required_str_array(args: &Value, key: &str) -> Result<Vec<String>, JsonRpcError> {
+    let arr = args
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("missing {key}")))?;
+    Ok(arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+}
+
+/// Wrap a serializable value as `ToolCallResult::text` with a JSON-string body.
+/// `fallback` is the literal returned if serialization fails ("[]" for arrays,
+/// "{}" for objects).
+fn result_json<T: serde::Serialize>(value: &T, fallback: &str) -> ToolCallResult {
+    ToolCallResult::text(serde_json::to_string(value).unwrap_or_else(|_| fallback.into()))
+}
+
 async fn call_tool(
     name: &str,
     args: Value,
@@ -120,18 +150,8 @@ async fn call_tool(
     }
     match name {
         "ask_user_choice" => {
-            let question = args
-                .get("question")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing question"))?
-                .to_string();
-            let options: Vec<String> = args
-                .get("options")
-                .and_then(Value::as_array)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing options"))?
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect();
+            let question = arg_required_str(&args, "question")?;
+            let options = arg_required_str_array(&args, "options")?;
             if options.is_empty() {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
@@ -161,11 +181,7 @@ async fn call_tool(
             Ok(ToolCallResult::text("ok"))
         }
         "advance_phase" => {
-            let target = args
-                .get("target")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing target"))?
-                .to_string();
+            let target = arg_required_str(&args, "target")?;
             if crate::core::ipav::IpavPhase::parse(&target).is_none() {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
@@ -182,11 +198,7 @@ async fn call_tool(
             Ok(ToolCallResult::text("phase advanced"))
         }
         "request_phase_advance" => {
-            let target = args
-                .get("target")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing target"))?
-                .to_string();
+            let target = arg_required_str(&args, "target")?;
             if !matches!(
                 target.as_str(),
                 "Investigate" | "Plan" | "Apply" | "Verify"
@@ -198,11 +210,7 @@ async fn call_tool(
                     ),
                 ));
             }
-            let reason = args
-                .get("reason")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing reason"))?
-                .to_string();
+            let reason = arg_required_str(&args, "reason")?;
             bridge
                 .request_phase_advance(
                     caller.session_id.clone(),
@@ -226,37 +234,16 @@ async fn call_tool(
                     format!("unknown kind '{kind_str}'"),
                 )
             })?;
-            let action = args
-                .get("action")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing action"))?
-                .to_string();
-            let question = args
-                .get("question")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing question")
-                })?
-                .to_string();
-            let options: Vec<String> = args
-                .get("options")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing options")
-                })?
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect();
+            let action = arg_required_str(&args, "action")?;
+            let question = arg_required_str(&args, "question")?;
+            let options = arg_required_str_array(&args, "options")?;
             if options.len() < 2 {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
                     "options must have at least 2 entries",
                 ));
             }
-            let detail = args
-                .get("detail")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let detail = arg_opt_str(&args, "detail");
             let ctx = ApprovalContext {
                 kind,
                 action,
@@ -289,13 +276,7 @@ async fn call_tool(
             ))
         }
         "check_commit_message" => {
-            let message = args
-                .get("message")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing message")
-                })?
-                .to_string();
+            let message = arg_required_str(&args, "message")?;
             // Audit the policy files BEFORE resolving — if the agent has
             // quietly modified policy.yaml to remove forbidden words,
             // PolicyMutation gets logged and the user sees it post-hoc.
@@ -351,18 +332,10 @@ async fn call_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&mine).unwrap_or_else(|_| "[]".into()),
-            ))
+            Ok(result_json(&mine, "[]"))
         }
         "withdraw_question" => {
-            let choice_id = args
-                .get("choice_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing choice_id")
-                })?
-                .to_string();
+            let choice_id = arg_required_str(&args, "choice_id")?;
             let was_pending = bridge.withdraw_question(&choice_id).await;
             Ok(ToolCallResult::text(if was_pending {
                 "withdrawn"
@@ -371,29 +344,9 @@ async fn call_tool(
             }))
         }
         "supersede_question" => {
-            let stale_choice_id = args
-                .get("stale_choice_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing stale_choice_id")
-                })?
-                .to_string();
-            let question = args
-                .get("question")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing question")
-                })?
-                .to_string();
-            let options: Vec<String> = args
-                .get("options")
-                .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing options")
-                })?
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect();
+            let stale_choice_id = arg_required_str(&args, "stale_choice_id")?;
+            let question = arg_required_str(&args, "question")?;
+            let options = arg_required_str_array(&args, "options")?;
             if options.is_empty() {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
@@ -413,16 +366,8 @@ async fn call_tool(
             Ok(ToolCallResult::text(picked))
         }
         "session_doc_write" => {
-            let slug = args
-                .get("slug")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing slug"))?
-                .to_string();
-            let body = args
-                .get("body")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing body"))?
-                .to_string();
+            let slug = arg_required_str(&args, "slug")?;
+            let body = arg_required_str(&args, "body")?;
             let id = bridge
                 .session_doc_write(&caller.session_id, &slug, &body)
                 .await
@@ -449,16 +394,10 @@ async fn call_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&trimmed).unwrap_or_else(|_| "[]".into()),
-            ))
+            Ok(result_json(&trimmed, "[]"))
         }
         "session_doc_read" => {
-            let slug = args
-                .get("slug")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing slug"))?
-                .to_string();
+            let slug = arg_required_str(&args, "slug")?;
             let row = bridge
                 .session_doc_read(&caller.session_id, &slug)
                 .await
@@ -498,23 +437,11 @@ async fn call_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&trimmed).unwrap_or_else(|_| "[]".into()),
-            ))
+            Ok(result_json(&trimmed, "[]"))
         }
         "cl_register_read" => {
-            let project = args
-                .get("project")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing project"))?
-                .to_string();
-            let file_path = args
-                .get("file_path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing file_path")
-                })?
-                .to_string();
+            let project = arg_required_str(&args, "project")?;
+            let file_path = arg_required_str(&args, "file_path")?;
             // Fire-and-forget at the tool layer too — caller doesn't gain
             // anything by waiting on an audit insert.
             bridge
@@ -547,34 +474,13 @@ async fn call_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&trimmed).unwrap_or_else(|_| "[]".into()),
-            ))
+            Ok(result_json(&trimmed, "[]"))
         }
         "cl_register_folder_description" => {
-            let project = args
-                .get("project")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing project"))?
-                .to_string();
-            let folder_path = args
-                .get("folder_path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing folder_path")
-                })?
-                .to_string();
-            let description = args
-                .get("description")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing description")
-                })?
-                .to_string();
-            let tags = args
-                .get("tags")
-                .and_then(Value::as_str)
-                .map(str::to_string);
+            let project = arg_required_str(&args, "project")?;
+            let folder_path = arg_required_str(&args, "folder_path")?;
+            let description = arg_required_str(&args, "description")?;
+            let tags = arg_opt_str(&args, "tags");
             bridge
                 .cl_register_folder_description(
                     &project,
@@ -587,18 +493,12 @@ async fn call_tool(
             Ok(ToolCallResult::text("ok"))
         }
         "cl_rescan" => {
-            let project = args
-                .get("project")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing project"))?
-                .to_string();
+            let project = arg_required_str(&args, "project")?;
             let report = bridge
                 .cl_rescan(&project)
                 .await
                 .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&report).unwrap_or_else(|_| "{}".into()),
-            ))
+            Ok(result_json(&report, "{}"))
         }
         "grant_session_permission" => {
             let action = parse_permission_action(args.get("action"))?;
@@ -649,9 +549,7 @@ async fn call_tool(
         }
         "list_session_permissions" => {
             let perm = bridge.list_session_permissions(&caller.session_id).await;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&perm).unwrap_or_else(|_| "{}".into()),
-            ))
+            Ok(result_json(&perm, "{}"))
         }
         other => Err(JsonRpcError::new(
             JsonRpcError::METHOD_NOT_FOUND,
