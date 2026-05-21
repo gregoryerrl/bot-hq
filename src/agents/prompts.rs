@@ -7,9 +7,11 @@
 //!
 //! Layering at session spawn (see core::session::read_system_prompt):
 //!   1. role prompt (this file)              — identity + ask-close convention
-//!   2. ~/.bot-hq/general-rules.md           — shared boilerplate
-//!   3. ~/.bot-hq/agents/<name>/custom-instruction.md — user overrides
-//!   4. policy directive block               — rendered from policy.yaml
+//!   2. CL location anchor                    — index-first orientation
+//!   3. agents::general_rules::GENERAL_RULES  — hardcoded universal rules
+//!   4. ~/.bot-hq/custom-general-rules.md     — optional user additions
+//!   5. ~/.bot-hq/agents/<name>/custom-instruction.md — per-agent overrides
+//!   6. policy directive block                — rendered from policy.yaml
 
 pub const BRIAN_ROLE: &str = "\
 # Role — Brian (HANDS)

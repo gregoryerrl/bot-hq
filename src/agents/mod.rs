@@ -4,11 +4,13 @@
 //! built against, and `docs/decisions.md#mcp-server` for transport choices.
 
 pub mod events;
+pub mod general_rules;
 pub mod input;
 pub mod prompts;
 pub mod protocol;
 pub mod spawn;
 
+pub use general_rules::GENERAL_RULES;
 pub use prompts::role_for;
 pub use protocol::{OutgoingUserMessage, StreamEvent};
 pub use spawn::{spawn_agent, AgentEvent, AgentHandle, SpawnConfig};

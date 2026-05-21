@@ -345,10 +345,16 @@ pub fn user_mcp_servers_for_agent(
 ///
 ///   1. **Hardcoded role** (from `agents::prompts`) — identity + ask-close
 ///      convention. Baked into the binary so user can't break it.
-///   2. **`~/.bot-hq/general-rules.md`** — shared boilerplate (optional).
-///   3. **`~/.bot-hq/agents/<name>/custom-instruction.md`** — user-editable
-///      overrides per agent (optional).
-///   4. **Policy directive block** — rendered from policy.yaml, project-aware.
+///   2. **CL location anchor** — index-first orientation.
+///   3. **Hardcoded `GENERAL_RULES`** (from `agents::general_rules`) — shared
+///      conventions every agent follows. Baked into the binary so the load-
+///      bearing parts (commit hygiene, push gates, CL workflow, IPAV, prod
+///      safety) can't drift if a user edits a CL file.
+///   4. **`<data_dir>/custom-general-rules.md`** — user-editable additions
+///      to the universal rules (optional).
+///   5. **`<data_dir>/agents/<name>/custom-instruction.md`** — per-agent
+///      overrides (optional).
+///   6. **Policy directive block** — rendered from policy.yaml, project-aware.
 ///
 /// Project context (conventions / notes / decisions) is NOT injected here —
 /// agents read those via the `Read` tool when assigned a project task. This
@@ -374,11 +380,11 @@ pub fn read_system_prompt(
         }
     }
 
-    // 1b. CL location anchor + index-first workflow. Without this, agents
+    // 2. CL location anchor + index-first workflow. Without this, agents
     // wander into legacy archives by accident OR blind-Read a fixed set of
     // filenames and miss the rest of the CL. The full tool signatures for
-    // cl_index_search / cl_register_read / cl_rescan live in general-rules.md
-    // (layer 2 below) — here we just establish the orientation.
+    // cl_index_search / cl_register_read / cl_rescan live in GENERAL_RULES
+    // (layer 3 below) — here we just establish the orientation.
     out.push_str(&format!(
         "## Context Library\n\n\
          Your Context Library lives at `{cl}`. Single source of truth — \
@@ -395,7 +401,7 @@ pub fn read_system_prompt(
          folder-level summaries so you can scope a sweep before opening \
          individual files. Tool signatures for `cl_index_search`, \
          `cl_folder_search`, `cl_register_read`, `cl_rescan` are in the \
-         general-rules section below.\n\n\
+         General rules section below.\n\n\
          **Bare-filename heuristic.** If the user references a bare \
          filename (e.g. \"work on task 1 from tasks.md\", \"check eod.md\") \
          and it's NOT in your working repo, do NOT keep `Glob`-searching \
@@ -415,9 +421,16 @@ pub fn read_system_prompt(
         cl = paths.data_dir.display()
     ));
 
-    // 2 + 3. CL slots — optional.
+    // 3. Hardcoded universal rules — always present.
+    out.push_str(crate::agents::GENERAL_RULES);
+    if !out.ends_with("\n\n") {
+        out.push_str("\n\n");
+    }
+
+    // 4 + 5. Optional user-editable slots: custom-general-rules.md applies to
+    // all agents; agents/<name>/custom-instruction.md is per-agent.
     let slots = [
-        paths.data_dir.join("general-rules.md"),
+        paths.data_dir.join("custom-general-rules.md"),
         paths.data_dir
             .join(format!("agents/{agent}/custom-instruction.md")),
     ];
@@ -679,9 +692,48 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        // Nothing in agents/<name>/, no general-rules.md — should still produce
-        // a prompt with at minimum the hardcoded role.
+        // No custom-general-rules.md content, nothing in agents/<name>/ —
+        // should still produce a prompt with at minimum the hardcoded role
+        // and the hardcoded universal rules.
+        std::fs::remove_file(tmp.path().join("custom-general-rules.md")).ok();
         let prompt = read_system_prompt(&paths, "rain", Some("nonexistent"), None).unwrap();
         assert!(prompt.contains("EYES"));
+        assert!(prompt.contains("Commit hygiene"));
+    }
+
+    #[test]
+    fn prompt_always_contains_hardcoded_general_rules() {
+        // Load-bearing test: even on a freshly-init'd data dir with the
+        // user's custom file deleted, the universal rules must be present
+        // (commit hygiene, push gate, IPAV, prod safety).
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        std::fs::remove_file(tmp.path().join("custom-general-rules.md")).ok();
+        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
+        assert!(prompt.contains("Commit hygiene"), "missing commit-hygiene section");
+        assert!(prompt.contains("`git push` requires authorization"), "missing push gate");
+        assert!(prompt.contains("IPAV discipline"), "missing IPAV section");
+        assert!(prompt.contains("Production data access"), "missing prod-safety section");
+    }
+
+    #[test]
+    fn custom_general_rules_appends_to_hardcoded() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        std::fs::write(
+            tmp.path().join("custom-general-rules.md"),
+            "MY_ORG_RULE_X7P: always prefer ripgrep over grep.\n",
+        )
+        .unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
+        // Both layers present.
+        assert!(prompt.contains("Commit hygiene"));
+        assert!(prompt.contains("MY_ORG_RULE_X7P"));
+        // Custom additions come AFTER the hardcoded core.
+        let core_pos = prompt.find("Commit hygiene").unwrap();
+        let custom_pos = prompt.find("MY_ORG_RULE_X7P").unwrap();
+        assert!(custom_pos > core_pos, "custom rules should append after hardcoded core");
     }
 }

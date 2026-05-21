@@ -6,7 +6,8 @@
 //! ```text
 //! <data_dir>/
 //!   cl-version.txt                 ("1" for v1)
-//!   general-rules.md
+//!   custom-general-rules.md        (optional user additions; hardcoded core
+//!                                   lives in agents::general_rules)
 //!   agents/<name>/custom-instruction.md  (emma, brian, rain — user tweaks)
 //!   projects/<p>/conventions.md
 //!   projects/<p>/notes.md
@@ -107,6 +108,11 @@ impl Paths {
                 .with_context(|| format!("writing {}", self.cl_version_path.display()))?;
         }
 
+        // One-time rename: general-rules.md -> custom-general-rules.md. Has
+        // to run BEFORE default_cl_files so we don't seed a stub atop a
+        // freshly renamed user file. Idempotent.
+        let _renamed = migrate_general_rules(&self.data_dir)?;
+
         for (path, body) in default_cl_files(&self.data_dir) {
             if !path.exists() {
                 if let Some(parent) = path.parent() {
@@ -185,17 +191,18 @@ fn expand_tilde(s: &str) -> Result<PathBuf> {
 
 /// The required CL slots and their baked-in default contents.
 ///
-/// Role prompts are no longer here — those moved into the binary as Rust
-/// constants in `agents::prompts`. What lives in CL now is:
+/// Universal rules are no longer here — they moved into the binary as the
+/// `agents::general_rules::GENERAL_RULES` constant. What lives in CL now is:
 ///
-/// - `general-rules.md` — shared boilerplate for all agents
+/// - `custom-general-rules.md` — optional user additions appended to the
+///   hardcoded universal rules at session spawn
 /// - `agents/<name>/custom-instruction.md` — empty placeholders the user can
 ///   fill in to tweak each agent without touching role identity
 fn default_cl_files(root: &Path) -> Vec<(PathBuf, &'static str)> {
     vec![
         (
-            root.join("general-rules.md"),
-            include_str!("../templates/cl/general-rules.md"),
+            root.join("custom-general-rules.md"),
+            include_str!("../templates/cl/custom-general-rules.md"),
         ),
         (
             root.join("agents/emma/custom-instruction.md"),
@@ -210,6 +217,36 @@ fn default_cl_files(root: &Path) -> Vec<(PathBuf, &'static str)> {
             include_str!("../templates/cl/agents/rain/custom-instruction.md"),
         ),
     ]
+}
+
+/// One-time migration: pre-rename installs had a user-editable
+/// `general-rules.md`. After the binary started hardcoding the universal
+/// rules, the editable file became `custom-general-rules.md`. If the old
+/// path exists and the new one doesn't, rename it so user-added content is
+/// preserved. Idempotent; runs every `init()` but only acts when both
+/// conditions hold.
+///
+/// Renamed content will likely duplicate things now baked into the
+/// hardcoded core — the warning prompts the user to trim it.
+fn migrate_general_rules(data_dir: &Path) -> Result<bool> {
+    let old = data_dir.join("general-rules.md");
+    let new = data_dir.join("custom-general-rules.md");
+    if !old.exists() || new.exists() {
+        return Ok(false);
+    }
+    fs::rename(&old, &new).with_context(|| {
+        format!(
+            "migrating {} -> {}",
+            old.display(),
+            new.display()
+        )
+    })?;
+    warn!(
+        old = %old.display(),
+        new = %new.display(),
+        "renamed general-rules.md to custom-general-rules.md; the hardcoded core now ships in-binary. Trim any duplicated sections from the renamed file."
+    );
+    Ok(true)
 }
 
 // ---- single-instance lock ---------------------------------------------
@@ -299,11 +336,57 @@ mod tests {
         assert_eq!(outcome, InitOutcome::FirstRun);
         assert!(paths.cl_version_path.exists());
         assert!(paths.local_dir.exists());
-        assert!(tmp.path().join("general-rules.md").exists());
+        assert!(
+            tmp.path().join("custom-general-rules.md").exists(),
+            "first run should seed custom-general-rules.md stub"
+        );
+        assert!(
+            !tmp.path().join("general-rules.md").exists(),
+            "general-rules.md is hardcoded now — should not be seeded"
+        );
         assert!(tmp
             .path()
             .join("agents/brian/custom-instruction.md")
             .exists());
+    }
+
+    #[test]
+    fn migrates_general_rules_to_custom_when_only_old_exists() {
+        let tmp = TempDir::new().unwrap();
+        // Pre-rename install: seed the old file with user content.
+        fs::write(
+            tmp.path().join("general-rules.md"),
+            "# my custom rule\n\nalways add foo before bar.\n",
+        )
+        .unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        assert!(
+            !tmp.path().join("general-rules.md").exists(),
+            "old file should have been renamed"
+        );
+        let migrated = fs::read_to_string(tmp.path().join("custom-general-rules.md")).unwrap();
+        assert!(
+            migrated.contains("always add foo before bar"),
+            "user content should be preserved after rename, got: {migrated}"
+        );
+    }
+
+    #[test]
+    fn migration_leaves_existing_custom_file_alone() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("general-rules.md"), "old content").unwrap();
+        fs::write(
+            tmp.path().join("custom-general-rules.md"),
+            "user-curated content",
+        )
+        .unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        // Both should still exist; the custom one untouched.
+        assert!(tmp.path().join("general-rules.md").exists());
+        let body = fs::read_to_string(tmp.path().join("custom-general-rules.md")).unwrap();
+        assert_eq!(body, "user-curated content");
     }
 
     #[test]
