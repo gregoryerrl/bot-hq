@@ -6,6 +6,7 @@
 use crate::policy::{ViolationKind, ViolationOutcome};
 use crate::signaling::bridge::{ApprovalContext, SignalingBridge};
 use crate::signaling::protocol::*;
+use crate::signaling::response::result_json;
 use crate::signaling::tool_args::{arg_opt_str, arg_required_str, arg_required_str_array};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -101,13 +102,6 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
 /// and Emma (solo helper) own mutations; Rain (EYES) reviews via the read
 /// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
 const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
-
-/// Wrap a serializable value as `ToolCallResult::text` with a JSON-string body.
-/// `fallback` is the literal returned if serialization fails ("[]" for arrays,
-/// "{}" for objects).
-fn result_json<T: serde::Serialize>(value: &T, fallback: &str) -> ToolCallResult {
-    ToolCallResult::text(serde_json::to_string(value).unwrap_or_else(|_| fallback.into()))
-}
 
 async fn call_tool(
     name: &str,

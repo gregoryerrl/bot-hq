@@ -13,6 +13,7 @@ use crate::signaling::protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION, ToolCallResult,
     ToolDescriptor,
 };
+use crate::signaling::response::result_json;
 use crate::signaling::tool_args::arg_required_str;
 use crate::storage::AgentConfig as DbAgentConfig;
 use serde_json::{json, Value};
@@ -327,9 +328,7 @@ async fn call_external_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "sessions": arr })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "sessions": arr }), "{}"))
         }
         "create_session" => {
             let title = arg_required_str(&args, "title")?;
@@ -344,9 +343,7 @@ async fn call_external_tool(
                 .map_err(|e| {
                     JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("open_session: {e}"))
                 })?;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "session_id": session_id })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "session_id": session_id }), "{}"))
         }
         "send_message" => {
             let session_id = arg_required_str(&args, "session_id")?;
@@ -354,9 +351,7 @@ async fn call_external_tool(
             core.broadcast(&session_id, &text).await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("broadcast: {e}"))
             })?;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "ok": true })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "ok": true }), "{}"))
         }
         "get_session_messages" => {
             let session_id = arg_required_str(&args, "session_id")?;
@@ -383,9 +378,7 @@ async fn call_external_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "messages": arr })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "messages": arr }), "{}"))
         }
         "advance_phase" => {
             let session_id = arg_required_str(&args, "session_id")?;
@@ -402,9 +395,7 @@ async fn call_external_tool(
             core.advance_phase(&session_id, phase).await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("advance_phase: {e}"))
             })?;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "ok": true })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "ok": true }), "{}"))
         }
         "resolve_choice" => {
             let choice_id = arg_required_str(&args, "choice_id")?;
@@ -412,9 +403,7 @@ async fn call_external_tool(
             core.resolve_choice(&choice_id, picked).await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("resolve_choice: {e}"))
             })?;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "ok": true })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "ok": true }), "{}"))
         }
         "close_session" => {
             let session_id = arg_required_str(&args, "session_id")?;
@@ -422,17 +411,13 @@ async fn call_external_tool(
             core.close_session(&session_id, archive).await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("close_session: {e}"))
             })?;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "ok": true })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "ok": true }), "{}"))
         }
         "restart_emma" => {
             core.restart_emma().await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("restart_emma: {e}"))
             })?;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "ok": true })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "ok": true }), "{}"))
         }
         "get_emma_messages" => {
             let since_id = args.get("since_id").and_then(Value::as_i64);
@@ -458,9 +443,7 @@ async fn call_external_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "messages": arr })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "messages": arr }), "{}"))
         }
         "get_pending_choices" => {
             let choices = core.bridge.list_pending_choices().await;
@@ -476,9 +459,7 @@ async fn call_external_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "pending_choices": arr })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "pending_choices": arr }), "{}"))
         }
         "get_status" => {
             let session_count = core.sessions.lock().await.len();
@@ -497,9 +478,7 @@ async fn call_external_tool(
                 "emma_started": emma_started,
                 "now": chrono::Utc::now().to_rfc3339(),
             });
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&payload).unwrap_or_default(),
-            ))
+            Ok(result_json(&payload, "{}"))
         }
         "get_agent_configs" => {
             let cfgs = core.storage.list_agent_configs().await.map_err(|e| {
@@ -521,9 +500,7 @@ async fn call_external_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "agent_configs": arr })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "agent_configs": arr }), "{}"))
         }
         "set_agent_config" => {
             let agent_name = arg_required_str(&args, "agent_name")?;
@@ -588,9 +565,7 @@ async fn call_external_tool(
                     format!("upsert_agent_config: {e}"),
                 )
             })?;
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "ok": true })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "ok": true }), "{}"))
         }
         "get_violations" => {
             let limit = args
@@ -613,9 +588,7 @@ async fn call_external_tool(
             // Most-recent first; cap to `limit`.
             records.reverse();
             records.truncate(limit);
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "violations": records })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "violations": records }), "{}"))
         }
         "wait_for_change" => {
             let session_id = arg_required_str(&args, "session_id")?;
@@ -642,9 +615,7 @@ async fn call_external_tool(
                     })
                 })
                 .collect();
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&json!({ "messages": arr })).unwrap_or_default(),
-            ))
+            Ok(result_json(&json!({ "messages": arr }), "{}"))
         }
         "get_session_snapshot" => {
             let session_id = arg_required_str(&args, "session_id")?;
@@ -725,9 +696,7 @@ async fn call_external_tool(
                 "pending_choices": pending,
                 "messages": msg_arr,
             });
-            Ok(ToolCallResult::text(
-                serde_json::to_string(&snapshot).unwrap_or_default(),
-            ))
+            Ok(result_json(&snapshot, "{}"))
         }
         unknown => Err(JsonRpcError::new(
             JsonRpcError::METHOD_NOT_FOUND,
