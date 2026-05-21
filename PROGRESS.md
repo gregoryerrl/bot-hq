@@ -11,13 +11,13 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-189 tests passing (145 lib + 29 external MCP + 10 storage + 5 server).
-Release build clean. Seven audit-cleanup commits landed and pushed
-today (2026-05-21).
+193 tests passing (145 lib + 31 external MCP + 10 storage + 7 server).
+Release build clean. Eight audit-cleanup commits landed today
+(2026-05-21) plus the F4 smoke-test scaffolding.
 
 ---
 
-## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5, F11, F6, F13 landed)
+## 2026-05-21 — Audit Round 2 cleanup (F12, F2, F1, F5, F11, F6, F13, F4 landed)
 
 Acted on `~/.bot-hq/projects/bot-hq/investigations/audit-round-2-2026-05-21.md`
 — the Brian+Rain adversarial codebase audit produced earlier in the
@@ -85,24 +85,37 @@ session. Seven findings shipped, one remains queued.
   as the owned Vec). Rain caught that `&TOOLS` would lean on a
   multi-step `Deref` coercion — switched to explicit `&*TOOLS`. Net
   +4 LOC; perf win is one alloc per process instead of per call.
-
-**Queued for next session (audit recommended order):**
-
-- F4 — extract HTTP `handle_request` body-decode + response shaping
-  from `server.rs` + `external_server.rs`. Rain flagged that
-  `external_server.rs` has zero tests today; an external HTTP smoke
-  test should precede the refactor.
+- **F4 — `fb2deb0` (tests) + `fab33e9` (extract)** — both HTTP
+  handlers (`signaling/server.rs::handle_request` and
+  `external_server.rs::handle_request`) had identical body-collect →
+  serde_json::from_slice → PARSE_ERROR-envelope blocks and identical
+  dispatch-outcome match arms (~30 LOC each, copy-paste-divergent
+  waiting to happen). Rain's gate required external HTTP smoke
+  coverage of the paths first — `tests/external_mcp_test.rs` already
+  exercised the full HTTP stack but neither parse-error nor
+  202-ACCEPTED were covered explicitly. First commit (`fb2deb0`)
+  added 4 tests pinning those contracts on both servers; second
+  commit (`fab33e9`) extracted `decode_jsonrpc_body(Incoming) ->
+  Result<JsonRpcRequest, Response>` and `dispatch_outcome_to_response
+  (outcome, id_for_err) -> Response` into `signaling/response.rs`.
+  Per-server pre-dispatch logic (path parse for internal; method +
+  path + bearer auth for external) and debug log lines stay in the
+  callers since they carry caller-specific fields. Net: each handler
+  drops ~28 LOC; response.rs gains ~50; -6 LOC overall, but the more
+  meaningful win is removing the last RPC-handling drift surface
+  between the two servers.
 
 **Rejected (recorded for future re-evaluation):** F3 (generic
 `dispatch_jsonrpc<F>` extraction — async closure overhead exceeds
 savings), F10 (per-table storage split — import sprawl without
 discoverability gain). See the audit file for re-open triggers.
 
-**Resume point:** last F-series code commit `136e924` (F13); next
-finding is F4 (needs external_server.rs smoke tests first per Rain's
-flag). The audit file at
-`investigations/audit-round-2-2026-05-21.md` has the exact line
-numbers and proposed diffs.
+**Audit round 2 complete.** Last F-series code commit `fab33e9` (F4).
+F8 / F9 (view_model.rs / bridge.rs splits) remain deferred — both are
+organizational preference rather than duplication; defer until either
+file is actively painful or the user requests the split. Audit file
+`investigations/audit-round-2-2026-05-21.md` archived as the
+source-of-truth for the round.
 
 ---
 
