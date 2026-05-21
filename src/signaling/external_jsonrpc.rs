@@ -30,6 +30,10 @@ fn message_to_json(m: &Message) -> Value {
     })
 }
 
+fn internal_err(op: &str, e: impl std::fmt::Display) -> JsonRpcError {
+    JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("{op}: {e}"))
+}
+
 /// Top-level dispatch. Mirrors the internal `signaling::jsonrpc::dispatch`
 /// shape so the same hyper plumbing pattern works for both servers.
 pub async fn dispatch_external(
@@ -320,10 +324,7 @@ async fn call_external_tool(
     match name {
         "list_sessions" => {
             let sessions = core.list_active_sessions().await.map_err(|e| {
-                JsonRpcError::new(
-                    JsonRpcError::INTERNAL_ERROR,
-                    format!("list_active_sessions: {e}"),
-                )
+                internal_err("list_active_sessions", e)
             })?;
             let arr: Vec<_> = sessions
                 .into_iter()
@@ -351,7 +352,7 @@ async fn call_external_tool(
                 .open_session(title, working_repo_path)
                 .await
                 .map_err(|e| {
-                    JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("open_session: {e}"))
+                    internal_err("open_session", e)
                 })?;
             Ok(result_json(&json!({ "session_id": session_id }), "{}"))
         }
@@ -359,7 +360,7 @@ async fn call_external_tool(
             let session_id = arg_required_str(&args, "session_id")?;
             let text = arg_required_str(&args, "text")?;
             core.broadcast(&session_id, &text).await.map_err(|e| {
-                JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("broadcast: {e}"))
+                internal_err("broadcast", e)
             })?;
             Ok(result_json(&json!({ "ok": true }), "{}"))
         }
@@ -371,10 +372,7 @@ async fn call_external_tool(
                 .messages_for_session(&session_id, since_id)
                 .await
                 .map_err(|e| {
-                    JsonRpcError::new(
-                        JsonRpcError::INTERNAL_ERROR,
-                        format!("messages_for_session: {e}"),
-                    )
+                    internal_err("messages_for_session", e)
                 })?;
             let arr: Vec<_> = msgs
                 .iter()
@@ -395,7 +393,7 @@ async fn call_external_tool(
                 )
             })?;
             core.advance_phase(&session_id, phase).await.map_err(|e| {
-                JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("advance_phase: {e}"))
+                internal_err("advance_phase", e)
             })?;
             Ok(result_json(&json!({ "ok": true }), "{}"))
         }
@@ -403,7 +401,7 @@ async fn call_external_tool(
             let choice_id = arg_required_str(&args, "choice_id")?;
             let picked = arg_required_str(&args, "picked")?;
             core.resolve_choice(&choice_id, picked).await.map_err(|e| {
-                JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("resolve_choice: {e}"))
+                internal_err("resolve_choice", e)
             })?;
             Ok(result_json(&json!({ "ok": true }), "{}"))
         }
@@ -411,13 +409,13 @@ async fn call_external_tool(
             let session_id = arg_required_str(&args, "session_id")?;
             let archive = args.get("archive").and_then(Value::as_bool).unwrap_or(true);
             core.close_session(&session_id, archive).await.map_err(|e| {
-                JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("close_session: {e}"))
+                internal_err("close_session", e)
             })?;
             Ok(result_json(&json!({ "ok": true }), "{}"))
         }
         "restart_emma" => {
             core.restart_emma().await.map_err(|e| {
-                JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("restart_emma: {e}"))
+                internal_err("restart_emma", e)
             })?;
             Ok(result_json(&json!({ "ok": true }), "{}"))
         }
@@ -428,10 +426,7 @@ async fn call_external_tool(
                 .messages_for_session("emma", since_id)
                 .await
                 .map_err(|e| {
-                    JsonRpcError::new(
-                        JsonRpcError::INTERNAL_ERROR,
-                        format!("messages_for_session(emma): {e}"),
-                    )
+                    internal_err("messages_for_session(emma)", e)
                 })?;
             let arr: Vec<_> = msgs
                 .iter()
@@ -476,10 +471,7 @@ async fn call_external_tool(
         }
         "get_agent_configs" => {
             let cfgs = core.storage.list_agent_configs().await.map_err(|e| {
-                JsonRpcError::new(
-                    JsonRpcError::INTERNAL_ERROR,
-                    format!("list_agent_configs: {e}"),
-                )
+                internal_err("list_agent_configs", e)
             })?;
             let arr: Vec<_> = cfgs
                 .into_iter()
@@ -510,10 +502,7 @@ async fn call_external_tool(
                 .get_agent_config(&agent_name)
                 .await
                 .map_err(|e| {
-                    JsonRpcError::new(
-                        JsonRpcError::INTERNAL_ERROR,
-                        format!("get_agent_config: {e}"),
-                    )
+                    internal_err("get_agent_config", e)
                 })?
                 .unwrap_or_else(|| DbAgentConfig {
                     agent_name: agent_name.clone(),
@@ -554,10 +543,7 @@ async fn call_external_tool(
                 updated_at: String::new(), // upsert sets datetime('now')
             };
             core.storage.upsert_agent_config(&cfg).await.map_err(|e| {
-                JsonRpcError::new(
-                    JsonRpcError::INTERNAL_ERROR,
-                    format!("upsert_agent_config: {e}"),
-                )
+                internal_err("upsert_agent_config", e)
             })?;
             Ok(result_json(&json!({ "ok": true }), "{}"))
         }
@@ -574,10 +560,7 @@ async fn call_external_tool(
                 )
             })?;
             let mut records = log.read_all().map_err(|e| {
-                JsonRpcError::new(
-                    JsonRpcError::INTERNAL_ERROR,
-                    format!("violations read_all: {e}"),
-                )
+                internal_err("violations read_all", e)
             })?;
             // Most-recent first; cap to `limit`.
             records.reverse();
@@ -595,7 +578,7 @@ async fn call_external_tool(
             let messages = wait_for_change(core, &session_id, since_id, timeout_ms)
                 .await
                 .map_err(|e| {
-                    JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("wait_for_change: {e}"))
+                    internal_err("wait_for_change", e)
                 })?;
             let arr: Vec<_> = messages
                 .iter()
@@ -612,17 +595,14 @@ async fn call_external_tool(
                 .clamp(1, 500) as usize;
 
             let session_row = core.storage.get_session(&session_id).await.map_err(|e| {
-                JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("get_session: {e}"))
+                internal_err("get_session", e)
             })?;
             let mut messages = core
                 .storage
                 .messages_for_session(&session_id, None)
                 .await
                 .map_err(|e| {
-                    JsonRpcError::new(
-                        JsonRpcError::INTERNAL_ERROR,
-                        format!("messages_for_session: {e}"),
-                    )
+                    internal_err("messages_for_session", e)
                 })?;
             // Keep only last msg_limit entries (already in chronological order).
             if messages.len() > msg_limit {
