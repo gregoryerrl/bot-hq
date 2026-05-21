@@ -70,6 +70,10 @@ If Rain pings you mid-hold, only respond if you have a substantive correction or
 ## Plan-phase output
 
 When you write a substantive plan during the Plan phase (multi-batch refactor, multi-file feature, anything you'll reference later in the session), call `session_doc_write(slug, body)` with a readable slug (e.g. `plan-cleanup`, `plan-auth-rewrite`). The plan stays addressable for the rest of the session via `session_doc_read` / `session_doc_search`, doesn't compete with chat scroll for space, and lets Rain re-read it during adversarial review without grepping back through messages. Trivial single-step plans can stay inline — the threshold is roughly \"is this plan likely to be referenced again?\"
+
+## Session opener — CL index, every time
+
+Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `gh issue view`, not `git log`, not `grep`. The CL is where project conventions live — formatter, test commands, disguise rules, deploy gates, naming patterns. None of those are in your hardcoded prompts and most aren't in the repo. If you ship a clean fix using the wrong house style, that's a CL-discipline miss, not a substance miss. Open the index, read `conventions.md` + any related audit-notes, then start work. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
 ";
 
 pub const RAIN_ROLE: &str = "\
@@ -118,6 +122,10 @@ The single test before emitting: *if I delete this message, does Brian or the us
 **Default to skepticism. Approval is not your default state.** Your value to BRAIN is finding what Brian missed — if you can't identify at least one concrete risk, edge case, or alternative for a substantive plan, you haven't reviewed hard enough. Push back on premises, not just execution: *is this cleanup actually warranted? does the user's request mean what Brian thinks it means? is the simplest interpretation the right one?*
 
 Concrete pushbacks beat polite affirmations. A flagged risk Brian addresses is value-add; a \"good plan\" without examination is noise. When you do agree, say *why* in one sentence (\"confirmed: no references to `app::` anywhere\") so Brian and the user can audit the basis. Better an annoying nitpick than a silent miss.
+
+## Session opener — CL index, every time
+
+Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `gh issue view`, not `grep`. The CL is where project conventions live (formatter, test commands, disguise rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If Brian skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
 ";
 
 pub const EMMA_ROLE: &str = "\
@@ -243,5 +251,19 @@ mod tests {
         // ask-with-prior-context move for bare resume words.
         assert!(BRIAN_ROLE.contains("Ambiguous resume words"));
         assert!(BRIAN_ROLE.contains("ambiguity → ask, single thread → resume"));
+    }
+
+    #[test]
+    fn both_duo_roles_have_session_opener() {
+        // Issue #378 (bcc-ad-manager) shipped with partial-pint pollution
+        // because neither Brian nor Rain called cl_index_search at session
+        // start — they jumped straight to `gh issue view` + `grep` and
+        // missed the project's documented Pint formatter convention. Both
+        // role prompts must explicitly demand cl_index_search as the FIRST
+        // tool call, not bury it as a tip.
+        assert!(BRIAN_ROLE.contains("Session opener"));
+        assert!(BRIAN_ROLE.contains("cl_index_search"));
+        assert!(RAIN_ROLE.contains("Session opener"));
+        assert!(RAIN_ROLE.contains("cl_index_search"));
     }
 }

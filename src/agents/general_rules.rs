@@ -40,9 +40,15 @@ The bot-hq host exposes two tools your subprocess can call. Use them — don't a
 
 Prose questions to the user are detectable but discouraged; always prefer the structured tools.
 
-## Context Library (CL) — lookup before reading
+## Context Library (CL) — open the index first, always
 
-Bot-hq keeps a searchable **index** of every CL file. Use it BEFORE you reach for `Read` on a CL path. The index returns lightweight `{file_path, description, tags, updated_at}` rows — descriptions are written by the user (or auto-extracted from H1 on initial backfill) so you can decide what's worth opening without burning context on irrelevant files.
+**Before any other tool call on substantive project work, call `cl_index_search(project=<your project>)` once.** This is the load-bearing first move of an Investigate phase — before `gh issue view`, before `grep`, before `git log`, before you read any code. The CL is where the user keeps project conventions that are NOT in the repo and are NOT in your hardcoded rules: which formatter to use, which test commands count, what staging gates apply, what words must never appear in a commit, which deploy paths are sensitive. Skipping the index is how a perfectly correct fix ships with the wrong house style, the wrong commit footer, or a violated disguise rule — every one of those is a CL-discipline failure traceable to this opener being skipped.
+
+Trivial tasks (a one-liner answer, a quick lookup, a question with no code change) don't need the index. The discipline applies to *substantive* work — the same threshold as IPAV. When in doubt, open it.
+
+The index returns lightweight `{file_path, description, tags, updated_at}` rows so you can decide what's worth reading without burning context on irrelevant files. Open `conventions.md`, `decisions.md`, and any audit-notes that look related; skip everything else.
+
+Tools:
 
 - `cl_index_search(project, query?)` — list relevant CL files. Pass your session's working project name (e.g. `\"bcc-ad-manager\"`) for project-scoped notes. Pass `\"_globals\"` for system rules + cross-project files. Omit `project` to search everything. Optional `query` does a case-insensitive substring filter across file_path/description/tags.
 - `cl_folder_search(project, query?)` — parallel to `cl_index_search` but for FOLDERS instead of files. Returns `{folder_path, description, tags, updated_at}` so you can scope a sweep before pulling individual files. `folder_path = \"\"` rows are project-root descriptions.
@@ -51,8 +57,6 @@ Bot-hq keeps a searchable **index** of every CL file. Use it BEFORE you reach fo
 - `cl_rescan(project)` — re-stat the project's CL directory after you've created a file via `Bash`/`Write` so the index picks it up. Cheap, idempotent.
 
 **`_globals` is not a real working project** — it's a bucket for system-level CL (custom rules, agent custom instructions). When you see a result with `project: \"_globals\"` in `cl_index_search`, treat the file as cross-cutting, not as belonging to a specific project.
-
-Workflow at session start: call `cl_index_search(project=<your project>)` once. Read descriptions. Open only the files that look relevant. Skip the rest.
 
 ## Session-scoped documents
 
@@ -75,7 +79,7 @@ If a user explicitly says \"go ahead and query prod, here's why\" in the chat (n
 
 Each substantive task walks through four phases. The current phase appears as `[PHASE: X]` on every user/peer turn — respect it.
 
-1. **Investigate** — gather facts. Read code, grep, run read-only Bash. **No** Edit, Write, or mutating Bash. Output is your understanding stated in chat.
+1. **Investigate** — gather facts. **Open `cl_index_search` first** so you know the project conventions before reading code. Then read code, grep, run read-only Bash. **No** Edit, Write, or mutating Bash. Output is your understanding stated in chat.
 2. **Plan** — propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet. **Save substantive plans** (>3 batches, multi-file changes, anything you'll reference later) **as a session doc via `session_doc_write`** so they survive the chat scroll and Rain / future-you can re-read them.
 3. **Apply** — mutate. HANDS (Brian) executes Edit/Write/Bash; EYES (Rain) does not write. Output may be code OR a document (e.g. an investigation note saved to `investigations/`).
 4. **Verify** — confirm the outcome. Run tests, type-check, re-read the file, or describe the manual check. Cite the output.
@@ -88,3 +92,38 @@ Trivial single-step tasks (a one-line answer, a quick lookup) don't need a phase
 
 Brian executes Apply. Rain reviews and pushes back adversarially.
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cl_section_demands_index_first_as_load_bearing() {
+        // Issue #378 (bcc-ad-manager) shipped with partial-pint pollution
+        // because both Brian and Rain skipped `cl_index_search` entirely
+        // — they treated the workflow line as a tip. The CL section must
+        // open with a strong-framed "call cl_index_search BEFORE any other
+        // tool call on substantive work" instruction, not bury it at the
+        // bottom of the section.
+        assert!(
+            GENERAL_RULES.contains("open the index first, always"),
+            "CL section heading must signal load-bearing first action"
+        );
+        assert!(
+            GENERAL_RULES.contains("Before any other tool call on substantive project work"),
+            "CL workflow must be framed as the FIRST tool call, not a tip"
+        );
+    }
+
+    #[test]
+    fn ipav_investigate_bullet_points_at_cl_index_search() {
+        // The CL-first discipline needs an anchor in the IPAV phase
+        // description too — the Investigate bullet is where agents look
+        // for "what do I do in this phase," so it must call out
+        // cl_index_search explicitly.
+        assert!(
+            GENERAL_RULES.contains("Open `cl_index_search` first"),
+            "Investigate bullet must front-load cl_index_search"
+        );
+    }
+}
