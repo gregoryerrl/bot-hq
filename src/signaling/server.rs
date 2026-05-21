@@ -12,11 +12,10 @@
 
 use crate::signaling::bridge::SignalingBridge;
 use crate::signaling::jsonrpc::{dispatch, CallerIdentity};
-use crate::signaling::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-use crate::signaling::response::{json_response, text_response};
+use crate::signaling::response::{decode_jsonrpc_body, dispatch_outcome_to_response, text_response};
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -123,39 +122,18 @@ async fn handle_request(
         }
     };
 
-    let body_bytes = match req.into_body().collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(err) => {
-            warn!(?err, "read body");
-            return Ok(text_response(StatusCode::BAD_REQUEST, "body read error"));
-        }
-    };
-
-    let rpc: JsonRpcRequest = match serde_json::from_slice(&body_bytes) {
+    let rpc = match decode_jsonrpc_body(req.into_body()).await {
         Ok(r) => r,
-        Err(err) => {
-            warn!(?err, "json-rpc parse");
-            return Ok(json_response(
-                StatusCode::OK,
-                &JsonRpcResponse::err(
-                    json!(null),
-                    JsonRpcError::new(JsonRpcError::PARSE_ERROR, "invalid JSON"),
-                ),
-            ));
-        }
+        Err(resp) => return Ok(resp),
     };
 
     debug!(method = %rpc.method, %caller.session_id, %caller.agent, "rpc");
 
     let id_for_err = rpc.id.clone().unwrap_or(json!(null));
-    match dispatch(rpc, &caller, &bridge).await {
-        Ok(None) => Ok(text_response(StatusCode::ACCEPTED, "")),
-        Ok(Some(resp)) => Ok(json_response(StatusCode::OK, &resp)),
-        Err(err) => Ok(json_response(
-            StatusCode::OK,
-            &JsonRpcResponse::err(id_for_err, err),
-        )),
-    }
+    Ok(dispatch_outcome_to_response(
+        dispatch(rpc, &caller, &bridge).await,
+        id_for_err,
+    ))
 }
 
 fn parse_path(path: &str) -> Option<CallerIdentity> {
