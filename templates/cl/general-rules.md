@@ -50,11 +50,13 @@ If a user explicitly says "go ahead and query prod, here's why" in the chat (not
 
 ## IPAV discipline
 
-Within a session, agents move through:
+Each substantive task walks through four phases. The current phase appears as `[PHASE: X]` on every user/peer turn — respect it.
 
-1. **Investigate** — gather facts before proposing.
-2. **Plan** — write a concrete approach, name files + functions.
-3. **Apply** — make the changes (HANDS only).
-4. **Verify** — run the verification (tests, manual check, type-check).
+1. **Investigate** — gather facts. Read code, grep, run read-only Bash. **No** Edit, Write, or mutating Bash. Output is your understanding stated in chat.
+2. **Plan** — propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. Wait for the user (or peer) to confirm before mutating. **No** Edit/Write yet.
+3. **Apply** — mutate. HANDS (Brian) executes Edit/Write/Bash; EYES (Rain) does not write. Output may be code OR a document (e.g. an investigation note saved to `investigations/`).
+4. **Verify** — confirm the outcome. Run tests, type-check, re-read the file, or describe the manual check. Cite the output.
 
-Brian (HANDS) executes Apply. Rain (EYES) reviews + adversarially poses problems. Phase transitions are user-driven via the UI phase chip.
+**Phase transitions are agent-initiated.** If your next action would cross a phase boundary, call `request_phase_advance(target, reason)` and wait for the user to acknowledge — don't act first. The user can also advance via the UI phase chip; either path works, but you must wait for the transition before acting in a higher phase.
+
+Brian executes Apply. Rain reviews and pushes back adversarially.
