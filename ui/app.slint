@@ -1902,6 +1902,13 @@ component CLTreeRow inherits Rectangle {
     callback commit-edit();
     callback cancel-edit();
     height: 26px;
+    // Fill the sidebar width. Without horizontal-stretch the parent
+    // VerticalLayout sizes each row to its content's preferred width
+    // (chevron + icon + display-name) and centers it — that's the
+    // "center-justified" look. Stretching anchors the row left so the
+    // chevron + icon + label sit at fixed offsets regardless of text length.
+    horizontal-stretch: 1;
+    min-width: 0;
     border-radius: Theme.radius-default;
     background: root.editing
         ? Theme.primary-container.with-alpha(0.35)
@@ -1977,14 +1984,18 @@ component CLTreeRow inherits Rectangle {
                     clicked => { root.toggle-collapse(); }
                 }
             }
-            // Registered-project marker. Renders before the label for folders
-            // that are project CL roots (matching `projects.cl_path` or the
-            // default convention). Paired with the accent text color below so
-            // the row reads as "this folder is a project" at a glance.
-            if entry.is-dir && entry.is-registered-project: Icon {
-                glyph: Icons.lightbulb;
-                size: 12px;
-                tint: Theme.primary;
+            // Registered-project marker slot. Always present (fixed width)
+            // so the label's x-position is stable regardless of whether the
+            // row carries a lightbulb — without the reserved slot, label
+            // start jitters between registered/non-registered folders.
+            Rectangle {
+                width: 14px;
+                horizontal-stretch: 0;
+                if entry.is-dir && entry.is-registered-project: Icon {
+                    glyph: Icons.lightbulb;
+                    size: 12px;
+                    tint: Theme.primary;
+                }
             }
             // Label OR inline edit input depending on mode. TextInput is
             // ALWAYS rendered (just hidden when not editing) so:
@@ -1992,10 +2003,23 @@ component CLTreeRow inherits Rectangle {
             //      this Rectangle delegate focus to the input
             //   2. Slint's LineEdit-style focus dispatch works
             //      (matches the std widget pattern in lineedit-base.slint)
+            //
+            // The Text + TextInput explicitly fill the parent Rectangle's
+            // width (x: 0; width: parent.width) and pin horizontal-alignment:
+            // left. Without this slint sizes the Text/TextInput to their
+            // preferred (content) width AND centers them inside the wider
+            // stretched Rectangle — that's what produced the "text appears
+            // centered" look when the row stretched to fill the sidebar.
             Rectangle {
                 horizontal-stretch: 1;
+                min-width: 0;
+                clip: true;
                 forward-focus: edit-input;
                 if !root.editing: Text {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
                     text: entry.display-name;
                     color: root.active
                         ? Theme.primary
@@ -2005,15 +2029,21 @@ component CLTreeRow inherits Rectangle {
                     font-family: Theme.font-mono;
                     font-size: Theme.font-code;
                     font-weight: entry.is-dir ? Theme.w-bold : Theme.w-regular;
+                    horizontal-alignment: left;
                     vertical-alignment: center;
                     overflow: elide;
                 }
                 edit-input := TextInput {
                     visible: root.editing;
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: parent.height;
                     text <=> AppState.cl-tree-editing-name;
                     color: Theme.on-surface;
                     font-family: Theme.font-mono;
                     font-size: Theme.font-code;
+                    horizontal-alignment: left;
                     vertical-alignment: center;
                     single-line: true;
                     selection-background-color: Theme.primary.with-alpha(0.4);
