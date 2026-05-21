@@ -6,6 +6,7 @@
 use crate::policy::{ViolationKind, ViolationOutcome};
 use crate::signaling::bridge::{ApprovalContext, SignalingBridge};
 use crate::signaling::protocol::*;
+use crate::signaling::tool_args::{arg_opt_str, arg_required_str, arg_required_str_array};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -100,29 +101,6 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
 /// and Emma (solo helper) own mutations; Rain (EYES) reviews via the read
 /// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
 const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
-
-/// Extract a required string argument. Returns INVALID_PARAMS if absent or non-string.
-fn arg_required_str(args: &Value, key: &str) -> Result<String, JsonRpcError> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("missing {key}")))
-}
-
-/// Extract an optional string argument. None if absent or non-string.
-fn arg_opt_str(args: &Value, key: &str) -> Option<String> {
-    args.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-/// Extract a required array-of-strings argument. Returns INVALID_PARAMS if absent or
-/// non-array; non-string entries are silently dropped.
-fn arg_required_str_array(args: &Value, key: &str) -> Result<Vec<String>, JsonRpcError> {
-    let arr = args
-        .get(key)
-        .and_then(Value::as_array)
-        .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("missing {key}")))?;
-    Ok(arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-}
 
 /// Wrap a serializable value as `ToolCallResult::text` with a JSON-string body.
 /// `fallback` is the literal returned if serialization fails ("[]" for arrays,

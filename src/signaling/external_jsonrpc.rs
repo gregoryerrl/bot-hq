@@ -12,6 +12,7 @@ use crate::signaling::bridge::SignalingEvent;
 use crate::signaling::protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, ToolCallResult, ToolDescriptor,
 };
+use crate::signaling::tool_args::arg_required_str;
 use crate::storage::AgentConfig as DbAgentConfig;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -332,11 +333,7 @@ async fn call_external_tool(
             ))
         }
         "create_session" => {
-            let title = args
-                .get("title")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing title"))?
-                .to_string();
+            let title = arg_required_str(&args, "title")?;
             let working_repo_path = args
                 .get("working_repo_path")
                 .and_then(Value::as_str)
@@ -353,18 +350,8 @@ async fn call_external_tool(
             ))
         }
         "send_message" => {
-            let session_id = args
-                .get("session_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing session_id")
-                })?
-                .to_string();
-            let text = args
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing text"))?
-                .to_string();
+            let session_id = arg_required_str(&args, "session_id")?;
+            let text = arg_required_str(&args, "text")?;
             core.broadcast(&session_id, &text).await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("broadcast: {e}"))
             })?;
@@ -373,13 +360,7 @@ async fn call_external_tool(
             ))
         }
         "get_session_messages" => {
-            let session_id = args
-                .get("session_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing session_id")
-                })?
-                .to_string();
+            let session_id = arg_required_str(&args, "session_id")?;
             let since_id = args.get("since_id").and_then(Value::as_i64);
             let msgs = core
                 .storage
@@ -408,20 +389,9 @@ async fn call_external_tool(
             ))
         }
         "advance_phase" => {
-            let session_id = args
-                .get("session_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing session_id")
-                })?
-                .to_string();
-            let phase_str = args
-                .get("phase")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing phase")
-                })?;
-            let phase = IpavPhase::parse(phase_str).ok_or_else(|| {
+            let session_id = arg_required_str(&args, "session_id")?;
+            let phase_str = arg_required_str(&args, "phase")?;
+            let phase = IpavPhase::parse(&phase_str).ok_or_else(|| {
                 JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
                     format!("phase must be one of I/P/A/V, got {phase_str}"),
@@ -435,20 +405,8 @@ async fn call_external_tool(
             ))
         }
         "resolve_choice" => {
-            let choice_id = args
-                .get("choice_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing choice_id")
-                })?
-                .to_string();
-            let picked = args
-                .get("picked")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing picked")
-                })?
-                .to_string();
+            let choice_id = arg_required_str(&args, "choice_id")?;
+            let picked = arg_required_str(&args, "picked")?;
             core.resolve_choice(&choice_id, picked).await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("resolve_choice: {e}"))
             })?;
@@ -457,13 +415,7 @@ async fn call_external_tool(
             ))
         }
         "close_session" => {
-            let session_id = args
-                .get("session_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing session_id")
-                })?
-                .to_string();
+            let session_id = arg_required_str(&args, "session_id")?;
             let archive = args.get("archive").and_then(Value::as_bool).unwrap_or(true);
             core.close_session(&session_id, archive).await.map_err(|e| {
                 JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("close_session: {e}"))
@@ -572,13 +524,7 @@ async fn call_external_tool(
             ))
         }
         "set_agent_config" => {
-            let agent_name = args
-                .get("agent_name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing agent_name")
-                })?
-                .to_string();
+            let agent_name = arg_required_str(&args, "agent_name")?;
             if !["emma", "brian", "rain"].contains(&agent_name.as_str()) {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
@@ -670,13 +616,7 @@ async fn call_external_tool(
             ))
         }
         "wait_for_change" => {
-            let session_id = args
-                .get("session_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing session_id")
-                })?
-                .to_string();
+            let session_id = arg_required_str(&args, "session_id")?;
             let since_id = args.get("since_id").and_then(Value::as_i64);
             let timeout_ms = args
                 .get("timeout_ms")
@@ -705,13 +645,7 @@ async fn call_external_tool(
             ))
         }
         "get_session_snapshot" => {
-            let session_id = args
-                .get("session_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing session_id")
-                })?
-                .to_string();
+            let session_id = arg_required_str(&args, "session_id")?;
             let msg_limit = args
                 .get("msg_limit")
                 .and_then(Value::as_i64)

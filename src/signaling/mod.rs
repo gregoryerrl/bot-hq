@@ -23,6 +23,7 @@ mod jsonrpc;
 pub mod protocol;
 mod response;
 mod server;
+mod tool_args;
 
 pub use bridge::{PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent};
 pub use external_server::{start_external_server, ExternalServer};
