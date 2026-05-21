@@ -157,13 +157,16 @@ pub struct SignalingBridge {
 }
 
 impl SignalingBridge {
-    pub fn new() -> Arc<Self> {
+    fn new_with(
+        violations: Option<ViolationsLog>,
+        data_dir: Option<PathBuf>,
+    ) -> Arc<Self> {
         let (event_tx, _) = broadcast::channel(64);
         Arc::new(Self {
             event_tx,
             pending: Mutex::new(HashMap::new()),
-            violations: None,
-            data_dir: None,
+            violations,
+            data_dir,
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
@@ -171,37 +174,21 @@ impl SignalingBridge {
         })
     }
 
+    pub fn new() -> Arc<Self> {
+        Self::new_with(None, None)
+    }
+
     /// Construct a bridge with a violations log attached. Approval-class
     /// resolutions write a record after the user picks an option.
     pub fn with_violations_log(violations: ViolationsLog) -> Arc<Self> {
-        let (event_tx, _) = broadcast::channel(64);
-        Arc::new(Self {
-            event_tx,
-            pending: Mutex::new(HashMap::new()),
-            violations: Some(violations),
-            data_dir: None,
-            session_projects: Mutex::new(HashMap::new()),
-            session_awaiting: Mutex::new(HashMap::new()),
-            storage: Mutex::new(None),
-            session_permissions: Mutex::new(HashMap::new()),
-        })
+        Self::new_with(Some(violations), None)
     }
 
     /// Full-featured constructor: violations log + policy resolution root.
     /// Used in production; tests can use [`new`] or [`with_violations_log`]
     /// for partial setups.
     pub fn with_policy(violations: ViolationsLog, data_dir: PathBuf) -> Arc<Self> {
-        let (event_tx, _) = broadcast::channel(64);
-        Arc::new(Self {
-            event_tx,
-            pending: Mutex::new(HashMap::new()),
-            violations: Some(violations),
-            data_dir: Some(data_dir),
-            session_projects: Mutex::new(HashMap::new()),
-            session_awaiting: Mutex::new(HashMap::new()),
-            storage: Mutex::new(None),
-            session_permissions: Mutex::new(HashMap::new()),
-        })
+        Self::new_with(Some(violations), Some(data_dir))
     }
 
     /// Called by the session spawn code so the bridge can resolve the right
