@@ -1092,6 +1092,15 @@ pub async fn install_view_model(
                     show_toast(&weak, "Could not register project.");
                     return;
                 }
+                // Index every file under the new cl_path into cl_index so
+                // agents find them via cl_index_search immediately. Without
+                // this the project's files only appear in the index on the
+                // next bot-hq restart (when startup_init's rescan loop runs)
+                // or on a manual Refresh — surprising for "I just registered
+                // this folder, why doesn't search see anything in it?".
+                if let Err(e) = core.bridge.cl_rescan(&name).await {
+                    warn!(?e, project = %name, "cl_rescan after register failed");
+                }
                 close_register_dialog(&weak);
                 refresh_new_session_projects(&weak, &core).await;
                 refresh_cl_tree(&weak, &core).await;
