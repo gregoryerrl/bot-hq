@@ -15,10 +15,20 @@ use crate::signaling::protocol::{
 };
 use crate::signaling::response::result_json;
 use crate::signaling::tool_args::arg_required_str;
-use crate::storage::AgentConfig as DbAgentConfig;
+use crate::storage::{AgentConfig as DbAgentConfig, Message};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
+
+fn message_to_json(m: &Message) -> Value {
+    json!({
+        "id": m.id,
+        "author": m.author,
+        "kind": m.kind,
+        "content": m.content,
+        "created_at": m.created_at,
+    })
+}
 
 /// Top-level dispatch. Mirrors the internal `signaling::jsonrpc::dispatch`
 /// shape so the same hyper plumbing pattern works for both servers.
@@ -367,16 +377,8 @@ async fn call_external_tool(
                     )
                 })?;
             let arr: Vec<_> = msgs
-                .into_iter()
-                .map(|m| {
-                    json!({
-                        "id": m.id,
-                        "author": m.author,
-                        "kind": m.kind,
-                        "content": m.content,
-                        "created_at": m.created_at,
-                    })
-                })
+                .iter()
+                .map(message_to_json)
                 .collect();
             Ok(result_json(&json!({ "messages": arr }), "{}"))
         }
@@ -432,16 +434,8 @@ async fn call_external_tool(
                     )
                 })?;
             let arr: Vec<_> = msgs
-                .into_iter()
-                .map(|m| {
-                    json!({
-                        "id": m.id,
-                        "author": m.author,
-                        "kind": m.kind,
-                        "content": m.content,
-                        "created_at": m.created_at,
-                    })
-                })
+                .iter()
+                .map(message_to_json)
                 .collect();
             Ok(result_json(&json!({ "messages": arr }), "{}"))
         }
@@ -604,16 +598,8 @@ async fn call_external_tool(
                     JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("wait_for_change: {e}"))
                 })?;
             let arr: Vec<_> = messages
-                .into_iter()
-                .map(|m| {
-                    json!({
-                        "id": m.id,
-                        "author": m.author,
-                        "kind": m.kind,
-                        "content": m.content,
-                        "created_at": m.created_at,
-                    })
-                })
+                .iter()
+                .map(message_to_json)
                 .collect();
             Ok(result_json(&json!({ "messages": arr }), "{}"))
         }
@@ -670,16 +656,8 @@ async fn call_external_tool(
                 })
                 .collect();
             let msg_arr: Vec<_> = messages
-                .into_iter()
-                .map(|m| {
-                    json!({
-                        "id": m.id,
-                        "author": m.author,
-                        "kind": m.kind,
-                        "content": m.content,
-                        "created_at": m.created_at,
-                    })
-                })
+                .iter()
+                .map(message_to_json)
                 .collect();
             let snapshot = json!({
                 "session": session_row.map(|s| json!({
