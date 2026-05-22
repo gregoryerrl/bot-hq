@@ -156,29 +156,27 @@ impl Paths {
     }
 }
 
-/// Default data dir = `~/.bot-hq/`.
-fn default_data_dir() -> Result<PathBuf> {
-    let home = directories::BaseDirs::new()
+/// Resolve the user's home directory via `directories::BaseDirs`. Single
+/// source of truth — every path helper below routes through this so the
+/// `.context()` message stays identical.
+fn home_dir() -> Result<PathBuf> {
+    Ok(directories::BaseDirs::new()
         .context("locating user home dir")?
         .home_dir()
-        .to_path_buf();
-    Ok(home.join(".bot-hq"))
+        .to_path_buf())
+}
+
+/// Default data dir = `~/.bot-hq/`.
+fn default_data_dir() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".bot-hq"))
 }
 
 /// Expand a leading `~` (and optionally `~/`) in a path string.
 fn expand_tilde(s: &str) -> Result<PathBuf> {
     if let Some(stripped) = s.strip_prefix("~/") {
-        let home = directories::BaseDirs::new()
-            .context("locating user home dir")?
-            .home_dir()
-            .to_path_buf();
-        Ok(home.join(stripped))
+        Ok(home_dir()?.join(stripped))
     } else if s == "~" {
-        let home = directories::BaseDirs::new()
-            .context("locating user home dir")?
-            .home_dir()
-            .to_path_buf();
-        Ok(home)
+        home_dir()
     } else {
         Ok(PathBuf::from(s))
     }
