@@ -12,7 +12,7 @@ use crate::signaling::protocol::{
     parse_phase_arg, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION,
     ToolCallResult, ToolDescriptor,
 };
-use crate::signaling::response::result_json;
+use crate::signaling::response::{ok_response, result_json};
 use crate::signaling::tool_args::arg_required_str;
 use crate::storage::{AgentConfig as DbAgentConfig, Message};
 use serde_json::{json, Value};
@@ -363,7 +363,7 @@ async fn call_external_tool(
             core.broadcast(&session_id, &text).await.map_err(|e| {
                 internal_err("broadcast", e)
             })?;
-            Ok(result_json(&json!({ "ok": true }), "{}"))
+            Ok(ok_response())
         }
         "get_session_messages" => {
             let session_id = arg_required_str(&args, "session_id")?;
@@ -388,7 +388,7 @@ async fn call_external_tool(
             core.advance_phase(&session_id, phase).await.map_err(|e| {
                 internal_err("advance_phase", e)
             })?;
-            Ok(result_json(&json!({ "ok": true }), "{}"))
+            Ok(ok_response())
         }
         "resolve_choice" => {
             let choice_id = arg_required_str(&args, "choice_id")?;
@@ -396,7 +396,7 @@ async fn call_external_tool(
             core.resolve_choice(&choice_id, picked).await.map_err(|e| {
                 internal_err("resolve_choice", e)
             })?;
-            Ok(result_json(&json!({ "ok": true }), "{}"))
+            Ok(ok_response())
         }
         "close_session" => {
             let session_id = arg_required_str(&args, "session_id")?;
@@ -404,13 +404,13 @@ async fn call_external_tool(
             core.close_session(&session_id, archive).await.map_err(|e| {
                 internal_err("close_session", e)
             })?;
-            Ok(result_json(&json!({ "ok": true }), "{}"))
+            Ok(ok_response())
         }
         "restart_emma" => {
             core.restart_emma().await.map_err(|e| {
                 internal_err("restart_emma", e)
             })?;
-            Ok(result_json(&json!({ "ok": true }), "{}"))
+            Ok(ok_response())
         }
         "get_emma_messages" => {
             let since_id = args.get("since_id").and_then(Value::as_i64);
@@ -538,7 +538,7 @@ async fn call_external_tool(
             core.storage.upsert_agent_config(&cfg).await.map_err(|e| {
                 internal_err("upsert_agent_config", e)
             })?;
-            Ok(result_json(&json!({ "ok": true }), "{}"))
+            Ok(ok_response())
         }
         "get_violations" => {
             let limit = args

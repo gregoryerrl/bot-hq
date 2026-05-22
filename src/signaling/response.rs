@@ -20,6 +20,12 @@ pub(super) fn result_json<T: serde::Serialize>(value: &T, fallback: &str) -> Too
     ToolCallResult::text(serde_json::to_string(value).unwrap_or_else(|_| fallback.into()))
 }
 
+/// Stub `{"ok": true}` response shape — the standard "operation succeeded,
+/// nothing to return" payload used across the external MCP tool dispatch.
+pub(super) fn ok_response() -> ToolCallResult {
+    result_json(&serde_json::json!({ "ok": true }), "{}")
+}
+
 pub(super) fn text_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
