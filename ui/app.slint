@@ -184,33 +184,33 @@ export global Theme {
 
 export global AppState {
     in-out property <int> current-tab;
-    in-out property <bool> emma-open;
-    in-out property <string> status-text;
+    in     property <bool> emma-open;
+    in     property <string> status-text;
 
-    in-out property <[SessionTile]> sessions;
+    in     property <[SessionTile]> sessions;
     in-out property <string> active-session-id;
 
-    in-out property <[ChatMsg]> session-msgs;
+    in     property <[ChatMsg]> session-msgs;
     // Counter Rust increments after each set_session_msgs / set_emma_msgs.
     // SessionView and EmmaPane watch their respective tick via a local property
     // + `changed` handler, then scroll their ScrollView to the bottom. This
     // decouples auto-scroll from layout-time `changed viewport-height`, which
     // was unreliable on model swaps and recursed on EmmaPane's layout.
-    in-out property <int> session-scroll-tick;
-    in-out property <int> emma-scroll-tick;
-    in-out property <string> active-phase;
-    in-out property <string> active-title;
-    in-out property <bool>   active-awaiting;
+    in     property <int> session-scroll-tick;
+    in     property <int> emma-scroll-tick;
+    in     property <string> active-phase;
+    in     property <string> active-title;
+    in     property <bool>   active-awaiting;
     // All currently-pending user-input items for the active session, sourced
     // from the durable `session_questions` table. The in-chat questions tray
     // reads this; the dashboard card reads only the count.
-    in-out property <[PendingQuestion]> active-questions;
+    in     property <[PendingQuestion]> active-questions;
     // User-controlled toggle for the tray. Default closed (so the chat is
     // unobstructed); clicking the header chip opens it.
     in-out property <bool>   questions-tray-open;
     // Set true by view_model when at least one row in the tray has a
     // user-supplied answer. Drives the "Send all" button enable state.
-    in-out property <bool>   submit-ready;
+    in     property <bool>   submit-ready;
     // Called every time the user picks a choice option or types into a
     // halt/open-ask input. `value` is the picked option string (choice)
     // or the typed text (open-ask/halt). view_model maintains the batch
@@ -223,21 +223,21 @@ export global AppState {
     // Frozen-at-spawn model names for this session's two agents. Header strip
     // reads these so the user sees what's actually talking, not the (mutable)
     // current agent_configs.model_name. Empty for pre-migration session rows.
-    in-out property <string> active-brian-model;
-    in-out property <string> active-rain-model;
+    in     property <string> active-brian-model;
+    in     property <string> active-rain-model;
 
-    in-out property <[ChatMsg]> emma-msgs;
+    in     property <[ChatMsg]> emma-msgs;
     // Emma has no dashboard tile + isn't an "active session" in the SessionView
     // sense, so signaling events for session_id="emma" need a dedicated render
     // surface in EmmaPane. Mirrors the active-pending-* / active-awaiting set.
-    in-out property <bool>   emma-awaiting;
-    in-out property <bool>   emma-pending-choice;
-    in-out property <string> emma-pending-question;
-    in-out property <[string]> emma-pending-options;
-    in-out property <string> emma-pending-choice-id;
+    in     property <bool>   emma-awaiting;
+    in     property <bool>   emma-pending-choice;
+    in     property <string> emma-pending-question;
+    in     property <[string]> emma-pending-options;
+    in     property <string> emma-pending-choice-id;
 
-    in-out property <[CLFileEntry]> cl-tree;
-    in-out property <string> cl-current-path;
+    in     property <[CLFileEntry]> cl-tree;
+    in     property <string> cl-current-path;
     in-out property <string> cl-current-body;
     in-out property <bool>   cl-dirty;
     // Index metadata for the currently open file. Edits set cl-metadata-dirty;
@@ -252,11 +252,11 @@ export global AppState {
     // as first-class projects. `cl-current-folder-project-name` is the
     // registered project's name when is-project=true (lets Unregister find
     // the right row even if the user later renamed the folder on disk).
-    in-out property <string> cl-current-folder;
+    in     property <string> cl-current-folder;
     in-out property <string> cl-current-folder-description;
-    in-out property <bool>   cl-current-folder-is-project;
-    in-out property <string> cl-current-folder-project-name;
-    in-out property <string> cl-current-folder-working-repo;
+    in     property <bool>   cl-current-folder-is-project;
+    in     property <string> cl-current-folder-project-name;
+    in     property <string> cl-current-folder-working-repo;
     in-out property <bool>   cl-current-folder-dirty;
     // Register-project modal state. Defaults populated by view-model when the
     // user clicks "Register as Project" — cl_path defaults to the folder's
@@ -279,8 +279,8 @@ export global AppState {
     in     property <[NewSessionProject]> new-session-projects;
     // Active session's permission grants (commit / push). View-model refreshes
     // these on signaling tick. Chip click → toggle via set-session-permission.
-    in-out property <bool> active-commit-granted;
-    in-out property <bool> active-push-granted;
+    in     property <bool> active-commit-granted;
+    in     property <bool> active-push-granted;
     // (action, granted) — action is "commit" or "push", granted is the
     // NEW desired state. View-model calls bridge.grant/revoke accordingly.
     callback set-session-permission(string, bool);
@@ -307,10 +307,10 @@ export global AppState {
     // startup; opening one adds it to this set and persists in-memory
     // across tab switches but resets at restart. Editing = the single
     // row currently being typed into (inline rename or new-file/folder).
-    in-out property <[string]> cl-tree-expanded;
-    in-out property <string>   cl-tree-editing-path;
+    in     property <[string]> cl-tree-expanded;
+    in     property <string>   cl-tree-editing-path;
     in-out property <string>   cl-tree-editing-name;
-    in-out property <string>   cl-tree-editing-mode;   // "" | "new-file" | "new-folder" | "rename"
+    in     property <string>   cl-tree-editing-mode;   // "" | "new-file" | "new-folder" | "rename"
     // CL sidebar width. Drag-resizable via the divider; persists across
     // tab switches but resets at app restart.
     in-out property <length>   cl-sidebar-width: 220px;
@@ -322,11 +322,11 @@ export global AppState {
     callback cl-tree-cancel-edit();                      // clears editing state
     callback cl-tree-delete-path(string);                // (path) — file or folder, with confirm
 
-    in-out property <[AgentConfigRow]> agent-configs;
+    in     property <[AgentConfigRow]> agent-configs;
 
     // Transient bottom-center notification (e.g., "Changes will apply to new
     // sessions" after agent config save). Auto-hidden by a 3s Timer in AppWindow.
-    in-out property <string> toast-text;
+    in     property <string> toast-text;
     in-out property <bool>   toast-visible;
 
     // Emma restart confirmation modal. Brian/Rain swaps apply on next session,
@@ -337,8 +337,8 @@ export global AppState {
 
     // External MCP — populated at startup by view_model. Empty when the
     // external server failed to bind (port in use / disabled via env var).
-    in-out property <string> external-mcp-url;
-    in-out property <string> external-mcp-token;
+    in     property <string> external-mcp-url;
+    in     property <string> external-mcp-token;
     in-out property <bool>   external-mcp-token-revealed;
 
     callback open-session(string);
