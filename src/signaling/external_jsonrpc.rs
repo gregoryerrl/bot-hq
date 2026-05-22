@@ -6,12 +6,11 @@
 //!
 //! See `external_server.rs` for the listener / auth half.
 
-use crate::core::ipav::IpavPhase;
 use crate::core::AppState as CoreAppState;
 use crate::signaling::bridge::SignalingEvent;
 use crate::signaling::protocol::{
-    JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION, ToolCallResult,
-    ToolDescriptor,
+    parse_phase_arg, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION,
+    ToolCallResult, ToolDescriptor,
 };
 use crate::signaling::response::result_json;
 use crate::signaling::tool_args::arg_required_str;
@@ -385,15 +384,7 @@ async fn call_external_tool(
         "advance_phase" => {
             let session_id = arg_required_str(&args, "session_id")?;
             let phase_str = arg_required_str(&args, "phase")?;
-            let phase = IpavPhase::parse(&phase_str).ok_or_else(|| {
-                JsonRpcError::new(
-                    JsonRpcError::INVALID_PARAMS,
-                    format!(
-                        "unknown phase '{phase_str}' (expected {})",
-                        IpavPhase::error_hint()
-                    ),
-                )
-            })?;
+            let phase = parse_phase_arg("phase", &phase_str)?;
             core.advance_phase(&session_id, phase).await.map_err(|e| {
                 internal_err("advance_phase", e)
             })?;

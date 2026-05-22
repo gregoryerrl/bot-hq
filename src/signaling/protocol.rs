@@ -73,6 +73,28 @@ impl JsonRpcResponse {
     }
 }
 
+/// Parse an IPAV phase target from an MCP argument. Returns INVALID_PARAMS
+/// with the canonical error_hint message on failure. `field` is the
+/// argument name as the dispatcher exposes it on the wire (`"target"` for
+/// internal `advance_phase`/`request_phase_advance`, `"phase"` for
+/// external `advance_phase`) — preserved in the error string for caller
+/// clarity. Single source of truth so the three dispatch sites can't
+/// drift on what they tell agents.
+pub(crate) fn parse_phase_arg(
+    field: &str,
+    value: &str,
+) -> Result<crate::core::ipav::IpavPhase, JsonRpcError> {
+    crate::core::ipav::IpavPhase::parse(value).ok_or_else(|| {
+        JsonRpcError::new(
+            JsonRpcError::INVALID_PARAMS,
+            format!(
+                "unknown {field} '{value}' (expected {})",
+                crate::core::ipav::IpavPhase::error_hint()
+            ),
+        )
+    })
+}
+
 // ---- MCP-specific shapes ----
 
 #[derive(Debug, Clone, Serialize)]

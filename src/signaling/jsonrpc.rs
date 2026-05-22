@@ -154,15 +154,7 @@ async fn call_tool(
         }
         "advance_phase" => {
             let target = arg_required_str(&args, "target")?;
-            if crate::core::ipav::IpavPhase::parse(&target).is_none() {
-                return Err(JsonRpcError::new(
-                    JsonRpcError::INVALID_PARAMS,
-                    format!(
-                        "unknown target '{target}' (expected {})",
-                        crate::core::ipav::IpavPhase::error_hint()
-                    ),
-                ));
-            }
+            parse_phase_arg("target", &target)?;
             bridge.agent_advance_phase(
                 caller.session_id.clone(),
                 caller.agent.clone(),
@@ -172,15 +164,7 @@ async fn call_tool(
         }
         "request_phase_advance" => {
             let target = arg_required_str(&args, "target")?;
-            if crate::core::ipav::IpavPhase::parse(&target).is_none() {
-                return Err(JsonRpcError::new(
-                    JsonRpcError::INVALID_PARAMS,
-                    format!(
-                        "unknown target '{target}' (expected {})",
-                        crate::core::ipav::IpavPhase::error_hint()
-                    ),
-                ));
-            }
+            parse_phase_arg("target", &target)?;
             let reason = arg_required_str(&args, "reason")?;
             bridge
                 .request_phase_advance(
