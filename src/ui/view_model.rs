@@ -19,12 +19,44 @@ use crate::{
 use once_cell::sync::Lazy;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::sync::broadcast;
 use tracing::warn;
+
+/// Wrap a Slint callback body in `catch_unwind` so a Rust panic logs +
+/// surfaces a toast instead of unwinding across the C++ FFI boundary
+/// into `abort()`. Slint dispatches the registered `on_*` callbacks
+/// from Cocoa/C++ via the event loop; a Rust panic that crosses that
+/// barrier is undefined behavior and the runtime aborts the process.
+///
+/// `weak` is captured by reference (cheap) and used to surface a toast
+/// when a panic is caught. The body closure must wrap in
+/// `AssertUnwindSafe` because moved-in captures like `Arc<CoreAppState>`
+/// and `Weak<AppWindow>` do not auto-derive `UnwindSafe`.
+fn ffi_safe<F>(name: &'static str, weak: &Weak<AppWindow>, f: F)
+where
+    F: FnOnce() + std::panic::UnwindSafe,
+{
+    if let Err(payload) = std::panic::catch_unwind(f) {
+        let msg = panic_payload_string(&payload);
+        tracing::error!(callback = name, panic = %msg, "panic in Slint callback (contained)");
+        show_toast(weak, &format!("Internal error in {name}; see logs."));
+    }
+}
+
+fn panic_payload_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
+}
 
 /// In-memory accumulator for the questions-tray "Send all" form. Keyed by
 /// `choice_id`. The Slint side fires `set-answer(cid, value)` on every
@@ -204,96 +236,51 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_open_session(move |session_id| {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            let session_id = session_id.to_string();
-            rt.spawn(async move {
-                // Sessions persist in the DB across app restarts but their live
-                // subprocess handles do NOT. If the user clicks a session that
-                // existed before the current process, the `sessions` HashMap
-                // won't have it and broadcasts will fail with "no live session".
-                // Auto-respawn here so the session is live by the time the user
-                // tries to broadcast. Idempotent — no-op if already running.
-                if let Err(e) = core.ensure_session_started(&session_id).await {
-                    warn!(
-                        session_id = %session_id,
-                        ?e,
-                        "ensure_session_started failed — chat will be inactive (check claude auth)"
-                    );
-                }
-                let _ = refresh_session_view(&weak, &core, &session_id).await;
-                update_active_session_id(&weak, &session_id);
-                // Inherit awaiting/pending state from the tile we just opened.
-                // Without this, the active-* globals carry over from whichever
-                // session was previously active — "Need user input" showed on
-                // every session you switched to, even if only one needed it.
-                sync_active_from_tile(&weak, &session_id);
-                // Populate the in-chat questions tray from durable storage.
-                refresh_active_questions(&weak, &core, &session_id);
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        app.on_back_to_dashboard(move || {
-            update_active_session_id(&weak, "");
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_advance_phase(move |chip| {
-            let Some(target) = IpavPhase::parse(&chip) else {
-                return;
-            };
-            // Read Slint state on the event-loop thread (we ARE here, in the
-            // callback). Calling current_session_id INSIDE rt.spawn would return
-            // "" because Weak::upgrade fails off-thread, and the broadcast/phase
-            // would silently no-op.
-            let session_id = current_session_id(&weak);
-            if session_id.is_empty() {
-                return;
+        app.on_open_session({
+            let weak_for_safe = weak.clone();
+            move |session_id| {
+                ffi_safe("on_open_session", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    let session_id = session_id.to_string();
+                    rt.spawn(async move {
+                        // Sessions persist in the DB across app restarts but their live
+                        // subprocess handles do NOT. If the user clicks a session that
+                        // existed before the current process, the `sessions` HashMap
+                        // won't have it and broadcasts will fail with "no live session".
+                        // Auto-respawn here so the session is live by the time the user
+                        // tries to broadcast. Idempotent — no-op if already running.
+                        if let Err(e) = core.ensure_session_started(&session_id).await {
+                            warn!(
+                                session_id = %session_id,
+                                ?e,
+                                "ensure_session_started failed — chat will be inactive (check claude auth)"
+                            );
+                        }
+                        let _ = refresh_session_view(&weak, &core, &session_id).await;
+                        update_active_session_id(&weak, &session_id);
+                        // Inherit awaiting/pending state from the tile we just opened.
+                        // Without this, the active-* globals carry over from whichever
+                        // session was previously active — "Need user input" showed on
+                        // every session you switched to, even if only one needed it.
+                        sync_active_from_tile(&weak, &session_id);
+                        // Populate the in-chat questions tray from durable storage.
+                        refresh_active_questions(&weak, &core, &session_id);
+                    });
+                }));
             }
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                if let Err(e) = core.advance_phase(&session_id, target).await {
-                    warn!(?e, "advance_phase failed");
-                }
-                let _ = refresh_session_view(&weak, &core, &session_id).await;
-            });
         });
     }
 
     {
         let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_broadcast(move |text| {
-            // See on_advance_phase: read session_id on the event-loop thread
-            // FIRST, then spawn the async work. Reading inside rt.spawn yields
-            // "" and the broadcast silently no-ops (the user's original bug).
-            let session_id = current_session_id(&weak);
-            let text = text.to_string();
-            if session_id.is_empty() || text.trim().is_empty() {
-                return;
+        app.on_back_to_dashboard({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_back_to_dashboard", &weak_for_safe, AssertUnwindSafe(|| {
+                    update_active_session_id(&weak, "");
+                }));
             }
-            // The user just answered — clear "Need user input" for this session.
-            // mark_awaiting_user set it; without an explicit clear, the banner
-            // stays sticky across sessions forever.
-            clear_awaiting_for(&weak, &session_id);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                if let Err(e) = core.broadcast(&session_id, &text).await {
-                    warn!(?e, "broadcast failed");
-                }
-                let _ = refresh_session_view(&weak, &core, &session_id).await;
-            });
         });
     }
 
@@ -301,36 +288,112 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_emma_send(move |text| {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            let text = text.to_string();
-            // Same as on_broadcast: user reply clears Emma's awaiting flag.
-            clear_emma_awaiting(&weak);
-            rt.spawn(async move {
-                if text.trim().is_empty() {
-                    return;
-                }
-                if let Err(e) = core.broadcast("emma", &text).await {
-                    warn!(?e, "emma send failed");
-                }
-                let _ = refresh_emma(&weak, &core).await;
-            });
+        app.on_advance_phase({
+            let weak_for_safe = weak.clone();
+            move |chip| {
+                ffi_safe("on_advance_phase", &weak_for_safe, AssertUnwindSafe(|| {
+                    let Some(target) = IpavPhase::parse(&chip) else {
+                        return;
+                    };
+                    // Read Slint state on the event-loop thread (we ARE here, in the
+                    // callback). Calling current_session_id INSIDE rt.spawn would return
+                    // "" because Weak::upgrade fails off-thread, and the broadcast/phase
+                    // would silently no-op.
+                    let session_id = current_session_id(&weak);
+                    if session_id.is_empty() {
+                        return;
+                    }
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        if let Err(e) = core.advance_phase(&session_id, target).await {
+                            warn!(?e, "advance_phase failed");
+                        }
+                        let _ = refresh_session_view(&weak, &core, &session_id).await;
+                    });
+                }));
+            }
         });
     }
 
     {
+        let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_choice_clicked(move |choice_id, picked| {
-            let core = Arc::clone(&core);
-            let choice_id = choice_id.to_string();
-            let picked = picked.to_string();
-            rt.spawn(async move {
-                if let Err(e) = core.resolve_choice(&choice_id, picked).await {
-                    warn!(?e, "resolve_choice");
-                }
-            });
+        app.on_broadcast({
+            let weak_for_safe = weak.clone();
+            move |text| {
+                ffi_safe("on_broadcast", &weak_for_safe, AssertUnwindSafe(|| {
+                    // See on_advance_phase: read session_id on the event-loop thread
+                    // FIRST, then spawn the async work. Reading inside rt.spawn yields
+                    // "" and the broadcast silently no-ops (the user's original bug).
+                    let session_id = current_session_id(&weak);
+                    let text = text.to_string();
+                    if session_id.is_empty() || text.trim().is_empty() {
+                        return;
+                    }
+                    // The user just answered — clear "Need user input" for this session.
+                    // mark_awaiting_user set it; without an explicit clear, the banner
+                    // stays sticky across sessions forever.
+                    clear_awaiting_for(&weak, &session_id);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        if let Err(e) = core.broadcast(&session_id, &text).await {
+                            warn!(?e, "broadcast failed");
+                        }
+                        let _ = refresh_session_view(&weak, &core, &session_id).await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_emma_send({
+            let weak_for_safe = weak.clone();
+            move |text| {
+                ffi_safe("on_emma_send", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    let text = text.to_string();
+                    // Same as on_broadcast: user reply clears Emma's awaiting flag.
+                    clear_emma_awaiting(&weak);
+                    rt.spawn(async move {
+                        if text.trim().is_empty() {
+                            return;
+                        }
+                        if let Err(e) = core.broadcast("emma", &text).await {
+                            warn!(?e, "emma send failed");
+                        }
+                        let _ = refresh_emma(&weak, &core).await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_choice_clicked({
+            let weak_for_safe = weak.clone();
+            move |choice_id, picked| {
+                ffi_safe("on_choice_clicked", &weak_for_safe, AssertUnwindSafe(|| {
+                    let core = Arc::clone(&core);
+                    let choice_id = choice_id.to_string();
+                    let picked = picked.to_string();
+                    rt.spawn(async move {
+                        if let Err(e) = core.resolve_choice(&choice_id, picked).await {
+                            warn!(?e, "resolve_choice");
+                        }
+                    });
+                }));
+            }
         });
     }
 
@@ -339,21 +402,26 @@ pub async fn install_view_model(
     // this. We mirror it into ANSWER_ACCUMULATOR and recompute submit-ready.
     {
         let weak = weak.clone();
-        app.on_set_answer(move |choice_id, value| {
-            let cid = choice_id.to_string();
-            let val = value.to_string();
-            {
-                let mut acc = ANSWER_ACCUMULATOR.lock().unwrap();
-                if val.is_empty() {
-                    acc.remove(&cid);
-                } else {
-                    acc.insert(cid, val);
-                }
+        app.on_set_answer({
+            let weak_for_safe = weak.clone();
+            move |choice_id, value| {
+                ffi_safe("on_set_answer", &weak_for_safe, AssertUnwindSafe(|| {
+                    let cid = choice_id.to_string();
+                    let val = value.to_string();
+                    {
+                        let mut acc = ANSWER_ACCUMULATOR.lock().unwrap();
+                        if val.is_empty() {
+                            acc.remove(&cid);
+                        } else {
+                            acc.insert(cid, val);
+                        }
+                    }
+                    let ready = !ANSWER_ACCUMULATOR.lock().unwrap().is_empty();
+                    let _ = weak.upgrade_in_event_loop(move |handle| {
+                        handle.global::<SlintAppState>().set_submit_ready(ready);
+                    });
+                }));
             }
-            let ready = !ANSWER_ACCUMULATOR.lock().unwrap().is_empty();
-            let _ = weak.upgrade_in_event_loop(move |handle| {
-                handle.global::<SlintAppState>().set_submit_ready(ready);
-            });
         });
     }
 
@@ -364,17 +432,20 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_submit_questions_batch(move || {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                let answers: Vec<(String, String)> = {
-                    let mut acc = ANSWER_ACCUMULATOR.lock().unwrap();
-                    acc.drain().collect()
-                };
-                if answers.is_empty() {
-                    return;
-                }
+        app.on_submit_questions_batch({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_submit_questions_batch", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        let answers: Vec<(String, String)> = {
+                            let mut acc = ANSWER_ACCUMULATOR.lock().unwrap();
+                            acc.drain().collect()
+                        };
+                        if answers.is_empty() {
+                            return;
+                        }
                 // Read the active session id from the Slint thread.
                 let session_id: String = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -460,85 +531,8 @@ pub async fn install_view_model(
                 // Refresh the tray so the answered/withdrawn rows drop out.
                 refresh_active_questions(&weak, &core, &session_id);
             });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_create_session(move |title, working_repo| {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            let title = title.to_string();
-            let path: Option<PathBuf> = if working_repo.is_empty() {
-                None
-            } else {
-                Some(PathBuf::from(working_repo.to_string()))
-            };
-            rt.spawn(async move {
-                match core.open_session(title, path).await {
-                    Ok(id) => {
-                        refresh_dashboard(&weak, &core).await;
-                        // refresh_session_view atomically sets session-msgs +
-                        // active-session-id in one slint invoke — calling
-                        // update_active_session_id separately before it caused
-                        // a flash: Slint rendered SessionView with active=new_id
-                        // but session-msgs still holding the previous session's
-                        // chat between the two invokes.
-                        let _ = refresh_session_view(&weak, &core, &id).await;
-                    }
-                    Err(e) => warn!(?e, "open_session failed"),
-                }
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_set_session_permission(move |action, granted| {
-            // Read active session id on the event-loop thread BEFORE spawning
-            // — Slint property reads from a tokio task return empty.
-            let session_id = weak
-                .upgrade()
-                .map(|h| h.global::<SlintAppState>().get_active_session_id().to_string())
-                .unwrap_or_default();
-            if session_id.is_empty() {
-                return;
+                }));
             }
-            let action_str = action.to_string();
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                let parsed = match action_str.as_str() {
-                    "commit" => crate::policy::PermissionAction::Commit,
-                    "push" => crate::policy::PermissionAction::Push,
-                    other => {
-                        warn!(action = %other, "set_session_permission: unknown action");
-                        return;
-                    }
-                };
-                let result = if granted {
-                    core.bridge
-                        .grant_session_permission(
-                            &session_id,
-                            parsed,
-                            crate::policy::GrantScope::AllBranches,
-                        )
-                        .await
-                } else {
-                    core.bridge
-                        .revoke_session_permission(&session_id, parsed)
-                        .await
-                };
-                if let Err(e) = result {
-                    warn!(?e, "set_session_permission failed");
-                    return;
-                }
-                refresh_session_permissions(&weak, &core, &session_id).await;
-            });
         });
     }
 
@@ -546,135 +540,35 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_save_agent_config(move |row| {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            let cfg = DbAgentConfig {
-                agent_name: row.agent_name.to_string(),
-                provider: row.provider.to_string(),
-                model_name: row.model_name.to_string(),
-                base_url: optional(row.base_url.to_string()),
-                auth_token: optional(row.auth_token.to_string()),
-                updated_at: String::new(),
-            };
-            rt.spawn(async move {
-                match core.storage.upsert_agent_config(&cfg).await {
-                    Err(e) => warn!(?e, "upsert agent_config"),
-                    Ok(()) => {
-                        // Session agents (brian/rain) bake env vars at spawn, so a
-                        // config edit only affects the next-spawned session. Tell
-                        // the user so silent stale-config drift doesn't happen.
-                        // Emma has her own Restart button so we skip the toast.
-                        if cfg.agent_name == "brian" || cfg.agent_name == "rain" {
-                            show_toast(&weak, "Changes will apply to new sessions.");
-                        }
-                    }
-                }
-                refresh_agent_configs(&weak, &core).await;
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_restart_emma(move || {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                match core.restart_emma().await {
-                    Ok(()) => {
-                        show_toast(&weak, "Emma restarted with the saved model.");
-                    }
-                    Err(e) => {
-                        warn!(?e, "restart_emma");
-                        show_toast(&weak, "Restart failed — check logs.");
-                    }
-                }
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_open_file(move |relative| {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            let rel = relative.to_string();
-            rt.spawn(async move {
-                let path = core.paths.data_dir.join(&rel);
-                let body = std::fs::read_to_string(&path).unwrap_or_default();
-                // Look up index metadata for this path so the description + tags
-                // strip above the editor reflects it.
-                let (project, file_path) = resolve_project_and_path(&rel);
-                let (desc, tags) = match core.storage.get_cl_index(&project, &file_path).await {
-                    Ok(Some(entry)) => (entry.description, entry.tags.unwrap_or_default()),
-                    _ => (String::new(), String::new()),
-                };
-                update_cl_current(&weak, &rel, &body);
-                update_cl_metadata(&weak, &desc, &tags);
-                clear_cl_dirty(&weak);
-                clear_cl_metadata_dirty(&weak);
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_save_current(move || {
-            // Read state on the event-loop thread (we're in a Slint callback)
-            // before spawning. Off-thread reads return empty silently.
-            let (rel, body) = current_cl_state(&weak);
-            let (desc, tags) = current_cl_metadata(&weak);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                if rel.is_empty() {
-                    return;
-                }
-                let path = core.paths.data_dir.join(&rel);
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if let Err(e) = std::fs::write(&path, body) {
-                    warn!(?e, "CL save body");
-                    return;
-                }
-                // Persist metadata as part of the same flush. Description
-                // empty → keep whatever the index had (don't overwrite with
-                // emptiness; users may have content saved without metadata).
-                if !desc.trim().is_empty() {
-                    let (project, file_path) = resolve_project_and_path(&rel);
-                    // Ensure parent project row exists. Auto-create with a
-                    // bare-bones display name if missing — projects are
-                    // user-registered but file-system-driven sessions can
-                    // populate ahead of registration.
-                    let _ = core
-                        .storage
-                        .upsert_project(&project, &project, None, None, None)
-                        .await;
-                    let tag_opt = if tags.trim().is_empty() {
+        app.on_create_session({
+            let weak_for_safe = weak.clone();
+            move |title, working_repo| {
+                ffi_safe("on_create_session", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    let title = title.to_string();
+                    let path: Option<PathBuf> = if working_repo.is_empty() {
                         None
                     } else {
-                        Some(tags.trim())
+                        Some(PathBuf::from(working_repo.to_string()))
                     };
-                    if let Err(e) = core
-                        .storage
-                        .upsert_cl_index(&project, &file_path, desc.trim(), tag_opt)
-                        .await
-                    {
-                        warn!(?e, "CL save metadata");
-                    }
-                }
-                clear_cl_dirty(&weak);
-                clear_cl_metadata_dirty(&weak);
-                refresh_cl_tree(&weak, &core).await;
-            });
+                    rt.spawn(async move {
+                        match core.open_session(title, path).await {
+                            Ok(id) => {
+                                refresh_dashboard(&weak, &core).await;
+                                // refresh_session_view atomically sets session-msgs +
+                                // active-session-id in one slint invoke — calling
+                                // update_active_session_id separately before it caused
+                                // a flash: Slint rendered SessionView with active=new_id
+                                // but session-msgs still holding the previous session's
+                                // chat between the two invokes.
+                                let _ = refresh_session_view(&weak, &core, &id).await;
+                            }
+                            Err(e) => warn!(?e, "open_session failed"),
+                        }
+                    });
+                }));
+            }
         });
     }
 
@@ -682,494 +576,89 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_cl_create_file(move |name, description| {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            let name = name.to_string();
-            let description = description.to_string();
-            rt.spawn(async move {
-                let name = name.trim().trim_start_matches('/');
-                if name.is_empty() {
-                    show_toast(&weak, "File path required.");
-                    return;
-                }
-                let path = core.paths.data_dir.join(name);
-                if path.exists() {
-                    show_toast(&weak, "File already exists.");
-                    return;
-                }
-                if let Some(parent) = path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        warn!(?e, "create_dir_all");
-                        show_toast(&weak, "Could not create parent directory.");
+        app.on_set_session_permission({
+            let weak_for_safe = weak.clone();
+            move |action, granted| {
+                ffi_safe("on_set_session_permission", &weak_for_safe, AssertUnwindSafe(|| {
+                    // Read active session id on the event-loop thread BEFORE spawning
+                    // — Slint property reads from a tokio task return empty.
+                    let session_id = weak
+                        .upgrade()
+                        .map(|h| h.global::<SlintAppState>().get_active_session_id().to_string())
+                        .unwrap_or_default();
+                    if session_id.is_empty() {
                         return;
                     }
-                }
-                // Description defaults to the filename stem when blank — speed
-                // is the win, the user refines via the metadata strip later.
-                let stem = std::path::Path::new(name)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(name)
-                    .to_string();
-                let final_desc = if description.trim().is_empty() {
-                    stem.clone()
-                } else {
-                    description.trim().to_string()
-                };
-                let initial = format!("# {}\n\n", final_desc);
-                if let Err(e) = std::fs::write(&path, &initial) {
-                    warn!(?e, "CL create");
-                    show_toast(&weak, "Could not write file.");
-                    return;
-                }
-                let (project, file_path) = resolve_project_and_path(name);
-                let _ = core
-                    .storage
-                    .upsert_project(&project, &project, None, None, None)
-                    .await;
-                if let Err(e) = core
-                    .storage
-                    .upsert_cl_index(&project, &file_path, &final_desc, None)
-                    .await
-                {
-                    warn!(?e, "CL create index");
-                }
-                refresh_cl_tree(&weak, &core).await;
-                update_cl_current(&weak, name, &initial);
-                update_cl_metadata(&weak, &final_desc, "");
-                clear_cl_dirty(&weak);
-                clear_cl_metadata_dirty(&weak);
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_delete_file(move |relative| {
-            let rel = relative.to_string();
-            // Capture current-path here on the event-loop thread so the post-
-            // delete check correctly detects whether the deleted file was open.
-            let currently_open = current_cl_state(&weak).0;
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                let path = core.paths.data_dir.join(&rel);
-                if let Err(e) = std::fs::remove_file(&path) {
-                    warn!(?e, "CL delete");
-                    show_toast(&weak, "Could not delete file.");
-                    return;
-                }
-                let (project, file_path) = resolve_project_and_path(&rel);
-                let _ = core.storage.delete_cl_index(&project, &file_path).await;
-                refresh_cl_tree(&weak, &core).await;
-                let was_open = currently_open == rel;
-                if was_open {
-                    update_cl_current(&weak, "", "");
-                    update_cl_metadata(&weak, "", "");
-                    clear_cl_dirty(&weak);
-                    clear_cl_metadata_dirty(&weak);
-                }
-                show_toast(&weak, "File deleted.");
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_rescan(move || {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                // Rescan every known project + the globals bucket.
-                let projects = core.storage.list_projects().await.unwrap_or_default();
-                let mut added = 0usize;
-                let mut touched = 0usize;
-                let mut orphaned = 0usize;
-                for p in projects {
-                    if let Ok(report) = core.bridge.cl_rescan(&p.name).await {
-                        added += report.added.len();
-                        touched += report.touched.len();
-                        orphaned += report.orphaned.len();
-                    }
-                }
-                refresh_cl_tree(&weak, &core).await;
-                show_toast(
-                    &weak,
-                    &format!(
-                        "Rescan: +{added} new · {touched} touched · {orphaned} orphan(s)"
-                    ),
-                );
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_autodescribe(move || {
-            // Slint property reads only return the live value on the event-
-            // loop thread. The callback fires here ON that thread, so capture
-            // (rel, body) NOW and move them into the tokio task — otherwise
-            // current_cl_state inside rt.spawn returns empty and the user
-            // sees "Open a file first" with a file plainly open.
-            let (rel, body) = current_cl_state(&weak);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                if rel.is_empty() {
-                    show_toast(&weak, "Open a file first.");
-                    return;
-                }
-                if body.trim().is_empty() {
-                    show_toast(&weak, "File is empty — nothing to describe.");
-                    return;
-                }
-                // Use Emma as the describer. Send a focused prompt; poll her
-                // chat for the first new text reply. Pollutes Emma's chat
-                // with the request/response which is the v1 trade-off.
-                let snippet: String = body.chars().take(4000).collect();
-                // Sharpened brief: lead with the content itself so Emma's
-                // first read is the file (not a meta instruction), forbid
-                // "I need to read the file" explicitly (her usual reflex),
-                // give a fallback for stub files so empty/placeholder
-                // files still get a useful one-liner.
-                let brief = format!(
-                    "Below between the ===FILE-START=== / ===FILE-END=== markers is the ENTIRE content of a CL (context library) file. The content is already in this message — you do NOT need to call any tool or ask me to share the file. Reply with exactly ONE plain sentence summarizing what the file is about. No preface, no quotes, no \"let me\" or \"I'll\" — just the sentence.\n\n\
-                     The sentence will be saved into a searchable index that other agents read to decide whether the file is relevant to their task; specific is better than generic.\n\n\
-                     If the file is empty or only contains a heading stub (e.g. just `# Title` with nothing else), describe it as a placeholder for what the heading suggests — for example, an empty file titled `# Auth notes` becomes \"Placeholder for auth-related notes (no body yet).\"\n\n\
-                     File path: {rel}\n\n\
-                     ===FILE-START===\n{snippet}\n===FILE-END===\n\n\
-                     One sentence. Plain prose. Reply now."
-                );
-                let weak_apply = weak.clone();
-                poll_emma_description(&core, &weak, "autodescribe", &brief, move |first_line| {
-                    update_cl_metadata(&weak_apply, &first_line, "");
-                    // The CustomInput edited callback won't fire from
-                    // programmatic property changes, so flag dirty here.
-                    let _ = weak_apply.upgrade_in_event_loop(move |handle| {
-                        handle.global::<SlintAppState>().set_cl_metadata_dirty(true);
-                    });
-                })
-                .await;
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_open_folder(move |folder| {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            let rel = folder.to_string();
-            rt.spawn(async move {
-                let folder_abs = core.paths.data_dir.join(&rel);
-                let (owner, folder_path) =
-                    resolve_folder_owner(&core.storage, &core.paths.data_dir, &rel).await;
-                let description = core
-                    .storage
-                    .get_folder(&owner, &folder_path)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|f| f.description)
-                    .unwrap_or_default();
-                // Folder is a registered project when its absolute path
-                // matches some project's `cl_path` (or the default
-                // convention). Pull the project row so we can show
-                // working_repo + the canonical name.
-                let mut is_project = false;
-                let mut project_name = String::new();
-                let mut working_repo = String::new();
-                if let Ok(projects) = core.storage.list_projects().await {
-                    for proj in projects {
-                        if proj.name == crate::storage::Project::GLOBALS {
-                            continue;
-                        }
-                        // Match the walker's stricter definition: only
-                        // user-bound projects (cl_path or working_repo set)
-                        // count as registered. Auto-scanned subdirs do not.
-                        let configured = proj
-                            .cl_path
-                            .as_deref()
-                            .is_some_and(|s| !s.is_empty())
-                            || proj
-                                .working_repo_path
-                                .as_deref()
-                                .is_some_and(|s| !s.is_empty());
-                        if !configured {
-                            continue;
-                        }
-                        let abs = match proj.cl_path.as_deref() {
-                            Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
-                            _ => core.paths.data_dir.join("projects").join(&proj.name),
+                    let action_str = action.to_string();
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        let parsed = match action_str.as_str() {
+                            "commit" => crate::policy::PermissionAction::Commit,
+                            "push" => crate::policy::PermissionAction::Push,
+                            other => {
+                                warn!(action = %other, "set_session_permission: unknown action");
+                                return;
+                            }
                         };
-                        if abs == folder_abs {
-                            is_project = true;
-                            project_name = proj.name.clone();
-                            working_repo = proj.working_repo_path.unwrap_or_default();
-                            break;
-                        }
-                    }
-                }
-                update_cl_folder(
-                    &weak,
-                    &rel,
-                    &description,
-                    is_project,
-                    &project_name,
-                    &working_repo,
-                );
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_save_folder_description(move || {
-            let (folder, description, _is_project, _project_name) =
-                current_cl_folder_state(&weak);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                if folder.is_empty() {
-                    return;
-                }
-                let (owner, folder_path) =
-                    resolve_folder_owner(&core.storage, &core.paths.data_dir, &folder).await;
-                // Ensure the owning project row exists. _globals is bootstrapped
-                // by the migration; named projects without a row get an empty
-                // shell so the FK doesn't break.
-                if owner != crate::storage::Project::GLOBALS {
-                    let _ = core
-                        .storage
-                        .upsert_project(&owner, &owner, None, None, None)
-                        .await;
-                }
-                if let Err(e) = core
-                    .storage
-                    .upsert_folder_description(&owner, &folder_path, description.trim(), None)
-                    .await
-                {
-                    warn!(?e, "save folder description");
-                    show_toast(&weak, "Could not save folder description.");
-                    return;
-                }
-                // Clear dirty + refresh tree so the row's `description` field
-                // reflects the latest write.
-                let _ = weak.upgrade_in_event_loop(move |handle| {
-                    handle
-                        .global::<SlintAppState>()
-                        .set_cl_current_folder_dirty(false);
-                });
-                refresh_cl_tree(&weak, &core).await;
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_register_project_open(move || {
-            let (folder, _description, _is_project, _project_name) =
-                current_cl_folder_state(&weak);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                if folder.is_empty() {
-                    return;
-                }
-                let folder_abs = core.paths.data_dir.join(&folder);
-                let default_name = folder_abs
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&folder)
-                    .to_string();
-                let abs = folder_abs.display().to_string();
-                open_register_dialog(&weak, &default_name, &abs, &abs);
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_register_project_submit(move || {
-            let (name, cl_path, working_repo) = current_register_dialog(&weak);
-            let folder = weak
-                .upgrade()
-                .map(|h| h.global::<SlintAppState>().get_cl_current_folder().to_string())
-                .unwrap_or_default();
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                let name = name.trim().to_string();
-                let cl_path = cl_path.trim().to_string();
-                let working = working_repo.trim().to_string();
-                if name.is_empty() || cl_path.is_empty() {
-                    show_toast(&weak, "Name and CL path are required.");
-                    return;
-                }
-                let working_opt = if working.is_empty() {
-                    None
-                } else {
-                    Some(working.as_str())
-                };
-                if let Err(e) = core
-                    .storage
-                    .upsert_project(&name, &name, working_opt, None, Some(&cl_path))
-                    .await
-                {
-                    warn!(?e, "register project");
-                    show_toast(&weak, "Could not register project.");
-                    return;
-                }
-                // Index every file under the new cl_path into cl_index so
-                // agents find them via cl_index_search immediately. Without
-                // this the project's files only appear in the index on the
-                // next bot-hq restart (when startup_init's rescan loop runs)
-                // or on a manual Refresh — surprising for "I just registered
-                // this folder, why doesn't search see anything in it?".
-                if let Err(e) = core.bridge.cl_rescan(&name).await {
-                    warn!(?e, project = %name, "cl_rescan after register failed");
-                }
-                close_register_dialog(&weak);
-                refresh_new_session_projects(&weak, &core).await;
-                refresh_cl_tree(&weak, &core).await;
-                // Re-open the folder view so the panel reflects registered
-                // state without a manual click. invoke_cl_open_folder MUST
-                // be dispatched on the Slint event loop — calling it from
-                // this tokio task silently no-ops.
-                if !folder.is_empty() {
-                    let folder_clone = folder.clone();
-                    let _ = weak.upgrade_in_event_loop(move |handle| {
-                        handle.global::<SlintAppState>().invoke_cl_open_folder(
-                            SharedString::from(folder_clone),
-                        );
-                    });
-                }
-                show_toast(&weak, "Project registered.");
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_unregister_project(move || {
-            let (folder, _description, _is_project, project_name) =
-                current_cl_folder_state(&weak);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                if project_name.is_empty() {
-                    return;
-                }
-                if let Err(e) = core.storage.unregister_project(&project_name).await {
-                    warn!(?e, "unregister project");
-                    show_toast(&weak, "Could not unregister project.");
-                    return;
-                }
-                refresh_new_session_projects(&weak, &core).await;
-                refresh_cl_tree(&weak, &core).await;
-                if !folder.is_empty() {
-                    let folder_clone = folder.clone();
-                    let _ = weak.upgrade_in_event_loop(move |handle| {
-                        handle.global::<SlintAppState>().invoke_cl_open_folder(
-                            SharedString::from(folder_clone),
-                        );
-                    });
-                }
-                show_toast(&weak, "Project unregistered.");
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_autodescribe_folder(move || {
-            let (folder, _description, _is_project, _project_name) =
-                current_cl_folder_state(&weak);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                if folder.is_empty() {
-                    show_toast(&weak, "Open a folder first.");
-                    return;
-                }
-                let folder_abs = core.paths.data_dir.join(&folder);
-                // Build a snapshot of the folder's immediate contents +
-                // first ~200 chars of each .md inside. Emma reads this to
-                // draft a one-sentence description.
-                let mut listing = String::new();
-                let mut snippets = String::new();
-                if let Ok(entries) = std::fs::read_dir(&folder_abs) {
-                    let mut paths: Vec<_> = entries.flatten().collect();
-                    paths.sort_by_key(|a| a.file_name());
-                    for e in paths.iter().take(40) {
-                        let p = e.path();
-                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        if name.starts_with('.') {
-                            continue;
-                        }
-                        if p.is_dir() {
-                            listing.push_str(&format!("- {name}/\n"));
+                        let result = if granted {
+                            core.bridge
+                                .grant_session_permission(
+                                    &session_id,
+                                    parsed,
+                                    crate::policy::GrantScope::AllBranches,
+                                )
+                                .await
                         } else {
-                            listing.push_str(&format!("- {name}\n"));
-                            if name.ends_with(".md") {
-                                if let Ok(body) = std::fs::read_to_string(&p) {
-                                    let head: String = body.chars().take(200).collect();
-                                    snippets.push_str(&format!(
-                                        "--- {name} ---\n{head}\n\n"
-                                    ));
+                            core.bridge
+                                .revoke_session_permission(&session_id, parsed)
+                                .await
+                        };
+                        if let Err(e) = result {
+                            warn!(?e, "set_session_permission failed");
+                            return;
+                        }
+                        refresh_session_permissions(&weak, &core, &session_id).await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_save_agent_config({
+            let weak_for_safe = weak.clone();
+            move |row| {
+                ffi_safe("on_save_agent_config", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    let cfg = DbAgentConfig {
+                        agent_name: row.agent_name.to_string(),
+                        provider: row.provider.to_string(),
+                        model_name: row.model_name.to_string(),
+                        base_url: optional(row.base_url.to_string()),
+                        auth_token: optional(row.auth_token.to_string()),
+                        updated_at: String::new(),
+                    };
+                    rt.spawn(async move {
+                        match core.storage.upsert_agent_config(&cfg).await {
+                            Err(e) => warn!(?e, "upsert agent_config"),
+                            Ok(()) => {
+                                // Session agents (brian/rain) bake env vars at spawn, so a
+                                // config edit only affects the next-spawned session. Tell
+                                // the user so silent stale-config drift doesn't happen.
+                                // Emma has her own Restart button so we skip the toast.
+                                if cfg.agent_name == "brian" || cfg.agent_name == "rain" {
+                                    show_toast(&weak, "Changes will apply to new sessions.");
                                 }
                             }
                         }
-                    }
-                }
-                let brief = format!(
-                    "Below between the ===FOLDER-START=== / ===FOLDER-END=== markers is a snapshot of a CL (context library) folder's immediate contents. Reply with exactly ONE plain sentence describing what the folder is for. No preface, no quotes, no \"let me\" or \"I'll\" — just the sentence.\n\n\
-                     The sentence will be saved into a searchable index that other agents read to decide whether the folder is relevant; specific is better than generic.\n\n\
-                     Folder path: {folder}\n\n\
-                     ===FOLDER-START===\n\
-                     Listing:\n{listing}\n\
-                     Snippets:\n{snippets}\
-                     ===FOLDER-END===\n\n\
-                     One sentence. Plain prose. Reply now."
-                );
-                let weak_apply = weak.clone();
-                poll_emma_description(&core, &weak, "autodescribe-folder", &brief, move |first_line| {
-                    let _ = weak_apply.upgrade_in_event_loop(move |handle| {
-                        let app = handle.global::<SlintAppState>();
-                        app.set_cl_current_folder_description(SharedString::from(first_line));
-                        app.set_cl_current_folder_dirty(true);
+                        refresh_agent_configs(&weak, &core).await;
                     });
-                })
-                .await;
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        app.on_toggle_emma(move || {
-            if let Some(handle) = weak.upgrade() {
-                let app = handle.global::<SlintAppState>();
-                app.set_emma_open(!app.get_emma_open());
+                }));
             }
         });
     }
@@ -1178,12 +667,686 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_cl_refresh(move || {
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                refresh_cl_tree(&weak, &core).await;
-            });
+        app.on_restart_emma({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_restart_emma", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        match core.restart_emma().await {
+                            Ok(()) => {
+                                show_toast(&weak, "Emma restarted with the saved model.");
+                            }
+                            Err(e) => {
+                                warn!(?e, "restart_emma");
+                                show_toast(&weak, "Restart failed — check logs.");
+                            }
+                        }
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_open_file({
+            let weak_for_safe = weak.clone();
+            move |relative| {
+                ffi_safe("on_cl_open_file", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    let rel = relative.to_string();
+                    rt.spawn(async move {
+                        let path = core.paths.data_dir.join(&rel);
+                        let body = std::fs::read_to_string(&path).unwrap_or_default();
+                        // Look up index metadata for this path so the description + tags
+                        // strip above the editor reflects it.
+                        let (project, file_path) = resolve_project_and_path(&rel);
+                        let (desc, tags) = match core.storage.get_cl_index(&project, &file_path).await {
+                            Ok(Some(entry)) => (entry.description, entry.tags.unwrap_or_default()),
+                            _ => (String::new(), String::new()),
+                        };
+                        update_cl_current(&weak, &rel, &body);
+                        update_cl_metadata(&weak, &desc, &tags);
+                        clear_cl_dirty(&weak);
+                        clear_cl_metadata_dirty(&weak);
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_save_current({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_save_current", &weak_for_safe, AssertUnwindSafe(|| {
+                    // Read state on the event-loop thread (we're in a Slint callback)
+                    // before spawning. Off-thread reads return empty silently.
+                    let (rel, body) = current_cl_state(&weak);
+                    let (desc, tags) = current_cl_metadata(&weak);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        if rel.is_empty() {
+                            return;
+                        }
+                        let path = core.paths.data_dir.join(&rel);
+                        if let Some(parent) = path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(e) = std::fs::write(&path, body) {
+                            warn!(?e, "CL save body");
+                            return;
+                        }
+                        // Persist metadata as part of the same flush. Description
+                        // empty → keep whatever the index had (don't overwrite with
+                        // emptiness; users may have content saved without metadata).
+                        if !desc.trim().is_empty() {
+                            let (project, file_path) = resolve_project_and_path(&rel);
+                            // Ensure parent project row exists. Auto-create with a
+                            // bare-bones display name if missing — projects are
+                            // user-registered but file-system-driven sessions can
+                            // populate ahead of registration.
+                            let _ = core
+                                .storage
+                                .upsert_project(&project, &project, None, None, None)
+                                .await;
+                            let tag_opt = if tags.trim().is_empty() {
+                                None
+                            } else {
+                                Some(tags.trim())
+                            };
+                            if let Err(e) = core
+                                .storage
+                                .upsert_cl_index(&project, &file_path, desc.trim(), tag_opt)
+                                .await
+                            {
+                                warn!(?e, "CL save metadata");
+                            }
+                        }
+                        clear_cl_dirty(&weak);
+                        clear_cl_metadata_dirty(&weak);
+                        refresh_cl_tree(&weak, &core).await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_create_file({
+            let weak_for_safe = weak.clone();
+            move |name, description| {
+                ffi_safe("on_cl_create_file", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    let name = name.to_string();
+                    let description = description.to_string();
+                    rt.spawn(async move {
+                        let name = name.trim().trim_start_matches('/');
+                        if name.is_empty() {
+                            show_toast(&weak, "File path required.");
+                            return;
+                        }
+                        let path = core.paths.data_dir.join(name);
+                        if path.exists() {
+                            show_toast(&weak, "File already exists.");
+                            return;
+                        }
+                        if let Some(parent) = path.parent() {
+                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                warn!(?e, "create_dir_all");
+                                show_toast(&weak, "Could not create parent directory.");
+                                return;
+                            }
+                        }
+                        // Description defaults to the filename stem when blank — speed
+                        // is the win, the user refines via the metadata strip later.
+                        let stem = std::path::Path::new(name)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(name)
+                            .to_string();
+                        let final_desc = if description.trim().is_empty() {
+                            stem.clone()
+                        } else {
+                            description.trim().to_string()
+                        };
+                        let initial = format!("# {}\n\n", final_desc);
+                        if let Err(e) = std::fs::write(&path, &initial) {
+                            warn!(?e, "CL create");
+                            show_toast(&weak, "Could not write file.");
+                            return;
+                        }
+                        let (project, file_path) = resolve_project_and_path(name);
+                        let _ = core
+                            .storage
+                            .upsert_project(&project, &project, None, None, None)
+                            .await;
+                        if let Err(e) = core
+                            .storage
+                            .upsert_cl_index(&project, &file_path, &final_desc, None)
+                            .await
+                        {
+                            warn!(?e, "CL create index");
+                        }
+                        refresh_cl_tree(&weak, &core).await;
+                        update_cl_current(&weak, name, &initial);
+                        update_cl_metadata(&weak, &final_desc, "");
+                        clear_cl_dirty(&weak);
+                        clear_cl_metadata_dirty(&weak);
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_delete_file({
+            let weak_for_safe = weak.clone();
+            move |relative| {
+                ffi_safe("on_cl_delete_file", &weak_for_safe, AssertUnwindSafe(|| {
+                    let rel = relative.to_string();
+                    // Capture current-path here on the event-loop thread so the post-
+                    // delete check correctly detects whether the deleted file was open.
+                    let currently_open = current_cl_state(&weak).0;
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        let path = core.paths.data_dir.join(&rel);
+                        if let Err(e) = std::fs::remove_file(&path) {
+                            warn!(?e, "CL delete");
+                            show_toast(&weak, "Could not delete file.");
+                            return;
+                        }
+                        let (project, file_path) = resolve_project_and_path(&rel);
+                        let _ = core.storage.delete_cl_index(&project, &file_path).await;
+                        refresh_cl_tree(&weak, &core).await;
+                        let was_open = currently_open == rel;
+                        if was_open {
+                            update_cl_current(&weak, "", "");
+                            update_cl_metadata(&weak, "", "");
+                            clear_cl_dirty(&weak);
+                            clear_cl_metadata_dirty(&weak);
+                        }
+                        show_toast(&weak, "File deleted.");
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_rescan({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_rescan", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        // Rescan every known project + the globals bucket.
+                        let projects = core.storage.list_projects().await.unwrap_or_default();
+                        let mut added = 0usize;
+                        let mut touched = 0usize;
+                        let mut orphaned = 0usize;
+                        for p in projects {
+                            if let Ok(report) = core.bridge.cl_rescan(&p.name).await {
+                                added += report.added.len();
+                                touched += report.touched.len();
+                                orphaned += report.orphaned.len();
+                            }
+                        }
+                        refresh_cl_tree(&weak, &core).await;
+                        show_toast(
+                            &weak,
+                            &format!(
+                                "Rescan: +{added} new · {touched} touched · {orphaned} orphan(s)"
+                            ),
+                        );
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_autodescribe({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_autodescribe", &weak_for_safe, AssertUnwindSafe(|| {
+                    // Slint property reads only return the live value on the event-
+                    // loop thread. The callback fires here ON that thread, so capture
+                    // (rel, body) NOW and move them into the tokio task — otherwise
+                    // current_cl_state inside rt.spawn returns empty and the user
+                    // sees "Open a file first" with a file plainly open.
+                    let (rel, body) = current_cl_state(&weak);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        if rel.is_empty() {
+                            show_toast(&weak, "Open a file first.");
+                            return;
+                        }
+                        if body.trim().is_empty() {
+                            show_toast(&weak, "File is empty — nothing to describe.");
+                            return;
+                        }
+                        // Use Emma as the describer. Send a focused prompt; poll her
+                        // chat for the first new text reply. Pollutes Emma's chat
+                        // with the request/response which is the v1 trade-off.
+                        let snippet: String = body.chars().take(4000).collect();
+                        // Sharpened brief: lead with the content itself so Emma's
+                        // first read is the file (not a meta instruction), forbid
+                        // "I need to read the file" explicitly (her usual reflex),
+                        // give a fallback for stub files so empty/placeholder
+                        // files still get a useful one-liner.
+                        let brief = format!(
+                            "Below between the ===FILE-START=== / ===FILE-END=== markers is the ENTIRE content of a CL (context library) file. The content is already in this message — you do NOT need to call any tool or ask me to share the file. Reply with exactly ONE plain sentence summarizing what the file is about. No preface, no quotes, no \"let me\" or \"I'll\" — just the sentence.\n\n\
+                             The sentence will be saved into a searchable index that other agents read to decide whether the file is relevant to their task; specific is better than generic.\n\n\
+                             If the file is empty or only contains a heading stub (e.g. just `# Title` with nothing else), describe it as a placeholder for what the heading suggests — for example, an empty file titled `# Auth notes` becomes \"Placeholder for auth-related notes (no body yet).\"\n\n\
+                             File path: {rel}\n\n\
+                             ===FILE-START===\n{snippet}\n===FILE-END===\n\n\
+                             One sentence. Plain prose. Reply now."
+                        );
+                        let weak_apply = weak.clone();
+                        poll_emma_description(&core, &weak, "autodescribe", &brief, move |first_line| {
+                            update_cl_metadata(&weak_apply, &first_line, "");
+                            // The CustomInput edited callback won't fire from
+                            // programmatic property changes, so flag dirty here.
+                            let _ = weak_apply.upgrade_in_event_loop(move |handle| {
+                                handle.global::<SlintAppState>().set_cl_metadata_dirty(true);
+                            });
+                        })
+                        .await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_open_folder({
+            let weak_for_safe = weak.clone();
+            move |folder| {
+                ffi_safe("on_cl_open_folder", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    let rel = folder.to_string();
+                    rt.spawn(async move {
+                        let folder_abs = core.paths.data_dir.join(&rel);
+                        let (owner, folder_path) =
+                            resolve_folder_owner(&core.storage, &core.paths.data_dir, &rel).await;
+                        let description = core
+                            .storage
+                            .get_folder(&owner, &folder_path)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|f| f.description)
+                            .unwrap_or_default();
+                        // Folder is a registered project when its absolute path
+                        // matches some project's `cl_path` (or the default
+                        // convention). Pull the project row so we can show
+                        // working_repo + the canonical name.
+                        let mut is_project = false;
+                        let mut project_name = String::new();
+                        let mut working_repo = String::new();
+                        if let Ok(projects) = core.storage.list_projects().await {
+                            for proj in projects {
+                                if proj.name == crate::storage::Project::GLOBALS {
+                                    continue;
+                                }
+                                // Match the walker's stricter definition: only
+                                // user-bound projects (cl_path or working_repo set)
+                                // count as registered. Auto-scanned subdirs do not.
+                                let configured = proj
+                                    .cl_path
+                                    .as_deref()
+                                    .is_some_and(|s| !s.is_empty())
+                                    || proj
+                                        .working_repo_path
+                                        .as_deref()
+                                        .is_some_and(|s| !s.is_empty());
+                                if !configured {
+                                    continue;
+                                }
+                                let abs = match proj.cl_path.as_deref() {
+                                    Some(p) if !p.is_empty() => std::path::PathBuf::from(p),
+                                    _ => core.paths.data_dir.join("projects").join(&proj.name),
+                                };
+                                if abs == folder_abs {
+                                    is_project = true;
+                                    project_name = proj.name.clone();
+                                    working_repo = proj.working_repo_path.unwrap_or_default();
+                                    break;
+                                }
+                            }
+                        }
+                        update_cl_folder(
+                            &weak,
+                            &rel,
+                            &description,
+                            is_project,
+                            &project_name,
+                            &working_repo,
+                        );
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_save_folder_description({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_save_folder_description", &weak_for_safe, AssertUnwindSafe(|| {
+                    let (folder, description, _is_project, _project_name) =
+                        current_cl_folder_state(&weak);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        if folder.is_empty() {
+                            return;
+                        }
+                        let (owner, folder_path) =
+                            resolve_folder_owner(&core.storage, &core.paths.data_dir, &folder).await;
+                        // Ensure the owning project row exists. _globals is bootstrapped
+                        // by the migration; named projects without a row get an empty
+                        // shell so the FK doesn't break.
+                        if owner != crate::storage::Project::GLOBALS {
+                            let _ = core
+                                .storage
+                                .upsert_project(&owner, &owner, None, None, None)
+                                .await;
+                        }
+                        if let Err(e) = core
+                            .storage
+                            .upsert_folder_description(&owner, &folder_path, description.trim(), None)
+                            .await
+                        {
+                            warn!(?e, "save folder description");
+                            show_toast(&weak, "Could not save folder description.");
+                            return;
+                        }
+                        // Clear dirty + refresh tree so the row's `description` field
+                        // reflects the latest write.
+                        let _ = weak.upgrade_in_event_loop(move |handle| {
+                            handle
+                                .global::<SlintAppState>()
+                                .set_cl_current_folder_dirty(false);
+                        });
+                        refresh_cl_tree(&weak, &core).await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_register_project_open({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_register_project_open", &weak_for_safe, AssertUnwindSafe(|| {
+                    let (folder, _description, _is_project, _project_name) =
+                        current_cl_folder_state(&weak);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        if folder.is_empty() {
+                            return;
+                        }
+                        let folder_abs = core.paths.data_dir.join(&folder);
+                        let default_name = folder_abs
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(&folder)
+                            .to_string();
+                        let abs = folder_abs.display().to_string();
+                        open_register_dialog(&weak, &default_name, &abs, &abs);
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_register_project_submit({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_register_project_submit", &weak_for_safe, AssertUnwindSafe(|| {
+                    let (name, cl_path, working_repo) = current_register_dialog(&weak);
+                    let folder = weak
+                        .upgrade()
+                        .map(|h| h.global::<SlintAppState>().get_cl_current_folder().to_string())
+                        .unwrap_or_default();
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        let name = name.trim().to_string();
+                        let cl_path = cl_path.trim().to_string();
+                        let working = working_repo.trim().to_string();
+                        if name.is_empty() || cl_path.is_empty() {
+                            show_toast(&weak, "Name and CL path are required.");
+                            return;
+                        }
+                        let working_opt = if working.is_empty() {
+                            None
+                        } else {
+                            Some(working.as_str())
+                        };
+                        if let Err(e) = core
+                            .storage
+                            .upsert_project(&name, &name, working_opt, None, Some(&cl_path))
+                            .await
+                        {
+                            warn!(?e, "register project");
+                            show_toast(&weak, "Could not register project.");
+                            return;
+                        }
+                        // Index every file under the new cl_path into cl_index so
+                        // agents find them via cl_index_search immediately. Without
+                        // this the project's files only appear in the index on the
+                        // next bot-hq restart (when startup_init's rescan loop runs)
+                        // or on a manual Refresh — surprising for "I just registered
+                        // this folder, why doesn't search see anything in it?".
+                        if let Err(e) = core.bridge.cl_rescan(&name).await {
+                            warn!(?e, project = %name, "cl_rescan after register failed");
+                        }
+                        close_register_dialog(&weak);
+                        refresh_new_session_projects(&weak, &core).await;
+                        refresh_cl_tree(&weak, &core).await;
+                        // Re-open the folder view so the panel reflects registered
+                        // state without a manual click. invoke_cl_open_folder MUST
+                        // be dispatched on the Slint event loop — calling it from
+                        // this tokio task silently no-ops.
+                        if !folder.is_empty() {
+                            let folder_clone = folder.clone();
+                            let _ = weak.upgrade_in_event_loop(move |handle| {
+                                handle.global::<SlintAppState>().invoke_cl_open_folder(
+                                    SharedString::from(folder_clone),
+                                );
+                            });
+                        }
+                        show_toast(&weak, "Project registered.");
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_unregister_project({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_unregister_project", &weak_for_safe, AssertUnwindSafe(|| {
+                    let (folder, _description, _is_project, project_name) =
+                        current_cl_folder_state(&weak);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        if project_name.is_empty() {
+                            return;
+                        }
+                        if let Err(e) = core.storage.unregister_project(&project_name).await {
+                            warn!(?e, "unregister project");
+                            show_toast(&weak, "Could not unregister project.");
+                            return;
+                        }
+                        refresh_new_session_projects(&weak, &core).await;
+                        refresh_cl_tree(&weak, &core).await;
+                        if !folder.is_empty() {
+                            let folder_clone = folder.clone();
+                            let _ = weak.upgrade_in_event_loop(move |handle| {
+                                handle.global::<SlintAppState>().invoke_cl_open_folder(
+                                    SharedString::from(folder_clone),
+                                );
+                            });
+                        }
+                        show_toast(&weak, "Project unregistered.");
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_autodescribe_folder({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_autodescribe_folder", &weak_for_safe, AssertUnwindSafe(|| {
+                    let (folder, _description, _is_project, _project_name) =
+                        current_cl_folder_state(&weak);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        if folder.is_empty() {
+                            show_toast(&weak, "Open a folder first.");
+                            return;
+                        }
+                        let folder_abs = core.paths.data_dir.join(&folder);
+                        // Build a snapshot of the folder's immediate contents +
+                        // first ~200 chars of each .md inside. Emma reads this to
+                        // draft a one-sentence description.
+                        let mut listing = String::new();
+                        let mut snippets = String::new();
+                        if let Ok(entries) = std::fs::read_dir(&folder_abs) {
+                            let mut paths: Vec<_> = entries.flatten().collect();
+                            paths.sort_by_key(|a| a.file_name());
+                            for e in paths.iter().take(40) {
+                                let p = e.path();
+                                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                if name.starts_with('.') {
+                                    continue;
+                                }
+                                if p.is_dir() {
+                                    listing.push_str(&format!("- {name}/\n"));
+                                } else {
+                                    listing.push_str(&format!("- {name}\n"));
+                                    if name.ends_with(".md") {
+                                        if let Ok(body) = std::fs::read_to_string(&p) {
+                                            let head: String = body.chars().take(200).collect();
+                                            snippets.push_str(&format!(
+                                                "--- {name} ---\n{head}\n\n"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        let brief = format!(
+                            "Below between the ===FOLDER-START=== / ===FOLDER-END=== markers is a snapshot of a CL (context library) folder's immediate contents. Reply with exactly ONE plain sentence describing what the folder is for. No preface, no quotes, no \"let me\" or \"I'll\" — just the sentence.\n\n\
+                             The sentence will be saved into a searchable index that other agents read to decide whether the folder is relevant; specific is better than generic.\n\n\
+                             Folder path: {folder}\n\n\
+                             ===FOLDER-START===\n\
+                             Listing:\n{listing}\n\
+                             Snippets:\n{snippets}\
+                             ===FOLDER-END===\n\n\
+                             One sentence. Plain prose. Reply now."
+                        );
+                        let weak_apply = weak.clone();
+                        poll_emma_description(&core, &weak, "autodescribe-folder", &brief, move |first_line| {
+                            let _ = weak_apply.upgrade_in_event_loop(move |handle| {
+                                let app = handle.global::<SlintAppState>();
+                                app.set_cl_current_folder_description(SharedString::from(first_line));
+                                app.set_cl_current_folder_dirty(true);
+                            });
+                        })
+                        .await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        app.on_toggle_emma({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_toggle_emma", &weak_for_safe, AssertUnwindSafe(|| {
+                    if let Some(handle) = weak.upgrade() {
+                        let app = handle.global::<SlintAppState>();
+                        app.set_emma_open(!app.get_emma_open());
+                    }
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_refresh({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_refresh", &weak_for_safe, AssertUnwindSafe(|| {
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        refresh_cl_tree(&weak, &core).await;
+                    });
+                }));
+            }
         });
     }
 
@@ -1193,34 +1356,39 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_cl_tree_toggle_collapse(move |folder_path| {
-            let folder_path = folder_path.to_string();
-            // Read+mutate expanded set on the event-loop thread. Folders
-            // default to COLLAPSED; presence in the set means user-expanded.
-            if let Some(handle) = weak.upgrade() {
-                let app = handle.global::<SlintAppState>();
-                let cur = app.get_cl_tree_expanded();
-                let mut set: Vec<SharedString> = Vec::with_capacity(cur.row_count() + 1);
-                let mut was_expanded = false;
-                for i in 0..cur.row_count() {
-                    if let Some(p) = cur.row_data(i) {
-                        if p == folder_path {
-                            was_expanded = true; // dropping it = collapse
-                        } else {
-                            set.push(p);
+        app.on_cl_tree_toggle_collapse({
+            let weak_for_safe = weak.clone();
+            move |folder_path| {
+                ffi_safe("on_cl_tree_toggle_collapse", &weak_for_safe, AssertUnwindSafe(|| {
+                    let folder_path = folder_path.to_string();
+                    // Read+mutate expanded set on the event-loop thread. Folders
+                    // default to COLLAPSED; presence in the set means user-expanded.
+                    if let Some(handle) = weak.upgrade() {
+                        let app = handle.global::<SlintAppState>();
+                        let cur = app.get_cl_tree_expanded();
+                        let mut set: Vec<SharedString> = Vec::with_capacity(cur.row_count() + 1);
+                        let mut was_expanded = false;
+                        for i in 0..cur.row_count() {
+                            if let Some(p) = cur.row_data(i) {
+                                if p == folder_path {
+                                    was_expanded = true; // dropping it = collapse
+                                } else {
+                                    set.push(p);
+                                }
+                            }
                         }
+                        if !was_expanded {
+                            set.push(SharedString::from(folder_path));
+                        }
+                        app.set_cl_tree_expanded(ModelRc::new(VecModel::from(set)));
                     }
-                }
-                if !was_expanded {
-                    set.push(SharedString::from(folder_path));
-                }
-                app.set_cl_tree_expanded(ModelRc::new(VecModel::from(set)));
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        refresh_cl_tree(&weak, &core).await;
+                    });
+                }));
             }
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                refresh_cl_tree(&weak, &core).await;
-            });
         });
     }
 
@@ -1228,89 +1396,112 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_cl_tree_begin_create_file(move |parent_dir| {
-            let parent_dir = parent_dir.to_string();
-            set_editing_state(&weak, "new-file", &parent_dir, "");
-            // The walker injects a ghost row at the create site — refresh
-            // the tree so the user sees the inline input immediately.
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                refresh_cl_tree(&weak, &core).await;
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_tree_begin_create_folder(move |parent_dir| {
-            let parent_dir = parent_dir.to_string();
-            set_editing_state(&weak, "new-folder", &parent_dir, "");
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                refresh_cl_tree(&weak, &core).await;
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_tree_begin_rename(move |path| {
-            let path = path.to_string();
-            let name = std::path::Path::new(&path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            set_editing_state(&weak, "rename", &path, &name);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                refresh_cl_tree(&weak, &core).await;
-            });
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        app.on_cl_tree_cancel_edit(move || {
-            clear_editing_state(&weak);
-        });
-    }
-
-    {
-        let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_cl_tree_commit_edit(move || {
-            // Read editing state on the event-loop thread.
-            let (mode, target_path, name) = match weak.upgrade() {
-                Some(handle) => {
-                    let app = handle.global::<SlintAppState>();
-                    (
-                        app.get_cl_tree_editing_mode().to_string(),
-                        app.get_cl_tree_editing_path().to_string(),
-                        app.get_cl_tree_editing_name().to_string(),
-                    )
-                }
-                None => return,
-            };
-            let name = name.trim().trim_start_matches('/').to_string();
-            if name.is_empty() {
-                clear_editing_state(&weak);
-                return;
+        app.on_cl_tree_begin_create_file({
+            let weak_for_safe = weak.clone();
+            move |parent_dir| {
+                ffi_safe("on_cl_tree_begin_create_file", &weak_for_safe, AssertUnwindSafe(|| {
+                    let parent_dir = parent_dir.to_string();
+                    set_editing_state(&weak, "new-file", &parent_dir, "");
+                    // The walker injects a ghost row at the create site — refresh
+                    // the tree so the user sees the inline input immediately.
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        refresh_cl_tree(&weak, &core).await;
+                    });
+                }));
             }
-            clear_editing_state(&weak);
-            let weak = weak.clone();
-            let core = Arc::clone(&core);
-            rt.spawn(async move {
-                match mode.as_str() {
-                    "new-file" => {
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_begin_create_folder({
+            let weak_for_safe = weak.clone();
+            move |parent_dir| {
+                ffi_safe("on_cl_tree_begin_create_folder", &weak_for_safe, AssertUnwindSafe(|| {
+                    let parent_dir = parent_dir.to_string();
+                    set_editing_state(&weak, "new-folder", &parent_dir, "");
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        refresh_cl_tree(&weak, &core).await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_begin_rename({
+            let weak_for_safe = weak.clone();
+            move |path| {
+                ffi_safe("on_cl_tree_begin_rename", &weak_for_safe, AssertUnwindSafe(|| {
+                    let path = path.to_string();
+                    let name = std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    set_editing_state(&weak, "rename", &path, &name);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        refresh_cl_tree(&weak, &core).await;
+                    });
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        app.on_cl_tree_cancel_edit({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_tree_cancel_edit", &weak_for_safe, AssertUnwindSafe(|| {
+                    clear_editing_state(&weak);
+                }));
+            }
+        });
+    }
+
+    {
+        let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
+        app.on_cl_tree_commit_edit({
+            let weak_for_safe = weak.clone();
+            move || {
+                ffi_safe("on_cl_tree_commit_edit", &weak_for_safe, AssertUnwindSafe(|| {
+                    // Read editing state on the event-loop thread.
+                    let (mode, target_path, name) = match weak.upgrade() {
+                        Some(handle) => {
+                            let app = handle.global::<SlintAppState>();
+                            (
+                                app.get_cl_tree_editing_mode().to_string(),
+                                app.get_cl_tree_editing_path().to_string(),
+                                app.get_cl_tree_editing_name().to_string(),
+                            )
+                        }
+                        None => return,
+                    };
+                    let name = name.trim().trim_start_matches('/').to_string();
+                    if name.is_empty() {
+                        clear_editing_state(&weak);
+                        return;
+                    }
+                    clear_editing_state(&weak);
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    rt.spawn(async move {
+                        match mode.as_str() {
+                            "new-file" => {
                         // For files in `_globals` we don't auto-append .md;
                         // user can type extension. For convenience, if no
                         // extension and no slash, append .md.
@@ -1452,6 +1643,8 @@ pub async fn install_view_model(
                     _ => {}
                 }
             });
+                }));
+            }
         });
     }
 
@@ -1459,37 +1652,42 @@ pub async fn install_view_model(
         let weak = weak.clone();
         let core = Arc::clone(&core);
         let rt = rt.clone();
-        app.on_cl_tree_delete_path(move |path| {
-            // Files use the existing delete-confirm dialog (cl-delete-confirm-path).
-            // Folders delete immediately (with a soft confirm via toast).
-            let path = path.to_string();
-            let full = core.paths.data_dir.join(&path);
-            if full.is_dir() {
-                let weak = weak.clone();
-                let core = Arc::clone(&core);
-                rt.spawn(async move {
-                    if let Err(e) = std::fs::remove_dir_all(&full) {
-                        warn!(?e, "delete folder");
-                        show_toast(&weak, "Could not delete folder.");
-                        return;
+        app.on_cl_tree_delete_path({
+            let weak_for_safe = weak.clone();
+            move |path| {
+                ffi_safe("on_cl_tree_delete_path", &weak_for_safe, AssertUnwindSafe(|| {
+                    // Files use the existing delete-confirm dialog (cl-delete-confirm-path).
+                    // Folders delete immediately (with a soft confirm via toast).
+                    let path = path.to_string();
+                    let full = core.paths.data_dir.join(&path);
+                    if full.is_dir() {
+                        let weak = weak.clone();
+                        let core = Arc::clone(&core);
+                        rt.spawn(async move {
+                            if let Err(e) = std::fs::remove_dir_all(&full) {
+                                warn!(?e, "delete folder");
+                                show_toast(&weak, "Could not delete folder.");
+                                return;
+                            }
+                            // Drop every index row whose path starts with the
+                            // deleted folder. Use rescan to clean orphans; the
+                            // bridge.cl_rescan handles per-project sweeps.
+                            let projects = core.storage.list_projects().await.unwrap_or_default();
+                            for p in projects {
+                                let _ = core.bridge.cl_rescan(&p.name).await;
+                            }
+                            refresh_cl_tree(&weak, &core).await;
+                            show_toast(&weak, "Folder deleted.");
+                        });
+                    } else {
+                        // Trigger the existing single-file confirm dialog.
+                        if let Some(handle) = weak.upgrade() {
+                            handle
+                                .global::<SlintAppState>()
+                                .set_cl_delete_confirm_path(SharedString::from(path));
+                        }
                     }
-                    // Drop every index row whose path starts with the
-                    // deleted folder. Use rescan to clean orphans; the
-                    // bridge.cl_rescan handles per-project sweeps.
-                    let projects = core.storage.list_projects().await.unwrap_or_default();
-                    for p in projects {
-                        let _ = core.bridge.cl_rescan(&p.name).await;
-                    }
-                    refresh_cl_tree(&weak, &core).await;
-                    show_toast(&weak, "Folder deleted.");
-                });
-            } else {
-                // Trigger the existing single-file confirm dialog.
-                if let Some(handle) = weak.upgrade() {
-                    handle
-                        .global::<SlintAppState>()
-                        .set_cl_delete_confirm_path(SharedString::from(path));
-                }
+                }));
             }
         });
     }
