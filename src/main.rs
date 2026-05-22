@@ -12,6 +12,18 @@ use tokio::runtime::Builder;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    // Default RUST_BACKTRACE=full so a Rust panic anywhere (Slint FFI
+    // callbacks, startup, async tasks) prints a full backtrace to stderr.
+    // Without this the panic dies as a bare `abort()` in the crash report
+    // and we lose the panic site. User can still pin a different level
+    // (RUST_BACKTRACE=1 / =0) by exporting before launch.
+    if std::env::var_os("RUST_BACKTRACE").is_none() {
+        // SAFETY: single-threaded main-thread setup before any other threads spawn.
+        unsafe {
+            std::env::set_var("RUST_BACKTRACE", "full");
+        }
+    }
+
     // CLI subcommand dispatch — runs BEFORE GUI init so git hooks don't
     // pay the Slint/tokio startup cost. Hooks invoke us hundreds of
     // milliseconds per commit; the GUI takes seconds.
