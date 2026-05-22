@@ -141,7 +141,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     // already been reaped — the registration is best-effort either way.
     let child_pid = child.id();
     if let Some(pid) = child_pid {
-        CHILD_PIDS.lock().unwrap().insert(pid);
+        CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).insert(pid);
     }
 
     let stdin = child.stdin.take().context("subprocess missing stdin")?;
@@ -160,7 +160,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
                 info!(agent = %agent_name, "kill signalled");
                 let _ = child.kill().await;
                 if let Some(pid) = child_pid {
-                    CHILD_PIDS.lock().unwrap().remove(&pid);
+                    CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).remove(&pid);
                 }
                 let _ = event_tx_for_lifecycle
                     .send(AgentEvent::Exited("killed by supervisor".into()))
@@ -168,7 +168,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
             }
             res = child.wait() => {
                 if let Some(pid) = child_pid {
-                    CHILD_PIDS.lock().unwrap().remove(&pid);
+                    CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).remove(&pid);
                 }
                 let msg = match res {
                     Ok(status) => format!("status={status:?}"),

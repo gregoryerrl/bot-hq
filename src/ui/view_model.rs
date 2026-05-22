@@ -90,7 +90,7 @@ fn fingerprint(msgs: &[Message]) -> (usize, i64) {
 
 /// Returns true iff the fingerprint changed and the cache was updated.
 fn fingerprint_changed(session_id: &str, fp: (usize, i64)) -> bool {
-    let mut cache = MSG_FINGERPRINTS.lock().expect("fingerprint cache poisoned");
+    let mut cache = MSG_FINGERPRINTS.lock().unwrap_or_else(|p| p.into_inner());
     if cache.get(session_id) == Some(&fp) {
         false
     } else {
@@ -103,7 +103,7 @@ fn fingerprint_changed(session_id: &str, fp: (usize, i64)) -> bool {
 /// currently displayed in `session-msgs`. Side-effect: updates the tracker.
 /// Use to force a session-switch reload regardless of fingerprint state.
 fn displayed_session_changed(session_id: &str) -> bool {
-    let mut current = DISPLAYED_SESSION.lock().expect("displayed session poisoned");
+    let mut current = DISPLAYED_SESSION.lock().unwrap_or_else(|p| p.into_inner());
     if *current != session_id {
         *current = session_id.to_string();
         true
@@ -409,14 +409,14 @@ pub async fn install_view_model(
                     let cid = choice_id.to_string();
                     let val = value.to_string();
                     {
-                        let mut acc = ANSWER_ACCUMULATOR.lock().unwrap();
+                        let mut acc = ANSWER_ACCUMULATOR.lock().unwrap_or_else(|p| p.into_inner());
                         if val.is_empty() {
                             acc.remove(&cid);
                         } else {
                             acc.insert(cid, val);
                         }
                     }
-                    let ready = !ANSWER_ACCUMULATOR.lock().unwrap().is_empty();
+                    let ready = !ANSWER_ACCUMULATOR.lock().unwrap_or_else(|p| p.into_inner()).is_empty();
                     let _ = weak.upgrade_in_event_loop(move |handle| {
                         handle.global::<SlintAppState>().set_submit_ready(ready);
                     });
@@ -440,7 +440,7 @@ pub async fn install_view_model(
                     let core = Arc::clone(&core);
                     rt.spawn(async move {
                         let answers: Vec<(String, String)> = {
-                            let mut acc = ANSWER_ACCUMULATOR.lock().unwrap();
+                            let mut acc = ANSWER_ACCUMULATOR.lock().unwrap_or_else(|p| p.into_inner());
                             acc.drain().collect()
                         };
                         if answers.is_empty() {
