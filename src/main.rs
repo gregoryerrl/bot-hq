@@ -24,6 +24,18 @@ fn main() -> Result<()> {
         }
     }
 
+    // Chain a panic hook that SIGKILLs every registered claude-code child
+    // BEFORE the original hook prints the panic + unwind reaches the C++
+    // FFI barrier and aborts. Without this, a Slint-callback panic leaves
+    // brian/rain/emma orphaned to launchd, where they keep editing files
+    // (the ghost-Brian incident). Combined with the per-callback
+    // catch_unwind, this is belt-and-suspenders.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        bot_hq::agents::spawn::reap_all_children();
+        original_hook(info);
+    }));
+
     // CLI subcommand dispatch — runs BEFORE GUI init so git hooks don't
     // pay the Slint/tokio startup cost. Hooks invoke us hundreds of
     // milliseconds per commit; the GUI takes seconds.
@@ -145,6 +157,29 @@ fn main() -> Result<()> {
     }
     let state = window.global::<AppState>();
     apply_init_outcome(&state, &paths, &init_outcome);
+
+    // Shutdown-signal handler: when bot-hq is killed from outside
+    // (SIGTERM from launchd, SIGINT from the terminal, SIGHUP on
+    // session disconnect), the OS event loop never returns from
+    // `window.run()` so the drop chain at the bottom of main never
+    // fires. Without an explicit reap, the claude-code children orphan
+    // to launchd — same incident class as the panic-abort case. Uses
+    // tokio's signal API (self-pipe; the actual handler is async-
+    // signal-safe and the work runs on a normal tokio worker).
+    rt.spawn(async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).ok();
+        let mut sigint = signal(SignalKind::interrupt()).ok();
+        let mut sighup = signal(SignalKind::hangup()).ok();
+        tokio::select! {
+            _ = async { if let Some(s) = sigterm.as_mut() { s.recv().await; } }, if sigterm.is_some() => {}
+            _ = async { if let Some(s) = sigint.as_mut() { s.recv().await; } }, if sigint.is_some() => {}
+            _ = async { if let Some(s) = sighup.as_mut() { s.recv().await; } }, if sighup.is_some() => {}
+        }
+        tracing::warn!("shutdown signal received; reaping children");
+        bot_hq::agents::spawn::reap_all_children();
+        std::process::exit(0);
+    });
 
     runtime.block_on(install_view_model(&window, Arc::clone(&core), rt))?;
 

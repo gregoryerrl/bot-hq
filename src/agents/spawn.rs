@@ -2,9 +2,12 @@
 //! MCP-signaling server. Returns an `AgentHandle` the core layer drives.
 
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Mutex;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
@@ -13,6 +16,35 @@ use crate::agents::events;
 use crate::agents::input;
 use crate::agents::protocol::OutgoingUserMessage;
 use crate::storage::AgentConfig;
+
+/// Global registry of live claude-code child PIDs. Updated by
+/// `spawn_agent` (insert) and the lifecycle task (remove on exit). Read
+/// by `reap_all_children` from `main.rs`'s panic hook + signal handler
+/// so the children get SIGKILL even when the tokio runtime can't be
+/// trusted (panic-abort / SIGTERM paths skip Drop chains entirely).
+pub static CHILD_PIDS: Lazy<Mutex<HashSet<u32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Sync, signal-safe child reaper. Walks the registered PIDs and sends
+/// SIGKILL via libc directly — no tokio, no async, no Drop chain.
+///
+/// Uses `try_lock` (not `lock`) so the panic hook can't deadlock against
+/// a spawn-in-progress on another thread, and so a same-thread panic
+/// mid-`insert()` doesn't recurse. Worst case on contention: one
+/// cleanup cycle skipped — preferable to a hang.
+pub fn reap_all_children() {
+    let pids: Vec<u32> = match CHILD_PIDS.try_lock() {
+        Ok(g) => g.iter().copied().collect(),
+        Err(_) => return,
+    };
+    for pid in pids {
+        // SAFETY: libc::kill is async-signal-safe + thread-safe; valid
+        // pids are u32 from std/tokio's child.id() which fits in i32 for
+        // every realistic process number on darwin/linux.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+}
 
 /// High-level events a session-orchestrator consumes from an agent.
 #[derive(Debug, Clone)]
@@ -104,6 +136,14 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         )
     })?;
 
+    // Register PID for crash-path reaping. None on platforms that don't
+    // expose pids (we only ship darwin/linux) or after the child has
+    // already been reaped — the registration is best-effort either way.
+    let child_pid = child.id();
+    if let Some(pid) = child_pid {
+        CHILD_PIDS.lock().unwrap().insert(pid);
+    }
+
     let stdin = child.stdin.take().context("subprocess missing stdin")?;
     let stdout = child.stdout.take().context("subprocess missing stdout")?;
     let stderr = child.stderr.take().context("subprocess missing stderr")?;
@@ -119,11 +159,17 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
             _ = kill_rx => {
                 info!(agent = %agent_name, "kill signalled");
                 let _ = child.kill().await;
+                if let Some(pid) = child_pid {
+                    CHILD_PIDS.lock().unwrap().remove(&pid);
+                }
                 let _ = event_tx_for_lifecycle
                     .send(AgentEvent::Exited("killed by supervisor".into()))
                     .await;
             }
             res = child.wait() => {
+                if let Some(pid) = child_pid {
+                    CHILD_PIDS.lock().unwrap().remove(&pid);
+                }
                 let msg = match res {
                     Ok(status) => format!("status={status:?}"),
                     Err(e) => format!("wait error: {e}"),

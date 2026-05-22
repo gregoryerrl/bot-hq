@@ -34,6 +34,7 @@ http-body-util = "0.1"
 bytes = "1"
 tempfile = "3"
 subtle = "2"
+libc = "0.2"
 
 [build-dependencies]
 slint-build = "1.16"
