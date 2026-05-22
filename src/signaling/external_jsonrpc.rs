@@ -12,7 +12,7 @@ use crate::signaling::protocol::{
     parse_phase_arg, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION,
     ToolCallResult, ToolDescriptor,
 };
-use crate::signaling::response::{ok_response, result_json};
+use crate::signaling::response::{internal_err, ok_response, result_json};
 use crate::signaling::tool_args::arg_required_str;
 use crate::storage::{AgentConfig as DbAgentConfig, Message};
 use serde_json::{json, Value};
@@ -27,10 +27,6 @@ fn message_to_json(m: &Message) -> Value {
         "content": m.content,
         "created_at": m.created_at,
     })
-}
-
-fn internal_err(op: &str, e: impl std::fmt::Display) -> JsonRpcError {
-    JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, format!("{op}: {e}"))
 }
 
 /// Top-level dispatch. Mirrors the internal `signaling::jsonrpc::dispatch`

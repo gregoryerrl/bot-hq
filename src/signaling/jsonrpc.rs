@@ -6,7 +6,7 @@
 use crate::policy::{ViolationKind, ViolationOutcome};
 use crate::signaling::bridge::{ApprovalContext, SignalingBridge};
 use crate::signaling::protocol::*;
-use crate::signaling::response::result_json;
+use crate::signaling::response::{internal_err_no_prefix, result_json};
 use crate::signaling::tool_args::{arg_opt_str, arg_required_str, arg_required_str_array};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -138,7 +138,7 @@ async fn call_tool(
                     options,
                 )
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(picked))
         }
         "mark_awaiting_user" => {
@@ -213,7 +213,7 @@ async fn call_tool(
                     ctx,
                 )
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(picked))
         }
         "close_session" => {
@@ -242,7 +242,7 @@ async fn call_tool(
             let policy = bridge
                 .resolve_policy_for(&caller.session_id)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             match policy.first_forbidden_word(&message) {
                 None => Ok(ToolCallResult::text("ok")),
                 Some(word) => {
@@ -270,7 +270,7 @@ async fn call_tool(
             let rows = bridge
                 .list_questions_for_session(&caller.session_id)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             // Filter to this agent's still-pending questions and shape into
             // the documented contract.
             let mine: Vec<Value> = rows
@@ -317,7 +317,7 @@ async fn call_tool(
                     options,
                 )
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(picked))
         }
         "session_doc_write" => {
@@ -326,7 +326,7 @@ async fn call_tool(
             let id = bridge
                 .session_doc_write(&caller.session_id, &slug, &body)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(
                 json!({"id": id, "slug": slug}).to_string(),
             ))
@@ -336,7 +336,7 @@ async fn call_tool(
             let rows = bridge
                 .session_doc_search(&caller.session_id, query)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             let trimmed: Vec<Value> = rows
                 .into_iter()
                 .map(|d| {
@@ -356,7 +356,7 @@ async fn call_tool(
             let row = bridge
                 .session_doc_read(&caller.session_id, &slug)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             match row {
                 Some(d) => Ok(ToolCallResult::text(
                     json!({
@@ -377,7 +377,7 @@ async fn call_tool(
             let rows = bridge
                 .cl_index_search(project, query)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             // Strip noisy fields; agents care about file_path, description,
             // tags, updated_at. Return as a compact JSON array.
             let trimmed: Vec<serde_json::Value> = rows
@@ -407,7 +407,7 @@ async fn call_tool(
                     &file_path,
                 )
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text("recorded"))
         }
         "cl_folder_search" => {
@@ -416,7 +416,7 @@ async fn call_tool(
             let rows = bridge
                 .cl_folder_search(project, query)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             let trimmed: Vec<serde_json::Value> = rows
                 .into_iter()
                 .map(|r| {
@@ -444,7 +444,7 @@ async fn call_tool(
                     tags.as_deref(),
                 )
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text("ok"))
         }
         "cl_rescan" => {
@@ -452,7 +452,7 @@ async fn call_tool(
             let report = bridge
                 .cl_rescan(&project)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(result_json(&report, "{}"))
         }
         "grant_session_permission" => {
@@ -491,7 +491,7 @@ async fn call_tool(
             bridge
                 .grant_session_permission(&caller.session_id, action, scope)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text("granted"))
         }
         "revoke_session_permission" => {
@@ -499,7 +499,7 @@ async fn call_tool(
             bridge
                 .revoke_session_permission(&caller.session_id, action)
                 .await
-                .map_err(|e| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, e.to_string()))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text("revoked"))
         }
         "list_session_permissions" => {
