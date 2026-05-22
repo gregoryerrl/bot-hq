@@ -42,13 +42,13 @@ where
     F: FnOnce() + std::panic::UnwindSafe,
 {
     if let Err(payload) = std::panic::catch_unwind(f) {
-        let msg = panic_payload_string(&payload);
+        let msg = panic_payload_string(&*payload);
         tracing::error!(callback = name, panic = %msg, "panic in Slint callback (contained)");
         show_toast(weak, &format!("Internal error in {name}; see logs."));
     }
 }
 
-fn panic_payload_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+fn panic_payload_string(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         return (*s).to_string();
     }
