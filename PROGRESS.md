@@ -12,8 +12,92 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 196 tests passing (148 lib + 31 external MCP + 10 storage + 7 server).
-Release build clean. Round 3 audit (Slint/Rust patterns) shipped three
-findings (S4, S1, S5) today (2026-05-22).
+Release build clean. Round 4 audit shipped 11 findings today
+(2026-05-22); Round 3 (Slint/Rust patterns) shipped earlier same day.
+
+---
+
+## 2026-05-22 — Audit Round 4 cleanup (11 findings landed)
+
+Brian + Rain adversarial sweep of the post-Round-2/3 codebase using
+`~/.bot-hq/projects/slint-rust-docs/` Tier 1/2/3 as the Rust+Slint
+reference. Two independent passes (session docs `findings-fresh-sweep-2026-05-22`
++ `findings-rain-sweep-2026-05-22`); 11 findings consolidated; all
+shipped per the verified commit order.
+
+**Landed (in order):**
+
+- **C1 — `c54a8ea` (N7, real bug)** — main.rs's shutdown-signal
+  `tokio::select!` had no `else` arm. If all three `signal()`
+  registrations failed (non-Unix host, container without signal
+  support) the select panics ("all branches disabled"). Added a
+  `future::pending()` arm that parks the task — children still get
+  reaped via the panic-hook path.
+- **C2 — `99ffd62` (N8, lint)** — `panic_payload_string(&Box<dyn Any>)`
+  → `&(dyn Any)`. clippy::borrowed_box. 2 lines.
+- **C3 — `1c3a103` (N10, doc)** — PLAN.md said "165 tests passing";
+  actual is 196.
+- **C4 — `57d80e7` (N2, dispatch helper)** — `IpavPhase::parse + same
+  error_hint format!` was triplicated across jsonrpc.rs:155, :174,
+  external_jsonrpc.rs:387 — each with the same shape but different
+  wire field names ("target" vs "phase"). Extracted
+  `protocol::parse_phase_arg(field, value)` preserving the
+  wire-compatible error string via the `field` param. Dropped the
+  now-unused `IpavPhase` import in external_jsonrpc.rs. Net -3 LOC.
+- **C5 — `303db61` (N1, response helper)** — `result_json(&json!({"ok":true}), "{}")`
+  was repeated 6× in external_jsonrpc.rs as the standard "operation
+  succeeded" payload. Extracted `ok_response()` next to `result_json`
+  in response.rs.
+- **C6 — `57fbd6d` (N3, error helper)** — F6 added file-private
+  `internal_err(op, e)` to external_jsonrpc.rs but jsonrpc.rs still
+  had 15× `map_err(|e| JsonRpcError::new(INTERNAL_ERROR, e.to_string()))`
+  (no-op-prefix shape). Lifted `internal_err` into response.rs; added
+  `internal_err_no_prefix` sibling; replaced all 15 sites with
+  `.map_err(internal_err_no_prefix)?`.
+- **C7 — `b9e1cb0` (N6, consistency)** — `on_set_session_permission`
+  inlined a 4-line `weak.upgrade().map(...)` block instead of calling
+  the existing `current_session_id(&weak)` helper (used by
+  `on_advance_phase` + `on_broadcast`). Dropped the inline form.
+- **C8 — `40f7868` (N5, bridge dedupe)** — `resolve_policy_for` and
+  `audit_policy_files_for_session` had identical 12-line
+  project→project_root resolution chains. Extracted private
+  `resolve_project_and_root(data_dir, sid)` returning
+  `(Option<String>, Option<PathBuf>)`. Both callers collapse to one
+  line.
+- **C9 — `0172ba4` (N4, bridge dedupe)** — `grant_session_permission`,
+  `revoke_session_permission`, and `add_branch_to_session_grant` all
+  replicated the same lock→entry-or-default→mutate→snapshot→drop→mirror
+  sequence (~14 lines each). Extracted `mutate_session_permission(sid, FnOnce)`;
+  each caller reduces to its one-line mutation closure. Side-effect:
+  the mirror-write side can't be forgotten in a future variant.
+- **C10 — `bea60bd` (R4-F1, real failure-mode fix)** — `catch_unwind`
+  (ffi_safe) prevents Slint-callback panics from aborting, but does
+  NOT clear a poisoned `Mutex`. Before C10: first panic inside e.g.
+  `ANSWER_ACCUMULATOR.lock()` poisoned the mutex; every subsequent
+  tray interaction re-locked → `.unwrap()` → panic → caught → toast-
+  spam until session restart. Replaced `.lock().unwrap()` /
+  `.lock().expect()` with `.lock().unwrap_or_else(|p| p.into_inner())`
+  at all 8 sites (5× view_model.rs, 3× spawn.rs). This is the
+  hardening pass logged in decisions.md (2026-05-22) as deferred.
+- **C11 — `cd3a6b8` (R4-F2, paths dedupe)** — `directories::BaseDirs::new().context("locating user home dir")?.home_dir().to_path_buf()`
+  was repeated 3× in paths.rs. Extracted `home_dir() -> Result<PathBuf>`;
+  all three sites reduce to one line. Net -2 LOC.
+
+**Wire compatibility:** every refactor preserved exact existing wire
+error strings and tool-call result shapes. C1 + C10 are the only
+commits with behavior changes (both eliminating failure modes that
+previously aborted or toast-spammed the daemon).
+
+**Round 4 metrics:** 11 commits, 12 files touched, ~41 duplication
+sites collapsed into 6 new shared helpers (`parse_phase_arg`,
+`ok_response`, `internal_err_no_prefix`, `resolve_project_and_root`,
+`mutate_session_permission`, `home_dir`). Net +12 LOC because each
+helper carries a load-bearing docstring; the raw repetition is gone.
+196 tests still pass.
+
+**Deferred from Round 2/3 still deferred:** view_model.rs (3,038 LOC),
+bridge.rs (1,841 LOC), storage/mod.rs (960 LOC), app.slint (3,846 LOC)
+splits — all organizational. Re-open when actively painful.
 
 ---
 
