@@ -175,6 +175,14 @@ fn main() -> Result<()> {
             _ = async { if let Some(s) = sigterm.as_mut() { s.recv().await; } }, if sigterm.is_some() => {}
             _ = async { if let Some(s) = sigint.as_mut() { s.recv().await; } }, if sigint.is_some() => {}
             _ = async { if let Some(s) = sighup.as_mut() { s.recv().await; } }, if sighup.is_some() => {}
+            else => {
+                // All three signal() registrations failed (non-Unix host, or
+                // container without signal support). Park forever so the
+                // select! doesn't panic — children will be reaped via the
+                // panic-hook path or window-close drop chain instead.
+                tracing::warn!("no signal handlers installed; shutdown won't trigger child reap via signal");
+                std::future::pending::<()>().await;
+            }
         }
         tracing::warn!("shutdown signal received; reaping children");
         bot_hq::agents::spawn::reap_all_children();
