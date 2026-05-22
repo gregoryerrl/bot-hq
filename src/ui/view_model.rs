@@ -582,10 +582,7 @@ pub async fn install_view_model(
                 ffi_safe("on_set_session_permission", &weak_for_safe, AssertUnwindSafe(|| {
                     // Read active session id on the event-loop thread BEFORE spawning
                     // — Slint property reads from a tokio task return empty.
-                    let session_id = weak
-                        .upgrade()
-                        .map(|h| h.global::<SlintAppState>().get_active_session_id().to_string())
-                        .unwrap_or_default();
+                    let session_id = current_session_id(&weak);
                     if session_id.is_empty() {
                         return;
                     }
