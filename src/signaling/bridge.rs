@@ -229,21 +229,22 @@ impl SignalingBridge {
 
     // ---- Session permissions ----------------------------------------
 
-    /// Set the grant scope for `action` on this session. Overwrites any prior
-    /// grant for the same action. Mirrors the new cache state to
-    /// `<data_dir>/.local/session-permissions/<session_id>.json` so the
-    /// pre-push hook can see it.
-    pub async fn grant_session_permission(
+    /// Lock the session-permissions cache, apply `mutator` to the entry
+    /// for `session_id` (creating a default entry if absent), then mirror
+    /// the resulting state to `<data_dir>/.local/session-permissions/<sid>.json`
+    /// so the pre-push hook can see it. Single source of truth for the
+    /// lock→mutate→snapshot→mirror dance shared by every public grant /
+    /// revoke / branch-add path.
+    async fn mutate_session_permission(
         &self,
         session_id: &str,
-        action: crate::policy::PermissionAction,
-        scope: crate::policy::GrantScope,
+        mutator: impl FnOnce(&mut crate::policy::SessionPermissions),
     ) -> Result<()> {
         let mut map = self.session_permissions.lock().await;
         let perm = map
             .entry(session_id.to_string())
             .or_insert_with(crate::policy::SessionPermissions::default);
-        perm.set(action, scope);
+        mutator(perm);
         let snapshot = perm.clone();
         drop(map);
         if let Some(data_dir) = &self.data_dir {
@@ -256,6 +257,20 @@ impl SignalingBridge {
         Ok(())
     }
 
+    /// Set the grant scope for `action` on this session. Overwrites any prior
+    /// grant for the same action. Mirrors the new cache state to
+    /// `<data_dir>/.local/session-permissions/<session_id>.json` so the
+    /// pre-push hook can see it.
+    pub async fn grant_session_permission(
+        &self,
+        session_id: &str,
+        action: crate::policy::PermissionAction,
+        scope: crate::policy::GrantScope,
+    ) -> Result<()> {
+        self.mutate_session_permission(session_id, |perm| perm.set(action, scope))
+            .await
+    }
+
     /// Revoke (reset to None) the grant for `action`. Idempotent on absent
     /// grants. Re-mirrors the file.
     pub async fn revoke_session_permission(
@@ -263,21 +278,10 @@ impl SignalingBridge {
         session_id: &str,
         action: crate::policy::PermissionAction,
     ) -> Result<()> {
-        let mut map = self.session_permissions.lock().await;
-        let perm = map
-            .entry(session_id.to_string())
-            .or_insert_with(crate::policy::SessionPermissions::default);
-        perm.set(action, crate::policy::GrantScope::None);
-        let snapshot = perm.clone();
-        drop(map);
-        if let Some(data_dir) = &self.data_dir {
-            crate::policy::session_permissions::write_session_permission(
-                data_dir,
-                session_id,
-                &snapshot,
-            )?;
-        }
-        Ok(())
+        self.mutate_session_permission(session_id, |perm| {
+            perm.set(action, crate::policy::GrantScope::None)
+        })
+        .await
     }
 
     /// Read the current permissions for this session. Returns the default
@@ -320,38 +324,27 @@ impl SignalingBridge {
         action: crate::policy::PermissionAction,
         branch: String,
     ) -> Result<()> {
-        use crate::policy::GrantScope;
-        let mut map = self.session_permissions.lock().await;
-        let perm = map
-            .entry(session_id.to_string())
-            .or_insert_with(crate::policy::SessionPermissions::default);
-        let current = match action {
-            crate::policy::PermissionAction::Commit => &mut perm.commit,
-            crate::policy::PermissionAction::Push => &mut perm.push,
-        };
-        match current {
-            GrantScope::None => {
-                *current = GrantScope::Specific {
-                    branches: vec![branch],
-                };
-            }
-            GrantScope::Specific { branches } => {
-                if !branches.iter().any(|b| b == &branch) {
-                    branches.push(branch);
+        self.mutate_session_permission(session_id, move |perm| {
+            use crate::policy::GrantScope;
+            let current = match action {
+                crate::policy::PermissionAction::Commit => &mut perm.commit,
+                crate::policy::PermissionAction::Push => &mut perm.push,
+            };
+            match current {
+                GrantScope::None => {
+                    *current = GrantScope::Specific {
+                        branches: vec![branch],
+                    };
                 }
+                GrantScope::Specific { branches } => {
+                    if !branches.iter().any(|b| b == &branch) {
+                        branches.push(branch);
+                    }
+                }
+                GrantScope::AllBranches => { /* already broader */ }
             }
-            GrantScope::AllBranches => { /* already broader */ }
-        }
-        let snapshot = perm.clone();
-        drop(map);
-        if let Some(data_dir) = &self.data_dir {
-            crate::policy::session_permissions::write_session_permission(
-                data_dir,
-                session_id,
-                &snapshot,
-            )?;
-        }
-        Ok(())
+        })
+        .await
     }
 
     // ---- Project helpers --------------------------------------------
