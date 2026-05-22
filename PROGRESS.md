@@ -11,9 +11,78 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-193 tests passing (145 lib + 31 external MCP + 10 storage + 7 server).
-Release build clean. Eight audit-cleanup commits landed today
-(2026-05-21) plus the F4 smoke-test scaffolding.
+196 tests passing (148 lib + 31 external MCP + 10 storage + 7 server).
+Release build clean. Round 3 audit (Slint/Rust patterns) shipped three
+findings (S4, S1, S5) today (2026-05-22).
+
+---
+
+## 2026-05-22 — Audit Round 3 cleanup (S4, S1, S5 landed)
+
+Acted on `findings-slint-rust-audit` (session doc) — Brian + Rain
+adversarial audit of the codebase against
+`~/.bot-hq/projects/slint-rust-docs/` Tier 1/2 reference docs.
+Five findings produced; three actionable (S4 LOW, S1 HIGH, S5 LOW)
+shipped; two (S2, S3) deferred organizationally per the same precedent
+that deferred Round 2's F8/F9.
+
+**Landed:**
+
+- **S4 — `41ef278`** — `build.rs` was using Slint's default
+  `std-widgets` style, which is platform-dependent (fluent on Windows,
+  qt on Linux, native on macOS), so widget chrome (LineEdit /
+  ScrollView / TextEdit focus rings, scrollbar handles, input borders)
+  drifted across builds even though the rest of the app paints from
+  the Theme global. Switched to `compile_with_config(..., with_style(
+  "material"))` to match the app.slint header's stated "Material 3
+  dark theme".
+- **S1 — `a88bc0a`** — `view_model.rs` used the LLM anti-pattern
+  `slint::invoke_from_event_loop(move || { if let Some(handle) =
+  weak.upgrade() {...} })` at 38 call sites — exactly what
+  `slint-rust-docs/patterns/weak-handle.md` calls out as duplicating
+  what `Weak::upgrade_in_event_loop` packages. Migrated all 38 sites
+  to the canonical primitive (closure receives the upgraded handle,
+  silently skips if the component dropped). Two edge cases handled per
+  the audit spec: TreeState init moved inside the new closure body;
+  `current_session_id_async`'s oneshot dropped the explicit empty-send
+  branch (the receiver's `rx.await.unwrap_or_default()` covers tx-drop
+  identically). Also updated 4 doc/inline comments naming the old
+  primitive. Net -126 LOC (view_model.rs: 2966 → 2840).
+- **S5 — `bfbde16`** — `AppState` global in `ui/app.slint` defaulted
+  `in-out property` for one-way Rust-pushed values. Per
+  `slint-rust-docs/conventions/slint-syntax-for-rust.md` + 
+  `patterns/globals.md`, `in-out` should be justified, not the default.
+  Verified each property by grepping for `.slint`-side writes
+  (`AppState.foo = ...`, `<=>` two-way binds). Converted 33 to
+  `in property`; kept 27 as `in-out` where TextEdit/LineEdit `<=>`
+  binds, UI click-toggles, modal state, or drag-resize legitimately
+  write from the `.slint` side. Three audit-table corrections caught
+  during the grep pass — `cl-dirty`, `cl-metadata-dirty`, and
+  `external-mcp-token-revealed` ARE UI-written (initial table was
+  wrong) and stayed `in-out`.
+
+**Deferred:**
+
+- **S2 — persistent `Rc<VecModel<ChatMsg>>` with incremental
+  mutation.** Reference pattern in `slint-rust-docs/patterns/models.md`.
+  Current behavior uses fresh `ModelRc::new(VecModel::from(rows))` per
+  poll with a `MSG_FINGERPRINTS` cache to short-circuit identical
+  refreshes. The fingerprint workaround is load-bearing and correct;
+  the canonical pattern is perf+correctness polish, not a fix. Re-open
+  if rebuild churn surfaces in profiling or selection-loss appears as
+  a UX complaint.
+- **S3 — split `ui/app.slint`** (3846 LOC) into conventional
+  `ui/{theme,types,components/,views/,main}.slint` layout per
+  `slint-rust-docs/conventions/project-structure.md`. Organizational,
+  not correctness — same conclusion Round 2 reached for F8/F9. Re-open
+  if the mono-file becomes painful to edit / merge.
+
+**What was already correct (no change needed):** Tokio/Slint event-loop
+boundary (multi-thread Tokio + Slint on main thread, matches "Fix (a)"
+in `pitfalls/tokio-event-loop-conflict.md`), zero `clone_strong()`
+usage, correct weak-handle capture in all callbacks, correct
+`export component AppWindow` shape, no `set_X(format!()).into()`
+allocation anti-patterns on hot paths.
 
 ---
 
