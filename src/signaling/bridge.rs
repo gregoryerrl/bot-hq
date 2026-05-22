@@ -367,13 +367,15 @@ impl SignalingBridge {
             .flatten()
     }
 
-    /// Load (resolve) policy for the given session. Falls back to default
-    /// policy if data_dir isn't configured or the session isn't registered.
-    /// Parse errors propagate — callers should map to a JSON-RPC error.
-    pub async fn resolve_policy_for(&self, session_id: &str) -> Result<Policy> {
-        let Some(data_dir) = self.data_dir.as_ref() else {
-            return Ok(Policy::default());
-        };
+    /// Look up the registered project for `session_id` and, when a project
+    /// is registered, resolve its CL root via storage's `cl_path_for_project`.
+    /// Returns both because the callers that resolve project_root also pass
+    /// the project name through to the underlying policy/audit fns.
+    async fn resolve_project_and_root(
+        &self,
+        data_dir: &Path,
+        session_id: &str,
+    ) -> (Option<String>, Option<PathBuf>) {
         let project = self.project_for_session(session_id).await;
         let project_root = match project.as_deref() {
             Some(p) => {
@@ -385,6 +387,17 @@ impl SignalingBridge {
             }
             None => None,
         };
+        (project, project_root)
+    }
+
+    /// Load (resolve) policy for the given session. Falls back to default
+    /// policy if data_dir isn't configured or the session isn't registered.
+    /// Parse errors propagate — callers should map to a JSON-RPC error.
+    pub async fn resolve_policy_for(&self, session_id: &str) -> Result<Policy> {
+        let Some(data_dir) = self.data_dir.as_ref() else {
+            return Ok(Policy::default());
+        };
+        let (project, project_root) = self.resolve_project_and_root(data_dir, session_id).await;
         Policy::resolve_at_root(
             data_dir,
             project.as_deref(),
@@ -412,17 +425,7 @@ impl SignalingBridge {
         let Some(data_dir) = self.data_dir.as_ref() else {
             return Ok(());
         };
-        let project = self.project_for_session(session_id).await;
-        let project_root = match project.as_deref() {
-            Some(p) => {
-                let storage = self.storage.lock().await.clone();
-                match storage {
-                    Some(storage) => storage.cl_path_for_project(data_dir, p).await.ok(),
-                    None => None,
-                }
-            }
-            None => None,
-        };
+        let (project, project_root) = self.resolve_project_and_root(data_dir, session_id).await;
         crate::policy::audit_policy_files_at_root(
             data_dir,
             project.as_deref(),
