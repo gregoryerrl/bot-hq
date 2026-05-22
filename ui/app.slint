@@ -1637,16 +1637,21 @@ component PhaseSelector inherits HorizontalLayout {
 }
 
 // Clean chatbox input — NOT terminal-style (per user direction).
+// Grows upward (min 36px → max 160px) as the user types multi-line. Enter
+// submits; Shift+Enter inserts a newline. Beyond max-height, TextInput's
+// native caret-follow keeps the cursor visible within the clipped container.
 component ChatInput inherits Rectangle {
     in property <string> placeholder: "Type a message...";
     callback submit(string);
     background: transparent;
     HorizontalLayout {
         spacing: Theme.s-2;
-        alignment: stretch;
+        alignment: end;
         Rectangle {
             horizontal-stretch: 1;
-            height: 36px;
+            min-height: 36px;
+            max-height: 160px;
+            clip: true;
             border-radius: Theme.radius-lg;
             border-width: 1px;
             border-color: input.has-focus ? Theme.primary : Theme.outline-variant;
@@ -1655,21 +1660,27 @@ component ChatInput inherits Rectangle {
             HorizontalLayout {
                 padding-left: Theme.s-3;
                 padding-right: Theme.s-3;
+                padding-top: Theme.s-2;
+                padding-bottom: Theme.s-2;
                 alignment: stretch;
                 input := TextInput {
                     color: Theme.on-surface;
                     font-family: Theme.font-mono;
                     font-size: Theme.font-code;
-                    vertical-alignment: center;
-                    single-line: true;
+                    single-line: false;
+                    wrap: word-wrap;
                     horizontal-stretch: 1;
                     selection-background-color: Theme.primary.with-alpha(0.4);
                     selection-foreground-color: Theme.on-surface;
-                    accepted => {
-                        if (self.text != "") {
-                            root.submit(self.text);
-                            self.text = "";
+                    key-pressed(ev) => {
+                        if (ev.text == Key.Return && !ev.modifiers.shift) {
+                            if (self.text != "") {
+                                root.submit(self.text);
+                                self.text = "";
+                            }
+                            return accept;
                         }
+                        return reject;
                     }
                 }
             }
@@ -1677,13 +1688,15 @@ component ChatInput inherits Rectangle {
                 HorizontalLayout {
                     padding-left: Theme.s-3;
                     padding-right: Theme.s-3;
+                    padding-top: Theme.s-2;
+                    padding-bottom: Theme.s-2;
                     alignment: start;
                     Text {
                         text: root.placeholder;
                         color: Theme.on-surface-variant.with-alpha(0.55);
                         font-family: Theme.font-mono;
                         font-size: Theme.font-code;
-                        vertical-alignment: center;
+                        vertical-alignment: top;
                     }
                 }
         }
@@ -3235,7 +3248,9 @@ component EmmaPane inherits Rectangle {
             VerticalLayout {
                 padding: Theme.s-3;
                 Rectangle {
-                    height: 36px;
+                    min-height: 36px;
+                    max-height: 160px;
+                    clip: true;
                     border-radius: Theme.radius-lg;
                     border-width: 1px;
                     border-color: cmd.has-focus ? Theme.primary : Theme.outline-variant;
@@ -3244,6 +3259,8 @@ component EmmaPane inherits Rectangle {
                     HorizontalLayout {
                         padding-left: Theme.s-3;
                         padding-right: Theme.s-3;
+                        padding-top: Theme.s-2;
+                        padding-bottom: Theme.s-2;
                         spacing: Theme.s-2;
                         alignment: stretch;
                         Text {
@@ -3252,22 +3269,26 @@ component EmmaPane inherits Rectangle {
                             font-family: Theme.font-mono;
                             font-size: Theme.font-code;
                             font-weight: Theme.w-bold;
-                            vertical-alignment: center;
+                            vertical-alignment: top;
                         }
                         cmd := TextInput {
                             color: Theme.on-surface;
                             font-family: Theme.font-mono;
                             font-size: Theme.font-code;
-                            vertical-alignment: center;
-                            single-line: true;
+                            single-line: false;
+                            wrap: word-wrap;
                             horizontal-stretch: 1;
                             selection-background-color: Theme.primary.with-alpha(0.4);
                             selection-foreground-color: Theme.on-surface;
-                            accepted => {
-                                if (self.text != "") {
-                                    AppState.emma-send(self.text);
-                                    self.text = "";
+                            key-pressed(ev) => {
+                                if (ev.text == Key.Return && !ev.modifiers.shift) {
+                                    if (self.text != "") {
+                                        AppState.emma-send(self.text);
+                                        self.text = "";
+                                    }
+                                    return accept;
                                 }
+                                return reject;
                             }
                         }
                         IconButton {
@@ -3286,13 +3307,15 @@ component EmmaPane inherits Rectangle {
                         HorizontalLayout {
                             padding-left: 28px;
                             padding-right: Theme.s-3;
+                            padding-top: Theme.s-2;
+                            padding-bottom: Theme.s-2;
                             alignment: start;
                             Text {
                                 text: "Type command...";
                                 color: Theme.on-surface-variant.with-alpha(0.55);
                                 font-family: Theme.font-mono;
                                 font-size: Theme.font-code;
-                                vertical-alignment: center;
+                                vertical-alignment: top;
                             }
                         }
                 }
