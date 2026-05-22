@@ -18,7 +18,7 @@ level permission grants are in flight — the in-memory + mirrored-JSON
 plumbing is functional but the work is uncommitted at the time of
 writing.
 
-165 tests passing, release build clean.
+196 tests passing, release build clean.
 
 ---
 
