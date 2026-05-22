@@ -7,7 +7,7 @@
 //! - kicks off periodic refresh tasks for chat history.
 //!
 //! Slint's main-loop is on the OS main thread; tokio runs on its own thread.
-//! We use `slint::invoke_from_event_loop` to mutate Slint models from tokio.
+//! We use `slint::Weak::upgrade_in_event_loop` to mutate Slint models from tokio.
 
 use crate::core::{AppState as CoreAppState, IpavPhase};
 use crate::signaling::SignalingEvent;
@@ -191,7 +191,7 @@ pub async fn install_view_model(
     refresh_new_session_projects(&weak, &core).await;
     // Use the no-hop variant: the Slint event loop is not running yet —
     // window.run() is called by main.rs AFTER install_view_model returns —
-    // so anything that awaits an invoke_from_event_loop hop will deadlock
+    // so anything that awaits an upgrade_in_event_loop hop will deadlock
     // here. TreeState::default() is correct at startup: no folders are
     // collapsed and no inline-edit is in progress.
     refresh_cl_tree_with_state(&weak, &core, &TreeState::default()).await;
@@ -351,11 +351,8 @@ pub async fn install_view_model(
                 }
             }
             let ready = !ANSWER_ACCUMULATOR.lock().unwrap().is_empty();
-            let weak2 = weak.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(handle) = weak2.upgrade() {
-                    handle.global::<SlintAppState>().set_submit_ready(ready);
-                }
+            let _ = weak.upgrade_in_event_loop(move |handle| {
+                handle.global::<SlintAppState>().set_submit_ready(ready);
             });
         });
     }
@@ -381,18 +378,13 @@ pub async fn install_view_model(
                 // Read the active session id from the Slint thread.
                 let session_id: String = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
-                    let weak_inner = weak.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(handle) = weak_inner.upgrade() {
-                            let _ = tx.send(
-                                handle
-                                    .global::<SlintAppState>()
-                                    .get_active_session_id()
-                                    .to_string(),
-                            );
-                        } else {
-                            let _ = tx.send(String::new());
-                        }
+                    let _ = weak.upgrade_in_event_loop(move |handle| {
+                        let _ = tx.send(
+                            handle
+                                .global::<SlintAppState>()
+                                .get_active_session_id()
+                                .to_string(),
+                        );
                     });
                     rx.await.unwrap_or_default()
                 };
@@ -443,13 +435,10 @@ pub async fn install_view_model(
                 // it once active-questions is empty, but force-closing here
                 // makes the dismiss happen synchronously instead of waiting
                 // for a refresh round-trip.
-                let weak_btn = weak.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(handle) = weak_btn.upgrade() {
-                        let app = handle.global::<SlintAppState>();
-                        app.set_submit_ready(false);
-                        app.set_questions_tray_open(false);
-                    }
+                let _ = weak.upgrade_in_event_loop(move |handle| {
+                    let app = handle.global::<SlintAppState>();
+                    app.set_submit_ready(false);
+                    app.set_questions_tray_open(false);
                 });
                 // Broadcast the residual non-choice answers (halt + open_ask
                 // replies) as one combined user message — this is also what
@@ -863,11 +852,8 @@ pub async fn install_view_model(
                     update_cl_metadata(&weak_apply, &first_line, "");
                     // The CustomInput edited callback won't fire from
                     // programmatic property changes, so flag dirty here.
-                    let weak2 = weak_apply.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(handle) = weak2.upgrade() {
-                            handle.global::<SlintAppState>().set_cl_metadata_dirty(true);
-                        }
+                    let _ = weak_apply.upgrade_in_event_loop(move |handle| {
+                        handle.global::<SlintAppState>().set_cl_metadata_dirty(true);
                     });
                 })
                 .await;
@@ -980,13 +966,10 @@ pub async fn install_view_model(
                 }
                 // Clear dirty + refresh tree so the row's `description` field
                 // reflects the latest write.
-                let weak2 = weak.clone();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(handle) = weak2.upgrade() {
-                        handle
-                            .global::<SlintAppState>()
-                            .set_cl_current_folder_dirty(false);
-                    }
+                let _ = weak.upgrade_in_event_loop(move |handle| {
+                    handle
+                        .global::<SlintAppState>()
+                        .set_cl_current_folder_dirty(false);
                 });
                 refresh_cl_tree(&weak, &core).await;
             });
@@ -1069,14 +1052,11 @@ pub async fn install_view_model(
                 // be dispatched on the Slint event loop — calling it from
                 // this tokio task silently no-ops.
                 if !folder.is_empty() {
-                    let weak2 = weak.clone();
                     let folder_clone = folder.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(handle) = weak2.upgrade() {
-                            handle.global::<SlintAppState>().invoke_cl_open_folder(
-                                SharedString::from(folder_clone),
-                            );
-                        }
+                    let _ = weak.upgrade_in_event_loop(move |handle| {
+                        handle.global::<SlintAppState>().invoke_cl_open_folder(
+                            SharedString::from(folder_clone),
+                        );
                     });
                 }
                 show_toast(&weak, "Project registered.");
@@ -1105,14 +1085,11 @@ pub async fn install_view_model(
                 refresh_new_session_projects(&weak, &core).await;
                 refresh_cl_tree(&weak, &core).await;
                 if !folder.is_empty() {
-                    let weak2 = weak.clone();
                     let folder_clone = folder.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(handle) = weak2.upgrade() {
-                            handle.global::<SlintAppState>().invoke_cl_open_folder(
-                                SharedString::from(folder_clone),
-                            );
-                        }
+                    let _ = weak.upgrade_in_event_loop(move |handle| {
+                        handle.global::<SlintAppState>().invoke_cl_open_folder(
+                            SharedString::from(folder_clone),
+                        );
                     });
                 }
                 show_toast(&weak, "Project unregistered.");
@@ -1176,13 +1153,10 @@ pub async fn install_view_model(
                 );
                 let weak_apply = weak.clone();
                 poll_emma_description(&core, &weak, "autodescribe-folder", &brief, move |first_line| {
-                    let weak2 = weak_apply.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(handle) = weak2.upgrade() {
-                            let app = handle.global::<SlintAppState>();
-                            app.set_cl_current_folder_description(SharedString::from(first_line));
-                            app.set_cl_current_folder_dirty(true);
-                        }
+                    let _ = weak_apply.upgrade_in_event_loop(move |handle| {
+                        let app = handle.global::<SlintAppState>();
+                        app.set_cl_current_folder_description(SharedString::from(first_line));
+                        app.set_cl_current_folder_dirty(true);
                     });
                 })
                 .await;
@@ -1716,37 +1690,34 @@ async fn refresh_dashboard(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
             quickview,
         });
     }
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            // Snapshot per-id pending/awaiting state from the EXISTING model
-            // before we rebuild. SignalingEvent::PendingChoice and AwaitingUser
-            // set these per-tile via update_tile_*; we don't want this 500ms
-            // rebuild to wipe them — that was making the choice dialog flicker
-            // away after a fraction of a second on the dashboard.
-            let existing = app.get_sessions();
-            let mut carry: std::collections::HashMap<String, SessionTile> =
-                std::collections::HashMap::new();
-            for i in 0..existing.row_count() {
-                if let Some(tile) = existing.row_data(i) {
-                    carry.insert(tile.id.to_string(), tile);
-                }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        // Snapshot per-id pending/awaiting state from the EXISTING model
+        // before we rebuild. SignalingEvent::PendingChoice and AwaitingUser
+        // set these per-tile via update_tile_*; we don't want this 500ms
+        // rebuild to wipe them — that was making the choice dialog flicker
+        // away after a fraction of a second on the dashboard.
+        let existing = app.get_sessions();
+        let mut carry: std::collections::HashMap<String, SessionTile> =
+            std::collections::HashMap::new();
+        for i in 0..existing.row_count() {
+            if let Some(tile) = existing.row_data(i) {
+                carry.insert(tile.id.to_string(), tile);
             }
-            let rows: Vec<SessionTile> = tiles
-                .into_iter()
-                .map(|d| {
-                    let mut new_tile = tile_from_data(d);
-                    if let Some(prev) = carry.get(&new_tile.id.to_string()) {
-                        // Awaiting state survives across rebuilds; pending_input_count
-                        // is rebuilt fresh from storage on every tile build.
-                        new_tile.awaiting = prev.awaiting;
-                    }
-                    new_tile
-                })
-                .collect();
-            app.set_sessions(ModelRc::new(VecModel::from(rows)));
         }
+        let rows: Vec<SessionTile> = tiles
+            .into_iter()
+            .map(|d| {
+                let mut new_tile = tile_from_data(d);
+                if let Some(prev) = carry.get(&new_tile.id.to_string()) {
+                    // Awaiting state survives across rebuilds; pending_input_count
+                    // is rebuilt fresh from storage on every tile build.
+                    new_tile.awaiting = prev.awaiting;
+                }
+                new_tile
+            })
+            .collect();
+        app.set_sessions(ModelRc::new(VecModel::from(rows)));
     });
 }
 
@@ -1758,13 +1729,10 @@ async fn refresh_session_permissions(
     let perms = core.bridge.list_session_permissions(session_id).await;
     let commit_granted = !matches!(perms.commit, crate::policy::GrantScope::None);
     let push_granted = !matches!(perms.push, crate::policy::GrantScope::None);
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_active_commit_granted(commit_granted);
-            app.set_active_push_granted(push_granted);
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_active_commit_granted(commit_granted);
+        app.set_active_push_granted(push_granted);
     });
 }
 
@@ -1786,20 +1754,17 @@ async fn refresh_new_session_projects(weak: &Weak<AppWindow>, core: &Arc<CoreApp
                 .map(|path| (p.name, path))
         })
         .collect();
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let rows: Vec<NewSessionProject> = entries
-                .into_iter()
-                .map(|(name, path)| NewSessionProject {
-                    name: name.into(),
-                    path: path.into(),
-                })
-                .collect();
-            handle
-                .global::<SlintAppState>()
-                .set_new_session_projects(ModelRc::new(VecModel::from(rows)));
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let rows: Vec<NewSessionProject> = entries
+            .into_iter()
+            .map(|(name, path)| NewSessionProject {
+                name: name.into(),
+                path: path.into(),
+            })
+            .collect();
+        handle
+            .global::<SlintAppState>()
+            .set_new_session_projects(ModelRc::new(VecModel::from(rows)));
     });
 }
 
@@ -1821,14 +1786,11 @@ async fn refresh_agent_configs(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>)
             auth_token: c.auth_token.unwrap_or_default(),
         })
         .collect();
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let rows: Vec<AgentConfigRow> = data.into_iter().map(agent_cfg_from_data).collect();
-            handle
-                .global::<SlintAppState>()
-                .set_agent_configs(ModelRc::new(VecModel::from(rows)));
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let rows: Vec<AgentConfigRow> = data.into_iter().map(agent_cfg_from_data).collect();
+        handle
+            .global::<SlintAppState>()
+            .set_agent_configs(ModelRc::new(VecModel::from(rows)));
     });
 }
 
@@ -1836,7 +1798,7 @@ async fn refresh_cl_tree(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) {
     // Snapshot collapsed-folder set + inline-edit state from Slint on the
     // event-loop thread so the walker can honor them. read_tree_state itself
     // requires the event loop to be RUNNING (it hops in via
-    // invoke_from_event_loop + oneshot). For callers that may be invoked
+    // upgrade_in_event_loop + oneshot). For callers that may be invoked
     // before window.run() — i.e., the initial install_view_model pull —
     // use refresh_cl_tree_with_state(TreeState::default()) instead, or you
     // will deadlock waiting for a hop that can never complete.
@@ -1855,14 +1817,11 @@ async fn refresh_cl_tree_with_state(
     let root = core.paths.data_dir.clone();
     let lookups = load_cl_lookups(core, &root).await;
     let entries = walk_cl(&root, state, &lookups);
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let rows: Vec<CLFileEntry> = entries.into_iter().map(cl_entry_from_data).collect();
-            handle
-                .global::<SlintAppState>()
-                .set_cl_tree(ModelRc::new(VecModel::from(rows)));
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let rows: Vec<CLFileEntry> = entries.into_iter().map(cl_entry_from_data).collect();
+        handle
+            .global::<SlintAppState>()
+            .set_cl_tree(ModelRc::new(VecModel::from(rows)));
     });
 }
 
@@ -1943,20 +1902,17 @@ struct TreeState {
 
 async fn read_tree_state(weak: &Weak<AppWindow>) -> TreeState {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let weak_inner = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
+    let _ = weak.upgrade_in_event_loop(move |handle| {
         let mut state = TreeState::default();
-        if let Some(handle) = weak_inner.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            let expanded = app.get_cl_tree_expanded();
-            for i in 0..expanded.row_count() {
-                if let Some(p) = expanded.row_data(i) {
-                    state.expanded.insert(p.to_string());
-                }
+        let app = handle.global::<SlintAppState>();
+        let expanded = app.get_cl_tree_expanded();
+        for i in 0..expanded.row_count() {
+            if let Some(p) = expanded.row_data(i) {
+                state.expanded.insert(p.to_string());
             }
-            state.editing_mode = app.get_cl_tree_editing_mode().to_string();
-            state.editing_path = app.get_cl_tree_editing_path().to_string();
         }
+        state.editing_mode = app.get_cl_tree_editing_mode().to_string();
+        state.editing_path = app.get_cl_tree_editing_path().to_string();
         let _ = tx.send(state);
     });
     rx.await.unwrap_or_default()
@@ -2173,27 +2129,24 @@ async fn refresh_session_view(
     let commit_granted = !matches!(perms.commit, crate::policy::GrantScope::None);
     let push_granted = !matches!(perms.push, crate::policy::GrantScope::None);
 
-    let weak = weak.clone();
     let session_id = session_id.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            if content_changed {
-                let rows: Vec<ChatMsg> = chrono.into_iter().map(chat_from_data).collect();
-                app.set_session_msgs(ModelRc::new(VecModel::from(rows)));
-                // Tick the auto-scroll counter — slint side reacts and pins
-                // viewport to bottom. Only when content actually changed so
-                // we don't yank the user back to bottom on every 500ms poll.
-                app.set_session_scroll_tick(app.get_session_scroll_tick().wrapping_add(1));
-            }
-            app.set_active_title(SharedString::from(title));
-            app.set_active_phase(SharedString::from(phase));
-            app.set_active_session_id(SharedString::from(session_id));
-            app.set_active_brian_model(SharedString::from(brian_model));
-            app.set_active_rain_model(SharedString::from(rain_model));
-            app.set_active_commit_granted(commit_granted);
-            app.set_active_push_granted(push_granted);
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        if content_changed {
+            let rows: Vec<ChatMsg> = chrono.into_iter().map(chat_from_data).collect();
+            app.set_session_msgs(ModelRc::new(VecModel::from(rows)));
+            // Tick the auto-scroll counter — slint side reacts and pins
+            // viewport to bottom. Only when content actually changed so
+            // we don't yank the user back to bottom on every 500ms poll.
+            app.set_session_scroll_tick(app.get_session_scroll_tick().wrapping_add(1));
         }
+        app.set_active_title(SharedString::from(title));
+        app.set_active_phase(SharedString::from(phase));
+        app.set_active_session_id(SharedString::from(session_id));
+        app.set_active_brian_model(SharedString::from(brian_model));
+        app.set_active_rain_model(SharedString::from(rain_model));
+        app.set_active_commit_granted(commit_granted);
+        app.set_active_push_granted(push_granted);
     });
     Ok(())
 }
@@ -2212,13 +2165,10 @@ async fn seed_external_mcp_panel(weak: &Weak<AppWindow>, core: &Arc<CoreAppState
         .map(|s| s.local_addr.to_string());
     let url = addr.map(|a| format!("http://{a}/mcp")).unwrap_or_default();
     let token = core.paths.read_mcp_token().unwrap_or_default();
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_external_mcp_url(SharedString::from(url));
-            app.set_external_mcp_token(SharedString::from(token));
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_external_mcp_url(SharedString::from(url));
+        app.set_external_mcp_token(SharedString::from(token));
     });
 }
 
@@ -2230,15 +2180,12 @@ async fn refresh_emma(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) -> anyho
         return Ok(());
     }
     let data: Vec<ChatMsgData> = msgs.iter().map(to_chat_data).collect();
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            let rows: Vec<ChatMsg> = data.into_iter().map(chat_from_data).collect();
-            app.set_emma_msgs(ModelRc::new(VecModel::from(rows)));
-            // Pin Emma's scroll to bottom on content change (see SessionView).
-            app.set_emma_scroll_tick(app.get_emma_scroll_tick().wrapping_add(1));
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        let rows: Vec<ChatMsg> = data.into_iter().map(chat_from_data).collect();
+        app.set_emma_msgs(ModelRc::new(VecModel::from(rows)));
+        // Pin Emma's scroll to bottom on content change (see SessionView).
+        app.set_emma_scroll_tick(app.get_emma_scroll_tick().wrapping_add(1));
     });
     Ok(())
 }
@@ -2361,108 +2308,88 @@ async fn handle_signaling_event(
             // Refresh dashboard so the closed session disappears from tiles.
             refresh_dashboard(weak, core).await;
             // If the closed session was the active one, kick back to dashboard.
-            let weak2 = weak.clone();
             let closed_id = session_id.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(handle) = weak2.upgrade() {
-                    let app = handle.global::<SlintAppState>();
-                    if app.get_active_session_id() == closed_id {
-                        app.set_active_session_id(SharedString::new());
-                        app.set_active_awaiting(false);
-                    }
+            let _ = weak.upgrade_in_event_loop(move |handle| {
+                let app = handle.global::<SlintAppState>();
+                if app.get_active_session_id() == closed_id {
+                    app.set_active_session_id(SharedString::new());
+                    app.set_active_awaiting(false);
                 }
             });
         }
         SignalingEvent::PendingChoice(p) => {
-            let weak_for_tray = weak.clone();
-            let weak = weak.clone();
             let session_id = p.session_id.clone();
             let core_for_tray = Arc::clone(core);
             let session_for_tray = session_id.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(handle) = weak.upgrade() {
-                    let app = handle.global::<SlintAppState>();
-                    // Emma has its own inline panel surface — populate the
-                    // emma-pending-* properties she still renders from.
-                    if session_id == "emma" {
-                        let opts: Vec<SharedString> =
-                            p.options.iter().map(|s| SharedString::from(s.clone())).collect();
-                        app.set_emma_pending_choice(true);
-                        app.set_emma_pending_question(SharedString::from(p.question.clone()));
-                        app.set_emma_pending_options(ModelRc::new(VecModel::from(opts)));
-                        app.set_emma_pending_choice_id(SharedString::from(p.choice_id.clone()));
-                    }
-                    // Duo sessions (brian + rain) render through the tray
-                    // exclusively — refresh handled below.
+            let _ = weak.upgrade_in_event_loop(move |handle| {
+                let app = handle.global::<SlintAppState>();
+                // Emma has its own inline panel surface — populate the
+                // emma-pending-* properties she still renders from.
+                if session_id == "emma" {
+                    let opts: Vec<SharedString> =
+                        p.options.iter().map(|s| SharedString::from(s.clone())).collect();
+                    app.set_emma_pending_choice(true);
+                    app.set_emma_pending_question(SharedString::from(p.question.clone()));
+                    app.set_emma_pending_options(ModelRc::new(VecModel::from(opts)));
+                    app.set_emma_pending_choice_id(SharedString::from(p.choice_id.clone()));
                 }
+                // Duo sessions (brian + rain) render through the tray
+                // exclusively — refresh handled below.
             });
             // Refresh the durable-storage-backed questions tray when this is
             // the active session. Storage write happens in the bridge BEFORE
             // PendingChoice fires, so the read here sees the new row.
-            refresh_active_questions(&weak_for_tray, &core_for_tray, &session_for_tray);
+            refresh_active_questions(weak, &core_for_tray, &session_for_tray);
         }
         SignalingEvent::AwaitingUser {
             session_id,
             agent: _,
             reason: _,
         } => {
-            let weak_for_tray = weak.clone();
-            let weak = weak.clone();
             let session_for_tray = session_id.clone();
             let core_for_tray = Arc::clone(core);
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(handle) = weak.upgrade() {
-                    let app = handle.global::<SlintAppState>();
-                    if session_id == "emma" {
-                        app.set_emma_awaiting(true);
-                        return;
-                    }
-                    if app.get_active_session_id() == session_id {
-                        app.set_active_awaiting(true);
-                    }
-                    update_tile_awaiting(&app, &session_id, true);
+            let _ = weak.upgrade_in_event_loop(move |handle| {
+                let app = handle.global::<SlintAppState>();
+                if session_id == "emma" {
+                    app.set_emma_awaiting(true);
+                    return;
                 }
+                if app.get_active_session_id() == session_id {
+                    app.set_active_awaiting(true);
+                }
+                update_tile_awaiting(&app, &session_id, true);
             });
             // mark_awaiting_user writes a `halt` row that should appear in
             // the tray too — refresh.
-            refresh_active_questions(&weak_for_tray, &core_for_tray, &session_for_tray);
+            refresh_active_questions(weak, &core_for_tray, &session_for_tray);
         }
         SignalingEvent::ChoiceResolved { .. } => {
-            let weak_for_tray = weak.clone();
-            let weak = weak.clone();
             let core_for_tray = Arc::clone(core);
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(handle) = weak.upgrade() {
-                    let app = handle.global::<SlintAppState>();
-                    // Clear Emma's inline panel state. Duo sessions render
-                    // through the tray, which refreshes from storage below.
-                    app.set_emma_pending_choice(false);
-                    app.set_emma_pending_question(SharedString::new());
-                    app.set_emma_pending_options(ModelRc::new(VecModel::from(
-                        Vec::<SharedString>::new(),
-                    )));
-                    app.set_emma_pending_choice_id(SharedString::new());
-                }
+            let _ = weak.upgrade_in_event_loop(move |handle| {
+                let app = handle.global::<SlintAppState>();
+                // Clear Emma's inline panel state. Duo sessions render
+                // through the tray, which refreshes from storage below.
+                app.set_emma_pending_choice(false);
+                app.set_emma_pending_question(SharedString::new());
+                app.set_emma_pending_options(ModelRc::new(VecModel::from(
+                    Vec::<SharedString>::new(),
+                )));
+                app.set_emma_pending_choice_id(SharedString::new());
             });
             // ChoiceResolved doesn't carry session_id (bridge limitation), so
             // refresh the tray for the currently-active session. The storage
             // row was already updated to status=answered in resolve_choice
             // BEFORE this event fires, so the next read drops the answered
             // question from the pending list.
-            let weak_outer = weak_for_tray.clone();
+            let weak_outer = weak.clone();
             let core_inner = Arc::clone(&core_for_tray);
             Handle::current().spawn(async move {
                 let active = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
-                    let weak_inner = weak_outer.clone();
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(handle) = weak_inner.upgrade() {
-                            let _ = tx.send(
-                                handle.global::<SlintAppState>().get_active_session_id().to_string(),
-                            );
-                        } else {
-                            let _ = tx.send(String::new());
-                        }
+                    let _ = weak_outer.upgrade_in_event_loop(move |handle| {
+                        let _ = tx.send(
+                            handle.global::<SlintAppState>().get_active_session_id().to_string(),
+                        );
                     });
                     rx.await.unwrap_or_default()
                 };
@@ -2520,31 +2447,28 @@ pub(crate) fn refresh_active_questions(
                 asked_at: r.asked_at,
             })
             .collect();
-        let weak = weak.clone();
         let session_id_clone = session_id.clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(handle) = weak.upgrade() {
-                let app = handle.global::<SlintAppState>();
-                // Only paint if this session is still the active one — guards
-                // against a late storage read landing after the user navigated.
-                if app.get_active_session_id() == session_id_clone {
-                    let mapped: Vec<PendingQuestion> = pending
-                        .into_iter()
-                        .map(|q| {
-                            let opts: Vec<SharedString> =
-                                q.options.into_iter().map(SharedString::from).collect();
-                            PendingQuestion {
-                                choice_id: SharedString::from(q.choice_id),
-                                kind: SharedString::from(q.kind),
-                                agent: SharedString::from(q.agent),
-                                prompt: SharedString::from(q.prompt),
-                                options: ModelRc::new(VecModel::from(opts)),
-                                asked_at: SharedString::from(q.asked_at),
-                            }
-                        })
-                        .collect();
-                    app.set_active_questions(ModelRc::new(VecModel::from(mapped)));
-                }
+        let _ = weak.upgrade_in_event_loop(move |handle| {
+            let app = handle.global::<SlintAppState>();
+            // Only paint if this session is still the active one — guards
+            // against a late storage read landing after the user navigated.
+            if app.get_active_session_id() == session_id_clone {
+                let mapped: Vec<PendingQuestion> = pending
+                    .into_iter()
+                    .map(|q| {
+                        let opts: Vec<SharedString> =
+                            q.options.into_iter().map(SharedString::from).collect();
+                        PendingQuestion {
+                            choice_id: SharedString::from(q.choice_id),
+                            kind: SharedString::from(q.kind),
+                            agent: SharedString::from(q.agent),
+                            prompt: SharedString::from(q.prompt),
+                            options: ModelRc::new(VecModel::from(opts)),
+                            asked_at: SharedString::from(q.asked_at),
+                        }
+                    })
+                    .collect();
+                app.set_active_questions(ModelRc::new(VecModel::from(mapped)));
             }
         });
     });
@@ -2555,23 +2479,20 @@ pub(crate) fn refresh_active_questions(
 /// AttentionBanner + choice prompt reflect THIS session's state, not
 /// whatever was active before.
 fn sync_active_from_tile(weak: &Weak<AppWindow>, session_id: &str) {
-    let weak = weak.clone();
     let session_id = session_id.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            let model = app.get_sessions();
-            for i in 0..model.row_count() {
-                if let Some(tile) = model.row_data(i) {
-                    if tile.id == session_id {
-                        app.set_active_awaiting(tile.awaiting);
-                        return;
-                    }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        let model = app.get_sessions();
+        for i in 0..model.row_count() {
+            if let Some(tile) = model.row_data(i) {
+                if tile.id == session_id {
+                    app.set_active_awaiting(tile.awaiting);
+                    return;
                 }
             }
-            // No matching tile (e.g., emma) → clear awaiting.
-            app.set_active_awaiting(false);
         }
+        // No matching tile (e.g., emma) → clear awaiting.
+        app.set_active_awaiting(false);
     });
 }
 
@@ -2579,22 +2500,19 @@ fn sync_active_from_tile(weak: &Weak<AppWindow>, session_id: &str) {
 /// pair (if it's the active session) and the matching dashboard tile.
 /// Called when the user sends a message answering the request.
 fn clear_awaiting_for(weak: &Weak<AppWindow>, session_id: &str) {
-    let weak = weak.clone();
     let session_id = session_id.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            if app.get_active_session_id() == session_id {
-                app.set_active_awaiting(false);
-            }
-            let model = app.get_sessions();
-            for i in 0..model.row_count() {
-                if let Some(mut tile) = model.row_data(i) {
-                    if tile.id == session_id {
-                        tile.awaiting = false;
-                        model.set_row_data(i, tile);
-                        break;
-                    }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        if app.get_active_session_id() == session_id {
+            app.set_active_awaiting(false);
+        }
+        let model = app.get_sessions();
+        for i in 0..model.row_count() {
+            if let Some(mut tile) = model.row_data(i) {
+                if tile.id == session_id {
+                    tile.awaiting = false;
+                    model.set_row_data(i, tile);
+                    break;
                 }
             }
         }
@@ -2606,18 +2524,15 @@ fn clear_awaiting_for(weak: &Weak<AppWindow>, session_id: &str) {
 /// awaiting flag lives on active-awaiting when emma is the active session,
 /// but emma is more typically the side panel. Clearing both is harmless.
 fn clear_emma_awaiting(weak: &Weak<AppWindow>) {
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_emma_awaiting(false);
-            app.set_emma_pending_choice(false);
-            app.set_emma_pending_question(SharedString::new());
-            app.set_emma_pending_options(ModelRc::new(VecModel::from(
-                Vec::<SharedString>::new(),
-            )));
-            app.set_emma_pending_choice_id(SharedString::new());
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_emma_awaiting(false);
+        app.set_emma_pending_choice(false);
+        app.set_emma_pending_question(SharedString::new());
+        app.set_emma_pending_options(ModelRc::new(VecModel::from(
+            Vec::<SharedString>::new(),
+        )));
+        app.set_emma_pending_choice_id(SharedString::new());
     });
 }
 
@@ -2638,26 +2553,20 @@ fn update_tile_awaiting(app: &SlintAppState, session_id: &str, awaiting: bool) {
 }
 
 fn update_active_session_id(weak: &Weak<AppWindow>, id: &str) {
-    let weak = weak.clone();
     let id = id.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            handle
-                .global::<SlintAppState>()
-                .set_active_session_id(SharedString::from(id));
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        handle
+            .global::<SlintAppState>()
+            .set_active_session_id(SharedString::from(id));
     });
 }
 
 fn show_toast(weak: &Weak<AppWindow>, text: &str) {
-    let weak = weak.clone();
     let text = text.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_toast_text(SharedString::from(text));
-            app.set_toast_visible(true);
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_toast_text(SharedString::from(text));
+        app.set_toast_visible(true);
     });
 }
 
@@ -2677,19 +2586,11 @@ fn current_session_id(weak: &Weak<AppWindow>) -> String {
 }
 
 /// Async-safe read of `active-session-id` from off the event loop. Hops via
-/// `invoke_from_event_loop` + oneshot. Use inside `rt.spawn` tasks.
+/// `upgrade_in_event_loop` + oneshot. Use inside `rt.spawn` tasks.
 async fn current_session_id_async(weak: &Weak<AppWindow>) -> String {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let weak_clone = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        let id = weak_clone
-            .upgrade()
-            .map(|h| {
-                h.global::<SlintAppState>()
-                    .get_active_session_id()
-                    .to_string()
-            })
-            .unwrap_or_default();
+    let _ = weak.upgrade_in_event_loop(move |h| {
+        let id = h.global::<SlintAppState>().get_active_session_id().to_string();
         let _ = tx.send(id);
     });
     rx.await.unwrap_or_default()
@@ -2720,51 +2621,39 @@ fn current_cl_metadata(weak: &Weak<AppWindow>) -> (String, String) {
 }
 
 fn update_cl_metadata(weak: &Weak<AppWindow>, description: &str, tags: &str) {
-    let weak = weak.clone();
     let description = description.to_string();
     let tags = tags.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_cl_current_description(SharedString::from(description));
-            app.set_cl_current_tags(SharedString::from(tags));
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_cl_current_description(SharedString::from(description));
+        app.set_cl_current_tags(SharedString::from(tags));
     });
 }
 
 fn clear_cl_metadata_dirty(weak: &Weak<AppWindow>) {
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            handle.global::<SlintAppState>().set_cl_metadata_dirty(false);
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        handle.global::<SlintAppState>().set_cl_metadata_dirty(false);
     });
 }
 
 fn set_editing_state(weak: &Weak<AppWindow>, mode: &str, path: &str, name: &str) {
-    let weak = weak.clone();
     let mode = mode.to_string();
     let path = path.to_string();
     let name = name.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_cl_tree_editing_mode(SharedString::from(mode));
-            app.set_cl_tree_editing_path(SharedString::from(path));
-            app.set_cl_tree_editing_name(SharedString::from(name));
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_cl_tree_editing_mode(SharedString::from(mode));
+        app.set_cl_tree_editing_path(SharedString::from(path));
+        app.set_cl_tree_editing_name(SharedString::from(name));
     });
 }
 
 fn clear_editing_state(weak: &Weak<AppWindow>) {
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_cl_tree_editing_mode(SharedString::new());
-            app.set_cl_tree_editing_path(SharedString::new());
-            app.set_cl_tree_editing_name(SharedString::new());
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_cl_tree_editing_mode(SharedString::new());
+        app.set_cl_tree_editing_path(SharedString::new());
+        app.set_cl_tree_editing_name(SharedString::new());
     });
 }
 
@@ -2784,23 +2673,20 @@ fn resolve_project_and_path(rel: &str) -> (String, String) {
 }
 
 fn update_cl_current(weak: &Weak<AppWindow>, rel: &str, body: &str) {
-    let weak = weak.clone();
     let rel = rel.to_string();
     let body = body.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_cl_current_path(SharedString::from(rel));
-            app.set_cl_current_body(SharedString::from(body));
-            // Mutual exclusivity with the folder view — opening a file
-            // closes any open folder view in the right pane.
-            app.set_cl_current_folder(SharedString::new());
-            app.set_cl_current_folder_description(SharedString::new());
-            app.set_cl_current_folder_is_project(false);
-            app.set_cl_current_folder_project_name(SharedString::new());
-            app.set_cl_current_folder_working_repo(SharedString::new());
-            app.set_cl_current_folder_dirty(false);
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_cl_current_path(SharedString::from(rel));
+        app.set_cl_current_body(SharedString::from(body));
+        // Mutual exclusivity with the folder view — opening a file
+        // closes any open folder view in the right pane.
+        app.set_cl_current_folder(SharedString::new());
+        app.set_cl_current_folder_description(SharedString::new());
+        app.set_cl_current_folder_is_project(false);
+        app.set_cl_current_folder_project_name(SharedString::new());
+        app.set_cl_current_folder_working_repo(SharedString::new());
+        app.set_cl_current_folder_dirty(false);
     });
 }
 
@@ -2816,28 +2702,25 @@ fn update_cl_folder(
     project_name: &str,
     working_repo: &str,
 ) {
-    let weak = weak.clone();
     let folder = folder.to_string();
     let description = description.to_string();
     let project_name = project_name.to_string();
     let working_repo = working_repo.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_cl_current_folder(SharedString::from(folder));
-            app.set_cl_current_folder_description(SharedString::from(description));
-            app.set_cl_current_folder_is_project(is_project);
-            app.set_cl_current_folder_project_name(SharedString::from(project_name));
-            app.set_cl_current_folder_working_repo(SharedString::from(working_repo));
-            app.set_cl_current_folder_dirty(false);
-            // Mutual exclusivity with the file view.
-            app.set_cl_current_path(SharedString::new());
-            app.set_cl_current_body(SharedString::new());
-            app.set_cl_current_description(SharedString::new());
-            app.set_cl_current_tags(SharedString::new());
-            app.set_cl_dirty(false);
-            app.set_cl_metadata_dirty(false);
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_cl_current_folder(SharedString::from(folder));
+        app.set_cl_current_folder_description(SharedString::from(description));
+        app.set_cl_current_folder_is_project(is_project);
+        app.set_cl_current_folder_project_name(SharedString::from(project_name));
+        app.set_cl_current_folder_working_repo(SharedString::from(working_repo));
+        app.set_cl_current_folder_dirty(false);
+        // Mutual exclusivity with the file view.
+        app.set_cl_current_path(SharedString::new());
+        app.set_cl_current_body(SharedString::new());
+        app.set_cl_current_description(SharedString::new());
+        app.set_cl_current_tags(SharedString::new());
+        app.set_cl_dirty(false);
+        app.set_cl_metadata_dirty(false);
     });
 }
 
@@ -2863,31 +2746,25 @@ fn open_register_dialog(
     cl_path: &str,
     working_repo: &str,
 ) {
-    let weak = weak.clone();
     let name = name.to_string();
     let cl_path = cl_path.to_string();
     let working_repo = working_repo.to_string();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_cl_register_name(SharedString::from(name));
-            app.set_cl_register_cl_path(SharedString::from(cl_path));
-            app.set_cl_register_working_repo(SharedString::from(working_repo));
-            app.set_cl_register_dialog_open(true);
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_cl_register_name(SharedString::from(name));
+        app.set_cl_register_cl_path(SharedString::from(cl_path));
+        app.set_cl_register_working_repo(SharedString::from(working_repo));
+        app.set_cl_register_dialog_open(true);
     });
 }
 
 fn close_register_dialog(weak: &Weak<AppWindow>) {
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            let app = handle.global::<SlintAppState>();
-            app.set_cl_register_dialog_open(false);
-            app.set_cl_register_name(SharedString::new());
-            app.set_cl_register_cl_path(SharedString::new());
-            app.set_cl_register_working_repo(SharedString::new());
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_cl_register_dialog_open(false);
+        app.set_cl_register_name(SharedString::new());
+        app.set_cl_register_cl_path(SharedString::new());
+        app.set_cl_register_working_repo(SharedString::new());
     });
 }
 
@@ -2957,10 +2834,7 @@ async fn resolve_folder_owner(
 }
 
 fn clear_cl_dirty(weak: &Weak<AppWindow>) {
-    let weak = weak.clone();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(handle) = weak.upgrade() {
-            handle.global::<SlintAppState>().set_cl_dirty(false);
-        }
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        handle.global::<SlintAppState>().set_cl_dirty(false);
     });
 }
