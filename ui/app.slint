@@ -1637,12 +1637,18 @@ component PhaseSelector inherits HorizontalLayout {
 }
 
 // Clean chatbox input — NOT terminal-style (per user direction).
-// Auto-grows from 36px (1 line) up to 160px (~8 lines) as the user types.
-// Beyond max-height, an inner Flickable scrolls so the caret stays visible
-// (mirrors std-widgets `TextEditBase`). Enter submits; Shift+Enter inserts
-// a newline. Outer HorizontalLayout MUST stay `alignment: stretch` —
-// `alignment: end` creates a sizing cycle between Rectangle.preferred-width
-// and Flickable.width and collapses the box to 0 (regression in 3be5d72).
+// Auto-grows from 1 line (36px) up to 4 lines as the user types. Beyond
+// 4 lines, an inner Flickable scrolls so the caret stays visible (mirrors
+// std-widgets `TextEditBase`). Enter submits; Shift+Enter inserts a newline.
+// Outer HorizontalLayout MUST stay `alignment: stretch` — `alignment: end`
+// creates a sizing cycle between Rectangle.preferred-width and
+// Flickable.width and collapses the box to 0 (regression in 3be5d72).
+//
+// Why explicit `height` instead of min/max/preferred: Slint's
+// HorizontalLayout pins clipping children to their `min-height` rather
+// than picking up `preferred-height`, so the auto-grow regressed silently
+// (b36a851 added the binding but the layout never honored it). Computing
+// `height` directly forces the layout to respect the wrapped content size.
 component ChatInput inherits Rectangle {
     in property <string> placeholder: "Type a message...";
     callback submit(string);
@@ -1652,9 +1658,9 @@ component ChatInput inherits Rectangle {
         alignment: stretch;
         Rectangle {
             horizontal-stretch: 1;
-            min-height: 36px;
-            max-height: 160px;
-            preferred-height: input.preferred-height + Theme.s-2 * 2;
+            // 4 lines of font-code (12px, mono) ≈ 4 × 17px = 68px + Theme.s-2 * 2
+            // vertical padding = 84px ceiling. 36px floor = 1 line + padding.
+            height: clamp(input.preferred-height + Theme.s-2 * 2, 36px, 84px);
             clip: true;
             border-radius: Theme.radius-lg;
             border-width: 1px;
@@ -3267,9 +3273,11 @@ component EmmaPane inherits Rectangle {
             VerticalLayout {
                 padding: Theme.s-3;
                 Rectangle {
-                    min-height: 36px;
-                    max-height: 160px;
-                    preferred-height: cmd.preferred-height + Theme.s-2 * 2;
+                    // Same 1-line floor / 4-line ceiling as ChatInput. See the
+                    // ChatInput comment for why `height:` instead of min/max/
+                    // preferred — Slint's layout doesn't honor preferred-height
+                    // on clipping children, so we compute the size directly.
+                    height: clamp(cmd.preferred-height + Theme.s-2 * 2, 36px, 84px);
                     clip: true;
                     border-radius: Theme.radius-lg;
                     border-width: 1px;
