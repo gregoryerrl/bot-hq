@@ -1637,9 +1637,12 @@ component PhaseSelector inherits HorizontalLayout {
 }
 
 // Clean chatbox input — NOT terminal-style (per user direction).
-// Grows upward (min 36px → max 160px) as the user types multi-line. Enter
-// submits; Shift+Enter inserts a newline. Beyond max-height, TextInput's
-// native caret-follow keeps the cursor visible within the clipped container.
+// Auto-grows from 36px (1 line) up to 160px (~8 lines) as the user types.
+// Beyond max-height, an inner Flickable scrolls so the caret stays visible
+// (mirrors std-widgets `TextEditBase`). Enter submits; Shift+Enter inserts
+// a newline. Outer HorizontalLayout MUST stay `alignment: stretch` —
+// `alignment: end` creates a sizing cycle between Rectangle.preferred-width
+// and Flickable.width and collapses the box to 0 (regression in 3be5d72).
 component ChatInput inherits Rectangle {
     in property <string> placeholder: "Type a message...";
     callback submit(string);
@@ -1651,25 +1654,30 @@ component ChatInput inherits Rectangle {
             horizontal-stretch: 1;
             min-height: 36px;
             max-height: 160px;
+            preferred-height: input.preferred-height + Theme.s-2 * 2;
             clip: true;
             border-radius: Theme.radius-lg;
             border-width: 1px;
             border-color: input.has-focus ? Theme.primary : Theme.outline-variant;
             background: Theme.surface;
             animate border-color { duration: 100ms; }
-            HorizontalLayout {
-                padding-left: Theme.s-3;
-                padding-right: Theme.s-3;
-                padding-top: Theme.s-2;
-                padding-bottom: Theme.s-2;
-                alignment: stretch;
+            forward-focus: input;
+            scroll := Flickable {
+                x: Theme.s-3;
+                y: Theme.s-2;
+                width: parent.width - Theme.s-3 * 2;
+                height: parent.height - Theme.s-2 * 2;
+                interactive: true;
+                viewport-width: self.width;
+                viewport-height: max(self.height, input.preferred-height);
                 input := TextInput {
+                    width: parent.width;
                     color: Theme.on-surface;
                     font-family: Theme.font-mono;
                     font-size: Theme.font-code;
                     single-line: false;
                     wrap: word-wrap;
-                    horizontal-stretch: 1;
+                    page-height: scroll.height;
                     selection-background-color: Theme.primary.with-alpha(0.4);
                     selection-foreground-color: Theme.on-surface;
                     key-pressed(ev) => {
@@ -1682,22 +1690,29 @@ component ChatInput inherits Rectangle {
                         }
                         return reject;
                     }
+                    // Keep caret inside the Flickable viewport. viewport-y is
+                    // non-positive; cpos.y is in TextInput's own coords (=
+                    // viewport coords here since TextInput fills the viewport).
+                    // 20px margin ≈ one font-code line height + breathing room.
+                    cursor-position-changed(cpos) => {
+                        if (cpos.y + scroll.viewport-y < 0) {
+                            scroll.viewport-y = -cpos.y;
+                        } else if (cpos.y + scroll.viewport-y > scroll.height - 20px) {
+                            scroll.viewport-y = min(0px, scroll.height - cpos.y - 20px);
+                        }
+                    }
                 }
             }
             if input.text == "" && !input.has-focus:
-                HorizontalLayout {
-                    padding-left: Theme.s-3;
-                    padding-right: Theme.s-3;
-                    padding-top: Theme.s-2;
-                    padding-bottom: Theme.s-2;
-                    alignment: start;
-                    Text {
-                        text: root.placeholder;
-                        color: Theme.on-surface-variant.with-alpha(0.55);
-                        font-family: Theme.font-mono;
-                        font-size: Theme.font-code;
-                        vertical-alignment: top;
-                    }
+                Text {
+                    x: Theme.s-3;
+                    y: Theme.s-2;
+                    width: parent.width - Theme.s-3 * 2;
+                    text: root.placeholder;
+                    color: Theme.on-surface-variant.with-alpha(0.55);
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    vertical-alignment: top;
                 }
         }
         PrimaryButton {
@@ -3238,6 +3253,10 @@ component EmmaPane inherits Rectangle {
             }
 
         // Terminal-style command input (Emma IS terminal-y per design).
+        // Same auto-grow + Flickable-scroll model as ChatInput, with the `$`
+        // prefix Text and Send IconButton kept as HorizontalLayout siblings
+        // alongside the Flickable (so they stay anchored top regardless of
+        // how tall the input grows).
         Rectangle {
             background: Theme.surface;
             Rectangle {
@@ -3250,12 +3269,14 @@ component EmmaPane inherits Rectangle {
                 Rectangle {
                     min-height: 36px;
                     max-height: 160px;
+                    preferred-height: cmd.preferred-height + Theme.s-2 * 2;
                     clip: true;
                     border-radius: Theme.radius-lg;
                     border-width: 1px;
                     border-color: cmd.has-focus ? Theme.primary : Theme.outline-variant;
                     background: Theme.surface-lowest;
                     animate border-color { duration: 100ms; }
+                    forward-focus: cmd;
                     HorizontalLayout {
                         padding-left: Theme.s-3;
                         padding-right: Theme.s-3;
@@ -3271,24 +3292,38 @@ component EmmaPane inherits Rectangle {
                             font-weight: Theme.w-bold;
                             vertical-alignment: top;
                         }
-                        cmd := TextInput {
-                            color: Theme.on-surface;
-                            font-family: Theme.font-mono;
-                            font-size: Theme.font-code;
-                            single-line: false;
-                            wrap: word-wrap;
+                        emma-scroll := Flickable {
                             horizontal-stretch: 1;
-                            selection-background-color: Theme.primary.with-alpha(0.4);
-                            selection-foreground-color: Theme.on-surface;
-                            key-pressed(ev) => {
-                                if (ev.text == Key.Return && !ev.modifiers.shift) {
-                                    if (self.text != "") {
-                                        AppState.emma-send(self.text);
-                                        self.text = "";
+                            interactive: true;
+                            viewport-width: self.width;
+                            viewport-height: max(self.height, cmd.preferred-height);
+                            cmd := TextInput {
+                                width: parent.width;
+                                color: Theme.on-surface;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                single-line: false;
+                                wrap: word-wrap;
+                                page-height: emma-scroll.height;
+                                selection-background-color: Theme.primary.with-alpha(0.4);
+                                selection-foreground-color: Theme.on-surface;
+                                key-pressed(ev) => {
+                                    if (ev.text == Key.Return && !ev.modifiers.shift) {
+                                        if (self.text != "") {
+                                            AppState.emma-send(self.text);
+                                            self.text = "";
+                                        }
+                                        return accept;
                                     }
-                                    return accept;
+                                    return reject;
                                 }
-                                return reject;
+                                cursor-position-changed(cpos) => {
+                                    if (cpos.y + emma-scroll.viewport-y < 0) {
+                                        emma-scroll.viewport-y = -cpos.y;
+                                    } else if (cpos.y + emma-scroll.viewport-y > emma-scroll.height - 20px) {
+                                        emma-scroll.viewport-y = min(0px, emma-scroll.height - cpos.y - 20px);
+                                    }
+                                }
                             }
                         }
                         IconButton {
@@ -3304,19 +3339,15 @@ component EmmaPane inherits Rectangle {
                         }
                     }
                     if cmd.text == "" && !cmd.has-focus:
-                        HorizontalLayout {
-                            padding-left: 28px;
-                            padding-right: Theme.s-3;
-                            padding-top: Theme.s-2;
-                            padding-bottom: Theme.s-2;
-                            alignment: start;
-                            Text {
-                                text: "Type command...";
-                                color: Theme.on-surface-variant.with-alpha(0.55);
-                                font-family: Theme.font-mono;
-                                font-size: Theme.font-code;
-                                vertical-alignment: top;
-                            }
+                        Text {
+                            x: 28px;
+                            y: Theme.s-2;
+                            width: parent.width - 28px - Theme.s-3;
+                            text: "Type command...";
+                            color: Theme.on-surface-variant.with-alpha(0.55);
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-code;
+                            vertical-alignment: top;
                         }
                 }
             }
