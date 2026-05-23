@@ -79,6 +79,8 @@ pub struct Session {
     pub archived: i64,
     pub brian_model_at_spawn: Option<String>,
     pub rain_model_at_spawn: Option<String>,
+    pub brian_claude_session_id: Option<String>,
+    pub rain_claude_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

@@ -196,6 +196,13 @@ async fn spawn_session_handle(
         warn!(?e, "set_session_spawn_models");
     }
 
+    // Resume each agent's prior claude-code conversation if we have its UUID
+    // stored on the session row. First-time spawn = None for both; the `init`
+    // stream-json event will fire and `duo::pump_agent` persists the UUID so
+    // the next reopen of this session can resume.
+    let brian_resume = session.brian_claude_session_id.clone();
+    let rain_resume = session.rain_claude_session_id.clone();
+
     let brian = spawn_agent_for(
         &session.id,
         "brian",
@@ -206,6 +213,7 @@ async fn spawn_session_handle(
         signaling_addr,
         mcp_temp.path(),
         working_repo_path.clone(),
+        brian_resume,
     )
     .await?;
     let rain = spawn_agent_for(
@@ -218,6 +226,7 @@ async fn spawn_session_handle(
         signaling_addr,
         mcp_temp.path(),
         working_repo_path.clone(),
+        rain_resume,
     )
     .await?;
 
@@ -293,6 +302,7 @@ async fn spawn_agent_for(
     signaling_addr: SocketAddr,
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
+    resume_session_id: Option<String>,
 ) -> Result<AgentHandle> {
     let system_prompt =
         read_system_prompt(paths, agent_name, project.as_deref(), project_root)?;
@@ -310,6 +320,7 @@ async fn spawn_agent_for(
         working_dir,
         claude_bin: None,
         session_id: session_id.to_string(),
+        resume_session_id,
     };
     spawn_agent(spawn_cfg).await
 }
@@ -492,6 +503,7 @@ pub async fn spawn_emma_handle(
         signaling_addr,
         mcp_temp.path(),
         None, // no working dir
+        None, // emma: fresh claude session every app start; resume not wired
     )
     .await?;
 

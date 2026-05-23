@@ -164,8 +164,20 @@ pub async fn pump_agent(
                 // Always flush on turn-complete, both phases.
                 flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
             }
-            AgentEvent::Init { .. } => {
-                debug!(agent = ?cfg.author, "init received");
+            AgentEvent::Init { session_id, .. } => {
+                debug!(agent = ?cfg.author, ?session_id, "init received");
+                // Persist the claude-code session UUID so the next reopen of
+                // this bot-hq session can resume each agent's prior context
+                // via `--resume <uuid>`. Idempotent UPDATE — on a resume spawn
+                // the same UUID comes back and we just overwrite with itself.
+                if let Some(claude_id) = session_id {
+                    if let Err(e) = storage
+                        .set_session_claude_id(&cfg.session_id, cfg.author.as_str(), &claude_id)
+                        .await
+                    {
+                        warn!(?e, agent = ?cfg.author, "persisting claude session id");
+                    }
+                }
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");

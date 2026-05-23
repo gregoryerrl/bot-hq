@@ -92,6 +92,12 @@ pub struct SpawnConfig {
     /// Session this agent belongs to. Exported as `BOT_HQ_SESSION_ID` so
     /// the git pre-push hook can resolve session-scoped approvals.
     pub session_id: String,
+    /// claude-code session UUID to resume (per-agent, captured from a prior
+    /// spawn's `init` stream-json event and persisted on the bot-hq session
+    /// row). When Some, the command line gains `--resume <uuid>` so the
+    /// child picks up its previous conversation. When None, claude assigns
+    /// a fresh UUID — we capture that one in the next `init` event.
+    pub resume_session_id: Option<String>,
 }
 
 /// Driver handle for one running agent subprocess.
@@ -206,6 +212,14 @@ fn build_command(cfg: &SpawnConfig) -> Command {
             .arg("--strict-mcp-config");
     }
 
+    // Resume a prior claude-code conversation for this agent if we have its
+    // UUID stored. Lets a user close bot-hq and reopen the same session
+    // without losing the agent's accumulated context. `--resume` coexists
+    // with `-p` (`--help`: bracketed value skips the interactive picker).
+    if let Some(resume_id) = &cfg.resume_session_id {
+        cmd.args(["--resume", resume_id]);
+    }
+
     // bot-hq is the permission layer (policy.yaml + UI dialogs gate every
     // risky tool call). Letting claude-code prompt the user in parallel would
     // be a double-gate that only confuses things — and worse, those prompts
@@ -272,6 +286,7 @@ mod tests {
             working_dir: Some(Path::new("/tmp/repo").to_path_buf()),
             claude_bin: Some("claude".into()),
             session_id: "test-session".into(),
+            resume_session_id: None,
         }
     }
 
@@ -287,5 +302,18 @@ mod tests {
         assert!(argv.iter().any(|a| a == "--strict-mcp-config"));
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
         assert!(argv.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == "be terse"));
+        // No resume flag when SpawnConfig.resume_session_id is None.
+        assert!(!argv.iter().any(|a| a == "--resume"));
+    }
+
+    #[test]
+    fn resume_session_id_emits_resume_flag() {
+        let mut c = cfg();
+        c.resume_session_id = Some("abc-123-uuid".into());
+        let argv = debug_command(&c);
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--resume" && w[1] == "abc-123-uuid"),
+            "expected `--resume abc-123-uuid` in argv: {argv:?}"
+        );
     }
 }

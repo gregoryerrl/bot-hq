@@ -80,7 +80,8 @@ impl Storage {
     pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
         let row = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
-                    brian_model_at_spawn, rain_model_at_spawn \
+                    brian_model_at_spawn, rain_model_at_spawn, \
+                    brian_claude_session_id, rain_claude_session_id \
              FROM sessions WHERE id = ?",
         )
         .bind(id)
@@ -111,7 +112,8 @@ impl Storage {
     pub async fn list_active_sessions(&self) -> Result<Vec<Session>> {
         let rows = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
-                    brian_model_at_spawn, rain_model_at_spawn \
+                    brian_model_at_spawn, rain_model_at_spawn, \
+                    brian_claude_session_id, rain_claude_session_id \
              FROM sessions \
              WHERE archived = 0 AND closed_at IS NULL \
              ORDER BY created_at DESC, id ASC",
@@ -140,6 +142,34 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording spawn models on session {session_id}"))?;
+        Ok(())
+    }
+
+    /// Persist the claude-code session UUID for one agent in a bot-hq session.
+    /// Called by `core/duo.rs::pump_agent` when the agent's `init` stream-json
+    /// event fires. The next time the bot-hq session is reopened, the spawn
+    /// path reads this column and passes `--resume <uuid>` to claude.
+    /// `agent` must be `"brian"` or `"rain"`; other values return Err.
+    pub async fn set_session_claude_id(
+        &self,
+        session_id: &str,
+        agent: &str,
+        claude_session_id: &str,
+    ) -> Result<()> {
+        let column = match agent {
+            "brian" => "brian_claude_session_id",
+            "rain" => "rain_claude_session_id",
+            other => anyhow::bail!("set_session_claude_id: unsupported agent {other:?}"),
+        };
+        let sql = format!("UPDATE sessions SET {column} = ? WHERE id = ?");
+        sqlx::query(&sql)
+            .bind(claude_session_id)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| {
+                format!("recording {agent} claude session id on session {session_id}")
+            })?;
         Ok(())
     }
 
