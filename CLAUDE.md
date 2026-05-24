@@ -27,6 +27,24 @@ reference — do not treat them as current.
 
 ---
 
+## Slint UI work — check slint-rust-docs first
+
+Before writing or modifying any `.slint` code or Rust ↔ Slint bridge
+logic, call `cl_index_search(project="slint-rust-docs")` and read
+`MEMORY.md`. The knowledge base covers layouts, callbacks, weak handles,
+models, threading, styling, animations, and common pitfalls (binding
+loops, Tokio conflicts, strong-ref leaks, Flickable viewport-height,
+ScrollView viewport-width, `width` + `min-width` collisions). **This is
+not optional** — past sessions shipped horizontal-overflow and
+Flickable-viewport bugs that slint-rust-docs already documented fixes
+for, plus a `width` + `min-width` Slint compile error that the docs'
+layout pattern would have caught.
+
+Skipping the index here is the same class of CL-discipline miss as
+skipping `cl_index_search(project="bot-hq")` for repo conventions.
+
+---
+
 ## Operating mode
 
 This is **maintenance + feature-extension** mode. The big build is
