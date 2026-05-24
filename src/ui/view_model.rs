@@ -2433,16 +2433,15 @@ fn push_doc_pane_state(
 }
 
 /// Refresh the SessionView's right-pane DocumentPane for the currently-
-/// selected IPAV tab.
+/// selected IPAV tab. When a phase has multiple docs, they're concatenated
+/// into a single scrollable strip with "DOC N/M · slug · timestamp"
+/// separators — no chip / expansion UI; the ScrollView handles overflow.
 ///
-/// I/P/V tabs: filter `session_documents` by `phase = <tab>`, surface the
-/// newest matching doc, set count for the "N more" chip (wired in B10).
+/// I/P/V tabs: all `session_documents` with `phase = <tab>`, newest-first.
 ///
-/// A tab fallback chain:
-///   1. `git diff <session_start_sha>` (covers committed + staged + unstaged)
-///   2. `git diff HEAD` with anchor-lost note (post-restart fallback)
-///   3. Latest `phase='apply'` session doc
-///   4. Empty state ("No changes applied yet." / "no working repo path")
+/// A tab: git diff (if available) prepended as the first entry, followed
+/// by all `phase='apply'` session docs. Falls back to empty state when
+/// the working repo is missing or there's no content at all.
 async fn refresh_session_docs(
     weak: &Weak<AppWindow>,
     core: &Arc<CoreAppState>,
@@ -2465,9 +2464,11 @@ async fn refresh_session_docs(
     }
     .to_string();
 
-    // Apply tab: try git diff first. Fall through to phase='apply' docs on
-    // diff failure / empty diff. If there's no working repo at all, short-
-    // circuit to a distinct empty-state message.
+    // (slug, body, updated_at) per entry, in display order.
+    let mut entries: Vec<(String, String, String)> = Vec::new();
+
+    // Apply tab: prepend git diff if available. Distinct empty-state when
+    // no working repo at all (short-circuits before doc loading).
     if selected_tab == "A" {
         match core.working_repo_path(session_id).await {
             Some(repo) => {
@@ -2477,17 +2478,12 @@ async fn refresh_session_docs(
                         Some(n) => format!("{n}\n\n{diff}"),
                         None => diff,
                     };
-                    push_doc_pane_state(
-                        weak,
-                        content,
+                    entries.push((
                         "git diff".to_string(),
+                        content,
                         chrono::Utc::now().to_rfc3339(),
-                        1,
-                        String::new(),
-                    );
-                    return;
+                    ));
                 }
-                // Diff path produced nothing — fall through to phase='apply'.
             }
             None => {
                 push_doc_pane_state(
@@ -2503,23 +2499,62 @@ async fn refresh_session_docs(
         }
     }
 
+    // Load phase-tagged docs and append after any synthetic entry (the diff).
     let docs = core
         .bridge
         .session_doc_search(session_id, None, Some(phase))
         .await
         .unwrap_or_default();
+    for d in docs {
+        entries.push((d.slug, d.body, d.updated_at));
+    }
 
-    let (content, slug, updated_at, count) = match docs.first() {
-        Some(newest) => (
-            newest.body.clone(),
-            newest.slug.clone(),
-            newest.updated_at.clone(),
-            docs.len() as i32,
-        ),
-        None => (String::new(), String::new(), String::new(), 0),
+    if entries.is_empty() {
+        push_doc_pane_state(
+            weak,
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+            empty_msg,
+        );
+        return;
+    }
+
+    let total = entries.len();
+    let joined: String = entries
+        .iter()
+        .enumerate()
+        .map(|(i, (slug, body, ts))| {
+            let header = format!(
+                "─── DOC {}/{}  ·  {}  ·  {} ───\n\n",
+                i + 1,
+                total,
+                slug,
+                ts
+            );
+            if i == 0 {
+                format!("{header}{body}")
+            } else {
+                format!("\n\n{header}{body}")
+            }
+        })
+        .collect();
+
+    let (footer_slug, footer_ts) = if total == 1 {
+        (entries[0].0.clone(), entries[0].2.clone())
+    } else {
+        (format!("{total} docs"), entries[0].2.clone())
     };
 
-    push_doc_pane_state(weak, content, slug, updated_at, count, empty_msg);
+    push_doc_pane_state(
+        weak,
+        joined,
+        footer_slug,
+        footer_ts,
+        total as i32,
+        String::new(),
+    );
 }
 
 async fn refresh_emma(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) -> anyhow::Result<()> {

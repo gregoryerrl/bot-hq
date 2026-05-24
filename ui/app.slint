@@ -1770,12 +1770,10 @@ component DocumentPane inherits Rectangle {
     border-radius: Theme.radius-default;
     VerticalLayout {
         spacing: 0px;
-        // Header: PhaseSelector left, "N more" chip right (visible only when
-        // the active tab has more than one matching phase-tagged doc — the
-        // pane displays the newest by default; the chip signals there are
-        // others. Expansion UI (popup list) deferred per YAGNI; the chip
-        // makes the count visible so the user knows nothing's been silently
-        // hidden.
+        // Header: PhaseSelector only. Multiple docs for a phase are
+        // concatenated into the body with "DOC N/M" separators (handled by
+        // view_model::refresh_session_docs) and scroll naturally in the
+        // existing ScrollView — no chip / expansion UI needed.
         Rectangle {
             background: Theme.surface-high;
             height: 40px;
@@ -1788,31 +1786,6 @@ component DocumentPane inherits Rectangle {
                     alignment: center;
                     horizontal-stretch: 1;
                     PhaseSelector {}
-                }
-                VerticalLayout {
-                    alignment: center;
-                    horizontal-stretch: 0;
-                    if AppState.active-doc-count > 1:
-                        Rectangle {
-                            height: 22px;
-                            background: Theme.surface;
-                            border-width: 1px;
-                            border-color: Theme.outline-variant;
-                            border-radius: Theme.radius-default;
-                            HorizontalLayout {
-                                padding-left: Theme.s-2;
-                                padding-right: Theme.s-2;
-                                alignment: center;
-                                Text {
-                                    text: "+" + (AppState.active-doc-count - 1) + " more";
-                                    color: Theme.on-surface-variant;
-                                    font-family: Theme.font-mono;
-                                    font-size: Theme.font-code;
-                                    letter-spacing: Theme.ls-label;
-                                    vertical-alignment: center;
-                                }
-                            }
-                        }
                 }
             }
             Rectangle {
