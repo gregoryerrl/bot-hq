@@ -1605,19 +1605,31 @@ component ChatBubble inherits VerticalLayout {
     }
 }
 
-// Need-User-Input banner — mirrors the dashboard tile's pending-input footer
-// so users see the same affordance whether they're at the dashboard or inside
-// the session.
-// Inline IPAV phase selector — text-only tabs with underline indicator.
+// IPAV document-tab pill — TAB selector, NOT a phase indicator. Selection
+// is driven by `selected-doc-tab` (NOT `active-phase` — that's what the
+// LabelChip shows). Top-border accent on the selected tab keeps the per-
+// phase `tint` color identity (helps the user associate I→blue, P→green,
+// etc.) while text stays monochrome so the pill never looks like the
+// LabelChip's phase pill.
 component PhasePill inherits Rectangle {
     in property <string> phase;
     in property <string> letter;
     in property <string> name;
     in property <color> tint;
+    property <bool> selected: AppState.selected-doc-tab == root.letter;
     height: 28px;
     horizontal-stretch: 0;
     background: ta.has-hover ? Theme.surface-high : transparent;
     animate background { duration: 60ms; }
+    // Top-border accent on the selected tab.
+    Rectangle {
+        x: Theme.s-2;
+        y: 0;
+        width: parent.width - Theme.s-2 * 2;
+        height: 2px;
+        background: root.selected ? root.tint : transparent;
+        animate background { duration: 60ms; }
+    }
     HorizontalLayout {
         padding-left: Theme.s-3;
         padding-right: Theme.s-3;
@@ -1625,19 +1637,12 @@ component PhasePill inherits Rectangle {
         spacing: Theme.s-1;
         Text {
             text: root.letter;
-            color: AppState.active-phase == root.letter ? root.tint : Theme.on-surface-variant;
+            color: root.selected ? Theme.on-surface : Theme.on-surface-variant;
             font-family: Theme.font-mono;
             font-size: Theme.font-code;
-            font-weight: AppState.active-phase == root.letter ? Theme.w-bold : Theme.w-regular;
+            font-weight: root.selected ? Theme.w-bold : Theme.w-regular;
             vertical-alignment: center;
         }
-    }
-    Rectangle {
-        x: Theme.s-2;
-        y: parent.height - 2px;
-        width: parent.width - Theme.s-2 * 2;
-        height: 2px;
-        background: AppState.active-phase == root.letter ? root.tint : transparent;
     }
     ta := TouchArea { clicked => { AppState.select-doc-tab(root.phase); } }
 }
