@@ -1013,7 +1013,9 @@ impl SignalingBridge {
         let Some(storage) = storage_guard.as_ref() else {
             return Err(anyhow::anyhow!("storage not configured"));
         };
-        storage.upsert_session_document(session_id, slug, body).await
+        storage
+            .upsert_session_document(session_id, slug, body, None)
+            .await
     }
 
     /// Agent-callable: search this session's docs (slug + body substring).
@@ -1026,7 +1028,9 @@ impl SignalingBridge {
         let Some(storage) = storage_guard.as_ref() else {
             return Ok(Vec::new());
         };
-        storage.session_documents_for(session_id, query).await
+        storage
+            .session_documents_for(session_id, query, None)
+            .await
     }
 
     /// Agent-callable: read one session doc by slug.
