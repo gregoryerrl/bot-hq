@@ -1849,110 +1849,11 @@ component SessionView inherits Rectangle {
             padding-bottom: Theme.s-3;
             spacing: Theme.s-4;
 
-                    // Session header — title + initialized line + status chip.
-                    Rectangle {
-                        Rectangle {
-                            x: 0; y: parent.height - 1px;
-                            width: parent.width; height: 1px;
-                            background: Theme.outline-variant;
-                        }
-                        HorizontalLayout {
-                            padding-bottom: Theme.s-3;
-                            spacing: Theme.s-3;
-                            alignment: stretch;
-                            VerticalLayout {
-                                spacing: 2px;
-                                horizontal-stretch: 1;
-                                HorizontalLayout {
-                                    spacing: Theme.s-2;
-                                    alignment: start;
-                                    GhostButton {
-                                        label: "Back";
-                                        icon: Icons.arrow-left;
-                                        btn-height: 24px;
-                                        clicked => { AppState.back-to-dashboard(); }
-                                    }
-                                    Icon { glyph: Icons.hash; size: 18px; tint: Theme.primary; }
-                                    Text {
-                                        text: AppState.active-title == "" ? AppState.active-session-id : AppState.active-title;
-                                        color: Theme.on-surface;
-                                        font-family: Theme.font-display;
-                                        font-size: Theme.font-head-md;
-                                        font-weight: Theme.w-semi;
-                                        overflow: elide;
-                                        vertical-alignment: center;
-                                    }
-                                }
-                                Text {
-                                    text: "SESSION " + AppState.active-session-id;
-                                    color: Theme.on-surface-variant;
-                                    font-family: Theme.font-mono;
-                                    font-size: Theme.font-code;
-                                    letter-spacing: Theme.ls-label;
-                                }
-                            }
-                            VerticalLayout {
-                                alignment: end;
-                                spacing: Theme.s-2;
-                                horizontal-stretch: 0;
-                                HorizontalLayout {
-                                    spacing: Theme.s-2;
-                                    alignment: end;
-                                    // Commit / push session-grant chips. Click toggles. ON =
-                                    // agents skip request_approval for that action; OFF =
-                                    // default per-action gate.
-                                    GrantToggleChip {
-                                        label: "COMMIT";
-                                        granted: AppState.active-commit-granted;
-                                        clicked => {
-                                            AppState.set-session-permission("commit", !AppState.active-commit-granted);
-                                        }
-                                    }
-                                    GrantToggleChip {
-                                        label: "PUSH";
-                                        granted: AppState.active-push-granted;
-                                        clicked => {
-                                            AppState.set-session-permission("push", !AppState.active-push-granted);
-                                        }
-                                    }
-                                    // Questions toggle relocated to the chat-column header
-                                    // (below) so it sits with the chat conversation rather than
-                                    // spanning into the document pane.
-                                    if AppState.active-phase != "":
-                                        LabelChip {
-                                            label: AppState.active-phase == "I" ? "INVESTIGATING"
-                                                : AppState.active-phase == "P" ? "PLANNING"
-                                                : AppState.active-phase == "A" ? "APPLYING"
-                                                : AppState.active-phase == "V" ? "VERIFYING"
-                                                : "—";
-                                            tint:
-                                                AppState.active-phase == "I" ? Theme.phase-i :
-                                                AppState.active-phase == "P" ? Theme.phase-p :
-                                                AppState.active-phase == "A" ? Theme.phase-a :
-                                                AppState.active-phase == "V" ? Theme.phase-v :
-                                                Theme.on-surface-variant;
-                                            dot: true;
-                                        }
-                                }
-                                // PhaseSelector relocated to DocumentPane's header
-                                // (right-pane tab switcher). Phase is no longer
-                                // user-advanceable from the header — the LabelChip
-                                // above is the sole phase indicator; agents drive
-                                // advancement via the advance_phase MCP tool.
-                            }
-                        }
-                    }
-
-                    // Models bar relocated to the chat-column header (below) so it
-                    // doesn't span into the document pane.
-
-                    // Questions tray — sole source of truth for ALL questions
-                    // (choice + halt + open_ask). Toggle via the header chip.
-                    if AppState.questions-tray-open && AppState.active-questions.length > 0:
-                        QuestionsTray {
-                            questions: AppState.active-questions;
-                            submit-ready: AppState.submit-ready;
-                        }
+                    // Session header (back+title+COMMIT/PUSH/PHASE chips) and
+                    // QuestionsTray are now scoped to the chat column (below) so
+                    // the document pane extends the full height of the SessionView
+                    // — taking the right half of what was previously a full-width
+                    // header band.
 
                     // 60/40 split: Chat (left, horizontal-stretch:1.5) and
                     // DocumentPane (right, horizontal-stretch:1). User-decided
@@ -1962,7 +1863,7 @@ component SessionView inherits Rectangle {
                     HorizontalLayout {
                         vertical-stretch: 1;
                         spacing: Theme.s-3;
-                        // Chat column: scrollable stream above, input below.
+                        // Chat column: session header + chat header + tray + scroll + input.
                         // `min-width: 0` lets the column shrink below its widest
                         // ChatBubble preferred-width — without it, the column
                         // expands to fit content and the whole split overflows.
@@ -1972,9 +1873,94 @@ component SessionView inherits Rectangle {
                             background: Theme.bg-canvas;
                             VerticalLayout {
                                 spacing: Theme.s-4;
-                                // Chat-column header: model details + questions chip.
-                                // Scoped to chat so the document pane keeps its full
-                                // width above its own PhaseSelector header.
+                                // Session header — back + title (left), COMMIT/PUSH/PHASE
+                                // chips (right). Scoped to the chat column so the document
+                                // pane has a clean PhaseSelector-only header.
+                                Rectangle {
+                                    Rectangle {
+                                        x: 0; y: parent.height - 1px;
+                                        width: parent.width; height: 1px;
+                                        background: Theme.outline-variant;
+                                    }
+                                    HorizontalLayout {
+                                        padding-bottom: Theme.s-3;
+                                        spacing: Theme.s-3;
+                                        alignment: stretch;
+                                        VerticalLayout {
+                                            spacing: 2px;
+                                            horizontal-stretch: 1;
+                                            HorizontalLayout {
+                                                spacing: Theme.s-2;
+                                                alignment: start;
+                                                GhostButton {
+                                                    label: "Back";
+                                                    icon: Icons.arrow-left;
+                                                    btn-height: 24px;
+                                                    clicked => { AppState.back-to-dashboard(); }
+                                                }
+                                                Icon { glyph: Icons.hash; size: 18px; tint: Theme.primary; }
+                                                Text {
+                                                    text: AppState.active-title == "" ? AppState.active-session-id : AppState.active-title;
+                                                    color: Theme.on-surface;
+                                                    font-family: Theme.font-display;
+                                                    font-size: Theme.font-head-md;
+                                                    font-weight: Theme.w-semi;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            Text {
+                                                text: "SESSION " + AppState.active-session-id;
+                                                color: Theme.on-surface-variant;
+                                                font-family: Theme.font-mono;
+                                                font-size: Theme.font-code;
+                                                letter-spacing: Theme.ls-label;
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: end;
+                                            spacing: Theme.s-2;
+                                            horizontal-stretch: 0;
+                                            HorizontalLayout {
+                                                spacing: Theme.s-2;
+                                                alignment: end;
+                                                // Commit / push session-grant chips. Click toggles. ON =
+                                                // agents skip request_approval for that action; OFF =
+                                                // default per-action gate.
+                                                GrantToggleChip {
+                                                    label: "COMMIT";
+                                                    granted: AppState.active-commit-granted;
+                                                    clicked => {
+                                                        AppState.set-session-permission("commit", !AppState.active-commit-granted);
+                                                    }
+                                                }
+                                                GrantToggleChip {
+                                                    label: "PUSH";
+                                                    granted: AppState.active-push-granted;
+                                                    clicked => {
+                                                        AppState.set-session-permission("push", !AppState.active-push-granted);
+                                                    }
+                                                }
+                                                if AppState.active-phase != "":
+                                                    LabelChip {
+                                                        label: AppState.active-phase == "I" ? "INVESTIGATING"
+                                                            : AppState.active-phase == "P" ? "PLANNING"
+                                                            : AppState.active-phase == "A" ? "APPLYING"
+                                                            : AppState.active-phase == "V" ? "VERIFYING"
+                                                            : "—";
+                                                        tint:
+                                                            AppState.active-phase == "I" ? Theme.phase-i :
+                                                            AppState.active-phase == "P" ? Theme.phase-p :
+                                                            AppState.active-phase == "A" ? Theme.phase-a :
+                                                            AppState.active-phase == "V" ? Theme.phase-v :
+                                                            Theme.on-surface-variant;
+                                                        dot: true;
+                                                    }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Chat-column secondary header: model details + questions chip.
                                 HorizontalLayout {
                                     spacing: Theme.s-5;
                                     alignment: stretch;
@@ -2003,6 +1989,13 @@ component SessionView inherits Rectangle {
                                         }
                                     }
                                 }
+                                // Questions tray — toggled by the chip above. Scoped to chat
+                                // column so it doesn't overlap the document pane.
+                                if AppState.questions-tray-open && AppState.active-questions.length > 0:
+                                    QuestionsTray {
+                                        questions: AppState.active-questions;
+                                        submit-ready: AppState.submit-ready;
+                                    }
                                 Rectangle {
                                     vertical-stretch: 1;
                                     background: Theme.bg-canvas;
