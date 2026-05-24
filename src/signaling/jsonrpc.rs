@@ -103,6 +103,29 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
 /// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
 const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
 
+/// Valid IPAV phase tags accepted by `session_doc_write` / `session_doc_search`.
+/// Kept in sync with the `phase` enums in `protocol.rs` ToolDescriptors.
+const VALID_PHASES: [&str; 4] = ["investigate", "plan", "apply", "verify"];
+
+/// Parse + validate the optional `phase` arg shared by session_doc_write and
+/// session_doc_search. Returns Ok(None) when absent; Err with INVALID_PARAMS
+/// when present but outside the enum.
+fn parse_optional_phase(args: &Value) -> Result<Option<String>, JsonRpcError> {
+    let raw = args.get("phase").and_then(Value::as_str);
+    if let Some(p) = raw {
+        if !VALID_PHASES.contains(&p) {
+            return Err(JsonRpcError::new(
+                JsonRpcError::INVALID_PARAMS,
+                format!(
+                    "phase must be one of {:?}, got {:?}",
+                    VALID_PHASES, p
+                ),
+            ));
+        }
+    }
+    Ok(raw.map(str::to_string))
+}
+
 async fn call_tool(
     name: &str,
     args: Value,
@@ -323,8 +346,9 @@ async fn call_tool(
         "session_doc_write" => {
             let slug = arg_required_str(&args, "slug")?;
             let body = arg_required_str(&args, "body")?;
+            let phase = parse_optional_phase(&args)?;
             let id = bridge
-                .session_doc_write(&caller.session_id, &slug, &body)
+                .session_doc_write(&caller.session_id, &slug, &body, phase.as_deref())
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(
@@ -333,8 +357,9 @@ async fn call_tool(
         }
         "session_doc_search" => {
             let query = args.get("query").and_then(Value::as_str);
+            let phase = parse_optional_phase(&args)?;
             let rows = bridge
-                .session_doc_search(&caller.session_id, query)
+                .session_doc_search(&caller.session_id, query, phase.as_deref())
                 .await
                 .map_err(internal_err_no_prefix)?;
             let trimmed: Vec<Value> = rows
@@ -344,6 +369,7 @@ async fn call_tool(
                         "id": d.id,
                         "slug": d.slug,
                         "body": d.body,
+                        "phase": d.phase,
                         "created_at": d.created_at,
                         "updated_at": d.updated_at,
                     })
@@ -1025,6 +1051,119 @@ mod tests {
         .unwrap();
         let v = serde_json::to_value(&res).unwrap();
         assert_eq!(v["result"]["content"][0]["text"], "null");
+    }
+
+    #[tokio::test]
+    async fn session_doc_write_with_phase_then_search_by_phase() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        // Write three docs: two plans, one investigation.
+        for (slug, phase) in [
+            ("plan-v1", "plan"),
+            ("plan-v2", "plan"),
+            ("find-1", "investigate"),
+        ] {
+            dispatch(
+                req(
+                    "tools/call",
+                    json!({
+                        "name": "session_doc_write",
+                        "arguments": {"slug": slug, "body": "x", "phase": phase}
+                    }),
+                    1,
+                ),
+                &caller(),
+                &bridge,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+
+        // Search filtered by phase="plan" returns only the two plans.
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_search",
+                    "arguments": {"phase": "plan"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        let rows: Vec<Value> = serde_json::from_str(text).unwrap();
+        assert_eq!(rows.len(), 2, "expected 2 plan docs, got: {text}");
+        for row in &rows {
+            assert_eq!(row["phase"], "plan");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_doc_write_rejects_invalid_phase() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        let err = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_write",
+                    "arguments": {"slug": "doc", "body": "x", "phase": "garbage"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .expect_err("invalid phase enum should return Err(JsonRpcError)");
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(
+            err.message.contains("phase must be one of"),
+            "msg: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn session_doc_search_rejects_invalid_phase() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        let err = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_search",
+                    "arguments": {"phase": "garbage"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .expect_err("invalid phase enum should return Err(JsonRpcError)");
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(
+            err.message.contains("phase must be one of"),
+            "msg: {}",
+            err.message
+        );
     }
 
     #[tokio::test]

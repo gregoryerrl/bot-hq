@@ -289,7 +289,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_write",
-            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. Idempotent on (session_id, slug) — re-writing the same slug overwrites. Use slugs that read well later (e.g. 'plan-v1', 'findings-broadcast'). Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.",
+            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. Idempotent on (session_id, slug) — re-writing the same slug overwrites. Use slugs that read well later (e.g. 'plan-v1', 'findings-broadcast'). **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) so the doc surfaces in the matching IPAV document tab in the session view AND is retrievable via `session_doc_search(phase=...)`.** Untagged docs are session-scoped scratch — invisible to tabs and phase searches. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -300,6 +300,11 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     "body": {
                         "type": "string",
                         "description": "The document body, free-form markdown / text."
+                    },
+                    "phase": {
+                        "type": "string",
+                        "enum": ["investigate", "plan", "apply", "verify"],
+                        "description": "Optional. Tag the doc so it surfaces in the matching IPAV document tab in the session view AND is retrievable via session_doc_search(phase=...)."
                     }
                 },
                 "required": ["slug", "body"]
@@ -307,13 +312,18 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_search",
-            description: "List this session's scratch documents (slug + body substring filter). Returns lightweight rows {id, slug, body, updated_at} ordered newest-first. Use BEFORE session_doc_read to find what's worth opening.",
+            description: "List this session's scratch documents. Returns lightweight rows {id, slug, body, phase, updated_at} ordered newest-first. Use BEFORE session_doc_read to find what's worth opening. **Use the `phase` filter to pull prior-phase context (e.g., Brian in Apply: `session_doc_search(phase=\"plan\")` finds the plan to implement; Rain in Verify: `session_doc_search(phase=\"apply\")` finds the apply summary).** Prefer this over scrolling chat history.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
                         "description": "Optional case-insensitive substring filter over slug + body."
+                    },
+                    "phase": {
+                        "type": "string",
+                        "enum": ["investigate", "plan", "apply", "verify"],
+                        "description": "Optional. Filter results to docs tagged with this IPAV phase. Use for cross-phase context retrieval."
                     }
                 },
                 "required": []
