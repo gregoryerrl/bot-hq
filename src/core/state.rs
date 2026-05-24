@@ -291,6 +291,28 @@ impl AppState {
         let phase = handle.ipav.lock().await.current_phase;
         Some(phase)
     }
+
+    /// HEAD SHA captured when this session was spawned, used by the session
+    /// view's Apply tab to diff "everything applied this session". Returns
+    /// None when no working repo, no `.git/`, the spawn-time capture failed,
+    /// or the session has already closed.
+    pub async fn session_start_sha(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|h| h.session_start_sha.clone())
+    }
+
+    /// Working-repo path for a live session, or None if no repo / not running.
+    /// Pairs with `session_start_sha` for the Apply-tab `git diff` invocation.
+    pub async fn working_repo_path(&self, session_id: &str) -> Option<std::path::PathBuf> {
+        self.sessions
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|h| h.working_repo_path.clone())
+    }
 }
 
 #[cfg(test)]
