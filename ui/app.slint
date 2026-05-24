@@ -2089,9 +2089,11 @@ component SessionView inherits Rectangle {
                                 }
                             }
                         }
-                        // Document pane column. `min-width: 0` matches the chat
-                        // column so the layout can shrink to parent width
-                        // instead of overflowing.
+                        // Document pane column. Fills the remainder via
+                        // horizontal-stretch:1 — chat column's explicit width
+                        // (set by the divider drag) leaves the rest for docs.
+                        // min-width:0 lets it shrink as the user drags chat
+                        // wider, without forcing the outer layout to overflow.
                         Rectangle {
                             horizontal-stretch: 1;
                             min-width: 0;
