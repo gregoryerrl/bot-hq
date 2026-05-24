@@ -1741,6 +1741,62 @@ component ChatInput inherits Rectangle {
     }
 }
 
+// Document pane — right-hand side of the SessionView 60/40 split. Displays
+// session_documents tagged with the phase matching `selected-doc-tab`. The
+// PhaseSelector lives in this pane's header (pills are pure tab switchers
+// per B4 — they no longer advance the IPAV phase; agents do that via MCP).
+//
+// B6 ships the skeleton (PhaseSelector + empty body); B7 wires the doc
+// loading via `refresh_session_docs` for I/P/V tabs; B8 wires the git diff
+// path for the A tab; B10 polishes empty-state copy + the "N more" chip
+// + Flickable viewport handling per slint-rust-docs/patterns/layouts.md.
+component DocumentPane inherits Rectangle {
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.outline-variant;
+    border-radius: Theme.radius-default;
+    VerticalLayout {
+        spacing: 0px;
+        // Header: PhaseSelector left, "N more" chip lands in B10.
+        Rectangle {
+            background: Theme.surface-high;
+            height: 40px;
+            HorizontalLayout {
+                padding-left: Theme.s-3;
+                padding-right: Theme.s-3;
+                spacing: Theme.s-2;
+                alignment: stretch;
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 1;
+                    PhaseSelector {}
+                }
+            }
+            Rectangle {
+                x: 0; y: parent.height - 1px;
+                width: parent.width; height: 1px;
+                background: Theme.outline-variant;
+            }
+        }
+        // Body: placeholder until B7 wires AppState.active-doc-content.
+        Rectangle {
+            vertical-stretch: 1;
+            background: Theme.surface;
+            VerticalLayout {
+                alignment: center;
+                padding: Theme.s-4;
+                Text {
+                    text: "Tab: " + AppState.selected-doc-tab + "\n(content wires in B7)";
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}
+
 component SessionView inherits Rectangle {
     background: Theme.bg-canvas;
     VerticalLayout {
@@ -1845,10 +1901,11 @@ component SessionView inherits Rectangle {
                                             dot: true;
                                         }
                                 }
-                                VerticalLayout {
-                                    alignment: end;
-                                    PhaseSelector {}
-                                }
+                                // PhaseSelector relocated to DocumentPane's header
+                                // (right-pane tab switcher). Phase is no longer
+                                // user-advanceable from the header — the LabelChip
+                                // above is the sole phase indicator; agents drive
+                                // advancement via the advance_phase MCP tool.
                             }
                         }
                     }
@@ -1882,47 +1939,66 @@ component SessionView inherits Rectangle {
                             submit-ready: AppState.submit-ready;
                         }
 
-                    // Chat stream.
-                    Rectangle {
+                    // 60/40 split: Chat (left, horizontal-stretch:1.5) and
+                    // DocumentPane (right, horizontal-stretch:1). User-decided
+                    // layout per the IPAV-doc-tabs plan — chat fills ~60% width
+                    // even at narrow widths (the alternative toggleable drawer
+                    // was raised and explicitly declined).
+                    HorizontalLayout {
                         vertical-stretch: 1;
-                        background: Theme.bg-canvas;
-                        session-sv := ScrollView {
-                            // Local alias on global tick. Slint maintainer's
-                            // formula from GH#2301: clamp to ≤ 0 since
-                            // viewport-y is non-positive when scrolled.
-                            property <int> scroll-tick: AppState.session-scroll-tick;
-                            changed scroll-tick => {
-                                session-sv.viewport-y = min(0px, -session-sv.viewport-height + session-sv.visible-height);
-                            }
+                        spacing: Theme.s-3;
+                        // Chat column: scrollable stream above, input below.
+                        Rectangle {
+                            horizontal-stretch: 1.5;
+                            background: Theme.bg-canvas;
                             VerticalLayout {
-                                padding-bottom: Theme.s-4;
                                 spacing: Theme.s-4;
-                                alignment: start;
-                                for msg in AppState.session-msgs:
-                                    ChatBubble { msg: msg; }
-                                if AppState.session-msgs.length == 0:
-                                    Rectangle {
-                                        height: 160px;
+                                Rectangle {
+                                    vertical-stretch: 1;
+                                    background: Theme.bg-canvas;
+                                    session-sv := ScrollView {
+                                        // Local alias on global tick. Slint maintainer's
+                                        // formula from GH#2301: clamp to ≤ 0 since
+                                        // viewport-y is non-positive when scrolled.
+                                        property <int> scroll-tick: AppState.session-scroll-tick;
+                                        changed scroll-tick => {
+                                            session-sv.viewport-y = min(0px, -session-sv.viewport-height + session-sv.visible-height);
+                                        }
                                         VerticalLayout {
-                                            alignment: center;
-                                            Text {
-                                                text: "Session ready. Type a message to start.";
-                                                color: Theme.on-surface-variant;
-                                                font-family: Theme.font-mono;
-                                                font-size: Theme.font-code;
-                                                horizontal-alignment: center;
-                                            }
+                                            padding-bottom: Theme.s-4;
+                                            spacing: Theme.s-4;
+                                            alignment: start;
+                                            for msg in AppState.session-msgs:
+                                                ChatBubble { msg: msg; }
+                                            if AppState.session-msgs.length == 0:
+                                                Rectangle {
+                                                    height: 160px;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        Text {
+                                                            text: "Session ready. Type a message to start.";
+                                                            color: Theme.on-surface-variant;
+                                                            font-family: Theme.font-mono;
+                                                            font-size: Theme.font-code;
+                                                            horizontal-alignment: center;
+                                                        }
+                                                    }
+                                                }
                                         }
                                     }
+                                }
+                                ChatInput {
+                                    placeholder: "Type a message...";
+                                    submit(t) => { AppState.broadcast(t); }
+                                }
                             }
                         }
+                        // Document pane column.
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            DocumentPane {}
+                        }
                     }
-
-            // Chat input.
-            ChatInput {
-                placeholder: "Type a message...";
-                submit(t) => { AppState.broadcast(t); }
-            }
         }
     }
 }
