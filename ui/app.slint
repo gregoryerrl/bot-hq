@@ -1812,6 +1812,11 @@ component DocumentPane inherits Rectangle {
                 }
             if AppState.active-doc-content != "":
                 ScrollView {
+                    // Lock horizontal viewport so long unwrapped lines (typical
+                    // for git diff output / code blocks in session docs) don't
+                    // blow the pane wider than the column. Text wrap: word-wrap
+                    // handles the visual reflow.
+                    viewport-width: self.visible-width;
                     VerticalLayout {
                         padding: Theme.s-3;
                         spacing: Theme.s-2;
@@ -2000,6 +2005,14 @@ component SessionView inherits Rectangle {
                                     vertical-stretch: 1;
                                     background: Theme.bg-canvas;
                                     session-sv := ScrollView {
+                                        // Lock horizontal viewport to the visible width so
+                                        // ChatBubble's `max-width: 720px` + `horizontal-stretch: 0`
+                                        // can't blow the viewport wider than the chat column.
+                                        // Without this, the inner VerticalLayout reports
+                                        // preferred-width = bubble preferred (up to 720px)
+                                        // and the ScrollView allows horizontal scroll —
+                                        // user-aligned (right-end) bubbles get hidden offscreen.
+                                        viewport-width: self.visible-width;
                                         // Local alias on global tick. Slint maintainer's
                                         // formula from GH#2301: clamp to ≤ 0 since
                                         // viewport-y is non-positive when scrolled.
@@ -3312,6 +3325,9 @@ component EmmaPane inherits Rectangle {
             background: Theme.surface-low;
             emma-sv := ScrollView {
                 // See session-sv — same pattern, maintainer's clamp formula.
+                // Lock horizontal viewport so wide message bubbles can't make
+                // the pane scroll sideways (mirrors the session-sv fix).
+                viewport-width: self.visible-width;
                 property <int> scroll-tick: AppState.emma-scroll-tick;
                 changed scroll-tick => {
                     emma-sv.viewport-y = min(0px, -emma-sv.viewport-height + emma-sv.visible-height);
