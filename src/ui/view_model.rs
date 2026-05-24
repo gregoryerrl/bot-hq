@@ -9,7 +9,7 @@
 //! Slint's main-loop is on the OS main thread; tokio runs on its own thread.
 //! We use `slint::Weak::upgrade_in_event_loop` to mutate Slint models from tokio.
 
-use crate::core::{AppState as CoreAppState, IpavPhase};
+use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingEvent;
 use crate::storage::{AgentConfig as DbAgentConfig, Message};
 use crate::{
@@ -286,31 +286,21 @@ pub async fn install_view_model(
 
     {
         let weak = weak.clone();
-        let core = Arc::clone(&core);
-        let rt = rt.clone();
-        app.on_advance_phase({
+        app.on_select_doc_tab({
             let weak_for_safe = weak.clone();
-            move |chip| {
-                ffi_safe("on_advance_phase", &weak_for_safe, AssertUnwindSafe(|| {
-                    let Some(target) = IpavPhase::parse(&chip) else {
+            move |letter| {
+                ffi_safe("on_select_doc_tab", &weak_for_safe, AssertUnwindSafe(|| {
+                    // B4 wires the AppState property only — the document-load
+                    // refresh (filtering session_documents by phase, computing the
+                    // git diff for the Apply tab, etc.) lands in B7. Phase
+                    // advancement is now strictly agent-driven via
+                    // `mcp__bot-hq-signaling__advance_phase` (see core/duo.rs).
+                    let Some(window) = weak.upgrade() else {
                         return;
                     };
-                    // Read Slint state on the event-loop thread (we ARE here, in the
-                    // callback). Calling current_session_id INSIDE rt.spawn would return
-                    // "" because Weak::upgrade fails off-thread, and the broadcast/phase
-                    // would silently no-op.
-                    let session_id = current_session_id(&weak);
-                    if session_id.is_empty() {
-                        return;
-                    }
-                    let weak = weak.clone();
-                    let core = Arc::clone(&core);
-                    rt.spawn(async move {
-                        if let Err(e) = core.advance_phase(&session_id, target).await {
-                            warn!(?e, "advance_phase failed");
-                        }
-                        let _ = refresh_session_view(&weak, &core, &session_id).await;
-                    });
+                    window
+                        .global::<SlintAppState>()
+                        .set_selected_doc_tab(letter);
                 }));
             }
         });

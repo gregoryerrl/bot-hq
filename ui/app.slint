@@ -343,8 +343,14 @@ export global AppState {
 
     callback open-session(string);
     callback back-to-dashboard();
-    callback advance-phase(string);
     callback broadcast(string);
+    // IPAV pills are now document-tab selectors (not phase advancers).
+    // Phase advancement is agent-driven via the `advance_phase` MCP tool;
+    // the UI no longer offers a click-to-advance path (Liars That Compile
+    // — leaving a dead callback invites future re-wiring that reintroduces
+    // the two-sources-of-truth bug).
+    callback select-doc-tab(string);
+    in-out property <string> selected-doc-tab: "I";
     callback emma-send(string);
     callback choice-clicked(string, string);
     callback create-session(string, string);
@@ -1625,7 +1631,7 @@ component PhasePill inherits Rectangle {
         height: 2px;
         background: AppState.active-phase == root.letter ? root.tint : transparent;
     }
-    ta := TouchArea { clicked => { AppState.advance-phase(root.phase); } }
+    ta := TouchArea { clicked => { AppState.select-doc-tab(root.phase); } }
 }
 
 component PhaseSelector inherits HorizontalLayout {
