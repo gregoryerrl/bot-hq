@@ -11,9 +11,66 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-196 tests passing (148 lib + 31 external MCP + 10 storage + 7 server).
-Release build clean. Round 4 audit shipped 11 findings today
-(2026-05-22); Round 3 (Slint/Rust patterns) shipped earlier same day.
+202 tests passing (154 lib + 31 external MCP + 10 storage + 7 server).
+Release build clean. IPAV document-tabs feature shipped today
+(2026-05-24); Round 4 audit shipped 11 findings 2026-05-22.
+
+---
+
+## 2026-05-24 — IPAV pills become document tabs (10-batch implementation)
+
+User-requested redesign of the session view: the I/P/A/V pills no longer
+advance the IPAV phase (agents do that via the `advance_phase` MCP tool —
+two sources of truth was a latent bug). Instead the pills are document-
+tab selectors driving a new right-pane DocumentPane in an always-visible
+60/40 split (Chat left ~60%, Documents right ~40%). User-decided layout
+over Brian+Rain's drawer-toggle recommendation.
+
+**Data model**: `session_documents` gains a nullable `phase` TEXT column
+(values `investigate`/`plan`/`apply`/`verify`) via `migrations/0008_
+session_documents_phase.sql`. Existing rows pass through as NULL —
+invisible to tabs + phase-filtered searches. The `session_doc_write` and
+`session_doc_search` MCP tool descriptors gain optional `phase` enum
+params + dispatch-layer validation. Agents tag plans/findings/etc. and
+retrieve cross-phase context via `session_doc_search(phase="plan")`
+instead of scrolling chat history. Hardcoded agent prompts updated in
+`prompts.rs:72` + `general_rules.rs:63,83` so the pattern is discoverable.
+
+**Apply tab — git diff path**: the in-memory `SessionHandle.session_
+start_sha` (new field) captures `git rev-parse HEAD` via `spawn_blocking`
+at session spawn. The view's `compute_apply_diff` runs `git diff --no-
+color <sha>` (one-arg form covers committed + staged + unstaged in one
+shot — `git diff HEAD` alone is empty right after commits land, which
+is the moment the user wants to inspect what just shipped). Fallback
+chain: SHA-diff → `git diff HEAD` with anchor-lost note → latest
+`phase='apply'` session doc → empty state. No schema column for the SHA;
+in-memory is enough since live session state already resets on app
+restart.
+
+**Slint changes**: `AppState.advance-phase` callback + the `on_advance_
+phase` handler in `view_model.rs` fully stripped (Liars That Compile —
+leaving dead callbacks invites future re-wiring that reintroduces the
+bug). New `select-doc-tab` callback + `selected-doc-tab` property +
+five `active-doc-*` properties (content/slug/updated-at/count/empty-msg).
+PhasePill rewritten: top-border accent on selected tab (keeps per-phase
+`tint` color), monochrome text. SessionView outer `VerticalLayout` now
+wraps the chat + DocumentPane in a `HorizontalLayout` with `horizontal-
+stretch: 1.5` / `1`. PhaseSelector relocated from session header to the
+DocumentPane header. LabelChip remains the sole phase indicator.
+
+**View-model wiring**: new `refresh_session_docs` async helper (called
+both from the 500ms poll loop and the immediate tab-click handler);
+new `compute_apply_diff` helper; new `current_selected_doc_tab_async`
++ `push_doc_pane_state` utility. "N more" chip surfaces in the
+DocumentPane header when the active tab has >1 phase-tagged doc;
+expansion UI deferred per YAGNI.
+
+**Verification**: `cargo build` clean (dev + release), 202 tests pass
+(was 196 → +6 from 2 storage phase tests + 3 MCP phase tests + 1 round-
+trip). 11 files modified, 1 new migration. Diff stat: +714 / -113.
+Visual smoke (60/40 split renders, tabs switch, doc loads from session_
+documents, git diff appears in A tab after agent commits) is the user's
+gate — bot-hq's desktop nature precludes automated UI testing.
 
 ---
 
