@@ -314,6 +314,11 @@ export global AppState {
     // CL sidebar width. Drag-resizable via the divider; persists across
     // tab switches but resets at app restart.
     in-out property <length>   cl-sidebar-width: 220px;
+    // SessionView chat/document split width. Drag-resizable via the divider
+    // between the two columns; same persistence model as cl-sidebar-width
+    // (in-memory only, resets at restart). Default ~60% of a 1200px window
+    // preserves the visual ratio of the prior horizontal-stretch:1.5/1 split.
+    in-out property <length>   session-chat-width: 720px;
     callback cl-tree-toggle-collapse(string);            // (folder_path)
     callback cl-tree-begin-create-file(string);          // (parent_dir)  "" = project root pick
     callback cl-tree-begin-create-folder(string);        // (parent_dir)
@@ -1860,21 +1865,23 @@ component SessionView inherits Rectangle {
                     // — taking the right half of what was previously a full-width
                     // header band.
 
-                    // 60/40 split: Chat (left, horizontal-stretch:1.5) and
-                    // DocumentPane (right, horizontal-stretch:1). User-decided
-                    // layout per the IPAV-doc-tabs plan — chat fills ~60% width
-                    // even at narrow widths (the alternative toggleable drawer
-                    // was raised and explicitly declined).
-                    HorizontalLayout {
+                    // Drag-resizeable chat / document split. Chat column has
+                    // an explicit width driven by AppState.session-chat-width;
+                    // the 6px divider (between the two columns) updates that
+                    // property on drag. Doc column fills the remainder via
+                    // horizontal-stretch:1. Same pattern as the CL sidebar
+                    // handle (ui/app.slint:2266-2300).
+                    split-layout := HorizontalLayout {
                         vertical-stretch: 1;
-                        spacing: Theme.s-3;
+                        spacing: 0px;
                         // Chat column: session header + chat header + tray + scroll + input.
-                        // `min-width: 0` lets the column shrink below its widest
-                        // ChatBubble preferred-width — without it, the column
-                        // expands to fit content and the whole split overflows.
+                        // Explicit width — drag-driven via the divider below. The
+                        // ScrollView's `viewport-width: self.visible-width` already
+                        // prevents ChatBubble preferred-widths from bursting the
+                        // column horizontally, so min-width is unnecessary (and
+                        // Slint forbids combining width + min-width).
                         Rectangle {
-                            horizontal-stretch: 1.5;
-                            min-width: 0;
+                            width: AppState.session-chat-width;
                             background: Theme.bg-canvas;
                             VerticalLayout {
                                 spacing: Theme.s-4;
@@ -2046,6 +2053,39 @@ component SessionView inherits Rectangle {
                                 ChatInput {
                                     placeholder: "Type a message...";
                                     submit(t) => { AppState.broadcast(t); }
+                                }
+                            }
+                        }
+                        // 6px draggable divider. 1px outline-variant line at
+                        // x:2px (visual), 6px hit area at x:0 with hover tint.
+                        // Same shape as ContextLibraryPane's sidebar handle.
+                        Rectangle {
+                            width: 6px;
+                            Rectangle {
+                                x: 2px; y: 0;
+                                width: 1px; height: parent.height;
+                                background: Theme.outline-variant;
+                            }
+                            Rectangle {
+                                x: 0; y: 0;
+                                width: 6px; height: parent.height;
+                                background: split-ta.has-hover || split-ta.pressed
+                                    ? Theme.primary.with-alpha(0.4)
+                                    : transparent;
+                                animate background { duration: 80ms; }
+                                split-ta := TouchArea {
+                                    mouse-cursor: ew-resize;
+                                    moved => {
+                                        if (self.pressed) {
+                                            // Clamp: chat min 200px (room for chips/input);
+                                            // upper bound = outer split width minus 280px
+                                            // (so doc column has at least 280px). split-layout
+                                            // is the outer HorizontalLayout (named above).
+                                            AppState.session-chat-width = max(200px,
+                                                min(split-layout.width - 280px,
+                                                    AppState.session-chat-width + (self.mouse-x - self.pressed-x)));
+                                        }
+                                    }
                                 }
                             }
                         }
