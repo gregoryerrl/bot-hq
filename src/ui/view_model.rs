@@ -286,21 +286,34 @@ pub async fn install_view_model(
 
     {
         let weak = weak.clone();
+        let core = Arc::clone(&core);
+        let rt = rt.clone();
         app.on_select_doc_tab({
             let weak_for_safe = weak.clone();
             move |letter| {
                 ffi_safe("on_select_doc_tab", &weak_for_safe, AssertUnwindSafe(|| {
-                    // B4 wires the AppState property only — the document-load
-                    // refresh (filtering session_documents by phase, computing the
-                    // git diff for the Apply tab, etc.) lands in B7. Phase
-                    // advancement is now strictly agent-driven via
-                    // `mcp__bot-hq-signaling__advance_phase` (see core/duo.rs).
+                    // Phase advancement is agent-driven via the advance_phase
+                    // MCP tool — this callback only switches the document-tab
+                    // selection and triggers an immediate phase-doc refresh
+                    // so the right pane updates without waiting for the 500ms
+                    // poll to come around.
                     let Some(window) = weak.upgrade() else {
                         return;
                     };
                     window
                         .global::<SlintAppState>()
-                        .set_selected_doc_tab(letter);
+                        .set_selected_doc_tab(letter.clone());
+
+                    let session_id = current_session_id(&weak);
+                    if session_id.is_empty() {
+                        return;
+                    }
+                    let weak = weak.clone();
+                    let core = Arc::clone(&core);
+                    let tab = letter.to_string();
+                    rt.spawn(async move {
+                        refresh_session_docs(&weak, &core, &session_id, &tab).await;
+                    });
                 }));
             }
         });
@@ -1713,6 +1726,12 @@ pub async fn install_view_model(
             let session_id = current_session_id_async(&weak_for_poll).await;
             if !session_id.is_empty() {
                 let _ = refresh_session_view(&weak_for_poll, &core_for_poll, &session_id).await;
+                // Also refresh the right-pane DocumentPane for the active
+                // tab. Cheap (one indexed query on session_documents);
+                // running every 500ms keeps phase-tagged docs surfaced as
+                // agents write them without a manual click.
+                let tab = current_selected_doc_tab_async(&weak_for_poll).await;
+                refresh_session_docs(&weak_for_poll, &core_for_poll, &session_id, &tab).await;
             }
             let _ = refresh_emma(&weak_for_poll, &core_for_poll).await;
             refresh_dashboard(&weak_for_poll, &core_for_poll).await;
@@ -2357,6 +2376,61 @@ async fn seed_external_mcp_panel(weak: &Weak<AppWindow>, core: &Arc<CoreAppState
     });
 }
 
+/// Refresh the SessionView's right-pane DocumentPane for the currently-
+/// selected IPAV tab. Filters `session_documents` by `phase = <tab>` and
+/// surfaces the newest matching doc, plus a count for the "N more" chip
+/// (wired in B10). Empty-state copy lands in the empty_msg property.
+///
+/// For the Apply tab (B7 minimal): falls back to phase='apply' docs only.
+/// B8 layers in the `git diff <session_start_sha>` path before this fallback.
+async fn refresh_session_docs(
+    weak: &Weak<AppWindow>,
+    core: &Arc<CoreAppState>,
+    session_id: &str,
+    selected_tab: &str,
+) {
+    let phase = match selected_tab {
+        "I" => "investigate",
+        "P" => "plan",
+        "A" => "apply",
+        "V" => "verify",
+        _ => return,
+    };
+    let empty_msg = match selected_tab {
+        "I" => "No investigation notes yet.",
+        "P" => "No plan written yet.",
+        "A" => "No changes applied yet.",
+        "V" => "No verification notes yet.",
+        _ => "",
+    }
+    .to_string();
+
+    let docs = core
+        .bridge
+        .session_doc_search(session_id, None, Some(phase))
+        .await
+        .unwrap_or_default();
+
+    let (content, slug, updated_at, count) = match docs.first() {
+        Some(newest) => (
+            newest.body.clone(),
+            newest.slug.clone(),
+            newest.updated_at.clone(),
+            docs.len() as i32,
+        ),
+        None => (String::new(), String::new(), String::new(), 0),
+    };
+
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_active_doc_content(SharedString::from(content));
+        app.set_active_doc_slug(SharedString::from(slug));
+        app.set_active_doc_updated_at(SharedString::from(updated_at));
+        app.set_active_doc_count(count);
+        app.set_active_doc_empty_msg(SharedString::from(empty_msg));
+    });
+}
+
 async fn refresh_emma(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) -> anyhow::Result<()> {
     let msgs = core.storage.messages_for_session("emma", None).await?;
     // Same skip-if-unchanged as refresh_session_view — keep highlight alive.
@@ -2779,6 +2853,17 @@ async fn current_session_id_async(weak: &Weak<AppWindow>) -> String {
         let _ = tx.send(id);
     });
     rx.await.unwrap_or_default()
+}
+
+/// Async-safe read of `selected-doc-tab` (I/P/A/V) from off the event loop.
+/// Defaults to "I" if the read fails, matching the Slint default initializer.
+async fn current_selected_doc_tab_async(weak: &Weak<AppWindow>) -> String {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = weak.upgrade_in_event_loop(move |h| {
+        let t = h.global::<SlintAppState>().get_selected_doc_tab().to_string();
+        let _ = tx.send(t);
+    });
+    rx.await.unwrap_or_else(|_| "I".to_string())
 }
 
 fn current_cl_state(weak: &Weak<AppWindow>) -> (String, String) {

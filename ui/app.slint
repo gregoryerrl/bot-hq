@@ -351,6 +351,14 @@ export global AppState {
     // the two-sources-of-truth bug).
     callback select-doc-tab(string);
     in-out property <string> selected-doc-tab: "I";
+    // Document pane state — written by view_model::refresh_session_docs every
+    // 500ms (or on tab click). Empty content + empty-msg drives the empty
+    // state. count > 1 triggers the "N more" chip in B10.
+    in property <string> active-doc-content;
+    in property <string> active-doc-slug;
+    in property <string> active-doc-updated-at;
+    in property <int> active-doc-count;
+    in property <string> active-doc-empty-msg;
     callback emma-send(string);
     callback choice-clicked(string, string);
     callback create-session(string, string);
@@ -1778,21 +1786,45 @@ component DocumentPane inherits Rectangle {
                 background: Theme.outline-variant;
             }
         }
-        // Body: placeholder until B7 wires AppState.active-doc-content.
+        // Body: doc content when present, empty-state copy otherwise.
         Rectangle {
             vertical-stretch: 1;
             background: Theme.surface;
-            VerticalLayout {
-                alignment: center;
-                padding: Theme.s-4;
-                Text {
-                    text: "Tab: " + AppState.selected-doc-tab + "\n(content wires in B7)";
-                    color: Theme.on-surface-variant;
-                    font-family: Theme.font-mono;
-                    font-size: Theme.font-code;
-                    horizontal-alignment: center;
+            if AppState.active-doc-content == "":
+                VerticalLayout {
+                    alignment: center;
+                    padding: Theme.s-4;
+                    Text {
+                        text: AppState.active-doc-empty-msg;
+                        color: Theme.on-surface-variant;
+                        font-family: Theme.font-mono;
+                        font-size: Theme.font-code;
+                        horizontal-alignment: center;
+                    }
                 }
-            }
+            if AppState.active-doc-content != "":
+                ScrollView {
+                    VerticalLayout {
+                        padding: Theme.s-3;
+                        spacing: Theme.s-2;
+                        alignment: start;
+                        Text {
+                            text: AppState.active-doc-content;
+                            color: Theme.on-surface;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-code;
+                            wrap: word-wrap;
+                        }
+                        if AppState.active-doc-slug != "":
+                            Text {
+                                text: AppState.active-doc-slug + " · " + AppState.active-doc-updated-at;
+                                color: Theme.on-surface-variant;
+                                font-family: Theme.font-mono;
+                                font-size: Theme.font-code;
+                                letter-spacing: Theme.ls-label;
+                            }
+                    }
+                }
         }
     }
 }
