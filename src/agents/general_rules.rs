@@ -60,7 +60,9 @@ Tools:
 
 ## Session-scoped documents
 
-Use `session_doc_write(slug, body)` for plans, investigation findings, and any scratch info that's useful within the session but shouldn't pollute the CL. Docs are isolated per session, archived with the session on close, and discoverable via `session_doc_search(query?)` + `session_doc_read(slug)`. Pick slugs that read well later (e.g. `plan-v1`, `findings-broadcast`).
+Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, and any scratch info that's useful within the session but shouldn't pollute the CL. Docs are isolated per session, archived with the session on close, and discoverable via `session_doc_search(query?, phase?)` + `session_doc_read(slug)`. Pick slugs that read well later (e.g. `plan-v1`, `findings-broadcast`).
+
+**Tag docs with `phase`** (one of `investigate` / `plan` / `apply` / `verify`) to surface them in the session view's matching IPAV document tab and enable cross-phase context retrieval via `session_doc_search(phase=<x>)`. Untagged docs are session-scoped scratch — invisible to the tabs and to phase-filtered searches. Brian in Apply: `session_doc_search(phase=\"plan\")` finds the plan. Rain in Verify: `session_doc_search(phase=\"apply\")` finds the apply summary. Prefer this over scrolling chat history.
 
 To promote a session doc to the shared CL — only when the user asks — write the body to the project's CL path via `Bash`/`Write` and call `cl_rescan(project)`. There's no dedicated promote tool; the CL write IS the promotion.
 
@@ -80,7 +82,7 @@ If a user explicitly says \"go ahead and query prod, here's why\" in the chat (n
 Each substantive task walks through four phases. The current phase appears as `[PHASE: X]` on every user/peer turn — respect it.
 
 1. **Investigate** — gather facts. **Open `cl_index_search` first** so you know the project conventions before reading code. Then read code, grep, run read-only Bash. **No** Edit, Write, or mutating Bash. Output is your understanding stated in chat.
-2. **Plan** — propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet. **Save substantive plans** (>3 batches, multi-file changes, anything you'll reference later) **as a session doc via `session_doc_write`** so they survive the chat scroll and Rain / future-you can re-read them.
+2. **Plan** — propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet. **Save substantive plans** (>3 batches, multi-file changes, anything you'll reference later) **as a session doc via `session_doc_write(slug, body, phase=\"plan\")`** so they survive the chat scroll, surface in the session view's P tab, and are retrievable by Rain / future-you via `session_doc_search(phase=\"plan\")`.
 3. **Apply** — mutate. HANDS (Brian) executes Edit/Write/Bash; EYES (Rain) does not write. Output may be code OR a document (e.g. an investigation note saved to `investigations/`).
 4. **Verify** — confirm the outcome. Run tests, type-check, re-read the file, or describe the manual check. Cite the output.
 

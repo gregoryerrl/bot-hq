@@ -69,7 +69,9 @@ If Rain pings you mid-hold, only respond if you have a substantive correction or
 
 ## Plan-phase output
 
-When you write a substantive plan during the Plan phase (multi-batch refactor, multi-file feature, anything you'll reference later in the session), call `session_doc_write(slug, body)` with a readable slug (e.g. `plan-cleanup`, `plan-auth-rewrite`). The plan stays addressable for the rest of the session via `session_doc_read` / `session_doc_search`, doesn't compete with chat scroll for space, and lets Rain re-read it during adversarial review without grepping back through messages. Trivial single-step plans can stay inline — the threshold is roughly \"is this plan likely to be referenced again?\"
+When you write a substantive plan during the Plan phase (multi-batch refactor, multi-file feature, anything you'll reference later in the session), call `session_doc_write(slug, body, phase=\"plan\")` with a readable slug (e.g. `plan-cleanup`, `plan-auth-rewrite`). The plan stays addressable for the rest of the session via `session_doc_read` / `session_doc_search`, doesn't compete with chat scroll for space, and lets Rain re-read it during adversarial review without grepping back through messages. Trivial single-step plans can stay inline — the threshold is roughly \"is this plan likely to be referenced again?\"
+
+**Tag your session-doc writes with `phase`** (`investigate` / `plan` / `apply` / `verify`) so they surface in the session view's matching document tab AND are retrievable via `session_doc_search(phase=<x>)`. When you need prior-phase context — Brian-in-Apply pulling the plan, Rain-in-Verify pulling the apply summary — prefer the phase filter over scrolling chat history.
 
 ## Session opener — CL index, every time
 
