@@ -2376,13 +2376,73 @@ async fn seed_external_mcp_panel(weak: &Weak<AppWindow>, core: &Arc<CoreAppState
     });
 }
 
+/// Run `git diff` against `session_start_sha` (or HEAD as fallback) inside
+/// `repo`. Returns (diff_text, optional_prefix_note). Returns None on empty
+/// diff or git failure. Uses `--no-color` to avoid ANSI codes (Slint Text
+/// has no ANSI parser; stripping at the source is cleaner than post-hoc).
+async fn compute_apply_diff(
+    repo: std::path::PathBuf,
+    session_start_sha: Option<String>,
+) -> Option<(String, Option<String>)> {
+    tokio::task::spawn_blocking(move || -> Option<(String, Option<String>)> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(&repo).arg("diff").arg("--no-color");
+        let note = if let Some(ref sha) = session_start_sha {
+            cmd.arg(sha);
+            None
+        } else {
+            cmd.arg("HEAD");
+            Some(
+                "(session-start anchor lost — showing working-tree diff only)"
+                    .to_string(),
+            )
+        };
+        let out = cmd.output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let diff = String::from_utf8(out.stdout).ok()?;
+        if diff.trim().is_empty() {
+            return None;
+        }
+        Some((diff, note))
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Push the doc-pane state via the Slint event loop. Centralizes the
+/// `upgrade_in_event_loop` hop so refresh_session_docs branches stay tight.
+fn push_doc_pane_state(
+    weak: &Weak<AppWindow>,
+    content: String,
+    slug: String,
+    updated_at: String,
+    count: i32,
+    empty_msg: String,
+) {
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_active_doc_content(SharedString::from(content));
+        app.set_active_doc_slug(SharedString::from(slug));
+        app.set_active_doc_updated_at(SharedString::from(updated_at));
+        app.set_active_doc_count(count);
+        app.set_active_doc_empty_msg(SharedString::from(empty_msg));
+    });
+}
+
 /// Refresh the SessionView's right-pane DocumentPane for the currently-
-/// selected IPAV tab. Filters `session_documents` by `phase = <tab>` and
-/// surfaces the newest matching doc, plus a count for the "N more" chip
-/// (wired in B10). Empty-state copy lands in the empty_msg property.
+/// selected IPAV tab.
 ///
-/// For the Apply tab (B7 minimal): falls back to phase='apply' docs only.
-/// B8 layers in the `git diff <session_start_sha>` path before this fallback.
+/// I/P/V tabs: filter `session_documents` by `phase = <tab>`, surface the
+/// newest matching doc, set count for the "N more" chip (wired in B10).
+///
+/// A tab fallback chain:
+///   1. `git diff <session_start_sha>` (covers committed + staged + unstaged)
+///   2. `git diff HEAD` with anchor-lost note (post-restart fallback)
+///   3. Latest `phase='apply'` session doc
+///   4. Empty state ("No changes applied yet." / "no working repo path")
 async fn refresh_session_docs(
     weak: &Weak<AppWindow>,
     core: &Arc<CoreAppState>,
@@ -2405,6 +2465,44 @@ async fn refresh_session_docs(
     }
     .to_string();
 
+    // Apply tab: try git diff first. Fall through to phase='apply' docs on
+    // diff failure / empty diff. If there's no working repo at all, short-
+    // circuit to a distinct empty-state message.
+    if selected_tab == "A" {
+        match core.working_repo_path(session_id).await {
+            Some(repo) => {
+                let sha = core.session_start_sha(session_id).await;
+                if let Some((diff, note)) = compute_apply_diff(repo, sha).await {
+                    let content = match note {
+                        Some(n) => format!("{n}\n\n{diff}"),
+                        None => diff,
+                    };
+                    push_doc_pane_state(
+                        weak,
+                        content,
+                        "git diff".to_string(),
+                        chrono::Utc::now().to_rfc3339(),
+                        1,
+                        String::new(),
+                    );
+                    return;
+                }
+                // Diff path produced nothing — fall through to phase='apply'.
+            }
+            None => {
+                push_doc_pane_state(
+                    weak,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    0,
+                    "This session has no working repo path.".to_string(),
+                );
+                return;
+            }
+        }
+    }
+
     let docs = core
         .bridge
         .session_doc_search(session_id, None, Some(phase))
@@ -2421,14 +2519,7 @@ async fn refresh_session_docs(
         None => (String::new(), String::new(), String::new(), 0),
     };
 
-    let _ = weak.upgrade_in_event_loop(move |handle| {
-        let app = handle.global::<SlintAppState>();
-        app.set_active_doc_content(SharedString::from(content));
-        app.set_active_doc_slug(SharedString::from(slug));
-        app.set_active_doc_updated_at(SharedString::from(updated_at));
-        app.set_active_doc_count(count);
-        app.set_active_doc_empty_msg(SharedString::from(empty_msg));
-    });
+    push_doc_pane_state(weak, content, slug, updated_at, count, empty_msg);
 }
 
 async fn refresh_emma(weak: &Weak<AppWindow>, core: &Arc<CoreAppState>) -> anyhow::Result<()> {
