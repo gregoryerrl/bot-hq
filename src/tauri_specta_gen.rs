@@ -20,7 +20,9 @@ pub fn typescript_config() -> specta_typescript::Typescript {
         .bigint(specta_typescript::BigIntExportBehavior::Number)
 }
 
-use crate::tauri_cmd::{agent_configs, cl, docs, messages, policy, questions, sessions};
+use crate::tauri_cmd::{
+    agent_configs, cl, docs, messages, policy, questions, screenshot, sessions,
+};
 use tauri_specta::{collect_commands, Builder};
 
 pub fn builder() -> Builder<tauri::Wry> {
@@ -54,6 +56,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         docs::session_doc_search,
         docs::session_doc_read,
         docs::compute_apply_diff,
+        // Screenshot
+        screenshot::capture_window_screenshot,
     ])
 }
 

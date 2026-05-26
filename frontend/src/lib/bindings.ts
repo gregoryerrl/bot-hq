@@ -184,6 +184,31 @@ async sessionDocRead(sessionId: string, slug: string) : Promise<Result<SessionDo
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Run `git diff --no-color <session_start_sha>` (falling back to
+ * `git diff HEAD` if the anchor was never captured) inside the session's
+ * `working_repo_path`, then classify each line via [`parse_diff_lines`].
+ * 
+ * Returns an empty `lines` Vec with a note if the diff is empty, the
+ * session isn't running, or the session has no working repo. Errors only
+ * when the git invocation itself can't be spawned.
+ */
+async computeApplyDiff(sessionId: string) : Promise<Result<ComputeApplyDiffResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("compute_apply_diff", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async captureWindowScreenshot(sessionId: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("capture_window_screenshot", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -235,6 +260,19 @@ export type AppError =
 export type ClFolderView = { id: number; project_id: string; folder_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
+/**
+ * Result of `compute_apply_diff`: the classified diff lines plus an
+ * optional human-readable note (e.g., the session-start anchor was lost
+ * and we fell back to `git diff HEAD`).
+ */
+export type ComputeApplyDiffResult = { lines: DiffLine[]; note: string | null }
+/**
+ * One classified line of a unified `git diff`. Ports the Slint-era
+ * `DiffLine` struct (deleted with `view_model.rs`). `kind` is one of
+ * `"add" | "remove" | "hunk" | "file" | "context"` — order-sensitive
+ * classification per [`parse_diff_lines`].
+ */
+export type DiffLine = { kind: string; text: string }
 export type GrantScopeView = { kind: "none" } | { kind: "all_branches" } | { kind: "specific"; branches: string[] }
 export type PendingChoiceView = { choice_id: string; session_id: string; agent: string; question: string; options: string[] }
 export type PermissionActionView = "commit" | "push"

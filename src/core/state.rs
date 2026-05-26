@@ -27,6 +27,12 @@ pub struct AppState {
     /// External MCP server handle. None when disabled or port-busy at startup;
     /// the binary stays usable in that case (internal MCP keeps working).
     pub external_server: Mutex<Option<ExternalServer>>,
+    /// Populated from Tauri's `setup()` once the AppHandle exists. The
+    /// external MCP starts BEFORE Tauri setup (see main.rs ordering), so
+    /// any MCP tool that needs the webview (screenshot, click, scroll, etc.)
+    /// has to wait for this to be filled. `OnceCell` because it's write-once
+    /// at startup; no contention.
+    pub app_handle: once_cell::sync::OnceCell<tauri::AppHandle>,
 }
 
 impl AppState {
@@ -42,6 +48,7 @@ impl AppState {
             sessions: Mutex::new(HashMap::new()),
             emma: Mutex::new(None),
             external_server: Mutex::new(None),
+            app_handle: once_cell::sync::OnceCell::new(),
         }
     }
 

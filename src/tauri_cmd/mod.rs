@@ -22,6 +22,7 @@ pub mod error;
 pub mod messages;
 pub mod policy;
 pub mod questions;
+pub mod screenshot;
 pub mod sessions;
 
 pub use error::AppError;

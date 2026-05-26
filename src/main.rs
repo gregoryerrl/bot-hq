@@ -170,6 +170,7 @@ fn main() -> Result<()> {
     let storage_for_subscriber = Arc::clone(&storage_arc);
     let bridge_for_subscriber = Arc::clone(&bridge_arc);
     let rt_for_setup = rt.clone();
+    let core_for_setup = Arc::clone(&core);
 
     tauri::Builder::default()
         .manage(Arc::clone(&storage_arc))
@@ -183,6 +184,10 @@ fn main() -> Result<()> {
             // enter the runtime for the duration of those calls. The spawned
             // tasks themselves are bound to the runtime once registered.
             let _rt_guard = rt_for_setup.enter();
+            // Stash the AppHandle on CoreAppState so MCP tools (screenshot,
+            // webview automation) can reach the webview from outside the
+            // Tauri command path. Set-once — ignore the Err on duplicate.
+            let _ = core_for_setup.app_handle.set(app.handle().clone());
             // Wire the bridge subscriber: SignalingEvent stream → Tauri emit.
             let app_handle_for_msgs = app.handle().clone();
             let app_handle_for_events = app.handle().clone();

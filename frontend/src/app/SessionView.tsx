@@ -36,6 +36,8 @@ export function SessionView() {
     "respawn_session",
   );
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
+  const [screenshotPending, setScreenshotPending] = useState(false);
+  const [screenshotError, setScreenshotError] = useState<string | null>(null);
   useEffect(() => {
     if (!sessionId) return;
     setRespawnError(null);
@@ -125,6 +127,29 @@ export function SessionView() {
               </code>
             </p>
           </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            title="Capture the bot-hq window and share with Brian + Rain"
+            disabled={screenshotPending}
+            onClick={async () => {
+              try {
+                setScreenshotPending(true);
+                setScreenshotError(null);
+                await invoke("capture_window_screenshot", { sessionId });
+              } catch (e) {
+                const msg =
+                  e && typeof e === "object" && "message" in e
+                    ? String((e as { message: unknown }).message)
+                    : String(e);
+                setScreenshotError(msg);
+              } finally {
+                setScreenshotPending(false);
+              }
+            }}
+          >
+            {screenshotPending ? "…" : "📸 Share view"}
+          </Button>
         </header>
 
         {respawnError && (
@@ -142,6 +167,19 @@ export function SessionView() {
               }}
             >
               retry
+            </button>
+          </div>
+        )}
+
+        {screenshotError && (
+          <div className="border-b border-default bg-red-950/30 px-4 py-2 text-xs text-red-200">
+            <span className="font-semibold">Screenshot failed:</span>{" "}
+            {screenshotError}
+            <button
+              className="ml-2 underline"
+              onClick={() => setScreenshotError(null)}
+            >
+              dismiss
             </button>
           </div>
         )}

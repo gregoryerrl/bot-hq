@@ -239,6 +239,58 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
                 "required": ["session_id"]
             }),
         },
+        ToolDescriptor {
+            name: "webview_screenshot",
+            description: "Capture the bot-hq main window to a PNG file under `<data_dir>/screenshots/<timestamp>.png`. Returns `{path}`. Read the PNG with your built-in Read tool to view it. Requires macOS Screen Recording permission for the binary (or its launching terminal); the first call may surface a permission error until the user grants it. Use this to inspect the user-visible UI state when debugging or iterating on UX.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDescriptor {
+            name: "webview_click",
+            description: "Dispatch a click event on the first DOM element matching the CSS selector inside the bot-hq webview. Fire-and-forget: no return value; verify effect with a follow-up `webview_screenshot` or `get_session_messages` poll. Selector examples: `[data-testid=foo]`, `button:has-text(\"Send\")` (not supported — use attribute or class instead), `.session-tile:nth-of-type(1)`.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS selector for the target element." }
+                },
+                "required": ["selector"]
+            }),
+        },
+        ToolDescriptor {
+            name: "webview_type",
+            description: "Set the value of an input/textarea matched by the CSS selector and dispatch input + change events so React state updates. Use this to fill the chat input or other text fields before clicking a Send button. The element is also focused.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS selector for an input/textarea element." },
+                    "text": { "type": "string", "description": "The text to set." }
+                },
+                "required": ["selector", "text"]
+            }),
+        },
+        ToolDescriptor {
+            name: "webview_scroll",
+            description: "Scroll an element (or the page) inside the webview. If `selector` is provided, scrolls that element's scrollTop. Otherwise scrolls window.scrollY. `y` is the destination in pixels (use 0 for top, a very large value like 999999 for bottom).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "Optional CSS selector for the scrollable element. Omit for window scroll." },
+                    "y": { "type": "integer", "description": "Destination scrollTop / scrollY in pixels." }
+                },
+                "required": ["y"]
+            }),
+        },
+        ToolDescriptor {
+            name: "webview_press_key",
+            description: "Synthesize a keydown + keypress + keyup sequence on a target element (or the document if no selector). Useful for Enter to submit a form, Tab to focus next, ArrowDown for list nav, Escape to dismiss. Key names follow the DOM KeyboardEvent.key spec (\"Enter\", \"Tab\", \"Escape\", \"ArrowDown\", \"a\", etc.).",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "DOM key name." },
+                    "selector": { "type": "string", "description": "Optional CSS selector for the target element. Omit to dispatch to document.activeElement (or document)." }
+                },
+                "required": ["key"]
+            }),
+        },
     ]);
     &*TOOLS
 }
@@ -645,11 +697,122 @@ async fn call_external_tool(
             });
             Ok(result_json(&snapshot, "{}"))
         }
+        "webview_screenshot" => {
+            let handle = core.app_handle.get().ok_or_else(|| {
+                JsonRpcError::new(
+                    JsonRpcError::INTERNAL_ERROR,
+                    "Tauri AppHandle not yet initialized (called before Tauri setup completed)".to_string(),
+                )
+            })?;
+            let path = crate::tauri_cmd::screenshot::capture_main_window(
+                handle,
+                &core.paths.data_dir,
+            )
+            .map_err(|e| internal_err("webview_screenshot", e))?;
+            Ok(result_json(
+                &json!({ "path": path.display().to_string() }),
+                "{}",
+            ))
+        }
+        "webview_click" => {
+            let selector = arg_required_str(&args, "selector")?;
+            let sel = serde_json::to_string(&selector).unwrap();
+            let js = format!(
+                "(() => {{ const el = document.querySelector({sel}); \
+                 if (el) {{ el.click(); }} \
+                 else {{ console.warn('webview_click: no element matches', {sel}); }} }})();"
+            );
+            eval_in_webview(core, &js)?;
+            Ok(ok_response())
+        }
+        "webview_type" => {
+            let selector = arg_required_str(&args, "selector")?;
+            let text = arg_required_str(&args, "text")?;
+            let sel = serde_json::to_string(&selector).unwrap();
+            let txt = serde_json::to_string(&text).unwrap();
+            // React's onChange listens to events fired via the prototype's
+            // native value setter. Plain `el.value = ...` bypasses React.
+            let js = format!(
+                "(() => {{ \
+                   const el = document.querySelector({sel}); \
+                   if (!el) {{ console.warn('webview_type: no element matches', {sel}); return; }} \
+                   el.focus(); \
+                   const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; \
+                   const desc = Object.getOwnPropertyDescriptor(proto, 'value'); \
+                   if (desc && desc.set) {{ desc.set.call(el, {txt}); }} else {{ el.value = {txt}; }} \
+                   el.dispatchEvent(new Event('input', {{ bubbles: true }})); \
+                   el.dispatchEvent(new Event('change', {{ bubbles: true }})); \
+                 }})();"
+            );
+            eval_in_webview(core, &js)?;
+            Ok(ok_response())
+        }
+        "webview_scroll" => {
+            let y = args.get("y").and_then(Value::as_i64).ok_or_else(|| {
+                JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "y is required".to_string())
+            })?;
+            let selector = args.get("selector").and_then(Value::as_str);
+            let js = match selector {
+                Some(sel) => {
+                    let sel_json = serde_json::to_string(sel).unwrap();
+                    format!(
+                        "(() => {{ const el = document.querySelector({sel_json}); \
+                         if (el) {{ el.scrollTop = {y}; }} \
+                         else {{ console.warn('webview_scroll: no element matches', {sel_json}); }} }})();"
+                    )
+                }
+                None => format!("window.scrollTo({{ top: {y}, behavior: 'auto' }});"),
+            };
+            eval_in_webview(core, &js)?;
+            Ok(ok_response())
+        }
+        "webview_press_key" => {
+            let key = arg_required_str(&args, "key")?;
+            let selector = args.get("selector").and_then(Value::as_str);
+            let key_json = serde_json::to_string(&key).unwrap();
+            let target_expr = match selector {
+                Some(sel) => {
+                    let sel_json = serde_json::to_string(sel).unwrap();
+                    format!("(document.querySelector({sel_json}) || document.activeElement || document)")
+                }
+                None => "(document.activeElement || document)".to_string(),
+            };
+            let js = format!(
+                "(() => {{ const target = {target_expr}; \
+                 for (const type of ['keydown', 'keypress', 'keyup']) {{ \
+                   target.dispatchEvent(new KeyboardEvent(type, {{ key: {key_json}, bubbles: true, cancelable: true }})); \
+                 }} }})();"
+            );
+            eval_in_webview(core, &js)?;
+            Ok(ok_response())
+        }
         unknown => Err(JsonRpcError::new(
             JsonRpcError::METHOD_NOT_FOUND,
             format!("unknown tool {unknown}"),
         )),
     }
+}
+
+/// Resolve the main webview from the stashed AppHandle and run a JS snippet
+/// inside it. Fire-and-forget — `eval()` doesn't return a value.
+fn eval_in_webview(core: &Arc<CoreAppState>, js: &str) -> Result<(), JsonRpcError> {
+    use tauri::Manager;
+    let handle = core.app_handle.get().ok_or_else(|| {
+        JsonRpcError::new(
+            JsonRpcError::INTERNAL_ERROR,
+            "Tauri AppHandle not yet initialized".to_string(),
+        )
+    })?;
+    let window = handle.get_webview_window("main").ok_or_else(|| {
+        JsonRpcError::new(
+            JsonRpcError::INTERNAL_ERROR,
+            "main webview not found".to_string(),
+        )
+    })?;
+    window
+        .eval(js)
+        .map_err(|e| internal_err("webview.eval", e))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -682,7 +845,13 @@ mod tests {
         // iter 4
         assert!(names.contains(&"wait_for_change"));
         assert!(names.contains(&"get_session_snapshot"));
-        assert_eq!(names.len(), 16);
+        // iter 5 — webview automation (screenshot + click/type/scroll/key)
+        assert!(names.contains(&"webview_screenshot"));
+        assert!(names.contains(&"webview_click"));
+        assert!(names.contains(&"webview_type"));
+        assert!(names.contains(&"webview_scroll"));
+        assert!(names.contains(&"webview_press_key"));
+        assert_eq!(names.len(), 21);
     }
 
     #[test]
