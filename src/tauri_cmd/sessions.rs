@@ -1,5 +1,6 @@
 //! Session lifecycle commands.
 
+use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingBridge;
 use crate::storage::{Session, Storage};
 use crate::tauri_cmd::error::AppError;
@@ -75,6 +76,22 @@ pub async fn list_sessions(
         .await
         .map(|v| v.into_iter().map(Into::into).collect())
         .map_err(|e| AppError::DbError(e.to_string()))
+}
+
+/// Spawn (or re-spawn) the agent subprocesses for an existing session row.
+/// Idempotent — `core::AppState::ensure_session_started` is a no-op if the
+/// session is already live. Mirrors the Slint-era click-to-respawn flow:
+/// frontend SessionView calls this on mount so a reopened bot-hq window
+/// brings Brian + Rain back via `claude --resume <uuid>`.
+#[tauri::command]
+#[specta::specta]
+pub async fn respawn_session(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+) -> Result<(), AppError> {
+    core.ensure_session_started(&session_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 #[tauri::command]

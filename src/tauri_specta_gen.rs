@@ -23,6 +23,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::create_session,
         sessions::get_session,
         sessions::list_sessions,
+        sessions::respawn_session,
         sessions::close_session,
         // Messages
         messages::get_session_messages,

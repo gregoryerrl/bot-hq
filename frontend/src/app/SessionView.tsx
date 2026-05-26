@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { useTauriQuery } from "../hooks/useInvoke";
+import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
@@ -9,6 +9,7 @@ import { authorColorClass } from "../components/AuthorBadge";
 import { cn } from "../lib/cn";
 import type {
   AgentMessage,
+  AppError,
   PendingChoiceView,
   SessionInfo,
 } from "../lib/bindings";
@@ -21,6 +22,25 @@ export function SessionView() {
   const { data: session } = useTauriQuery<SessionInfo | null>("get_session", {
     session_id: sessionId,
   });
+
+  // Respawn agents on mount. Idempotent — `ensure_session_started` returns
+  // immediately if Brian/Rain are already running. Mirrors the Slint-era
+  // click-to-respawn flow; reads `brian_claude_session_id` /
+  // `rain_claude_session_id` and passes `--resume <uuid>` so the agents
+  // come back with full memory.
+  const respawn = useTauriMutation<void, { session_id: string }>(
+    "respawn_session",
+  );
+  const [respawnError, setRespawnError] = useState<AppError | null>(null);
+  useEffect(() => {
+    if (!sessionId) return;
+    setRespawnError(null);
+    respawn.mutate(
+      { session_id: sessionId },
+      { onError: (err) => setRespawnError(err) },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
   const { data: initialMsgs = [] } = useTauriQuery<AgentMessage[]>(
     "get_session_messages",
@@ -78,6 +98,25 @@ export function SessionView() {
             </p>
           </div>
         </header>
+
+        {respawnError && (
+          <div className="border-b border-neutral-800 bg-red-950/30 px-4 py-2 text-xs text-red-200">
+            <span className="font-semibold">Agent spawn failed:</span>{" "}
+            {respawnError.message}{" "}
+            <button
+              className="ml-2 underline"
+              onClick={() => {
+                setRespawnError(null);
+                respawn.mutate(
+                  { session_id: sessionId },
+                  { onError: (err) => setRespawnError(err) },
+                );
+              }}
+            >
+              retry
+            </button>
+          </div>
+        )}
 
         {choicesForSession.length > 0 && (
           <div className="border-b border-neutral-800 bg-purple-950/30 px-4 py-2 text-xs">
