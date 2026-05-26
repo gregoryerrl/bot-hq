@@ -210,6 +210,7 @@ export function ContextLibrary() {
               >
                 <button
                   onClick={() => toggleProject(projectId)}
+                  aria-expanded={!collapsed}
                   className="flex w-full items-center justify-between border-b border-default px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-neutral-300 hover:bg-elevated"
                 >
                   <span className="flex items-center gap-2">
