@@ -69,6 +69,26 @@ export function SessionView() {
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
   const [screenshotPending, setScreenshotPending] = useState(false);
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
+  // Track which (choiceId, option) is mid-resolve so the clicked button can
+  // show "…" and ALL options for that choice disable until the invoke
+  // settles. Banner naturally disappears on the next list_pending_choices
+  // refresh after resolve_choice lands.
+  const [resolvingChoice, setResolvingChoice] = useState<
+    Map<string, string>
+  >(new Map());
+
+  const handleResolveChoice = async (choiceId: string, picked: string) => {
+    setResolvingChoice((s) => new Map(s).set(choiceId, picked));
+    try {
+      await invoke("resolve_choice", { choiceId, picked });
+    } finally {
+      setResolvingChoice((s) => {
+        const next = new Map(s);
+        next.delete(choiceId);
+        return next;
+      });
+    }
+  };
   useEffect(() => {
     if (!sessionId) return;
     setRespawnError(null);
@@ -271,31 +291,33 @@ export function SessionView() {
                 : `Awaiting ${choicesForSession.length} choices`}
             </div>
             <div className="space-y-3">
-              {choicesForSession.map((choice) => (
-                <div
-                  key={choice.choice_id}
-                  className="border-l-2 border-purple-500/50 pl-3"
-                >
-                  <div className="text-purple-100">{choice.question}</div>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {choice.options.map((opt) => (
-                      <Button
-                        key={opt}
-                        size="sm"
-                        variant="primary"
-                        onClick={() =>
-                          invoke("resolve_choice", {
-                            choiceId: choice.choice_id,
-                            picked: opt,
-                          })
-                        }
-                      >
-                        {opt}
-                      </Button>
-                    ))}
+              {choicesForSession.map((choice) => {
+                const pendingOpt = resolvingChoice.get(choice.choice_id);
+                const isPending = pendingOpt !== undefined;
+                return (
+                  <div
+                    key={choice.choice_id}
+                    className="border-l-2 border-purple-500/50 pl-3"
+                  >
+                    <div className="text-purple-100">{choice.question}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {choice.options.map((opt) => (
+                        <Button
+                          key={opt}
+                          size="sm"
+                          variant="primary"
+                          disabled={isPending}
+                          onClick={() =>
+                            handleResolveChoice(choice.choice_id, opt)
+                          }
+                        >
+                          {pendingOpt === opt ? `${opt} …` : opt}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
