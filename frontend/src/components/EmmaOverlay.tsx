@@ -237,7 +237,7 @@ export function EmmaOverlay() {
               "hover:border-author-emma hover:text-white transition-colors",
             )}
           >
-            ↓
+            ↓ Jump to latest
           </button>
         )}
       </div>
