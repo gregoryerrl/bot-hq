@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { authorColorClass } from "./AuthorBadge";
@@ -29,6 +29,10 @@ export const ChatMessage = memo(function ChatMessage({
         — {message.content} —
       </div>
     );
+  }
+
+  if (message.kind === "tool_use" || message.kind === "tool_result") {
+    return <ToolMessage message={message} groupedWithPrev={groupedWithPrev} />;
   }
 
   return (
@@ -118,6 +122,127 @@ export const ChatMessage = memo(function ChatMessage({
     </article>
   );
 });
+
+// Collapsible row for tool_use / tool_result messages. Raw JSON in the
+// chat stream buries the agents' prose; this pulls them down to one-line
+// pills with click-to-expand. Parses the storage-layer JSON shape:
+//   tool_use:    { name, input | args, tool_use_id }
+//   tool_result: { tool_use_id, output | content }
+// Parser failures fall through to the raw content as a faint mono line.
+function ToolMessage({
+  message,
+  groupedWithPrev,
+}: {
+  message: AgentMessage;
+  groupedWithPrev?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const parsed = safeParse(message.content);
+  const isUse = message.kind === "tool_use";
+
+  // Best-effort summary line.
+  const toolName = isUse
+    ? (parsed?.name as string | undefined) ?? "tool"
+    : "result";
+  const previewSource = isUse
+    ? (parsed?.input ?? parsed?.args ?? parsed)
+    : (parsed?.output ?? parsed?.content ?? parsed);
+  const preview = formatPreview(previewSource, message.content);
+
+  return (
+    <article className={cn("mb-1", groupedWithPrev ? "mt-0" : "mt-2")}>
+      {!groupedWithPrev && (
+        <header className="mb-1 flex items-center gap-2">
+          <span
+            className={cn(
+              "text-[0.65rem] font-semibold uppercase tracking-wide",
+              authorColorClass(message.author),
+            )}
+          >
+            {message.author}
+          </span>
+          <span className="text-[0.65rem] text-neutral-600">
+            {formatRelative(message.created_at)}
+          </span>
+        </header>
+      )}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className={cn(
+          "flex w-full items-center gap-2 rounded border border-default bg-surface px-2 py-1 text-left",
+          "text-[0.7rem] text-neutral-400 hover:bg-elevated transition-colors",
+        )}
+        title={isUse ? "tool call" : "tool result"}
+      >
+        <span aria-hidden className="w-3 text-neutral-500">
+          {expanded ? "▾" : "▸"}
+        </span>
+        <span className="font-mono text-neutral-300">
+          {isUse ? "→" : "←"} {toolName}
+        </span>
+        <span className="flex-1 truncate font-mono text-neutral-500">
+          {preview}
+        </span>
+      </button>
+      {expanded && (
+        <pre className="mt-1 overflow-x-auto rounded border border-default bg-canvas px-3 py-2 font-mono text-[0.7rem] leading-relaxed text-neutral-300">
+          {(() => {
+            try {
+              return JSON.stringify(parsed ?? message.content, null, 2);
+            } catch {
+              return message.content;
+            }
+          })()}
+        </pre>
+      )}
+    </article>
+  );
+}
+
+function safeParse(raw: string): Record<string, unknown> | null {
+  try {
+    const v = JSON.parse(raw);
+    return typeof v === "object" && v !== null
+      ? (v as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+const PREVIEW_MAX = 80;
+
+function formatPreview(value: unknown, fallback: string): string {
+  if (value == null) return clip(fallback);
+  // Smart extraction for common tool shapes the agents emit a lot.
+  if (typeof value === "object" && value !== null) {
+    const v = value as Record<string, unknown>;
+    const known =
+      (typeof v.command === "string" && v.command) ||
+      (typeof v.file_path === "string" && v.file_path) ||
+      (typeof v.path === "string" && v.path) ||
+      (typeof v.pattern === "string" && v.pattern) ||
+      (typeof v.url === "string" && v.url) ||
+      (typeof v.text === "string" && v.text) ||
+      (typeof v.description === "string" && v.description);
+    if (known) return clip(known);
+    try {
+      return clip(JSON.stringify(value));
+    } catch {
+      return clip(String(value));
+    }
+  }
+  return clip(String(value));
+}
+
+function clip(s: string): string {
+  const single = s.replace(/\s+/g, " ").trim();
+  return single.length > PREVIEW_MAX
+    ? single.slice(0, PREVIEW_MAX - 1) + "…"
+    : single;
+}
 
 function formatRelative(iso: string): string {
   if (!iso) return "";
