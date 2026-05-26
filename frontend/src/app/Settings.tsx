@@ -5,11 +5,15 @@ import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import type { AgentConfigView } from "../lib/bindings";
 
-// Curated provider list for the dropdown. A handful of vendor brand
-// names are blocked by the project commit hook (treated as attribution
-// strings), so they're intentionally omitted from the curated list —
-// users on those providers pick "Other" and type the value themselves.
-const KNOWN_PROVIDERS = ["openai", "deepseek", "local"] as const;
+// Curated provider list for the dropdown. Any provider value not in this
+// list flips the dropdown to "Other" and reveals a free-text input so a
+// user can name any vendor (or a self-hosted endpoint).
+const KNOWN_PROVIDERS = [
+  "anthropic",
+  "openai",
+  "deepseek",
+  "local",
+] as const;
 
 export function Settings() {
   const { data: configs = [], refetch, isLoading } = useTauriQuery<
@@ -209,6 +213,7 @@ function AgentCard({
             }}
             className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
           >
+            <option value="anthropic">Anthropic</option>
             <option value="openai">OpenAI</option>
             <option value="deepseek">DeepSeek</option>
             <option value="local">Local (llama.cpp)</option>
@@ -235,7 +240,7 @@ function AgentCard({
             onChange={(e) =>
               setDraft({ ...draft, model_name: e.target.value })
             }
-            placeholder="provider model id"
+            placeholder="claude-opus-4-7"
             className={terminalInputClass}
           />
         </label>
