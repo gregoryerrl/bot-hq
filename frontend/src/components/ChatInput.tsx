@@ -57,6 +57,9 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
         type="submit"
         variant="primary"
         disabled={!value.trim() || disabled || sending}
+        // Fixed min-width so the label cycle (Send → Sending… → Send)
+        // doesn't dance the layout on every submit.
+        className="min-w-[5.5rem]"
       >
         {sending ? "Sending…" : "Send"}
       </Button>
