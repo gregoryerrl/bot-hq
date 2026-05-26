@@ -1,79 +1,277 @@
+import { useState } from "react";
+import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { useTauriEvent } from "../hooks/useTauriEvent";
+import { Button } from "../components/ui/Button";
 import { Card, CardDescription, CardTitle } from "../components/ui/Card";
+import { cn } from "../lib/cn";
+import type {
+  AppError,
+  InstalledPluginView,
+  PluginStatus,
+} from "../lib/bindings";
 
 /**
- * The Rust-side plugin runtime is scaffolded (`src/plugins/{manifest,loader,
- * capabilities,heartbeat}.rs`) but live install + enable/disable Tauri
- * commands aren't wired yet. This page documents the manifest schema so a
- * dev can drop a plugin into `<data_dir>/plugins/<id>/` and see it on next
- * restart of bot-hq once the install commands land.
+ * Live PluginManager: list installed plugins, install new ones (URL or
+ * local path), enable/disable/uninstall, watch heartbeat status updates
+ * via Tauri events.
  */
 export function PluginManager() {
+  const [installSource, setInstallSource] = useState("");
+  const [installError, setInstallError] = useState<AppError | null>(null);
+
+  const list = useTauriQuery<InstalledPluginView[]>(
+    "list_installed_plugins",
+    {},
+    { refetchInterval: 10_000 },
+  );
+  const plugins = list.data ?? [];
+
+  const install = useTauriMutation<InstalledPluginView, { source: string }>(
+    "install_plugin",
+  );
+  const enable = useTauriMutation<void, { pluginId: string }>("enable_plugin");
+  const disable = useTauriMutation<void, { pluginId: string }>("disable_plugin");
+  const uninstall = useTauriMutation<void, { pluginId: string }>(
+    "uninstall_plugin",
+  );
+
+  // Refetch on any backend state change. The plugin:state-changed event
+  // covers enable/disable; uninstall + crash carry their own events.
+  useTauriEvent<{ plugin_id: string }>(
+    "plugin:state-changed",
+    () => void list.refetch(),
+    [list.refetch],
+  );
+  useTauriEvent<{ plugin_id: string }>(
+    "plugin:uninstalled",
+    () => void list.refetch(),
+    [list.refetch],
+  );
+  useTauriEvent<{ plugin_id: string }>(
+    "plugin:crashed",
+    () => void list.refetch(),
+    [list.refetch],
+  );
+
+  const handleInstall = () => {
+    const source = installSource.trim();
+    if (!source || install.isPending) return;
+    setInstallError(null);
+    install.mutate(
+      { source },
+      {
+        onSuccess: () => {
+          setInstallSource("");
+          void list.refetch();
+        },
+        onError: (err) => setInstallError(err),
+      },
+    );
+  };
+
   return (
     <div className="mx-auto h-full max-w-3xl overflow-auto px-6 py-6">
-      <div className="mb-6">
+      <header className="mb-6 flex items-baseline gap-3">
         <h1 className="text-xl font-semibold tracking-tight">Plugins</h1>
-        <p className="mt-1 text-sm text-neutral-400">
-          Plugin loader is scaffolded; live install commands land in a
-          follow-up batch. Plugins live at{" "}
-          <code className="rounded bg-elevated px-1 py-0.5 font-mono text-[0.78rem] text-neutral-200">
-            ~/.bot-hq/plugins/&lt;id&gt;/
-          </code>{" "}
-          with a top-level{" "}
-          <code className="rounded bg-elevated px-1 py-0.5 font-mono text-[0.78rem] text-neutral-200">
-            manifest.json
-          </code>
-          .
-        </p>
-      </div>
+        <span className="text-xs text-neutral-500">
+          {plugins.length} installed
+        </span>
+      </header>
 
-      <Card className="mb-4 bg-surface">
-        <CardTitle>No live plugins yet</CardTitle>
-        <CardDescription>
-          The Rust runtime can load + capability-gate manifests; the frontend
-          install flow (Tauri command + enable/disable toggle) is the next
-          shipping step. Until then, plugins drop in via the filesystem.
-        </CardDescription>
-      </Card>
-
-      <Card className="bg-surface">
-        <CardTitle>Manifest schema (v1)</CardTitle>
-        <pre className="mt-3 overflow-x-auto rounded border border-default bg-canvas px-3 py-2 font-mono text-[0.75rem] leading-relaxed text-neutral-200">
-          {`{
-  "id": "discord",
-  "name": "Discord Bridge",
-  "version": "0.1.0",
-  "entry": "index.html",
-  "requested_capabilities": [
-    "cl_index_search",
-    "session_doc_search"
-  ],
-  "slots": [
-    { "slot_name": "sidebar.bottom", "panel_route": null },
-    { "slot_name": null, "panel_route": "/plugins/discord" }
-  ]
-}`}
-        </pre>
-        <div className="mt-3 space-y-2 text-xs text-neutral-400">
-          <p>
-            <b className="text-neutral-200">id</b> — lowercase alphanumeric +{" "}
-            <code className="font-mono">-</code>; doubles as the iframe origin
-            host (<code className="font-mono">plugin-&lt;id&gt;.localhost</code>
-            ).
-          </p>
-          <p>
-            <b className="text-neutral-200">requested_capabilities</b> —
-            command names the plugin will invoke; each maps to{" "}
-            <code className="font-mono">allow-&lt;kebab-cmd&gt;</code> in the
-            generated Tauri capability JSON.
-          </p>
-          <p>
-            <b className="text-neutral-200">slots</b> — UI contribution
-            points. Either <code className="font-mono">slot_name</code> (host
-            slot the iframe renders into) or{" "}
-            <code className="font-mono">panel_route</code> (top-level route).
-          </p>
+      <section className="mb-6">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={installSource}
+            onChange={(e) => setInstallSource(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleInstall();
+              }
+            }}
+            placeholder="URL to manifest.json or local directory path…"
+            className="flex-1 rounded-md border border-default bg-elevated px-3 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          />
+          <Button
+            variant="primary"
+            onClick={handleInstall}
+            disabled={!installSource.trim() || install.isPending}
+          >
+            {install.isPending ? "Installing…" : "Install"}
+          </Button>
         </div>
-      </Card>
+        {installError && (
+          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-default bg-red-950/30 px-3 py-2 text-xs text-red-200">
+            <div>
+              <span className="font-semibold">{installError.kind}:</span>{" "}
+              {installError.message}
+            </div>
+            <button
+              className="underline"
+              onClick={() => setInstallError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+      </section>
+
+      {list.isLoading ? (
+        <p className="text-sm text-neutral-500">Loading…</p>
+      ) : plugins.length === 0 ? (
+        <Card className="bg-surface">
+          <CardTitle>No plugins installed</CardTitle>
+          <CardDescription>
+            Paste a manifest URL or a local plugin directory above to install.
+            Plugins live at{" "}
+            <code className="rounded bg-elevated px-1 py-0.5 font-mono text-[0.78rem] text-neutral-200">
+              ~/.bot-hq/plugins/&lt;id&gt;/
+            </code>{" "}
+            once installed.
+          </CardDescription>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {plugins.map((p) => (
+            <PluginCard
+              key={p.id}
+              plugin={p}
+              onToggle={() => {
+                const action = p.enabled ? disable : enable;
+                action.mutate({ pluginId: p.id });
+              }}
+              onUninstall={() => {
+                if (window.confirm(`Uninstall plugin "${p.name}"?`)) {
+                  uninstall.mutate({ pluginId: p.id });
+                }
+              }}
+              busy={
+                (p.enabled && disable.isPending) ||
+                (!p.enabled && enable.isPending) ||
+                uninstall.isPending
+              }
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
+}
+
+interface PluginCardProps {
+  plugin: InstalledPluginView;
+  onToggle: () => void;
+  onUninstall: () => void;
+  busy: boolean;
+}
+
+function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
+  const { manifest, status, enabled } = plugin;
+  const panelSlot = manifest.slots?.find((s) => s.panel_route);
+  const namedSlots = (manifest.slots ?? []).filter((s) => s.slot_name);
+
+  return (
+    <Card className="bg-surface">
+      <header className="mb-2 flex items-center gap-2">
+        <span
+          aria-hidden
+          className={cn("size-2 rounded-full", statusDotClass(status, enabled))}
+          title={statusLabel(status, enabled)}
+        />
+        <CardTitle>{plugin.name}</CardTitle>
+        <span className="rounded bg-elevated px-1.5 py-0.5 font-mono text-[0.65rem] text-neutral-300">
+          v{plugin.version}
+        </span>
+        <span className="ml-auto text-[0.65rem] text-neutral-500">
+          {statusLabel(status, enabled)}
+        </span>
+      </header>
+
+      <div className="mb-3 text-xs text-neutral-400">
+        <code className="font-mono">{manifest.id}</code> · entry{" "}
+        <code className="font-mono">{manifest.entry}</code>
+        {manifest.requested_capabilities &&
+          manifest.requested_capabilities.length > 0 && (
+            <>
+              {" "}
+              · caps:{" "}
+              {manifest.requested_capabilities.map((c) => (
+                <code
+                  key={c}
+                  className="ml-1 rounded bg-elevated px-1 py-0.5 font-mono text-[0.65rem] text-neutral-300"
+                >
+                  {c}
+                </code>
+              ))}
+            </>
+          )}
+      </div>
+
+      {namedSlots.length > 0 && (
+        <div className="mb-3 text-[0.65rem] text-neutral-500">
+          slots:{" "}
+          {namedSlots.map((s, i) => (
+            <code
+              key={i}
+              className="ml-1 rounded bg-elevated px-1 py-0.5 font-mono text-neutral-300"
+            >
+              {s.slot_name}
+            </code>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant={enabled ? "secondary" : "primary"}
+          size="sm"
+          onClick={onToggle}
+          disabled={busy}
+        >
+          {enabled ? "Disable" : "Enable"}
+        </Button>
+        <Button
+          variant="danger"
+          size="sm"
+          onClick={onUninstall}
+          disabled={busy}
+        >
+          Uninstall
+        </Button>
+        {panelSlot?.panel_route && (
+          <a
+            href={`#${panelSlot.panel_route}`}
+            className="ml-auto text-xs text-blue-400 underline hover:text-blue-300"
+          >
+            Open panel →
+          </a>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function statusDotClass(status: PluginStatus, enabled: boolean): string {
+  if (!enabled) return "bg-neutral-600";
+  switch (status.kind) {
+    case "Healthy":
+      return "bg-emerald-400";
+    case "Slow":
+      return "animate-pulse bg-amber-400";
+    case "Crashed":
+      return "bg-red-400";
+  }
+}
+
+function statusLabel(status: PluginStatus, enabled: boolean): string {
+  if (!enabled) return "disabled";
+  switch (status.kind) {
+    case "Healthy":
+      return "healthy";
+    case "Slow":
+      return `slow · ${status.miss_count} miss${status.miss_count === 1 ? "" : "es"}`;
+    case "Crashed":
+      return "crashed";
+  }
 }
