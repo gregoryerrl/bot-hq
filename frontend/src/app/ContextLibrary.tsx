@@ -20,9 +20,27 @@ export function ContextLibrary() {
   const [rescanReport, setRescanReport] = useState<ClRescanReportView | null>(
     null,
   );
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(
-    new Set(),
-  );
+  // Persist expand/collapse choices across route navigation + restarts.
+  // Lazy-init from localStorage so the first render already reflects prior state.
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("bot-hq.cl.collapsedProjects");
+      if (raw) return new Set(JSON.parse(raw) as string[]);
+    } catch {
+      // Bad JSON or localStorage disabled — fall through to empty.
+    }
+    return new Set();
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "bot-hq.cl.collapsedProjects",
+        JSON.stringify([...collapsedProjects]),
+      );
+    } catch {
+      // Storage quota or disabled — silent no-op.
+    }
+  }, [collapsedProjects]);
 
   const {
     data: entries = [],
