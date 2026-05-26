@@ -7,6 +7,7 @@ import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
 import { ChatMessage } from "../components/ChatMessage";
 import { DocumentPane } from "../components/DocumentPane";
+import { PhasePillRow, type Phase } from "../components/PhasePill";
 import { cn } from "../lib/cn";
 import type {
   AgentMessage,
@@ -16,6 +17,36 @@ import type {
 } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { invoke } from "@tauri-apps/api/core";
+
+interface PhaseChangedPayload {
+  session_id: string;
+  agent: string;
+  target: string;
+}
+
+const PHASE_NAMES: Phase[] = ["investigate", "plan", "apply", "verify"];
+
+function normalizePhase(raw: string | null | undefined): Phase | null {
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  // Accept either single-letter chips ("I"/"P"/"A"/"V") or full names.
+  switch (lower) {
+    case "i":
+    case "investigate":
+      return "investigate";
+    case "p":
+    case "plan":
+      return "plan";
+    case "a":
+    case "apply":
+      return "apply";
+    case "v":
+    case "verify":
+      return "verify";
+    default:
+      return PHASE_NAMES.includes(lower as Phase) ? (lower as Phase) : null;
+  }
+}
 
 // Stable reference so zustand selector doesn't return a fresh array per call
 // (would trigger infinite re-renders via Object.is).
@@ -84,6 +115,28 @@ export function SessionView() {
     (c) => c.session_id === sessionId,
   );
 
+  // IPAV phase indicator. Initial value comes from `get_session_phase`
+  // (in-memory on `CoreAppState`); subsequent updates arrive via the
+  // `session:phase_changed` Tauri event fired by the bridge subscriber.
+  const { data: initialPhase } = useTauriQuery<string | null>(
+    "get_session_phase",
+    { sessionId },
+    { enabled: !!sessionId },
+  );
+  const [phase, setPhase] = useState<Phase | null>(null);
+  useEffect(() => {
+    setPhase(normalizePhase(initialPhase));
+  }, [initialPhase]);
+  useTauriEvent<PhaseChangedPayload>(
+    "session:phase_changed",
+    (payload) => {
+      if (payload.session_id !== sessionId) return;
+      const next = normalizePhase(payload.target);
+      if (next) setPhase(next);
+    },
+    [sessionId],
+  );
+
   // Auto-scroll on new messages when user is at-bottom; show "↓ N new" jump
   // button when they've scrolled up.
   const { ref: scrollRef, stuck, scrollToBottom } =
@@ -113,8 +166,8 @@ export function SessionView() {
     <div className="grid h-full grid-cols-[3fr_2fr] grid-rows-1">
       <section className="flex h-full min-h-0 flex-col border-r border-default">
         <header className="flex items-center justify-between border-b border-default px-4 py-3">
-          <div>
-            <h1 className="text-base font-semibold tracking-tight">
+          <div className="min-w-0">
+            <h1 className="truncate text-base font-semibold tracking-tight">
               {session.title}
             </h1>
             <p className="text-xs text-neutral-500">
@@ -125,31 +178,57 @@ export function SessionView() {
               <code className="font-mono text-[0.65rem] text-neutral-600">
                 {sessionId.slice(0, 8)}
               </code>
+              {phase && (
+                <>
+                  <span className="mx-2 text-neutral-700">·</span>
+                  <span className="text-neutral-400">
+                    Phase: <span className="text-neutral-200">{phase}</span>
+                  </span>
+                </>
+              )}
             </p>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            title="Capture the bot-hq window and share with Brian + Rain"
-            disabled={screenshotPending}
-            onClick={async () => {
-              try {
-                setScreenshotPending(true);
-                setScreenshotError(null);
-                await invoke("capture_window_screenshot", { sessionId });
-              } catch (e) {
-                const msg =
-                  e && typeof e === "object" && "message" in e
-                    ? String((e as { message: unknown }).message)
-                    : String(e);
-                setScreenshotError(msg);
-              } finally {
-                setScreenshotPending(false);
-              }
-            }}
-          >
-            {screenshotPending ? "…" : "📸 Share view"}
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <PhasePillRow
+              selected={phase ?? "investigate"}
+              onSelect={(next) => {
+                setPhase(next);
+                invoke("advance_session_phase", {
+                  sessionId,
+                  target: next,
+                }).catch((e) => {
+                  // Roll back optimistic state; the next event refresh
+                  // will reconcile if the bridge state actually advanced.
+                  setPhase(normalizePhase(initialPhase));
+                  // eslint-disable-next-line no-console
+                  console.warn("advance_session_phase failed", e);
+                });
+              }}
+            />
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Capture the bot-hq window and share with Brian + Rain"
+              disabled={screenshotPending}
+              onClick={async () => {
+                try {
+                  setScreenshotPending(true);
+                  setScreenshotError(null);
+                  await invoke("capture_window_screenshot", { sessionId });
+                } catch (e) {
+                  const msg =
+                    e && typeof e === "object" && "message" in e
+                      ? String((e as { message: unknown }).message)
+                      : String(e);
+                  setScreenshotError(msg);
+                } finally {
+                  setScreenshotPending(false);
+                }
+              }}
+            >
+              {screenshotPending ? "…" : "📸"}
+            </Button>
+          </div>
         </header>
 
         {respawnError && (

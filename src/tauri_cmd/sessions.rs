@@ -1,5 +1,6 @@
 //! Session lifecycle commands.
 
+use crate::core::ipav::IpavPhase;
 use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingBridge;
 use crate::storage::{Session, Storage};
@@ -90,6 +91,45 @@ pub async fn respawn_session(
     session_id: String,
 ) -> Result<(), AppError> {
     core.ensure_session_started(&session_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// Read the current IPAV phase for a session. Returns one of "investigate" /
+/// "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
+/// state is in-memory only — restart loses it). Frontend SessionView header
+/// uses this for the initial phase chip; subsequent updates come from the
+/// `session:phase_changed` Tauri event.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_session_phase(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+) -> Result<Option<String>, AppError> {
+    Ok(core
+        .current_phase(&session_id)
+        .await
+        .map(|p| p.name().to_ascii_lowercase()))
+}
+
+/// Advance the IPAV phase from the UI. Target accepts single-letter chips
+/// (`I`/`P`/`A`/`V`) or full names (`Investigate`/`Plan`/`Apply`/`Verify`).
+/// Synthesizes a phase-change message in storage + feeds the transition
+/// notice to both agents' stdin so they pick up the new phase as a prompt.
+#[tauri::command]
+#[specta::specta]
+pub async fn advance_session_phase(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+    target: String,
+) -> Result<(), AppError> {
+    let phase = IpavPhase::parse(&target).ok_or_else(|| {
+        AppError::Validation(format!(
+            "invalid phase {target:?} \u{2014} expected {}",
+            IpavPhase::error_hint()
+        ))
+    })?;
+    core.advance_phase(&session_id, phase)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))
 }
