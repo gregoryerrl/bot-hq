@@ -11,35 +11,38 @@ For recent changes see [`PROGRESS.md`](PROGRESS.md).
 
 ## Current state (TL;DR)
 
-bot-hq is built and used. The rebuild milestone (v0.1.0) shipped. Post-
-rebuild work added a UI redesign, an external driver MCP server, and a
-two-layer policy enforcement layer (MCP tools + git hooks). Session-
-level permission grants are in flight — the in-memory + mirrored-JSON
-plumbing is functional but the work is uncommitted at the time of
-writing.
+bot-hq is built and used. The rebuild milestone (v0.1.0) shipped, the
+session-permission grants work landed, and the **Tauri v2 migration
+landed 2026-05-26** on branch `tauri-v2-migration` (7 batches; see
+PROGRESS.md). React frontend in `frontend/`, Slint deleted, Rust core
+untouched.
 
-196 tests passing, release build clean.
+253 Rust tests passing (205 lib + 31 external_mcp + 7 signaling + 10
+storage) plus 12 frontend Vitest. Release build clean.
 
 ---
 
 ## In flight
 
-### Session permission grants (post-rebuild, uncommitted)
+### Tauri v2 migration follow-ups
 
-Status: functional, uncommitted in working tree.
-
-The `grant_session_permission` / `revoke_session_permission` /
-`list_session_permissions` MCP tools are wired through the bridge and
-mirrored to `<data_dir>/.local/session-permissions/<sid>.json`. The
-`pre-push` git hook reads the mirror to allow pushes without prompting.
-Tests pass.
+Status: branch `tauri-v2-migration` shipped 7 batches; awaiting user
+manual-smoke + merge to main.
 
 **To finish:**
-- Decide whether to commit the in-flight state as one logical commit or
-  split (e.g. session_permissions module + hook integration as one;
-  bridge wiring as a second).
-- Smoke-test the full grant → hook flow end-to-end in a real session.
-- Confirm grant scopes show in Settings → Sessions for transparency.
+- Run `cargo run --release` from the worktree; verify dashboard, new
+  session, IPAV tabs, Emma overlay all work.
+- Wire `broadcast_to_session` Tauri command — `ChatInput` callbacks are
+  inert until a `core::broadcast` helper lands. Needed for chat-driven
+  agent prompts to actually reach the agents.
+- Port `view_model::parse_diff_lines` to a Rust-side `compute_apply_diff`
+  Tauri command + a TypeScript renderer for the A tab git-diff view.
+- Plugin install flow (manage `tauri_cmd/plugins.rs`) + iframe
+  ping/pong frontend channel for the heartbeat watcher.
+- Replace the placeholder `icons/icon.png` with the real bot-hq mark.
+- Update `~/.bot-hq/projects/bot-hq/{conventions,notes}.md` to drop the
+  Slint sections + slint-rust-docs cross-references (CL is shared, so
+  deferred until the migration merges to main).
 
 ---
 

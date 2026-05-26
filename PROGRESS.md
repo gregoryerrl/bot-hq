@@ -11,11 +11,88 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-202 tests passing (154 lib + 31 external MCP + 10 storage + 7 server).
-Release build clean. **Tauri v2 migration decided 2026-05-26** (big-bang
-shape; design doc at `docs/plans/2026-05-26-tauri-v2-migration-design.md`,
-awaiting fresh-session implementation handoff). IPAV document-tabs
-feature shipped 2026-05-24; Round 4 audit shipped 11 findings 2026-05-22.
+253 tests passing (205 lib + 31 external MCP + 7 signaling + 10 storage)
+plus 12 frontend Vitest. Release build clean. **Tauri v2 migration landed
+2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
+→ Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
+`frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
+`src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
+constraint.
+
+---
+
+## 2026-05-26 — Tauri v2 migration landed (7 batches)
+
+After the design doc (`docs/plans/2026-05-26-tauri-v2-migration-design.md`,
+committed at `7d5d400` + `a9c0abf` on main) and a Plan-phase correction
+to the Batch 1 BatchEmitter design (event-triggered batch fetch via the
+existing `messages_for_session(since_id)` query, not content-pushing —
+the bridge is zero-delta), the migration shipped across 7 batches on
+branch `tauri-v2-migration`:
+
+- **Batch 0** (`eba536e` + `83d4ca7` + `3f39ce2`) — Tauri v2 + Vite +
+  React 18 + Tailwind + Vitest foundation. `tauri-specta` smoke-tested
+  with empty command set; frontend smoke test renders.
+- **Batch 1** (`6bc81ee`) — Tauri events layer. `src/tauri_events/`
+  with `BatchEmitter` (since_id watermark, N=20 / 50ms coalesce) +
+  `bridge_subscriber` routing `SignalingEvent` variants to typed Tauri
+  emits. 12 new tests.
+- **Batch 2** (`1579eb7`) — Tauri command layer. `src/tauri_cmd/` with
+  19 commands across sessions / messages / agent_configs / cl / policy /
+  questions / docs domains + `AppError` enum + view types. tauri-specta
+  exports to TypeScript with i64 → number bigint behavior.
+- **Batch 3** (`30432d4`) — Plugin module scaffolding. `src/plugins/`
+  with manifest parser (strict id validation), loader, per-plugin
+  capability JSON generator (`https://plugin-<id>.localhost/*`),
+  heartbeat watcher (3-strike model). 25 new tests including the
+  design-doc coverage-gap (dummy iframe origin chain).
+- **Batch 4** (`6aa9f1e`) — main.rs Tauri bootstrap. Slint event loop
+  out, `tauri::Builder` in. Tokio multi-thread on workers, Tauri on OS
+  main thread. All existing setup (CLI dispatch, panic hook, child
+  reaper, signal task, MCP servers, Emma auto-spawn, CL init,
+  tauri-specta TS export) preserved verbatim. Bridge subscriber wired in
+  Tauri `setup()`.
+- **Batch 5** (`84cddb4`) — React frontend. App shell + 5 routes
+  (Dashboard, SessionView, Settings, ContextLibrary, PluginManager) +
+  Emma overlay. shadcn-style minimal primitives by hand. Zustand stores
+  (chat watermark dedupe), TanStack Query hooks (`useTauriQuery`,
+  `useTauriMutation`), `useTauriEvent` wrapper. 12 Vitest passing.
+- **Batch 6** (`8dbb03d`) — Slint removal. Deleted `src/ui/`, `ui/`,
+  dropped `slint` + `slint-build` deps. Updated `ARCHITECTURE.md` +
+  `CLAUDE.md` to reflect the new UI. -11,875 LOC across the diff
+  (Cargo.lock shed Slint's transitive dep tree).
+
+**Zero-delta verified:** `src/agents/`, `src/core/`, `src/policy/`,
+`src/storage/`, `src/signaling/` untouched through every commit. The
+Rust core's 202 baseline tests (now 253 with new Tauri layer tests)
+stay green at each batch boundary.
+
+**Path A locked** for force-flush on turn-end: design doc's
+`SignalingEvent::TurnEnded` variant deferred (would be ~10 LOC core
+delta). Accepting ≤50ms tail latency at turn-end as the cost of true
+zero-delta. Revisit only if profiling shows perceived lag.
+
+**Push grant:** session-level `scope=specific`, `branches=["tauri-v2-migration"]`
+granted at start of Apply phase. Each batch pushed without per-action
+prompt; main branch protections unaffected.
+
+**Open items deferred:**
+
+- `broadcast_to_session` Tauri command — `ChatInput` callbacks wired but
+  inert until a `core::broadcast` helper lands.
+- Live `compute_apply_diff` rendering in the A tab — port
+  `view_model::parse_diff_lines` to a Rust-side command + frontend
+  renderer.
+- Plugin install flow + heartbeat ping/pong frontend channel.
+- Real bot-hq app icon (current `icons/icon.png` is a 32×32 placeholder).
+- Manual smoke checklist run-through (new-session → agent streams →
+  Emma overlay → IPAV tabs → close).
+- CL doc updates (`~/.bot-hq/projects/bot-hq/conventions.md` + `notes.md`)
+  to drop Slint references — deferred until merge to main since the CL
+  is shared across sessions.
+
+**Reference:** Elves (mvmcode.github.io/elves) — Tauri v2 + sqlite + PTY
++ AI agents, validates the architecture in the same domain.
 
 ---
 
