@@ -38,6 +38,11 @@ export function Settings() {
     useCallback(() => dirtyRef.current.size > 0, [dirtyCount]),
   );
 
+  // Save-all uses a counter as a fan-out signal: incrementing it triggers
+  // every AgentRow's effect, which checks its own dirty state and saves
+  // if needed. Avoids lifting draft state out of AgentRow.
+  const [saveAllSignal, setSaveAllSignal] = useState(0);
+
   return (
     <div className="mx-auto h-full max-w-3xl overflow-auto px-6 py-6">
       {blocker.state === "blocked" && (
@@ -53,16 +58,28 @@ export function Settings() {
           </Button>
         </div>
       )}
-      <div className="mb-6">
-        <h1 className="text-xl font-semibold tracking-tight">
-          Agent configuration
-        </h1>
-        <p className="mt-1 max-w-prose text-sm text-neutral-400">
-          Per-agent provider, model, base URL, and auth token. Tokens are
-          stored as plaintext in sqlite for v1 — OS keychain migration is
-          tracked separately. Brian + Rain spawn with these settings on next
-          session start.
-        </p>
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">
+            Agent configuration
+          </h1>
+          <p className="mt-1 max-w-prose text-sm text-neutral-400">
+            Per-agent provider, model, base URL, and auth token. Tokens are
+            stored as plaintext in sqlite for v1 — OS keychain migration is
+            tracked separately. Brian + Rain spawn with these settings on next
+            session start.
+          </p>
+        </div>
+        {dirtyCount > 0 && (
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => setSaveAllSignal((n) => n + 1)}
+            disabled={upsert.isPending}
+          >
+            Save all ({dirtyCount})
+          </Button>
+        )}
       </div>
       {isLoading ? (
         <div className="space-y-3">
@@ -86,6 +103,7 @@ export function Settings() {
               }}
               onDirtyChange={(dirty) => setDirty(c.agent_name, dirty)}
               isSaving={upsert.isPending}
+              saveAllSignal={saveAllSignal}
             />
           ))}
         </div>
@@ -99,17 +117,31 @@ function AgentRow({
   onSave,
   onDirtyChange,
   isSaving,
+  saveAllSignal,
 }: {
   cfg: AgentConfigView;
   onSave: (next: AgentConfigView) => Promise<void>;
   onDirtyChange: (dirty: boolean) => void;
   isSaving?: boolean;
+  saveAllSignal: number;
 }) {
   const [draft, setDraft] = useState(cfg);
   const [tokenVisible, setTokenVisible] = useState(false);
   const [saved, setSaved] = useState(false);
   const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
   const accentDotClass = authorColorClass(cfg.agent_name);
+
+  // Save-all fan-out: parent increments saveAllSignal; each dirty row
+  // triggers its own save. Skipping initial mount via a ref guards against
+  // saving on first render when saveAllSignal=0.
+  const lastSeenSignal = useRef(saveAllSignal);
+  useEffect(() => {
+    if (saveAllSignal === lastSeenSignal.current) return;
+    lastSeenSignal.current = saveAllSignal;
+    if (!dirty) return;
+    onSave(draft).then(() => setSaved(true));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveAllSignal]);
 
   // Auto-clear the "Saved ✓" badge after 2s so it doesn't linger forever.
   useEffect(() => {
