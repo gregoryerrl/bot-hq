@@ -38,6 +38,15 @@ export function Dashboard() {
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [repoPath, setRepoPath] = useState("");
+  const [filter, setFilter] = useState("");
+
+  // Case-insensitive substring filter on session title. In-memory so no
+  // debounce needed — the list isn't a paginated query.
+  const filteredSessions = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((s) => s.title.toLowerCase().includes(q));
+  }, [sessions, filter]);
 
   const handleCreate = async () => {
     if (!title.trim()) return;
@@ -60,7 +69,9 @@ export function Dashboard() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Sessions</h1>
           <p className="mt-1 text-xs text-neutral-500">
-            {sessions.length} active
+            {filter.trim()
+              ? `${filteredSessions.length} of ${sessions.length} match`
+              : `${sessions.length} active`}
           </p>
         </div>
         <Button variant="primary" onClick={() => setCreating(!creating)}>
@@ -97,6 +108,27 @@ export function Dashboard() {
           />
         </div>
       )}
+      {sessions.length > 0 && (
+        <div className="relative mb-4">
+          <Input
+            placeholder="Filter sessions by title…"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            className="w-full pr-8"
+          />
+          {filter.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setFilter("")}
+              aria-label="Clear filter"
+              title="Clear filter"
+              className="absolute inset-y-0 right-0 flex w-8 items-center justify-center text-neutral-500 hover:text-neutral-100"
+            >
+              ×
+            </button>
+          )}
+        </div>
+      )}
       {error && (
         <div className="mb-6 rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3">
           <p className="text-sm text-red-200">
@@ -128,9 +160,15 @@ export function Dashboard() {
             Click <b>+ New session</b> to spawn a Brian + Rain duo on a scope.
           </p>
         </div>
+      ) : filteredSessions.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-default p-10 text-center">
+          <p className="text-sm text-neutral-400">
+            No sessions match <code className="font-mono">{filter.trim()}</code>.
+          </p>
+        </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {sessions.map((s) => (
+          {filteredSessions.map((s) => (
             <SessionTile
               key={s.id}
               session={s}
