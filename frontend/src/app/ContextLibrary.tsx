@@ -5,6 +5,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import type {
+  ClFileContentView,
   ClIndexEntryView,
   ClRescanReportView,
   ProjectView,
@@ -63,6 +64,23 @@ export function ContextLibrary() {
     {},
     { refetchInterval: 60_000 },
   );
+
+  // File-content viewer: clicking a row opens a side pane with the file
+  // content. State holds the {project, file_path} we're currently viewing
+  // (null = pane closed). The actual fetch is a useTauriQuery so React
+  // Query handles cache + loading + errors.
+  const [selectedFile, setSelectedFile] = useState<{
+    project: string;
+    filePath: string;
+  } | null>(null);
+  const { data: fileContent, isFetching: fileLoading, error: fileError } =
+    useTauriQuery<ClFileContentView>(
+      "cl_read_file",
+      selectedFile
+        ? { project: selectedFile.project, filePath: selectedFile.filePath }
+        : {},
+      { enabled: selectedFile !== null },
+    );
 
   const byProject = useMemo(() => {
     const acc: Record<string, ClIndexEntryView[]> = {};
@@ -271,39 +289,109 @@ export function ContextLibrary() {
                 </button>
                 {!collapsed && (
                   <div className="divide-y divide-subtle">
-                    {files.map((f) => (
-                      <div
-                        key={f.id}
-                        className="px-3 py-2 transition-colors hover:bg-elevated"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <code className="font-mono text-xs text-neutral-200">
-                            {f.file_path}
-                          </code>
-                          <span
-                            className="shrink-0 text-[0.65rem] text-neutral-500"
-                            title={f.updated_at}
-                          >
-                            {formatRelative(f.updated_at)}
-                          </span>
-                        </div>
-                        {f.description && (
-                          <p className="mt-1 text-xs leading-relaxed text-neutral-400">
-                            {f.description}
-                          </p>
-                        )}
-                        {f.tags && (
-                          <p className="mt-1 text-[0.65rem] text-neutral-600">
-                            tags: {f.tags}
-                          </p>
-                        )}
-                      </div>
-                    ))}
+                    {files.map((f) => {
+                      const isSelected =
+                        selectedFile?.project === f.project_id &&
+                        selectedFile?.filePath === f.file_path;
+                      return (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() =>
+                            setSelectedFile({
+                              project: f.project_id,
+                              filePath: f.file_path,
+                            })
+                          }
+                          className={cn(
+                            "block w-full px-3 py-2 text-left transition-colors",
+                            isSelected
+                              ? "bg-accent/10 ring-1 ring-inset ring-accent/40"
+                              : "hover:bg-elevated",
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <code className="font-mono text-xs text-neutral-200">
+                              {f.file_path}
+                            </code>
+                            <span
+                              className="shrink-0 text-[0.65rem] text-neutral-500"
+                              title={f.updated_at}
+                            >
+                              {formatRelative(f.updated_at)}
+                            </span>
+                          </div>
+                          {f.description && (
+                            <p className="mt-1 text-xs leading-relaxed text-neutral-400">
+                              {f.description}
+                            </p>
+                          )}
+                          {f.tags && (
+                            <p className="mt-1 text-[0.65rem] text-neutral-600">
+                              tags: {f.tags}
+                            </p>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </section>
             );
           })}
+        </div>
+      )}
+      {selectedFile && (
+        <div
+          className="fixed inset-y-0 right-0 z-30 flex w-[min(720px,60vw)] flex-col border-l border-default bg-canvas shadow-2xl"
+          role="dialog"
+          aria-label={`File ${selectedFile.filePath}`}
+        >
+          <header className="flex items-center justify-between gap-3 border-b border-default px-4 py-2">
+            <div className="min-w-0">
+              <p className="truncate font-mono text-xs text-neutral-200">
+                {selectedFile.filePath}
+              </p>
+              <p className="text-[0.65rem] text-neutral-500">
+                {selectedFile.project}
+                {fileContent && (
+                  <>
+                    <span className="mx-2 text-neutral-700">·</span>
+                    {fileContent.size_bytes.toLocaleString()} bytes
+                    {fileContent.truncated && (
+                      <>
+                        <span className="mx-2 text-neutral-700">·</span>
+                        <span className="text-amber-400">
+                          truncated to 1 MB
+                        </span>
+                      </>
+                    )}
+                  </>
+                )}
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setSelectedFile(null)}
+              aria-label="Close file"
+            >
+              ×
+            </Button>
+          </header>
+          <div className="min-h-0 flex-1 overflow-auto">
+            {fileLoading && !fileContent ? (
+              <div className="p-6 text-sm text-neutral-500">Loading…</div>
+            ) : fileError ? (
+              <div className="p-6 text-sm text-red-300">
+                Failed to read: {String(fileError.message ?? fileError)}
+              </div>
+            ) : fileContent ? (
+              <pre className="overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-xs text-neutral-200">
+                {fileContent.content}
+              </pre>
+            ) : null}
+          </div>
         </div>
       )}
     </div>

@@ -166,6 +166,21 @@ async listProjects() : Promise<Result<ProjectView[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Read a single CL file's contents, resolved as
+ * `<data_dir>/projects/<project>/<file_path>`. Hard cap on read size so a
+ * very large file can't pin the IPC. Path-traversal guarded by
+ * canonicalizing both the project root and the resolved file and
+ * rejecting any read that escapes.
+ */
+async clReadFile(project: string, filePath: string) : Promise<Result<ClFileContentView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_read_file", { project, filePath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async grantSessionPermission(sessionId: string, action: PermissionActionView, scope: GrantScopeView) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("grant_session_permission", { sessionId, action, scope }) };
@@ -294,6 +309,18 @@ export type AppError =
  * Tauri capability check denied a plugin's request.
  */
 { kind: "CapabilityDenied"; message: string }
+export type ClFileContentView = { project: string; file_path: string; content: string; 
+/**
+ * Byte size of the file as it lives on disk. The `content` field is
+ * the full text — included as a sanity check for the frontend.
+ */
+size_bytes: number; 
+/**
+ * True when the file was truncated because it exceeded the read cap.
+ * Frontend can show a "showing first 1 MB" notice and offer to open
+ * in $EDITOR (deferred).
+ */
+truncated: boolean }
 export type ClFolderView = { id: number; project_id: string; folder_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }

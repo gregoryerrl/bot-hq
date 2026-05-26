@@ -158,6 +158,88 @@ pub async fn cl_rescan(
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ClFileContentView {
+    pub project: String,
+    pub file_path: String,
+    pub content: String,
+    /// Byte size of the file as it lives on disk. The `content` field is
+    /// the full text — included as a sanity check for the frontend.
+    pub size_bytes: u64,
+    /// True when the file was truncated because it exceeded the read cap.
+    /// Frontend can show a "showing first 1 MB" notice and offer to open
+    /// in $EDITOR (deferred).
+    pub truncated: bool,
+}
+
+/// Read a single CL file's contents, resolved as
+/// `<data_dir>/projects/<project>/<file_path>`. Hard cap on read size so a
+/// very large file can't pin the IPC. Path-traversal guarded by
+/// canonicalizing both the project root and the resolved file and
+/// rejecting any read that escapes.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_read_file(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    project: String,
+    file_path: String,
+) -> Result<ClFileContentView, AppError> {
+    const MAX_READ_BYTES: u64 = 1_048_576; // 1 MB
+
+    let data_dir = bridge
+        .data_dir()
+        .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?
+        .clone();
+    let project_root = data_dir.join("projects").join(&project);
+
+    // Canonicalize the project root first. If it doesn't exist (typo or
+    // project removed), refuse rather than letting a relative file path
+    // escape the data_dir.
+    let project_root_real = project_root
+        .canonicalize()
+        .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))?;
+
+    let candidate = project_root_real.join(&file_path);
+    let candidate_real = candidate
+        .canonicalize()
+        .map_err(|e| AppError::NotFound(format!("file '{file_path}' not found: {e}")))?;
+
+    if !candidate_real.starts_with(&project_root_real) {
+        return Err(AppError::Internal(
+            "path traversal rejected — file resolves outside project root".into(),
+        ));
+    }
+
+    let meta = std::fs::metadata(&candidate_real)
+        .map_err(|e| AppError::Internal(format!("metadata: {e}")))?;
+    if !meta.is_file() {
+        return Err(AppError::Internal("not a regular file".into()));
+    }
+    let size_bytes = meta.len();
+
+    let (content, truncated) = if size_bytes > MAX_READ_BYTES {
+        use std::io::Read;
+        let mut buf = vec![0u8; MAX_READ_BYTES as usize];
+        let mut f = std::fs::File::open(&candidate_real)
+            .map_err(|e| AppError::Internal(format!("open: {e}")))?;
+        let n = f.read(&mut buf).map_err(|e| AppError::Internal(format!("read: {e}")))?;
+        buf.truncate(n);
+        (String::from_utf8_lossy(&buf).into_owned(), true)
+    } else {
+        let bytes = std::fs::read(&candidate_real)
+            .map_err(|e| AppError::Internal(format!("read: {e}")))?;
+        (String::from_utf8_lossy(&bytes).into_owned(), false)
+    };
+
+    Ok(ClFileContentView {
+        project,
+        file_path,
+        content,
+        size_bytes,
+        truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
