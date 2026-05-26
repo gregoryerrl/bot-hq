@@ -13,8 +13,8 @@ use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingEvent;
 use crate::storage::{AgentConfig as DbAgentConfig, Message};
 use crate::{
-    AgentConfigRow, AppState as SlintAppState, AppWindow, CLFileEntry, ChatMsg, NewSessionProject,
-    PendingQuestion, SessionTile,
+    AgentConfigRow, AppState as SlintAppState, AppWindow, CLFileEntry, ChatMsg, DiffLine,
+    NewSessionProject, PendingQuestion, SessionTile,
 };
 use once_cell::sync::Lazy;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel, Weak};
@@ -2412,6 +2412,41 @@ async fn compute_apply_diff(
     .flatten()
 }
 
+/// Classify each line of a unified `git diff` for color-coded rendering in
+/// the Apply tab. Order-sensitive: `--- ` / `+++ ` (file headers, trailing
+/// space) must be checked before the single-char `+` / `-` to avoid
+/// misclassifying file markers as add/remove lines.
+fn parse_diff_lines(diff: &str) -> Vec<DiffLine> {
+    diff.lines()
+        .map(|line| {
+            let kind = if line.starts_with("diff --git ")
+                || line.starts_with("index ")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ ")
+                || line.starts_with("new file mode ")
+                || line.starts_with("deleted file mode ")
+                || line.starts_with("similarity index ")
+                || line.starts_with("rename from ")
+                || line.starts_with("rename to ")
+            {
+                "file"
+            } else if line.starts_with("@@ ") {
+                "hunk"
+            } else if line.starts_with('+') {
+                "add"
+            } else if line.starts_with('-') {
+                "remove"
+            } else {
+                "context"
+            };
+            DiffLine {
+                kind: SharedString::from(kind),
+                text: SharedString::from(line),
+            }
+        })
+        .collect()
+}
+
 /// Push the doc-pane state via the Slint event loop. Centralizes the
 /// `upgrade_in_event_loop` hop so refresh_session_docs branches stay tight.
 fn push_doc_pane_state(
@@ -2432,16 +2467,27 @@ fn push_doc_pane_state(
     });
 }
 
+/// Push the Apply-tab diff rows to the Slint model. Pass an empty Vec to
+/// clear the diff block (non-A tabs, no-diff cases). Paired with
+/// `push_doc_pane_state` for the trailing-text path.
+fn push_doc_diff_lines(weak: &Weak<AppWindow>, lines: Vec<DiffLine>) {
+    let _ = weak.upgrade_in_event_loop(move |handle| {
+        let app = handle.global::<SlintAppState>();
+        app.set_active_doc_diff_lines(ModelRc::new(VecModel::from(lines)));
+    });
+}
+
 /// Refresh the SessionView's right-pane DocumentPane for the currently-
-/// selected IPAV tab. When a phase has multiple docs, they're concatenated
-/// into a single scrollable strip with "DOC N/M · slug · timestamp"
-/// separators — no chip / expansion UI; the ScrollView handles overflow.
+/// selected IPAV tab.
 ///
-/// I/P/V tabs: all `session_documents` with `phase = <tab>`, newest-first.
+/// I/P/V tabs: all `session_documents` with `phase = <tab>`, newest-first,
+/// joined with "DOC N/M · slug · timestamp" separators into the
+/// `active-doc-content` flat-text pane. Diff-lines model is cleared.
 ///
-/// A tab: git diff (if available) prepended as the first entry, followed
-/// by all `phase='apply'` session docs. Falls back to empty state when
-/// the working repo is missing or there's no content at all.
+/// A tab: `git diff` is parsed into `active-doc-diff-lines` (color-coded
+/// per-line model). Any `phase='apply'` session docs render BELOW the
+/// diff via the flat-text path. Empty-state shows when both diff AND
+/// docs are empty.
 async fn refresh_session_docs(
     weak: &Weak<AppWindow>,
     core: &Arc<CoreAppState>,
@@ -2464,28 +2510,31 @@ async fn refresh_session_docs(
     }
     .to_string();
 
-    // (slug, body, updated_at) per entry, in display order.
+    // (slug, body, updated_at) per session-doc entry, in display order.
     let mut entries: Vec<(String, String, String)> = Vec::new();
+    // Color-coded diff rows for the Apply tab. Always pushed at the end
+    // (empty Vec for I/P/V tabs and for A-tab-with-no-diff).
+    let mut diff_lines: Vec<DiffLine> = Vec::new();
 
-    // Apply tab: prepend git diff if available. Distinct empty-state when
-    // no working repo at all (short-circuits before doc loading).
+    // Apply tab: compute diff into a separate model. The trailing apply-
+    // phase session docs are still loaded as normal `entries` below.
     if selected_tab == "A" {
         match core.working_repo_path(session_id).await {
             Some(repo) => {
                 let sha = core.session_start_sha(session_id).await;
                 if let Some((diff, note)) = compute_apply_diff(repo, sha).await {
-                    let content = match note {
-                        Some(n) => format!("{n}\n\n{diff}"),
-                        None => diff,
-                    };
-                    entries.push((
-                        "git diff".to_string(),
-                        content,
-                        chrono::Utc::now().to_rfc3339(),
-                    ));
+                    if let Some(n) = note {
+                        // Anchor-lost prefix becomes a yellow file-header row.
+                        diff_lines.push(DiffLine {
+                            kind: SharedString::from("file"),
+                            text: SharedString::from(n),
+                        });
+                    }
+                    diff_lines.extend(parse_diff_lines(&diff));
                 }
             }
             None => {
+                push_doc_diff_lines(weak, Vec::new());
                 push_doc_pane_state(
                     weak,
                     String::new(),
@@ -2499,7 +2548,8 @@ async fn refresh_session_docs(
         }
     }
 
-    // Load phase-tagged docs and append after any synthetic entry (the diff).
+    // Load phase-tagged docs (apply-phase docs for A tab; all docs for
+    // I/P/V tabs — the diff path doesn't touch these).
     let docs = core
         .bridge
         .session_doc_search(session_id, None, Some(phase))
@@ -2509,7 +2559,13 @@ async fn refresh_session_docs(
         entries.push((d.slug, d.body, d.updated_at));
     }
 
-    if entries.is_empty() {
+    // Push diff-lines first so the Slint model is in place before the
+    // flat-text path updates `active-doc-content`.
+    let diff_count = diff_lines.len();
+    push_doc_diff_lines(weak, diff_lines);
+
+    // Empty-state: nothing to render at all.
+    if entries.is_empty() && diff_count == 0 {
         push_doc_pane_state(
             weak,
             String::new(),
@@ -2517,6 +2573,19 @@ async fn refresh_session_docs(
             String::new(),
             0,
             empty_msg,
+        );
+        return;
+    }
+
+    // Diff present but no trailing docs: clear the flat-text pane.
+    if entries.is_empty() {
+        push_doc_pane_state(
+            weak,
+            String::new(),
+            String::new(),
+            String::new(),
+            0,
+            String::new(),
         );
         return;
     }
@@ -3233,4 +3302,78 @@ fn clear_cl_dirty(weak: &Weak<AppWindow>) {
     let _ = weak.upgrade_in_event_loop(move |handle| {
         handle.global::<SlintAppState>().set_cl_dirty(false);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_diff_lines;
+
+    #[test]
+    fn parse_diff_lines_classifies_each_kind() {
+        let diff = "\
+diff --git a/foo.rs b/foo.rs
+index 1234567..89abcde 100644
+--- a/foo.rs
++++ b/foo.rs
+@@ -1,5 +1,6 @@
+ fn main() {
+-    println!(\"old\");
++    println!(\"new\");
++    println!(\"added\");
+ }
+";
+        let lines = parse_diff_lines(diff);
+        let kinds: Vec<&str> = lines.iter().map(|l| l.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "file",    // diff --git
+                "file",    // index
+                "file",    // ---
+                "file",    // +++
+                "hunk",    // @@
+                "context", // fn main()
+                "remove",  // -    println!("old");
+                "add",     // +    println!("new");
+                "add",     // +    println!("added");
+                "context", // }
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_diff_lines_handles_file_rename_markers() {
+        let diff = "\
+diff --git a/old.rs b/new.rs
+similarity index 95%
+rename from old.rs
+rename to new.rs
+new file mode 100644
+deleted file mode 100644
+";
+        let lines = parse_diff_lines(diff);
+        for line in &lines {
+            assert_eq!(line.kind, "file", "line {:?} should be file", line.text);
+        }
+    }
+
+    #[test]
+    fn parse_diff_lines_returns_empty_for_empty_input() {
+        assert_eq!(parse_diff_lines("").len(), 0);
+    }
+
+    #[test]
+    fn parse_diff_lines_distinguishes_file_marker_from_remove_line() {
+        // A removal line `--foo` would be misclassified as `file` if the
+        // classifier didn't require the trailing space on `--- `.
+        let diff = "\
+@@ -1,2 +1,2 @@
+-foo
+--bar
++baz
+";
+        let lines = parse_diff_lines(diff);
+        let kinds: Vec<&str> = lines.iter().map(|l| l.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["hunk", "remove", "remove", "add"]);
+    }
 }

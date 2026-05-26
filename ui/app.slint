@@ -86,6 +86,16 @@ export struct CLFileEntry {
     description: string,
 }
 
+// One classified line of a unified `git diff`. The Apply tab's DocumentPane
+// renders a `for` loop over `AppState.active-doc-diff-lines` to color each
+// row per its `kind`. Parsed from `git diff` output in
+// `view_model::parse_diff_lines`.
+export struct DiffLine {
+    // "add" | "remove" | "hunk" | "file" | "context"
+    kind: string,
+    text: string,
+}
+
 // ---- Design tokens ---------------------------------------------------------
 
 export global Theme {
@@ -139,6 +149,16 @@ export global Theme {
     out property <color> author-brian: #ffb68b;
     out property <color> author-rain:  #ddb7ff;
     out property <color> author-emma:  #ffb68b;
+
+    // Diff rendering (GitHub dark-mode palette). DiffLineRow auto-sizes
+    // height for wrap; no fixed row-height token is needed.
+    out property <color> diff-add-bg:    #12291e;
+    out property <color> diff-add-fg:    #57ab5a;
+    out property <color> diff-remove-bg: #2d1217;
+    out property <color> diff-remove-fg: #f47067;
+    out property <color> diff-hunk-bg:   #1b2b4e;
+    out property <color> diff-hunk-fg:   #7dafde;
+    out property <color> diff-file-fg:   #e6be7b;
 
     // Typography (system fallback if not installed).
     out property <string> font-display: "Hanken Grotesk";
@@ -364,6 +384,9 @@ export global AppState {
     in property <string> active-doc-updated-at;
     in property <int> active-doc-count;
     in property <string> active-doc-empty-msg;
+    // Color-coded diff rows for the Apply tab. Empty on I/P/V tabs and when
+    // no diff is present. Populated by view_model::push_doc_diff_lines.
+    in property <[DiffLine]> active-doc-diff-lines;
     callback emma-send(string);
     callback choice-clicked(string, string);
     callback create-session(string, string);
@@ -1759,15 +1782,47 @@ component ChatInput inherits Rectangle {
     }
 }
 
+// One colored row of a `git diff` for the Apply-tab document pane. Auto-
+// sizes to wrap-content height so long lines wrap onto multiple visual
+// rows while the tinted background spans the full wrapped block (a long
+// `+` line stays contiguous green across all wrap rows). The unified
+// ScrollView relies on this pattern matching the working ChatBubble
+// shape at ui/app.slint:1486 + ui/app.slint:2098-2119.
+component DiffLineRow inherits Rectangle {
+    in property <DiffLine> line;
+    background: line.kind == "add"    ? Theme.diff-add-bg
+              : line.kind == "remove" ? Theme.diff-remove-bg
+              : line.kind == "hunk"   ? Theme.diff-hunk-bg
+              :                          transparent;
+    HorizontalLayout {
+        padding-left: Theme.s-2;
+        padding-right: Theme.s-2;
+        Text {
+            text: line.text;
+            color: line.kind == "add"    ? Theme.diff-add-fg
+                 : line.kind == "remove" ? Theme.diff-remove-fg
+                 : line.kind == "hunk"   ? Theme.diff-hunk-fg
+                 : line.kind == "file"   ? Theme.diff-file-fg
+                 :                          Theme.on-surface;
+            font-family: Theme.font-mono;
+            font-size:   Theme.font-code;
+            font-weight: line.kind == "file" ? Theme.w-semi : Theme.w-regular;
+            wrap: word-wrap;
+            horizontal-alignment: left;
+        }
+    }
+}
+
 // Document pane — right-hand side of the SessionView 60/40 split. Displays
 // session_documents tagged with the phase matching `selected-doc-tab`. The
 // PhaseSelector lives in this pane's header (pills are pure tab switchers
 // per B4 — they no longer advance the IPAV phase; agents do that via MCP).
 //
-// B6 ships the skeleton (PhaseSelector + empty body); B7 wires the doc
-// loading via `refresh_session_docs` for I/P/V tabs; B8 wires the git diff
-// path for the A tab; B10 polishes empty-state copy + the "N more" chip
-// + Flickable viewport handling per slint-rust-docs/patterns/layouts.md.
+// The body is a single VerticalLayout holding up to three conditional
+// children (diff block, trailing-text block, empty-state). The A tab
+// can show the diff block + trailing text together (two stacked
+// ScrollViews); I/P/V tabs only ever show the trailing text or the
+// empty state.
 component DocumentPane inherits Rectangle {
     background: Theme.surface;
     border-width: 1px;
@@ -1799,30 +1854,53 @@ component DocumentPane inherits Rectangle {
                 background: Theme.outline-variant;
             }
         }
-        // Body: doc content when present, empty-state copy otherwise.
+        // Body. One unified ScrollView holds both the colored diff and the
+        // trailing apply-phase docs (or just the trailing text on I/P/V
+        // tabs). Empty-state is its own branch when both are absent.
+        //
+        // Why one ScrollView works: the `for` inside the diff wrapper is
+        // nested in a Rectangle with explicit `height: N * 18px`, so the
+        // outer ScrollView sees a child with KNOWN height and can sum
+        // layout normally — no manual viewport-height needed. This
+        // bypasses the slint-rust-docs/patterns/layouts.md:107 pitfall
+        // (which only bites when `for` is a DIRECT child of the
+        // ScrollView).
         Rectangle {
             vertical-stretch: 1;
             background: Theme.surface;
-            if AppState.active-doc-content == "":
-                VerticalLayout {
-                    alignment: center;
-                    padding: Theme.s-4;
-                    Text {
-                        text: AppState.active-doc-empty-msg;
-                        color: Theme.on-surface-variant;
-                        font-family: Theme.font-mono;
-                        font-size: Theme.font-code;
-                        horizontal-alignment: center;
-                    }
+            if AppState.active-doc-diff-lines.length == 0
+                    && AppState.active-doc-content == "": VerticalLayout {
+                alignment: center;
+                padding: Theme.s-4;
+                Text {
+                    text: AppState.active-doc-empty-msg;
+                    color: Theme.on-surface-variant;
+                    font-family: Theme.font-mono;
+                    font-size: Theme.font-code;
+                    horizontal-alignment: center;
                 }
-            if AppState.active-doc-content != "":
-                ScrollView {
-                    // Lock horizontal viewport so long unwrapped lines (typical
-                    // for git diff output / code blocks in session docs) don't
-                    // blow the pane wider than the column. Text wrap: word-wrap
-                    // handles the visual reflow.
-                    viewport-width: self.visible-width;
-                    VerticalLayout {
+            }
+            if AppState.active-doc-diff-lines.length > 0
+                    || AppState.active-doc-content != "": ScrollView {
+                // Lock horizontal viewport so long word-wrapped text fits
+                // the column. Diff rows have wrap: no-wrap and overflow:
+                // clip, so they're unaffected.
+                viewport-width: self.visible-width;
+                VerticalLayout {
+                    spacing: 0px;
+                    // Diff block — same `for line: DiffLineRow` pattern as
+                    // the chat ScrollView at ui/app.slint:2098-2119. Rows
+                    // auto-size to wrap-content height; parent layout
+                    // sums children naturally.
+                    if AppState.active-doc-diff-lines.length > 0: VerticalLayout {
+                        spacing: 0px;
+                        for line in AppState.active-doc-diff-lines: DiffLineRow {
+                            line: line;
+                        }
+                    }
+                    // Trailing docs — lifted out of its old ScrollView
+                    // and rendered inline in the unified scroll.
+                    if AppState.active-doc-content != "": VerticalLayout {
                         padding: Theme.s-3;
                         spacing: Theme.s-2;
                         alignment: start;
@@ -1833,16 +1911,16 @@ component DocumentPane inherits Rectangle {
                             font-size: Theme.font-code;
                             wrap: word-wrap;
                         }
-                        if AppState.active-doc-slug != "":
-                            Text {
-                                text: AppState.active-doc-slug + " · " + AppState.active-doc-updated-at;
-                                color: Theme.on-surface-variant;
-                                font-family: Theme.font-mono;
-                                font-size: Theme.font-code;
-                                letter-spacing: Theme.ls-label;
-                            }
+                        if AppState.active-doc-slug != "": Text {
+                            text: AppState.active-doc-slug + " · " + AppState.active-doc-updated-at;
+                            color: Theme.on-surface-variant;
+                            font-family: Theme.font-mono;
+                            font-size: Theme.font-code;
+                            letter-spacing: Theme.ls-label;
+                        }
                     }
                 }
+            }
         }
     }
 }

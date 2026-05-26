@@ -147,6 +147,18 @@ column: all messages (user, Brian, Rain, phase_change) interleaved by
 rain=purple, emma=green, user=blue, system=muted grey). Phase-change
 events render as centered muted-italic system lines.
 
+**DocumentPane (right half of the SessionView split):** session
+documents tab-grouped by IPAV phase (I/P/A/V). I/P/V tabs render
+matching `session_documents` rows as flat markdown text. The A tab is
+special — it auto-renders a live color-coded `git diff` of the
+session's working repo (GitHub dark-mode palette: green adds, red
+removes, blue hunk headers, yellow file headers), parsed by
+`view_model::parse_diff_lines` (prefix classifier). `phase="apply"`
+session docs render inline below the diff in the same unified
+ScrollView. Long diff lines word-wrap to multiple visual rows; each
+wrapped block's tinted background spans all of its visual rows so
+add/remove blocks stay visually contiguous.
+
 **Pending-choice / awaiting banner** sits above the prompt bar (purple
 for choice, red for awaiting). Choice buttons render inline at the
 agent message position AND in the banner.
