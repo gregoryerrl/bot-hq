@@ -322,41 +322,48 @@ export function SessionView() {
           </div>
         )}
 
-        <div className="relative min-h-0 flex-1 overflow-hidden">
-          <div
-            ref={scrollRef}
-            className="h-full overflow-auto px-4 py-3"
-          >
-            {messagesLoading && messages.length === 0 ? (
-              <MessagesSkeleton />
-            ) : messages.length === 0 ? (
-              <p className="text-sm text-neutral-500">No messages yet…</p>
-            ) : (
-              messages.map((m, i) => (
-                <ChatMessage
-                  key={m.id}
-                  message={m}
-                  groupedWithPrev={
-                    i > 0 &&
-                    m.kind !== "phase_change" &&
-                    messages[i - 1].kind !== "phase_change" &&
-                    messages[i - 1].author === m.author
-                  }
-                />
-              ))
-            )}
-          </div>
+        {/*
+         * Single scroll boundary: the scroll container IS the positioning
+         * context for the floating "Jump to latest" button. The button is
+         * absolutely positioned inside the scroll container itself with
+         * `position: sticky`-equivalent layout via inset offsets, kept
+         * out of the document flow so it doesn't push messages.
+         */}
+        <div
+          ref={scrollRef}
+          className="relative min-h-0 flex-1 overflow-auto px-4 py-3"
+        >
+          {messagesLoading && messages.length === 0 ? (
+            <MessagesSkeleton />
+          ) : messages.length === 0 ? (
+            <p className="text-sm text-neutral-500">No messages yet…</p>
+          ) : (
+            messages.map((m, i) => (
+              <ChatMessage
+                key={m.id}
+                message={m}
+                groupedWithPrev={
+                  i > 0 &&
+                  m.kind !== "phase_change" &&
+                  messages[i - 1].kind !== "phase_change" &&
+                  messages[i - 1].author === m.author
+                }
+              />
+            ))
+          )}
           {!stuck && messages.length > 0 && (
-            <button
-              onClick={scrollToBottom}
-              className={cn(
-                "absolute bottom-3 right-3 inline-flex items-center gap-1 rounded-full",
-                "border border-default bg-overlay px-3 py-1 text-xs text-neutral-200 shadow-lg",
-                "hover:border-accent hover:text-white transition-colors",
-              )}
-            >
-              ↓ Jump to latest
-            </button>
+            <div className="pointer-events-none sticky bottom-0 flex justify-end pr-1 pt-2">
+              <button
+                onClick={scrollToBottom}
+                className={cn(
+                  "pointer-events-auto inline-flex items-center gap-1 rounded-full",
+                  "border border-default bg-overlay px-3 py-1 text-xs text-neutral-200 shadow-lg",
+                  "hover:border-accent hover:text-white transition-colors",
+                )}
+              >
+                ↓ Jump to latest
+              </button>
+            </div>
           )}
         </div>
 

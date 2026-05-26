@@ -209,36 +209,40 @@ export function EmmaOverlay() {
           </button>
         </div>
       )}
-      <div className="relative flex-1 overflow-hidden">
-        <div ref={scrollRef} className="h-full overflow-auto px-3 py-3">
-          {messages.length === 0 ? (
-            <p className="text-sm text-neutral-500">Say hi to Emma…</p>
-          ) : (
-            messages.map((m, i) => (
-              <ChatMessage
-                key={m.id}
-                message={m}
-                groupedWithPrev={
-                  i > 0 &&
-                  m.kind !== "phase_change" &&
-                  messages[i - 1].kind !== "phase_change" &&
-                  messages[i - 1].author === m.author
-                }
-              />
-            ))
-          )}
-        </div>
+      {/* Single scroll boundary — see SessionView for the same pattern. */}
+      <div
+        ref={scrollRef}
+        className="relative flex-1 overflow-auto px-3 py-3"
+      >
+        {messages.length === 0 ? (
+          <p className="text-sm text-neutral-500">Say hi to Emma…</p>
+        ) : (
+          messages.map((m, i) => (
+            <ChatMessage
+              key={m.id}
+              message={m}
+              groupedWithPrev={
+                i > 0 &&
+                m.kind !== "phase_change" &&
+                messages[i - 1].kind !== "phase_change" &&
+                messages[i - 1].author === m.author
+              }
+            />
+          ))
+        )}
         {!stuck && messages.length > 0 && (
-          <button
-            onClick={scrollToBottom}
-            className={cn(
-              "absolute bottom-3 right-3 inline-flex items-center gap-1 rounded-full",
-              "border border-default bg-overlay px-3 py-1 text-xs text-neutral-200 shadow-lg",
-              "hover:border-author-emma hover:text-white transition-colors",
-            )}
-          >
-            ↓ Jump to latest
-          </button>
+          <div className="pointer-events-none sticky bottom-0 flex justify-end pr-1 pt-2">
+            <button
+              onClick={scrollToBottom}
+              className={cn(
+                "pointer-events-auto inline-flex items-center gap-1 rounded-full",
+                "border border-default bg-overlay px-3 py-1 text-xs text-neutral-200 shadow-lg",
+                "hover:border-author-emma hover:text-white transition-colors",
+              )}
+            >
+              ↓ Jump to latest
+            </button>
+          </div>
         )}
       </div>
       <div className="border-t border-default">
