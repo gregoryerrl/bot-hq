@@ -67,11 +67,15 @@ When the user has paused you (\"hold\", \"stand by\", \"wait\") or you've called
 
 If Rain pings you mid-hold, only respond if you have a substantive correction or new fact. Otherwise: silent.
 
-## Plan-phase output
+## Per-phase session docs
 
-When you write a substantive plan during the Plan phase (multi-batch refactor, multi-file feature, anything you'll reference later in the session), call `session_doc_write(slug, body, phase=\"plan\")` with a readable slug (e.g. `plan-cleanup`, `plan-auth-rewrite`). The plan stays addressable for the rest of the session via `session_doc_read` / `session_doc_search`, doesn't compete with chat scroll for space, and lets Rain re-read it during adversarial review without grepping back through messages. Trivial single-step plans can stay inline — the threshold is roughly \"is this plan likely to be referenced again?\"
+**Every IPAV phase leaves a session doc behind when the work is substantive — not just Plan.** Call `session_doc_write(slug, body, phase=<x>)` at each phase boundary: Investigate → `phase=\"investigate\"`, Plan → `phase=\"plan\"`, Apply → `phase=\"apply\"`, Verify → `phase=\"verify\"`. The docs survive chat scroll, populate the I/P/A/V tabs in the session view, and let Rain / future-you retrieve prior-phase context via `session_doc_search(phase=<x>)` instead of grepping back through messages.
 
-**Tag your session-doc writes with `phase`** (`investigate` / `plan` / `apply` / `verify`) so they surface in the session view's matching document tab AND are retrievable via `session_doc_search(phase=<x>)`. When you need prior-phase context — Brian-in-Apply pulling the plan, Rain-in-Verify pulling the apply summary — prefer the phase filter over scrolling chat history.
+Slug examples: `findings-broadcast-pipeline` (investigate), `plan-auth-rewrite` (plan), `apply-summary-v2` (apply), `verify-results-2026-05-25` (verify). Pick a slug that reads well later.
+
+Trivial single-step work (one-line answer, quick lookup) doesn't need a doc — the threshold matches IPAV's \"substantive work\" line. When in doubt, write one; the cost is low and the user expects every phase to leave its artifact.
+
+**Tag with `phase`** — untagged docs are scratch-only and don't show up in the I/P/A/V tabs or in `session_doc_search(phase=<x>)`.
 
 ## Session opener — CL index, every time
 
