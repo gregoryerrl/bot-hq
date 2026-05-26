@@ -1,12 +1,27 @@
 import { render, screen } from "@testing-library/react";
-import { describe, it, expect } from "vitest";
-import App from "./App";
+import { describe, it, expect, vi } from "vitest";
+import { Dashboard } from "./app/Dashboard";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 
-describe("App", () => {
-  it("renders the bot-hq shell title", () => {
-    render(<App />);
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn().mockResolvedValue([]),
+}));
+
+describe("Dashboard route", () => {
+  it("shows the sessions heading", async () => {
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
     expect(
-      screen.getByRole("heading", { level: 1, name: /bot-hq/i }),
+      await screen.findByRole("heading", { name: /sessions/i }),
     ).toBeInTheDocument();
   });
 });
