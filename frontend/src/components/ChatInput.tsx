@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Button } from "./ui/Button";
 import { Textarea } from "./ui/Textarea";
 
@@ -7,6 +7,16 @@ interface ChatInputProps {
   onSend: (text: string) => Promise<void> | void;
   disabled?: boolean;
 }
+
+// macOS uses ⌘; everywhere else show "Ctrl". Detection is best-effort:
+// `navigator.platform` is deprecated but still populated; falling back to
+// userAgent keeps the hint correct on common platforms without pulling in a
+// dep. Computed once at module-load — no need to track changes.
+const isMac =
+  typeof navigator !== "undefined" &&
+  (/Mac|iPhone|iPad/i.test(navigator.platform) ||
+    /Mac|iPhone|iPad/i.test(navigator.userAgent));
+const modKeyLabel = isMac ? "⌘" : "Ctrl";
 
 export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
   const [value, setValue] = useState("");
@@ -36,23 +46,36 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
     }
   };
 
+  // Stable identity so the hint <kbd> elements don't reflow on every render.
+  const hint = useMemo(() => `${modKeyLabel}↵`, []);
+
   return (
     <form onSubmit={handleSubmit} className="flex items-end gap-2 p-3">
-      <Textarea
-        ref={textareaRef}
-        rows={2}
-        placeholder={placeholder ?? "Message…"}
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            handleSubmit(e as unknown as FormEvent);
-          }
-        }}
-        disabled={disabled || sending}
-        className="flex-1 resize-none"
-      />
+      <div className="relative flex-1">
+        <Textarea
+          ref={textareaRef}
+          rows={2}
+          placeholder={placeholder ?? "Message…"}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              handleSubmit(e as unknown as FormEvent);
+            }
+          }}
+          disabled={disabled || sending}
+          // Right padding leaves room for the kbd hint overlay.
+          className="w-full resize-none pr-14"
+        />
+        <kbd
+          aria-hidden
+          className="pointer-events-none absolute bottom-1.5 right-2 select-none rounded border border-default bg-canvas px-1.5 py-0.5 font-mono text-[0.65rem] text-neutral-500"
+          title="Send"
+        >
+          {hint}
+        </kbd>
+      </div>
       <Button
         type="submit"
         variant="primary"
