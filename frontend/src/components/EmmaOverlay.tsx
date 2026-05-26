@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useEmmaStore } from "../stores/emma";
@@ -10,6 +11,11 @@ import { authorColorClass } from "./AuthorBadge";
 import { cn } from "../lib/cn";
 
 const EMMA_SESSION_ID = "emma";
+// Stable reference for the "no messages yet" branch — a fresh `[]` literal
+// inside a zustand selector triggers infinite re-renders because
+// `Object.is([], [])` is false, so the selector output looks like it changed
+// on every render.
+const EMPTY_MESSAGES: AgentMessage[] = [];
 
 export function EmmaOverlay() {
   const open = useEmmaStore((s) => s.open);
@@ -17,13 +23,13 @@ export function EmmaOverlay() {
 
   const { data: initial = [] } = useTauriQuery<AgentMessage[]>(
     "get_session_messages",
-    { session_id: EMMA_SESSION_ID, since_id: null },
+    { sessionId: EMMA_SESSION_ID, sinceId: null },
     { enabled: open },
   );
 
   const setMessages = useChatStore((s) => s.setMessages);
   const applyBatch = useChatStore((s) => s.applyBatch);
-  const messages = useChatStore((s) => s.messages[EMMA_SESSION_ID] ?? []);
+  const messages = useChatStore((s) => s.messages[EMMA_SESSION_ID] ?? EMPTY_MESSAGES);
 
   useEffect(() => {
     if (open && initial.length > 0) {
@@ -73,11 +79,10 @@ export function EmmaOverlay() {
         <ChatInput
           placeholder="Message Emma…"
           onSend={async (text) => {
-            // Batch 5 ships the get/listen path. broadcast_to_session is
-            // deferred; emit a synthetic user message to storage in a future
-            // batch via a dedicated tauri_cmd. For now the input is wired
-            // but no-ops on send — Batch 5b will plumb it.
-            void text;
+            await invoke("broadcast_message", {
+              sessionId: EMMA_SESSION_ID,
+              text,
+            });
           }}
         />
       </div>

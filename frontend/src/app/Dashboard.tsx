@@ -13,7 +13,7 @@ export function Dashboard() {
   const createSession = useTauriMutation<SessionInfo, {
     id: string;
     title: string;
-    repo_path: string | null;
+    repoPath: string | null;
     project: string | null;
   }>("create_session");
 
@@ -26,7 +26,7 @@ export function Dashboard() {
     await createSession.mutateAsync({
       id,
       title: title.trim(),
-      repo_path: null,
+      repoPath: null,
       project: null,
     });
     setTitle("");

@@ -169,6 +169,7 @@ fn main() -> Result<()> {
     // Hand off to Tauri. Tauri owns the OS main thread.
     let storage_for_subscriber = Arc::clone(&storage_arc);
     let bridge_for_subscriber = Arc::clone(&bridge_arc);
+    let rt_for_setup = rt.clone();
 
     tauri::Builder::default()
         .manage(Arc::clone(&storage_arc))
@@ -176,6 +177,12 @@ fn main() -> Result<()> {
         .manage(Arc::clone(&core))
         .invoke_handler(specta_builder.invoke_handler())
         .setup(move |app| {
+            // Tauri's setup runs on the OS main thread outside any Tokio
+            // runtime context. spawn_subscriber + BatchEmitter::new both call
+            // `tokio::spawn` internally (thread-local lookup), so we have to
+            // enter the runtime for the duration of those calls. The spawned
+            // tasks themselves are bound to the runtime once registered.
+            let _rt_guard = rt_for_setup.enter();
             // Wire the bridge subscriber: SignalingEvent stream → Tauri emit.
             let app_handle_for_msgs = app.handle().clone();
             let app_handle_for_events = app.handle().clone();

@@ -10,7 +10,13 @@
 //! exact up to 2^53. Sqlite ROWIDs we use are bounded well below that.
 
 pub fn typescript_config() -> specta_typescript::Typescript {
+    // `@ts-nocheck` suppresses tsc on the generated file itself. The frontend
+    // tsconfig enables `noUnusedLocals`, and tauri-specta unconditionally
+    // imports `TAURI_CHANNEL` + emits `__makeEvents__` whether commands use
+    // them or not — both trip the rule. Type-checking still happens at the
+    // call sites that import from this file; the file is a thin pass-through.
     specta_typescript::Typescript::default()
+        .header("// @ts-nocheck")
         .bigint(specta_typescript::BigIntExportBehavior::Number)
 }
 
@@ -27,6 +33,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::close_session,
         // Messages
         messages::get_session_messages,
+        messages::broadcast_message,
         // Agent configs
         agent_configs::get_agent_config,
         agent_configs::list_agent_configs,

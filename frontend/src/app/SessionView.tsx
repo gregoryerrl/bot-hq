@@ -16,19 +16,23 @@ import type {
 import { Button } from "../components/ui/Button";
 import { invoke } from "@tauri-apps/api/core";
 
+// Stable reference — see EmmaOverlay for the same reason.
+const EMPTY_MESSAGES: AgentMessage[] = [];
+
 export function SessionView() {
   const { sessionId = "" } = useParams<{ sessionId: string }>();
 
-  const { data: session } = useTauriQuery<SessionInfo | null>("get_session", {
-    session_id: sessionId,
-  });
+  const { data: session, error: sessionError } = useTauriQuery<SessionInfo | null>(
+    "get_session",
+    { sessionId },
+  );
 
   // Respawn agents on mount. Idempotent — `ensure_session_started` returns
   // immediately if Brian/Rain are already running. Mirrors the Slint-era
   // click-to-respawn flow; reads `brian_claude_session_id` /
   // `rain_claude_session_id` and passes `--resume <uuid>` so the agents
   // come back with full memory.
-  const respawn = useTauriMutation<void, { session_id: string }>(
+  const respawn = useTauriMutation<void, { sessionId: string }>(
     "respawn_session",
   );
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
@@ -36,7 +40,7 @@ export function SessionView() {
     if (!sessionId) return;
     setRespawnError(null);
     respawn.mutate(
-      { session_id: sessionId },
+      { sessionId },
       { onError: (err) => setRespawnError(err) },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -44,11 +48,11 @@ export function SessionView() {
 
   const { data: initialMsgs = [] } = useTauriQuery<AgentMessage[]>(
     "get_session_messages",
-    { session_id: sessionId, since_id: null },
+    { sessionId, sinceId: null },
     { enabled: !!sessionId },
   );
 
-  const messages = useChatStore((s) => s.messages[sessionId] ?? []);
+  const messages = useChatStore((s) => s.messages[sessionId] ?? EMPTY_MESSAGES);
   const setMessages = useChatStore((s) => s.setMessages);
   const applyBatch = useChatStore((s) => s.applyBatch);
 
@@ -77,7 +81,16 @@ export function SessionView() {
   if (!session) {
     return (
       <div className="p-6 text-sm text-neutral-500">
-        Session not found.{" "}
+        {sessionError ? (
+          <>
+            <p className="mb-2 text-red-300">
+              Failed to load session: {sessionError.message}
+            </p>
+            <p className="text-xs text-neutral-500">id: {sessionId}</p>
+          </>
+        ) : (
+          <>Session not found.</>
+        )}{" "}
         <Link to="/" className="text-blue-400 underline">
           Back to dashboard
         </Link>
@@ -86,8 +99,12 @@ export function SessionView() {
   }
 
   return (
-    <div className="grid h-full grid-cols-[3fr_2fr]">
-      <section className="flex h-full flex-col border-r border-neutral-800">
+    // `grid-rows-1` makes the single implicit row take the full container
+    // height instead of shrinking to content. Without it the inner section's
+    // `h-full` has no defined parent height, the messages div grows past the
+    // viewport, and the ChatInput at the bottom becomes unreachable.
+    <div className="grid h-full grid-cols-[3fr_2fr] grid-rows-1">
+      <section className="flex h-full min-h-0 flex-col border-r border-neutral-800">
         <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
           <div>
             <h1 className="text-base font-semibold">{session.title}</h1>
@@ -108,7 +125,7 @@ export function SessionView() {
               onClick={() => {
                 setRespawnError(null);
                 respawn.mutate(
-                  { session_id: sessionId },
+                  { sessionId },
                   { onError: (err) => setRespawnError(err) },
                 );
               }}
@@ -132,7 +149,7 @@ export function SessionView() {
                   variant="primary"
                   onClick={() =>
                     invoke("resolve_choice", {
-                      choice_id: choicesForSession[0].choice_id,
+                      choiceId: choicesForSession[0].choice_id,
                       picked: opt,
                     })
                   }
@@ -144,7 +161,7 @@ export function SessionView() {
           </div>
         )}
 
-        <div className="flex-1 overflow-auto px-4 py-3">
+        <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
           {messages.length === 0 ? (
             <p className="text-sm text-neutral-500">No messages yet…</p>
           ) : (
@@ -169,9 +186,8 @@ export function SessionView() {
         <div className="border-t border-neutral-800">
           <ChatInput
             placeholder="Broadcast to Brian + Rain…"
-            onSend={async () => {
-              // broadcast_to_session deferred until core::broadcast path
-              // ships. See Batch 2's deferred-list. Wire here when ready.
+            onSend={async (text) => {
+              await invoke("broadcast_message", { sessionId, text });
             }}
           />
         </div>

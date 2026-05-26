@@ -1,6 +1,8 @@
 //! Message stream commands. Frontend SessionView polls `get_session_messages`
 //! once on mount, then subscribes to `agent.messages.batch` for deltas.
+//! `broadcast_message` is the inverse — the user→agent send path.
 
+use crate::core::AppState as CoreAppState;
 use crate::storage::Storage;
 use crate::tauri_cmd::error::AppError;
 use crate::tauri_events::types::AgentMessage;
@@ -18,6 +20,21 @@ pub async fn get_session_messages(
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
     Ok(msgs.into_iter().map(AgentMessage::from).collect())
+}
+
+/// Send a user message to a session. For the duo session this fans out to
+/// both Brian and Rain (with phase envelope); for Emma's solo session it
+/// goes to her singleton agent. Persists the raw text + notifies the bridge.
+#[tauri::command]
+#[specta::specta]
+pub async fn broadcast_message(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+    text: String,
+) -> Result<(), AppError> {
+    core.broadcast(&session_id, &text)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 #[cfg(test)]

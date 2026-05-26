@@ -12,7 +12,7 @@ export function DocumentPane({ sessionId }: DocumentPaneProps) {
 
   const { data: docs = [] } = useTauriQuery<SessionDocumentView[]>(
     "session_doc_search",
-    { session_id: sessionId, phase: activePhase },
+    { sessionId, phase: activePhase },
   );
 
   const counts = useMemo(() => {
