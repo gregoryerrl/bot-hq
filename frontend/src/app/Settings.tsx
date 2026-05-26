@@ -4,35 +4,54 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Card, CardTitle } from "../components/ui/Card";
 import { authorColorClass } from "../components/AuthorBadge";
+import { cn } from "../lib/cn";
 import type { AgentConfigView } from "../lib/bindings";
 
 export function Settings() {
-  const { data: configs = [], refetch } = useTauriQuery<AgentConfigView[]>(
-    "list_agent_configs",
-  );
+  const { data: configs = [], refetch, isLoading } = useTauriQuery<
+    AgentConfigView[]
+  >("list_agent_configs");
   const upsert = useTauriMutation<void, { cfg: AgentConfigView }>(
     "upsert_agent_config",
   );
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-6">
-      <h1 className="mb-4 text-xl font-semibold">Agent configuration</h1>
-      <p className="mb-6 max-w-prose text-sm text-neutral-400">
-        Per-agent provider, model, and auth token. Plaintext token storage in
-        v1 — keychain migration tracked separately.
-      </p>
-      <div className="space-y-4">
-        {configs.map((c) => (
-          <AgentRow
-            key={c.agent_name}
-            cfg={c}
-            onSave={async (next) => {
-              await upsert.mutateAsync({ cfg: next });
-              refetch();
-            }}
-          />
-        ))}
+    <div className="mx-auto h-full max-w-3xl overflow-auto px-6 py-6">
+      <div className="mb-6">
+        <h1 className="text-xl font-semibold tracking-tight">
+          Agent configuration
+        </h1>
+        <p className="mt-1 max-w-prose text-sm text-neutral-400">
+          Per-agent provider, model, base URL, and auth token. Tokens are
+          stored as plaintext in sqlite for v1 — OS keychain migration is
+          tracked separately. Brian + Rain spawn with these settings on next
+          session start.
+        </p>
       </div>
+      {isLoading ? (
+        <div className="space-y-3">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="h-40 animate-pulse rounded-lg border border-default bg-surface"
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {configs.map((c) => (
+            <AgentRow
+              key={c.agent_name}
+              cfg={c}
+              onSave={async (next) => {
+                await upsert.mutateAsync({ cfg: next });
+                refetch();
+              }}
+              isSaving={upsert.isPending}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -40,20 +59,32 @@ export function Settings() {
 function AgentRow({
   cfg,
   onSave,
+  isSaving,
 }: {
   cfg: AgentConfigView;
   onSave: (next: AgentConfigView) => Promise<void>;
+  isSaving?: boolean;
 }) {
   const [draft, setDraft] = useState(cfg);
+  const [tokenVisible, setTokenVisible] = useState(false);
   const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
+  const accentDotClass = authorColorClass(cfg.agent_name);
 
   return (
-    <Card>
-      <div className="mb-3 flex items-center gap-2">
-        <span
-          className={`size-2 rounded-full bg-current ${authorColorClass(cfg.agent_name)}`}
-        />
-        <CardTitle>{cfg.agent_name}</CardTitle>
+    <Card className="bg-surface">
+      <div className="mb-4 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className={cn("size-2 rounded-full bg-current", accentDotClass)} />
+          <CardTitle className="capitalize">{cfg.agent_name}</CardTitle>
+          {dirty && (
+            <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-amber-300">
+              Unsaved
+            </span>
+          )}
+        </div>
+        <span className="text-[0.65rem] text-neutral-500">
+          updated {cfg.updated_at}
+        </span>
       </div>
       <div className="grid gap-3 md:grid-cols-2">
         <label className="block">
@@ -61,6 +92,7 @@ function AgentRow({
           <Input
             value={draft.provider}
             onChange={(e) => setDraft({ ...draft, provider: e.target.value })}
+            placeholder="anthropic"
           />
         </label>
         <label className="block">
@@ -70,6 +102,7 @@ function AgentRow({
             onChange={(e) =>
               setDraft({ ...draft, model_name: e.target.value })
             }
+            placeholder="claude-opus-4-7"
           />
         </label>
         <label className="block">
@@ -79,34 +112,53 @@ function AgentRow({
             onChange={(e) =>
               setDraft({ ...draft, base_url: e.target.value || null })
             }
-            placeholder="(default)"
+            placeholder="(provider default)"
           />
         </label>
         <label className="block">
           <span className="mb-1 flex items-center justify-between text-xs text-neutral-400">
             <span>Auth token</span>
-            <span className="text-amber-400">⚠ plaintext</span>
+            <span className="text-amber-400" title="Stored plaintext in sqlite">
+              ⚠ plaintext
+            </span>
           </span>
-          <Input
-            type="password"
-            value={draft.auth_token ?? ""}
-            onChange={(e) =>
-              setDraft({ ...draft, auth_token: e.target.value || null })
-            }
-            placeholder="(unset)"
-          />
+          <div className="relative">
+            <Input
+              type={tokenVisible ? "text" : "password"}
+              value={draft.auth_token ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, auth_token: e.target.value || null })
+              }
+              placeholder="(unset — uses provider env vars)"
+              className="pr-16"
+            />
+            <button
+              type="button"
+              onClick={() => setTokenVisible((v) => !v)}
+              className="absolute inset-y-0 right-0 px-2 text-[0.7rem] font-medium text-neutral-400 hover:text-neutral-100"
+            >
+              {tokenVisible ? "Hide" : "Show"}
+            </button>
+          </div>
         </label>
       </div>
-      <div className="mt-3 flex justify-end gap-2">
-        <Button variant="ghost" disabled={!dirty} onClick={() => setDraft(cfg)}>
+      <div className="mt-4 flex justify-end gap-2">
+        <Button
+          variant="ghost"
+          disabled={!dirty || isSaving}
+          onClick={() => {
+            setDraft(cfg);
+            setTokenVisible(false);
+          }}
+        >
           Reset
         </Button>
         <Button
           variant="primary"
-          disabled={!dirty}
+          disabled={!dirty || isSaving}
           onClick={() => onSave(draft)}
         >
-          Save
+          {isSaving ? "Saving…" : "Save"}
         </Button>
       </div>
     </Card>
