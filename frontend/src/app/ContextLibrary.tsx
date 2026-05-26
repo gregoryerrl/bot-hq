@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { Input } from "../components/ui/Input";
@@ -9,6 +9,13 @@ import type { ClIndexEntryView, ClRescanReportView } from "../lib/bindings";
 export function ContextLibrary() {
   const [project, setProject] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  // 300ms debounce — input value updates instantly for keystroke feedback;
+  // the Tauri call uses the settled value so we don't hammer the bridge.
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  useEffect(() => {
+    const id = setTimeout(() => setDebouncedQuery(query), 300);
+    return () => clearTimeout(id);
+  }, [query]);
   const [rescanning, setRescanning] = useState(false);
   const [rescanReport, setRescanReport] = useState<ClRescanReportView | null>(
     null,
@@ -23,7 +30,7 @@ export function ContextLibrary() {
     refetch,
   } = useTauriQuery<ClIndexEntryView[]>("cl_index_search", {
     project,
-    query: query.trim() || null,
+    query: debouncedQuery.trim() || null,
   });
 
   const handleRescan = async () => {
