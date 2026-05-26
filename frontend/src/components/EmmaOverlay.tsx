@@ -1,11 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useTauriQuery } from "../hooks/useInvoke";
+import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useEmmaStore } from "../stores/emma";
 import { useChatStore } from "../stores/chat";
-import type { AgentMessage } from "../lib/bindings";
+import type { AgentMessage, AppError } from "../lib/bindings";
 import { Button } from "./ui/Button";
 import { ChatInput } from "./ChatInput";
 import { ChatMessage } from "./ChatMessage";
@@ -19,6 +19,25 @@ const EMPTY_MESSAGES: AgentMessage[] = [];
 export function EmmaOverlay() {
   const open = useEmmaStore((s) => s.open);
   const setOpen = useEmmaStore((s) => s.setOpen);
+
+  // Respawn Emma on overlay open. Mirrors SessionView's pattern: when the
+  // user closes + reopens bot-hq the Emma subprocess is dead, but the row
+  // persists with `brian_claude_session_id` / `rain_claude_session_id`.
+  // `ensure_session_started` reads those + passes `--resume <uuid>` so the
+  // agent comes back with full memory. Idempotent — no-op if Emma is alive.
+  const respawn = useTauriMutation<void, { sessionId: string }>(
+    "respawn_session",
+  );
+  const [respawnError, setRespawnError] = useState<AppError | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setRespawnError(null);
+    respawn.mutate(
+      { sessionId: EMMA_SESSION_ID },
+      { onError: (err) => setRespawnError(err) },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   const { data: initial = [] } = useTauriQuery<AgentMessage[]>(
     "get_session_messages",
@@ -61,10 +80,33 @@ export function EmmaOverlay() {
           <h2 className="text-sm font-semibold text-neutral-100">Emma</h2>
           <span className="text-[0.65rem] text-neutral-500">chat helper</span>
         </div>
-        <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setOpen(false)}
+          aria-label="Close Emma"
+        >
           ×
         </Button>
       </header>
+      {respawnError && (
+        <div className="border-b border-default bg-red-950/30 px-3 py-2 text-xs text-red-200">
+          <span className="font-semibold">Emma spawn failed:</span>{" "}
+          {respawnError.message}{" "}
+          <button
+            className="ml-2 underline"
+            onClick={() => {
+              setRespawnError(null);
+              respawn.mutate(
+                { sessionId: EMMA_SESSION_ID },
+                { onError: (err) => setRespawnError(err) },
+              );
+            }}
+          >
+            retry
+          </button>
+        </div>
+      )}
       <div className="relative flex-1 overflow-hidden">
         <div ref={scrollRef} className="h-full overflow-auto px-3 py-3">
           {messages.length === 0 ? (
