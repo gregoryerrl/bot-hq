@@ -38,7 +38,7 @@ export function EmmaOverlay() {
   }, [open, initial, setMessages]);
 
   useTauriEvent<AgentMessage[]>(
-    "agent.messages.batch",
+    "agent:messages:batch",
     (batch) => {
       const forEmma = batch.filter((m) => m.session_id === EMMA_SESSION_ID);
       if (forEmma.length > 0) applyBatch(forEmma);

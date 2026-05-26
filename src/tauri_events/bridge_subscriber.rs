@@ -72,7 +72,7 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
                 "question": p.question,
                 "options": p.options,
             });
-            emit_event("session.pending_choice", v);
+            emit_event("session:pending_choice", v);
         }
         SignalingEvent::ChoiceResolved { choice_id, picked } => {
             let payload = ChoiceResolvedEvent { choice_id, picked };

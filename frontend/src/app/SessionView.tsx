@@ -63,7 +63,7 @@ export function SessionView() {
   }, [initialMsgs, sessionId, setMessages]);
 
   useTauriEvent<AgentMessage[]>(
-    "agent.messages.batch",
+    "agent:messages:batch",
     (batch) => {
       const forSession = batch.filter((m) => m.session_id === sessionId);
       if (forSession.length > 0) applyBatch(forSession);

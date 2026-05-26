@@ -24,8 +24,10 @@ pub struct AgentMessage {
 
 impl AgentMessage {
     /// The event name used for batched message emits. Frontend subscribes
-    /// with `listen("agent.messages.batch", handler)`.
-    pub const EVENT_NAME_BATCH: &'static str = "agent.messages.batch";
+    /// with `listen("agent:messages:batch", handler)`. Tauri 2 event names
+    /// disallow dots (alphanumeric / `-` / `/` / `:` / `_` only) — emits
+    /// with a dotted name return IllegalEventName and the event is dropped.
+    pub const EVENT_NAME_BATCH: &'static str = "agent:messages:batch";
 }
 
 impl From<Message> for AgentMessage {
@@ -51,7 +53,7 @@ pub struct PhaseChangedEvent {
 }
 
 impl PhaseChangedEvent {
-    pub const EVENT_NAME: &'static str = "session.phase_changed";
+    pub const EVENT_NAME: &'static str = "session:phase_changed";
 }
 
 /// Emitted when a session enters or leaves "awaiting user input" state
@@ -64,7 +66,7 @@ pub struct AwaitingUser {
 }
 
 impl AwaitingUser {
-    pub const EVENT_NAME: &'static str = "session.awaiting_user";
+    pub const EVENT_NAME: &'static str = "session:awaiting_user";
 }
 
 /// Emitted when a parked choice resolves (user picked, or agent withdrew).
@@ -75,7 +77,7 @@ pub struct ChoiceResolvedEvent {
 }
 
 impl ChoiceResolvedEvent {
-    pub const EVENT_NAME: &'static str = "session.choice_resolved";
+    pub const EVENT_NAME: &'static str = "session:choice_resolved";
 }
 
 /// Emitted when a new session row is persisted (from Tauri's `create_session`
@@ -87,7 +89,7 @@ pub struct SessionCreatedEvent {
 }
 
 impl SessionCreatedEvent {
-    pub const EVENT_NAME: &'static str = "session.created";
+    pub const EVENT_NAME: &'static str = "session:created";
 }
 
 /// Emitted when an agent subprocess dies (panic, OOM, kill -9). React
@@ -101,7 +103,7 @@ pub struct SessionSubprocessDiedEvent {
 }
 
 impl SessionSubprocessDiedEvent {
-    pub const EVENT_NAME: &'static str = "session.subprocess_died";
+    pub const EVENT_NAME: &'static str = "session:subprocess_died";
 }
 
 /// Emitted by the plugin loader. Frontend PluginManager reconciles.
@@ -112,7 +114,7 @@ pub struct PluginEvent {
 }
 
 impl PluginEvent {
-    pub const EVENT_NAME: &'static str = "plugin.event";
+    pub const EVENT_NAME: &'static str = "plugin:event";
 }
 
 #[cfg(test)]
@@ -121,7 +123,7 @@ mod tests {
 
     #[test]
     fn agent_message_event_name_is_batch_path() {
-        assert_eq!(AgentMessage::EVENT_NAME_BATCH, "agent.messages.batch");
+        assert_eq!(AgentMessage::EVENT_NAME_BATCH, "agent:messages:batch");
     }
 
     #[test]
@@ -161,11 +163,11 @@ mod tests {
 
     #[test]
     fn phase_changed_event_name() {
-        assert_eq!(PhaseChangedEvent::EVENT_NAME, "session.phase_changed");
+        assert_eq!(PhaseChangedEvent::EVENT_NAME, "session:phase_changed");
     }
 
     #[test]
     fn awaiting_user_event_name() {
-        assert_eq!(AwaitingUser::EVENT_NAME, "session.awaiting_user");
+        assert_eq!(AwaitingUser::EVENT_NAME, "session:awaiting_user");
     }
 }
