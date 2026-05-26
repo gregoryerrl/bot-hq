@@ -5,7 +5,7 @@ use bot_hq::policy::{hooks, ViolationsLog};
 use bot_hq::signaling::{start_external_server, start_signaling_server, SignalingBridge};
 use bot_hq::storage::Storage;
 use bot_hq::tauri_events;
-use bot_hq::tauri_events::types::{AgentMessage, AwaitingUser, PhaseChangedEvent};
+use bot_hq::tauri_events::types::AgentMessage;
 use serde_json::Value;
 use std::sync::Arc;
 use tauri::Emitter;
@@ -381,8 +381,3 @@ fn load_env_file(path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-const _UNUSED_EVENT_TYPES: (
-    std::marker::PhantomData<AwaitingUser>,
-    std::marker::PhantomData<PhaseChangedEvent>,
-) = (std::marker::PhantomData, std::marker::PhantomData);

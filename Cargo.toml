@@ -12,7 +12,6 @@ name = "bot-hq"
 path = "src/main.rs"
 
 [dependencies]
-slint = { version = "1.16", features = ["unstable-fontique-08"] }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "macros", "migrate", "chrono"] }
 serde = { version = "1", features = ["derive"] }
@@ -41,7 +40,6 @@ specta-typescript = "=0.0.9"
 tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
 
 [build-dependencies]
-slint-build = "1.16"
 tauri-build = "2"
 
 [dev-dependencies]

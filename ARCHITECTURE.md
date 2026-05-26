@@ -131,56 +131,64 @@ coordinator (`src/core/duo.rs`). Forwarding rules per phase:
 
 ---
 
-## Slint UI
+## Tauri + React UI
 
-**Topbar:** `Dashboard | Context Library | Settings` + Emma button.
+**Stack:** Tauri v2 shell + React 18 + TypeScript + Tailwind + minimal
+shadcn-style primitives (Vite build). Tauri owns the OS main thread; the
+Rust core runs on a multi-thread Tokio runtime.
 
-**Dashboard:** grid of session tiles. Each tile shows scope title, phase
-chip (I/P/A/V), last activity, `[Need User Input]` badge,
-inline-clickable choice buttons when the duo is awaiting a pick. Click
-tile → opens session view.
+**IPC:** Tauri commands + Tauri events. No HTTP from the frontend. The
+existing `SignalingBridge` stays the single source of truth — a thin
+command layer in `src/tauri_cmd/` wraps bridge methods, and a
+broadcast-subscriber bridge in `src/tauri_events/` translates
+`SignalingEvent` into typed Tauri events. The hot path
+(`MessagePersisted` IDs → batched message fetch via existing
+`messages_for_session(session_id, since_id)`) goes through a
+`BatchEmitter` (N=20 / 50ms coalesce).
 
-**Session view:** rich header (title + phase subtitle + interactive
-PhaseSelector segmented control + back link). Single chronological chat
-column: all messages (user, Brian, Rain, phase_change) interleaved by
-`created_at` in one stream. Author color coding (brian=orange,
-rain=purple, emma=green, user=blue, system=muted grey). Phase-change
-events render as centered muted-italic system lines.
+**Topbar:** `Dashboard | Context Library | Plugins | Settings` + Emma
+button.
 
-**DocumentPane (right half of the SessionView split):** session
-documents tab-grouped by IPAV phase (I/P/A/V). I/P/V tabs render
-matching `session_documents` rows as flat markdown text. The A tab is
-special — it auto-renders a live color-coded `git diff` of the
-session's working repo (GitHub dark-mode palette: green adds, red
-removes, blue hunk headers, yellow file headers), parsed by
-`view_model::parse_diff_lines` (prefix classifier). `phase="apply"`
-session docs render inline below the diff in the same unified
-ScrollView. Long diff lines word-wrap to multiple visual rows; each
-wrapped block's tinted background spans all of its visual rows so
-add/remove blocks stay visually contiguous.
+**Dashboard:** grid of session tiles. Each tile shows title, last
+activity, `[Needs Input]` badge tinting the border red. Click tile →
+opens session view. Inline `+ New session` form creates rows + registers
+the session with the bridge.
 
-**Pending-choice / awaiting banner** sits above the prompt bar (purple
-for choice, red for awaiting). Choice buttons render inline at the
-agent message position AND in the banner.
+**Session view:** 60/40 split — chat (left) + DocumentPane (right).
+Header: title + back link. Chronological chat: all messages (user,
+Brian, Rain, phase_change) interleaved by `created_at` with author color
+coding (brian=orange, rain=purple, emma=green, user=blue, system=muted).
+Pending-choice banner (purple) renders above the input with inline
+choice buttons.
 
-**Emma overlay:** half-pane on the right when opened. Dedicated header
-bar with name + presence dot + status + close (×). Divider line for
-visual separation from the underlying view.
+**DocumentPane:** IPAV tab selector (I/P/A/V chips) drives
+`session_doc_search(session_id, phase=<x>)`. Each tab renders matching
+`session_documents` rows; counts surface on the chips. The A tab will
+also render the live color-coded `git diff` for the session's working
+repo (port of `view_model::parse_diff_lines` to a Rust-side
+`compute_apply_diff` Tauri command — deferred to a follow-up).
 
-**Context Library tab:** SQLite-backed index over `<data_dir>/`. Tree
-view of CL files with file/folder icons, hover highlights, refresh
-button (↻). Editor pane with dirty-state indicator. Explicit-save UI
-(no auto-accumulation from agents). Each CL file has a free-text
-**description** column that agents read via `cl_index_search`.
+**Emma overlay:** fixed half-pane on the right, toggled from the topbar.
+Subscribes to the `agent.messages.batch` event filtered to
+`session_id="emma"`.
+
+**Context Library tab:** Project-grouped index browser backed by
+`cl_index_search`. Substring search + project filter.
+
+**Plugins tab:** Placeholder UI surfaced from `tauri_cmd/plugins.rs`
+(landing later). Rust scaffold in `src/plugins/` ships the manifest
+parser, loader, capability JSON generator, and host-side heartbeat
+watcher.
 
 **Settings tab:** per-agent config (provider, model, base_url,
 auth_token). Per-row accent dot keyed to author color. Plaintext-token
-warning rendered as amber-tinted callout.
+warning preserved.
 
-**Design system:** Slint `Theme` global owns colors/typography/spacing/
-radii (single source of truth). 4-tier background hierarchy
-(canvas → surface → elevated → overlay), 4-step font scale, 4px-base
-spacing scale.
+**Plugin model:** iframes at per-plugin origin
+(`https://plugin-<id>.localhost`) via Tauri custom URI scheme; each gets
+a generated capability JSON listing only the commands its manifest
+requested. Heartbeat watchers register at app-shell level (NOT
+per-PluginSlot — those remount).
 
 ---
 

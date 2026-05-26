@@ -1,8 +1,8 @@
 # bot-hq — Project Instructions (for claude-code)
 
-You are working on **bot-hq**, a Rust + Slint desktop GUI app for
-driving AI-assisted coding sessions through a bilateral-duo agent model
-(Brian = HANDS, Rain = EYES) with policy enforcement. Emma is an
+You are working on **bot-hq**, a Tauri v2 + React + Rust desktop GUI app
+for driving AI-assisted coding sessions through a bilateral-duo agent
+model (Brian = HANDS, Rain = EYES) with policy enforcement. Emma is an
 optional solo helper agent.
 
 The original from-scratch rebuild shipped at v0.1.0; subsequent work
@@ -27,21 +27,19 @@ reference — do not treat them as current.
 
 ---
 
-## Slint UI work — check slint-rust-docs first
+## Tauri + React UI work
 
-Before writing or modifying any `.slint` code or Rust ↔ Slint bridge
-logic, call `cl_index_search(project="slint-rust-docs")` and read
-`MEMORY.md`. The knowledge base covers layouts, callbacks, weak handles,
-models, threading, styling, animations, and common pitfalls (binding
-loops, Tokio conflicts, strong-ref leaks, Flickable viewport-height,
-ScrollView viewport-width, `width` + `min-width` collisions). **This is
-not optional** — past sessions shipped horizontal-overflow and
-Flickable-viewport bugs that slint-rust-docs already documented fixes
-for, plus a `width` + `min-width` Slint compile error that the docs'
-layout pattern would have caught.
+The frontend is React 18 + TypeScript + Tailwind in `frontend/`. Tauri
+commands live in `src/tauri_cmd/<domain>.rs` as thin `#[tauri::command]`
+wrappers over `SignalingBridge` / `Storage` methods. Events flow through
+`src/tauri_events/`: bridge subscriber → `BatchEmitter` (since_id
+watermark, 50ms / N=20 coalesce) → `app.emit(name, payload)`. TypeScript
+bindings auto-generate via `tauri-specta` on each app launch (writes
+`frontend/src/lib/bindings.ts`).
 
-Skipping the index here is the same class of CL-discipline miss as
-skipping `cl_index_search(project="bot-hq")` for repo conventions.
+Plugin model (scaffolded; live plugins TBD): per-plugin origin via
+custom URI scheme (`https://plugin-<id>.localhost`), capability-gated
+via Tauri JSON, host-side heartbeat watcher at app-shell level.
 
 ---
 
@@ -143,7 +141,8 @@ or PLAN.md:
 
 ## Prerequisites
 
-- Rust stable toolchain (rustup, latest stable; MSRV 1.92 per slint).
+- Rust stable toolchain (rustup, latest stable).
+- Node.js 22+ and npm (for the React frontend; pnpm works too).
 - `claude-code` CLI installed and authed (used as subprocess by each
   agent + needed for live tests).
 - macOS (initial target; Linux + Windows tracked in PLAN.md).

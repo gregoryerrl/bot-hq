@@ -11,8 +11,3 @@ pub mod storage;
 pub mod tauri_cmd;
 pub mod tauri_events;
 pub mod tauri_specta_gen;
-pub mod ui;
-
-// Slint-generated UI types. Lives at the crate root so any module in the
-// library can reference `AppWindow`, `AppState`, `SessionTile`, etc.
-slint::include_modules!();
