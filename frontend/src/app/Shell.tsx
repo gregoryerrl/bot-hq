@@ -54,6 +54,8 @@ export function Shell() {
           <PendingTray />
           <button
             onClick={() => toggleEmma()}
+            aria-pressed={emmaOpen}
+            aria-label={emmaOpen ? "Close Emma chat" : "Open Emma chat"}
             className={cn(
               "inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors",
               emmaOpen
