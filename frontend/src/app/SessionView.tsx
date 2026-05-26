@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
+import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
+import { ChatMessage } from "../components/ChatMessage";
 import { DocumentPane } from "../components/DocumentPane";
-import { authorColorClass } from "../components/AuthorBadge";
 import { cn } from "../lib/cn";
 import type {
   AgentMessage,
@@ -16,22 +17,21 @@ import type {
 import { Button } from "../components/ui/Button";
 import { invoke } from "@tauri-apps/api/core";
 
-// Stable reference — see EmmaOverlay for the same reason.
+// Stable reference so zustand selector doesn't return a fresh array per call
+// (would trigger infinite re-renders via Object.is).
 const EMPTY_MESSAGES: AgentMessage[] = [];
 
 export function SessionView() {
   const { sessionId = "" } = useParams<{ sessionId: string }>();
 
-  const { data: session, error: sessionError } = useTauriQuery<SessionInfo | null>(
-    "get_session",
-    { sessionId },
-  );
+  const { data: session, error: sessionError } = useTauriQuery<
+    SessionInfo | null
+  >("get_session", { sessionId });
 
-  // Respawn agents on mount. Idempotent — `ensure_session_started` returns
-  // immediately if Brian/Rain are already running. Mirrors the Slint-era
-  // click-to-respawn flow; reads `brian_claude_session_id` /
-  // `rain_claude_session_id` and passes `--resume <uuid>` so the agents
-  // come back with full memory.
+  // Respawn agents on mount. Idempotent — `ensure_session_started` is a no-op
+  // if Brian/Rain are already running. Reads `brian_claude_session_id` /
+  // `rain_claude_session_id` from the session row + passes `--resume <uuid>`
+  // so the agents come back with full memory.
   const respawn = useTauriMutation<void, { sessionId: string }>(
     "respawn_session",
   );
@@ -46,13 +46,17 @@ export function SessionView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  const { data: initialMsgs = [] } = useTauriQuery<AgentMessage[]>(
+  const { data: initialMsgs = [], isLoading: messagesLoading } = useTauriQuery<
+    AgentMessage[]
+  >(
     "get_session_messages",
     { sessionId, sinceId: null },
     { enabled: !!sessionId },
   );
 
-  const messages = useChatStore((s) => s.messages[sessionId] ?? EMPTY_MESSAGES);
+  const messages = useChatStore(
+    (s) => s.messages[sessionId] ?? EMPTY_MESSAGES,
+  );
   const setMessages = useChatStore((s) => s.setMessages);
   const applyBatch = useChatStore((s) => s.applyBatch);
 
@@ -78,6 +82,11 @@ export function SessionView() {
     (c) => c.session_id === sessionId,
   );
 
+  // Auto-scroll on new messages when user is at-bottom; show "↓ N new" jump
+  // button when they've scrolled up.
+  const { ref: scrollRef, stuck, scrollToBottom } =
+    useStickyScroll<HTMLDivElement>([messages.length]);
+
   if (!session) {
     return (
       <div className="p-6 text-sm text-neutral-500">
@@ -99,25 +108,27 @@ export function SessionView() {
   }
 
   return (
-    // `grid-rows-1` makes the single implicit row take the full container
-    // height instead of shrinking to content. Without it the inner section's
-    // `h-full` has no defined parent height, the messages div grows past the
-    // viewport, and the ChatInput at the bottom becomes unreachable.
     <div className="grid h-full grid-cols-[3fr_2fr] grid-rows-1">
-      <section className="flex h-full min-h-0 flex-col border-r border-neutral-800">
-        <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
+      <section className="flex h-full min-h-0 flex-col border-r border-default">
+        <header className="flex items-center justify-between border-b border-default px-4 py-3">
           <div>
-            <h1 className="text-base font-semibold">{session.title}</h1>
+            <h1 className="text-base font-semibold tracking-tight">
+              {session.title}
+            </h1>
             <p className="text-xs text-neutral-500">
               <Link to="/" className="hover:text-neutral-300">
                 ← Dashboard
               </Link>
+              <span className="mx-2 text-neutral-700">·</span>
+              <code className="font-mono text-[0.65rem] text-neutral-600">
+                {sessionId.slice(0, 8)}
+              </code>
             </p>
           </div>
         </header>
 
         {respawnError && (
-          <div className="border-b border-neutral-800 bg-red-950/30 px-4 py-2 text-xs text-red-200">
+          <div className="border-b border-default bg-red-950/30 px-4 py-2 text-xs text-red-200">
             <span className="font-semibold">Agent spawn failed:</span>{" "}
             {respawnError.message}{" "}
             <button
@@ -136,7 +147,7 @@ export function SessionView() {
         )}
 
         {choicesForSession.length > 0 && (
-          <div className="border-b border-neutral-800 bg-purple-950/30 px-4 py-2 text-xs">
+          <div className="border-b border-default bg-purple-950/30 px-4 py-2 text-xs">
             <span className="font-semibold text-purple-200">
               Awaiting your choice:
             </span>{" "}
@@ -161,41 +172,45 @@ export function SessionView() {
           </div>
         )}
 
-        <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
-          {messages.length === 0 ? (
-            <p className="text-sm text-neutral-500">No messages yet…</p>
-          ) : (
-            messages.map((m) =>
-              m.kind === "phase_change" ? (
-                // Phase changes persist with author=user (no `system` author
-                // exists), so the `kind` field is the discriminator. Slint-era
-                // convention: centered muted-italic system line.
-                <div
+        <div className="relative min-h-0 flex-1 overflow-hidden">
+          <div
+            ref={scrollRef}
+            className="h-full overflow-auto px-4 py-3"
+          >
+            {messagesLoading && messages.length === 0 ? (
+              <MessagesSkeleton />
+            ) : messages.length === 0 ? (
+              <p className="text-sm text-neutral-500">No messages yet…</p>
+            ) : (
+              messages.map((m, i) => (
+                <ChatMessage
                   key={m.id}
-                  className="my-3 text-center text-[0.7rem] italic text-neutral-500"
-                >
-                  — {m.content} —
-                </div>
-              ) : (
-                <article key={m.id} className="mb-3">
-                  <div
-                    className={cn(
-                      "text-[0.65rem] uppercase tracking-wide",
-                      authorColorClass(m.author),
-                    )}
-                  >
-                    {m.author}
-                  </div>
-                  <div className="whitespace-pre-wrap text-sm text-neutral-100">
-                    {m.content}
-                  </div>
-                </article>
-              ),
-            )
+                  message={m}
+                  groupedWithPrev={
+                    i > 0 &&
+                    m.kind !== "phase_change" &&
+                    messages[i - 1].kind !== "phase_change" &&
+                    messages[i - 1].author === m.author
+                  }
+                />
+              ))
+            )}
+          </div>
+          {!stuck && messages.length > 0 && (
+            <button
+              onClick={scrollToBottom}
+              className={cn(
+                "absolute bottom-3 right-3 inline-flex items-center gap-1 rounded-full",
+                "border border-default bg-overlay px-3 py-1 text-xs text-neutral-200 shadow-lg",
+                "hover:border-accent hover:text-white transition-colors",
+              )}
+            >
+              ↓ Jump to latest
+            </button>
           )}
         </div>
 
-        <div className="border-t border-neutral-800">
+        <div className="border-t border-default">
           <ChatInput
             placeholder="Broadcast to Brian + Rain…"
             onSend={async (text) => {
@@ -206,6 +221,20 @@ export function SessionView() {
       </section>
 
       <DocumentPane sessionId={sessionId} />
+    </div>
+  );
+}
+
+function MessagesSkeleton() {
+  return (
+    <div className="space-y-4">
+      {[0, 1, 2].map((i) => (
+        <div key={i} className="space-y-2">
+          <div className="h-3 w-12 animate-pulse rounded bg-elevated" />
+          <div className="h-3 w-3/4 animate-pulse rounded bg-elevated" />
+          <div className="h-3 w-1/2 animate-pulse rounded bg-elevated" />
+        </div>
+      ))}
     </div>
   );
 }
