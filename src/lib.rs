@@ -4,6 +4,7 @@
 pub mod agents;
 pub mod core;
 pub mod paths;
+pub mod plugins;
 pub mod policy;
 pub mod signaling;
 pub mod storage;
