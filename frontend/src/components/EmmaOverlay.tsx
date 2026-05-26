@@ -1,11 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useEmmaStore } from "../stores/emma";
 import { useChatStore } from "../stores/chat";
-import type { AgentMessage, AppError } from "../lib/bindings";
+import type {
+  AgentMessage,
+  AppError,
+  PendingChoiceView,
+} from "../lib/bindings";
 import { Button } from "./ui/Button";
 import { ChatInput } from "./ChatInput";
 import { ChatMessage } from "./ChatMessage";
@@ -66,6 +70,22 @@ export function EmmaOverlay() {
     [applyBatch],
   );
 
+  // Live status for the header dot. Derived from existing data so no new
+  // command is needed:
+  //   - awaiting: Emma has a parked choice in `list_pending_choices`
+  //   - thinking: last message is the user's (Emma hasn't replied yet)
+  //   - idle: last message is Emma's (or there are no messages)
+  const { data: pending = [] } = useTauriQuery<PendingChoiceView[]>(
+    "list_pending_choices",
+    {},
+    { refetchInterval: 3_000, enabled: open },
+  );
+  const status = useMemo<"idle" | "thinking" | "awaiting">(() => {
+    if (pending.some((p) => p.session_id === EMMA_SESSION_ID)) return "awaiting";
+    if (messages.length === 0) return "idle";
+    return messages[messages.length - 1].author !== "emma" ? "thinking" : "idle";
+  }, [pending, messages]);
+
   const { ref: scrollRef, stuck, scrollToBottom } = useStickyScroll<HTMLDivElement>(
     [messages.length, open],
   );
@@ -92,9 +112,23 @@ export function EmmaOverlay() {
     <aside className="fixed inset-y-0 right-0 z-30 flex w-[420px] flex-col border-l border-default bg-canvas shadow-2xl">
       <header className="flex items-center justify-between border-b border-default px-3 py-2">
         <div className="flex items-center gap-2">
-          <span className="size-1.5 rounded-full bg-author-emma" />
           <h2 className="text-sm font-semibold text-neutral-100">Emma</h2>
-          <span className="text-[0.65rem] text-neutral-500">chat helper</span>
+          <span
+            aria-hidden
+            className={cn(
+              "ml-1 size-1.5 rounded-full",
+              status === "awaiting" && "bg-red-400",
+              status === "thinking" && "animate-pulse bg-amber-400",
+              status === "idle" && "bg-emerald-400",
+            )}
+          />
+          <span className="text-[0.65rem] text-neutral-500">
+            {status === "awaiting"
+              ? "awaiting"
+              : status === "thinking"
+                ? "thinking"
+                : "idle"}
+          </span>
         </div>
         <Button
           variant="ghost"
