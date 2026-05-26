@@ -2,6 +2,24 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Hanken Grotesk — Industrial Terminal headline font (variable wght). */
+@font-face {
+  font-family: "Hanken Grotesk";
+  src: url("./fonts/HankenGrotesk.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Inter — Industrial Terminal body font (variable wght). */
+@font-face {
+  font-family: "Inter";
+  src: url("./fonts/Inter.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* JetBrains Mono — variable-weight TTF bundled at build time. Slint era
    loaded this via the fontique collection; the Vite frontend serves it from
    /fonts/ (relative to the webview origin via vite base: "./"). */
