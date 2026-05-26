@@ -184,10 +184,14 @@ fn main() -> Result<()> {
             // enter the runtime for the duration of those calls. The spawned
             // tasks themselves are bound to the runtime once registered.
             let _rt_guard = rt_for_setup.enter();
-            // Stash the AppHandle on CoreAppState so MCP tools (screenshot,
-            // webview automation) can reach the webview from outside the
-            // Tauri command path. Set-once — ignore the Err on duplicate.
-            let _ = core_for_setup.app_handle.set(app.handle().clone());
+            // Stash the AppHandle on CoreAppState AND on the bridge so MCP
+            // tools (screenshot, webview automation) can reach the webview.
+            // CoreAppState is for the external MCP path; the bridge copy is
+            // for the internal MCP (per-agent jsonrpc.rs), which doesn't see
+            // CoreAppState. Set-once — ignore the Err on duplicate.
+            let handle = app.handle().clone();
+            let _ = core_for_setup.app_handle.set(handle.clone());
+            bridge_for_subscriber.set_app_handle(handle);
             // Wire the bridge subscriber: SignalingEvent stream → Tauri emit.
             let app_handle_for_msgs = app.handle().clone();
             let app_handle_for_events = app.handle().clone();

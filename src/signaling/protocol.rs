@@ -486,6 +486,60 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "required": []
             }),
         },
+        // Webview automation — agents test the bot-hq UI on their own.
+        // Mirror of the external-MCP equivalents in external_jsonrpc.rs.
+        ToolDescriptor {
+            name: "webview_screenshot",
+            description: "Capture the bot-hq main window to a PNG under `<data_dir>/screenshots/<ts>.png`. Returns `{path}`. Open the file with your built-in Read tool (which supports PNG). Use this AS YOUR EYES on what the user sees. macOS Screen Recording permission required.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDescriptor {
+            name: "webview_click",
+            description: "Synthesize a click on the first DOM element matching the CSS selector in the bot-hq webview. Fire-and-forget — verify with a follow-up `webview_screenshot`. Examples: `a[href=\"/sessions/abc\"]`, `button[title^=\"Capture\"]`, `[data-testid=foo]`.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS selector for the target element." }
+                },
+                "required": ["selector"]
+            }),
+        },
+        ToolDescriptor {
+            name: "webview_type",
+            description: "Set the value of an input/textarea matched by the CSS selector + dispatch input/change events the React-friendly way (via the prototype value setter so React state actually updates). Element is also focused.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "CSS selector for an input or textarea." },
+                    "text": { "type": "string", "description": "Text to set." }
+                },
+                "required": ["selector", "text"]
+            }),
+        },
+        ToolDescriptor {
+            name: "webview_scroll",
+            description: "Scroll an element (if selector given) or the page. `y` is the destination scrollTop / scrollY in pixels.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "selector": { "type": "string", "description": "Optional CSS selector. Omit for window scroll." },
+                    "y": { "type": "integer", "description": "Destination in pixels." }
+                },
+                "required": ["y"]
+            }),
+        },
+        ToolDescriptor {
+            name: "webview_press_key",
+            description: "Synthesize keydown + keypress + keyup on a target element (or document.activeElement if no selector). Key names follow DOM KeyboardEvent.key: `Enter`, `Tab`, `Escape`, `ArrowDown`, `a`, etc.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "DOM key name." },
+                    "selector": { "type": "string", "description": "Optional CSS selector for the target element." }
+                },
+                "required": ["key"]
+            }),
+        },
     ]);
     &*TOOLS
 }

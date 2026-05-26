@@ -154,6 +154,12 @@ pub struct SignalingBridge {
     /// HTTP roundtrip. Dropped + file deleted by `cleanup_session_permissions`
     /// on session close.
     session_permissions: Mutex<HashMap<String, crate::policy::SessionPermissions>>,
+    /// Tauri AppHandle, populated from `setup()` once the webview exists.
+    /// Internal MCP `webview_*` tools (jsonrpc.rs) reach the webview through
+    /// this — bridge is the only shared handle accessible to the per-agent
+    /// dispatchers, which don't have CoreAppState. Set-once; `None` in tests
+    /// and during the pre-setup window.
+    app_handle: once_cell::sync::OnceCell<tauri::AppHandle>,
 }
 
 impl SignalingBridge {
@@ -171,6 +177,7 @@ impl SignalingBridge {
             session_awaiting: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
             session_permissions: Mutex::new(HashMap::new()),
+            app_handle: once_cell::sync::OnceCell::new(),
         })
     }
 
@@ -434,6 +441,18 @@ impl SignalingBridge {
     /// (policy hash cache, etc.). None on test bridges built via `new()`.
     pub fn data_dir(&self) -> Option<&PathBuf> {
         self.data_dir.as_ref()
+    }
+
+    /// Stash the Tauri AppHandle once `setup()` has it. Idempotent — silently
+    /// ignores a second call. Tests don't set this; internal MCP webview_*
+    /// tools error with "AppHandle not initialized" when unset.
+    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
+        let _ = self.app_handle.set(handle);
+    }
+
+    /// Get the stashed AppHandle. None until `setup()` runs, or in tests.
+    pub fn app_handle(&self) -> Option<&tauri::AppHandle> {
+        self.app_handle.get()
     }
 
     /// Subscribe to all signaling events. The UI layer uses this to paint.
