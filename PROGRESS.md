@@ -12,8 +12,60 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 202 tests passing (154 lib + 31 external MCP + 10 storage + 7 server).
-Release build clean. IPAV document-tabs feature shipped today
-(2026-05-24); Round 4 audit shipped 11 findings 2026-05-22.
+Release build clean. **Tauri v2 migration decided 2026-05-26** (big-bang
+shape; design doc at `docs/plans/2026-05-26-tauri-v2-migration-design.md`,
+awaiting fresh-session implementation handoff). IPAV document-tabs
+feature shipped 2026-05-24; Round 4 audit shipped 11 findings 2026-05-22.
+
+---
+
+## 2026-05-26 — Tauri v2 migration decided (big-bang)
+
+After ~28% of recent commits going to Slint layout fixes and the planned
+plugin roadmap (Discord, Clive, themes, future UI-mutation plugins) being
+structurally hostile to Slint's compile-time component model, the user +
+Brian + Rain brainstormed a migration to Tauri v2 + React. All four
+anchors validated through `ask_user_choice` gates:
+
+1. **Migration shape:** Big-bang — branch off main, focused UI-shell
+   rebuild, no parallel Slint maintenance.
+2. **Frontend stack:** React 18 + TypeScript + Tailwind + shadcn/ui
+   (Vite build).
+3. **Plugin model:** Slot-extend + custom panels via iframes (per-plugin
+   origin via Tauri custom URI scheme + capability JSON). Defer full
+   UI-mutation tier.
+4. **IPC architecture:** Tauri-native. All React↔Rust via Tauri commands
+   + Tauri events. No HTTP from frontend.
+
+**Operating principle locked:** HTTP only where protocol mandates it.
+External agent driver server stays HTTP. Internal MCP server (HTTP
+localhost) stays — that's claude-code's MCP transport contract.
+Everything else is Tauri IPC.
+
+**What's preserved:** Entire Rust core (`src/agents/`, `src/core/`,
+`src/policy/`, `src/storage/`, `src/signaling/`, `SignalingBridge`,
+session permissions, sqlite schema, all 19+16 MCP tool implementations).
+~12,000 LOC zero-delta. The 202 existing tests are the migration's
+regression baseline.
+
+**What's getting replaced:** ~6,700 LOC of Slint+view_model
+(`ui/app.slint` + `src/ui/view_model.rs`) → ~3,000–5,000 LOC React
+frontend + ~500–1,000 LOC thin Tauri command layer + new plugin module.
+
+**Canonical blueprint:** `docs/plans/2026-05-26-tauri-v2-migration-design.md`
+(committed `7d5d400` + `a9c0abf`). All five design sections (architecture
+/ components / data flow / error handling / testing) user-validated
+through structured `ask_user_choice` gates. Rain's 8 review flags all
+incorporated as section content or addenda. Session brainstorm artifact
+preserved as session doc `brainstorm-tauri-migration` (phase=investigate).
+
+**Status:** Plan-phase output complete. Awaiting fresh-session
+implementation handoff (worktree off main + `superpowers:writing-plans`
++ `superpowers:executing-plans`).
+
+**Reference:** Elves (https://mvmcode.github.io/elves/) — Tauri v2 +
+sqlite + PTY + AI agents, Homebrew-installable. Validates the exact
+domain.
 
 ---
 
