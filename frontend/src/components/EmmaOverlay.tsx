@@ -70,6 +70,22 @@ export function EmmaOverlay() {
     [messages.length, open],
   );
 
+  // Escape-to-close. Scoped to overlay-open so the shortcut doesn't fight
+  // with other Escape handlers when Emma isn't visible. Uses `keydown` on
+  // the window so it fires regardless of which child has focus (the chat
+  // textarea, the message list, etc.).
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, setOpen]);
+
   if (!open) return null;
 
   return (
