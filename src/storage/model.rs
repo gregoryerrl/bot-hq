@@ -234,6 +234,24 @@ impl Project {
     }
 }
 
+/// A bot-hq plugin row. The plugin runtime is scaffolded in `src/plugin/`;
+/// the registry persists installed plugins so they survive restart.
+///
+/// `manifest_json` is the raw JSON content of `bot-hq-plugin.json` from the
+/// plugin's directory at install time; `dir_path` is the absolute path where
+/// the plugin's files live on disk. `enabled` toggles whether the runtime
+/// loads it on startup (the row is preserved either way).
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Plugin {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub enabled: bool,
+    pub manifest_json: String,
+    pub dir_path: String,
+    pub installed_at: String,
+}
+
 /// Per-folder description (parallel to ClIndexEntry but for directories).
 /// `folder_path` is relative to the project's CL root; `''` is the project
 /// root itself.
