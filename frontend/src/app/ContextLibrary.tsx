@@ -199,8 +199,11 @@ export function ContextLibrary() {
                           <code className="font-mono text-xs text-neutral-200">
                             {f.file_path}
                           </code>
-                          <span className="shrink-0 text-[0.65rem] text-neutral-500">
-                            {f.updated_at.slice(0, 10)}
+                          <span
+                            className="shrink-0 text-[0.65rem] text-neutral-500"
+                            title={f.updated_at}
+                          >
+                            {formatRelative(f.updated_at)}
                           </span>
                         </div>
                         {f.description && (
@@ -224,4 +227,30 @@ export function ContextLibrary() {
       )}
     </div>
   );
+}
+
+// Coarse human-readable "time since" matching SessionTile's idiom but
+// extended for older entries: CL files can be months/years old.
+// Hover title keeps the precise ISO timestamp accessible.
+function formatRelative(iso: string): string {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return iso.slice(0, 10);
+  const now = Date.now();
+  const sec = Math.max(0, Math.floor((now - then) / 1000));
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day === 0) return "today";
+  if (day === 1) return "yesterday";
+  if (day < 7) return `${day}d ago`;
+  const week = Math.floor(day / 7);
+  if (week < 5) return `${week}w ago`;
+  const month = Math.floor(day / 30);
+  if (month < 12) return `${month}mo ago`;
+  const year = Math.floor(day / 365);
+  return `${year}y ago`;
 }
