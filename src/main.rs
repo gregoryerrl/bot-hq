@@ -1,22 +1,22 @@
 use anyhow::Result;
 use bot_hq::core::AppState as CoreAppState;
-use bot_hq::paths::{InitOutcome, LockGuard, Paths};
+use bot_hq::paths::{LockGuard, Paths};
 use bot_hq::policy::{hooks, ViolationsLog};
 use bot_hq::signaling::{start_external_server, start_signaling_server, SignalingBridge};
 use bot_hq::storage::Storage;
-use bot_hq::ui::install_view_model;
-use bot_hq::{AppState, AppWindow};
-use slint::ComponentHandle;
+use bot_hq::tauri_events;
+use bot_hq::tauri_events::types::{AgentMessage, AwaitingUser, PhaseChangedEvent};
+use serde_json::Value;
 use std::sync::Arc;
+use tauri::Emitter;
 use tokio::runtime::Builder;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
-    // Default RUST_BACKTRACE=full so a Rust panic anywhere (Slint FFI
-    // callbacks, startup, async tasks) prints a full backtrace to stderr.
-    // Without this the panic dies as a bare `abort()` in the crash report
-    // and we lose the panic site. User can still pin a different level
-    // (RUST_BACKTRACE=1 / =0) by exporting before launch.
+    // Default RUST_BACKTRACE=full so a Rust panic anywhere prints a full
+    // backtrace to stderr. Without this the panic dies as a bare `abort()`
+    // and we lose the panic site. User can pin a different level by
+    // exporting RUST_BACKTRACE before launch.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         // SAFETY: single-threaded main-thread setup before any other threads spawn.
         unsafe {
@@ -25,11 +25,9 @@ fn main() -> Result<()> {
     }
 
     // Chain a panic hook that SIGKILLs every registered claude-code child
-    // BEFORE the original hook prints the panic + unwind reaches the C++
-    // FFI barrier and aborts. Without this, a Slint-callback panic leaves
-    // brian/rain/emma orphaned to launchd, where they keep editing files
-    // (the ghost-Brian incident). Combined with the per-callback
-    // catch_unwind, this is belt-and-suspenders.
+    // BEFORE the original hook prints the panic + unwind reaches the FFI
+    // barrier and aborts. Without this, a panic leaves brian/rain/emma
+    // orphaned to launchd (the ghost-Brian incident).
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         bot_hq::agents::spawn::reap_all_children();
@@ -37,8 +35,8 @@ fn main() -> Result<()> {
     }));
 
     // CLI subcommand dispatch — runs BEFORE GUI init so git hooks don't
-    // pay the Slint/tokio startup cost. Hooks invoke us hundreds of
-    // milliseconds per commit; the GUI takes seconds.
+    // pay the GUI startup cost. Hooks invoke us hundreds of milliseconds
+    // per commit; the GUI takes seconds.
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && args[1] == "policy-check" {
         return run_policy_check_cli(&args[2..]);
@@ -61,47 +59,41 @@ fn main() -> Result<()> {
 
     let _lock = LockGuard::acquire(&paths.lock_path)?;
 
-    // Tokio runtime on a dedicated thread pool. The Slint event loop owns the
-    // OS main thread; all async I/O (storage, agents, HTTP) runs here.
+    // Tokio runtime on dedicated worker threads. Tauri owns the OS main
+    // thread; all async I/O (storage, agents, HTTP, bridge subscriber)
+    // runs on this runtime.
     let runtime = Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()?;
     let rt = runtime.handle().clone();
 
-    let core: Arc<CoreAppState> = runtime.block_on(async {
+    let (core, storage_arc, bridge_arc): (
+        Arc<CoreAppState>,
+        Arc<Storage>,
+        Arc<SignalingBridge>,
+    ) = runtime.block_on(async {
         let storage = Storage::open(&paths.db_path).await?;
         let violations = ViolationsLog::new(&paths.data_dir);
-        // Bridge in-memory state is gone after a restart; any leftover
-        // session-permission JSON files would let a fresh session inherit
-        // grants it never earned. Wipe them all.
         if let Err(e) =
             bot_hq::policy::session_permissions::purge_all_session_permissions(&paths.data_dir)
         {
             tracing::warn!(?e, "purge_all_session_permissions failed at startup");
         }
         let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
-        // Wire storage into the bridge so out-of-band choice resolutions (when
-        // the agent's blocking tool call already timed out client-side) can be
-        // surfaced as synthetic user messages.
         bridge.set_storage(storage.clone()).await;
-        // Initialize the CL index: scan projects on disk, upsert project rows,
-        // rescan each one so file metadata gets indexed. Also one-shot
-        // import of legacy bcc-ad-manager files. All idempotent.
         if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {
             tracing::warn!(?e, "cl startup init failed — index may be partial");
         }
-        let server = start_signaling_server(bridge).await?;
+        let server = start_signaling_server(bridge.clone()).await?;
         tracing::info!(addr = %server.local_addr, "signaling server up");
-        Ok::<_, anyhow::Error>(Arc::new(
-            CoreAppState::new(paths.clone(), storage, server).await,
-        ))
+        let storage_arc = Arc::new(storage.clone());
+        let bridge_arc = bridge.clone();
+        let core = Arc::new(CoreAppState::new(paths.clone(), storage, server).await);
+        Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc))
     })?;
 
-    // Spawn Emma's solo agent (NOT the duo — Emma is a singleton helper, not a
-    // bilateral pair) so her chat is responsive on first message. Failure is
-    // non-fatal — Emma chat stays dormant until the user fixes the env (e.g.,
-    // installs/auths claude-code CLI).
+    // Auto-spawn Emma (singleton chat helper). Non-fatal on failure.
     runtime.block_on(async {
         if let Err(e) = core.ensure_emma_started().await {
             tracing::warn!(
@@ -111,9 +103,8 @@ fn main() -> Result<()> {
         }
     });
 
-    // External MCP server — lets another agent (Claude Code, etc.) drive
-    // bot-hq from outside. Soft-fails on port conflict + when disabled. The
-    // returned handle is stored on AppState so it lives until shutdown.
+    // External MCP server — driver tools surface. Soft-fail on port
+    // conflict or when explicitly disabled.
     runtime.block_on(async {
         if std::env::var("BOT_HQ_EXTERNAL_MCP_DISABLED").is_ok() {
             tracing::info!("external MCP server disabled via BOT_HQ_EXTERNAL_MCP_DISABLED");
@@ -141,31 +132,10 @@ fn main() -> Result<()> {
         }
     });
 
-    let window = AppWindow::new()?;
-    // Register the embedded Lucide icon font with the shared font
-    // collection. Must happen AFTER AppWindow::new() because that's what
-    // initializes the slint platform (the fontique collection lives on
-    // the platform context). Failure is non-fatal — icons fall back to
-    // .notdef boxes if registration trips, but the UI still works.
-    {
-        use slint::fontique_08::fontique;
-        let bytes: &[u8] = include_bytes!("../assets/fonts/lucide.ttf");
-        let blob = fontique::Blob::new(std::sync::Arc::new(bytes.to_vec()));
-        let mut collection = slint::fontique_08::shared_collection();
-        let fonts = collection.register_fonts(blob, None);
-        tracing::info!(font_count = fonts.len(), "lucide.ttf registered");
-    }
-    let state = window.global::<AppState>();
-    apply_init_outcome(&state, &paths, &init_outcome);
-
-    // Shutdown-signal handler: when bot-hq is killed from outside
-    // (SIGTERM from launchd, SIGINT from the terminal, SIGHUP on
-    // session disconnect), the OS event loop never returns from
-    // `window.run()` so the drop chain at the bottom of main never
-    // fires. Without an explicit reap, the claude-code children orphan
-    // to launchd — same incident class as the panic-abort case. Uses
-    // tokio's signal API (self-pipe; the actual handler is async-
-    // signal-safe and the work runs on a normal tokio worker).
+    // Shutdown-signal handler. When killed from outside (SIGTERM from
+    // launchd, SIGINT from terminal, SIGHUP on session disconnect), Tauri's
+    // main-thread event loop never returns, so the panic-hook + signal-task
+    // PID reapers are the only ways the claude-code children get killed.
     rt.spawn(async {
         use tokio::signal::unix::{signal, SignalKind};
         let mut sigterm = signal(SignalKind::terminate()).ok();
@@ -176,10 +146,6 @@ fn main() -> Result<()> {
             _ = async { if let Some(s) = sigint.as_mut() { s.recv().await; } }, if sigint.is_some() => {}
             _ = async { if let Some(s) = sighup.as_mut() { s.recv().await; } }, if sighup.is_some() => {}
             else => {
-                // All three signal() registrations failed (non-Unix host, or
-                // container without signal support). Park forever so the
-                // select! doesn't panic — children will be reaped via the
-                // panic-hook path or window-close drop chain instead.
                 tracing::warn!("no signal handlers installed; shutdown won't trigger child reap via signal");
                 std::future::pending::<()>().await;
             }
@@ -189,28 +155,56 @@ fn main() -> Result<()> {
         std::process::exit(0);
     });
 
-    runtime.block_on(install_view_model(&window, Arc::clone(&core), rt))?;
+    // Export TypeScript bindings for the frontend at startup. Writes
+    // `frontend/src/lib/bindings.ts` so the React side sees current
+    // command signatures. Best-effort: missing dir doesn't block startup.
+    let specta_builder = bot_hq::tauri_specta_gen::builder();
+    if let Err(e) = specta_builder.export(
+        bot_hq::tauri_specta_gen::typescript_config(),
+        "frontend/src/lib/bindings.ts",
+    ) {
+        tracing::warn!(?e, "tauri-specta bindings export failed (frontend may have stale types)");
+    }
 
-    window.run()?;
+    // Hand off to Tauri. Tauri owns the OS main thread.
+    let storage_for_subscriber = Arc::clone(&storage_arc);
+    let bridge_for_subscriber = Arc::clone(&bridge_arc);
 
-    // After window closes, drop everything in an orderly fashion.
+    tauri::Builder::default()
+        .manage(Arc::clone(&storage_arc))
+        .manage(Arc::clone(&bridge_arc))
+        .manage(Arc::clone(&core))
+        .invoke_handler(specta_builder.invoke_handler())
+        .setup(move |app| {
+            // Wire the bridge subscriber: SignalingEvent stream → Tauri emit.
+            let app_handle_for_msgs = app.handle().clone();
+            let app_handle_for_events = app.handle().clone();
+            tauri_events::spawn_subscriber(
+                bridge_for_subscriber,
+                storage_for_subscriber,
+                move |msgs: Vec<AgentMessage>| {
+                    if let Err(e) = app_handle_for_msgs
+                        .emit(AgentMessage::EVENT_NAME_BATCH, &msgs)
+                    {
+                        tracing::warn!(?e, "emit agent.messages.batch failed");
+                    }
+                },
+                move |name: &str, payload: Value| {
+                    if let Err(e) = app_handle_for_events.emit(name, &payload) {
+                        tracing::warn!(?e, event = name, "emit event failed");
+                    }
+                },
+            );
+            tracing::info!("Tauri setup complete; webview launching");
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+
+    // After Tauri returns (window closed), drop everything in order.
     drop(core);
     drop(runtime);
     Ok(())
-}
-
-fn apply_init_outcome(state: &AppState, paths: &Paths, outcome: &InitOutcome) {
-    let text = match outcome {
-        InitOutcome::FirstRun => format!(
-            "Initialized fresh Context Library at {}",
-            paths.data_dir.display()
-        ),
-        InitOutcome::Repaired { repaired_slots } => {
-            format!("Repaired missing CL slot(s): {}", repaired_slots.join(", "))
-        }
-        InitOutcome::Existing => String::new(),
-    };
-    state.set_status_text(text.into());
 }
 
 fn init_logging() {
@@ -219,19 +213,15 @@ fn init_logging() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
-/// Handle `bot-hq policy-check <subcommand> [--data-dir P] [--project Q] ...`.
-/// Used by git hooks installed in working repos. Exits with the appropriate
-/// status code (0 = clean / allow, 1 = block).
+/// `bot-hq policy-check <subcommand>` — used by git hooks installed in
+/// working repos. Exits with the appropriate status code (0 = clean, 1 = block).
 fn run_policy_check_cli(args: &[String]) -> Result<()> {
     use std::process::ExitCode;
-    let exit_code = hooks::run_cli(args)
-        .unwrap_or_else(|e| {
-            eprintln!("bot-hq policy-check: {e}");
-            // Soft-fail: don't break the user's git workflow on internal
-            // errors. The hook prints the error; user can investigate.
-            // Returning 0 means git allows the operation to proceed.
-            0
-        });
+    let exit_code = hooks::run_cli(args).unwrap_or_else(|e| {
+        eprintln!("bot-hq policy-check: {e}");
+        // Soft-fail: don't break the user's git workflow on internal errors.
+        0
+    });
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -239,9 +229,9 @@ fn run_policy_check_cli(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Handle `bot-hq install-hooks --repo <P> --data-dir <D> [--project <Q>]`.
-/// Useful for manual install in a working repo (CI scripts, dev tooling).
-/// Normal session-spawn flow installs hooks automatically.
+/// `bot-hq install-hooks --repo <P> --data-dir <D> [--project <Q>]` — manual
+/// install path for CI / dev tooling. Normal session-spawn installs
+/// automatically.
 fn run_install_hooks_cli(args: &[String]) -> Result<()> {
     let mut repo: Option<std::path::PathBuf> = None;
     let mut data_dir: Option<std::path::PathBuf> = None;
@@ -263,9 +253,11 @@ fn run_install_hooks_cli(args: &[String]) -> Result<()> {
                 i += 2;
             }
             "--project" => {
-                project = Some(args.get(i + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--project needs value"))?
-                    .clone());
+                project = Some(
+                    args.get(i + 1)
+                        .ok_or_else(|| anyhow::anyhow!("--project needs value"))?
+                        .clone(),
+                );
                 i += 2;
             }
             unknown => return Err(anyhow::anyhow!("unknown flag {unknown}")),
@@ -285,25 +277,8 @@ fn run_install_hooks_cli(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// Path of the legacy bot-hq CL root we offer a one-shot import from.
-/// Only `bcc-ad-manager` content is migrated; other legacy projects are
-/// considered superseded by their entries in the new CL or deliberately
-/// dropped.
 const LEGACY_CL_ROOT: &str = ".bot-hq-legacy-2026-05-15";
 
-/// Idempotent CL index initialization. Called once at startup, after storage
-/// is opened and the bridge has been wired with storage + data_dir.
-///
-/// Three jobs:
-///   1. Walk `<data_dir>/projects/<name>/` and register each subdirectory as
-///      a project row (best-effort display_name).
-///   2. Call `bridge.cl_rescan(<project>)` for every project + `_globals`,
-///      which auto-adds new files to `cl_index` with description seeded
-///      from the file's first H1.
-///   3. One-shot legacy import: copy missing files from
-///      `~/.bot-hq-legacy-2026-05-15/projects/bcc-ad-manager/` into
-///      `<data_dir>/projects/bcc-ad-manager/`. Non-destructive (skips
-///      files that already exist in the new CL).
 async fn cl_startup_init(
     storage: &Storage,
     bridge: &Arc<SignalingBridge>,
@@ -311,7 +286,7 @@ async fn cl_startup_init(
 ) -> Result<()> {
     let projects_dir = data_dir.join("projects");
     if projects_dir.is_dir() {
-        for entry in std::fs::read_dir(&projects_dir)? .flatten() {
+        for entry in std::fs::read_dir(&projects_dir)?.flatten() {
             let path = entry.path();
             if !path.is_dir() {
                 continue;
@@ -343,7 +318,6 @@ async fn cl_startup_init(
                     "imported {} new files from legacy bcc-ad-manager CL",
                     imported
                 );
-                // Make sure the project row exists.
                 storage
                     .upsert_project("bcc-ad-manager", "bcc-ad-manager", None, None, None)
                     .await?;
@@ -351,8 +325,6 @@ async fn cl_startup_init(
         }
     }
 
-    // Rescan every project (including _globals) so the index sees the
-    // current filesystem.
     let projects = storage.list_projects().await?;
     for p in projects {
         if let Err(e) = bridge.cl_rescan(&p.name).await {
@@ -362,10 +334,6 @@ async fn cl_startup_init(
     Ok(())
 }
 
-/// Copy every file from `src` to `dst` (recursively), preserving relative
-/// structure, BUT only when the target file doesn't already exist. Returns
-/// the count of files actually copied. The user can prune duplicates later
-/// via the UI; we never overwrite their newer content.
 fn mirror_dir_non_destructive(
     src: &std::path::Path,
     dst: &std::path::Path,
@@ -377,8 +345,6 @@ fn mirror_dir_non_destructive(
             Some(n) => n.to_os_string(),
             None => continue,
         };
-        // Skip hidden (.git, .local, etc.) — legacy CL had a lock file and
-        // sqlite db in the root we don't want to drag over.
         if name.to_str().is_some_and(|n| n.starts_with('.')) {
             continue;
         }
@@ -394,8 +360,6 @@ fn mirror_dir_non_destructive(
     Ok(copied)
 }
 
-/// Minimal .env loader. Mutates the process env. Lines that aren't `KEY=VALUE`
-/// are skipped silently. Existing env vars take precedence.
 fn load_env_file(path: &std::path::Path) -> std::io::Result<()> {
     let body = std::fs::read_to_string(path)?;
     for line in body.lines() {
@@ -416,3 +380,9 @@ fn load_env_file(path: &std::path::Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[allow(dead_code)]
+const _UNUSED_EVENT_TYPES: (
+    std::marker::PhantomData<AwaitingUser>,
+    std::marker::PhantomData<PhaseChangedEvent>,
+) = (std::marker::PhantomData, std::marker::PhantomData);
