@@ -186,25 +186,36 @@ export function SessionView() {
 
         {choicesForSession.length > 0 && (
           <div className="border-b border-default bg-purple-950/30 px-4 py-2 text-xs">
-            <span className="font-semibold text-purple-200">
-              Awaiting your choice:
-            </span>{" "}
-            {choicesForSession[0].question}
-            <div className="mt-2 flex flex-wrap gap-1">
-              {choicesForSession[0].options.map((opt) => (
-                <Button
-                  key={opt}
-                  size="sm"
-                  variant="primary"
-                  onClick={() =>
-                    invoke("resolve_choice", {
-                      choiceId: choicesForSession[0].choice_id,
-                      picked: opt,
-                    })
-                  }
+            <div className="mb-2 font-semibold text-purple-200">
+              {choicesForSession.length === 1
+                ? "Awaiting your choice"
+                : `Awaiting ${choicesForSession.length} choices`}
+            </div>
+            <div className="space-y-3">
+              {choicesForSession.map((choice) => (
+                <div
+                  key={choice.choice_id}
+                  className="border-l-2 border-purple-500/50 pl-3"
                 >
-                  {opt}
-                </Button>
+                  <div className="text-purple-100">{choice.question}</div>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {choice.options.map((opt) => (
+                      <Button
+                        key={opt}
+                        size="sm"
+                        variant="primary"
+                        onClick={() =>
+                          invoke("resolve_choice", {
+                            choiceId: choice.choice_id,
+                            picked: opt,
+                          })
+                        }
+                      >
+                        {opt}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           </div>
