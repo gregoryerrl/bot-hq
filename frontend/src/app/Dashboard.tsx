@@ -5,6 +5,33 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type { PendingChoiceView, SessionInfo } from "../lib/bindings";
 
+/**
+ * Thin wrapper that drives the per-session phase query, so `SessionTile`
+ * stays pure presentational (test-friendly without a QueryClient). Each
+ * loader is its own hook call — fine for the typical bot-hq session count
+ * (< 20). React Query dedupes by `["get_session_phase", { sessionId }]`.
+ */
+function SessionTileLoader({
+  session,
+  pendingChoices,
+}: {
+  session: SessionInfo;
+  pendingChoices: PendingChoiceView[];
+}) {
+  const { data: phase = null } = useTauriQuery<string | null>(
+    "get_session_phase",
+    { sessionId: session.id },
+    { refetchInterval: 5_000 },
+  );
+  return (
+    <SessionTile
+      session={session}
+      pendingChoices={pendingChoices}
+      phase={phase}
+    />
+  );
+}
+
 export function Dashboard() {
   const {
     data: sessions = [],
@@ -29,10 +56,12 @@ export function Dashboard() {
     }
   >("create_session");
 
-  const sessionsNeedingInput = useMemo(() => {
-    const s = new Set<string>();
-    for (const p of pending) s.add(p.session_id);
-    return s;
+  const pendingBySession = useMemo(() => {
+    const acc: Record<string, PendingChoiceView[]> = {};
+    for (const p of pending) {
+      (acc[p.session_id] = acc[p.session_id] ?? []).push(p);
+    }
+    return acc;
   }, [pending]);
 
   const [creating, setCreating] = useState(false);
@@ -143,36 +172,36 @@ export function Dashboard() {
         </div>
       )}
       {isLoading ? (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-gutter md:grid-cols-2 xl:grid-cols-3">
           {[0, 1, 2].map((i) => (
             <div
               key={i}
-              className="h-24 animate-pulse rounded-lg border border-default bg-surface"
+              className="h-40 animate-pulse rounded-lg border border-outline-variant bg-surface"
             />
           ))}
         </div>
       ) : sessions.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-default p-10 text-center">
-          <p className="text-sm text-neutral-300">
+        <div className="rounded-lg border border-dashed border-outline-variant p-10 text-center">
+          <p className="text-sm text-on-surface">
             No active sessions yet.
           </p>
-          <p className="mt-1 text-xs text-neutral-500">
+          <p className="mt-1 text-xs text-on-surface-variant">
             Click <b>+ New session</b> to spawn a Brian + Rain duo on a scope.
           </p>
         </div>
       ) : filteredSessions.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-default p-10 text-center">
-          <p className="text-sm text-neutral-400">
+        <div className="rounded-lg border border-dashed border-outline-variant p-10 text-center">
+          <p className="text-sm text-on-surface-variant">
             No sessions match <code className="font-mono">{filter.trim()}</code>.
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-gutter md:grid-cols-2 xl:grid-cols-3">
           {filteredSessions.map((s) => (
-            <SessionTile
+            <SessionTileLoader
               key={s.id}
               session={s}
-              needsInput={sessionsNeedingInput.has(s.id)}
+              pendingChoices={pendingBySession[s.id] ?? []}
             />
           ))}
         </div>
