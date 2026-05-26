@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useBlocker } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
@@ -107,14 +107,25 @@ function AgentRow({
 }) {
   const [draft, setDraft] = useState(cfg);
   const [tokenVisible, setTokenVisible] = useState(false);
+  const [saved, setSaved] = useState(false);
   const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
   const accentDotClass = authorColorClass(cfg.agent_name);
 
-  // Push dirty state up to Settings so the route-blocker knows.
+  // Auto-clear the "Saved ✓" badge after 2s so it doesn't linger forever.
+  useEffect(() => {
+    if (!saved) return;
+    const id = setTimeout(() => setSaved(false), 2000);
+    return () => clearTimeout(id);
+  }, [saved]);
+
+  // Push dirty state up to Settings so the route-blocker knows. When the
+  // user resumes editing post-save, clear the green badge so the staleness
+  // is unambiguous.
   const prevDirty = useRef(dirty);
   if (prevDirty.current !== dirty) {
     prevDirty.current = dirty;
     onDirtyChange(dirty);
+    if (dirty) setSaved(false);
   }
 
   return (
@@ -126,6 +137,11 @@ function AgentRow({
           {dirty && (
             <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-amber-300">
               Unsaved
+            </span>
+          )}
+          {saved && !dirty && (
+            <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-emerald-300">
+              Saved ✓
             </span>
           )}
         </div>
@@ -204,7 +220,10 @@ function AgentRow({
         <Button
           variant="primary"
           disabled={!dirty || isSaving}
-          onClick={() => onSave(draft)}
+          onClick={async () => {
+            await onSave(draft);
+            setSaved(true);
+          }}
         >
           {isSaving ? "Saving…" : "Save"}
         </Button>
