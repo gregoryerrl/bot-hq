@@ -181,6 +181,20 @@ async clReadFile(project: string, filePath: string) : Promise<Result<ClFileConte
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Set the description (and optionally tags) on a CL index entry. Used by
+ * the ContextLibrary UI's inline edit flow. Underlying call is the same
+ * idempotent `upsert_cl_index` the backfill scan uses, so calling on an
+ * entry that doesn't exist yet is fine — it creates the row.
+ */
+async clSetDescription(project: string, filePath: string, description: string, tags: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_set_description", { project, filePath, description, tags }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async grantSessionPermission(sessionId: string, action: PermissionActionView, scope: GrantScopeView) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("grant_session_permission", { sessionId, action, scope }) };

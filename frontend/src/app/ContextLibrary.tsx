@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { Input } from "../components/ui/Input";
+import { Textarea } from "../components/ui/Textarea";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import type {
@@ -81,6 +82,20 @@ export function ContextLibrary() {
         : {},
       { enabled: selectedFile !== null },
     );
+
+  // The currently-selected file's CL index entry — looked up locally from
+  // the already-loaded `entries` rather than re-querying. Used by the inline
+  // description editor in the file viewer pane (C6).
+  const selectedEntry = useMemo(() => {
+    if (!selectedFile) return null;
+    return (
+      entries.find(
+        (e) =>
+          e.project_id === selectedFile.project &&
+          e.file_path === selectedFile.filePath,
+      ) ?? null
+    );
+  }, [entries, selectedFile]);
 
   const byProject = useMemo(() => {
     const acc: Record<string, ClIndexEntryView[]> = {};
@@ -379,6 +394,13 @@ export function ContextLibrary() {
               ×
             </Button>
           </header>
+          <DescriptionEditor
+            project={selectedFile.project}
+            filePath={selectedFile.filePath}
+            initial={selectedEntry?.description ?? ""}
+            tags={selectedEntry?.tags ?? null}
+            onSaved={() => refetch()}
+          />
           <div className="min-h-0 flex-1 overflow-auto">
             {fileLoading && !fileContent ? (
               <div className="p-6 text-sm text-neutral-500">Loading…</div>
@@ -394,6 +416,127 @@ export function ContextLibrary() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// Inline description + tags editor for a CL index entry. Wraps the
+// `cl_set_description` Tauri command (snake_case backend; tauri-specta
+// camelCases the IPC keys). Saves are idempotent — backend treats an
+// unknown (project, file_path) as upsert, so first-time descriptions on
+// freshly-scanned files Just Work.
+function DescriptionEditor({
+  project,
+  filePath,
+  initial,
+  tags,
+  onSaved,
+}: {
+  project: string;
+  filePath: string;
+  initial: string;
+  tags: string | null;
+  onSaved: () => void;
+}) {
+  // Re-seed local drafts whenever the selected file changes — without this,
+  // clicking a different file keeps the previous file's draft visible.
+  const seedKey = `${project}/${filePath}`;
+  const [seed, setSeed] = useState(seedKey);
+  const [desc, setDesc] = useState(initial);
+  const [tagsStr, setTagsStr] = useState(tags ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (seed !== seedKey) {
+    setSeed(seedKey);
+    setDesc(initial);
+    setTagsStr(tags ?? "");
+    setError(null);
+  }
+
+  const initialTagsStr = tags ?? "";
+  const dirty = desc !== initial || tagsStr !== initialTagsStr;
+
+  const handleSave = async () => {
+    if (!dirty || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await invoke("cl_set_description", {
+        project,
+        filePath,
+        description: desc,
+        tags: tagsStr.trim() ? tagsStr.trim() : null,
+      });
+      onSaved();
+    } catch (e) {
+      const msg =
+        e && typeof e === "object" && "message" in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="border-b border-default bg-surface px-4 py-3">
+      <label className="block">
+        <span className="mb-1 block text-[0.65rem] uppercase tracking-wide text-neutral-500">
+          Description
+        </span>
+        <Textarea
+          rows={2}
+          value={desc}
+          onChange={(e) => setDesc(e.target.value)}
+          placeholder="One-line description shown in the CL index."
+          className="w-full resize-y"
+        />
+      </label>
+      <label className="mt-3 block">
+        <span className="mb-1 block text-[0.65rem] uppercase tracking-wide text-neutral-500">
+          Tags
+        </span>
+        <Input
+          value={tagsStr}
+          onChange={(e) => setTagsStr(e.target.value)}
+          placeholder="(optional, comma-separated)"
+          className="w-full"
+        />
+      </label>
+      {error && (
+        <p className="mt-2 text-xs text-red-300">
+          Save failed: {error}{" "}
+          <button
+            onClick={() => setError(null)}
+            className="underline hover:text-red-100"
+          >
+            dismiss
+          </button>
+        </p>
+      )}
+      <div className="mt-3 flex items-center justify-end gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!dirty || saving}
+          onClick={() => {
+            setDesc(initial);
+            setTagsStr(initialTagsStr);
+            setError(null);
+          }}
+        >
+          Reset
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
+          disabled={!dirty || saving}
+          onClick={handleSave}
+        >
+          {saving ? "Saving…" : "Save"}
+        </Button>
+      </div>
     </div>
   );
 }

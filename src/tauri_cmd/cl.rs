@@ -8,6 +8,26 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
 
+/// Set the description (and optionally tags) on a CL index entry. Used by
+/// the ContextLibrary UI's inline edit flow. Underlying call is the same
+/// idempotent `upsert_cl_index` the backfill scan uses, so calling on an
+/// entry that doesn't exist yet is fine — it creates the row.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_set_description(
+    storage: tauri::State<'_, Arc<Storage>>,
+    project: String,
+    file_path: String,
+    description: String,
+    tags: Option<String>,
+) -> Result<(), AppError> {
+    storage
+        .upsert_cl_index(&project, &file_path, &description, tags.as_deref())
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(())
+}
+
 /// Project as exposed to the frontend. Drives the project-filter dropdown
 /// in ContextLibrary and (eventually) the New-Session repo picker.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

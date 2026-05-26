@@ -49,6 +49,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         cl::cl_rescan,
         cl::list_projects,
         cl::cl_read_file,
+        cl::cl_set_description,
         // Policy / session permissions
         policy::grant_session_permission,
         policy::revoke_session_permission,
