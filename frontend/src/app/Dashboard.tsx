@@ -10,6 +10,7 @@ export function Dashboard() {
     data: sessions = [],
     refetch,
     isLoading,
+    error,
   } = useTauriQuery<SessionInfo[]>("list_sessions");
 
   const { data: pending = [] } = useTauriQuery<PendingChoiceView[]>(
@@ -94,6 +95,19 @@ export function Dashboard() {
               if (e.key === "Enter") handleCreate();
             }}
           />
+        </div>
+      )}
+      {error && (
+        <div className="mb-6 rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3">
+          <p className="text-sm text-red-200">
+            Failed to load sessions: {error.message}
+          </p>
+          <button
+            onClick={() => refetch()}
+            className="mt-1 text-xs text-red-300 underline hover:text-red-100"
+          >
+            Retry
+          </button>
         </div>
       )}
       {isLoading ? (
