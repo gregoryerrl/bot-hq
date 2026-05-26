@@ -53,6 +53,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         // Session documents
         docs::session_doc_search,
         docs::session_doc_read,
+        docs::compute_apply_diff,
     ])
 }
 

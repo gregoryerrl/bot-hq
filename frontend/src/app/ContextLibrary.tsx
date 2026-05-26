@@ -1,20 +1,39 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { Input } from "../components/ui/Input";
 import { Card } from "../components/ui/Card";
-import type { ClIndexEntryView } from "../lib/bindings";
+import { Button } from "../components/ui/Button";
+import type { ClIndexEntryView, ClRescanReportView } from "../lib/bindings";
 
 export function ContextLibrary() {
   const [project, setProject] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [rescanning, setRescanning] = useState(false);
+  const [rescanReport, setRescanReport] = useState<ClRescanReportView | null>(
+    null,
+  );
 
-  const { data: entries = [], isLoading } = useTauriQuery<ClIndexEntryView[]>(
+  const { data: entries = [], isLoading, refetch } = useTauriQuery<ClIndexEntryView[]>(
     "cl_index_search",
     {
       project,
       query: query.trim() || null,
     },
   );
+
+  const handleRescan = async () => {
+    if (!project) return;
+    setRescanning(true);
+    setRescanReport(null);
+    try {
+      const report = await invoke<ClRescanReportView>("cl_rescan", { project });
+      setRescanReport(report);
+      refetch();
+    } finally {
+      setRescanning(false);
+    }
+  };
 
   const byProject = entries.reduce<Record<string, ClIndexEntryView[]>>(
     (acc, e) => {
@@ -27,7 +46,17 @@ export function ContextLibrary() {
 
   return (
     <div className="mx-auto h-full max-w-6xl px-6 py-6">
-      <h1 className="mb-4 text-xl font-semibold">Context Library</h1>
+      <div className="mb-4 flex items-center justify-between">
+        <h1 className="text-xl font-semibold">Context Library</h1>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => refetch()}
+          title="Refetch search results"
+        >
+          ↻ Refresh
+        </Button>
+      </div>
       <div className="mb-4 flex gap-2">
         <Input
           placeholder="Search CL files (substring on path/description/tags)…"
@@ -41,7 +70,22 @@ export function ContextLibrary() {
           onChange={(e) => setProject(e.target.value || null)}
           className="w-48"
         />
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={handleRescan}
+          disabled={!project || rescanning}
+          title={project ? `cl_rescan(${project})` : "Set a project filter to rescan"}
+        >
+          {rescanning ? "Rescanning…" : "Rescan disk"}
+        </Button>
       </div>
+      {rescanReport && (
+        <div className="mb-4 rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-300">
+          Rescan complete · added {rescanReport.added.length} · touched{" "}
+          {rescanReport.touched.length} · orphaned {rescanReport.orphaned.length}
+        </div>
+      )}
       {isLoading ? (
         <p className="text-sm text-neutral-500">Loading…</p>
       ) : entries.length === 0 ? (

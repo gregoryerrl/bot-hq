@@ -165,21 +165,33 @@ export function SessionView() {
           {messages.length === 0 ? (
             <p className="text-sm text-neutral-500">No messages yet…</p>
           ) : (
-            messages.map((m) => (
-              <article key={m.id} className="mb-3">
+            messages.map((m) =>
+              m.kind === "phase_change" ? (
+                // Phase changes persist with author=user (no `system` author
+                // exists), so the `kind` field is the discriminator. Slint-era
+                // convention: centered muted-italic system line.
                 <div
-                  className={cn(
-                    "text-[0.65rem] uppercase tracking-wide",
-                    authorColorClass(m.author),
-                  )}
+                  key={m.id}
+                  className="my-3 text-center text-[0.7rem] italic text-neutral-500"
                 >
-                  {m.author}
+                  — {m.content} —
                 </div>
-                <div className="whitespace-pre-wrap text-sm text-neutral-100">
-                  {m.content}
-                </div>
-              </article>
-            ))
+              ) : (
+                <article key={m.id} className="mb-3">
+                  <div
+                    className={cn(
+                      "text-[0.65rem] uppercase tracking-wide",
+                      authorColorClass(m.author),
+                    )}
+                  >
+                    {m.author}
+                  </div>
+                  <div className="whitespace-pre-wrap text-sm text-neutral-100">
+                    {m.content}
+                  </div>
+                </article>
+              ),
+            )
           )}
         </div>
 

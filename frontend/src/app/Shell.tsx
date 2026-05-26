@@ -3,6 +3,7 @@ import { cn } from "../lib/cn";
 import { useEmmaStore } from "../stores/emma";
 import { Button } from "../components/ui/Button";
 import { EmmaOverlay } from "../components/EmmaOverlay";
+import { PendingTray } from "../components/PendingTray";
 
 const navItem = ({ isActive }: { isActive: boolean }) =>
   cn(
@@ -32,9 +33,12 @@ export function Shell() {
             Settings
           </NavLink>
         </div>
-        <Button variant="secondary" size="sm" onClick={() => toggleEmma()}>
-          Emma
-        </Button>
+        <div className="flex items-center gap-1">
+          <PendingTray />
+          <Button variant="secondary" size="sm" onClick={() => toggleEmma()}>
+            Emma
+          </Button>
+        </div>
       </header>
       <main className="flex-1 overflow-hidden">
         <Outlet />
