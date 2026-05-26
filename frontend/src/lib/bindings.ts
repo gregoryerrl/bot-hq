@@ -44,6 +44,35 @@ async respawnSession(sessionId: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Read the current IPAV phase for a session. Returns one of "investigate" /
+ * "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
+ * state is in-memory only — restart loses it). Frontend SessionView header
+ * uses this for the initial phase chip; subsequent updates come from the
+ * `session:phase_changed` Tauri event.
+ */
+async getSessionPhase(sessionId: string) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_session_phase", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Advance the IPAV phase from the UI. Target accepts single-letter chips
+ * (`I`/`P`/`A`/`V`) or full names (`Investigate`/`Plan`/`Apply`/`Verify`).
+ * Synthesizes a phase-change message in storage + feeds the transition
+ * notice to both agents' stdin so they pick up the new phase as a prompt.
+ */
+async advanceSessionPhase(sessionId: string, target: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("advance_session_phase", { sessionId, target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async closeSession(sessionId: string, archive: boolean) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("close_session", { sessionId, archive }) };
@@ -124,6 +153,14 @@ async clRegisterRead(agent: string, sessionId: string | null, project: string, f
 async clRescan(project: string) : Promise<Result<ClRescanReportView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cl_rescan", { project }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listProjects() : Promise<Result<ProjectView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_projects") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -276,6 +313,11 @@ export type DiffLine = { kind: string; text: string }
 export type GrantScopeView = { kind: "none" } | { kind: "all_branches" } | { kind: "specific"; branches: string[] }
 export type PendingChoiceView = { choice_id: string; session_id: string; agent: string; question: string; options: string[] }
 export type PermissionActionView = "commit" | "push"
+/**
+ * Project as exposed to the frontend. Drives the project-filter dropdown
+ * in ContextLibrary and (eventually) the New-Session repo picker.
+ */
+export type ProjectView = { name: string; display_name: string; working_repo_path: string | null; description: string | null }
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null }
 export type SessionPermissionsView = { commit: GrantScopeView; push: GrantScopeView }

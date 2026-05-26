@@ -2,11 +2,44 @@
 //! Context-Library tab + plugin manager + audit views all hit one surface.
 
 use crate::signaling::SignalingBridge;
-use crate::storage::{ClFolder, ClIndexEntry};
+use crate::storage::{ClFolder, ClIndexEntry, Project, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
+
+/// Project as exposed to the frontend. Drives the project-filter dropdown
+/// in ContextLibrary and (eventually) the New-Session repo picker.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ProjectView {
+    pub name: String,
+    pub display_name: String,
+    pub working_repo_path: Option<String>,
+    pub description: Option<String>,
+}
+
+impl From<Project> for ProjectView {
+    fn from(p: Project) -> Self {
+        Self {
+            name: p.name,
+            display_name: p.display_name,
+            working_repo_path: p.working_repo_path,
+            description: p.description,
+        }
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_projects(
+    storage: tauri::State<'_, Arc<Storage>>,
+) -> Result<Vec<ProjectView>, AppError> {
+    let rows = storage
+        .list_projects()
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    Ok(rows.into_iter().map(ProjectView::from).collect())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct ClIndexEntryView {

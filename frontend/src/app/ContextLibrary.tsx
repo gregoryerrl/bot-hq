@@ -4,7 +4,11 @@ import { useTauriQuery } from "../hooks/useInvoke";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
-import type { ClIndexEntryView, ClRescanReportView } from "../lib/bindings";
+import type {
+  ClIndexEntryView,
+  ClRescanReportView,
+  ProjectView,
+} from "../lib/bindings";
 
 export function ContextLibrary() {
   const [project, setProject] = useState<string | null>(null);
@@ -50,6 +54,15 @@ export function ContextLibrary() {
     project,
     query: debouncedQuery.trim() || null,
   });
+
+  // Project dropdown source — populated from `list_projects` so the filter is
+  // discoverable instead of a free-text typo trap. Refetches every minute so
+  // newly-imported projects appear without a manual page reload.
+  const { data: projects = [] } = useTauriQuery<ProjectView[]>(
+    "list_projects",
+    {},
+    { refetchInterval: 60_000 },
+  );
 
   const byProject = useMemo(() => {
     const acc: Record<string, ClIndexEntryView[]> = {};
@@ -159,12 +172,22 @@ export function ContextLibrary() {
             </button>
           )}
         </div>
-        <Input
-          placeholder="project filter (blank = all)"
+        <select
           value={project ?? ""}
           onChange={(e) => setProject(e.target.value || null)}
-          className="w-56"
-        />
+          className={cn(
+            "w-56 rounded-md border border-default bg-surface px-3 py-1.5 text-sm",
+            "text-neutral-100 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent",
+          )}
+          aria-label="Project filter"
+        >
+          <option value="">All projects</option>
+          {projects.map((p) => (
+            <option key={p.name} value={p.name}>
+              {p.display_name || p.name}
+            </option>
+          ))}
+        </select>
         <Button
           variant="secondary"
           size="sm"
