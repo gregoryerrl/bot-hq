@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "./ui/Button";
 import { Textarea } from "./ui/Textarea";
 
@@ -11,6 +11,17 @@ interface ChatInputProps {
 export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow: reset to `auto` so scrollHeight reflects actual content height,
+  // then clamp to 200px (~8 rows). Beyond that the textarea scrolls
+  // internally instead of pushing the chat list off-screen.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, [value]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -28,6 +39,7 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
   return (
     <form onSubmit={handleSubmit} className="flex items-end gap-2 p-3">
       <Textarea
+        ref={textareaRef}
         rows={2}
         placeholder={placeholder ?? "Message…"}
         value={value}
@@ -39,7 +51,7 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
           }
         }}
         disabled={disabled || sending}
-        className="flex-1"
+        className="flex-1 resize-none"
       />
       <Button
         type="submit"
