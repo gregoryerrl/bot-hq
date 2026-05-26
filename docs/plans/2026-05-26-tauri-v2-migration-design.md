@@ -328,4 +328,4 @@ This session does NOT execute the migration. It produces the plan only.
 - **shadcn/ui** — copy-into-repo React component library (Vercel-built, used by Linear, Cal.com, etc.)
 - **`~/.bot-hq/projects/bot-hq/PROGRESS.md`** — existing bot-hq change log
 - **`~/.bot-hq/projects/slint-rust-docs/`** — knowledge base being retired post-migration
-- **Session doc `brainstorm-tauri-migration`** (session id 16617) — full brainstorming process artifact with section-by-section validation history
+- **Session doc `brainstorm-tauri-migration`** — full brainstorming process artifact with section-by-section validation history (surfaced in the session view's I tab; tag `phase=investigate`)
