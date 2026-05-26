@@ -152,7 +152,7 @@ export function Dashboard() {
           ))}
         </div>
       ) : sessions.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-default p-16 text-center">
+        <div className="rounded-lg border border-dashed border-default p-10 text-center">
           <p className="text-sm text-neutral-300">
             No active sessions yet.
           </p>
