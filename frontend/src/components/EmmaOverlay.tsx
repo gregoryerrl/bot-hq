@@ -109,7 +109,18 @@ export function EmmaOverlay() {
   if (!open) return null;
 
   return (
-    <aside className="fixed inset-y-0 right-0 z-30 flex w-[min(360px,90vw)] md:w-[420px] xl:w-[480px] flex-col border-l border-default bg-canvas shadow-2xl">
+    <>
+      {/* Dim scrim behind the overlay. Click anywhere outside Emma to close. */}
+      <div
+        className="fixed inset-0 z-20 bg-black/40 transition-opacity duration-150"
+        onClick={() => setOpen(false)}
+        aria-hidden
+      />
+      <aside
+        role="dialog"
+        aria-label="Emma chat"
+        className="fixed inset-y-0 right-0 z-30 flex w-[min(360px,90vw)] md:w-[420px] xl:w-[480px] flex-col border-l border-default bg-canvas shadow-2xl"
+      >
       <header className="flex items-center justify-between border-b border-default px-3 py-2">
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold text-neutral-100">Emma</h2>
@@ -200,6 +211,7 @@ export function EmmaOverlay() {
           }}
         />
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }
