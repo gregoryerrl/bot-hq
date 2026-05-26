@@ -179,12 +179,7 @@ function AgentRow({
           />
         </label>
         <label className="block">
-          <span className="mb-1 flex items-center justify-between text-xs text-neutral-400">
-            <span>Auth token</span>
-            <span className="text-amber-400" title="Stored plaintext in sqlite">
-              ⚠ plaintext
-            </span>
-          </span>
+          <span className="mb-1 block text-xs text-neutral-400">Auth token</span>
           <div className="relative">
             <Input
               type={tokenVisible ? "text" : "password"}
