@@ -33,21 +33,6 @@ export function ContextLibrary() {
     query: debouncedQuery.trim() || null,
   });
 
-  const handleRescan = async () => {
-    if (!project) return;
-    setRescanning(true);
-    setRescanReport(null);
-    try {
-      const report = await invoke<ClRescanReportView>("cl_rescan", {
-        project,
-      });
-      setRescanReport(report);
-      refetch();
-    } finally {
-      setRescanning(false);
-    }
-  };
-
   const byProject = useMemo(() => {
     const acc: Record<string, ClIndexEntryView[]> = {};
     for (const e of entries) {
@@ -59,6 +44,51 @@ export function ContextLibrary() {
     }
     return acc;
   }, [entries]);
+
+  const handleRescan = async () => {
+    if (rescanning) return;
+    setRescanning(true);
+    setRescanReport(null);
+    try {
+      if (project) {
+        // Single-project rescan
+        const report = await invoke<ClRescanReportView>("cl_rescan", {
+          project,
+        });
+        setRescanReport(report);
+      } else {
+        // All-projects rescan: iterate over every project we know about.
+        // NOTE: derived from current `byProject` (which comes from
+        // `cl_index_search` results). If a project has zero indexed files
+        // AND is filtered out by the search query, it won't be included.
+        // Acceptable for the common "clear search, then rescan all" flow.
+        const projectIds = Object.keys(byProject);
+        const agg: ClRescanReportView = {
+          added: [],
+          touched: [],
+          orphaned: [],
+        };
+        for (const p of projectIds) {
+          try {
+            const r = await invoke<ClRescanReportView>("cl_rescan", {
+              project: p,
+            });
+            agg.added.push(...r.added);
+            agg.touched.push(...r.touched);
+            agg.orphaned.push(...r.orphaned);
+          } catch (e) {
+            // One bad project shouldn't kill the whole sweep.
+            // eslint-disable-next-line no-console
+            console.warn(`cl_rescan(${p}) failed`, e);
+          }
+        }
+        setRescanReport(agg);
+      }
+      refetch();
+    } finally {
+      setRescanning(false);
+    }
+  };
 
   const toggleProject = (id: string) => {
     setCollapsedProjects((prev) => {
@@ -121,14 +151,23 @@ export function ContextLibrary() {
           variant="secondary"
           size="sm"
           onClick={handleRescan}
-          disabled={!project || rescanning}
+          disabled={
+            rescanning ||
+            (!project && Object.keys(byProject).length === 0)
+          }
           title={
             project
               ? `cl_rescan(${project})`
-              : "Set a project filter to rescan a specific project"
+              : `cl_rescan all (${Object.keys(byProject).length} project${
+                  Object.keys(byProject).length === 1 ? "" : "s"
+                })`
           }
         >
-          {rescanning ? "Rescanning…" : "Rescan disk"}
+          {rescanning
+            ? "Rescanning…"
+            : project
+              ? "Rescan disk"
+              : `Rescan all (${Object.keys(byProject).length})`}
         </Button>
       </div>
       {rescanReport && (
