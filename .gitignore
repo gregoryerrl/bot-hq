@@ -39,6 +39,8 @@ bot-hq.db
 /frontend/dist/
 /frontend/.vite/
 /frontend/src/lib/bindings.ts
+/frontend/tsconfig.tsbuildinfo
+/frontend/**/tsconfig.tsbuildinfo
 
 # Tauri
 /gen/
