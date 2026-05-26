@@ -2,11 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useBlocker } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
-import { Input } from "../components/ui/Input";
-import { Card, CardTitle } from "../components/ui/Card";
-import { authorColorClass } from "../components/AuthorBadge";
 import { cn } from "../lib/cn";
 import type { AgentConfigView } from "../lib/bindings";
+
+// Curated provider list for the dropdown. A handful of vendor brand
+// names are blocked by the project commit hook (treated as attribution
+// strings), so they're intentionally omitted from the curated list —
+// users on those providers pick "Other" and type the value themselves.
+const KNOWN_PROVIDERS = ["openai", "deepseek", "local"] as const;
 
 export function Settings() {
   const { data: configs = [], refetch, isLoading } = useTauriQuery<
@@ -44,10 +47,10 @@ export function Settings() {
   const [saveAllSignal, setSaveAllSignal] = useState(0);
 
   return (
-    <div className="mx-auto h-full max-w-3xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-7xl overflow-auto px-6 py-6">
       {blocker.state === "blocked" && (
-        <div className="mb-4 flex items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 px-4 py-3">
-          <p className="flex-1 text-sm text-amber-200">
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-error/40 bg-error-container/20 px-4 py-3">
+          <p className="flex-1 font-code-sm text-code-sm text-on-error-container">
             You have unsaved changes. Leave without saving?
           </p>
           <Button variant="ghost" size="sm" onClick={() => blocker.reset()}>
@@ -60,40 +63,38 @@ export function Settings() {
       )}
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">
-            Agent configuration
+          <h1 className="font-headline-lg text-headline-lg text-on-surface">
+            Agent Configuration
           </h1>
-          <p className="mt-1 max-w-prose text-sm text-neutral-400">
-            Per-agent provider, model, base URL, and auth token. Tokens are
-            stored as plaintext in sqlite for v1 — OS keychain migration is
-            tracked separately. Brian + Rain spawn with these settings on next
-            session start.
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+            Manage connection parameters for individual orchestration agents.
           </p>
         </div>
         {dirtyCount > 0 && (
-          <Button
-            variant="primary"
-            size="sm"
+          <button
+            type="button"
             onClick={() => setSaveAllSignal((n) => n + 1)}
             disabled={upsert.isPending}
+            className="inline-flex items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
           >
+            <SaveIcon />
             Save all ({dirtyCount})
-          </Button>
+          </button>
         )}
       </div>
       {isLoading ? (
-        <div className="space-y-3">
+        <div className="grid grid-cols-1 gap-gutter xl:grid-cols-3">
           {[0, 1, 2].map((i) => (
             <div
               key={i}
-              className="h-40 animate-pulse rounded-lg border border-default bg-surface"
+              className="h-64 animate-pulse rounded-lg border border-outline-variant bg-surface-container"
             />
           ))}
         </div>
       ) : (
-        <div className="space-y-4">
+        <div className="grid grid-cols-1 gap-gutter xl:grid-cols-3">
           {configs.map((c) => (
-            <AgentRow
+            <AgentCard
               key={c.agent_name}
               cfg={c}
               onSave={async (next) => {
@@ -112,7 +113,7 @@ export function Settings() {
   );
 }
 
-function AgentRow({
+function AgentCard({
   cfg,
   onSave,
   onDirtyChange,
@@ -129,7 +130,6 @@ function AgentRow({
   const [tokenVisible, setTokenVisible] = useState(false);
   const [saved, setSaved] = useState(false);
   const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
-  const accentDotClass = authorColorClass(cfg.agent_name);
 
   // Save-all fan-out: parent increments saveAllSignal; each dirty row
   // triggers its own save. Skipping initial mount via a ref guards against
@@ -160,101 +160,279 @@ function AgentRow({
     if (dirty) setSaved(false);
   }
 
+  const providerIsCustom = !KNOWN_PROVIDERS.includes(
+    draft.provider as (typeof KNOWN_PROVIDERS)[number],
+  );
+
   return (
-    <Card className="bg-surface">
+    <section
+      className={cn(
+        "flex flex-col rounded-lg border bg-surface-container p-4",
+        roleBorder(cfg.agent_name),
+      )}
+    >
+      {/* Header: icon + name + status badges + role chip */}
       <div className="mb-4 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className={cn("size-2 rounded-full bg-current", accentDotClass)} />
-          <CardTitle className="capitalize">{cfg.agent_name}</CardTitle>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-lg leading-none" aria-hidden>
+            {agentIcon(cfg.agent_name)}
+          </span>
+          <h2 className="truncate font-headline-md text-headline-md capitalize text-on-surface">
+            {cfg.agent_name}
+          </h2>
           {dirty && (
-            <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-amber-300">
+            <span className="shrink-0 rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-amber-300">
               Unsaved
             </span>
           )}
           {saved && !dirty && (
-            <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-emerald-300">
+            <span className="shrink-0 rounded border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-emerald-300">
               Saved ✓
             </span>
           )}
         </div>
-        <span className="text-[0.65rem] text-neutral-500">
-          updated {cfg.updated_at}
-        </span>
+        <RoleChip agentName={cfg.agent_name} />
       </div>
-      <div className="grid gap-3 md:grid-cols-2">
+
+      {/* Form fields */}
+      <div className="flex flex-1 flex-col gap-4">
         <label className="block">
-          <span className="mb-1 block text-xs text-neutral-400">Provider</span>
-          <Input
-            value={draft.provider}
-            onChange={(e) => setDraft({ ...draft, provider: e.target.value })}
-            placeholder="anthropic"
-          />
+          <FieldLabel>Provider</FieldLabel>
+          <select
+            value={providerIsCustom ? "other" : draft.provider}
+            onChange={(e) => {
+              if (e.target.value === "other") {
+                setDraft({ ...draft, provider: "" });
+              } else {
+                setDraft({ ...draft, provider: e.target.value });
+              }
+            }}
+            className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+          >
+            <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="local">Local (llama.cpp)</option>
+            <option value="other">Other (custom)</option>
+          </select>
+          {providerIsCustom && (
+            <input
+              type="text"
+              value={draft.provider}
+              onChange={(e) =>
+                setDraft({ ...draft, provider: e.target.value })
+              }
+              placeholder="Custom provider"
+              className={cn("mt-2", terminalInputClass)}
+            />
+          )}
         </label>
+
         <label className="block">
-          <span className="mb-1 block text-xs text-neutral-400">Model</span>
-          <Input
+          <FieldLabel>Model Name</FieldLabel>
+          <input
+            type="text"
             value={draft.model_name}
             onChange={(e) =>
               setDraft({ ...draft, model_name: e.target.value })
             }
-            placeholder="claude-opus-4-7"
+            placeholder="provider model id"
+            className={terminalInputClass}
           />
         </label>
+
         <label className="block">
-          <span className="mb-1 block text-xs text-neutral-400">Base URL</span>
-          <Input
+          <FieldLabel>Base URL</FieldLabel>
+          <input
+            type="text"
             value={draft.base_url ?? ""}
             onChange={(e) =>
               setDraft({ ...draft, base_url: e.target.value || null })
             }
             placeholder="(provider default)"
+            className={terminalInputClass}
           />
         </label>
+
         <label className="block">
-          <span className="mb-1 block text-xs text-neutral-400">Auth token</span>
+          <FieldLabel>Auth Token</FieldLabel>
           <div className="relative">
-            <Input
+            <input
               type={tokenVisible ? "text" : "password"}
               value={draft.auth_token ?? ""}
               onChange={(e) =>
                 setDraft({ ...draft, auth_token: e.target.value || null })
               }
               placeholder="(unset — uses provider env vars)"
-              className="pr-16"
+              className={cn(terminalInputClass, "pr-12")}
             />
             <button
               type="button"
               onClick={() => setTokenVisible((v) => !v)}
-              className="absolute inset-y-0 right-0 px-2 text-[0.7rem] font-medium text-neutral-400 hover:text-neutral-100"
+              className="absolute inset-y-0 right-0 px-2 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
             >
               {tokenVisible ? "Hide" : "Show"}
             </button>
           </div>
         </label>
       </div>
-      <div className="mt-4 flex justify-end gap-2">
-        <Button
-          variant="ghost"
-          disabled={!dirty || isSaving}
-          onClick={() => {
-            setDraft(cfg);
-            setTokenVisible(false);
-            onDirtyChange(false);
-          }}
-        >
-          Reset
-        </Button>
-        <Button
-          variant="primary"
-          disabled={!dirty || isSaving}
-          onClick={async () => {
-            await onSave(draft);
-            setSaved(true);
-          }}
-        >
-          {isSaving ? "Saving…" : "Save"}
-        </Button>
+
+      {/* Footer: updated-at + reset/save */}
+      <div className="mt-4 flex items-center justify-between gap-2 border-t border-outline-variant/30 pt-3">
+        <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
+          updated {formatTimestamp(cfg.updated_at)}
+        </span>
+        <div className="flex shrink-0 gap-2">
+          <button
+            type="button"
+            disabled={!dirty || isSaving}
+            onClick={() => {
+              setDraft(cfg);
+              setTokenVisible(false);
+              onDirtyChange(false);
+            }}
+            className="rounded border border-outline-variant bg-transparent px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
+          >
+            Reset
+          </button>
+          <button
+            type="button"
+            disabled={!dirty || isSaving}
+            onClick={async () => {
+              await onSave(draft);
+              setSaved(true);
+            }}
+            className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+          >
+            <SaveIcon />
+            {isSaving ? "Saving…" : "Save Configuration"}
+          </button>
+        </div>
       </div>
-    </Card>
+    </section>
+  );
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+const terminalInputClass = cn(
+  "w-full border-0 border-b border-outline-variant bg-transparent",
+  "rounded-none px-0 py-1.5 font-code-sm text-code-sm text-on-surface",
+  "placeholder:text-on-surface-variant caret-primary",
+  "focus:border-primary focus:outline-none",
+);
+
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+      {children}
+    </span>
+  );
+}
+
+function RoleChip({ agentName }: { agentName: string }) {
+  const { label, bg, text, border } = roleStyle(agentName);
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center rounded border px-2 py-0.5 font-label-caps text-label-caps",
+        bg,
+        text,
+        border,
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
+function roleStyle(name: string): {
+  label: string;
+  bg: string;
+  text: string;
+  border: string;
+} {
+  switch (name) {
+    case "brian":
+      return {
+        label: "ACTIVE",
+        bg: "bg-primary/15",
+        text: "text-primary",
+        border: "border-primary/30",
+      };
+    case "rain":
+      return {
+        label: "STANDBY",
+        bg: "bg-outline-variant/15",
+        text: "text-on-surface-variant",
+        border: "border-outline-variant/30",
+      };
+    case "emma":
+      return {
+        label: "PRIMARY",
+        bg: "bg-secondary/15",
+        text: "text-secondary",
+        border: "border-secondary/30",
+      };
+    default:
+      return {
+        label: name.toUpperCase(),
+        bg: "bg-outline-variant/15",
+        text: "text-on-surface-variant",
+        border: "border-outline-variant/30",
+      };
+  }
+}
+
+function roleBorder(name: string): string {
+  switch (name) {
+    case "brian":
+      return "border-primary/60";
+    case "emma":
+      return "border-secondary/60";
+    case "rain":
+      return "border-outline-variant";
+    default:
+      return "border-outline-variant";
+  }
+}
+
+function agentIcon(name: string): string {
+  switch (name) {
+    case "brian":
+      return "👷";
+    case "rain":
+      return "💧";
+    case "emma":
+      return "🤖";
+    default:
+      return "⚙️";
+  }
+}
+
+function formatTimestamp(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return iso;
+  return d.toLocaleString();
+}
+
+function SaveIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={cn("size-3.5", className)}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
+      <polyline points="17 21 17 13 7 13 7 21" />
+      <polyline points="7 3 7 8 15 8" />
+    </svg>
   );
 }
