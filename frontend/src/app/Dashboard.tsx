@@ -24,6 +24,7 @@ export function Dashboard() {
 
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
+  const [repoPath, setRepoPath] = useState("");
 
   const handleCreate = async () => {
     if (!title.trim()) return;
@@ -31,10 +32,11 @@ export function Dashboard() {
     await createSession.mutateAsync({
       id,
       title: title.trim(),
-      repoPath: null,
+      repoPath: repoPath.trim() || null,
       project: null,
     });
     setTitle("");
+    setRepoPath("");
     setCreating(false);
     refetch();
   };
@@ -53,23 +55,33 @@ export function Dashboard() {
         </Button>
       </div>
       {creating && (
-        <div className="mb-6 flex gap-2 rounded-lg border border-default bg-surface p-3">
+        <div className="mb-6 space-y-2 rounded-lg border border-default bg-surface p-3">
+          <div className="flex gap-2">
+            <Input
+              autoFocus
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Session title (e.g., refactor auth flow)"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleCreate();
+              }}
+            />
+            <Button
+              variant="primary"
+              onClick={handleCreate}
+              disabled={!title.trim() || createSession.isPending}
+            >
+              Create
+            </Button>
+          </div>
           <Input
-            autoFocus
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="Session title (e.g., refactor auth flow)"
+            value={repoPath}
+            onChange={(e) => setRepoPath(e.target.value)}
+            placeholder="Working repo path (optional — enables git diff in Apply tab)"
             onKeyDown={(e) => {
               if (e.key === "Enter") handleCreate();
             }}
           />
-          <Button
-            variant="primary"
-            onClick={handleCreate}
-            disabled={!title.trim() || createSession.isPending}
-          >
-            Create
-          </Button>
         </div>
       )}
       {isLoading ? (
