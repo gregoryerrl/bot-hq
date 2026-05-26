@@ -33,3 +33,13 @@ bot-hq.db
 
 # Test-run scratch (browser snapshots, screenshots, etc.)
 /tmp/
+
+# Frontend
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.vite/
+/frontend/src/lib/bindings.ts
+
+# Tauri
+/gen/
+/capabilities/gen/

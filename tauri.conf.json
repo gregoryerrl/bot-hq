@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "bot-hq",
+  "version": "0.1.0",
+  "identifier": "com.gregoryerrl.bot-hq",
+  "build": {
+    "frontendDist": "./frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "cd frontend && npm run build",
+    "beforeDevCommand": "cd frontend && npm run dev"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "bot-hq",
+        "width": 1400,
+        "height": 900
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

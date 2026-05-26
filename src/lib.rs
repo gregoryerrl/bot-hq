@@ -7,6 +7,7 @@ pub mod paths;
 pub mod policy;
 pub mod signaling;
 pub mod storage;
+pub mod tauri_specta_gen;
 pub mod ui;
 
 // Slint-generated UI types. Lives at the crate root so any module in the

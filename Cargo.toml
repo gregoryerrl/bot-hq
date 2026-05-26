@@ -35,9 +35,14 @@ bytes = "1"
 tempfile = "3"
 subtle = "2"
 libc = "0.2"
+tauri = { version = "2", features = [] }
+specta = "=2.0.0-rc.22"
+specta-typescript = "=0.0.9"
+tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
 
 [build-dependencies]
 slint-build = "1.16"
+tauri-build = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
