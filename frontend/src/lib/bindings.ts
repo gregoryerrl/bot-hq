@@ -276,16 +276,6 @@ async captureWindowScreenshot(sessionId: string) : Promise<Result<string, AppErr
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Install a plugin from a URL or local directory path.
- * 
- * Slice 3 implements:
- * - URL: fetch `manifest.json` first, validate, download bundle into
- * `<data_dir>/plugins/<id>/`.
- * - Path: read `<source>/manifest.json`, validate, copy directory.
- * Both branches insert a DB row + reload the registry + regenerate
- * capability JSON for Tauri.
- */
 async installPlugin(source: string) : Promise<Result<InstalledPluginView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source }) };
@@ -372,7 +362,12 @@ export type AppError =
 /**
  * Tauri capability check denied a plugin's request.
  */
-{ kind: "CapabilityDenied"; message: string }
+{ kind: "CapabilityDenied"; message: string } | 
+/**
+ * Resource already exists (409-ish). Used by plugin install when the
+ * target id is already on disk; frontend can offer "reinstall" UX.
+ */
+{ kind: "Conflict"; message: string }
 export type ClFileContentView = { project: string; file_path: string; content: string; 
 /**
  * Byte size of the file as it lives on disk. The `content` field is
