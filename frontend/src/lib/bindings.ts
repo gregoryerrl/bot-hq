@@ -275,6 +275,56 @@ async captureWindowScreenshot(sessionId: string) : Promise<Result<string, AppErr
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Install a plugin from a URL or local directory path.
+ * 
+ * Slice 3 implements:
+ * - URL: fetch `manifest.json` first, validate, download bundle into
+ * `<data_dir>/plugins/<id>/`.
+ * - Path: read `<source>/manifest.json`, validate, copy directory.
+ * Both branches insert a DB row + reload the registry + regenerate
+ * capability JSON for Tauri.
+ */
+async installPlugin(source: string) : Promise<Result<InstalledPluginView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listInstalledPlugins() : Promise<Result<InstalledPluginView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_installed_plugins") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async enablePlugin(pluginId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("enable_plugin", { pluginId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async disablePlugin(pluginId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("disable_plugin", { pluginId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async uninstallPlugin(pluginId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("uninstall_plugin", { pluginId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -352,8 +402,41 @@ export type ComputeApplyDiffResult = { lines: DiffLine[]; note: string | null }
  */
 export type DiffLine = { kind: string; text: string }
 export type GrantScopeView = { kind: "none" } | { kind: "all_branches" } | { kind: "specific"; branches: string[] }
+/**
+ * What the frontend sees for each installed plugin. Combines DB row state,
+ * parsed manifest, and live heartbeat status.
+ */
+export type InstalledPluginView = { id: string; name: string; version: string; enabled: boolean; status: PluginStatus; manifest: PluginManifest; dir_path: string; installed_at: string }
 export type PendingChoiceView = { choice_id: string; session_id: string; agent: string; question: string; options: string[] }
 export type PermissionActionView = "commit" | "push"
+export type PluginManifest = { id: string; name: string; version: string; entry: string; requested_capabilities?: string[]; slots?: PluginSlot[] }
+export type PluginSlot = { 
+/**
+ * React shell slot name (e.g., "sidebar.bottom"). `None` means the
+ * plugin contributes a dedicated panel via [`panel_route`] instead.
+ */
+slot_name: string | null; 
+/**
+ * Frontend router path for a dedicated panel. `None` means slot-only.
+ */
+panel_route: string | null }
+/**
+ * Internally-tagged so the TS surface is a discriminated union on `kind`:
+ * `{kind:"Healthy"} | {kind:"Slow", miss_count:N} | {kind:"Crashed"}`.
+ */
+export type PluginStatus = 
+/**
+ * Last ping got a pong within the window.
+ */
+{ kind: "Healthy" } | 
+/**
+ * One or more misses, below MISS_LIMIT.
+ */
+{ kind: "Slow"; miss_count: number } | 
+/**
+ * MISS_LIMIT consecutive misses — host should tear down the iframe.
+ */
+{ kind: "Crashed" }
 /**
  * Project as exposed to the frontend. Drives the project-filter dropdown
  * in ContextLibrary and (eventually) the New-Session repo picker.

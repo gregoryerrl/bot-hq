@@ -25,6 +25,9 @@ pub enum AppError {
     DbError(String),
     /// Tauri capability check denied a plugin's request.
     CapabilityDenied(String),
+    /// Resource already exists (409-ish). Used by plugin install when the
+    /// target id is already on disk; frontend can offer "reinstall" UX.
+    Conflict(String),
 }
 
 impl AppError {
@@ -48,6 +51,7 @@ impl std::fmt::Display for AppError {
             AppError::Internal(m) => write!(f, "internal: {m}"),
             AppError::DbError(m) => write!(f, "db_error: {m}"),
             AppError::CapabilityDenied(m) => write!(f, "capability_denied: {m}"),
+            AppError::Conflict(m) => write!(f, "conflict: {m}"),
         }
     }
 }

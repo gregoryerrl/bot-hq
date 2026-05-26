@@ -170,8 +170,13 @@ fn main() -> Result<()> {
 
     // Plugin registry — scans `<data_dir>/plugins/` and owns the heartbeat
     // state. Constructed eagerly so we can pass it to Tauri's `.manage()` AND
-    // share the Heartbeat with the setup-time sweep loop.
-    let registry = Arc::new(PluginRegistry::new(paths.data_dir.clone())?);
+    // share the Heartbeat with the setup-time sweep loop. Capability JSONs
+    // land under `<data_dir>/capabilities/` so Tauri's compile-time glob can
+    // pick them up on subsequent builds.
+    let registry = Arc::new(PluginRegistry::new(
+        paths.data_dir.clone(),
+        paths.data_dir.join("capabilities"),
+    )?);
 
     // Hand off to Tauri. Tauri owns the OS main thread.
     let storage_for_subscriber = Arc::clone(&storage_arc);
