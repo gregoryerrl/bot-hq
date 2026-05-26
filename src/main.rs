@@ -1,9 +1,11 @@
 use anyhow::Result;
 use bot_hq::core::AppState as CoreAppState;
 use bot_hq::paths::{LockGuard, Paths};
+use bot_hq::plugins::Heartbeat;
 use bot_hq::policy::{hooks, ViolationsLog};
 use bot_hq::signaling::{start_external_server, start_signaling_server, SignalingBridge};
 use bot_hq::storage::Storage;
+use bot_hq::tauri_cmd::plugins::PluginRegistry;
 use bot_hq::tauri_events;
 use bot_hq::tauri_events::types::AgentMessage;
 use serde_json::Value;
@@ -166,16 +168,23 @@ fn main() -> Result<()> {
         tracing::warn!(?e, "tauri-specta bindings export failed (frontend may have stale types)");
     }
 
+    // Plugin registry — scans `<data_dir>/plugins/` and owns the heartbeat
+    // state. Constructed eagerly so we can pass it to Tauri's `.manage()` AND
+    // share the Heartbeat with the setup-time sweep loop.
+    let registry = Arc::new(PluginRegistry::new(paths.data_dir.clone())?);
+
     // Hand off to Tauri. Tauri owns the OS main thread.
     let storage_for_subscriber = Arc::clone(&storage_arc);
     let bridge_for_subscriber = Arc::clone(&bridge_arc);
     let rt_for_setup = rt.clone();
     let core_for_setup = Arc::clone(&core);
+    let registry_for_setup = Arc::clone(&registry);
 
     tauri::Builder::default()
         .manage(Arc::clone(&storage_arc))
         .manage(Arc::clone(&bridge_arc))
         .manage(Arc::clone(&core))
+        .manage(Arc::clone(&registry))
         .invoke_handler(specta_builder.invoke_handler())
         .setup(move |app| {
             // Tauri's setup runs on the OS main thread outside any Tokio
@@ -211,6 +220,29 @@ fn main() -> Result<()> {
                     }
                 },
             );
+            // Plugin heartbeat sweep loop. Ticks every PING_INTERVAL and
+            // emits `plugin:crashed` for any iframe that crossed the
+            // miss-limit this tick. The frontend tears down the iframe in
+            // response. Skip mode on missed ticks: a backed-up runtime
+            // shouldn't double-sweep and double-emit crash events.
+            let app_handle_for_plugins = app.handle().clone();
+            let heartbeat_for_sweep = Arc::clone(&registry_for_setup.heartbeat);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Heartbeat::ping_interval());
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let crashed = heartbeat_for_sweep.sweep();
+                    for plugin_id in crashed {
+                        if let Err(e) = app_handle_for_plugins.emit(
+                            "plugin:crashed",
+                            serde_json::json!({ "plugin_id": plugin_id }),
+                        ) {
+                            tracing::warn!(?e, plugin_id = %plugin_id, "emit plugin:crashed failed");
+                        }
+                    }
+                }
+            });
             tracing::info!("Tauri setup complete; webview launching");
             Ok(())
         })

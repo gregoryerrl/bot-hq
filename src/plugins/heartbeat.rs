@@ -16,6 +16,8 @@
 //! frontend channel; this Rust module owns the timing + state machine + a
 //! callback the frontend wiring invokes on each miss/recover.
 
+use serde::{Deserialize, Serialize};
+use specta::Type;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -24,7 +26,10 @@ const PING_INTERVAL: Duration = Duration::from_secs(5);
 const PONG_WINDOW: Duration = Duration::from_secs(1);
 const MISS_LIMIT: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Internally-tagged so the TS surface is a discriminated union on `kind`:
+/// `{kind:"Healthy"} | {kind:"Slow", miss_count:N} | {kind:"Crashed"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "kind")]
 pub enum PluginStatus {
     /// Last ping got a pong within the window.
     Healthy,

@@ -30,6 +30,6 @@ pub mod manifest;
 mod iframe_ipc_test;
 
 pub use capabilities::{CapabilityGen, PluginCapability};
-pub use heartbeat::Heartbeat;
-pub use loader::Loader;
+pub use heartbeat::{Heartbeat, PluginStatus};
+pub use loader::{LoadedPlugin, Loader};
 pub use manifest::{PluginManifest, PluginSlot};

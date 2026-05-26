@@ -21,7 +21,7 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 }
 
 use crate::tauri_cmd::{
-    agent_configs, cl, docs, messages, policy, questions, screenshot, sessions,
+    agent_configs, cl, docs, messages, plugins, policy, questions, screenshot, sessions,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -63,6 +63,12 @@ pub fn builder() -> Builder<tauri::Wry> {
         docs::compute_apply_diff,
         // Screenshot
         screenshot::capture_window_screenshot,
+        // Plugins
+        plugins::install_plugin,
+        plugins::list_installed_plugins,
+        plugins::enable_plugin,
+        plugins::disable_plugin,
+        plugins::uninstall_plugin,
     ])
 }
 
