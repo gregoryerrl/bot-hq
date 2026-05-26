@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
@@ -10,9 +10,6 @@ import type {
   AppError,
   PendingChoiceView,
 } from "../lib/bindings";
-import { Button } from "./ui/Button";
-import { ChatInput } from "./ChatInput";
-import { ChatMessage } from "./ChatMessage";
 import { cn } from "../lib/cn";
 
 const EMMA_SESSION_ID = "emma";
@@ -72,9 +69,8 @@ export function EmmaOverlay() {
     [applyBatch],
   );
 
-  // Live status for the header dot. Derived from existing data so no new
-  // command is needed:
-  //   - awaiting: Emma has a parked choice in `list_pending_choices`
+  // Live status derivation for the status dot. Reuses existing data:
+  //   - awaiting: Emma has a parked choice
   //   - thinking: last message is the user's (Emma hasn't replied yet)
   //   - idle: last message is Emma's (or there are no messages)
   const { data: pending = [] } = useTauriQuery<PendingChoiceView[]>(
@@ -92,10 +88,8 @@ export function EmmaOverlay() {
     [messages.length, open],
   );
 
-  // Escape-to-close. Scoped to overlay-open so the shortcut doesn't fight
-  // with other Escape handlers when Emma isn't visible. Uses `keydown` on
-  // the window so it fires regardless of which child has focus (the chat
-  // textarea, the message list, etc.).
+  // Escape-to-close, scoped to overlay-open so it doesn't fight other Escape
+  // handlers when Emma isn't visible.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -108,83 +102,110 @@ export function EmmaOverlay() {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, setOpen]);
 
+  // Input state lives at the overlay level so a stale draft survives
+  // accidental focus loss (the terminal feels broken when typed text
+  // vanishes on re-render). Cleared by the send handler on success.
+  const [input, setInput] = useState("");
+  const [sending, setSending] = useState(false);
+  const handleSend = async (e: FormEvent) => {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      await invoke("broadcast_message", {
+        sessionId: EMMA_SESSION_ID,
+        text,
+      });
+      setInput("");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleScreenshot = async () => {
+    try {
+      setScreenshotPending(true);
+      setScreenshotError(null);
+      await invoke("capture_window_screenshot", {
+        sessionId: EMMA_SESSION_ID,
+      });
+    } catch (e) {
+      const msg =
+        e && typeof e === "object" && "message" in e
+          ? String((e as { message: unknown }).message)
+          : String(e);
+      setScreenshotError(msg);
+    } finally {
+      setScreenshotPending(false);
+    }
+  };
+
   if (!open) return null;
 
   return (
-    <>
-      {/* Dim scrim behind the overlay. Click anywhere outside Emma to close. */}
-      <div
-        className="fixed inset-0 z-20 bg-black/40 transition-opacity duration-150"
-        onClick={() => setOpen(false)}
-        aria-hidden
-      />
-      <aside
-        role="dialog"
-        aria-label="Emma chat"
-        className="fixed inset-y-0 right-0 z-30 flex w-[min(360px,90vw)] md:w-[420px] xl:w-[480px] flex-col border-l border-default bg-canvas shadow-2xl"
-      >
-      <header className="flex items-center justify-between border-b border-default px-3 py-2">
+    <aside
+      role="dialog"
+      aria-label="Emma terminal"
+      className={cn(
+        "fixed inset-y-0 right-0 z-30 flex w-full flex-col",
+        "border-l border-outline-variant bg-background shadow-2xl md:w-1/2",
+      )}
+    >
+      <header className="flex h-12 flex-shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container px-4">
         <div className="flex items-center gap-2">
-          <h2 className="text-sm font-semibold text-neutral-100">Emma</h2>
+          <TerminalIcon className="text-primary" />
+          <h2 className="font-headline-md text-headline-md text-on-surface">
+            Emma Terminal
+          </h2>
           <span
             aria-hidden
-            className={cn(
-              "ml-1 size-1.5 rounded-full",
-              status === "awaiting" && "bg-red-400",
-              status === "thinking" && "animate-pulse bg-amber-400",
-              status === "idle" && "bg-emerald-400",
-            )}
+            className="ml-1 size-2 rounded-full bg-primary"
+            title="Emma — brand"
           />
-          <span className="text-[0.65rem] text-neutral-500">
-            {status === "awaiting"
-              ? "awaiting"
-              : status === "thinking"
-                ? "thinking"
-                : "idle"}
-          </span>
         </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            title="Capture the bot-hq window and share with Emma"
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span
+              aria-hidden
+              className={cn(
+                "size-1.5 rounded-full",
+                status === "awaiting" && "bg-red-400",
+                status === "thinking" && "animate-pulse bg-amber-400",
+                status === "idle" && "bg-emerald-400",
+              )}
+            />
+            <span className="font-code-sm text-code-sm text-on-surface-variant">
+              {status}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleScreenshot}
             disabled={screenshotPending}
-            onClick={async () => {
-              try {
-                setScreenshotPending(true);
-                setScreenshotError(null);
-                await invoke("capture_window_screenshot", {
-                  sessionId: EMMA_SESSION_ID,
-                });
-              } catch (e) {
-                const msg =
-                  e && typeof e === "object" && "message" in e
-                    ? String((e as { message: unknown }).message)
-                    : String(e);
-                setScreenshotError(msg);
-              } finally {
-                setScreenshotPending(false);
-              }
-            }}
+            aria-label="Share view"
+            title="Capture the bot-hq window and share with Emma"
+            className="rounded p-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface disabled:opacity-50"
           >
             {screenshotPending ? "…" : "📸"}
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
+          </button>
+          <button
+            type="button"
             onClick={() => setOpen(false)}
             aria-label="Close Emma"
+            className="rounded p-1 text-on-surface-variant transition-colors hover:text-on-surface"
           >
-            ×
-          </Button>
+            <CloseIcon />
+          </button>
         </div>
       </header>
+
       {respawnError && (
-        <div className="border-b border-default bg-red-950/30 px-3 py-2 text-xs text-red-200">
+        <div className="flex-shrink-0 border-b border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
           <span className="font-semibold">Emma spawn failed:</span>{" "}
           {respawnError.message}{" "}
           <button
-            className="ml-2 underline"
+            className="ml-2 underline hover:text-error"
             onClick={() => {
               setRespawnError(null);
               respawn.mutate(
@@ -198,46 +219,53 @@ export function EmmaOverlay() {
         </div>
       )}
       {screenshotError && (
-        <div className="border-b border-default bg-red-950/30 px-3 py-2 text-xs text-red-200">
+        <div className="flex-shrink-0 border-b border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
           <span className="font-semibold">Screenshot failed:</span>{" "}
           {screenshotError}
           <button
-            className="ml-2 underline"
+            className="ml-2 underline hover:text-error"
             onClick={() => setScreenshotError(null)}
           >
             dismiss
           </button>
         </div>
       )}
-      {/* Single scroll boundary — see SessionView for the same pattern. */}
+
       <div
         ref={scrollRef}
-        className="relative flex-1 overflow-auto px-3 py-3"
+        className="relative flex-1 overflow-auto px-4 py-4"
       >
         {messages.length === 0 ? (
-          <p className="text-sm text-neutral-500">Say hi to Emma…</p>
+          <p className="font-code-sm text-code-sm text-on-surface-variant">
+            <span className="text-primary">$</span> initializing terminal session…
+          </p>
         ) : (
-          messages.map((m, i) => (
-            <ChatMessage
-              key={m.id}
-              message={m}
-              groupedWithPrev={
+          <div className="space-y-4">
+            {messages.map((m, i) => {
+              const groupedWithPrev =
                 i > 0 &&
                 m.kind !== "phase_change" &&
                 messages[i - 1].kind !== "phase_change" &&
-                messages[i - 1].author === m.author
-              }
-            />
-          ))
+                messages[i - 1].author === m.author;
+              return (
+                <EmmaTerminalMessage
+                  key={m.id}
+                  message={m}
+                  groupedWithPrev={groupedWithPrev}
+                />
+              );
+            })}
+          </div>
         )}
         {!stuck && messages.length > 0 && (
           <div className="pointer-events-none sticky bottom-0 flex justify-end pr-1 pt-2">
             <button
               onClick={scrollToBottom}
               className={cn(
-                "pointer-events-auto inline-flex items-center gap-1 rounded-full",
-                "border border-default bg-overlay px-3 py-1 text-xs text-neutral-200 shadow-lg",
-                "hover:border-author-emma hover:text-white transition-colors",
+                "pointer-events-auto inline-flex items-center gap-1 rounded",
+                "border border-outline-variant bg-surface-container px-3 py-1",
+                "font-code-sm text-code-sm text-on-surface shadow-lg",
+                "transition-colors hover:border-primary hover:text-primary",
               )}
             >
               ↓ Jump to latest
@@ -245,18 +273,168 @@ export function EmmaOverlay() {
           </div>
         )}
       </div>
-      <div className="border-t border-default">
-        <ChatInput
-          placeholder="Message Emma…"
-          onSend={async (text) => {
-            await invoke("broadcast_message", {
-              sessionId: EMMA_SESSION_ID,
-              text,
-            });
-          }}
-        />
+
+      <div className="flex-shrink-0 border-t border-outline-variant bg-surface-container p-4">
+        <form onSubmit={handleSend} className="relative flex items-center">
+          <span
+            aria-hidden
+            className="pointer-events-none absolute left-3 font-code-sm text-code-sm text-primary"
+          >
+            $
+          </span>
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Type command…"
+            disabled={sending}
+            className={cn(
+              "w-full rounded border border-outline-variant bg-surface-container-lowest",
+              "py-2 pl-8 pr-10 font-code-sm text-code-sm text-on-surface caret-primary",
+              "placeholder:text-on-surface-variant",
+              "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+              "disabled:opacity-50",
+            )}
+          />
+          <button
+            type="submit"
+            disabled={!input.trim() || sending}
+            aria-label="Send"
+            className="absolute right-2 rounded p-1 text-primary transition-colors hover:text-primary-fixed disabled:opacity-40"
+          >
+            <SendIcon />
+          </button>
+        </form>
       </div>
-      </aside>
-    </>
+    </aside>
+  );
+}
+
+// ============================================================================
+// Terminal-block message — inline replacement for the shared <ChatMessage>.
+// Kept Emma-local so SessionView's bubble-style messages aren't affected.
+// ============================================================================
+
+interface EmmaTerminalMessageProps {
+  message: AgentMessage;
+  groupedWithPrev: boolean;
+}
+
+const AUTHOR_TEXT: Record<string, string> = {
+  emma: "text-primary",
+  system: "text-tertiary",
+  user: "text-tertiary",
+};
+
+const AUTHOR_DOT: Record<string, string> = {
+  emma: "bg-primary",
+  system: "bg-tertiary",
+  user: "bg-tertiary",
+};
+
+function EmmaTerminalMessage({ message, groupedWithPrev }: EmmaTerminalMessageProps) {
+  if (message.kind === "phase_change") {
+    return (
+      <div className="my-2 text-center font-code-sm text-code-sm italic text-on-surface-variant">
+        — {message.content} —
+      </div>
+    );
+  }
+
+  const authorText = AUTHOR_TEXT[message.author] ?? "text-on-surface-variant";
+  const authorDot = AUTHOR_DOT[message.author] ?? "bg-on-surface-variant";
+
+  return (
+    <article className="flex flex-col gap-2">
+      {!groupedWithPrev && (
+        <header className="flex items-center gap-2">
+          <span
+            aria-hidden
+            className={cn("size-2 rounded-full", authorDot)}
+          />
+          <span
+            className={cn(
+              "font-label-caps text-label-caps uppercase",
+              authorText,
+            )}
+          >
+            {message.author}
+          </span>
+          <span className="font-code-sm text-code-sm text-on-surface-variant">
+            {formatClockTime(message.created_at)}
+          </span>
+        </header>
+      )}
+      <div className="rounded-lg border border-outline-variant/30 bg-surface-container-high p-3">
+        <p className="whitespace-pre-wrap font-code-sm text-code-sm text-on-surface">
+          {message.content}
+        </p>
+      </div>
+    </article>
+  );
+}
+
+function formatClockTime(iso: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "";
+  return d.toLocaleTimeString("en-US", { hour12: false });
+}
+
+// ============================================================================
+// Icons (inline SVG — no Material Symbols dep)
+// ============================================================================
+
+function TerminalIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={cn("size-5", className)}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="4 17 10 11 4 5" />
+      <line x1="12" y1="19" x2="20" y2="19" />
+    </svg>
+  );
+}
+
+function SendIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={cn("size-[18px]", className)}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </svg>
+  );
+}
+
+function CloseIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={cn("size-4", className)}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
   );
 }
