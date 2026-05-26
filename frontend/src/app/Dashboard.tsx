@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { SessionTile } from "../components/SessionTile";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
-import type { SessionInfo } from "../lib/bindings";
+import type { PendingChoiceView, SessionInfo } from "../lib/bindings";
 
 export function Dashboard() {
   const {
@@ -11,6 +11,12 @@ export function Dashboard() {
     refetch,
     isLoading,
   } = useTauriQuery<SessionInfo[]>("list_sessions");
+
+  const { data: pending = [] } = useTauriQuery<PendingChoiceView[]>(
+    "list_pending_choices",
+    {},
+    { refetchInterval: 5_000 },
+  );
 
   const createSession = useTauriMutation<
     SessionInfo,
@@ -21,6 +27,12 @@ export function Dashboard() {
       project: string | null;
     }
   >("create_session");
+
+  const sessionsNeedingInput = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of pending) s.add(p.session_id);
+    return s;
+  }, [pending]);
 
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
@@ -105,7 +117,11 @@ export function Dashboard() {
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {sessions.map((s) => (
-            <SessionTile key={s.id} session={s} />
+            <SessionTile
+              key={s.id}
+              session={s}
+              needsInput={sessionsNeedingInput.has(s.id)}
+            />
           ))}
         </div>
       )}
