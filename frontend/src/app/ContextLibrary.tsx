@@ -91,12 +91,26 @@ export function ContextLibrary() {
         </Button>
       </div>
       <div className="mb-4 flex gap-2">
-        <Input
-          placeholder="Search CL files (substring on path/description/tags)…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          className="flex-1"
-        />
+        <div className="relative flex-1">
+          <Input
+            placeholder="Search CL files (substring on path/description/tags)…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            // Right padding leaves room for the clear button overlay.
+            className="w-full pr-8"
+          />
+          {query.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              aria-label="Clear search"
+              title="Clear search"
+              className="absolute inset-y-0 right-0 flex w-8 items-center justify-center text-neutral-500 hover:text-neutral-100"
+            >
+              ×
+            </button>
+          )}
+        </div>
         <Input
           placeholder="project filter (blank = all)"
           value={project ?? ""}
