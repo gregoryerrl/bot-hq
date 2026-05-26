@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
+import { useBlocker } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -15,8 +16,43 @@ export function Settings() {
     "upsert_agent_config",
   );
 
+  // Per-agent dirty tracking. `dirtyRef` is the source of truth (avoids
+  // re-renders on every keystroke); `dirtyCount` mirrors size so the
+  // blocker's gate-fn closure stays current.
+  const dirtyRef = useRef<Set<string>>(new Set());
+  const [dirtyCount, setDirtyCount] = useState(0);
+
+  const setDirty = useCallback((agentName: string, dirty: boolean) => {
+    const prev = dirtyRef.current.size;
+    if (dirty) {
+      dirtyRef.current.add(agentName);
+    } else {
+      dirtyRef.current.delete(agentName);
+    }
+    const next = dirtyRef.current.size;
+    if ((prev === 0) !== (next === 0)) setDirtyCount(next);
+  }, []);
+
+  const blocker = useBlocker(
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useCallback(() => dirtyRef.current.size > 0, [dirtyCount]),
+  );
+
   return (
     <div className="mx-auto h-full max-w-3xl overflow-auto px-6 py-6">
+      {blocker.state === "blocked" && (
+        <div className="mb-4 flex items-center gap-3 rounded-lg border border-amber-500/40 bg-amber-500/5 px-4 py-3">
+          <p className="flex-1 text-sm text-amber-200">
+            You have unsaved changes. Leave without saving?
+          </p>
+          <Button variant="ghost" size="sm" onClick={() => blocker.reset()}>
+            Stay
+          </Button>
+          <Button variant="danger" size="sm" onClick={() => blocker.proceed()}>
+            Leave
+          </Button>
+        </div>
+      )}
       <div className="mb-6">
         <h1 className="text-xl font-semibold tracking-tight">
           Agent configuration
@@ -45,8 +81,10 @@ export function Settings() {
               cfg={c}
               onSave={async (next) => {
                 await upsert.mutateAsync({ cfg: next });
+                setDirty(c.agent_name, false);
                 refetch();
               }}
+              onDirtyChange={(dirty) => setDirty(c.agent_name, dirty)}
               isSaving={upsert.isPending}
             />
           ))}
@@ -59,16 +97,25 @@ export function Settings() {
 function AgentRow({
   cfg,
   onSave,
+  onDirtyChange,
   isSaving,
 }: {
   cfg: AgentConfigView;
   onSave: (next: AgentConfigView) => Promise<void>;
+  onDirtyChange: (dirty: boolean) => void;
   isSaving?: boolean;
 }) {
   const [draft, setDraft] = useState(cfg);
   const [tokenVisible, setTokenVisible] = useState(false);
   const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
   const accentDotClass = authorColorClass(cfg.agent_name);
+
+  // Push dirty state up to Settings so the route-blocker knows.
+  const prevDirty = useRef(dirty);
+  if (prevDirty.current !== dirty) {
+    prevDirty.current = dirty;
+    onDirtyChange(dirty);
+  }
 
   return (
     <Card className="bg-surface">
@@ -149,6 +196,7 @@ function AgentRow({
           onClick={() => {
             setDraft(cfg);
             setTokenVisible(false);
+            onDirtyChange(false);
           }}
         >
           Reset
