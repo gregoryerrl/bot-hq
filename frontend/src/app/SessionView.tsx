@@ -13,7 +13,9 @@ import type {
   AgentMessage,
   AppError,
   PendingChoiceView,
+  PermissionActionView,
   SessionInfo,
+  SessionPermissionsView,
 } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { invoke } from "@tauri-apps/api/core";
@@ -135,6 +137,37 @@ export function SessionView() {
     (c) => c.session_id === sessionId,
   );
 
+  // Per-session commit + push grants. The agents check these before running
+  // git commit / git push. Two states the user can toggle from the header:
+  // `none` (default; agents must call request_approval) and `all_branches`
+  // (blanket grant for the session). Per-branch specific grants are issued
+  // by agents via request_approval and arrive as ask_user_choice — no UI
+  // surface needed here for that path.
+  const { data: perms, refetch: refetchPerms } =
+    useTauriQuery<SessionPermissionsView>(
+      "list_session_permissions",
+      { sessionId },
+      { enabled: !!sessionId },
+    );
+  const togglePermission = async (action: PermissionActionView) => {
+    const current = perms?.[action]?.kind;
+    try {
+      if (current === "all_branches") {
+        await invoke("revoke_session_permission", { sessionId, action });
+      } else {
+        await invoke("grant_session_permission", {
+          sessionId,
+          action,
+          scope: { kind: "all_branches" },
+        });
+      }
+      refetchPerms();
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`toggle ${action} grant failed`, e);
+    }
+  };
+
   // IPAV phase indicator. Initial value comes from `get_session_phase`
   // (in-memory on `CoreAppState`); subsequent updates arrive via the
   // `session:phase_changed` Tauri event fired by the bridge subscriber.
@@ -209,6 +242,18 @@ export function SessionView() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
+            <GrantPill
+              label="commit"
+              granted={perms?.commit.kind === "all_branches"}
+              specific={perms?.commit.kind === "specific"}
+              onToggle={() => togglePermission("commit")}
+            />
+            <GrantPill
+              label="push"
+              granted={perms?.push.kind === "all_branches"}
+              specific={perms?.push.kind === "specific"}
+              onToggle={() => togglePermission("push")}
+            />
             <PhasePillRow
               selected={phase ?? "investigate"}
               onSelect={(next) => {
@@ -393,5 +438,49 @@ function MessagesSkeleton() {
         </div>
       ))}
     </div>
+  );
+}
+
+// Compact commit/push grant toggle. Three visual states keyed off the
+// underlying SessionPermissions kind:
+//   - granted=true   → blanket all_branches grant (primary-tinted)
+//   - specific=true  → per-branch grant (informational; click still toggles
+//                      via the granted path)
+//   - neither        → no grant (default; outline only)
+// Click cycles between none ↔ all_branches via the parent's onToggle.
+function GrantPill({
+  label,
+  granted,
+  specific,
+  onToggle,
+}: {
+  label: string;
+  granted: boolean;
+  specific: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={
+        granted
+          ? `Click to revoke session-wide ${label} permission`
+          : specific
+            ? `${label}: per-branch grant active. Click to upgrade to all-branches.`
+            : `Click to grant ${label} for all branches this session`
+      }
+      className={
+        "inline-flex items-center gap-1 rounded border px-2 py-1 font-label-caps text-label-caps transition-colors " +
+        (granted
+          ? "border-primary bg-primary/15 text-primary"
+          : specific
+            ? "border-tertiary/60 text-tertiary"
+            : "border-outline/40 text-on-surface-variant hover:border-outline")
+      }
+    >
+      <span aria-hidden>{granted ? "●" : specific ? "◐" : "○"}</span>
+      {label}
+    </button>
   );
 }
