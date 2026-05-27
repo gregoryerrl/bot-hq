@@ -110,12 +110,15 @@ impl Storage {
     /// non-deterministic order, causing dashboard tiles to swap places on
     /// every refresh.
     pub async fn list_active_sessions(&self) -> Result<Vec<Session>> {
+        // Exclude the special `emma` singleton — she's a chat overlay, not a
+        // duo session. She'd otherwise satisfy `archived=0 AND closed_at IS
+        // NULL` and surface as a phantom tile on the Dashboard.
         let rows = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
                     brian_model_at_spawn, rain_model_at_spawn, \
                     brian_claude_session_id, rain_claude_session_id \
              FROM sessions \
-             WHERE archived = 0 AND closed_at IS NULL \
+             WHERE archived = 0 AND closed_at IS NULL AND id != 'emma' \
              ORDER BY created_at DESC, id ASC",
         )
         .fetch_all(&self.pool)
