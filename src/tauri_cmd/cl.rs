@@ -206,11 +206,13 @@ pub async fn cl_read_file(
 ) -> Result<ClFileContentView, AppError> {
     const MAX_READ_BYTES: u64 = 1_048_576; // 1 MB
 
-    let data_dir = bridge
-        .data_dir()
-        .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?
-        .clone();
-    let project_root = data_dir.join("projects").join(&project);
+    // Resolve via the bridge helper so `_globals` maps to data_dir and
+    // projects with a custom `cl_path` row are honored. Falls back to
+    // `<data_dir>/projects/<name>` for the common case.
+    let project_root = bridge
+        .cl_project_root(&project)
+        .await
+        .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
 
     // Canonicalize the project root first. If it doesn't exist (typo or
     // project removed), refuse rather than letting a relative file path

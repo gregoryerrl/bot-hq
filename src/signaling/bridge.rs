@@ -991,7 +991,7 @@ impl SignalingBridge {
     /// Clones the Storage handle out of the mutex before awaiting so callers
     /// holding the bridge mutex (e.g. `cl_rescan`) don't deadlock when this
     /// method tries to re-lock for its own lookup.
-    async fn cl_project_root(&self, project: &str) -> Option<PathBuf> {
+    pub(crate) async fn cl_project_root(&self, project: &str) -> Option<PathBuf> {
         let data_dir = self.data_dir.as_ref()?.clone();
         if project == Project::GLOBALS {
             return Some(data_dir);
