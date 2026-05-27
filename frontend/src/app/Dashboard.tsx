@@ -1,9 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { SessionTile } from "../components/SessionTile";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
-import type { PendingChoiceView, SessionInfo } from "../lib/bindings";
+import type {
+  PendingChoiceView,
+  ProjectView,
+  SessionInfo,
+} from "../lib/bindings";
+import { cn } from "../lib/cn";
 
 /**
  * Thin wrapper that drives the per-session phase query, so `SessionTile`
@@ -46,6 +51,14 @@ export function Dashboard() {
     { refetchInterval: 5_000 },
   );
 
+  // Project dropdown source for the New Session dialog. Refreshes on a
+  // 60s interval so newly-imported projects show without a manual reload.
+  const { data: projects = [] } = useTauriQuery<ProjectView[]>(
+    "list_projects",
+    {},
+    { refetchInterval: 60_000 },
+  );
+
   const createSession = useTauriMutation<
     SessionInfo,
     {
@@ -66,7 +79,10 @@ export function Dashboard() {
 
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
-  const [repoPath, setRepoPath] = useState("");
+  // Selected project name (matches ProjectView.name). Empty string = no
+  // project (no working repo). When set, we look up the project's
+  // working_repo_path and pass it as repoPath to create_session.
+  const [selectedProject, setSelectedProject] = useState("");
   const [filter, setFilter] = useState("");
 
   // Case-insensitive substring filter on session title. In-memory so no
@@ -80,17 +96,33 @@ export function Dashboard() {
   const handleCreate = async () => {
     if (!title.trim()) return;
     const id = `s-${crypto.randomUUID().slice(0, 8)}`;
+    const proj = projects.find((p) => p.name === selectedProject);
     await createSession.mutateAsync({
       id,
       title: title.trim(),
-      repoPath: repoPath.trim() || null,
-      project: null,
+      repoPath: proj?.working_repo_path ?? null,
+      project: selectedProject || null,
     });
     setTitle("");
-    setRepoPath("");
+    setSelectedProject("");
     setCreating(false);
     refetch();
   };
+
+  // Escape-to-dismiss + first-input focus when the dialog opens.
+  const dialogTitleRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!creating) return;
+    dialogTitleRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setCreating(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [creating]);
 
   return (
     <div className="mx-auto h-full max-w-6xl overflow-auto px-6 py-6">
@@ -103,39 +135,95 @@ export function Dashboard() {
               : `${sessions.length} active`}
           </p>
         </div>
-        <Button variant="primary" onClick={() => setCreating(!creating)}>
-          {creating ? "Cancel" : "+ New session"}
+        <Button variant="primary" onClick={() => setCreating(true)}>
+          + New session
         </Button>
       </div>
       {creating && (
-        <div className="mb-6 space-y-2 rounded-lg border border-default bg-surface p-3">
-          <div className="flex gap-2">
-            <Input
-              autoFocus
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Session title (e.g., refactor auth flow)"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleCreate();
-              }}
-            />
-            <Button
-              variant="primary"
-              onClick={handleCreate}
-              disabled={!title.trim() || createSession.isPending}
-            >
-              Create
-            </Button>
-          </div>
-          <Input
-            value={repoPath}
-            onChange={(e) => setRepoPath(e.target.value)}
-            placeholder="Working repo path (optional — enables git diff in Apply tab)"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleCreate();
-            }}
+        <>
+          {/* Scrim — click anywhere outside the dialog to dismiss */}
+          <div
+            className="fixed inset-0 z-40 bg-black/60"
+            onClick={() => setCreating(false)}
+            aria-hidden
           />
-        </div>
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="New session"
+            className={cn(
+              "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] -translate-x-1/2 -translate-y-1/2",
+              "rounded-lg border border-default bg-surface-container p-5 shadow-2xl",
+            )}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="font-headline-md text-headline-md text-on-surface">
+                New session
+              </h2>
+              <button
+                type="button"
+                onClick={() => setCreating(false)}
+                aria-label="Close"
+                className="text-on-surface-variant hover:text-on-surface"
+              >
+                ×
+              </button>
+            </div>
+            <div className="space-y-3">
+              <label className="block">
+                <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                  Title
+                </span>
+                <Input
+                  ref={dialogTitleRef}
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  placeholder="e.g., refactor auth flow"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleCreate();
+                  }}
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                  Project
+                </span>
+                <select
+                  value={selectedProject}
+                  onChange={(e) => setSelectedProject(e.target.value)}
+                  className={cn(
+                    "w-full rounded-md border border-default bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                    "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+                  )}
+                >
+                  <option value="">(none — no working repo)</option>
+                  {projects.map((p) => (
+                    <option key={p.name} value={p.name}>
+                      {p.display_name || p.name}
+                      {p.working_repo_path ? ` — ${p.working_repo_path}` : ""}
+                    </option>
+                  ))}
+                </select>
+                <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+                  Drives git diff in the Apply tab + project-specific
+                  policy. Leave blank for ad-hoc scopes.
+                </span>
+              </label>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setCreating(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={handleCreate}
+                disabled={!title.trim() || createSession.isPending}
+              >
+                {createSession.isPending ? "Creating…" : "Create session"}
+              </Button>
+            </div>
+          </div>
+        </>
       )}
       {sessions.length > 0 && (
         <div className="relative mb-4">
