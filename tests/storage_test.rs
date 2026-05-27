@@ -82,14 +82,16 @@ async fn close_session_marks_closed() {
 }
 
 #[tokio::test]
-async fn active_sessions_excludes_closed() {
+async fn active_sessions_excludes_closed_and_emma() {
     let s = Storage::memory().await.unwrap();
     s.create_session("active1", "a", None).await.unwrap();
     s.create_session("closed1", "c", None).await.unwrap();
     s.close_session("closed1", true).await.unwrap();
     let active = s.list_active_sessions().await.unwrap();
     let ids: Vec<_> = active.iter().map(|s| s.id.as_str()).collect();
-    assert!(ids.contains(&"emma"));
+    // Emma is a chat-overlay singleton — explicitly filtered out so she
+    // doesn't surface as a phantom Dashboard tile alongside duo sessions.
+    assert!(!ids.contains(&"emma"));
     assert!(ids.contains(&"active1"));
     assert!(!ids.contains(&"closed1"));
 }

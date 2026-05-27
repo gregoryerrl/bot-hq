@@ -189,7 +189,7 @@ async fn tools_list_returns_iter1_set() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_sessions_returns_emma() {
+async fn list_sessions_excludes_emma() {
     let env = setup().await;
     let h = auth_header(&env.token);
     let (status, body) = http_post(
@@ -200,9 +200,10 @@ async fn list_sessions_returns_emma() {
     )
     .await;
     assert!(status.contains("200"), "got: {status}");
-    // The seeded emma session row is always active. Inner JSON is escaped
-    // inside the text-content block, so we look for the escaped key:value.
-    assert!(body.contains(r#"\"id\":\"emma\""#), "body: {body}");
+    // Emma is a chat-overlay singleton, not a duo session — explicitly
+    // filtered out of `list_active_sessions`. Inner JSON is escaped inside
+    // the text-content block, so we look for the escaped key:value.
+    assert!(!body.contains(r#"\"id\":\"emma\""#), "body: {body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
