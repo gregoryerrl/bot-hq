@@ -14,7 +14,7 @@ export function Shell() {
     <div className="flex h-screen flex-col bg-background font-body-md text-on-background">
       <header className="flex h-12 flex-shrink-0 items-center justify-between border-b border-outline-variant bg-surface px-grid-margin">
         <div className="flex h-full items-center gap-6">
-          <h1 className="text-headline-lg font-headline-lg tracking-tighter text-primary">
+          <h1 className="text-headline-lg font-headline-lg text-primary">
             bot-hq
           </h1>
           <nav className="flex h-full items-center gap-4 pt-1">

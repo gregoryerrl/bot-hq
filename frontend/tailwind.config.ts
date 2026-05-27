@@ -68,9 +68,7 @@ export default {
       spacing: {
         "grid-margin": "1rem",
         gutter: "0.75rem",
-        "stack-tight": "0.25rem",
         "stack-md": "0.5rem",
-        "panel-padding": "1rem",
       },
       colors: {
         // Legacy (kept through screen migration)
@@ -151,7 +149,6 @@ export default {
       },
       borderColor: {
         DEFAULT: "#262626",
-        subtle: "#1d1d1d",
       },
     },
   },

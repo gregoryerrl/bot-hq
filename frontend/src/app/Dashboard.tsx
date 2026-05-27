@@ -96,8 +96,8 @@ export function Dashboard() {
     <div className="mx-auto h-full max-w-6xl overflow-auto px-6 py-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Sessions</h1>
-          <p className="mt-1 text-xs text-neutral-500">
+          <h1 className="font-headline-lg text-headline-lg text-on-surface">Sessions</h1>
+          <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
             {filter.trim()
               ? `${filteredSessions.length} of ${sessions.length} match`
               : `${sessions.length} active`}
@@ -192,7 +192,7 @@ export function Dashboard() {
       ) : filteredSessions.length === 0 ? (
         <div className="rounded-lg border border-dashed border-outline-variant p-10 text-center">
           <p className="text-sm text-on-surface-variant">
-            No sessions match <code className="font-mono">{filter.trim()}</code>.
+            No sessions match <code className="font-code-sm text-code-sm">{filter.trim()}</code>.
           </p>
         </div>
       ) : (
