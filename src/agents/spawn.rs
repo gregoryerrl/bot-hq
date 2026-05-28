@@ -240,6 +240,20 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // internal MCP server `bot-hq-signaling` is allowed as a unit; its
     // HANDS-only tools are gated server-side (signaling/jsonrpc.rs).
     if cfg.agent_name == "rain" {
+        // Rain reaches her model through a third-party Anthropic-compatible
+        // gateway (DeepSeek, via ANTHROPIC_BASE_URL). claude-code >= 2.1.156
+        // serializes a SessionStart hook's `additionalContext` (the user's
+        // superpowers plugin injects one) as a `role:"system"` entry inside
+        // the request's `messages` array. The real Anthropic API tolerates
+        // that; DeepSeek's gateway only accepts user/assistant roles and
+        // rejects it ("unknown variant `system`, expected user or assistant"
+        // → API Error 400). `--bare` runs claude in minimal mode (skips
+        // plugin sync + hooks + LSP + CLAUDE.md autodiscovery), so the
+        // offending hook never loads and the body stays clean. Verified to
+        // still honor --mcp-config (signaling) and ANTHROPIC_AUTH_TOKEN
+        // bearer auth. Brian/Emma hit real Anthropic, so they skip --bare and
+        // keep CLAUDE.md/LSP.
+        cmd.arg("--bare");
         cmd.args(["--permission-mode", "dontAsk"]);
         cmd.args([
             "--allowedTools",
@@ -383,6 +397,31 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--permission-mode"));
         assert!(!argv.iter().any(|a| a == "--allowedTools"));
         assert!(!argv.iter().any(|a| a == "--disallowedTools"));
+        // Brian hits the real Anthropic API, which tolerates the system-role
+        // message claude-code injects from plugin SessionStart hooks, so he
+        // does NOT need --bare (and would lose CLAUDE.md/LSP if he had it).
+        assert!(!argv.iter().any(|a| a == "--bare"));
+    }
+
+    #[test]
+    fn rain_gets_bare_minimal_mode() {
+        // Rain talks to a third-party Anthropic-compatible gateway (DeepSeek
+        // via ANTHROPIC_BASE_URL). claude-code >= 2.1.156 serializes a
+        // SessionStart hook's `additionalContext` (the superpowers plugin
+        // injects one) as a `role:"system"` entry in the `messages` array.
+        // The real Anthropic API tolerates it; stricter gateways reject it
+        // ("unknown variant `system`, expected user or assistant" → 400).
+        // `--bare` skips plugin sync so the injection never happens, while
+        // still honoring --mcp-config and ANTHROPIC_AUTH_TOKEN bearer auth.
+        let mut c = cfg();
+        c.agent_name = "rain".into();
+        c.config.agent_name = "rain".into();
+        let argv = debug_command(&c);
+        assert!(
+            argv.iter().any(|a| a == "--bare"),
+            "Rain must run --bare so plugin SessionStart hooks can't inject a \
+             system-role message that non-Anthropic gateways reject: {argv:?}"
+        );
     }
 
     #[test]

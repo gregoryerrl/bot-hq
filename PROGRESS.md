@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-283 tests passing (235 lib + 31 external MCP + 7 signaling + 10 storage)
+284 tests passing (236 lib + 31 external MCP + 7 signaling + 10 storage)
 plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,38 @@ plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-05-29 — fix: Rain spawns `--bare` (DeepSeek 400 after claude 2.1.156)
+
+After upgrading claude-code to **2.1.156**, Rain (EYES — routed to DeepSeek
+via `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`) began failing
+*every* turn with `API Error: 400 ... messages[1].role: unknown variant
+`system``. Brian + Emma (real Anthropic API) were unaffected.
+
+**Root cause:** claude-code ≥ 2.1.156 serializes a `SessionStart` hook's
+`additionalContext` — the user's global **superpowers** plugin injects one —
+as a `role:"system"` entry *inside* the request's `messages` array. The real
+Anthropic API tolerates that; DeepSeek's Anthropic-compatible gateway only
+accepts `user`/`assistant` roles and rejects it. Captured + diffed the raw
+HTTP body across versions: **2.1.153 → `messages:[user]`** (clean);
+**2.1.156 → `messages:[user, system]`** (broken). bot-hq builds none of this
+body — it's claude-code reacting to a globally-installed plugin hook.
+
+**Fix** (`src/agents/spawn.rs`): spawn Rain's subprocess with `--bare`
+(minimal mode — skips plugin sync, so the offending hook never loads and the
+body stays clean). Verified end-to-end against the *real* DeepSeek gateway
+with Rain's actual token: identical flags, `--bare` turns the 400 into a clean
+reply. `--bare` still honors `--mcp-config` (signaling) and the
+`ANTHROPIC_AUTH_TOKEN` bearer header. Scoped to Rain; Brian/Emma keep
+CLAUDE.md autodiscovery + LSP. +1 test (`rain_gets_bare_minimal_mode`); 236
+lib tests green.
+
+**Known caveat:** `--bare` prevents *new* contamination but does NOT heal
+transcripts written before the fix — every existing Rain transcript already
+has the superpowers attachment baked in, so **resuming a pre-fix session still
+400s**. New sessions are clean. Heal-existing options if needed: start fresh,
+sanitize the stored `.jsonl` transcripts, or front DeepSeek with a
+system-message-normalizing proxy.
 
 ## 2026-05-28 — post-rebuild cleanup (7 batches)
 
