@@ -804,16 +804,9 @@ impl SignalingBridge {
                         // so the UI / message-poll callers see the resolution.
                         // CoreAppState::resolve_choice is the one that ALSO routes the
                         // body through the duo input channels to wake the subprocess.
-                        let agent_label = p.choice.agent.clone();
-                        let question = p.choice.question.clone();
                         let session_id = p.choice.session_id.clone();
-                        let body = format!(
-                            "(out-of-band) Your earlier `ask_user_choice` for {agent_label} resolved while \
-                             you were no longer waiting on the tool call.\n\n\
-                             **Question:** {question}\n\
-                             **User picked:** {picked}\n\n\
-                             Treat this as the user's reply. Continue from here."
-                        );
+                        let body =
+                            oob_resolution_body(&p.choice.agent, &p.choice.question, &picked);
                         let storage_guard = self.storage.lock().await;
                         if let Some(storage) = storage_guard.as_ref() {
                             if let Err(e) = storage
@@ -842,7 +835,51 @@ impl SignalingBridge {
                     }
                 }
             }
-            None => Err(anyhow::anyhow!("no pending choice with id {choice_id}")),
+            None => {
+                // No in-memory parked oneshot for this choice_id. The common
+                // cause is the #2 reopened-session bug: the session was closed
+                // (subprocess killed, its oneshot dropped) then reopened; the
+                // resumed agent re-asked with a NEW choice_id while the user
+                // answered the OLD one still shown in their tray. Previously
+                // this arm errored, so `answer_question` (above) cleared the
+                // tray but the pick never reached the live agent — it waited
+                // forever. Instead, reconstruct the question from the durable
+                // session_questions row and fall back to OOB stdin delivery so
+                // CoreAppState injects the answer into the live (respawned)
+                // session. Stdin injection is the only channel to a resumed
+                // subprocess — re-parking a oneshot across a PID boundary is
+                // impossible.
+                let q = {
+                    let storage_guard = self.storage.lock().await;
+                    match storage_guard.as_ref() {
+                        Some(storage) => storage.get_question(choice_id).await?,
+                        None => None,
+                    }
+                };
+                let Some(q) = q else {
+                    return Err(anyhow::anyhow!("no pending choice with id {choice_id}"));
+                };
+                let body = oob_resolution_body(&q.agent, &q.prompt, &picked);
+                {
+                    let storage_guard = self.storage.lock().await;
+                    if let Some(storage) = storage_guard.as_ref() {
+                        if let Err(e) = storage
+                            .insert_message(&q.session_id, Author::User, MessageKind::Text, &body)
+                            .await
+                        {
+                            tracing::warn!(
+                                ?e,
+                                session_id = %q.session_id,
+                                "OOB (reopened-session) choice-resolution message failed to persist"
+                            );
+                        }
+                    }
+                }
+                Ok(ResolveOutcome::AgentReceiverDroppedFellBack {
+                    session_id: q.session_id,
+                    body,
+                })
+            }
         }
     }
 
@@ -1336,6 +1373,22 @@ fn outcome_from_picked(picked: &str) -> ViolationOutcome {
     }
 }
 
+/// Build the out-of-band "your question resolved" message body fed back to an
+/// agent that is no longer blocked on the original `ask_user_choice` tool
+/// call — either because the MCP call timed out client-side, or because the
+/// session was closed + reopened and the asking subprocess was replaced.
+/// Shared by both resolve_choice fallbacks (dropped-receiver and the
+/// reopened-session `None` path) so the wording stays identical.
+fn oob_resolution_body(agent_label: &str, question: &str, picked: &str) -> String {
+    format!(
+        "(out-of-band) Your earlier `ask_user_choice` for {agent_label} resolved while \
+         you were no longer waiting on the tool call.\n\n\
+         **Question:** {question}\n\
+         **User picked:** {picked}\n\n\
+         Treat this as the user's reply. Continue from here."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1384,12 +1437,60 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_unknown_choice_errors() {
+        // No storage + no parked oneshot → genuinely unknown id → error.
         let bridge = SignalingBridge::new();
         let err = bridge
             .resolve_choice("nope", "x".into())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no pending choice"));
+    }
+
+    #[tokio::test]
+    async fn resolve_reopened_session_choice_falls_back_to_oob() {
+        // #2: after close+reopen the user may answer a choice_id whose parked
+        // oneshot died with the old subprocess. The durable question row still
+        // exists. resolve_choice must NOT error — it reconstructs the question
+        // and returns the OOB fallback so the answer reaches the live agent.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s-reopen", "t", None).await.unwrap();
+        let opts = vec!["Yes".to_string(), "No".to_string()];
+        storage
+            .insert_question(
+                "s-reopen",
+                "old-choice-id",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Ship it?",
+                Some(&opts),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // No parked oneshot in the in-memory map (post-reopen state).
+        let outcome = bridge
+            .resolve_choice("old-choice-id", "Yes".into())
+            .await
+            .expect("reopened-session resolve should fall back, not error");
+        match outcome {
+            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } => {
+                assert_eq!(session_id, "s-reopen");
+                assert!(body.contains("Ship it?"), "body: {body}");
+                assert!(body.contains("Yes"), "body: {body}");
+            }
+            other => panic!("expected OOB fallback, got {other:?}"),
+        }
+        // OOB message persisted for the agent to read on its next turn.
+        let msgs = storage.messages_for_session("s-reopen", None).await.unwrap();
+        assert!(msgs
+            .iter()
+            .any(|m| m.content.contains("(out-of-band)") && m.content.contains("Yes")));
+        // Question row marked answered so the tray clears.
+        let q = storage.get_question("old-choice-id").await.unwrap().unwrap();
+        assert_eq!(q.status, "answered");
     }
 
     #[tokio::test]
