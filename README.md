@@ -18,26 +18,33 @@ preserved under [`docs/rebuild-archive/`](docs/rebuild-archive/).
 
 ## Prerequisites
 
-- **Rust stable** (≥ 1.92 — slint 1.16.1 MSRV). `rustup update stable`.
+- **Rust stable** (latest). `rustup update stable`.
+- **Node.js 22+ and npm** — for the React frontend (Vite build).
 - **`claude-code` CLI** installed and authed. `claude --version` should
   print `2.x` or newer; `claude auth status` should be healthy.
-- **macOS** is the primary target. Slint covers Linux + Windows; builds
-  and smoke testing happen on macOS.
+- **macOS** is the primary target; Linux + Windows are tracked in PLAN.md.
 
 ## Quickstart
 
 ```bash
 git clone <repo>
 cd bot-hq
-cp .env.example .env       # contains BOT_HQ_DATA_DIR=~/.bot-hq-dev/
-cargo run                  # opens the desktop window
+cp .env.example .env                    # contains BOT_HQ_DATA_DIR=~/.bot-hq-dev/
+(cd frontend && npm install)            # React frontend deps (Vite + Tauri CLI)
+cargo install tauri-cli --version '^2'  # one-time, if `cargo tauri` is missing
+cargo tauri dev                         # builds the React UI + opens the desktop window
 ```
+
+`cargo tauri dev` runs the `beforeDevCommand` wired in `tauri.conf.json`
+(`cd frontend && npm run dev`), so the Vite dev server and the Rust app come
+up together. The Tauri CLI also ships locally via `@tauri-apps/cli` in
+`frontend/node_modules` if you'd rather not install it globally.
 
 Release build:
 
 ```bash
-cargo build --release
-./target/release/bot-hq
+cargo tauri build            # builds the frontend, compiles release, bundles the app
+./target/release/bot-hq      # the bundled app also lands under target/release/bundle/
 ```
 
 ## Configuration
@@ -59,32 +66,34 @@ you don't collide with a running production bot-hq at `~/.bot-hq/`.
 
 ```
 bot-hq/
-├── Cargo.toml
+├── Cargo.toml / tauri.conf.json / build.rs
 ├── CLAUDE.md / ARCHITECTURE.md / PLAN.md / PROGRESS.md   ← canonical docs
-├── ui/app.slint                                          ← all Slint UI
+├── frontend/              React 18 + TypeScript + Tailwind UI (Vite)
+│   └── src/{app,components,hooks,stores,lib}/   pages, components, hooks, zustand stores, tauri bindings
 ├── src/
-│   ├── main.rs            entry point — tokio runtime, Slint loop, CLI dispatch
-│   ├── lib.rs             module exports + slint::include_modules!()
-│   ├── app.rs             top-level AppState (single Arc shared across threads)
+│   ├── main.rs            entry point — tokio runtime, Tauri builder, CLI dispatch
 │   ├── paths.rs           data-dir resolution + first-run init + single-instance lock
-│   ├── storage/           sqlite (messages, sessions, agent_configs, questions, cl_index)
-│   ├── cl/                Context Library reader + SQLite-backed index
 │   ├── agents/            claude-code subprocess + stream-json I/O + hardcoded role prompts
-│   ├── signaling/         in-process MCP HTTP server — internal (UI tools) + external (driver tools)
-│   ├── policy/            Policy resolution, git-hook installer, session-permission grants, violations log
 │   ├── core/              sessions, IPAV cache, duo coordination, broadcast
-│   └── ui/view_model.rs   Slint ↔ core bridge
-├── migrations/0001_init.sql + later migrations
+│   ├── signaling/         in-process MCP HTTP servers (internal UI tools + external driver) + SignalingBridge
+│   ├── storage/           sqlite (messages, sessions, agent_configs, questions, cl_index)
+│   ├── policy/            policy resolution, git-hook installer, session-permission grants, violations log
+│   ├── plugins/           plugin manifest parser, loader, capability gen, heartbeat watcher
+│   ├── tauri_cmd/         #[tauri::command] wrappers over bridge/storage methods
+│   ├── tauri_events/      bridge subscriber → BatchEmitter → typed app.emit
+│   └── tauri_specta_gen.rs  TypeScript binding generation (tauri-specta)
+├── migrations/            0001_init.sql + later migrations
 ├── templates/cl/          baked-in default CL (used on first run)
 └── docs/
+    ├── design/            Industrial Terminal design spec + screen mocks
     ├── stream-json-events.md     claude-code CLI event schema (empirical)
     └── rebuild-archive/          original rebuild design + roadmap + decisions
 ```
 
 ## Architecture in 60 seconds
 
-- **Stack:** Single Rust binary, Slint UI on the OS main thread, tokio
-  multi-thread runtime for I/O.
+- **Stack:** Single Rust binary — Tauri v2 shell + React 18 UI, with the
+  Rust core on a tokio multi-thread runtime. Tauri owns the OS main thread.
 - **Per-agent subprocess:** spawned via `claude -p --input-format
   stream-json --output-format stream-json --verbose --append-system-prompt
   <text> --mcp-config <file> --strict-mcp-config
