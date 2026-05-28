@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { PhasePillRow, type Phase } from "./PhasePill";
 import { cn } from "../lib/cn";
@@ -6,6 +6,15 @@ import type { SessionDocumentView } from "../lib/bindings";
 
 interface DocumentPaneProps {
   sessionId: string;
+  /**
+   * The session's current IPAV phase. The pane's visible tab FOLLOWS this so
+   * docs don't appear to "disappear" (#3): the tab used to hardcode-default to
+   * "investigate" and never sync, so once work moved to Plan/Apply/Verify the
+   * Investigate tab showed empty ("No investigate documents yet") even though
+   * docs existed under the active phase. The user can still click other tabs
+   * to peek; the view re-follows on the next phase change.
+   */
+  sessionPhase?: Phase | null;
 }
 
 interface DiffLine {
@@ -18,8 +27,17 @@ interface ComputeApplyDiffResult {
   note: string | null;
 }
 
-export function DocumentPane({ sessionId }: DocumentPaneProps) {
-  const [activePhase, setActivePhase] = useState<Phase>("investigate");
+export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
+  const [activePhase, setActivePhase] = useState<Phase>(
+    sessionPhase ?? "investigate",
+  );
+
+  // Follow the session's phase whenever it changes (the fix for #3). Firing
+  // only on sessionPhase change means a manual tab click still sticks until
+  // the next phase transition, so the user can freely peek at other phases.
+  useEffect(() => {
+    if (sessionPhase) setActivePhase(sessionPhase);
+  }, [sessionPhase]);
 
   const { data: docs = [] } = useTauriQuery<SessionDocumentView[]>(
     "session_doc_search",

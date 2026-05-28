@@ -6,6 +6,7 @@ import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
 import { ChatMessage } from "../components/ChatMessage";
+import { ChoicePrompt } from "../components/ChoicePrompt";
 import { DocumentPane } from "../components/DocumentPane";
 import { PhasePillRow, type Phase } from "../components/PhasePill";
 import { cn } from "../lib/cn";
@@ -329,40 +330,22 @@ export function SessionView() {
         )}
 
         {choicesForSession.length > 0 && (
-          <div className="border-b border-default bg-purple-950/30 px-4 py-2 text-xs">
-            <div className="mb-2 font-semibold text-purple-200">
+          <div className="border-b border-default bg-surface-container px-4 py-3">
+            <div className="mb-2 flex items-center gap-2 font-label-caps text-label-caps text-secondary">
+              <span className="inline-block h-2 w-2 rounded-full bg-secondary motion-safe:animate-pulse" />
               {choicesForSession.length === 1
-                ? "Awaiting your choice"
-                : `Awaiting ${choicesForSession.length} choices`}
+                ? "Awaiting your input"
+                : `Awaiting your input · ${choicesForSession.length}`}
             </div>
-            <div className="space-y-3">
-              {choicesForSession.map((choice) => {
-                const pendingOpt = resolvingChoice.get(choice.choice_id);
-                const isPending = pendingOpt !== undefined;
-                return (
-                  <div
-                    key={choice.choice_id}
-                    className="border-l-2 border-purple-500/50 pl-3"
-                  >
-                    <div className="text-purple-100">{choice.question}</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {choice.options.map((opt) => (
-                        <Button
-                          key={opt}
-                          size="sm"
-                          variant="primary"
-                          disabled={isPending}
-                          onClick={() =>
-                            handleResolveChoice(choice.choice_id, opt)
-                          }
-                        >
-                          {pendingOpt === opt ? `${opt} …` : opt}
-                        </Button>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
+            <div className="space-y-2">
+              {choicesForSession.map((choice) => (
+                <ChoicePrompt
+                  key={choice.choice_id}
+                  choice={choice}
+                  pendingOption={resolvingChoice.get(choice.choice_id)}
+                  onResolve={handleResolveChoice}
+                />
+              ))}
             </div>
           </div>
         )}
@@ -422,7 +405,7 @@ export function SessionView() {
         </div>
       </section>
 
-      <DocumentPane sessionId={sessionId} />
+      <DocumentPane sessionId={sessionId} sessionPhase={phase} />
     </div>
   );
 }

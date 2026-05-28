@@ -1,21 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Link } from "react-router-dom";
 import { useTauriQuery } from "../hooks/useInvoke";
-import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
 import type { PendingChoiceView } from "../lib/bindings";
 
 /**
- * Aggregate view of all parked questions across sessions. A single tray so
- * a question from any session is reachable in one click from anywhere in
- * the app. Topbar visibility: always present (no longer hidden behind a
- * low-contrast neutral-400 text on the navy surface), with a count badge
- * + pulsing primary tint when something is awaiting.
+ * Topbar NOTIFIER for parked questions across all sessions. This is a
+ * notify-only surface (per #7): it tells the user which sessions need input
+ * and links straight to them — it does NOT answer questions inline. Answering
+ * happens in the session chat's questions tray (the sole answer surface), so
+ * the user always sees the full conversation context (and the mandatory
+ * "Other" free-text option) when they decide. Count badge + pulsing primary
+ * tint when something is awaiting.
  */
 export function PendingTray() {
   const [open, setOpen] = useState(false);
-  const { data: pending = [], refetch } = useTauriQuery<PendingChoiceView[]>(
+  const { data: pending = [] } = useTauriQuery<PendingChoiceView[]>(
     "list_pending_choices",
     {},
     { refetchInterval: 2_000 },
@@ -78,7 +78,7 @@ export function PendingTray() {
           className="absolute right-0 top-full z-40 mt-1 max-h-[60vh] w-96 overflow-auto rounded-lg border border-default bg-surface-container shadow-2xl"
         >
           <header className="border-b border-default px-3 py-2 font-label-caps text-label-caps text-on-surface-variant">
-            Pending questions ({count})
+            Awaiting your input ({count})
           </header>
           {count === 0 ? (
             <p className="px-3 py-4 font-body-md text-body-md text-on-surface-variant">
@@ -86,41 +86,22 @@ export function PendingTray() {
             </p>
           ) : (
             pending.map((q) => (
-              <div
+              <Link
                 key={q.choice_id}
-                className="border-b border-default px-3 py-3 last:border-b-0"
+                to={`/sessions/${q.session_id}`}
+                onClick={() => setOpen(false)}
+                className="block border-b border-default px-3 py-3 last:border-b-0 hover:bg-surface-container-high"
               >
                 <div className="mb-1 flex items-center justify-between font-label-caps text-label-caps text-on-surface-variant">
-                  <Link
-                    to={`/sessions/${q.session_id}`}
-                    onClick={() => setOpen(false)}
-                    className="hover:text-on-surface"
-                  >
+                  <span>
                     {q.agent} · {q.session_id.slice(0, 8)}
-                  </Link>
+                  </span>
+                  <span className="text-primary">Open →</span>
                 </div>
                 <p className="font-body-md text-body-md text-on-surface">
                   {q.question}
                 </p>
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {q.options.map((opt) => (
-                    <Button
-                      key={opt}
-                      size="sm"
-                      variant="primary"
-                      onClick={async () => {
-                        await invoke("resolve_choice", {
-                          choiceId: q.choice_id,
-                          picked: opt,
-                        });
-                        refetch();
-                      }}
-                    >
-                      {opt}
-                    </Button>
-                  ))}
-                </div>
-              </div>
+              </Link>
             ))
           )}
         </div>
