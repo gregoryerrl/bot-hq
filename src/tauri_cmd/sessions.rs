@@ -134,23 +134,23 @@ pub async fn advance_session_phase(
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
+/// Close a session from the UI. Delegates to `core.close_session`, which is
+/// the single source of truth for closing: it removes the live handle, KILLS
+/// the brian/rain subprocesses, marks the row closed/archived in storage, and
+/// wipes session permission grants. The previous version called
+/// `storage.close_session` directly, so it set `closed_at` but left the
+/// subprocesses running — a session that "closed" in the DB yet kept taking
+/// turns. Routing through core fixes that.
 #[tauri::command]
 #[specta::specta]
 pub async fn close_session(
-    storage: tauri::State<'_, Arc<Storage>>,
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
     session_id: String,
     archive: bool,
 ) -> Result<(), AppError> {
-    storage
-        .close_session(&session_id, archive)
+    core.close_session(&session_id, archive)
         .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
-    bridge
-        .cleanup_session_permissions(&session_id)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
-    Ok(())
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 #[cfg(test)]

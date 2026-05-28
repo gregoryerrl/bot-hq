@@ -225,6 +225,37 @@ fn main() -> Result<()> {
                     }
                 },
             );
+            // SessionCloseRequest handler. The agent-facing `close_session`
+            // MCP tool only broadcasts a SignalingEvent::SessionCloseRequest;
+            // nothing consumed it before (bridge_subscriber deliberately skips
+            // it, and the comment claiming "AppState handles it" was false), so
+            // close_session was a silent no-op — the subprocess kept running
+            // and the row never got `closed_at`. This task is that missing
+            // consumer: it routes the event to core.close_session, which kills
+            // the subprocesses, marks the row closed/archived, and wipes the
+            // session's permission grants.
+            let core_for_close = Arc::clone(&core_for_setup);
+            let mut close_rx = core_for_close.subscribe_signaling();
+            tokio::spawn(async move {
+                use bot_hq::signaling::SignalingEvent;
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    match close_rx.recv().await {
+                        Ok(SignalingEvent::SessionCloseRequest { session_id, archive, .. }) => {
+                            if let Err(e) =
+                                core_for_close.close_session(&session_id, archive).await
+                            {
+                                tracing::warn!(?e, %session_id, "close_session via MCP event failed");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "close-request subscriber lagged");
+                        }
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            });
             // Plugin heartbeat sweep loop. Ticks every PING_INTERVAL and
             // emits `plugin:crashed` for any iframe that crossed the
             // miss-limit this tick. The frontend tears down the iframe in

@@ -7,9 +7,10 @@
 //!   (coalesced fetch, single emit per batch).
 //! - `PendingChoice`, `ChoiceResolved`, `AwaitingUser`, `AgentAdvancePhase`
 //!   → direct `emit_fn(name, payload)` (no batching — these are infrequent).
-//! - `SessionCloseRequest` → ignored here. AppState's own subscriber handles
-//!   shutdown; the frontend gets notified via the downstream session row
-//!   update once the close path completes.
+//! - `SessionCloseRequest` → ignored here. A dedicated handler in main.rs
+//!   (with an `Arc<CoreAppState>`) routes it to `core.close_session`; the
+//!   frontend gets notified via the downstream session row update once the
+//!   close path completes.
 //!
 //! The emit function is a closure so this module is testable without a
 //! running Tauri runtime. Batch 4's main.rs wires it to
@@ -96,8 +97,11 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             );
         }
         SignalingEvent::SessionCloseRequest { .. } => {
-            // Handled by AppState's existing subscriber path. UI sees the
-            // close downstream via the session row update.
+            // Not this subscriber's job — the dedicated close handler in
+            // main.rs (which owns Arc<CoreAppState>) routes this to
+            // core.close_session. This subscriber only does Tauri emits and
+            // has no CoreAppState handle. UI sees the close downstream via the
+            // session row update once core.close_session completes.
         }
     }
 }
