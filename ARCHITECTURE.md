@@ -29,8 +29,8 @@ agents. Policy enforcement runs at two layers (MCP tool calls + git
 hooks). Two MCP servers run in-process: one for agent ↔ UI signaling,
 one for external driver clients.
 
-**Stack:** Single Rust binary, Slint UI on the OS main thread, tokio
-multi-thread runtime for I/O.
+**Stack:** Tauri v2 shell + React 18 frontend, Rust core on a tokio
+multi-thread runtime. Tauri owns the OS main thread.
 
 ---
 
@@ -40,7 +40,7 @@ multi-thread runtime for I/O.
                     ┌────────────────────────────────────────┐
                     │  bot-hq (Rust binary, main thread)     │
                     │                                        │
-                    │  Slint UI loop ◄──── AppState (Arc) ───┤
+                    │  Tauri webview ◄──── AppState (Arc) ───┤
                     │                       │                │
                     │   ┌───────────────────┴─────────────┐  │
                     │   │  tokio runtime (worker threads) │  │
@@ -203,13 +203,17 @@ in `src/signaling/{jsonrpc,protocol,server,bridge}.rs`. Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**13 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**26 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the full list with descriptions): `ask_user_choice`,
-`mark_awaiting_user`, `request_approval`, `check_commit_message`,
-`close_session`, `list_my_pending_questions`, `withdraw_question`,
-`cl_index_search`, `cl_register_read`, `cl_rescan`,
-`grant_session_permission`, `revoke_session_permission`,
-`list_session_permissions`.
+`mark_awaiting_user`, `advance_phase`, `request_phase_advance`,
+`request_approval`, `check_commit_message`, `close_session`,
+`list_my_pending_questions`, `withdraw_question`, `supersede_question`,
+`session_doc_write`, `session_doc_search`, `session_doc_read`,
+`cl_index_search`, `cl_register_read`, `cl_rescan`, `cl_folder_search`,
+`cl_register_folder_description`, `grant_session_permission`,
+`revoke_session_permission`, `list_session_permissions`,
+`webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
+`webview_press_key`.
 
 **Role enforcement at the dispatch layer:** `HANDS_ONLY_TOOLS` is a
 hard-coded list of tools Rain (EYES) cannot call. Tool calls from Rain
@@ -242,7 +246,7 @@ session, a test driver). Lives in `src/signaling/external_jsonrpc.rs`
   marks "unavailable" — bot-hq stays usable.
 
 Tools: see [README.md](README.md#available-external-tools) for the full
-list (~16 driver tools including `list_sessions`, `create_session`,
+list (21 driver tools including `list_sessions`, `create_session`,
 `send_message`, `wait_for_change`, `get_session_snapshot`, etc.).
 
 ---

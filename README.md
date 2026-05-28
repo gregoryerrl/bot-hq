@@ -94,7 +94,7 @@ bot-hq/
   state.
 - **Two MCP servers:**
   - **Internal** at `127.0.0.1:<ephemeral>` — UI-signaling tools served
-    to child agents (13 tools — see "Internal MCP tools" below).
+    to child agents (26 tools — see "Internal MCP tools" below).
   - **External** at `127.0.0.1:7892` — driver tools served to any
     bearer-token-authenticated MCP client (see "Driving bot-hq from
     another MCP client" below).
@@ -134,11 +134,26 @@ Bot-hq exposes these to each spawned agent via the per-agent
 | `grant_session_permission(action, scope, branches?)` | Record a session-level commit/push grant so subsequent ops skip approval. |
 | `revoke_session_permission(action)` | Revoke a previously granted commit/push permission. |
 | `list_session_permissions()` | List the current session's commit/push grants. |
+| `advance_phase(target)` | Move the IPAV phase chip yourself — no user gate. |
+| `request_phase_advance(target, reason)` | Request a user-acknowledged phase advance before an irreversible step. |
+| `supersede_question(choice_id, …)` | Replace a parked question with a rephrased one (links old→new). |
+| `session_doc_write(slug, body, phase?)` | Upsert a per-session scratch doc; `phase` surfaces it in the IPAV tabs. |
+| `session_doc_search(query?, phase?)` | List this session's scratch docs; `phase` filter for cross-phase retrieval. |
+| `session_doc_read(slug)` | Read a session doc by slug. |
+| `cl_folder_search(project, query?)` | Search CL folder descriptions (folder-level parallel to `cl_index_search`). |
+| `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (HANDS/Emma only). |
+| `webview_screenshot()` | Capture the bot-hq webview for agent-driven UI testing. |
+| `webview_click(selector)` | Synthesize a click on a DOM element in the webview. |
+| `webview_type(selector, text)` | Type into a webview element. |
+| `webview_scroll(selector?, y)` | Scroll an element or the page in the webview. |
+| `webview_press_key(key)` | Dispatch a keypress in the webview. |
 
 Role boundary: Rain (EYES) is blocked from `ask_user_choice`,
-`mark_awaiting_user`, `request_approval`, `grant_session_permission`,
-`revoke_session_permission`. Tool calls from Rain return a
-`HANDS_ONLY_TOOLS` error. Brian (HANDS) and Emma get the full set.
+`mark_awaiting_user`, `request_approval`, `supersede_question`,
+`grant_session_permission`, `revoke_session_permission` (the
+`HANDS_ONLY_TOOLS` gate), plus `cl_register_folder_description` (the
+`CL_MUTATE_TOOLS` gate — Emma is allowed). Tool calls from Rain to a
+blocked tool return an error. Brian (HANDS) gets the full set.
 
 ## Policy enforcement
 
@@ -236,6 +251,11 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 | `get_violations(limit?)` | Read recent `violations.jsonl` entries. |
 | `wait_for_change(session_id, since_id?, timeout_ms?)` | Long-poll: blocks server-side until new messages arrive or timeout. |
 | `get_session_snapshot(session_id, msg_limit?)` | One-shot aggregate: session meta + last N messages + phase + awaiting + pending choices. |
+| `webview_screenshot(session_id?)` | Capture the bot-hq webview as a base64 PNG. |
+| `webview_click(selector)` | Click a DOM element in the webview. |
+| `webview_type(selector, text)` | Type into a webview element. |
+| `webview_scroll(selector?, y)` | Scroll an element or the page in the webview. |
+| `webview_press_key(key)` | Dispatch a keypress in the webview. |
 
 ### Security model
 
@@ -267,10 +287,10 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 ## Testing
 
 ```bash
-cargo test                          # 165 tests
+cargo test                          # 280 tests
 RUN_LIVE_TESTS=1 cargo test         # includes claude-code subprocess smoke
 cargo build --release               # production binary
 ```
 
-Breakdown: 121 lib unit tests + 29 signaling integration + 5 external
-MCP integration + 10 storage integration.
+Breakdown: lib unit tests plus signaling, storage, and external-MCP
+integration suites — 280 Rust total, plus 14 frontend Vitest.

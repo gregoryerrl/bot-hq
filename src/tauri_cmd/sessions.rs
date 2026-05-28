@@ -81,7 +81,7 @@ pub async fn list_sessions(
 
 /// Spawn (or re-spawn) the agent subprocesses for an existing session row.
 /// Idempotent — `core::AppState::ensure_session_started` is a no-op if the
-/// session is already live. Mirrors the Slint-era click-to-respawn flow:
+/// session is already live. Mirrors the click-to-respawn flow:
 /// frontend SessionView calls this on mount so a reopened bot-hq window
 /// brings Brian + Rain back via `claude --resume <uuid>`.
 #[tauri::command]

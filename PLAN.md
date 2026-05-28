@@ -24,25 +24,16 @@ storage) plus 12 frontend Vitest. Release build clean.
 
 ## In flight
 
-### Tauri v2 migration follow-ups
+The Tauri v2 migration merged to main (see PROGRESS.md), and the
+follow-on `broadcast_message` command + `compute_apply_diff` A-tab diff
+shipped. Remaining follow-ups:
 
-Status: branch `tauri-v2-migration` shipped 7 batches; awaiting user
-manual-smoke + merge to main.
-
-**To finish:**
-- Run `cargo run --release` from the worktree; verify dashboard, new
-  session, IPAV tabs, Emma overlay all work.
-- Wire `broadcast_to_session` Tauri command — `ChatInput` callbacks are
-  inert until a `core::broadcast` helper lands. Needed for chat-driven
-  agent prompts to actually reach the agents.
-- Port `view_model::parse_diff_lines` to a Rust-side `compute_apply_diff`
-  Tauri command + a TypeScript renderer for the A tab git-diff view.
-- Plugin install flow (manage `tauri_cmd/plugins.rs`) + iframe
-  ping/pong frontend channel for the heartbeat watcher.
+- Plugin install flow + iframe ping/pong frontend channel for the
+  heartbeat watcher. The `tauri_cmd/plugins.rs` backend is live; the
+  frontend install/heartbeat wiring is not.
+- CL editor write-back: `cl_write_file` / `cl_create_file` / `cl_mkdir`
+  backend commands so the Context Library tab's Save is no longer a stub.
 - Replace the placeholder `icons/icon.png` with the real bot-hq mark.
-- Update `~/.bot-hq/projects/bot-hq/{conventions,notes}.md` to drop the
-  Slint sections + slint-rust-docs cross-references (CL is shared, so
-  deferred until the migration merges to main).
 
 ---
 
@@ -114,7 +105,7 @@ own design doc.
 
 ### Cross-platform builds
 
-Slint covers macOS, Linux, Windows. Initial focus is macOS. Linux + Windows
+Tauri covers macOS, Linux, Windows. Initial focus is macOS. Linux + Windows
 builds need: per-platform CI, install paths (`directories` crate likely
 already handles this), keychain backends (see auth-token v2), font
 loading for the icon font.

@@ -62,8 +62,7 @@ pub async fn session_doc_read(
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
-/// One classified line of a unified `git diff`. Ports the Slint-era
-/// `DiffLine` struct (deleted with `view_model.rs`). `kind` is one of
+/// One classified line of a unified `git diff`. `kind` is one of
 /// `"add" | "remove" | "hunk" | "file" | "context"` — order-sensitive
 /// classification per [`parse_diff_lines`].
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

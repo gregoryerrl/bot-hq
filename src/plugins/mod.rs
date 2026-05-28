@@ -17,9 +17,10 @@
 //!   path (v1: surface a fallback; v2: exponential-backoff auto-restart
 //!   before third-party plugin authors ship).
 //!
-//! No live plugins exist yet. Batch 3 ships the scaffolding so Batch 5's
-//! React PluginManager + future Discord/Clive plugins have a stable
-//! Rust-side surface to integrate against.
+//! The plugin backend is live (manifest parse, loader, capability gen,
+//! heartbeat watcher); no bundled plugins ship yet. The React
+//! PluginManager + future Discord/Clive plugins integrate against this
+//! Rust-side surface.
 
 pub mod capabilities;
 pub mod heartbeat;
