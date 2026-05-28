@@ -554,33 +554,13 @@ async fn call_tool(
         }
         "webview_click" => {
             let selector = arg_required_str(&args, "selector")?;
-            let sel = serde_json::to_string(&selector).unwrap();
-            let js = format!(
-                "(() => {{ const el = document.querySelector({sel}); \
-                 if (el) {{ el.click(); }} \
-                 else {{ console.warn('webview_click: no element matches', {sel}); }} }})();"
-            );
-            eval_in_webview(bridge, &js)?;
+            eval_in_webview(bridge, &super::webview_js::click_js(&selector))?;
             Ok(ok_response())
         }
         "webview_type" => {
             let selector = arg_required_str(&args, "selector")?;
             let text = arg_required_str(&args, "text")?;
-            let sel = serde_json::to_string(&selector).unwrap();
-            let txt = serde_json::to_string(&text).unwrap();
-            let js = format!(
-                "(() => {{ \
-                   const el = document.querySelector({sel}); \
-                   if (!el) {{ console.warn('webview_type: no element matches', {sel}); return; }} \
-                   el.focus(); \
-                   const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; \
-                   const desc = Object.getOwnPropertyDescriptor(proto, 'value'); \
-                   if (desc && desc.set) {{ desc.set.call(el, {txt}); }} else {{ el.value = {txt}; }} \
-                   el.dispatchEvent(new Event('input', {{ bubbles: true }})); \
-                   el.dispatchEvent(new Event('change', {{ bubbles: true }})); \
-                 }})();"
-            );
-            eval_in_webview(bridge, &js)?;
+            eval_in_webview(bridge, &super::webview_js::type_js(&selector, &text))?;
             Ok(ok_response())
         }
         "webview_scroll" => {
@@ -588,40 +568,13 @@ async fn call_tool(
                 JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "y is required".to_string())
             })?;
             let selector = args.get("selector").and_then(Value::as_str);
-            let js = match selector {
-                Some(sel) => {
-                    let sel_json = serde_json::to_string(sel).unwrap();
-                    format!(
-                        "(() => {{ const el = document.querySelector({sel_json}); \
-                         if (el) {{ el.scrollTop = {y}; }} \
-                         else {{ console.warn('webview_scroll: no element matches', {sel_json}); }} }})();"
-                    )
-                }
-                None => format!("window.scrollTo({{ top: {y}, behavior: 'auto' }});"),
-            };
-            eval_in_webview(bridge, &js)?;
+            eval_in_webview(bridge, &super::webview_js::scroll_js(selector, y))?;
             Ok(ok_response())
         }
         "webview_press_key" => {
             let key = arg_required_str(&args, "key")?;
             let selector = args.get("selector").and_then(Value::as_str);
-            let key_json = serde_json::to_string(&key).unwrap();
-            let target_expr = match selector {
-                Some(sel) => {
-                    let sel_json = serde_json::to_string(sel).unwrap();
-                    format!(
-                        "(document.querySelector({sel_json}) || document.activeElement || document)"
-                    )
-                }
-                None => "(document.activeElement || document)".to_string(),
-            };
-            let js = format!(
-                "(() => {{ const target = {target_expr}; \
-                 for (const type of ['keydown', 'keypress', 'keyup']) {{ \
-                   target.dispatchEvent(new KeyboardEvent(type, {{ key: {key_json}, bubbles: true, cancelable: true }})); \
-                 }} }})();"
-            );
-            eval_in_webview(bridge, &js)?;
+            eval_in_webview(bridge, &super::webview_js::press_key_js(selector, &key))?;
             Ok(ok_response())
         }
         other => Err(JsonRpcError::new(

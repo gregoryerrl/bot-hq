@@ -24,6 +24,7 @@ pub mod protocol;
 mod response;
 mod server;
 mod tool_args;
+mod webview_js;
 
 pub use bridge::{PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent};
 pub use external_server::{start_external_server, ExternalServer};
