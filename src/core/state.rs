@@ -23,6 +23,14 @@ pub struct AppState {
     pub signaling_addr: SocketAddr,
     pub signaling_server: Mutex<Option<SignalingServer>>,
     pub sessions: Mutex<HashMap<String, SessionHandle>>,
+    /// Serializes the duo-spawn path in `ensure_session_started` so two
+    /// concurrent calls for the same session (e.g. a double-mount of the
+    /// session view firing `respawn_session` twice) can't both pass the
+    /// contains_key check and spawn two Brian+Rain pairs — the second insert
+    /// would overwrite the first handle and orphan its subprocesses (untracked,
+    /// so close_session can't reap them). Only the spawn path takes this; the
+    /// fast already-running check short-circuits before acquiring it.
+    spawn_gate: Mutex<()>,
     pub emma: Mutex<Option<EmmaHandle>>,
     /// External MCP server handle. None when disabled or port-busy at startup;
     /// the binary stays usable in that case (internal MCP keeps working).
@@ -46,6 +54,7 @@ impl AppState {
             signaling_addr: addr,
             signaling_server: Mutex::new(Some(server)),
             sessions: Mutex::new(HashMap::new()),
+            spawn_gate: Mutex::new(()),
             emma: Mutex::new(None),
             external_server: Mutex::new(None),
             app_handle: once_cell::sync::OnceCell::new(),
@@ -118,6 +127,15 @@ impl AppState {
     /// singleton) if not already running. Idempotent — safe to call repeatedly.
     /// Logs and returns Err if spawn fails, but does NOT poison the AppState.
     pub async fn ensure_session_started(&self, session_id: &str) -> Result<()> {
+        // Fast path: already running. No gate needed.
+        if self.sessions.lock().await.contains_key(session_id) {
+            return Ok(());
+        }
+        // Slow path: take the spawn gate so concurrent callers serialize, then
+        // re-check under the gate — a racing call may have spawned while we
+        // waited. Without this double-check two callers both pass the fast
+        // check and spawn duplicate duos (one gets orphaned).
+        let _gate = self.spawn_gate.lock().await;
         if self.sessions.lock().await.contains_key(session_id) {
             return Ok(());
         }
