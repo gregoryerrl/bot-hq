@@ -7,6 +7,7 @@ use crate::core::ipav::IpavPhase;
 use crate::storage::{Author, MessageKind, Storage};
 use anyhow::Result;
 use tokio::sync::mpsc;
+use tracing::warn;
 
 /// Prefix every outgoing stdin payload with the active IPAV phase so the
 /// agent re-encounters it on each turn. Storage keeps the raw text — the
@@ -29,9 +30,18 @@ pub async fn broadcast_user_message(
         .await?;
     let wire = with_phase_envelope(phase, text);
     let msg = OutgoingUserMessage::text(wire);
-    // Best-effort: if one channel is closed, persist still happens.
-    let _ = brian_input.send(msg.clone()).await;
-    let _ = rain_input.send(msg).await;
+    // Fan out to both agents. The message is persisted (above) regardless, but
+    // a send error means that agent's input pump has exited (stdin gone) and
+    // the agent won't SEE this message. Previously swallowed with `let _`,
+    // which is precisely how the #4 user→HANDS desync stayed invisible: a
+    // failed send to Brian while Rain's succeeded looked like nothing wrong.
+    // Log per agent so the asymmetry is diagnosable.
+    if let Err(e) = brian_input.send(msg.clone()).await {
+        warn!(agent = "brian", error = %e, "user broadcast not delivered (input pump closed)");
+    }
+    if let Err(e) = rain_input.send(msg).await {
+        warn!(agent = "rain", error = %e, "user broadcast not delivered (input pump closed)");
+    }
     Ok(id)
 }
 

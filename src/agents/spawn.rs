@@ -156,7 +156,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
 
     tokio::spawn(events::pump_events(stdout, event_tx.clone()));
     tokio::spawn(events::pump_stderr(stderr, cfg.agent_name.clone()));
-    tokio::spawn(input::pump_inputs(stdin, input_rx));
+    tokio::spawn(input::pump_inputs(stdin, input_rx, cfg.agent_name.clone()));
 
     let event_tx_for_lifecycle = event_tx.clone();
     let agent_name = cfg.agent_name.clone();
@@ -220,13 +220,45 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         cmd.args(["--resume", resume_id]);
     }
 
-    // bot-hq is the permission layer (policy.yaml + UI dialogs gate every
-    // risky tool call). Letting claude-code prompt the user in parallel would
-    // be a double-gate that only confuses things — and worse, those prompts
-    // appear in the agent's stream-json output, never reach our UI, and the
-    // agent hangs. So skip claude-code's built-in permission prompts entirely
-    // and rely on our own enforcement (src/policy + signaling/bridge).
-    cmd.arg("--dangerously-skip-permissions");
+    // Permission posture is role-dependent.
+    //
+    // Brian (HANDS) + Emma (solo) run with `--dangerously-skip-permissions`:
+    // bot-hq is their permission layer (policy.yaml + UI dialogs + git hooks),
+    // and letting claude-code prompt in parallel would double-gate, leak
+    // prompts into stream-json (never reaching our UI), and hang the agent.
+    //
+    // Rain (EYES) is review-only and must be MECHANICALLY unable to mutate.
+    // A prompt instruction alone failed (2026-05-28: Rain ran Edit + git
+    // commit + gh issue create on a client repo). `--dangerously-skip-
+    // permissions` (bypass mode) CANNOT be used to enforce this because bypass
+    // mode disables the permission layer entirely — deny rules are ignored.
+    // Instead: `dontAsk` (no prompts, deny-by-default) + an allowlist of read-
+    // only tools + an explicit denylist of the mutation surface. Deny wins
+    // over allow, so `Bash` is allowed wholesale for read-only investigation
+    // while mutating git/gh invocations are blocked (verified: colon-form
+    // `Bash(cmd:*)` matching holds under dontAsk on claude 2.1.x). The
+    // internal MCP server `bot-hq-signaling` is allowed as a unit; its
+    // HANDS-only tools are gated server-side (signaling/jsonrpc.rs).
+    if cfg.agent_name == "rain" {
+        cmd.args(["--permission-mode", "dontAsk"]);
+        cmd.args([
+            "--allowedTools",
+            "Read Grep Glob WebFetch WebSearch TodoWrite BashOutput KillShell Bash mcp__bot-hq-signaling",
+        ]);
+        cmd.args([
+            "--disallowedTools",
+            "Edit Write NotebookEdit Task \
+             Bash(git commit:*) Bash(git push:*) Bash(git branch:*) \
+             Bash(git checkout:*) Bash(git switch:*) Bash(git reset:*) \
+             Bash(git merge:*) Bash(git rebase:*) Bash(git add:*) \
+             Bash(git stash:*) Bash(git restore:*) Bash(git rm:*) \
+             Bash(git tag:*) Bash(git cherry-pick:*) Bash(git apply:*) \
+             Bash(gh pr:*) Bash(gh issue:*) Bash(gh release:*) \
+             Bash(gh api:*) Bash(gh repo:*)",
+        ]);
+    } else {
+        cmd.arg("--dangerously-skip-permissions");
+    }
 
     // Env-vars per ARCHITECTURE.md "Agents" section.
     cmd.env("ANTHROPIC_MODEL", &cfg.config.model_name);
@@ -304,6 +336,53 @@ mod tests {
         assert!(argv.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == "be terse"));
         // No resume flag when SpawnConfig.resume_session_id is None.
         assert!(!argv.iter().any(|a| a == "--resume"));
+    }
+
+    #[test]
+    fn rain_gets_deny_by_default_not_bypass() {
+        // EYES enforcement: Rain must NOT get bypass mode (which nullifies
+        // deny rules); she gets dontAsk + an allowlist + a mutation denylist.
+        let mut c = cfg();
+        c.agent_name = "rain".into();
+        c.config.agent_name = "rain".into();
+        let argv = debug_command(&c);
+
+        assert!(
+            !argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+            "Rain must not run in bypass mode (it ignores deny rules): {argv:?}"
+        );
+        assert!(
+            argv.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "dontAsk"),
+            "expected `--permission-mode dontAsk`: {argv:?}"
+        );
+        // Allowlist keeps read-only investigation + the signaling MCP.
+        let allowed = argv
+            .windows(2)
+            .find(|w| w[0] == "--allowedTools")
+            .map(|w| w[1].clone())
+            .expect("--allowedTools present");
+        for t in ["Read", "Grep", "Glob", "Bash", "mcp__bot-hq-signaling"] {
+            assert!(allowed.contains(t), "allowlist missing {t}: {allowed}");
+        }
+        // Denylist covers the mutation surface from the 2026-05-28 incident.
+        let denied = argv
+            .windows(2)
+            .find(|w| w[0] == "--disallowedTools")
+            .map(|w| w[1].clone())
+            .expect("--disallowedTools present");
+        for t in ["Edit", "Write", "NotebookEdit", "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh issue:*)", "Bash(gh pr:*)"] {
+            assert!(denied.contains(t), "denylist missing {t}: {denied}");
+        }
+    }
+
+    #[test]
+    fn brian_still_gets_bypass() {
+        // HANDS keeps full power — bypass mode, no allow/deny lists.
+        let argv = debug_command(&cfg()); // cfg() is brian
+        assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
+        assert!(!argv.iter().any(|a| a == "--permission-mode"));
+        assert!(!argv.iter().any(|a| a == "--allowedTools"));
+        assert!(!argv.iter().any(|a| a == "--disallowedTools"));
     }
 
     #[test]
