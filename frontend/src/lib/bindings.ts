@@ -73,6 +73,15 @@ async advanceSessionPhase(sessionId: string, target: string) : Promise<Result<nu
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Close a session from the UI. Delegates to `core.close_session`, which is
+ * the single source of truth for closing: it removes the live handle, KILLS
+ * the brian/rain subprocesses, marks the row closed/archived in storage, and
+ * wipes session permission grants. The previous version called
+ * `storage.close_session` directly, so it set `closed_at` but left the
+ * subprocesses running — a session that "closed" in the DB yet kept taking
+ * turns. Routing through core fixes that.
+ */
 async closeSession(sessionId: string, archive: boolean) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("close_session", { sessionId, archive }) };
