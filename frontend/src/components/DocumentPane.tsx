@@ -64,7 +64,7 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
   const activeDocs = docs.filter((d) => d.phase === activePhase);
 
   return (
-    <div className="flex h-full flex-col border-l border-neutral-800 bg-neutral-950/50">
+    <div className="flex h-full min-w-0 flex-col border-l border-neutral-800 bg-neutral-950/50">
       <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-3 py-2">
         <PhasePillRow
           selected={activePhase}

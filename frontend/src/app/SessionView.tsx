@@ -218,7 +218,7 @@ export function SessionView() {
 
   return (
     <div className="grid h-full grid-cols-[3fr_2fr] grid-rows-1">
-      <section className="flex h-full min-h-0 flex-col border-r border-default">
+      <section className="flex h-full min-h-0 min-w-0 flex-col border-r border-default">
         <header className="flex items-center justify-between border-b border-default px-4 py-3">
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold tracking-tight">
