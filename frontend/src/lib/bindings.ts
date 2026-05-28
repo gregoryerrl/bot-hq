@@ -32,7 +32,7 @@ async listSessions() : Promise<Result<SessionInfo[], AppError>> {
 /**
  * Spawn (or re-spawn) the agent subprocesses for an existing session row.
  * Idempotent — `core::AppState::ensure_session_started` is a no-op if the
- * session is already live. Mirrors the Slint-era click-to-respawn flow:
+ * session is already live. Mirrors the click-to-respawn flow:
  * frontend SessionView calls this on mount so a reopened bot-hq window
  * brings Brian + Rain back via `claude --resume <uuid>`.
  */
@@ -399,8 +399,7 @@ export type ClRescanReportView = { added: string[]; touched: string[]; orphaned:
  */
 export type ComputeApplyDiffResult = { lines: DiffLine[]; note: string | null }
 /**
- * One classified line of a unified `git diff`. Ports the Slint-era
- * `DiffLine` struct (deleted with `view_model.rs`). `kind` is one of
+ * One classified line of a unified `git diff`. `kind` is one of
  * `"add" | "remove" | "hunk" | "file" | "context"` — order-sensitive
  * classification per [`parse_diff_lines`].
  */

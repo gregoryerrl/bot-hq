@@ -14,7 +14,7 @@ interface ChatMessageProps {
 /**
  * One rendered chat message. Markdown via react-markdown + GFM (tables,
  * task lists, autolinks). Code blocks get a contained scroll. Phase-change
- * messages render as centered muted-italic lines per the Slint-era look.
+ * messages render as centered muted-italic lines per the Industrial Terminal look.
  *
  * `groupedWithPrev` collapses the author header when the previous message
  * was from the same author — keeps long runs of agent output legible.

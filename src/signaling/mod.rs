@@ -1,10 +1,13 @@
-//! Embedded MCP server for UI-signaling tools.
+//! Embedded MCP servers for agent ↔ host signaling.
 //!
-//! ARCHITECTURE.md "UI signaling — embedded MCP server" is the spec. We
-//! expose exactly two tools to claude-code subprocesses:
-//!
-//! - `ask_user_choice(question, options)` — blocking; returns the picked option
-//! - `mark_awaiting_user(reason)` — non-blocking; flags the session
+//! Two in-process HTTP MCP servers live under this module: the **internal**
+//! server (UI-signaling tools served to spawned claude-code agents) and the
+//! **external** driver server (session-management tools for outside MCP
+//! clients). The internal tool surface — `ask_user_choice`, `advance_phase`,
+//! `request_approval`, `check_commit_message`, `cl_index_search`,
+//! `session_doc_*`, `grant`/`revoke_session_permission`, `webview_*`, and
+//! more — is defined by the descriptors in `protocol.rs`; see ARCHITECTURE.md
+//! and README.md for the full list (26 internal + 21 external tools).
 //!
 //! Transport: streamable HTTP, one server in the GUI process. Each spawned
 //! agent gets a per-agent `mcp-config.json` pointing at

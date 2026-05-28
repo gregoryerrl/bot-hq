@@ -20,8 +20,7 @@
   font-display: swap;
 }
 
-/* JetBrains Mono — variable-weight TTF bundled at build time. Slint era
-   loaded this via the fontique collection; the Vite frontend serves it from
+/* JetBrains Mono — variable-weight TTF bundled at build time, served from
    /fonts/ (relative to the webview origin via vite base: "./"). */
 @font-face {
   font-family: "JetBrains Mono";

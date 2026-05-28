@@ -108,8 +108,8 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
 }
 
 // GitHub dark-mode palette: green adds, red removes, blue hunk headers,
-// yellow file headers, muted context. Mirrors the Slint-era classifier
-// in `view_model::parse_diff_lines`.
+// yellow file headers, muted context. Mirrors the Rust diff classifier
+// `parse_diff_lines` in `tauri_cmd/docs.rs`.
 const diffLineClass: Record<string, string> = {
   add: "bg-emerald-500/10 text-emerald-300",
   remove: "bg-red-500/10 text-red-300",

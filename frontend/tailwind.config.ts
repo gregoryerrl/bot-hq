@@ -1,7 +1,7 @@
 import type { Config } from "tailwindcss";
 
 /**
- * Slint-era design tokens, ported. 4-tier background hierarchy (canvas →
+ * Design tokens. 4-tier background hierarchy (canvas →
  * surface → elevated → overlay) so layered components read visually distinct
  * without ad-hoc neutral-XXX choices. Author color tokens (brian/rain/emma/
  * user) keep chat author dots + accent rings consistent.
