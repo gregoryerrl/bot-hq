@@ -76,13 +76,18 @@ pub async fn pump_agent(
 ) {
     let mut buffer = String::new();
     let mut flush_at: Option<Instant> = None;
+    // Circuit breaker for the idle-volley antipattern: counts consecutive
+    // short (ack-shaped) peer-forwards. A substantive forward or any tool use
+    // resets it. Once it trips, further short forwards are suppressed so a
+    // novel ack phrasing the keyword list doesn't catch can't volley forever.
+    let mut consecutive_short: u32 = 0;
 
     loop {
         let event = match flush_at {
             Some(deadline) => {
                 let now = Instant::now();
                 if deadline <= now {
-                    flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
+                    flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
                     continue;
                 }
                 let remaining = deadline - now;
@@ -90,7 +95,7 @@ pub async fn pump_agent(
                     biased;
                     ev = event_rx.recv() => ev,
                     _ = tokio::time::sleep(remaining) => {
-                        flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
+                        flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
                         continue;
                     }
                 }
@@ -119,6 +124,9 @@ pub async fn pump_agent(
                 }
             }
             AgentEvent::ToolUse { id, name, input } => {
+                // A tool call is substantive activity — reset the idle breaker
+                // so post-work ack chunks aren't pre-emptively suppressed.
+                consecutive_short = 0;
                 let payload = serde_json::json!({
                     "tool_use_id": id,
                     "name": name,
@@ -162,7 +170,7 @@ pub async fn pump_agent(
             }
             AgentEvent::TurnComplete { .. } => {
                 // Always flush on turn-complete, both phases.
-                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
+                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
             }
             AgentEvent::Init { session_id, .. } => {
                 debug!(agent = ?cfg.author, ?session_id, "init received");
@@ -181,7 +189,7 @@ pub async fn pump_agent(
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");
-                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state).await;
+                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
                 break;
             }
             AgentEvent::Error(msg) => {
@@ -197,6 +205,7 @@ async fn flush_buffer(
     peer_input_tx: &mpsc::Sender<OutgoingUserMessage>,
     flush_at: &mut Option<Instant>,
     ipav_state: &Arc<Mutex<IpavState>>,
+    consecutive_short: &mut u32,
 ) {
     if buffer.trim().is_empty() {
         *flush_at = None;
@@ -213,14 +222,35 @@ async fn flush_buffer(
         *flush_at = None;
         return;
     }
-    // Heartbeat suppression: short ack-style chunks ("Holding.",
-    // "Standing by.", "[Silent — awaiting]", etc.) get persisted to storage
-    // for UI visibility but NOT forwarded to the peer. Forwarding them
-    // triggers the alternating-volley antipattern where Brian + Rain
-    // bounce content-free acknowledgments back to each other while idling
-    // between actions. Belt-and-suspenders with the prompt-side rule.
+    // Heartbeat suppression: short ack-style chunks ("Holding.", "Idle.",
+    // "No response needed.", "(Silent.)", "[Silent — awaiting]", etc.) get
+    // persisted to storage for UI visibility but NOT forwarded to the peer.
+    // Forwarding them triggers the alternating-volley antipattern where Brian
+    // + Rain bounce content-free acknowledgments back to each other while
+    // idling. Belt-and-suspenders with the prompt-side rule.
     if is_heartbeat_ack(&body) {
         debug!(agent = ?cfg.author, body = %body.trim(), "heartbeat ack; skipping peer forward");
+        *flush_at = None;
+        return;
+    }
+    // Circuit breaker: even if the keyword list misses a novel ack phrasing,
+    // a run of short forwards is the volley's signature. Forward the first
+    // few (some are legit: "Done.", "Pushed."), but once too many short
+    // chunks volley in a row with no substantive message resetting the count,
+    // suppress further short forwards until a long one breaks the streak.
+    let is_short = body.trim().len() <= HEARTBEAT_MAX_LEN;
+    if is_short {
+        *consecutive_short += 1;
+    } else {
+        *consecutive_short = 0;
+    }
+    if is_short && *consecutive_short > MAX_CONSECUTIVE_SHORT_FORWARDS {
+        debug!(
+            agent = ?cfg.author,
+            streak = *consecutive_short,
+            body = %body.trim(),
+            "idle-volley breaker tripped; skipping peer forward"
+        );
         *flush_at = None;
         return;
     }
@@ -231,44 +261,54 @@ async fn flush_buffer(
     *flush_at = None;
 }
 
+/// Max chars for a chunk to count as "short/ack-shaped" — shared by the
+/// keyword matcher and the circuit breaker.
+const HEARTBEAT_MAX_LEN: usize = 80;
+
+/// How many consecutive short forwards to allow before the idle-volley
+/// breaker suppresses further short chunks. Generous enough for legit rapid
+/// exchanges ("Done." / "Pushed." / "Confirmed."), tight enough to kill a
+/// runaway volley within a few turns.
+const MAX_CONSECUTIVE_SHORT_FORWARDS: u32 = 4;
+
 /// Identify a short ack-style chunk that should NOT be forwarded to the
 /// peer (purely an idle "I'm here" volley). Stays conservative on purpose:
 /// substantive acks ("Confirmed. The data at line 1580 is correct.") read
 /// as long-enough or non-heartbeat-prefixed and slip through.
 ///
-/// Patterns matched (case-insensitive, after trim, length ≤ 80 chars):
-/// - Starts with `[Silent`, `[Awaiting`, `[Holding` (bracketed status
-///   markers — always heartbeat by design).
-/// - Starts with `holding`, `standing by`, `silent hold`,
-///   `awaiting your`, `awaiting user`, `awaiting direction`.
+/// Matching (case-insensitive, after trim, length ≤ HEARTBEAT_MAX_LEN):
+/// the chunk's leading bracket/paren/emphasis chars are stripped, then the
+/// remainder is matched against a list of idle lead phrases. This catches
+/// both `[Silent — awaiting]` and `(Silent.)` and bare `Silent.` with one
+/// list. Observed live volley phrasings ("No response needed.", "(Silent.)",
+/// "Idle.", "(No further messages.)") are all covered.
 fn is_heartbeat_ack(text: &str) -> bool {
     let trimmed = text.trim();
-    if trimmed.len() > 80 {
+    if trimmed.len() > HEARTBEAT_MAX_LEN {
         return false;
     }
-    // Bracketed status markers are always heartbeat — short or not.
-    let lower_brackets = trimmed.to_lowercase();
-    if lower_brackets.starts_with("[silent")
-        || lower_brackets.starts_with("[awaiting")
-        || lower_brackets.starts_with("[holding")
-    {
-        return true;
-    }
-    // Stem matches: the leading phrase tells us this is an ack-vibe message;
-    // length cap above ensures it can't carry real content too.
+    // Strip leading wrapper chars so "(Silent.)", "[Silent …]", "*Idle*"
+    // all normalize to the same stem as the bare word.
+    let norm = trimmed
+        .trim_start_matches(['(', '[', ')', ']', '*', '_', '-', '—', ' '])
+        .to_lowercase();
     const HEARTBEAT_LEADS: &[&str] = &[
         "holding",
         "standing by",
-        "silent hold",
-        "silent —",
-        "silent.",
-        "awaiting your",
-        "awaiting user",
-        "awaiting direction",
+        "silent",
+        "awaiting",
+        "idle",
+        "no response needed",
+        "no response required",
+        "no further message",
+        "no further input",
+        "no further action",
+        "nothing to add",
+        "nothing further",
+        "no action needed",
+        "no action required",
     ];
-    HEARTBEAT_LEADS
-        .iter()
-        .any(|lead| lower_brackets.starts_with(lead))
+    HEARTBEAT_LEADS.iter().any(|lead| norm.starts_with(lead))
 }
 
 #[cfg(test)]
@@ -306,6 +346,16 @@ mod tests {
         assert!(is_heartbeat_ack("[Awaiting END-SSO from the user driving Brave.]"));
         assert!(is_heartbeat_ack("Awaiting your direction."));
         assert!(is_heartbeat_ack("Holding silently."));
+        // Phrases from the 2026-05-28 ad-exporter volley that the original
+        // list missed (the bug): bare + parenthesized forms.
+        assert!(is_heartbeat_ack("No response needed."));
+        assert!(is_heartbeat_ack("(Silent.)"));
+        assert!(is_heartbeat_ack("Idle."));
+        assert!(is_heartbeat_ack("(Idle.)"));
+        assert!(is_heartbeat_ack("(No further messages.)"));
+        assert!(is_heartbeat_ack("(No further messages from me.)"));
+        assert!(is_heartbeat_ack("Nothing to add. Standing by."));
+        assert!(is_heartbeat_ack("(Silent — standing by.)"));
     }
 
     #[test]
@@ -362,6 +412,85 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].author, "rain");
         assert!(msgs[0].content.contains("Holding."));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_volley_breaker_suppresses_runaway_short_forwards() {
+        // Novel ack phrasings the keyword list doesn't catch ("Ok.", "Sure.")
+        // still volley as short chunks. The breaker forwards the first
+        // MAX_CONSECUTIVE_SHORT_FORWARDS, then suppresses the rest.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (peer_tx, mut peer_rx) = mpsc::channel(64);
+        let task = tokio::spawn(pump_agent(
+            fast_cfg(Author::Rain, Author::Brian),
+            ev_rx,
+            peer_tx,
+            storage.clone(),
+            state.clone(),
+        ));
+
+        // Six short, non-heartbeat chunks, each its own turn so each flushes.
+        for word in ["Ok.", "Sure.", "Yep.", "Right.", "Fine.", "Cool."] {
+            ev_tx.send(AgentEvent::Text(word.into())).await.unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None })
+                .await
+                .unwrap();
+        }
+
+        drop(ev_tx);
+        task.await.unwrap();
+
+        // Exactly MAX_CONSECUTIVE_SHORT_FORWARDS reach the peer; the rest are
+        // suppressed by the breaker.
+        let mut forwarded = 0;
+        while peer_rx.try_recv().is_ok() {
+            forwarded += 1;
+        }
+        assert_eq!(forwarded, MAX_CONSECUTIVE_SHORT_FORWARDS as usize);
+
+        // All six still persisted for UI visibility.
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs.len(), 6);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn substantive_message_resets_idle_breaker() {
+        // A long (substantive) forward resets the short-streak counter, so a
+        // later short chunk forwards normally instead of being suppressed.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (peer_tx, mut peer_rx) = mpsc::channel(64);
+        let task = tokio::spawn(pump_agent(
+            fast_cfg(Author::Rain, Author::Brian),
+            ev_rx,
+            peer_tx,
+            storage.clone(),
+            state.clone(),
+        ));
+
+        let long = "This is a substantive review comment that is clearly longer than the heartbeat length cap and carries real content.";
+        // 5 shorts (5th suppressed), then a long (resets), then a short (forwards).
+        let seq: [&str; 7] = ["a.", "b.", "c.", "d.", "e.", long, "f."];
+        for chunk in seq {
+            ev_tx.send(AgentEvent::Text(chunk.into())).await.unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None })
+                .await
+                .unwrap();
+        }
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let mut got = Vec::new();
+        while let Ok(m) = peer_rx.try_recv() {
+            got.push(m.message.content);
+        }
+        // 4 of the first 5 shorts + the long + the trailing short = 6.
+        assert_eq!(got.len(), 6, "got: {got:?}");
+        assert!(got.iter().any(|c| c.contains("substantive review comment")));
+        assert!(got.iter().any(|c| c.contains("f.")), "post-reset short should forward");
     }
 
     #[tokio::test(flavor = "current_thread")]
