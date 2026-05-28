@@ -40,7 +40,7 @@ pub struct AppState {
     /// any MCP tool that needs the webview (screenshot, click, scroll, etc.)
     /// has to wait for this to be filled. `OnceCell` because it's write-once
     /// at startup; no contention.
-    pub app_handle: once_cell::sync::OnceCell<tauri::AppHandle>,
+    pub app_handle: std::sync::OnceLock<tauri::AppHandle>,
 }
 
 impl AppState {
@@ -57,7 +57,7 @@ impl AppState {
             spawn_gate: Mutex::new(()),
             emma: Mutex::new(None),
             external_server: Mutex::new(None),
-            app_handle: once_cell::sync::OnceCell::new(),
+            app_handle: std::sync::OnceLock::new(),
         }
     }
 

@@ -159,7 +159,7 @@ pub struct SignalingBridge {
     /// this — bridge is the only shared handle accessible to the per-agent
     /// dispatchers, which don't have CoreAppState. Set-once; `None` in tests
     /// and during the pre-setup window.
-    app_handle: once_cell::sync::OnceCell<tauri::AppHandle>,
+    app_handle: std::sync::OnceLock<tauri::AppHandle>,
 }
 
 impl SignalingBridge {
@@ -177,7 +177,7 @@ impl SignalingBridge {
             session_awaiting: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
             session_permissions: Mutex::new(HashMap::new()),
-            app_handle: once_cell::sync::OnceCell::new(),
+            app_handle: std::sync::OnceLock::new(),
         })
     }
 

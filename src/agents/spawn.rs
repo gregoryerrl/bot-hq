@@ -2,7 +2,7 @@
 //! MCP-signaling server. Returns an `AgentHandle` the core layer drives.
 
 use anyhow::{Context, Result};
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ use crate::storage::AgentConfig;
 /// by `reap_all_children` from `main.rs`'s panic hook + signal handler
 /// so the children get SIGKILL even when the tokio runtime can't be
 /// trusted (panic-abort / SIGTERM paths skip Drop chains entirely).
-pub static CHILD_PIDS: Lazy<Mutex<HashSet<u32>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+pub static CHILD_PIDS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// Sync, signal-safe child reaper. Walks the registered PIDs and sends
 /// SIGKILL via libc directly — no tokio, no async, no Drop chain.
