@@ -1,5 +1,6 @@
 //! Pending choice / question commands.
 
+use crate::core::AppState as CoreAppState;
 use crate::signaling::{PendingChoice, SignalingBridge};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -39,14 +40,12 @@ pub async fn list_pending_choices(
 #[tauri::command]
 #[specta::specta]
 pub async fn resolve_choice(
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
     choice_id: String,
     picked: String,
 ) -> Result<(), AppError> {
-    bridge
-        .resolve_choice(&choice_id, picked)
+    core.resolve_choice(&choice_id, picked)
         .await
-        .map(|_| ())
         .map_err(|e| AppError::Internal(e.to_string()))
 }
 
