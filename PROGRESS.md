@@ -11,13 +11,49 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-253 tests passing (205 lib + 31 external MCP + 7 signaling + 10 storage)
-plus 12 frontend Vitest. Release build clean. **Tauri v2 migration landed
+283 tests passing (235 lib + 31 external MCP + 7 signaling + 10 storage)
+plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-05-28 — post-rebuild cleanup (7 batches)
+
+A cleanup pass after the Tauri v2 migration: a tray-delivery bug fix,
+doc/CL reconciliation, and four pure refactors (zero behavior change).
+Batches 1–5 shipped first; batches 6–7 (the two big module splits) were
+deferred to a clean context window and landed last.
+
+- **Batch 1** (`8dd3198`) — fix: route UI `resolve_choice` through core so a
+  tray answer arriving after an MCP client-timeout still wakes the agent
+  (the `AgentReceiverDroppedFellBack` stdin-injection path).
+- **Batch 2** (`28db6d9`) — docs: correct MCP tool counts (26 internal /
+  21 external), drop stale Slint references, archive spent CL files.
+- **Batch 3** (`99530db`) — refactor: `once_cell` → std `LazyLock`/`OnceLock`.
+- **Batch 4** (`0cc5ab8`) — refactor: split `ContextLibrary.tsx` into shell
+  + sidebar + editor + shared modules.
+- **Batch 5** (`c24a4b2`) — refactor: extract shared `webview_*` JS builders
+  into `signaling/webview_js.rs` (+3 tests → 283 baseline).
+- **Batch 6** (`8118247`) — refactor: split `signaling/bridge.rs` (1965 LOC)
+  into a `bridge/` directory — `mod.rs` (types + struct + constructors +
+  session/policy/event-bus methods), `questions.rs`, `permissions.rs`,
+  `cl_facade.rs`, `session_docs.rs`, `util.rs`. Each submodule carries its
+  own `impl SignalingBridge` block; the `pub use bridge::{…}` re-exports are
+  unchanged. Cross-sibling private fns bumped to `pub(super)`; private
+  fields stay private (submodules are descendants of the bridge module).
+- **Batch 7** (`5d1da96`) — refactor: split `storage/mod.rs` (1197 LOC) into
+  per-table submodules (`sessions`, `messages`, `agent_config`, `questions`,
+  `projects`, `cl_index`, `session_docs`, `plugins`); `mod.rs` keeps the
+  `Storage` struct, `open`/`memory`/`pool`, and the shared `cl_search_table`
+  generic. No visibility bumps — every query method is `pub` and
+  `cl_search_table` stays a private parent method reachable from descendants.
+
+Batches 6–7 are pure file-splits: 283 Rust tests + 14 frontend Vitest stay
+green, release build clean, after each commit.
 
 ---
 
