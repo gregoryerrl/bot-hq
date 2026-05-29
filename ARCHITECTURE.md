@@ -174,8 +174,17 @@ parser `parse_diff_lines`), consumed by `DocumentPane.tsx`.
 Subscribes to the `agent.messages.batch` event filtered to
 `session_id="emma"`.
 
-**Context Library tab:** Project-grouped index browser backed by
-`cl_index_search`. Substring search + project filter.
+**Context Library tab:** 2-pane "Library Tree" sidebar + tabbed editor. The
+tree renders nested collapsible folders (`cl_index_search` + `cl_folder_search`).
+Files open a read-write editor (`cl_read_file` / `cl_write_file`; binary +
+truncated files are read-only so a lossy save can't corrupt them). Folders open
+a folder-view that edits the folder description (`cl_set_folder_description`)
+and, at the project root, configures + registers / unregisters the project
+(`cl_register_project` / `cl_unregister_project`); a sidebar modal registers an
+arbitrary on-disk folder as a new project. Right-click gives VSCode-style new
+file / new folder / rename / delete (`cl_create_file` / `cl_mkdir` / `cl_rename`
+/ `cl_delete_path`, each followed by `cl_rescan`). Substring search + project
+filter.
 
 **Plugins tab:** Placeholder UI surfaced from `tauri_cmd/plugins.rs`
 (landing later). Rust scaffold in `src/plugins/` ships the manifest

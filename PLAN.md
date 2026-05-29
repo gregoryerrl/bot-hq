@@ -31,9 +31,12 @@ shipped. Remaining follow-ups:
 - Plugin install flow + iframe ping/pong frontend channel for the
   heartbeat watcher. The `tauri_cmd/plugins.rs` backend is live; the
   frontend install/heartbeat wiring is not.
-- CL editor write-back: `cl_write_file` / `cl_create_file` / `cl_mkdir`
-  backend commands so the Context Library tab's Save is no longer a stub.
 - Replace the placeholder `icons/icon.png` with the real bot-hq mark.
+
+The Context Library editor write-back + folder-view + right-click disk ops
+shipped 2026-05-29 (see PROGRESS.md). Deferred from that work: native folder
+picker (text-input path for now — needs the Tauri dialog plugin), rename
+re-derives the description, hard delete (no OS trash).
 
 ---
 
