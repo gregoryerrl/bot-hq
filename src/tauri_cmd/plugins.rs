@@ -9,7 +9,7 @@
 use crate::plugins::{
     CapabilityGen, Heartbeat, LoadedPlugin, Loader, PluginManifest, PluginStatus,
 };
-use crate::storage::Storage;
+use crate::storage::{Plugin, Storage};
 use crate::tauri_cmd::error::AppError;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,25 @@ pub struct InstalledPluginView {
     pub manifest: PluginManifest,
     pub dir_path: String,
     pub installed_at: String,
+}
+
+impl InstalledPluginView {
+    /// Build the frontend view from a stored plugin row, its parsed
+    /// manifest, and the live heartbeat. Status defaults to Healthy when the
+    /// plugin isn't registered with the heartbeat (e.g. disabled).
+    fn from_row(row: Plugin, manifest: PluginManifest, heartbeat: &Heartbeat) -> Self {
+        let status = heartbeat.status_of(&row.id).unwrap_or(PluginStatus::Healthy);
+        Self {
+            id: row.id,
+            name: row.name,
+            version: row.version,
+            enabled: row.enabled,
+            status,
+            manifest,
+            dir_path: row.dir_path,
+            installed_at: row.installed_at,
+        }
+    }
 }
 
 // ---- commands -------------------------------------------------------------
@@ -187,19 +206,7 @@ async fn install_plugin_inner(
         .into_iter()
         .find(|r| r.id == manifest.id)
         .ok_or_else(|| AppError::Internal("plugin row vanished after insert".into()))?;
-    Ok(InstalledPluginView {
-        id: row.id,
-        name: row.name,
-        version: row.version,
-        enabled: row.enabled,
-        status: registry
-            .heartbeat
-            .status_of(&manifest.id)
-            .unwrap_or(PluginStatus::Healthy),
-        manifest,
-        dir_path: row.dir_path,
-        installed_at: row.installed_at,
-    })
+    Ok(InstalledPluginView::from_row(row, manifest, &registry.heartbeat))
 }
 
 async fn list_installed_plugins_inner(
@@ -216,20 +223,7 @@ async fn list_installed_plugins_inner(
                 continue;
             }
         };
-        let status = registry
-            .heartbeat
-            .status_of(&row.id)
-            .unwrap_or(PluginStatus::Healthy);
-        out.push(InstalledPluginView {
-            id: row.id,
-            name: row.name,
-            version: row.version,
-            enabled: row.enabled,
-            status,
-            manifest,
-            dir_path: row.dir_path,
-            installed_at: row.installed_at,
-        });
+        out.push(InstalledPluginView::from_row(row, manifest, &registry.heartbeat));
     }
     Ok(out)
 }
