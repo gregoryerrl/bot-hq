@@ -30,6 +30,14 @@ export function collapseKey(project: string, folderPath: string): string {
   return `${project}\t${folderPath}`;
 }
 
+// Right-click target in the tree. `path` is relative to the project CL root
+// (file_path for files, folder_path for folders; "" = project root).
+export interface CtxTarget {
+  project: string;
+  path: string;
+  kind: "file" | "folder";
+}
+
 export const terminalInputClass = cn(
   "w-full border-0 border-b border-outline-variant bg-transparent",
   "rounded-none px-0 py-1 font-code-sm text-code-sm text-on-surface",

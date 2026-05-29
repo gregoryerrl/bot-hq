@@ -1,16 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useTauriQuery } from "../hooks/useInvoke";
+import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import type {
   ClFolderView,
   ClIndexEntryView,
   ClRescanReportView,
   ProjectView,
 } from "../lib/bindings";
-import { collapseKey, tabKey, type OpenTab } from "./contextLibraryShared";
+import {
+  baseName,
+  collapseKey,
+  type CtxTarget,
+  tabKey,
+  type OpenTab,
+} from "./contextLibraryShared";
 import { WorkspaceSidebar } from "./ContextLibrarySidebar";
 import { EditorArea } from "./ContextLibraryEditor";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
+import {
+  ActionModal,
+  ContextMenu,
+  type ContextMenuItem,
+} from "./ContextLibraryContextMenu";
 
 // ============================================================================
 // ContextLibrary — 2-pane Industrial Terminal layout. The left WorkspaceSidebar
@@ -31,6 +42,12 @@ import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
 // File-content saves are disabled in v1 — `cl_write_file` doesn't exist.
 // Description saves work via the existing `cl_set_description` command.
 // ============================================================================
+
+type CtxAction =
+  | { mode: "newFile"; target: CtxTarget }
+  | { mode: "newFolder"; target: CtxTarget }
+  | { mode: "rename"; target: CtxTarget }
+  | { mode: "delete"; target: CtxTarget };
 
 export function ContextLibrary() {
   const [project, setProject] = useState<string | null>(null);
@@ -115,6 +132,138 @@ export function ContextLibrary() {
     refetchProjects();
     refetch();
     refetchFolders();
+  };
+
+  // Right-click context menu + the new-file / rename / delete action modal.
+  const [menu, setMenu] = useState<{
+    target: CtxTarget;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [action, setAction] = useState<CtxAction | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const menuItems = (target: CtxTarget): ContextMenuItem[] => {
+    if (target.kind === "folder") {
+      const items: ContextMenuItem[] = [
+        {
+          label: "New file",
+          onSelect: () => setAction({ mode: "newFile", target }),
+        },
+        {
+          label: "New folder",
+          onSelect: () => setAction({ mode: "newFolder", target }),
+        },
+      ];
+      // The project-root folder can't be renamed/deleted from here.
+      if (target.path !== "") {
+        items.push({
+          label: "Rename",
+          onSelect: () => setAction({ mode: "rename", target }),
+        });
+        items.push({
+          label: "Delete",
+          danger: true,
+          onSelect: () => setAction({ mode: "delete", target }),
+        });
+      }
+      return items;
+    }
+    return [
+      {
+        label: "Rename",
+        onSelect: () => setAction({ mode: "rename", target }),
+      },
+      {
+        label: "Delete",
+        danger: true,
+        onSelect: () => setAction({ mode: "delete", target }),
+      },
+    ];
+  };
+
+  const actionModalConfig = (a: CtxAction) => {
+    const t = a.target;
+    switch (a.mode) {
+      case "newFile":
+        return {
+          title: "New file",
+          inputLabel: "File name",
+          confirmLabel: "Create",
+        };
+      case "newFolder":
+        return {
+          title: "New folder",
+          inputLabel: "Folder name",
+          confirmLabel: "Create",
+        };
+      case "rename":
+        return {
+          title: "Rename",
+          inputLabel: "New name",
+          initialValue: baseName(t.path),
+          confirmLabel: "Rename",
+        };
+      case "delete":
+        return {
+          title: `Delete ${t.kind}`,
+          message: `Delete "${baseName(t.path) || t.project}"? This permanently removes it from disk and cannot be undone.`,
+          confirmLabel: "Delete",
+          danger: true,
+        };
+    }
+  };
+
+  const runAction = async (value: string) => {
+    if (!action) return;
+    const { target, mode } = action;
+    setActionBusy(true);
+    setActionError(null);
+    try {
+      if (mode === "newFile") {
+        const fp = target.path ? `${target.path}/${value}` : value;
+        await invoke("cl_create_file", { project: target.project, filePath: fp });
+      } else if (mode === "newFolder") {
+        const fp = target.path ? `${target.path}/${value}` : value;
+        await invoke("cl_mkdir", {
+          project: target.project,
+          folderPath: fp,
+        });
+      } else if (mode === "rename") {
+        const slash = target.path.lastIndexOf("/");
+        const parent = slash >= 0 ? target.path.slice(0, slash) : "";
+        const to = parent ? `${parent}/${value}` : value;
+        await invoke("cl_rename", {
+          project: target.project,
+          fromPath: target.path,
+          toPath: to,
+        });
+      } else {
+        await invoke("cl_delete_path", {
+          project: target.project,
+          path: target.path,
+        });
+        if (target.kind === "folder") {
+          // Best-effort: drop the deleted folder's own description row.
+          try {
+            await invoke("cl_delete_folder_description", {
+              project: target.project,
+              folderPath: target.path,
+            });
+          } catch {
+            // non-fatal
+          }
+        }
+      }
+      await invoke("cl_rescan", { project: target.project });
+      onProjectChanged();
+      setAction(null);
+    } catch (e) {
+      setActionError(errorMessage(e));
+    } finally {
+      setActionBusy(false);
+    }
   };
 
   // Multi-tab state. Opening a file that's already in `tabs` just focuses
@@ -226,6 +375,7 @@ export function ContextLibrary() {
         onOpenFile={openFile}
         onOpenFolder={openFolder}
         onRequestRegister={() => setRegisterOpen(true)}
+        onContextMenu={(target, x, y) => setMenu({ target, x, y })}
       />
       <EditorArea
         tabs={tabs}
@@ -245,6 +395,26 @@ export function ContextLibrary() {
         onClose={() => setRegisterOpen(false)}
         onRegistered={onProjectChanged}
       />
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems(menu.target)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+      {action && (
+        <ActionModal
+          {...actionModalConfig(action)}
+          busy={actionBusy}
+          error={actionError}
+          onConfirm={runAction}
+          onClose={() => {
+            setAction(null);
+            setActionError(null);
+          }}
+        />
+      )}
     </div>
   );
 }

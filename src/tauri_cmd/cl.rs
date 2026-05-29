@@ -218,6 +218,54 @@ fn resolve_existing_cl_file(
     Ok(candidate_real)
 }
 
+/// Resolve an existing path (file OR directory) inside the canonicalized root.
+/// Used by rename-source + delete, which operate on both files and folders.
+fn resolve_within_root(
+    project_root_real: &std::path::Path,
+    rel_path: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    let real = project_root_real
+        .join(rel_path)
+        .canonicalize()
+        .map_err(|e| AppError::NotFound(format!("path '{rel_path}' not found: {e}")))?;
+    if !real.starts_with(project_root_real) {
+        return Err(AppError::Internal(
+            "path traversal rejected — resolves outside project root".into(),
+        ));
+    }
+    Ok(real)
+}
+
+/// Resolve a NOT-yet-existing path for create / mkdir / rename-destination: the
+/// PARENT directory must already exist inside the root and the leaf must not
+/// exist yet. Traversal is guarded via the canonicalized parent (the leaf can't
+/// be canonicalized since it doesn't exist).
+fn resolve_new_cl_path(
+    project_root_real: &std::path::Path,
+    rel_path: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    let joined = project_root_real.join(rel_path);
+    let parent = joined
+        .parent()
+        .ok_or_else(|| AppError::Internal("invalid path: no parent".into()))?;
+    let file_name = joined
+        .file_name()
+        .ok_or_else(|| AppError::Internal("invalid path: no final segment".into()))?;
+    let parent_real = parent
+        .canonicalize()
+        .map_err(|e| AppError::NotFound(format!("parent directory not found: {e}")))?;
+    if !parent_real.starts_with(project_root_real) {
+        return Err(AppError::Internal(
+            "path traversal rejected — resolves outside project root".into(),
+        ));
+    }
+    let target = parent_real.join(file_name);
+    if target.exists() {
+        return Err(AppError::Internal(format!("'{rel_path}' already exists")));
+    }
+    Ok(target)
+}
+
 /// Read a single CL file's contents, resolved as
 /// `<data_dir>/projects/<project>/<file_path>`. Hard cap on read size so a
 /// very large file can't pin the IPC. Path-traversal guarded by
@@ -400,6 +448,88 @@ pub async fn cl_unregister_project(
     Ok(())
 }
 
+/// Resolve + canonicalize a project's CL root for the disk-op commands below.
+async fn canonical_cl_root(
+    bridge: &SignalingBridge,
+    project: &str,
+) -> Result<std::path::PathBuf, AppError> {
+    let root = bridge
+        .cl_project_root(project)
+        .await
+        .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
+    root.canonicalize()
+        .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))
+}
+
+/// Create a new empty file. Parent dir must exist; the file must not. The
+/// frontend follows with `cl_rescan` to index it.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_create_file(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    project: String,
+    file_path: String,
+) -> Result<(), AppError> {
+    let root = canonical_cl_root(&bridge, &project).await?;
+    let target = resolve_new_cl_path(&root, &file_path)?;
+    std::fs::write(&target, b"").map_err(|e| AppError::Internal(format!("create file: {e}")))?;
+    Ok(())
+}
+
+/// Create a new directory. Parent dir must exist; the directory must not.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_mkdir(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    project: String,
+    folder_path: String,
+) -> Result<(), AppError> {
+    let root = canonical_cl_root(&bridge, &project).await?;
+    let target = resolve_new_cl_path(&root, &folder_path)?;
+    std::fs::create_dir(&target).map_err(|e| AppError::Internal(format!("mkdir: {e}")))?;
+    Ok(())
+}
+
+/// Rename / move a file or folder within the project's CL root. Source must
+/// exist; destination's parent must exist and the destination must not.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_rename(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    project: String,
+    from_path: String,
+    to_path: String,
+) -> Result<(), AppError> {
+    let root = canonical_cl_root(&bridge, &project).await?;
+    let from_real = resolve_within_root(&root, &from_path)?;
+    let to_target = resolve_new_cl_path(&root, &to_path)?;
+    std::fs::rename(&from_real, &to_target)
+        .map_err(|e| AppError::Internal(format!("rename: {e}")))?;
+    Ok(())
+}
+
+/// Delete a file, or a folder and everything under it. Must exist + resolve
+/// inside the project root. Destructive — the frontend gates this behind a
+/// confirmation dialog.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_delete_path(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    project: String,
+    path: String,
+) -> Result<(), AppError> {
+    let root = canonical_cl_root(&bridge, &project).await?;
+    let target = resolve_within_root(&root, &path)?;
+    if target.is_dir() {
+        std::fs::remove_dir_all(&target)
+            .map_err(|e| AppError::Internal(format!("delete folder: {e}")))?;
+    } else {
+        std::fs::remove_file(&target)
+            .map_err(|e| AppError::Internal(format!("delete file: {e}")))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +582,69 @@ mod tests {
 
         // A traversal target never resolves to a writable path.
         assert!(resolve_existing_cl_file(&root, "../escape.md").is_err());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_within_root_allows_files_and_dirs_blocks_escape() {
+        use std::fs;
+        let base =
+            std::env::temp_dir().join(format!("bot-hq-b3within-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("sub")).unwrap();
+        fs::write(base.join("f.md"), b"x").unwrap();
+        let root = base.canonicalize().unwrap();
+
+        assert!(resolve_within_root(&root, "f.md").is_ok());
+        assert!(resolve_within_root(&root, "sub").is_ok()); // dirs allowed
+        assert!(resolve_within_root(&root, "missing").is_err());
+        assert!(resolve_within_root(&root, "..").is_err());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_new_cl_path_requires_existing_parent_and_absent_leaf() {
+        use std::fs;
+        let base =
+            std::env::temp_dir().join(format!("bot-hq-b3new-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("sub")).unwrap();
+        fs::write(base.join("exists.md"), b"x").unwrap();
+        let root = base.canonicalize().unwrap();
+
+        assert!(resolve_new_cl_path(&root, "sub/new.md").is_ok());
+        assert!(resolve_new_cl_path(&root, "new-at-root.md").is_ok());
+        assert!(resolve_new_cl_path(&root, "exists.md").is_err()); // leaf exists
+        assert!(resolve_new_cl_path(&root, "nope/child.md").is_err()); // parent missing
+        assert!(resolve_new_cl_path(&root, "../escape.md").is_err()); // traversal
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn create_rename_delete_through_guards() {
+        use std::fs;
+        let base =
+            std::env::temp_dir().join(format!("bot-hq-b3ops-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let root = base.canonicalize().unwrap();
+
+        let created = resolve_new_cl_path(&root, "note.md").unwrap();
+        fs::write(&created, b"").unwrap();
+        assert!(root.join("note.md").is_file());
+
+        let from = resolve_within_root(&root, "note.md").unwrap();
+        let to = resolve_new_cl_path(&root, "renamed.md").unwrap();
+        fs::rename(&from, &to).unwrap();
+        assert!(!root.join("note.md").exists());
+        assert!(root.join("renamed.md").is_file());
+
+        let target = resolve_within_root(&root, "renamed.md").unwrap();
+        fs::remove_file(&target).unwrap();
+        assert!(!root.join("renamed.md").exists());
 
         let _ = fs::remove_dir_all(&base);
     }

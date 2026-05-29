@@ -8,6 +8,7 @@ import {
   baseName,
   buildTree,
   collapseKey,
+  type CtxTarget,
   FileIcon,
   FolderIcon,
   type OpenTab,
@@ -42,6 +43,7 @@ interface WorkspaceSidebarProps {
   onOpenFile: (project: string, filePath: string) => void;
   onOpenFolder: (project: string, folderPath: string) => void;
   onRequestRegister: () => void;
+  onContextMenu: (target: CtxTarget, x: number, y: number) => void;
 }
 
 export function WorkspaceSidebar({
@@ -62,6 +64,7 @@ export function WorkspaceSidebar({
   onOpenFile,
   onOpenFolder,
   onRequestRegister,
+  onContextMenu,
 }: WorkspaceSidebarProps) {
   const projectIds = Object.keys(byProject).sort();
   const projectCount = projectIds.length;
@@ -181,6 +184,7 @@ export function WorkspaceSidebar({
                 activeTab={activeTab}
                 onOpenFile={onOpenFile}
                 onOpenFolder={onOpenFolder}
+                onContextMenu={onContextMenu}
               />
             </section>
           ))
@@ -211,6 +215,7 @@ function FolderNode({
   activeTab,
   onOpenFile,
   onOpenFolder,
+  onContextMenu,
 }: {
   project: string;
   node: TreeNode;
@@ -221,6 +226,7 @@ function FolderNode({
   activeTab: OpenTab | null;
   onOpenFile: (project: string, filePath: string) => void;
   onOpenFolder: (project: string, folderPath: string) => void;
+  onContextMenu: (target: CtxTarget, x: number, y: number) => void;
 }) {
   const isCollapsed = collapsed.has(collapseKey(project, node.path));
   const isActive =
@@ -236,6 +242,14 @@ function FolderNode({
         onClick={() => {
           onToggle(project, node.path);
           onOpenFolder(project, node.path);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onContextMenu(
+            { project, path: node.path, kind: "folder" },
+            e.clientX,
+            e.clientY,
+          );
         }}
         aria-expanded={!isCollapsed}
         title={node.path || project}
@@ -280,6 +294,7 @@ function FolderNode({
               activeTab={activeTab}
               onOpenFile={onOpenFile}
               onOpenFolder={onOpenFolder}
+              onContextMenu={onContextMenu}
             />
           ))}
           {node.files.map((f) => (
@@ -293,6 +308,7 @@ function FolderNode({
                 activeTab.filePath === f.file_path
               }
               onOpen={() => onOpenFile(f.project_id, f.file_path)}
+              onContextMenu={onContextMenu}
             />
           ))}
         </div>
@@ -310,16 +326,26 @@ function FileRow({
   depth,
   isActive,
   onOpen,
+  onContextMenu,
 }: {
   file: ClIndexEntryView;
   depth: number;
   isActive: boolean;
   onOpen: () => void;
+  onContextMenu: (target: CtxTarget, x: number, y: number) => void;
 }) {
   return (
     <button
       type="button"
       onClick={onOpen}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContextMenu(
+          { project: file.project_id, path: file.file_path, kind: "file" },
+          e.clientX,
+          e.clientY,
+        );
+      }}
       title={file.file_path}
       style={{ paddingLeft: `${depth * INDENT_PX + 8}px` }}
       className={cn(
