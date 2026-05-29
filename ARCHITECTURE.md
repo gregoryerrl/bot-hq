@@ -197,7 +197,8 @@ per-PluginSlot — those remount).
 ## Internal MCP server (UI signaling)
 
 In-process HTTP MCP server, hand-rolled JSON-RPC over hyper 1.x. Lives
-in `src/signaling/{jsonrpc,protocol,server,bridge}.rs`. Surface:
+in `src/signaling/` (`jsonrpc`, `protocol`, `server`, and the `bridge/`
+submodule tree). Surface:
 
 - **Bind:** `127.0.0.1:<ephemeral>` (chosen at startup; ephemeral port).
 - **URL per agent:** `http://127.0.0.1:<port>/sessions/<id>/<agent>/mcp`.
@@ -222,7 +223,7 @@ hard-coded list of tools Rain (EYES) cannot call. Tool calls from Rain
 to any HANDS-only tool return a `HANDS_ONLY_TOOLS` JSON-RPC error. The
 boundary is structural, not just convention.
 
-**Bridge (`src/signaling/bridge.rs`)** owns:
+**Bridge (`src/signaling/bridge/`)** owns:
 - Storage handle (writes question rows, message rows, violations).
 - Policy resolver (loads `general-policy.yaml` + `projects/<p>/policy.yaml`).
 - Session → project mapping.
