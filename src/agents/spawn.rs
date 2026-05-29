@@ -103,6 +103,13 @@ pub struct SpawnConfig {
     /// child picks up its previous conversation. When None, claude assigns
     /// a fresh UUID — we capture that one in the next `init` event.
     pub resume_session_id: Option<String>,
+    /// Project name (CL / policy key) this session targets, if any. Threaded so
+    /// HANDS/Emma can be spawned with a PreToolUse `tool-blocklist` hook bound to
+    /// the project's `policy.yaml`. `None` for the projectless singleton.
+    pub project: Option<String>,
+    /// bot-hq data dir — the injected PreToolUse hook needs it to resolve the
+    /// project's policy at tool-call time.
+    pub data_dir: PathBuf,
 }
 
 /// Driver handle for one running agent subprocess.
@@ -281,6 +288,48 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         ]);
     } else {
         cmd.arg("--dangerously-skip-permissions");
+
+        // Mechanical backstop for HANDS/Emma. They run in bypass mode, where
+        // claude-code's native deny rules are IGNORED — so the only thing that
+        // can hard-stop an outward/mutating command is a hook. Inject a
+        // PreToolUse Bash hook that calls back into THIS binary's `policy-check
+        // tool-blocklist` to deny commands matching the project's
+        // `tool_blocklist` BEFORE they execute. This is the gate the
+        // honor-system `request_approval` path lacked — see the 2026-05-29
+        // fabricated-comment incident (an agent ran `gh issue comment` under the
+        // user's identity with no gate, in a client repo that had no hook at
+        // all). Rain is exempt: she runs `--bare` (skips hooks) and is already
+        // mechanically read-only via the deny list above. Injected via
+        // `--settings` (a process arg) so NOTHING is written into the working
+        // repo's tree — disguise-safe for client repos.
+        match std::env::current_exe() {
+            Ok(exe) => {
+                let mut hook_cmd = format!(
+                    "\"{}\" policy-check tool-blocklist --data-dir \"{}\"",
+                    exe.display(),
+                    cfg.data_dir.display(),
+                );
+                if let Some(project) = &cfg.project {
+                    hook_cmd.push_str(&format!(" --project \"{project}\""));
+                }
+                hook_cmd.push_str(&format!(" --session \"{}\"", cfg.session_id));
+                let settings = serde_json::json!({
+                    "hooks": {
+                        "PreToolUse": [{
+                            "matcher": "Bash",
+                            "hooks": [{ "type": "command", "command": hook_cmd }],
+                        }],
+                    }
+                });
+                cmd.args(["--settings", &settings.to_string()]);
+            }
+            Err(e) => warn!(
+                agent = %cfg.agent_name,
+                error = %e,
+                "current_exe() failed — tool-blocklist PreToolUse hook NOT injected; \
+                 falling back to prompt-level tool_blocklist only"
+            ),
+        }
     }
 
     // Env-vars per ARCHITECTURE.md "Agents" section.
@@ -350,6 +399,8 @@ mod tests {
             claude_bin: Some("claude".into()),
             session_id: "test-session".into(),
             resume_session_id: None,
+            project: Some("bcc-ad-manager-ad-exporter".into()),
+            data_dir: Path::new("/tmp/data").to_path_buf(),
         }
     }
 
@@ -449,6 +500,58 @@ mod tests {
         assert!(
             argv.windows(2).any(|w| w[0] == "--resume" && w[1] == "abc-123-uuid"),
             "expected `--resume abc-123-uuid` in argv: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn brian_gets_tool_blocklist_pretooluse_hook() {
+        let argv = debug_command(&cfg()); // cfg() is brian
+        let settings = argv
+            .windows(2)
+            .find(|w| w[0] == "--settings")
+            .map(|w| w[1].clone())
+            .expect("brian must get --settings carrying the PreToolUse hook");
+        assert!(settings.contains("PreToolUse"), "settings: {settings}");
+        assert!(
+            settings.contains("policy-check tool-blocklist"),
+            "hook must call the gate subcommand: {settings}"
+        );
+        assert!(
+            settings.contains("bcc-ad-manager-ad-exporter"),
+            "hook must be bound to the session's project: {settings}"
+        );
+        assert!(
+            settings.contains("\"matcher\":\"Bash\""),
+            "hook must match the Bash tool: {settings}"
+        );
+    }
+
+    #[test]
+    fn emma_gets_tool_blocklist_pretooluse_hook() {
+        // Emma is solo + also runs in bypass (the `else` branch), so she needs
+        // the same mechanical gate.
+        let mut c = cfg();
+        c.agent_name = "emma".into();
+        c.config.agent_name = "emma".into();
+        let argv = debug_command(&c);
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--settings" && w[1].contains("policy-check tool-blocklist")),
+            "emma must get the PreToolUse tool-blocklist hook: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn rain_does_not_get_tool_blocklist_hook() {
+        // Rain runs --bare (skips hooks) and is already mechanically read-only
+        // via the deny list, so injecting --settings would be inert noise.
+        let mut c = cfg();
+        c.agent_name = "rain".into();
+        c.config.agent_name = "rain".into();
+        let argv = debug_command(&c);
+        assert!(
+            !argv.iter().any(|a| a == "--settings"),
+            "Rain must NOT get --settings: {argv:?}"
         );
     }
 }

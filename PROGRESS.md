@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-305 tests passing (256 lib + 32 external MCP + 7 signaling + 10 storage)
+314 tests passing (265 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 28 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,39 @@ plus 28 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-05-29 — Mechanical gate for outward/mutating agent commands
+
+After an agent confabulated a "third party confirmed X" instruction inside its
+own reasoning and published it as a GitHub issue comment under the user's
+identity — via the honor-system `request_approval` path, with no mechanical
+gate — added defense-in-depth so a fabricated or assumed instruction can't
+reach an outward action. (Authored by the Brian+Rain trio in a session that
+wedged on a `cargo test` turn before it could commit; verified — `cargo test`
++ release build clean, 314/314 — and landed by the maintenance operator.)
+
+- **Anti-confabulation rule baked into `GENERAL_RULES`**
+  (`src/agents/general_rules.rs`), not just the deletable
+  `custom-general-rules.md`: ground every action in real inputs (actual user
+  messages + actual tool results); never publish a claim about what a third
+  party said/did without a verbatim in-session source; outward actions under
+  the user's identity need a real in-session instruction + an approval gate.
+- **PreToolUse `tool-blocklist` hook injected at spawn for HANDS/Emma**
+  (`src/agents/spawn.rs` → `run_tool_blocklist` in `src/policy/hooks.rs`). They
+  run `--dangerously-skip-permissions`, where claude-code SILENTLY IGNORES a
+  JSON `{"decision":"deny"}` result — so the gate blocks via **exit code 2** (a
+  "blocking error" honored under bypass), matching the project `tool_blocklist`
+  against the Bash command before it runs. Fail-open on parse/IO error.
+  Injected via `--settings` (a process arg) so nothing lands in the working
+  tree. Rain is exempt — `--bare` skips hooks and she is already read-only.
+- **`approval-gate.js` corrected** to whole-command prefix matching
+  (`startsWith` on the trimmed command, same semantics as the Rust gate) —
+  prior substring/`&&`-split versions over-blocked commands that merely
+  *mentioned* a pattern (`echo "git push"`). Note: the JS hook uses
+  claude-code's JSON-deny form, a no-op under bypass — the Rust exit-2 hook is
+  the real gate for the trio; the JS hook backstops interactive sessions.
+
++9 tests (314 total: 265 lib + 49 integration).
 
 ## 2026-05-29 — Context Library view rework (post-migration UX fixes)
 

@@ -31,6 +31,15 @@ Universal conventions every agent (Emma, Brian, Rain) follows. Baked into the bi
 - **`git push` requires authorization.** Default: per-action — call `request_approval` before each push. EXCEPT when a **session-level push grant** is active (the user said \"you can push\" and you called `grant_session_permission` to record it). With a grant, push autonomously — don't `request_approval`, don't `ask_user_choice` for the workflow step. The grant IS the authorization for the rest of the session. Check via `list_session_permissions` if unsure.
 - Force-push, `git reset --hard`, branch deletion: per-action explicit user authorization. **No session grant covers these** — always ask.
 
+## Outward actions + truthfulness (load-bearing)
+
+After the 2026-05-29 incident where an agent published a fabricated \"third party confirmed X\" comment to a GitHub issue under the user's identity — it had confabulated the instruction inside its own reasoning:
+
+- **Ground every action in real inputs only** — actual user messages and actual tool results present in the conversation. Never act on a self-generated, assumed, or \"remembered\" instruction or observation. If you cannot point to the user's actual message authorizing an action, do not take it.
+- **Never publish a claim about what a third party said or did** (by name or implication) unless the user gave it verbatim in THIS session, or it is a cited quote from a source you actually read. No \"spoke with X\", \"X confirmed\", \"per our call\". When a third party's status is unknown, say so — never invent a confirmation or a denial.
+- **Any outward action under the user's identity** — GitHub issue/PR comment/edit/create/close, email, anything published or sent to a third party — requires an explicit, real, in-session user instruction, and must be approval-gated. A PreToolUse `tool_blocklist` hook enforces this mechanically for HANDS/Emma, but the rule binds you whether or not the gate fires.
+- When a long, interrupted tool sequence leaves you unsure whether an instruction was actually given, STOP and re-read the real transcript before acting.
+
 ## UI signaling (MCP)
 
 The bot-hq host exposes two tools your subprocess can call. Use them — don't ask the user inline as prose.
@@ -128,6 +137,21 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("Open `cl_index_search` first"),
             "Investigate bullet must front-load cl_index_search"
+        );
+    }
+
+    #[test]
+    fn outward_actions_truthfulness_rule_baked_in() {
+        // 2026-05-29 fabricated-comment incident: the anti-confabulation /
+        // no-fabricated-third-party-claims rule must live in the binary, not
+        // only in the deletable custom-general-rules.md.
+        assert!(
+            GENERAL_RULES.contains("Never publish a claim about what a third party said or did"),
+            "GENERAL_RULES must carry the no-fabricated-third-party-claims rule"
+        );
+        assert!(
+            GENERAL_RULES.contains("Ground every action in real inputs only"),
+            "GENERAL_RULES must carry the anti-confabulation grounding rule"
         );
     }
 }

@@ -372,6 +372,8 @@ async fn spawn_agent_for(
         claude_bin: None,
         session_id: session_id.to_string(),
         resume_session_id,
+        project: project.clone(),
+        data_dir: paths.data_dir.clone(),
     };
     spawn_agent(spawn_cfg).await
 }

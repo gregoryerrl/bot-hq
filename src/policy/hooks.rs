@@ -53,7 +53,7 @@ fn hook_session_id() -> Option<String> {
 pub fn run_cli(args: &[String]) -> Result<i32> {
     let Some(sub) = args.first() else {
         return Err(anyhow!(
-            "usage: bot-hq policy-check {{commit-msg|pre-commit|post-commit|pre-push}} \
+            "usage: bot-hq policy-check {{commit-msg|pre-commit|post-commit|pre-push|tool-blocklist}} \
              --data-dir <P> [--project <Q>] [--session <S>] [--msg-file <F>]"
         ));
     };
@@ -116,6 +116,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         "pre-commit" => run_pre_commit(&data_dir, project.as_deref()),
         "post-commit" => run_post_commit(&data_dir, project.as_deref(), session.as_deref()),
         "pre-push" => run_pre_push(&data_dir, project.as_deref()),
+        "tool-blocklist" => run_tool_blocklist(&data_dir, project.as_deref(), session.as_deref()),
         other => Err(anyhow!("unknown subcommand {other}")),
     }
 }
@@ -325,6 +326,70 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
         )
     );
     Ok(1)
+}
+
+/// PreToolUse hook handler — injected into HANDS/Emma at spawn via
+/// `--settings`. Reads the claude-code PreToolUse JSON payload on stdin; if the
+/// Bash command matches the project's `tool_blocklist`, BLOCKS it (exit 2)
+/// before it runs. This is the mechanical backstop the honor-system
+/// `request_approval` path lacked — see the 2026-05-29 fabricated-comment
+/// incident (an agent ran `gh issue comment` under the user's identity with no
+/// gate, in a client repo that had no hook at all).
+///
+/// IMPORTANT (verified empirically 2026-05-29): under
+/// `--dangerously-skip-permissions` (HANDS/Emma's mode) claude-code SILENTLY
+/// IGNORES a JSON `{"decision":"deny"}` PreToolUse result — that is a
+/// permission-layer decision and bypass skips the permission layer. Exit code 2
+/// ("blocking error") IS honored under bypass because it fires before the
+/// permission layer; stderr is fed back to the agent. So this hook blocks via
+/// exit 2, NOT JSON. (The repo-local `approval-gate.js` uses the JSON form, so
+/// it is a no-op for the bypass-mode trio agents — a separate latent gap.)
+/// FAIL-OPEN (exit 0) on any parse/IO/resolve error: a hook bug must never
+/// brick every Bash call; the prompt + content rules remain as the other layers.
+fn run_tool_blocklist(
+    data_dir: &Path,
+    project: Option<&str>,
+    session: Option<&str>,
+) -> Result<i32> {
+    use std::io::Read;
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        return Ok(0); // fail-open: couldn't read the payload
+    }
+    let Some(command) = parse_pretool_bash_command(&buf) else {
+        return Ok(0); // not a Bash tool call (or empty command) → allow
+    };
+    match Policy::resolve(data_dir, project, session) {
+        Ok(policy) if policy.is_blocked_command(&command) => {
+            // Exit 2 = claude-code "blocking error": it stops the tool call and
+            // feeds stderr to the agent. The ONLY block form honored under
+            // bypass (see the function doc above).
+            eprintln!(
+                "BLOCKED by bot-hq policy (tool_blocklist): `{command}`.\n\
+                 This is an outward/mutating command. Run it ONLY if the user \
+                 explicitly authorized THIS action in this session — verify against \
+                 their actual messages, never a self-generated or assumed \
+                 instruction — and gate it via request_approval."
+            );
+            Ok(2)
+        }
+        _ => Ok(0), // allow: exit 0 with no output → claude proceeds normally
+    }
+}
+
+/// Extract the Bash command from a claude-code PreToolUse payload. None for
+/// non-Bash tools or a missing/empty command.
+fn parse_pretool_bash_command(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    if v.get("tool_name").and_then(|t| t.as_str()) != Some("Bash") {
+        return None;
+    }
+    let cmd = v.get("tool_input")?.get("command")?.as_str()?.trim();
+    if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd.to_string())
+    }
 }
 
 /// Install bot-hq hooks into `<working_repo>/.git/hooks/`. Idempotent.
@@ -765,5 +830,53 @@ mod tests {
         let args = vec!["pre-commit".to_string()];
         let err = run_cli(&args).unwrap_err();
         assert!(err.to_string().contains("--data-dir"));
+    }
+
+    #[test]
+    fn pretool_parses_bash_command() {
+        let j = r#"{"tool_name":"Bash","tool_input":{"command":"gh issue comment 41 --body x"}}"#;
+        assert_eq!(
+            parse_pretool_bash_command(j).as_deref(),
+            Some("gh issue comment 41 --body x")
+        );
+    }
+
+    #[test]
+    fn pretool_ignores_non_bash_tools() {
+        let j = r#"{"tool_name":"Write","tool_input":{"file_path":"/x","content":"y"}}"#;
+        assert_eq!(parse_pretool_bash_command(j), None);
+    }
+
+    #[test]
+    fn pretool_ignores_empty_or_missing_command() {
+        assert_eq!(
+            parse_pretool_bash_command(r#"{"tool_name":"Bash","tool_input":{"command":"   "}}"#),
+            None
+        );
+        assert_eq!(
+            parse_pretool_bash_command(r#"{"tool_name":"Bash","tool_input":{}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn pretool_malformed_json_is_none() {
+        assert_eq!(parse_pretool_bash_command("not json at all"), None);
+    }
+
+    #[test]
+    fn tool_blocklist_blocks_gh_issue_comment_via_policy() {
+        // Integration: a project policy listing `gh issue comment` flags the
+        // incident command, while read-only `gh issue view` passes (prefix match).
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("projects/p")).unwrap();
+        std::fs::write(
+            data.path().join("projects/p/policy.yaml"),
+            "tool_blocklist:\n  - \"gh issue comment\"\n",
+        )
+        .unwrap();
+        let policy = Policy::resolve(data.path(), Some("p"), None).unwrap();
+        assert!(policy.is_blocked_command("gh issue comment 41 --body-file /tmp/x"));
+        assert!(!policy.is_blocked_command("gh issue view 41 --comments"));
     }
 }
