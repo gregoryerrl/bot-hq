@@ -89,6 +89,28 @@ async fn auth_rejects_no_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idless_request_is_notification_no_response() {
+    let env = setup().await;
+    let auth = auth_header(&env.token);
+    // A request without an `id` is a JSON-RPC notification: the server must
+    // accept it (202) and send NO response body, even for initialize/ping.
+    // (Regression: this server used to answer id-less initialize with a
+    // null-id result envelope, which the spec forbids.)
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(auth.0, auth.1.as_str())],
+        r#"{"jsonrpc":"2.0","method":"initialize"}"#,
+    )
+    .await;
+    assert!(status.contains("202"), "expected 202 Accepted, got: {status}");
+    assert!(
+        !body.contains("\"result\""),
+        "notification must not return a result body; got: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_rejects_wrong_token() {
     let env = setup().await;
     let h = auth_header("not-the-right-token");

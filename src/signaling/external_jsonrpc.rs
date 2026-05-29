@@ -35,7 +35,14 @@ pub async fn dispatch_external(
     req: JsonRpcRequest,
     core: &Arc<CoreAppState>,
 ) -> Result<Option<JsonRpcResponse>, JsonRpcError> {
-    let id = req.id.clone().unwrap_or(json!(null));
+    // A request without an id is a JSON-RPC notification (including
+    // `notifications/*`): execute if relevant, but never send a response.
+    // Mirrors the internal dispatcher; previously this server answered id-less
+    // initialize/ping with a null-id reply, which the spec forbids.
+    let id = match req.id.clone() {
+        Some(v) => v,
+        None => return Ok(None),
+    };
     match req.method.as_str() {
         "initialize" => Ok(Some(JsonRpcResponse::ok(
             id,
@@ -48,7 +55,6 @@ pub async fn dispatch_external(
                 }
             }),
         ))),
-        m if m.starts_with("notifications/") => Ok(None),
         "tools/list" => {
             let tools = external_tool_descriptors();
             Ok(Some(JsonRpcResponse::ok(id, json!({ "tools": tools }))))
