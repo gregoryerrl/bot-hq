@@ -17,8 +17,8 @@ landed 2026-05-26** on branch `tauri-v2-migration` (7 batches; see
 PROGRESS.md). React frontend in `frontend/`, Slint deleted, Rust core
 untouched.
 
-253 Rust tests passing (205 lib + 31 external_mcp + 7 signaling + 10
-storage) plus 12 frontend Vitest. Release build clean.
+288 Rust tests passing (240 lib + 31 external_mcp + 7 signaling + 10
+storage) plus 14 frontend Vitest. Release build clean.
 
 ---
 

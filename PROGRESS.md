@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-284 tests passing (236 lib + 31 external MCP + 7 signaling + 10 storage)
+288 tests passing (240 lib + 31 external MCP + 7 signaling + 10 storage)
 plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,34 @@ plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-05-29 — fix: break agent API-error spam loop (turn-failure signal)
+
+A Rain session resumed on a pre-`--bare` (contaminated) transcript 400s on
+*every* turn (DeepSeek rejects the injected `system`-role message). claude-code
+emits that "API Error: 400…" as an assistant **text** block, which bot-hq
+peer-forwarded to the other agent; the peer replied, that re-triggered the
+failing agent, and the volley looped unbounded — burning tokens with zero user
+input. (Same family as the idle-volley heartbeat loop fixed in `79114bf`, but
+the error text is long + non-ack so the heartbeat breaker didn't catch it.)
+
+**Root cause:** bot-hq discarded the turn-failure signal. claude-code's `result`
+event carries `is_error` / `api_error_status`, but `ResultEvent`
+(`agents/protocol.rs`) never parsed them — so a failed turn looked identical to
+a successful one and its text was peer-forwarded like any prose.
+
+**Fix** (`83c72f7`): parse `is_error` + `api_error_status` on `ResultEvent`;
+propagate `is_error` onto `AgentEvent::TurnComplete` (`spawn.rs` + `events.rs`,
+derived as `is_error || api_error_status.is_some()` — deliberately *not* from a
+non-`success` subtype alone, to avoid false-positive suppression of legit
+turns); in `core/duo.rs::pump_agent`, a failed turn drains its buffer WITHOUT
+peer-forwarding (the error stays in the agent's own transcript for UI
+visibility). +4 tests (1 duo: errored turn not forwarded; 3 events: error/
+api_error_status/success derivation). 240 lib tests green (288 total).
+
+**Known limit:** forward-looking — does NOT heal an already-contaminated
+transcript. A resumed pre-fix Rain still 400s; restart her for a clean session.
+This stops the loop/spam; it does not recover the agent.
 
 ## 2026-05-29 — fix: Rain spawns `--bare` (DeepSeek 400 after claude 2.1.156)
 

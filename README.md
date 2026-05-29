@@ -296,10 +296,10 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 ## Testing
 
 ```bash
-cargo test                          # 280 tests
+cargo test                          # 288 tests
 RUN_LIVE_TESTS=1 cargo test         # includes claude-code subprocess smoke
 cargo build --release               # production binary
 ```
 
 Breakdown: lib unit tests plus signaling, storage, and external-MCP
-integration suites — 280 Rust total, plus 14 frontend Vitest.
+integration suites — 288 Rust total, plus 14 frontend Vitest.

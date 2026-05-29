@@ -17,8 +17,10 @@ through a bilateral-duo agent model with policy enforcement. Each
 session spawns two `claude-code` subprocess agents:
 
 - **Brian** (HANDS) — executes: edits, commits, runs bash, calls tools.
-- **Rain** (EYES) — reviews: read-only, adversarial counterpart, blocked
-  from write tools at the MCP layer.
+- **Rain** (EYES) — reviews: read-only, adversarial counterpart. Write and
+  mutation tools (Edit/Write/NotebookEdit/Task + git/gh) are denied via
+  `--disallowedTools` on her claude-code subprocess; HANDS-only signaling
+  MCP tools are additionally gated server-side.
 
 A third agent, **Emma**, is a singleton solo helper (not a duo). User
 summons her for one-off questions; she lives at `session_id="emma"` and
