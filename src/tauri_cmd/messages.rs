@@ -32,9 +32,8 @@ pub async fn broadcast_message(
     session_id: String,
     text: String,
 ) -> Result<(), AppError> {
-    core.broadcast(&session_id, &text)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
+    core.broadcast(&session_id, &text).await?;
+    Ok(())
 }
 
 #[cfg(test)]

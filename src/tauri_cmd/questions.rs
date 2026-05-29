@@ -44,9 +44,8 @@ pub async fn resolve_choice(
     choice_id: String,
     picked: String,
 ) -> Result<(), AppError> {
-    core.resolve_choice(&choice_id, picked)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
+    core.resolve_choice(&choice_id, picked).await?;
+    Ok(())
 }
 
 #[cfg(test)]

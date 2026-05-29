@@ -81,8 +81,8 @@ pub async fn grant_session_permission(
 ) -> Result<(), AppError> {
     bridge
         .grant_session_permission(&session_id, action.into(), scope.into())
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -94,8 +94,8 @@ pub async fn revoke_session_permission(
 ) -> Result<(), AppError> {
     bridge
         .revoke_session_permission(&session_id, action.into())
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]

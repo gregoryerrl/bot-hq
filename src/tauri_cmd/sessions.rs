@@ -90,9 +90,8 @@ pub async fn respawn_session(
     core: tauri::State<'_, Arc<CoreAppState>>,
     session_id: String,
 ) -> Result<(), AppError> {
-    core.ensure_session_started(&session_id)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
+    core.ensure_session_started(&session_id).await?;
+    Ok(())
 }
 
 /// Read the current IPAV phase for a session. Returns one of "investigate" /
@@ -129,9 +128,8 @@ pub async fn advance_session_phase(
             IpavPhase::error_hint()
         ))
     })?;
-    core.advance_phase(&session_id, phase)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
+    core.advance_phase(&session_id, phase).await?;
+    Ok(())
 }
 
 /// Close a session from the UI. Delegates to `core.close_session`, which is
@@ -148,9 +146,8 @@ pub async fn close_session(
     session_id: String,
     archive: bool,
 ) -> Result<(), AppError> {
-    core.close_session(&session_id, archive)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
+    core.close_session(&session_id, archive).await?;
+    Ok(())
 }
 
 #[cfg(test)]

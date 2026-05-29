@@ -23,8 +23,7 @@ pub async fn cl_set_description(
 ) -> Result<(), AppError> {
     storage
         .upsert_cl_index(&project, &file_path, &description, tags.as_deref())
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .await?;
     Ok(())
 }
 
@@ -54,10 +53,7 @@ impl From<Project> for ProjectView {
 pub async fn list_projects(
     storage: tauri::State<'_, Arc<Storage>>,
 ) -> Result<Vec<ProjectView>, AppError> {
-    let rows = storage
-        .list_projects()
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let rows = storage.list_projects().await?;
     Ok(rows.into_iter().map(ProjectView::from).collect())
 }
 
@@ -118,11 +114,10 @@ pub async fn cl_index_search(
     project: Option<String>,
     query: Option<String>,
 ) -> Result<Vec<ClIndexEntryView>, AppError> {
-    bridge
+    let rows = bridge
         .cl_index_search(project.as_deref(), query.as_deref())
-        .await
-        .map(|v| v.into_iter().map(Into::into).collect())
-        .map_err(|e| AppError::Internal(e.to_string()))
+        .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 #[tauri::command]
@@ -132,11 +127,10 @@ pub async fn cl_folder_search(
     project: Option<String>,
     query: Option<String>,
 ) -> Result<Vec<ClFolderView>, AppError> {
-    bridge
+    let rows = bridge
         .cl_folder_search(project.as_deref(), query.as_deref())
-        .await
-        .map(|v| v.into_iter().map(Into::into).collect())
-        .map_err(|e| AppError::Internal(e.to_string()))
+        .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
 }
 
 #[tauri::command]
@@ -150,8 +144,8 @@ pub async fn cl_register_read(
 ) -> Result<(), AppError> {
     bridge
         .cl_register_read(&agent, session_id.as_deref(), &project, &file_path)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))
+        .await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -167,10 +161,7 @@ pub async fn cl_rescan(
     bridge: tauri::State<'_, Arc<SignalingBridge>>,
     project: String,
 ) -> Result<ClRescanReportView, AppError> {
-    let report = bridge
-        .cl_rescan(&project)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let report = bridge.cl_rescan(&project).await?;
     Ok(ClRescanReportView {
         added: report.added,
         touched: report.touched,

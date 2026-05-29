@@ -41,11 +41,10 @@ pub async fn session_doc_search(
     query: Option<String>,
     phase: Option<String>,
 ) -> Result<Vec<SessionDocumentView>, AppError> {
-    bridge
+    let docs = bridge
         .session_doc_search(&session_id, query.as_deref(), phase.as_deref())
-        .await
-        .map(|v| v.into_iter().map(Into::into).collect())
-        .map_err(|e| AppError::Internal(e.to_string()))
+        .await?;
+    Ok(docs.into_iter().map(Into::into).collect())
 }
 
 #[tauri::command]
@@ -55,11 +54,8 @@ pub async fn session_doc_read(
     session_id: String,
     slug: String,
 ) -> Result<Option<SessionDocumentView>, AppError> {
-    bridge
-        .session_doc_read(&session_id, &slug)
-        .await
-        .map(|opt| opt.map(Into::into))
-        .map_err(|e| AppError::Internal(e.to_string()))
+    let doc = bridge.session_doc_read(&session_id, &slug).await?;
+    Ok(doc.map(Into::into))
 }
 
 /// One classified line of a unified `git diff`. `kind` is one of
