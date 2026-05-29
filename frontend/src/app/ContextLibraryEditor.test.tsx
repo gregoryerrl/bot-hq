@@ -9,7 +9,7 @@ const mockInvoke = vi.mocked(invoke);
 
 function renderEditor() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const tab = { project: "p", filePath: "a.md" };
+  const tab = { kind: "file" as const, project: "p", filePath: "a.md" };
   return render(
     <QueryClientProvider client={qc}>
       <EditorArea
@@ -19,7 +19,9 @@ function renderEditor() {
         onCloseTab={() => {}}
         activeTab={tab}
         entries={[]}
+        folders={[]}
         onRefetchIndex={() => {}}
+        onRefetchFolders={() => {}}
       />
     </QueryClientProvider>,
   );

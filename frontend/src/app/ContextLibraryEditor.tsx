@@ -2,15 +2,22 @@ import { useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
-import type { ClFileContentView, ClIndexEntryView } from "../lib/bindings";
+import type {
+  ClFileContentView,
+  ClFolderView,
+  ClIndexEntryView,
+} from "../lib/bindings";
 import {
-  baseName,
   CloseIcon,
   FileIcon,
+  FolderIcon,
   type OpenTab,
   SaveIcon,
+  tabKey,
+  tabLabel,
   terminalInputClass,
 } from "./contextLibraryShared";
+import { FolderView } from "./ContextLibraryFolderView";
 
 // ============================================================================
 // EditorArea — tab strip + active tab content
@@ -23,7 +30,9 @@ interface EditorAreaProps {
   onCloseTab: (i: number) => void;
   activeTab: OpenTab | null;
   entries: ClIndexEntryView[];
+  folders: ClFolderView[];
   onRefetchIndex: () => void;
+  onRefetchFolders: () => void;
 }
 
 export function EditorArea({
@@ -33,7 +42,9 @@ export function EditorArea({
   onCloseTab,
   activeTab,
   entries,
+  folders,
   onRefetchIndex,
+  onRefetchFolders,
 }: EditorAreaProps) {
   return (
     <div className="flex min-w-0 flex-1 flex-col">
@@ -45,15 +56,22 @@ export function EditorArea({
           onCloseTab={onCloseTab}
         />
       )}
-      {activeTab ? (
+      {activeTab == null ? (
+        <EmptyEditor />
+      ) : activeTab.kind === "folder" ? (
+        <FolderView
+          key={tabKey(activeTab)}
+          tab={activeTab}
+          folders={folders}
+          onSaved={onRefetchFolders}
+        />
+      ) : (
         <EditorPane
-          key={`${activeTab.project}/${activeTab.filePath}`}
+          key={tabKey(activeTab)}
           tab={activeTab}
           entries={entries}
           onRefetchIndex={onRefetchIndex}
         />
-      ) : (
-        <EmptyEditor />
       )}
     </div>
   );
@@ -78,9 +96,10 @@ function TabStrip({
     <div className="flex flex-shrink-0 items-center overflow-x-auto border-b border-outline-variant bg-surface-container">
       {tabs.map((t, i) => {
         const active = i === activeTabIndex;
+        const path = t.kind === "file" ? t.filePath : t.folderPath;
         return (
           <div
-            key={`${t.project}/${t.filePath}`}
+            key={tabKey(t)}
             className={cn(
               "group flex shrink-0 items-center gap-2 border-r border-outline-variant/40 px-3 py-2",
               "font-code-sm text-code-sm transition-colors",
@@ -92,11 +111,15 @@ function TabStrip({
             <button
               type="button"
               onClick={() => onSelectTab(i)}
-              title={`${t.project} — ${t.filePath}`}
+              title={`${t.project} — ${path || "(root)"}`}
               className="flex max-w-[200px] items-center gap-1.5"
             >
-              <FileIcon className="shrink-0 text-on-surface-variant/60" />
-              <span className="truncate">{baseName(t.filePath)}</span>
+              {t.kind === "folder" ? (
+                <FolderIcon className="shrink-0 text-on-surface-variant/60" />
+              ) : (
+                <FileIcon className="shrink-0 text-on-surface-variant/60" />
+              )}
+              <span className="truncate">{tabLabel(t)}</span>
             </button>
             <button
               type="button"
@@ -104,7 +127,7 @@ function TabStrip({
                 e.stopPropagation();
                 onCloseTab(i);
               }}
-              aria-label={`Close ${t.filePath}`}
+              aria-label={`Close ${path || t.project}`}
               className="rounded p-0.5 text-on-surface-variant/60 transition-colors hover:bg-surface-container-highest hover:text-on-surface"
             >
               <CloseIcon />
@@ -125,7 +148,7 @@ function EditorPane({
   entries,
   onRefetchIndex,
 }: {
-  tab: OpenTab;
+  tab: Extract<OpenTab, { kind: "file" }>;
   entries: ClIndexEntryView[];
   onRefetchIndex: () => void;
 }) {

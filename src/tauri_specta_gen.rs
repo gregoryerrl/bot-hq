@@ -51,6 +51,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         cl::cl_read_file,
         cl::cl_write_file,
         cl::cl_set_description,
+        cl::cl_set_folder_description,
+        cl::cl_delete_folder_description,
         // Policy / session permissions
         policy::grant_session_permission,
         policy::revoke_session_permission,

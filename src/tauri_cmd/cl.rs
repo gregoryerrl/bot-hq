@@ -306,6 +306,41 @@ pub async fn cl_write_file(
     Ok(())
 }
 
+/// Upsert a folder's description + tags (`cl_folders`). Used by the Context
+/// Library folder-view editor. Routes through the bridge helper so the project
+/// row is ensured to exist first (same path as the agent-facing
+/// `cl_register_folder_description` MCP tool). `folder_path = ""` is the
+/// project-root folder's description.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_set_folder_description(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    project: String,
+    folder_path: String,
+    description: String,
+    tags: Option<String>,
+) -> Result<(), AppError> {
+    bridge
+        .cl_register_folder_description(&project, &folder_path, &description, tags.as_deref())
+        .await?;
+    Ok(())
+}
+
+/// Delete a folder's description row. The folder itself stays in the tree
+/// (it's still on disk); only the CL annotation is removed.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_delete_folder_description(
+    storage: tauri::State<'_, Arc<Storage>>,
+    project: String,
+    folder_path: String,
+) -> Result<(), AppError> {
+    storage
+        .delete_folder_description(&project, &folder_path)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

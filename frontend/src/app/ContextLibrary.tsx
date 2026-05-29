@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import type {
+  ClFolderView,
   ClIndexEntryView,
   ClRescanReportView,
   ProjectView,
 } from "../lib/bindings";
-import { type OpenTab } from "./contextLibraryShared";
+import { collapseKey, tabKey, type OpenTab } from "./contextLibraryShared";
 import { WorkspaceSidebar } from "./ContextLibrarySidebar";
 import { EditorArea } from "./ContextLibraryEditor";
 
@@ -46,10 +47,11 @@ export function ContextLibrary() {
     null,
   );
 
-  // Persist expand/collapse choices across route navigation + restarts.
-  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => {
+  // Persist expand/collapse choices across route navigation + restarts. Keyed
+  // by collapseKey(project, folderPath) — the project-root node uses "".
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     try {
-      const raw = localStorage.getItem("bot-hq.cl.collapsedProjects");
+      const raw = localStorage.getItem("bot-hq.cl.collapsed");
       if (raw) return new Set(JSON.parse(raw) as string[]);
     } catch {
       // Bad JSON or localStorage disabled — fall through to empty.
@@ -58,14 +60,11 @@ export function ContextLibrary() {
   });
   useEffect(() => {
     try {
-      localStorage.setItem(
-        "bot-hq.cl.collapsedProjects",
-        JSON.stringify([...collapsedProjects]),
-      );
+      localStorage.setItem("bot-hq.cl.collapsed", JSON.stringify([...collapsed]));
     } catch {
       // Storage quota or disabled — silent no-op.
     }
-  }, [collapsedProjects]);
+  }, [collapsed]);
 
   const {
     data: entries = [],
@@ -82,6 +81,15 @@ export function ContextLibrary() {
     { refetchInterval: 60_000 },
   );
 
+  // Folder descriptions feed both the tree (so a described-but-empty folder
+  // still shows) and the folder-view editor (current description lookup).
+  const { data: folders = [], refetch: refetchFolders } = useTauriQuery<
+    ClFolderView[]
+  >("cl_folder_search", {
+    project,
+    query: debouncedQuery.trim() || null,
+  });
+
   const byProject = useMemo(() => {
     const acc: Record<string, ClIndexEntryView[]> = {};
     for (const e of entries) {
@@ -93,27 +101,38 @@ export function ContextLibrary() {
     return acc;
   }, [entries]);
 
+  const byProjectFolders = useMemo(() => {
+    const acc: Record<string, string[]> = {};
+    for (const f of folders) {
+      (acc[f.project_id] = acc[f.project_id] ?? []).push(f.folder_path);
+    }
+    return acc;
+  }, [folders]);
+
   // Multi-tab state. Opening a file that's already in `tabs` just focuses
   // its tab; otherwise a new tab is pushed and activated.
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
   const activeTab: OpenTab | null = tabs[activeTabIndex] ?? null;
 
-  const openFile = (proj: string, filePath: string) => {
-    const idx = tabs.findIndex(
-      (t) => t.project === proj && t.filePath === filePath,
-    );
+  const openTab = (tab: OpenTab) => {
+    const key = tabKey(tab);
+    const idx = tabs.findIndex((t) => tabKey(t) === key);
     if (idx >= 0) {
       setActiveTabIndex(idx);
     } else {
       setTabs((prev) => {
-        const next = [...prev, { project: proj, filePath }];
+        const next = [...prev, tab];
         // Activate the freshly-pushed tab. Index is the prev length.
         setActiveTabIndex(prev.length);
         return next;
       });
     }
   };
+  const openFile = (project: string, filePath: string) =>
+    openTab({ kind: "file", project, filePath });
+  const openFolder = (project: string, folderPath: string) =>
+    openTab({ kind: "folder", project, folderPath });
 
   const closeTab = (index: number) => {
     setTabs((prev) => {
@@ -163,16 +182,18 @@ export function ContextLibrary() {
         setRescanReport(agg);
       }
       refetch();
+      refetchFolders();
     } finally {
       setRescanning(false);
     }
   };
 
-  const toggleProject = (id: string) => {
-    setCollapsedProjects((prev) => {
+  const toggle = (project: string, folderPath: string) => {
+    const key = collapseKey(project, folderPath);
+    setCollapsed((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   };
@@ -186,14 +207,16 @@ export function ContextLibrary() {
         setQuery={setQuery}
         projects={projects}
         byProject={byProject}
+        byProjectFolders={byProjectFolders}
         isLoading={isLoading}
         rescanning={rescanning}
         rescanReport={rescanReport}
         onRescan={handleRescan}
-        collapsedProjects={collapsedProjects}
-        onToggleProject={toggleProject}
+        collapsed={collapsed}
+        onToggle={toggle}
         activeTab={activeTab}
         onOpenFile={openFile}
+        onOpenFolder={openFolder}
       />
       <EditorArea
         tabs={tabs}
@@ -202,7 +225,9 @@ export function ContextLibrary() {
         onCloseTab={closeTab}
         activeTab={activeTab}
         entries={entries}
+        folders={folders}
         onRefetchIndex={refetch}
+        onRefetchFolders={refetchFolders}
       />
     </div>
   );

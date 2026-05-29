@@ -6,17 +6,22 @@ import type {
 } from "../lib/bindings";
 import {
   baseName,
+  buildTree,
+  collapseKey,
   FileIcon,
+  FolderIcon,
   type OpenTab,
   PlusIcon,
   RefreshIcon,
   terminalInputClass,
+  type TreeNode,
 } from "./contextLibraryShared";
 
 const SIDEBAR_WIDTH = 240;
+const INDENT_PX = 12;
 
 // ============================================================================
-// WorkspaceSidebar (left ~240px)
+// WorkspaceSidebar (left ~240px) — "Library Tree"
 // ============================================================================
 
 interface WorkspaceSidebarProps {
@@ -26,14 +31,16 @@ interface WorkspaceSidebarProps {
   setQuery: (v: string) => void;
   projects: ProjectView[];
   byProject: Record<string, ClIndexEntryView[]>;
+  byProjectFolders: Record<string, string[]>;
   isLoading: boolean;
   rescanning: boolean;
   rescanReport: ClRescanReportView | null;
   onRescan: () => void;
-  collapsedProjects: Set<string>;
-  onToggleProject: (id: string) => void;
+  collapsed: Set<string>;
+  onToggle: (project: string, folderPath: string) => void;
   activeTab: OpenTab | null;
   onOpenFile: (project: string, filePath: string) => void;
+  onOpenFolder: (project: string, folderPath: string) => void;
 }
 
 export function WorkspaceSidebar({
@@ -43,16 +50,19 @@ export function WorkspaceSidebar({
   setQuery,
   projects,
   byProject,
+  byProjectFolders,
   isLoading,
   rescanning,
   rescanReport,
   onRescan,
-  collapsedProjects,
-  onToggleProject,
+  collapsed,
+  onToggle,
   activeTab,
   onOpenFile,
+  onOpenFolder,
 }: WorkspaceSidebarProps) {
-  const projectCount = Object.keys(byProject).length;
+  const projectIds = Object.keys(byProject).sort();
+  const projectCount = projectIds.length;
 
   return (
     <aside
@@ -120,9 +130,7 @@ export function WorkspaceSidebar({
             <span className="text-emerald-400">
               +{rescanReport.added.length}
             </span>
-            <span className="text-blue-400">
-              ↻{rescanReport.touched.length}
-            </span>
+            <span className="text-blue-400">↻{rescanReport.touched.length}</span>
             <span className="text-amber-400">
               ⚠{rescanReport.orphaned.length}
             </span>
@@ -147,16 +155,23 @@ export function WorkspaceSidebar({
               : "Empty. Use Rescan to populate."}
           </p>
         ) : (
-          Object.entries(byProject).map(([projectId, files]) => (
-            <ProjectGroup
-              key={projectId}
-              projectId={projectId}
-              files={files}
-              collapsed={collapsedProjects.has(projectId)}
-              onToggle={() => onToggleProject(projectId)}
-              activeTab={activeTab}
-              onOpenFile={onOpenFile}
-            />
+          projectIds.map((projectId) => (
+            <section key={projectId} className="mb-1">
+              <FolderNode
+                project={projectId}
+                node={buildTree(
+                  byProject[projectId],
+                  byProjectFolders[projectId] ?? [],
+                )}
+                depth={0}
+                isProjectRoot
+                collapsed={collapsed}
+                onToggle={onToggle}
+                activeTab={activeTab}
+                onOpenFile={onOpenFile}
+                onOpenFolder={onOpenFolder}
+              />
+            </section>
           ))
         )}
       </div>
@@ -165,62 +180,113 @@ export function WorkspaceSidebar({
 }
 
 // ============================================================================
-// ProjectGroup — one collapsible project section in the tree
+// FolderNode — one folder row in the tree. A single click does BOTH things
+// the user asked for: toggle collapse AND open the folder-view tab.
 // ============================================================================
 
-function ProjectGroup({
-  projectId,
-  files,
+function countFiles(node: TreeNode): number {
+  return (
+    node.files.length + node.folders.reduce((s, f) => s + countFiles(f), 0)
+  );
+}
+
+function FolderNode({
+  project,
+  node,
+  depth,
+  isProjectRoot = false,
   collapsed,
   onToggle,
   activeTab,
   onOpenFile,
+  onOpenFolder,
 }: {
-  projectId: string;
-  files: ClIndexEntryView[];
-  collapsed: boolean;
-  onToggle: () => void;
+  project: string;
+  node: TreeNode;
+  depth: number;
+  isProjectRoot?: boolean;
+  collapsed: Set<string>;
+  onToggle: (project: string, folderPath: string) => void;
   activeTab: OpenTab | null;
   onOpenFile: (project: string, filePath: string) => void;
+  onOpenFolder: (project: string, folderPath: string) => void;
 }) {
+  const isCollapsed = collapsed.has(collapseKey(project, node.path));
+  const isActive =
+    activeTab?.kind === "folder" &&
+    activeTab.project === project &&
+    activeTab.folderPath === node.path;
+  const label = isProjectRoot ? project : node.name;
+
   return (
-    <section className="mb-1">
+    <div>
       <button
         type="button"
-        onClick={onToggle}
-        aria-expanded={!collapsed}
-        className="flex w-full items-center gap-1 rounded px-2 py-1 text-left font-label-caps text-label-caps text-on-surface-variant transition-colors hover:bg-surface-container-high"
+        onClick={() => {
+          onToggle(project, node.path);
+          onOpenFolder(project, node.path);
+        }}
+        aria-expanded={!isCollapsed}
+        title={node.path || project}
+        style={{ paddingLeft: `${depth * INDENT_PX + 8}px` }}
+        className={cn(
+          "flex w-full items-center gap-1 rounded py-1 pr-2 text-left transition-colors",
+          isProjectRoot
+            ? "font-label-caps text-label-caps"
+            : "font-code-sm text-code-sm",
+          isActive
+            ? "bg-primary/15 text-on-surface"
+            : "text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
+        )}
       >
         <span
           aria-hidden
           className={cn(
-            "inline-block w-3 text-on-surface-variant/60 transition-transform",
-            collapsed ? "" : "rotate-90",
+            "inline-block w-3 shrink-0 text-on-surface-variant/60 transition-transform",
+            isCollapsed ? "" : "rotate-90",
           )}
         >
           ▸
         </span>
-        <span className="truncate">{projectId}</span>
-        <span className="ml-auto font-code-sm text-code-sm text-on-surface-variant/60">
-          {files.length}
-        </span>
+        <FolderIcon className="shrink-0 text-on-surface-variant/60" />
+        <span className="truncate">{label}</span>
+        {isProjectRoot && (
+          <span className="ml-auto pl-1 font-code-sm text-code-sm text-on-surface-variant/60">
+            {countFiles(node)}
+          </span>
+        )}
       </button>
-      {!collapsed && (
+      {!isCollapsed && (
         <div>
-          {files.map((f) => (
+          {node.folders.map((child) => (
+            <FolderNode
+              key={child.path}
+              project={project}
+              node={child}
+              depth={depth + 1}
+              collapsed={collapsed}
+              onToggle={onToggle}
+              activeTab={activeTab}
+              onOpenFile={onOpenFile}
+              onOpenFolder={onOpenFolder}
+            />
+          ))}
+          {node.files.map((f) => (
             <FileRow
               key={f.id}
               file={f}
+              depth={depth + 1}
               isActive={
-                activeTab?.project === f.project_id &&
-                activeTab?.filePath === f.file_path
+                activeTab?.kind === "file" &&
+                activeTab.project === f.project_id &&
+                activeTab.filePath === f.file_path
               }
               onOpen={() => onOpenFile(f.project_id, f.file_path)}
             />
           ))}
         </div>
       )}
-    </section>
+    </div>
   );
 }
 
@@ -230,10 +296,12 @@ function ProjectGroup({
 
 function FileRow({
   file,
+  depth,
   isActive,
   onOpen,
 }: {
   file: ClIndexEntryView;
+  depth: number;
   isActive: boolean;
   onOpen: () => void;
 }) {
@@ -242,8 +310,9 @@ function FileRow({
       type="button"
       onClick={onOpen}
       title={file.file_path}
+      style={{ paddingLeft: `${depth * INDENT_PX + 8}px` }}
       className={cn(
-        "flex w-full items-center gap-1 truncate border-l-2 px-2 py-1 text-left font-code-sm text-code-sm transition-colors",
+        "flex w-full items-center gap-1 truncate border-l-2 py-1 pr-2 text-left font-code-sm text-code-sm transition-colors",
         isActive
           ? "border-primary bg-primary/15 text-on-surface"
           : "border-transparent text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
