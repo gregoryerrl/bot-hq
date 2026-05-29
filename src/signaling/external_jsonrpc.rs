@@ -361,6 +361,17 @@ async fn wait_for_change(
 /// Redact an auth_token field for read-side display. Returns `<unset>` for
 /// empty/None, or `<set:****abcd>` showing only the last 4 chars so the user
 /// can verify which credential is loaded without exposing the full secret.
+/// `set_agent_config` semantics for a clearable string field: an empty string
+/// clears it (None), an absent key keeps `current`, any other value sets it.
+/// Shared by the base_url + auth_token fields.
+fn arg_clear_on_empty(args: &Value, key: &str, current: Option<String>) -> Option<String> {
+    match args.get(key).and_then(Value::as_str) {
+        Some("") => None,
+        Some(s) => Some(s.to_string()),
+        None => current,
+    }
+}
+
 fn redact_auth_token(t: &Option<String>) -> String {
     match t.as_deref() {
         None | Some("") => "<unset>".to_string(),
@@ -571,16 +582,8 @@ async fn call_external_tool(
                 .unwrap_or(current.model_name);
             // For base_url / auth_token: empty string clears (None), absent keeps
             // the existing value. This matches the descriptor's documented semantics.
-            let base_url = match args.get("base_url").and_then(Value::as_str) {
-                Some("") => None,
-                Some(s) => Some(s.to_string()),
-                None => current.base_url,
-            };
-            let auth_token = match args.get("auth_token").and_then(Value::as_str) {
-                Some("") => None,
-                Some(s) => Some(s.to_string()),
-                None => current.auth_token,
-            };
+            let base_url = arg_clear_on_empty(&args, "base_url", current.base_url);
+            let auth_token = arg_clear_on_empty(&args, "auth_token", current.auth_token);
             let cfg = DbAgentConfig {
                 agent_name,
                 provider,

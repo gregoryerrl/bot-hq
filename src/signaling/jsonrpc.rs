@@ -546,7 +546,7 @@ async fn call_tool(
                 )
             })?;
             let path = crate::tauri_cmd::screenshot::capture_main_window(handle, data_dir)
-                .map_err(|e| internal_err_no_prefix(e))?;
+                .map_err(internal_err_no_prefix)?;
             Ok(result_json(
                 &json!({ "path": path.display().to_string() }),
                 "{}",
@@ -581,7 +581,7 @@ fn eval_in_webview(bridge: &Arc<SignalingBridge>, js: &str) -> Result<(), JsonRp
     })?;
     window
         .eval(js)
-        .map_err(|e| internal_err_no_prefix(e))?;
+        .map_err(internal_err_no_prefix)?;
     Ok(())
 }
 
