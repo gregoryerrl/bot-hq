@@ -21,6 +21,33 @@ constraint.
 
 ---
 
+## 2026-05-29 — round 5 refactor sweep (storage / signaling / tauri cleanups)
+
+A maintenance sweep after the Rain fix. The codebase came back clean (zero
+TODO/dead-code, no Slint staleness, docs accurate), so the round is small and
+low-risk — three commits:
+
+- `refactor: dedupe SQL column lists in storage queries` — `MESSAGE_COLUMNS` /
+  `QUESTION_COLUMNS` / `DOCUMENT_COLUMNS` consts so a projection can't drift
+  between the query branches / sibling methods that select the same row shape.
+- `refactor: simplify signaling closures and clearable-arg parsing` — drop the
+  redundant closures wrapping `internal_err_no_prefix`; extract
+  `arg_clear_on_empty` for the base_url/auth_token "empty clears, absent keeps"
+  parsing that `set_agent_config` repeated.
+- `refactor: use ? for anyhow-sourced internal errors in tauri commands` —
+  collapse 15 `.map_err(|e| AppError::Internal(e.to_string()))` sites that wrap
+  bot-hq's own anyhow calls to `?` (via the existing `From<anyhow::Error>`).
+
+**Deliberately NOT done** (recorded so they aren't re-proposed): a shared
+CL-result-shape helper for `cl_index_search`/`cl_folder_search` (the two map
+*different* row structs; a generic helper ≈ the duplication it removes), and
+`&*TOOLS`→`&TOOLS` (would revert the deliberate Round-2 explicit-deref choice
+in F13). Also scoped OUT of the tauri error sweep: `DbError`/`NotFound`/
+`Validation` sites (the frontend `useInvoke` switches on kind for retry /
+redirect) and `Internal(format!("ctx: {e}"))` sites over io/reqwest errors
+(they add a context message `?` would drop). 300 Rust + 14 frontend tests
+green; release + frontend builds clean.
+
 ## 2026-05-29 — fix: normalize role:system in Rain's gateway requests (local proxy)
 
 The `--bare` spawn fix (`c0fa928`) for Rain's DeepSeek 400 was **insufficient**:
