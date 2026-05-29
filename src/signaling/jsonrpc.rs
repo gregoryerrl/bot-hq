@@ -552,35 +552,16 @@ async fn call_tool(
                 "{}",
             ))
         }
-        "webview_click" => {
-            let selector = arg_required_str(&args, "selector")?;
-            eval_in_webview(bridge, &super::webview_js::click_js(&selector))?;
-            Ok(ok_response())
-        }
-        "webview_type" => {
-            let selector = arg_required_str(&args, "selector")?;
-            let text = arg_required_str(&args, "text")?;
-            eval_in_webview(bridge, &super::webview_js::type_js(&selector, &text))?;
-            Ok(ok_response())
-        }
-        "webview_scroll" => {
-            let y = args.get("y").and_then(Value::as_i64).ok_or_else(|| {
-                JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "y is required".to_string())
-            })?;
-            let selector = args.get("selector").and_then(Value::as_str);
-            eval_in_webview(bridge, &super::webview_js::scroll_js(selector, y))?;
-            Ok(ok_response())
-        }
-        "webview_press_key" => {
-            let key = arg_required_str(&args, "key")?;
-            let selector = args.get("selector").and_then(Value::as_str);
-            eval_in_webview(bridge, &super::webview_js::press_key_js(selector, &key))?;
-            Ok(ok_response())
-        }
-        other => Err(JsonRpcError::new(
-            JsonRpcError::METHOD_NOT_FOUND,
-            format!("unknown tool {other}"),
-        )),
+        other => match super::webview_js::webview_tool_js(other, &args)? {
+            Some(js) => {
+                eval_in_webview(bridge, &js)?;
+                Ok(ok_response())
+            }
+            None => Err(JsonRpcError::new(
+                JsonRpcError::METHOD_NOT_FOUND,
+                format!("unknown tool {other}"),
+            )),
+        },
     }
 }
 
