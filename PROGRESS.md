@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-288 tests passing (240 lib + 31 external MCP + 7 signaling + 10 storage)
+300 tests passing (251 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,45 @@ plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-05-29 — fix: normalize role:system in Rain's gateway requests (local proxy)
+
+The `--bare` spawn fix (`c0fa928`) for Rain's DeepSeek 400 was **insufficient**:
+a fresh `--bare` Rain still 400s on a fixed `messages[11].role: unknown variant
+`system``. Evidence: the live `--bare` Rain transcript logged 25 such error
+turns this session (prior Rain sessions: 140, 65); every DeepSeek session errors
+heavily, every Brian/Emma (real Anthropic) session ≈0.
+
+**Root cause:** claude-code 2.1.156 injects a `SessionStart` hook's
+`additionalContext` (and possibly other request-build-time context) as a
+`role:"system"` entry inside the request `messages` array. It is NOT stored in
+the transcript (so bot-hq can't sanitize it at the source) and `--bare` does
+NOT suppress it. DeepSeek's Anthropic-compat gateway rejects `role:"system"`;
+the real Anthropic API tolerates it (hence Brian/Emma are fine).
+
+**Fix** (`src/agents/llm_proxy.rs`): a local normalizing reverse proxy. Any
+agent with a custom `base_url` gets `ANTHROPIC_BASE_URL` pointed at it
+(`http://127.0.0.1:<port>/<hex(real-upstream)>`); per request the proxy hoists
+every `role:"system"` message out of `messages[]` into the top-level `system`
+field, then forwards to the real upstream (reqwest + rustls + the `stream`
+feature) and streams the SSE response straight back. Source-agnostic — it
+strips the alien role regardless of which hook injected it. Brian/Emma (no
+`base_url` → real Anthropic) never touch the proxy. Started at boot in
+`main.rs`; address held in a process-global `OnceLock` and read by
+`spawn::build_command` through the pure, unit-tested `resolve_anthropic_base_url`
+helper. `--bare` is retained as defense-in-depth + Rain leanness; the misleading
+spawn.rs comment claiming it fixes the 400 was corrected.
+
++11 tests (hex round-trip, base-url resolution, body normalization across
+string/array/absent `system` shapes, and an end-to-end test asserting a body
+that would 400 on a strict gateway returns 200 through the proxy with
+`role:system` stripped and hoisted). 300 Rust tests green; release + frontend
+builds clean.
+
+**Live confirmation pending:** the fix only takes effect after bot-hq is rebuilt
++ restarted — the running instance keeps the old binary, so the current Rain
+keeps 400ing until then. Rebuilding the binary does not disrupt the running
+process (the running image keeps its old inode).
 
 ## 2026-05-29 — fix: break agent API-error spam loop (turn-failure signal)
 

@@ -89,6 +89,23 @@ fn main() -> Result<()> {
         }
         let server = start_signaling_server(bridge.clone()).await?;
         tracing::info!(addr = %server.local_addr, "signaling server up");
+
+        // Local normalizing proxy for agents on a non-Anthropic gateway
+        // (Rain → DeepSeek): strips request-build-time `role:"system"`
+        // injections that strict gateways 400 on. Soft-fail — if it can't
+        // bind, those agents hit their gateway directly and the rest of
+        // bot-hq is unaffected. Started before any agent spawns so the addr
+        // is installed by the time `build_command` reads it.
+        match bot_hq::agents::llm_proxy::start_llm_proxy().await {
+            Ok(proxy) => {
+                tracing::info!(addr = %proxy.local_addr, "llm normalizing proxy up");
+                bot_hq::agents::llm_proxy::install_global(proxy);
+            }
+            Err(e) => tracing::warn!(
+                ?e,
+                "llm proxy failed to start — agents on custom gateways will hit them directly"
+            ),
+        }
         let storage_arc = Arc::new(storage.clone());
         let bridge_arc = bridge.clone();
         let core = Arc::new(CoreAppState::new(paths.clone(), storage, server).await);

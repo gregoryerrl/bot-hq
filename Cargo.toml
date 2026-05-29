@@ -36,7 +36,7 @@ tauri = { version = "2", features = ["devtools", "custom-protocol"] }
 specta = "=2.0.0-rc.22"
 specta-typescript = "=0.0.9"
 tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 [build-dependencies]
 tauri-build = "2"

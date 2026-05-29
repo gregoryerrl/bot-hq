@@ -6,6 +6,7 @@
 pub mod events;
 pub mod general_rules;
 pub mod input;
+pub mod llm_proxy;
 pub mod prompts;
 pub mod protocol;
 pub mod spawn;

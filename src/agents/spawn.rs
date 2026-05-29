@@ -252,12 +252,16 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // the request's `messages` array. The real Anthropic API tolerates
         // that; DeepSeek's gateway only accepts user/assistant roles and
         // rejects it ("unknown variant `system`, expected user or assistant"
-        // → API Error 400). `--bare` runs claude in minimal mode (skips
-        // plugin sync + hooks + LSP + CLAUDE.md autodiscovery), so the
-        // offending hook never loads and the body stays clean. Verified to
-        // still honor --mcp-config (signaling) and ANTHROPIC_AUTH_TOKEN
-        // bearer auth. Brian/Emma hit real Anthropic, so they skip --bare and
-        // keep CLAUDE.md/LSP.
+        // → API Error 400). The LOAD-BEARING fix is the local normalizing
+        // proxy (`agents::llm_proxy`): Rain's ANTHROPIC_BASE_URL routes
+        // through it and any role:"system" message is hoisted into the
+        // top-level `system` field before it reaches DeepSeek. `--bare` is
+        // retained as defense-in-depth + to keep Rain lean (skips plugin sync
+        // + hooks + LSP + CLAUDE.md autodiscovery), but it does NOT eliminate
+        // the injection on claude-code >= 2.1.156 — a fresh --bare Rain still
+        // 400s on a fixed messages[11], which is why the proxy exists.
+        // `--bare` still honors --mcp-config (signaling) + ANTHROPIC_AUTH_TOKEN
+        // bearer auth. Brian/Emma hit real Anthropic, so they skip --bare.
         cmd.arg("--bare");
         cmd.args(["--permission-mode", "dontAsk"]);
         cmd.args([
@@ -289,10 +293,18 @@ fn build_command(cfg: &SpawnConfig) -> Command {
             cmd.env("ANTHROPIC_AUTH_TOKEN", token);
         }
     }
-    if let Some(base) = &cfg.config.base_url {
-        if !base.is_empty() {
-            cmd.env("ANTHROPIC_BASE_URL", base);
-        }
+    // Route a custom (non-Anthropic) gateway through the local normalizing
+    // proxy so any `role:"system"` message claude-code injects at request-
+    // build time is hoisted out before it reaches a stricter gateway that
+    // would 400 on it (Rain → DeepSeek). See `agents::llm_proxy` for the full
+    // rationale. Falls back to the raw base_url if the proxy didn't start.
+    // Agents with no base_url (Brian/Emma → real Anthropic) get no override
+    // and never touch the proxy.
+    if let Some(base) = crate::agents::llm_proxy::resolve_anthropic_base_url(
+        cfg.config.base_url.as_deref(),
+        crate::agents::llm_proxy::proxy_addr(),
+    ) {
+        cmd.env("ANTHROPIC_BASE_URL", base);
     }
 
     if let Some(wd) = &cfg.working_dir {
