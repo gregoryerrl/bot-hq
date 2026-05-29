@@ -67,6 +67,13 @@ pub enum AgentEvent {
     TurnComplete {
         stop_reason: Option<String>,
         subtype: Option<String>,
+        /// True when the turn FAILED — `result.is_error`, a non-`success`
+        /// subtype, or a populated `api_error_status` (e.g. an API 400). A
+        /// failed turn's buffered text must NOT be peer-forwarded: forwarding
+        /// it bounces the error to the peer, the peer replies, and that
+        /// re-triggers the failing agent — an unbounded error-spam loop
+        /// (Rain on the DeepSeek gateway, 2026-05-29).
+        is_error: bool,
     },
     /// System/init event — agent is ready and reporting its session metadata.
     Init {

@@ -117,10 +117,19 @@ pub fn translate(ev: StreamEvent) -> Vec<AgentEvent> {
                 .collect(),
             UserContent::Text(_) => Vec::new(),
         },
-        StreamEvent::Result(r) => vec![AgentEvent::TurnComplete {
-            stop_reason: r.stop_reason,
-            subtype: r.subtype,
-        }],
+        StreamEvent::Result(r) => {
+            // A turn failed if claude-code set the explicit error flag OR an
+            // upstream API status is populated (e.g. the DeepSeek 400). Both
+            // are absent/false on success. We deliberately do NOT infer
+            // failure from a non-`success` subtype alone — unknown-but-benign
+            // subtypes shouldn't wrongly suppress a legit turn's forward.
+            let is_error = r.is_error || r.api_error_status.is_some();
+            vec![AgentEvent::TurnComplete {
+                stop_reason: r.stop_reason,
+                subtype: r.subtype,
+                is_error,
+            }]
+        }
         StreamEvent::RateLimit(_) => Vec::new(),
         StreamEvent::Unknown => Vec::new(),
     }
@@ -177,6 +186,48 @@ mod tests {
         }
         drop(write);
         task.await.unwrap();
+    }
+
+    #[test]
+    fn error_result_translates_to_errored_turn_complete() {
+        // The real Rain/DeepSeek 400: a failed turn arrives as a `result`
+        // with is_error:true + a populated api_error_status. translate() must
+        // set TurnComplete.is_error so the duo pump suppresses peer-forwarding
+        // (otherwise the error text volleys into an unbounded loop).
+        let line = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":400,"stop_reason":null}"#;
+        let ev: StreamEvent = serde_json::from_str(line).unwrap();
+        match translate(ev).as_slice() {
+            [AgentEvent::TurnComplete { is_error, .. }] => {
+                assert!(*is_error, "error result must mark TurnComplete.is_error")
+            }
+            other => panic!("expected one errored TurnComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_error_status_alone_marks_errored_turn() {
+        // Defensive: a populated api_error_status is itself a failure signal,
+        // even if the is_error flag is absent from the payload.
+        let line = r#"{"type":"result","api_error_status":429}"#;
+        let ev: StreamEvent = serde_json::from_str(line).unwrap();
+        match translate(ev).as_slice() {
+            [AgentEvent::TurnComplete { is_error, .. }] => assert!(*is_error),
+            other => panic!("expected one errored TurnComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn success_result_translates_to_clean_turn_complete() {
+        // Regression guard: a normal successful turn must NOT be marked errored
+        // (else the pump would wrongly suppress forwarding legit work).
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn"}"#;
+        let ev: StreamEvent = serde_json::from_str(line).unwrap();
+        match translate(ev).as_slice() {
+            [AgentEvent::TurnComplete { is_error, .. }] => {
+                assert!(!*is_error, "success result must not be marked errored")
+            }
+            other => panic!("expected one clean TurnComplete, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -168,9 +168,21 @@ pub async fn pump_agent(
                     Err(e) => warn!(?e, "persisting tool_result"),
                 }
             }
-            AgentEvent::TurnComplete { .. } => {
-                // Always flush on turn-complete, both phases.
-                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
+            AgentEvent::TurnComplete { is_error, .. } => {
+                if is_error {
+                    // Failed turn (API/permission error). The error text is
+                    // already persisted per-chunk above for UI visibility, but
+                    // must NOT be peer-forwarded: forwarding it bounces the
+                    // error to the peer, the peer replies, and that re-triggers
+                    // this failing agent — an unbounded error-spam loop (Rain
+                    // on the DeepSeek gateway, 2026-05-29). Drain silently.
+                    debug!(agent = ?cfg.author, "errored turn; draining buffer without peer-forward");
+                    buffer.clear();
+                    flush_at = None;
+                } else {
+                    // Always flush on a successful turn-complete, both phases.
+                    flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                }
             }
             AgentEvent::Init { session_id, .. } => {
                 debug!(agent = ?cfg.author, ?session_id, "init received");
@@ -396,7 +408,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        ev_tx.send(AgentEvent::TurnComplete { stop_reason: None, subtype: None }).await.unwrap();
+        ev_tx.send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false }).await.unwrap();
 
         // Give the pump a moment, then assert nothing landed in peer_rx.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -412,6 +424,51 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].author, "rain");
         assert!(msgs[0].content.contains("Holding."));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn errored_turn_is_not_forwarded_to_peer() {
+        // Regression (Rain on the DeepSeek gateway, 2026-05-29): a turn that
+        // ends in an API error must NOT be peer-forwarded. Forwarding the
+        // error text bounces it to the peer, the peer replies, and that
+        // re-triggers the failing agent — an unbounded error-spam loop. The
+        // error text is still persisted (UI visibility) but never volleyed.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let task = tokio::spawn(pump_agent(
+            fast_cfg(Author::Rain, Author::Brian),
+            ev_rx,
+            peer_tx,
+            storage.clone(),
+            state.clone(),
+        ));
+
+        let err = "API Error: 400 Failed to deserialize the JSON body into the \
+                   target type: messages[17].role: unknown variant `system`, \
+                   expected `user` or `assistant` at line 1 column 49275";
+        ev_tx.send(AgentEvent::Text(err.into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: Some("error_during_execution".into()),
+                is_error: true,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "errored turn must not be forwarded to peer (would re-trigger the loop)"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+        // Persisted for UI visibility even though not forwarded to the peer.
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content.contains("API Error"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -434,7 +491,7 @@ mod tests {
         for word in ["Ok.", "Sure.", "Yep.", "Right.", "Fine.", "Cool."] {
             ev_tx.send(AgentEvent::Text(word.into())).await.unwrap();
             ev_tx
-                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None })
+                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false })
                 .await
                 .unwrap();
         }
@@ -476,7 +533,7 @@ mod tests {
         for chunk in seq {
             ev_tx.send(AgentEvent::Text(chunk.into())).await.unwrap();
             ev_tx
-                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None })
+                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false })
                 .await
                 .unwrap();
         }
@@ -544,6 +601,7 @@ mod tests {
             .send(AgentEvent::TurnComplete {
                 stop_reason: Some("end_turn".into()),
                 subtype: None,
+                is_error: false,
             })
             .await
             .unwrap();
@@ -576,6 +634,7 @@ mod tests {
             .send(AgentEvent::TurnComplete {
                 stop_reason: Some("end_turn".into()),
                 subtype: None,
+                is_error: false,
             })
             .await
             .unwrap();

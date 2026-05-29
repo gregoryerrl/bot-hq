@@ -129,6 +129,15 @@ pub struct ResultEvent {
     pub stop_reason: Option<String>,
     #[serde(default)]
     pub subtype: Option<String>,
+    /// Turn-failure flag. `false` on success; `true` when the turn failed
+    /// (API/permission error). See `docs/stream-json-events.md` "Errors".
+    #[serde(default)]
+    pub is_error: bool,
+    /// HTTP status of an upstream API failure (e.g. `400` for the DeepSeek
+    /// system-role rejection). `null`/absent on success. A second, explicit
+    /// failure signal alongside `is_error`.
+    #[serde(default)]
+    pub api_error_status: Option<Value>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
     #[serde(default)]
