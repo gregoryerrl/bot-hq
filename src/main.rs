@@ -271,7 +271,7 @@ fn main() -> Result<()> {
                     let crashed = heartbeat_for_sweep.sweep();
                     for plugin_id in crashed {
                         if let Err(e) = app_handle_for_plugins.emit(
-                            "plugin:crashed",
+                            tauri_events::types::PLUGIN_CRASHED,
                             serde_json::json!({ "plugin_id": plugin_id }),
                         ) {
                             tracing::warn!(?e, plugin_id = %plugin_id, "emit plugin:crashed failed");

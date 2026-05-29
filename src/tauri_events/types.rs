@@ -80,6 +80,28 @@ impl ChoiceResolvedEvent {
     pub const EVENT_NAME: &'static str = "session:choice_resolved";
 }
 
+/// Emitted when an agent parks a choice/question for the user (a direct-emit
+/// nudge; the tray polls `list_pending_choices` as the source of truth).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct PendingChoiceEvent {
+    pub choice_id: String,
+    pub session_id: String,
+    pub agent: String,
+    pub question: String,
+    pub options: Vec<String>,
+}
+
+impl PendingChoiceEvent {
+    pub const EVENT_NAME: &'static str = "session:pending_choice";
+}
+
+/// Plugin lifecycle event names emitted to the frontend PluginManager, which
+/// listens for the same strings. Centralized so an emit site and the listener
+/// can't drift independently.
+pub const PLUGIN_STATE_CHANGED: &str = "plugin:state-changed";
+pub const PLUGIN_UNINSTALLED: &str = "plugin:uninstalled";
+pub const PLUGIN_CRASHED: &str = "plugin:crashed";
+
 #[cfg(test)]
 mod tests {
     use super::*;

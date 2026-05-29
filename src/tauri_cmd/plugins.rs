@@ -119,7 +119,7 @@ pub async fn uninstall_plugin(
 ) -> Result<(), AppError> {
     uninstall_plugin_inner(&storage, &registry, &plugin_id).await?;
     if let Err(e) = app.emit(
-        "plugin:uninstalled",
+        crate::tauri_events::types::PLUGIN_UNINSTALLED,
         serde_json::json!({ "plugin_id": plugin_id }),
     ) {
         tracing::warn!(?e, plugin_id = %plugin_id, "emit plugin:uninstalled failed");
@@ -364,7 +364,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 fn emit_state_changed(app: &tauri::AppHandle, plugin_id: &str, enabled: bool) {
     if let Err(e) = app.emit(
-        "plugin:state-changed",
+        crate::tauri_events::types::PLUGIN_STATE_CHANGED,
         serde_json::json!({ "plugin_id": plugin_id, "enabled": enabled }),
     ) {
         tracing::warn!(?e, plugin_id = %plugin_id, "emit plugin:state-changed failed");

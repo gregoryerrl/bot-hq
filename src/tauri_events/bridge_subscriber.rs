@@ -20,7 +20,7 @@ use crate::signaling::{SignalingBridge, SignalingEvent};
 use crate::storage::Storage;
 use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
-    AwaitingUser, ChoiceResolvedEvent, PhaseChangedEvent,
+    AwaitingUser, ChoiceResolvedEvent, PendingChoiceEvent, PhaseChangedEvent,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -66,14 +66,17 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             emitter.touch(session_id);
         }
         SignalingEvent::PendingChoice(p) => {
-            let v = serde_json::json!({
-                "choice_id": p.choice_id,
-                "session_id": p.session_id,
-                "agent": p.agent,
-                "question": p.question,
-                "options": p.options,
-            });
-            emit_event("session:pending_choice", v);
+            let payload = PendingChoiceEvent {
+                choice_id: p.choice_id,
+                session_id: p.session_id,
+                agent: p.agent,
+                question: p.question,
+                options: p.options,
+            };
+            emit_event(
+                PendingChoiceEvent::EVENT_NAME,
+                serde_json::to_value(&payload).unwrap_or(Value::Null),
+            );
         }
         SignalingEvent::ChoiceResolved { choice_id, picked } => {
             let payload = ChoiceResolvedEvent { choice_id, picked };
