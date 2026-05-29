@@ -375,7 +375,7 @@ async fn spawn_agent_for(
 /// instead of relying on prompt discipline the model rationalizes around
 /// when a "next step" looks obvious. Rain still has claude-code's
 /// built-in read-only tools (`Read`, `Grep`, `Glob`, `WebFetch`,
-/// `WebSearch`, `ToolSearch`, `TaskCreate`/`TaskUpdate`), which are what
+/// `WebSearch`, `ToolSearch`, `TodoWrite`), which are what
 /// EYES needs to review HANDS' work.
 ///
 /// HANDS (Brian) and the singleton Emma get the full merged set from the

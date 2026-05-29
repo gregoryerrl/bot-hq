@@ -165,10 +165,10 @@ choice buttons.
 
 **DocumentPane:** IPAV tab selector (I/P/A/V chips) drives
 `session_doc_search(session_id, phase=<x>)`. Each tab renders matching
-`session_documents` rows; counts surface on the chips. The A tab will
-also render the live color-coded `git diff` for the session's working
-repo (port of `view_model::parse_diff_lines` to a Rust-side
-`compute_apply_diff` Tauri command — deferred to a follow-up).
+`session_documents` rows; counts surface on the chips. The A tab also
+renders the live color-coded `git diff` for the session's working repo
+via the `compute_apply_diff` Tauri command (`src/tauri_cmd/docs.rs`,
+parser `parse_diff_lines`), consumed by `DocumentPane.tsx`.
 
 **Emma overlay:** fixed half-pane on the right, toggled from the topbar.
 Subscribes to the `agent.messages.batch` event filtered to

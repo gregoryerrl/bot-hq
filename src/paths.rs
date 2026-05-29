@@ -11,9 +11,12 @@
 //!   agents/<name>/custom-instruction.md  (emma, brian, rain — user tweaks)
 //!   projects/<p>/conventions.md
 //!   projects/<p>/notes.md
+//!   mcp-token                      (external MCP bearer token, 0600)
+//!   violations.jsonl               (policy audit trail)
 //!   .local/
 //!     bot-hq.db
 //!     lock                         (single-instance PID lock)
+//!     session-permissions/<sid>.json  (per-session grant mirrors)
 //! ```
 
 use anyhow::{Context, Result};

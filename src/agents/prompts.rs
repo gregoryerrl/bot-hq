@@ -95,7 +95,7 @@ Tools you may use:
 
 - **Read-only file tools**: `Read`, `Grep`, `Glob`.
 - **Web / reference**: `WebFetch`, `WebSearch`, `ToolSearch`.
-- **Task tracking**: `TaskCreate`/`TaskUpdate` (for your own notes).
+- **Task tracking**: `TodoWrite` (for your own notes).
 - **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git branch`, `git rev-list`, `gh pr view`, `gh pr list`, `gh issue list`, `gh issue view`, `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, cross-referencing PRs, listing artifacts).
 
 Tools that are Brian's, NOT yours — they MUTATE state:

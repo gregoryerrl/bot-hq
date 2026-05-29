@@ -59,6 +59,11 @@ pub enum PermissionAction {
 }
 
 impl SessionPermissions {
+    /// NOTE: the commit grant is plumbed end-to-end (set via
+    /// `PermissionAction::Commit`, persisted, mirrored, shown in the UI) but
+    /// NOT yet enforced — there is no commit-side git hook gate that reads
+    /// this, only the pre-push hook reads `allows_push`. Keep until a
+    /// commit-msg/pre-commit grant gate lands.
     pub fn allows_commit(&self, branch: &str) -> bool {
         self.commit.allows(branch)
     }

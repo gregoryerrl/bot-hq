@@ -1,8 +1,8 @@
 //! Git hook installation + CLI handlers.
 //!
 //! When a session opens against a working repo with an enforced policy,
-//! bot-hq installs `.git/hooks/{pre-commit,post-commit,pre-push}` that
-//! invoke `bot-hq policy-check ...` as a subprocess. The hook is the
+//! bot-hq installs `.git/hooks/{commit-msg,pre-commit,post-commit,pre-push}`
+//! that invoke `bot-hq policy-check ...` as a subprocess. The hook is the
 //! MECHANICAL BACKSTOP — it fires unconditionally on every git op,
 //! regardless of whether the agent remembered to call the MCP tool.
 //!
