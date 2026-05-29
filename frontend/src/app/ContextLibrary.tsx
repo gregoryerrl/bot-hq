@@ -10,6 +10,7 @@ import type {
 import { collapseKey, tabKey, type OpenTab } from "./contextLibraryShared";
 import { WorkspaceSidebar } from "./ContextLibrarySidebar";
 import { EditorArea } from "./ContextLibraryEditor";
+import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
 
 // ============================================================================
 // ContextLibrary — 2-pane Industrial Terminal layout. The left WorkspaceSidebar
@@ -46,6 +47,7 @@ export function ContextLibrary() {
   const [rescanReport, setRescanReport] = useState<ClRescanReportView | null>(
     null,
   );
+  const [registerOpen, setRegisterOpen] = useState(false);
 
   // Persist expand/collapse choices across route navigation + restarts. Keyed
   // by collapseKey(project, folderPath) — the project-root node uses "".
@@ -75,11 +77,9 @@ export function ContextLibrary() {
     query: debouncedQuery.trim() || null,
   });
 
-  const { data: projects = [] } = useTauriQuery<ProjectView[]>(
-    "list_projects",
-    {},
-    { refetchInterval: 60_000 },
-  );
+  const { data: projects = [], refetch: refetchProjects } = useTauriQuery<
+    ProjectView[]
+  >("list_projects", {}, { refetchInterval: 60_000 });
 
   // Folder descriptions feed both the tree (so a described-but-empty folder
   // still shows) and the folder-view editor (current description lookup).
@@ -108,6 +108,14 @@ export function ContextLibrary() {
     }
     return acc;
   }, [folders]);
+
+  // After register/unregister: refresh projects + index + folders so the tree,
+  // the project filter, and any open folder-view all reflect the change.
+  const onProjectChanged = () => {
+    refetchProjects();
+    refetch();
+    refetchFolders();
+  };
 
   // Multi-tab state. Opening a file that's already in `tabs` just focuses
   // its tab; otherwise a new tab is pushed and activated.
@@ -217,6 +225,7 @@ export function ContextLibrary() {
         activeTab={activeTab}
         onOpenFile={openFile}
         onOpenFolder={openFolder}
+        onRequestRegister={() => setRegisterOpen(true)}
       />
       <EditorArea
         tabs={tabs}
@@ -226,8 +235,15 @@ export function ContextLibrary() {
         activeTab={activeTab}
         entries={entries}
         folders={folders}
+        projects={projects}
         onRefetchIndex={refetch}
         onRefetchFolders={refetchFolders}
+        onProjectChanged={onProjectChanged}
+      />
+      <RegisterProjectModal
+        open={registerOpen}
+        onClose={() => setRegisterOpen(false)}
+        onRegistered={onProjectChanged}
       />
     </div>
   );

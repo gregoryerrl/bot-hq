@@ -6,6 +6,7 @@ import type {
   ClFileContentView,
   ClFolderView,
   ClIndexEntryView,
+  ProjectView,
 } from "../lib/bindings";
 import {
   CloseIcon,
@@ -31,8 +32,10 @@ interface EditorAreaProps {
   activeTab: OpenTab | null;
   entries: ClIndexEntryView[];
   folders: ClFolderView[];
+  projects: ProjectView[];
   onRefetchIndex: () => void;
   onRefetchFolders: () => void;
+  onProjectChanged: () => void;
 }
 
 export function EditorArea({
@@ -43,8 +46,10 @@ export function EditorArea({
   activeTab,
   entries,
   folders,
+  projects,
   onRefetchIndex,
   onRefetchFolders,
+  onProjectChanged,
 }: EditorAreaProps) {
   return (
     <div className="flex min-w-0 flex-1 flex-col">
@@ -63,7 +68,11 @@ export function EditorArea({
           key={tabKey(activeTab)}
           tab={activeTab}
           folders={folders}
+          project={
+            projects.find((p) => p.name === activeTab.project) ?? null
+          }
           onSaved={onRefetchFolders}
+          onProjectChanged={onProjectChanged}
         />
       ) : (
         <EditorPane

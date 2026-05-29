@@ -451,7 +451,7 @@ export type PluginStatus =
  * Project as exposed to the frontend. Drives the project-filter dropdown
  * in ContextLibrary and (eventually) the New-Session repo picker.
  */
-export type ProjectView = { name: string; display_name: string; working_repo_path: string | null; description: string | null }
+export type ProjectView = { name: string; display_name: string; working_repo_path: string | null; description: string | null; cl_path: string | null }
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null }
 export type SessionPermissionsView = { commit: GrantScopeView; push: GrantScopeView }

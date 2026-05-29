@@ -41,6 +41,7 @@ interface WorkspaceSidebarProps {
   activeTab: OpenTab | null;
   onOpenFile: (project: string, filePath: string) => void;
   onOpenFolder: (project: string, folderPath: string) => void;
+  onRequestRegister: () => void;
 }
 
 export function WorkspaceSidebar({
@@ -60,6 +61,7 @@ export function WorkspaceSidebar({
   activeTab,
   onOpenFile,
   onOpenFolder,
+  onRequestRegister,
 }: WorkspaceSidebarProps) {
   const projectIds = Object.keys(byProject).sort();
   const projectCount = projectIds.length;
@@ -124,6 +126,15 @@ export function WorkspaceSidebar({
             : project
               ? "Rescan project"
               : `Rescan all (${projectCount})`}
+        </button>
+        <button
+          type="button"
+          onClick={onRequestRegister}
+          title="Register an on-disk folder as a Context Library project"
+          className="inline-flex items-center justify-center gap-1.5 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-on-surface transition-colors hover:bg-surface-container-high"
+        >
+          <PlusIcon />
+          Register project
         </button>
         {rescanReport && (
           <div className="flex flex-wrap gap-2 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm">

@@ -31,7 +31,9 @@ describe("FolderView", () => {
       <FolderView
         tab={{ kind: "folder", project: "p", folderPath: "archive" }}
         folders={[folder("p", "archive", "old stuff")]}
+        project={null}
         onSaved={onSaved}
+        onProjectChanged={() => {}}
       />,
     );
 
@@ -60,10 +62,46 @@ describe("FolderView", () => {
       <FolderView
         tab={{ kind: "folder", project: "bot-hq", folderPath: "" }}
         folders={[]}
+        project={null}
         onSaved={() => {}}
+        onProjectChanged={() => {}}
       />,
     );
     expect(screen.getByText("bot-hq")).toBeInTheDocument();
     expect(screen.getByText("project root")).toBeInTheDocument();
+  });
+
+  it("shows the project registration section on a project root and unregisters", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const onProjectChanged = vi.fn();
+    render(
+      <FolderView
+        tab={{ kind: "folder", project: "bot-hq", folderPath: "" }}
+        folders={[]}
+        project={{
+          name: "bot-hq",
+          display_name: "bot-hq",
+          working_repo_path: "/Users/me/Projects/bot-hq",
+          description: null,
+          cl_path: "/Users/me/.bot-hq/projects/bot-hq",
+        }}
+        onSaved={() => {}}
+        onProjectChanged={onProjectChanged}
+      />,
+    );
+
+    // CL path + working repo surfaced
+    expect(
+      screen.getByText("/Users/me/.bot-hq/projects/bot-hq"),
+    ).toBeInTheDocument();
+    expect(screen.getByDisplayValue("/Users/me/Projects/bot-hq")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /unregister project/i }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("cl_unregister_project", {
+        name: "bot-hq",
+      }),
+    );
+    expect(onProjectChanged).toHaveBeenCalled();
   });
 });

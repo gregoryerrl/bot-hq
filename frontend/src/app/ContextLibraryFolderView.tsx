@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
-import type { ClFolderView } from "../lib/bindings";
+import type { ClFolderView, ProjectView } from "../lib/bindings";
 import { FolderIcon, type OpenTab, terminalInputClass } from "./contextLibraryShared";
 
 // ============================================================================
@@ -15,11 +15,15 @@ import { FolderIcon, type OpenTab, terminalInputClass } from "./contextLibrarySh
 export function FolderView({
   tab,
   folders,
+  project,
   onSaved,
+  onProjectChanged,
 }: {
   tab: Extract<OpenTab, { kind: "folder" }>;
   folders: ClFolderView[];
+  project: ProjectView | null;
   onSaved: () => void;
+  onProjectChanged: () => void;
 }) {
   const current =
     folders.find(
@@ -137,6 +141,124 @@ export function FolderView({
             {saving ? "Saving…" : "Save folder"}
           </button>
         </div>
+
+        {isRoot && project && (
+          <ProjectSection
+            project={project}
+            onProjectChanged={onProjectChanged}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// ProjectSection — shown only on a project-root folder-view. Configures the
+// project's working-repo and exposes soft-unregister. Registering a NEW folder
+// happens via the sidebar's RegisterProjectModal (an unregistered folder isn't
+// in the tree, so it can't host this view).
+// ============================================================================
+
+function ProjectSection({
+  project,
+  onProjectChanged,
+}: {
+  project: ProjectView;
+  onProjectChanged: () => void;
+}) {
+  const [wr, setWr] = useState(project.working_repo_path ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-seed when switching to a different project root.
+  const [seededName, setSeededName] = useState(project.name);
+  if (seededName !== project.name) {
+    setSeededName(project.name);
+    setWr(project.working_repo_path ?? "");
+    setError(null);
+  }
+
+  const wrDirty = wr.trim() !== (project.working_repo_path ?? "").trim();
+
+  const saveWorkingRepo = async () => {
+    if (!wrDirty || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("cl_register_project", {
+        name: project.name,
+        displayName: project.display_name,
+        workingRepoPath: wr.trim() || null,
+        clPath: null,
+        description: null,
+      });
+      onProjectChanged();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unregister = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await invoke("cl_unregister_project", { name: project.name });
+      onProjectChanged();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 border-t border-outline-variant pt-4">
+      <p className="mb-2 font-label-caps text-label-caps text-on-surface-variant/70">
+        Project · registration
+      </p>
+      <p className="mb-3 font-code-sm text-code-sm text-on-surface-variant">
+        CL path:{" "}
+        <span className="text-on-surface">
+          {project.cl_path || "(default convention)"}
+        </span>
+      </p>
+      <label className="block">
+        <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+          Working repo path
+        </span>
+        <input
+          type="text"
+          value={wr}
+          onChange={(e) => setWr(e.target.value)}
+          placeholder="(none)"
+          className={terminalInputClass}
+        />
+      </label>
+      {error && (
+        <p className="mt-2 font-code-sm text-code-sm text-error">{error}</p>
+      )}
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={unregister}
+          title="Clears the working-repo + custom CL path. Keeps files & descriptions."
+          className="rounded border border-error/50 bg-transparent px-3 py-1 font-code-sm text-code-sm text-error transition-colors hover:bg-error/10 disabled:opacity-50"
+        >
+          Unregister project
+        </button>
+        <button
+          type="button"
+          disabled={!wrDirty || busy}
+          onClick={saveWorkingRepo}
+          className="rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+        >
+          Save working repo
+        </button>
       </div>
     </div>
   );

@@ -20,8 +20,10 @@ function renderEditor() {
         activeTab={tab}
         entries={[]}
         folders={[]}
+        projects={[]}
         onRefetchIndex={() => {}}
         onRefetchFolders={() => {}}
+        onProjectChanged={() => {}}
       />
     </QueryClientProvider>,
   );

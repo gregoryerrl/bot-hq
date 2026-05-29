@@ -35,6 +35,10 @@ pub struct ProjectView {
     pub display_name: String,
     pub working_repo_path: Option<String>,
     pub description: Option<String>,
+    /// Custom CL root. NULL/None = default convention
+    /// `<data_dir>/projects/<name>/`. Lets the folder-view show whether a
+    /// project was registered at an arbitrary on-disk location.
+    pub cl_path: Option<String>,
 }
 
 impl From<Project> for ProjectView {
@@ -44,6 +48,7 @@ impl From<Project> for ProjectView {
             display_name: p.display_name,
             working_repo_path: p.working_repo_path,
             description: p.description,
+            cl_path: p.cl_path,
         }
     }
 }
@@ -338,6 +343,60 @@ pub async fn cl_delete_folder_description(
     storage
         .delete_folder_description(&project, &folder_path)
         .await?;
+    Ok(())
+}
+
+/// Register a project, or update an existing one. Used by the Context Library
+/// to promote an arbitrary on-disk folder to a project (`cl_path` = that
+/// folder) and to edit an existing project's working-repo from the folder-view.
+/// `upsert_project` COALESCEs `None` fields, so passing only the values you
+/// want to change preserves the rest. When `cl_path` is supplied it must point
+/// at a real directory (guards against registering a typo'd path).
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_register_project(
+    storage: tauri::State<'_, Arc<Storage>>,
+    name: String,
+    display_name: Option<String>,
+    working_repo_path: Option<String>,
+    cl_path: Option<String>,
+    description: Option<String>,
+) -> Result<(), AppError> {
+    if let Some(p) = cl_path.as_deref() {
+        if !p.is_empty() {
+            let real = std::path::Path::new(p)
+                .canonicalize()
+                .map_err(|e| AppError::NotFound(format!("cl_path '{p}' not found: {e}")))?;
+            if !real.is_dir() {
+                return Err(AppError::Internal(format!(
+                    "cl_path '{p}' is not a directory"
+                )));
+            }
+        }
+    }
+    let display = display_name.unwrap_or_else(|| name.clone());
+    storage
+        .upsert_project(
+            &name,
+            &display,
+            working_repo_path.as_deref(),
+            description.as_deref(),
+            cl_path.as_deref(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Soft-unregister a project: clears `cl_path` + `working_repo_path` but KEEPS
+/// the row and all child CL rows (index, folders, reads). The project stops
+/// being a usable session target; its descriptions survive for re-registration.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_unregister_project(
+    storage: tauri::State<'_, Arc<Storage>>,
+    name: String,
+) -> Result<(), AppError> {
+    storage.unregister_project(&name).await?;
     Ok(())
 }
 
