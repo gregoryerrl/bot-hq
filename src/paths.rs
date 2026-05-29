@@ -174,8 +174,10 @@ fn default_data_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".bot-hq"))
 }
 
-/// Expand a leading `~` (and optionally `~/`) in a path string.
-fn expand_tilde(s: &str) -> Result<PathBuf> {
+/// Expand a leading `~` (and optionally `~/`) in a path string. Shared with
+/// the policy-check hook subprocess (`policy::hooks`) so `~` resolves the same
+/// way (via `directories::BaseDirs`) regardless of caller.
+pub(crate) fn expand_tilde(s: &str) -> Result<PathBuf> {
     if let Some(stripped) = s.strip_prefix("~/") {
         Ok(home_dir()?.join(stripped))
     } else if s == "~" {

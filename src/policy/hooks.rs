@@ -67,7 +67,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         match args[i].as_str() {
             "--data-dir" => {
                 let v = args.get(i + 1).ok_or_else(|| anyhow!("--data-dir needs value"))?;
-                data_dir = Some(expand_tilde(v)?);
+                data_dir = Some(crate::paths::expand_tilde(v)?);
                 i += 2;
             }
             "--project" => {
@@ -120,6 +120,14 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
     }
 }
 
+/// A ruled "BLOCKED" banner for a hook rejection. Centralizes the rule line
+/// and `bot-hq <hook>: BLOCKED` header so the commit-msg / pre-commit /
+/// pre-push handlers can't drift. `body` is the hook-specific detail.
+fn blocked_banner(hook: &str, body: &str) -> String {
+    const RULE: &str = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+    format!("\n{RULE}\nbot-hq {hook}: BLOCKED\n{RULE}\n{body}")
+}
+
 /// commit-msg handler. Scans the message file (passed by git as $1) for
 /// forbidden words. Exits 1 if any found — blocks the commit reliably,
 /// even when `git commit -m "..."` is used.
@@ -141,18 +149,20 @@ fn run_commit_msg(
         None => Ok(0),
         Some(word) => {
             eprintln!(
-                "\n\
-                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
-                 bot-hq commit-msg: BLOCKED\n\
-                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
-                 Forbidden word in commit message: '{word}'\n\
-                 Policy: {project}\n\
-                 Message file: {msg}\n\
-                 \n\
-                 Rewrite the commit message to remove '{word}', then retry.\n\
-                 Do NOT bypass with --no-verify.\n",
-                project = project.unwrap_or("<none>"),
-                msg = msg_path.display(),
+                "{}",
+                blocked_banner(
+                    "commit-msg",
+                    &format!(
+                        "Forbidden word in commit message: '{word}'\n\
+                         Policy: {project}\n\
+                         Message file: {msg}\n\
+                         \n\
+                         Rewrite the commit message to remove '{word}', then retry.\n\
+                         Do NOT bypass with --no-verify.\n",
+                        project = project.unwrap_or("<none>"),
+                        msg = msg_path.display(),
+                    )
+                )
             );
             Ok(1)
         }
@@ -174,16 +184,18 @@ fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
         None => Ok(0),
         Some(word) => {
             eprintln!(
-                "\n\
-                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
-                 bot-hq pre-commit: BLOCKED\n\
-                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
-                 Forbidden word in staged diff: '{word}'\n\
-                 Policy: {project}\n\
-                 \n\
-                 Remove '{word}' from the source content, then retry.\n\
-                 Do NOT bypass with --no-verify.\n",
-                project = project.unwrap_or("<none>")
+                "{}",
+                blocked_banner(
+                    "pre-commit",
+                    &format!(
+                        "Forbidden word in staged diff: '{word}'\n\
+                         Policy: {project}\n\
+                         \n\
+                         Remove '{word}' from the source content, then retry.\n\
+                         Do NOT bypass with --no-verify.\n",
+                        project = project.unwrap_or("<none>")
+                    )
+                )
             );
             Ok(1)
         }
@@ -292,23 +304,25 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
         return Ok(0);
     }
     eprintln!(
-        "\n\
-         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
-         bot-hq pre-push: BLOCKED\n\
-         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
-         Branch '{branch}' is not approved for push (policy.push_gate.mode={mode}).\n\
-         \n\
-         Two ways to unblock:\n\
-         1. Per-push approval: agent calls \
-         `mcp__bot-hq-signaling__request_approval` with\n\
-            kind=\"push_gate\", action=\"git push origin {branch}\". User \
-         clicks Approve.\n\
-         2. Session-wide grant: user says \"you can push\" in chat → agent \
-         calls\n\
-            `mcp__bot-hq-signaling__grant_session_permission` with \
-         action=\"push\".\n\
-            All subsequent pushes in this session are auto-allowed.\n",
-        mode = policy.push_gate.mode.label()
+        "{}",
+        blocked_banner(
+            "pre-push",
+            &format!(
+                "Branch '{branch}' is not approved for push (policy.push_gate.mode={mode}).\n\
+                 \n\
+                 Two ways to unblock:\n\
+                 1. Per-push approval: agent calls \
+                 `mcp__bot-hq-signaling__request_approval` with\n\
+                    kind=\"push_gate\", action=\"git push origin {branch}\". User \
+                 clicks Approve.\n\
+                 2. Session-wide grant: user says \"you can push\" in chat → agent \
+                 calls\n\
+                    `mcp__bot-hq-signaling__grant_session_permission` with \
+                 action=\"push\".\n\
+                    All subsequent pushes in this session are auto-allowed.\n",
+                mode = policy.push_gate.mode.label()
+            )
+        )
     );
     Ok(1)
 }
@@ -516,18 +530,6 @@ fn git_output(args: &[&str]) -> Option<String> {
         return None;
     }
     String::from_utf8(out.stdout).ok()
-}
-
-fn expand_tilde(s: &str) -> Result<PathBuf> {
-    if let Some(rest) = s.strip_prefix("~/") {
-        let home = std::env::var("HOME").context("expanding ~/ but HOME not set")?;
-        Ok(PathBuf::from(home).join(rest))
-    } else if s == "~" {
-        let home = std::env::var("HOME").context("expanding ~ but HOME not set")?;
-        Ok(PathBuf::from(home))
-    } else {
-        Ok(PathBuf::from(s))
-    }
 }
 
 #[cfg(test)]
