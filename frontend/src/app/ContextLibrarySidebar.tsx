@@ -61,7 +61,7 @@ export function WorkspaceSidebar({
     >
       <header className="flex items-center justify-between border-b border-outline-variant px-3 py-2">
         <span className="font-label-caps text-label-caps text-on-surface-variant">
-          WORKSPACE
+          Library Tree
         </span>
         <button
           type="button"

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
@@ -129,11 +129,53 @@ function EditorPane({
   entries: ClIndexEntryView[];
   onRefetchIndex: () => void;
 }) {
-  const { data: fileContent, isFetching, error: fileError } =
-    useTauriQuery<ClFileContentView>(
-      "cl_read_file",
-      { project: tab.project, filePath: tab.filePath },
-    );
+  const {
+    data: fileContent,
+    isFetching,
+    error: fileError,
+    refetch,
+  } = useTauriQuery<ClFileContentView>("cl_read_file", {
+    project: tab.project,
+    filePath: tab.filePath,
+  });
+
+  // Editable working copy. EditorArea keys EditorPane by path, so this pane
+  // remounts per file — a one-shot seed when content first arrives is enough
+  // (there's no cross-file stale draft to clear).
+  const [draft, setDraft] = useState<string | null>(null);
+  if (draft === null && fileContent) setDraft(fileContent.content);
+
+  // Refuse edits that would lose data on save: a truncated read (we only hold
+  // the first 1 MB) or a binary / non-UTF-8 file (content is a lossy decode,
+  // so writing it back would corrupt the original bytes).
+  const readOnly =
+    !!fileContent && (fileContent.truncated || fileContent.binary);
+  const dirty =
+    !readOnly &&
+    fileContent != null &&
+    draft != null &&
+    draft !== fileContent.content;
+
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const handleSave = async () => {
+    if (!dirty || saving || draft == null) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await invoke("cl_write_file", {
+        project: tab.project,
+        filePath: tab.filePath,
+        content: draft,
+      });
+      await refetch(); // resync the baseline so `dirty` clears
+    } catch (e) {
+      setSaveError(errorMessage(e));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const entry = useMemo(
     () =>
@@ -164,30 +206,65 @@ function EditorPane({
                     </span>
                   </>
                 )}
+                {fileContent.binary && (
+                  <>
+                    <span className="mx-2 text-on-surface-variant/60">·</span>
+                    <span className="text-amber-400">binary / non-UTF-8</span>
+                  </>
+                )}
               </>
             )}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span
-            className="rounded border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 font-label-caps text-label-caps text-amber-300 opacity-40"
-            title="File-content edits aren't wired yet"
-          >
-            UNSAVED CHANGES
-          </span>
+          {readOnly && (
+            <span
+              className="rounded border border-outline-variant bg-surface-container-high px-2 py-0.5 font-label-caps text-label-caps text-on-surface-variant"
+              title="Read-only: editing a truncated or non-UTF-8 file could corrupt it"
+            >
+              READ-ONLY
+            </span>
+          )}
+          {dirty && (
+            <span
+              className="rounded border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 font-label-caps text-label-caps text-amber-300"
+              title="Unsaved edits"
+            >
+              UNSAVED CHANGES
+            </span>
+          )}
           <button
             type="button"
-            disabled
-            title="Backend not yet wired — cl_write_file not implemented"
-            className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!dirty || saving}
+            onClick={handleSave}
+            title={
+              readOnly
+                ? "Read-only file — cannot save"
+                : dirty
+                  ? "Save changes to disk"
+                  : "No unsaved changes"
+            }
+            className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:cursor-not-allowed disabled:opacity-40"
           >
             <SaveIcon />
-            Save Changes
+            {saving ? "Saving…" : "Save Changes"}
           </button>
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto bg-surface-container-low">
+      {saveError && (
+        <p className="flex-shrink-0 border-b border-outline-variant px-4 py-1.5 font-code-sm text-code-sm text-error">
+          Save failed: {saveError}{" "}
+          <button
+            onClick={() => setSaveError(null)}
+            className="underline hover:text-on-surface"
+          >
+            dismiss
+          </button>
+        </p>
+      )}
+
+      <div className="min-h-0 flex-1 overflow-hidden bg-surface-container-low">
         {isFetching && !fileContent ? (
           <p className="px-4 py-3 font-code-sm text-code-sm text-on-surface-variant">
             Loading…
@@ -196,8 +273,8 @@ function EditorPane({
           <p className="px-4 py-3 font-code-sm text-code-sm text-error">
             Failed to read: {String(fileError.message ?? fileError)}
           </p>
-        ) : fileContent ? (
-          <CodeView content={fileContent.content} />
+        ) : fileContent && draft != null ? (
+          <CodeView value={draft} onChange={setDraft} readOnly={readOnly} />
         ) : null}
       </div>
 
@@ -216,17 +293,28 @@ function EditorPane({
 // CodeView — content + line-number gutter (no syntax highlighting in v1)
 // ============================================================================
 
-function CodeView({ content }: { content: string }) {
+function CodeView({
+  value,
+  onChange,
+  readOnly,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  readOnly: boolean;
+}) {
   const lineCount = useMemo(
-    () => Math.max(1, content.split("\n").length),
-    [content],
+    () => Math.max(1, value.split("\n").length),
+    [value],
   );
   const gutterWidthCh = String(lineCount).length + 1; // +1 for breathing room
+  // Keep the gutter scroll-locked to the textarea so line numbers stay aligned.
+  const gutterRef = useRef<HTMLDivElement>(null);
 
   return (
-    <div className="flex font-code-sm text-code-sm">
+    <div className="flex h-full font-code-sm text-code-sm">
       <div
-        className="select-none border-r border-outline-variant/30 px-3 py-3 text-right text-on-surface-variant/60"
+        ref={gutterRef}
+        className="select-none overflow-hidden border-r border-outline-variant/30 px-3 py-3 text-right text-on-surface-variant/60"
         style={{ minWidth: `${gutterWidthCh}ch` }}
         aria-hidden
       >
@@ -236,9 +324,20 @@ function CodeView({ content }: { content: string }) {
           </div>
         ))}
       </div>
-      <pre className="flex-1 overflow-x-auto whitespace-pre px-4 py-3 leading-relaxed text-on-surface">
-        {content}
-      </pre>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onScroll={(e) => {
+          if (gutterRef.current) {
+            gutterRef.current.scrollTop = e.currentTarget.scrollTop;
+          }
+        }}
+        readOnly={readOnly}
+        wrap="off"
+        spellCheck={false}
+        aria-label="File content editor"
+        className="h-full flex-1 resize-none overflow-auto whitespace-pre border-0 bg-transparent px-4 py-3 leading-relaxed text-on-surface caret-primary outline-none focus:ring-0"
+      />
     </div>
   );
 }
@@ -318,6 +417,9 @@ function DescriptionEditor({
 
   return (
     <div className="flex-shrink-0 border-t border-outline-variant bg-surface-container px-4 py-3">
+      <p className="mb-2 font-label-caps text-label-caps text-on-surface-variant/70">
+        Metadata · CL index entry
+      </p>
       <label className="block">
         <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
           Description
@@ -370,9 +472,9 @@ function DescriptionEditor({
           type="button"
           disabled={!dirty || saving}
           onClick={handleSave}
-          className="rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+          className="rounded border border-outline-variant bg-surface-container-high px-3 py-1 font-code-sm text-code-sm text-on-surface transition-colors hover:bg-surface-container-highest disabled:opacity-50"
         >
-          {saving ? "Saving…" : "Save Description"}
+          {saving ? "Saving…" : "Save metadata"}
         </button>
       </div>
     </div>

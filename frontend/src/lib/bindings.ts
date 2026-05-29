@@ -388,7 +388,14 @@ size_bytes: number;
  * Frontend can show a "showing first 1 MB" notice and offer to open
  * in $EDITOR (deferred).
  */
-truncated: boolean }
+truncated: boolean;
+/**
+ * True when the on-disk bytes were NOT valid UTF-8, so `content` is a
+ * lossy decode (`from_utf8_lossy` had to allocate replacement chars).
+ * The editor must refuse to save such a file — writing the lossy
+ * content back would corrupt the original bytes.
+ */
+binary: boolean }
 export type ClFolderView = { id: number; project_id: string; folder_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
