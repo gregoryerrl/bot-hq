@@ -5,7 +5,7 @@ use bot_hq::plugins::Heartbeat;
 use bot_hq::policy::{hooks, ViolationsLog};
 use bot_hq::signaling::{start_external_server, start_signaling_server, SignalingBridge};
 use bot_hq::storage::Storage;
-use bot_hq::tauri_cmd::plugins::PluginRegistry;
+use bot_hq::plugins::PluginRegistry;
 use bot_hq::tauri_events;
 use bot_hq::tauri_events::types::AgentMessage;
 use serde_json::Value;

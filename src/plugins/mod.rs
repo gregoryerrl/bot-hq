@@ -26,6 +26,7 @@ pub mod capabilities;
 pub mod heartbeat;
 pub mod loader;
 pub mod manifest;
+pub mod registry;
 
 #[cfg(test)]
 mod iframe_ipc_test;
@@ -34,3 +35,4 @@ pub use capabilities::{CapabilityGen, PluginCapability};
 pub use heartbeat::{Heartbeat, PluginStatus};
 pub use loader::{LoadedPlugin, Loader};
 pub use manifest::{PluginManifest, PluginSlot};
+pub use registry::PluginRegistry;
