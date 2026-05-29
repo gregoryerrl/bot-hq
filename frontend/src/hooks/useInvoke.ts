@@ -48,3 +48,14 @@ function mapError(err: unknown): AppError {
   }
   return { kind: "Internal", message: String(err) };
 }
+
+/**
+ * Extract a human-readable string from an unknown error — raw `invoke`
+ * rejections, thrown values, or AppError objects. For call sites that invoke()
+ * directly (fire-and-forget mutations) instead of going through the hooks.
+ */
+export function errorMessage(err: unknown): string {
+  return err && typeof err === "object" && "message" in err
+    ? String((err as { message: unknown }).message)
+    : String(err);
+}

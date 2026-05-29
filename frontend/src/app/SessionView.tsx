@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
+import { useScreenshotCapture } from "../hooks/useScreenshotCapture";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
 import { ChatMessage } from "../components/ChatMessage";
@@ -70,8 +71,12 @@ export function SessionView() {
     "respawn_session",
   );
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
-  const [screenshotPending, setScreenshotPending] = useState(false);
-  const [screenshotError, setScreenshotError] = useState<string | null>(null);
+  const {
+    capture: captureScreenshot,
+    pending: screenshotPending,
+    error: screenshotError,
+    dismissError: dismissScreenshotError,
+  } = useScreenshotCapture(sessionId);
   // Track which (choiceId, option) is mid-resolve so the clicked button can
   // show "…" and ALL options for that choice disable until the invoke
   // settles. Banner naturally disappears on the next list_pending_choices
@@ -276,21 +281,7 @@ export function SessionView() {
               size="sm"
               title="Capture the bot-hq window and share with Brian + Rain"
               disabled={screenshotPending}
-              onClick={async () => {
-                try {
-                  setScreenshotPending(true);
-                  setScreenshotError(null);
-                  await invoke("capture_window_screenshot", { sessionId });
-                } catch (e) {
-                  const msg =
-                    e && typeof e === "object" && "message" in e
-                      ? String((e as { message: unknown }).message)
-                      : String(e);
-                  setScreenshotError(msg);
-                } finally {
-                  setScreenshotPending(false);
-                }
-              }}
+              onClick={captureScreenshot}
             >
               {screenshotPending ? "…" : "📸"}
             </Button>
@@ -322,7 +313,7 @@ export function SessionView() {
             {screenshotError}
             <button
               className="ml-2 underline"
-              onClick={() => setScreenshotError(null)}
+              onClick={dismissScreenshotError}
             >
               dismiss
             </button>

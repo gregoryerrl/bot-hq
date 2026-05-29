@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useTauriQuery } from "../hooks/useInvoke";
+import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import type { ClFileContentView, ClIndexEntryView } from "../lib/bindings";
 import {
@@ -310,11 +310,7 @@ function DescriptionEditor({
       });
       onSaved();
     } catch (e) {
-      const msg =
-        e && typeof e === "object" && "message" in e
-          ? String((e as { message: unknown }).message)
-          : String(e);
-      setError(msg);
+      setError(errorMessage(e));
     } finally {
       setSaving(false);
     }

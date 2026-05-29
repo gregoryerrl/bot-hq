@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
+import { useScreenshotCapture } from "../hooks/useScreenshotCapture";
 import { useEmmaStore } from "../stores/emma";
 import { useChatStore } from "../stores/chat";
 import type {
@@ -30,8 +31,12 @@ export function EmmaOverlay() {
     "respawn_session",
   );
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
-  const [screenshotPending, setScreenshotPending] = useState(false);
-  const [screenshotError, setScreenshotError] = useState<string | null>(null);
+  const {
+    capture: handleScreenshot,
+    pending: screenshotPending,
+    error: screenshotError,
+    dismissError: dismissScreenshotError,
+  } = useScreenshotCapture(EMMA_SESSION_ID);
   useEffect(() => {
     if (!open) return;
     setRespawnError(null);
@@ -123,24 +128,6 @@ export function EmmaOverlay() {
     }
   };
 
-  const handleScreenshot = async () => {
-    try {
-      setScreenshotPending(true);
-      setScreenshotError(null);
-      await invoke("capture_window_screenshot", {
-        sessionId: EMMA_SESSION_ID,
-      });
-    } catch (e) {
-      const msg =
-        e && typeof e === "object" && "message" in e
-          ? String((e as { message: unknown }).message)
-          : String(e);
-      setScreenshotError(msg);
-    } finally {
-      setScreenshotPending(false);
-    }
-  };
-
   if (!open) return null;
 
   return (
@@ -224,7 +211,7 @@ export function EmmaOverlay() {
           {screenshotError}
           <button
             className="ml-2 underline hover:text-error"
-            onClick={() => setScreenshotError(null)}
+            onClick={dismissScreenshotError}
           >
             dismiss
           </button>
