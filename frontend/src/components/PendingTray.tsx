@@ -75,9 +75,9 @@ export function PendingTray() {
         <div
           role="dialog"
           aria-label="Pending questions"
-          className="absolute right-0 top-full z-40 mt-1 max-h-[60vh] w-96 overflow-auto rounded-lg border border-default bg-surface-container shadow-2xl"
+          className="absolute right-0 top-full z-40 mt-1 max-h-[60vh] w-96 overflow-auto rounded-lg border border-outline-variant bg-surface-container shadow-2xl"
         >
-          <header className="border-b border-default px-3 py-2 font-label-caps text-label-caps text-on-surface-variant">
+          <header className="border-b border-outline-variant px-3 py-2 font-label-caps text-label-caps text-on-surface-variant">
             Awaiting your input ({count})
           </header>
           {count === 0 ? (
@@ -90,7 +90,7 @@ export function PendingTray() {
                 key={q.choice_id}
                 to={`/sessions/${q.session_id}`}
                 onClick={() => setOpen(false)}
-                className="block border-b border-default px-3 py-3 last:border-b-0 hover:bg-surface-container-high"
+                className="block border-b border-outline-variant px-3 py-3 last:border-b-0 hover:bg-surface-container-high"
               >
                 <div className="mb-1 flex items-center justify-between font-label-caps text-label-caps text-on-surface-variant">
                   <span>

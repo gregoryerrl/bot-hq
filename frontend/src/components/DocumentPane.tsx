@@ -64,14 +64,14 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
   const activeDocs = docs.filter((d) => d.phase === activePhase);
 
   return (
-    <div className="flex h-full min-w-0 flex-col border-l border-neutral-800 bg-neutral-950/50">
-      <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-3 py-2">
+    <div className="flex h-full min-w-0 flex-col border-l border-outline-variant bg-surface-container-lowest/50">
+      <div className="flex items-center justify-between gap-2 border-b border-outline-variant px-3 py-2">
         <PhasePillRow
           selected={activePhase}
           onSelect={setActivePhase}
           counts={counts}
         />
-        <span className="text-[0.65rem] uppercase tracking-wide text-neutral-500">
+        <span className="text-[0.65rem] uppercase tracking-wide text-on-surface-variant">
           {activeDocs.length} doc{activeDocs.length === 1 ? "" : "s"}
         </span>
       </div>
@@ -81,7 +81,7 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
         )}
         {activeDocs.length === 0 ? (
           activePhase === "apply" && applyDiff?.lines.length ? null : (
-            <p className="text-sm text-neutral-500">
+            <p className="text-sm text-on-surface-variant">
               No {activePhase} documents yet.
             </p>
           )
@@ -89,14 +89,14 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
           activeDocs.map((doc) => (
             <article key={doc.id} className="mb-6">
               <header className="mb-2 flex items-center justify-between">
-                <h4 className="text-sm font-semibold text-neutral-200">
+                <h4 className="text-sm font-semibold text-on-surface">
                   {doc.slug}
                 </h4>
-                <span className="text-[0.65rem] text-neutral-500">
+                <span className="text-[0.65rem] text-on-surface-variant">
                   {doc.updated_at}
                 </span>
               </header>
-              <pre className="whitespace-pre-wrap text-xs leading-relaxed text-neutral-300">
+              <pre className="whitespace-pre-wrap text-xs leading-relaxed text-on-surface">
                 {doc.body}
               </pre>
             </article>
@@ -121,19 +121,19 @@ const diffLineClass: Record<string, string> = {
 function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
   if (!diff) {
     return (
-      <p className="mb-6 text-xs text-neutral-500">Loading diff…</p>
+      <p className="mb-6 text-xs text-on-surface-variant">Loading diff…</p>
     );
   }
   if (diff.lines.length === 0) {
     return (
-      <p className="mb-6 text-xs text-neutral-500">
+      <p className="mb-6 text-xs text-on-surface-variant">
         {diff.note ?? "(no changes)"}
       </p>
     );
   }
   return (
-    <section className="mb-6 rounded border border-neutral-800 bg-neutral-950">
-      <header className="border-b border-neutral-800 px-3 py-1.5 text-[0.65rem] uppercase tracking-wide text-neutral-500">
+    <section className="mb-6 rounded border border-outline-variant bg-surface-container-lowest">
+      <header className="border-b border-outline-variant px-3 py-1.5 text-[0.65rem] uppercase tracking-wide text-on-surface-variant">
         git diff{diff.note ? ` — ${diff.note}` : ""}
       </header>
       <pre className="overflow-x-auto px-3 py-2 text-[0.7rem] leading-relaxed font-mono">

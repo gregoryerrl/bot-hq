@@ -73,7 +73,7 @@ export function PluginManager() {
     <div className="mx-auto h-full max-w-3xl overflow-auto px-6 py-6">
       <header className="mb-6 flex items-baseline gap-3">
         <h1 className="text-xl font-semibold tracking-tight">Plugins</h1>
-        <span className="text-xs text-neutral-500">
+        <span className="text-xs text-on-surface-variant">
           {plugins.length} installed
         </span>
       </header>
@@ -91,7 +91,7 @@ export function PluginManager() {
               }
             }}
             placeholder="URL to manifest.json or local directory path…"
-            className="flex-1 rounded-md border border-default bg-elevated px-3 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className="flex-1 rounded-md border border-outline-variant bg-surface-container-high px-3 py-1.5 text-sm text-on-surface placeholder:text-on-surface-variant focus:outline-none focus:ring-1 focus:ring-primary"
           />
           <Button
             variant="primary"
@@ -102,7 +102,7 @@ export function PluginManager() {
           </Button>
         </div>
         {installError && (
-          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-default bg-red-950/30 px-3 py-2 text-xs text-red-200">
+          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 text-xs text-on-error-container">
             <div>
               <span className="font-semibold">{installError.kind}:</span>{" "}
               {installError.message}
@@ -118,14 +118,14 @@ export function PluginManager() {
       </section>
 
       {list.isLoading ? (
-        <p className="text-sm text-neutral-500">Loading…</p>
+        <p className="text-sm text-on-surface-variant">Loading…</p>
       ) : plugins.length === 0 ? (
         <Card className="bg-surface">
           <CardTitle>No plugins installed</CardTitle>
           <CardDescription>
             Paste a manifest URL or a local plugin directory above to install.
             Plugins live at{" "}
-            <code className="rounded bg-elevated px-1 py-0.5 font-mono text-[0.78rem] text-neutral-200">
+            <code className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.78rem] text-on-surface">
               ~/.bot-hq/plugins/&lt;id&gt;/
             </code>{" "}
             once installed.
@@ -180,15 +180,15 @@ function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
           title={statusLabel(status, enabled)}
         />
         <CardTitle>{plugin.name}</CardTitle>
-        <span className="rounded bg-elevated px-1.5 py-0.5 font-mono text-[0.65rem] text-neutral-300">
+        <span className="rounded bg-surface-container-high px-1.5 py-0.5 font-mono text-[0.65rem] text-on-surface">
           v{plugin.version}
         </span>
-        <span className="ml-auto text-[0.65rem] text-neutral-500">
+        <span className="ml-auto text-[0.65rem] text-on-surface-variant">
           {statusLabel(status, enabled)}
         </span>
       </header>
 
-      <div className="mb-3 text-xs text-neutral-400">
+      <div className="mb-3 text-xs text-on-surface-variant">
         <code className="font-mono">{manifest.id}</code> · entry{" "}
         <code className="font-mono">{manifest.entry}</code>
         {manifest.requested_capabilities &&
@@ -199,7 +199,7 @@ function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
               {manifest.requested_capabilities.map((c) => (
                 <code
                   key={c}
-                  className="ml-1 rounded bg-elevated px-1 py-0.5 font-mono text-[0.65rem] text-neutral-300"
+                  className="ml-1 rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.65rem] text-on-surface"
                 >
                   {c}
                 </code>
@@ -209,12 +209,12 @@ function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
       </div>
 
       {namedSlots.length > 0 && (
-        <div className="mb-3 text-[0.65rem] text-neutral-500">
+        <div className="mb-3 text-[0.65rem] text-on-surface-variant">
           slots:{" "}
           {namedSlots.map((s, i) => (
             <code
               key={i}
-              className="ml-1 rounded bg-elevated px-1 py-0.5 font-mono text-neutral-300"
+              className="ml-1 rounded bg-surface-container-high px-1 py-0.5 font-mono text-on-surface"
             >
               {s.slot_name}
             </code>
@@ -242,7 +242,7 @@ function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
         {panelSlot?.panel_route && (
           <a
             href={`#${panelSlot.panel_route}`}
-            className="ml-auto text-xs text-blue-400 underline hover:text-blue-300"
+            className="ml-auto text-xs text-tertiary underline hover:text-tertiary"
           >
             Open panel →
           </a>

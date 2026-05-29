@@ -153,7 +153,7 @@ export function Dashboard() {
             aria-label="New session"
             className={cn(
               "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] -translate-x-1/2 -translate-y-1/2",
-              "rounded-lg border border-default bg-surface-container p-5 shadow-2xl",
+              "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl",
             )}
           >
             <div className="mb-4 flex items-center justify-between">
@@ -192,7 +192,7 @@ export function Dashboard() {
                   value={selectedProject}
                   onChange={(e) => setSelectedProject(e.target.value)}
                   className={cn(
-                    "w-full rounded-md border border-default bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                    "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
                     "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
                   )}
                 >
@@ -239,7 +239,7 @@ export function Dashboard() {
               onClick={() => setFilter("")}
               aria-label="Clear filter"
               title="Clear filter"
-              className="absolute inset-y-0 right-0 flex w-8 items-center justify-center text-neutral-500 hover:text-neutral-100"
+              className="absolute inset-y-0 right-0 flex w-8 items-center justify-center text-on-surface-variant hover:text-on-surface"
             >
               ×
             </button>
@@ -247,13 +247,13 @@ export function Dashboard() {
         </div>
       )}
       {error && (
-        <div className="mb-6 rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3">
-          <p className="text-sm text-red-200">
+        <div className="mb-6 rounded-lg border border-error/40 bg-error-container/30 px-4 py-3">
+          <p className="text-sm text-on-error-container">
             Failed to load sessions: {error.message}
           </p>
           <button
             onClick={() => refetch()}
-            className="mt-1 text-xs text-red-300 underline hover:text-red-100"
+            className="mt-1 text-xs text-on-error-container underline hover:text-error"
           >
             Retry
           </button>

@@ -70,7 +70,7 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
         />
         <kbd
           aria-hidden
-          className="pointer-events-none absolute bottom-1.5 right-2 select-none rounded border border-default bg-canvas px-1.5 py-0.5 font-mono text-[0.65rem] text-neutral-500"
+          className="pointer-events-none absolute bottom-1.5 right-2 select-none rounded border border-outline-variant bg-surface-container-lowest px-1.5 py-0.5 font-mono text-[0.65rem] text-on-surface-variant"
           title="Send"
         >
           {hint}

@@ -203,18 +203,18 @@ export function SessionView() {
 
   if (!session) {
     return (
-      <div className="p-6 text-sm text-neutral-500">
+      <div className="p-6 text-sm text-on-surface-variant">
         {sessionError ? (
           <>
-            <p className="mb-2 text-red-300">
+            <p className="mb-2 text-on-error-container">
               Failed to load session: {sessionError.message}
             </p>
-            <p className="text-xs text-neutral-500">id: {sessionId}</p>
+            <p className="text-xs text-on-surface-variant">id: {sessionId}</p>
           </>
         ) : (
           <>Session not found.</>
         )}{" "}
-        <Link to="/" className="text-blue-400 underline">
+        <Link to="/" className="text-tertiary underline">
           Back to dashboard
         </Link>
       </div>
@@ -223,25 +223,25 @@ export function SessionView() {
 
   return (
     <div className="grid h-full grid-cols-[3fr_2fr] grid-rows-1">
-      <section className="flex h-full min-h-0 min-w-0 flex-col border-r border-default">
-        <header className="flex items-center justify-between border-b border-default px-4 py-3">
+      <section className="flex h-full min-h-0 min-w-0 flex-col border-r border-outline-variant">
+        <header className="flex items-center justify-between border-b border-outline-variant px-4 py-3">
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold tracking-tight">
               {session.title}
             </h1>
-            <p className="text-xs text-neutral-500">
-              <Link to="/" className="hover:text-neutral-300">
+            <p className="text-xs text-on-surface-variant">
+              <Link to="/" className="hover:text-on-surface">
                 ← Dashboard
               </Link>
-              <span className="mx-2 text-neutral-700">·</span>
-              <code className="font-mono text-[0.65rem] text-neutral-600">
+              <span className="mx-2 text-outline-variant">·</span>
+              <code className="font-mono text-[0.65rem] text-on-surface-variant">
                 {sessionId.slice(0, 8)}
               </code>
               {phase && (
                 <>
-                  <span className="mx-2 text-neutral-700">·</span>
-                  <span className="text-neutral-400">
-                    Phase: <span className="text-neutral-200">{phase}</span>
+                  <span className="mx-2 text-outline-variant">·</span>
+                  <span className="text-on-surface-variant">
+                    Phase: <span className="text-on-surface">{phase}</span>
                   </span>
                 </>
               )}
@@ -289,11 +289,11 @@ export function SessionView() {
         </header>
 
         {respawnError && (
-          <div className="border-b border-default bg-red-950/30 px-4 py-2 text-xs text-red-200">
+          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">
             <span className="font-semibold">Agent spawn failed:</span>{" "}
             {respawnError.message}{" "}
             <button
-              className="ml-2 underline"
+              className="ml-2 underline hover:text-error"
               onClick={() => {
                 setRespawnError(null);
                 respawn.mutate(
@@ -308,11 +308,11 @@ export function SessionView() {
         )}
 
         {screenshotError && (
-          <div className="border-b border-default bg-red-950/30 px-4 py-2 text-xs text-red-200">
+          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">
             <span className="font-semibold">Screenshot failed:</span>{" "}
             {screenshotError}
             <button
-              className="ml-2 underline"
+              className="ml-2 underline hover:text-error"
               onClick={dismissScreenshotError}
             >
               dismiss
@@ -321,7 +321,7 @@ export function SessionView() {
         )}
 
         {choicesForSession.length > 0 && (
-          <div className="border-b border-default bg-surface-container px-4 py-3">
+          <div className="border-b border-outline-variant bg-surface-container px-4 py-3">
             <div className="mb-2 flex items-center gap-2 font-label-caps text-label-caps text-secondary">
               <span className="inline-block h-2 w-2 rounded-full bg-secondary motion-safe:animate-pulse" />
               {choicesForSession.length === 1
@@ -355,7 +355,7 @@ export function SessionView() {
           {messagesLoading && messages.length === 0 ? (
             <MessagesSkeleton />
           ) : messages.length === 0 ? (
-            <p className="text-sm text-neutral-500">No messages yet…</p>
+            <p className="text-sm text-on-surface-variant">No messages yet…</p>
           ) : (
             messages.map((m, i) => (
               <ChatMessage
@@ -376,8 +376,8 @@ export function SessionView() {
                 onClick={scrollToBottom}
                 className={cn(
                   "pointer-events-auto inline-flex items-center gap-1 rounded-full",
-                  "border border-default bg-overlay px-3 py-1 text-xs text-neutral-200 shadow-lg",
-                  "hover:border-accent hover:text-white transition-colors",
+                  "border border-outline-variant bg-surface-container-highest px-3 py-1 text-xs text-on-surface shadow-lg",
+                  "hover:border-primary hover:text-on-surface transition-colors",
                 )}
               >
                 ↓ Jump to latest
@@ -386,7 +386,7 @@ export function SessionView() {
           )}
         </div>
 
-        <div className="border-t border-default">
+        <div className="border-t border-outline-variant">
           <ChatInput
             placeholder="Broadcast to Brian + Rain…"
             onSend={async (text) => {
@@ -406,9 +406,9 @@ function MessagesSkeleton() {
     <div className="space-y-4">
       {[0, 1, 2].map((i) => (
         <div key={i} className="space-y-2">
-          <div className="h-3 w-12 animate-pulse rounded bg-elevated" />
-          <div className="h-3 w-3/4 animate-pulse rounded bg-elevated" />
-          <div className="h-3 w-1/2 animate-pulse rounded bg-elevated" />
+          <div className="h-3 w-12 animate-pulse rounded bg-surface-container-high" />
+          <div className="h-3 w-3/4 animate-pulse rounded bg-surface-container-high" />
+          <div className="h-3 w-1/2 animate-pulse rounded bg-surface-container-high" />
         </div>
       ))}
     </div>

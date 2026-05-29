@@ -25,7 +25,7 @@ export const ChatMessage = memo(function ChatMessage({
 }: ChatMessageProps) {
   if (message.kind === "phase_change") {
     return (
-      <div className="my-4 text-center text-[0.7rem] italic text-neutral-500">
+      <div className="my-4 text-center text-[0.7rem] italic text-on-surface-variant">
         — {message.content} —
       </div>
     );
@@ -47,12 +47,12 @@ export const ChatMessage = memo(function ChatMessage({
           >
             {message.author}
           </span>
-          <span className="text-[0.65rem] text-neutral-600">
+          <span className="text-[0.65rem] text-on-surface-variant">
             {formatRelative(message.created_at)}
           </span>
         </header>
       )}
-      <div className="prose-tight text-sm text-neutral-100">
+      <div className="prose-tight text-sm text-on-surface">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           components={{
@@ -71,13 +71,13 @@ export const ChatMessage = memo(function ChatMessage({
                 : false;
               if (isBlock) {
                 return (
-                  <pre className="my-2 overflow-x-auto rounded border border-default bg-canvas px-3 py-2 font-mono text-[0.75rem] leading-relaxed text-neutral-200">
+                  <pre className="my-2 overflow-x-auto rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.75rem] leading-relaxed text-on-surface">
                     <code className={className}>{children}</code>
                   </pre>
                 );
               }
               return (
-                <code className="rounded bg-elevated px-1 py-0.5 font-mono text-[0.78rem] text-neutral-200">
+                <code className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.78rem] text-on-surface">
                   {children}
                 </code>
               );
@@ -88,7 +88,7 @@ export const ChatMessage = memo(function ChatMessage({
                 href={href}
                 target="_blank"
                 rel="noreferrer"
-                className="text-blue-400 underline hover:text-blue-300"
+                className="text-tertiary underline hover:text-tertiary"
               >
                 {children}
               </a>
@@ -101,7 +101,7 @@ export const ChatMessage = memo(function ChatMessage({
             ),
             li: ({ children }) => <li className="leading-relaxed">{children}</li>,
             blockquote: ({ children }) => (
-              <blockquote className="my-2 border-l-2 border-default pl-3 italic text-neutral-300">
+              <blockquote className="my-2 border-l-2 border-outline-variant pl-3 italic text-on-surface">
                 {children}
               </blockquote>
             ),
@@ -161,7 +161,7 @@ function ToolMessage({
           >
             {message.author}
           </span>
-          <span className="text-[0.65rem] text-neutral-600">
+          <span className="text-[0.65rem] text-on-surface-variant">
             {formatRelative(message.created_at)}
           </span>
         </header>
@@ -171,23 +171,23 @@ function ToolMessage({
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
         className={cn(
-          "flex w-full items-center gap-2 rounded border border-default bg-surface px-2 py-1 text-left",
-          "text-[0.7rem] text-neutral-400 hover:bg-elevated transition-colors",
+          "flex w-full items-center gap-2 rounded border border-outline-variant bg-surface px-2 py-1 text-left",
+          "text-[0.7rem] text-on-surface-variant hover:bg-surface-container-high transition-colors",
         )}
         title={isUse ? "tool call" : "tool result"}
       >
-        <span aria-hidden className="w-3 text-neutral-500">
+        <span aria-hidden className="w-3 text-on-surface-variant">
           {expanded ? "▾" : "▸"}
         </span>
-        <span className="font-mono text-neutral-300">
+        <span className="font-mono text-on-surface">
           {isUse ? "→" : "←"} {toolName}
         </span>
-        <span className="flex-1 truncate font-mono text-neutral-500">
+        <span className="flex-1 truncate font-mono text-on-surface-variant">
           {preview}
         </span>
       </button>
       {expanded && (
-        <pre className="mt-1 overflow-x-auto rounded border border-default bg-canvas px-3 py-2 font-mono text-[0.7rem] leading-relaxed text-neutral-300">
+        <pre className="mt-1 overflow-x-auto rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.7rem] leading-relaxed text-on-surface">
           {(() => {
             try {
               return JSON.stringify(parsed ?? message.content, null, 2);

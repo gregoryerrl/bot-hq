@@ -3,11 +3,13 @@ import { cn } from "../lib/cn";
 export type Phase = "investigate" | "plan" | "apply" | "verify";
 const PHASES: Phase[] = ["investigate", "plan", "apply", "verify"];
 
+// Phase->color buckets match SessionPhaseChip (investigate/plan=primary,
+// apply=secondary, verify=tertiary) so the two IPAV widgets agree.
 const tintByPhase: Record<Phase, string> = {
-  investigate: "border-amber-500/70 text-amber-300",
-  plan: "border-blue-500/70 text-blue-300",
-  apply: "border-emerald-500/70 text-emerald-300",
-  verify: "border-purple-500/70 text-purple-300",
+  investigate: "border-primary/70 text-primary",
+  plan: "border-primary/70 text-primary",
+  apply: "border-secondary/70 text-secondary",
+  verify: "border-tertiary/70 text-tertiary",
 };
 
 const label: Record<Phase, string> = {
@@ -33,14 +35,14 @@ export function PhasePill({ phase, selected, onSelect, count }: PhasePillProps) 
         "border-t-2",
         tintByPhase[phase],
         selected
-          ? "bg-neutral-800/80"
-          : "bg-transparent border-transparent text-neutral-500 hover:text-neutral-300",
+          ? "bg-surface-container-high/80"
+          : "bg-transparent border-transparent text-on-surface-variant hover:text-on-surface",
       )}
       title={phase}
     >
       <span>{label[phase]}</span>
       {count !== undefined && count > 0 && (
-        <span className="text-[0.65rem] text-neutral-400">·{count}</span>
+        <span className="text-[0.65rem] text-on-surface-variant">·{count}</span>
       )}
     </button>
   );

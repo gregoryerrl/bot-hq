@@ -3,9 +3,9 @@ const colorByAuthor: Record<string, string> = {
   rain: "text-author-rain",
   emma: "text-author-emma",
   user: "text-author-user",
-  system: "text-neutral-500",
+  system: "text-on-surface-variant",
 };
 
 export function authorColorClass(author: string) {
-  return colorByAuthor[author] ?? "text-neutral-300";
+  return colorByAuthor[author] ?? "text-on-surface-variant";
 }
