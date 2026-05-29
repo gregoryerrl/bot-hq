@@ -276,16 +276,6 @@ impl SignalingBridge {
         storage.questions_for_session(session_id).await
     }
 
-    /// Count pending questions for a session — drives the dashboard
-    /// `[Need User Input] · N` badge.
-    pub async fn pending_question_count(&self, session_id: &str) -> Result<i64> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
-            return Ok(0);
-        };
-        storage.pending_question_count(session_id).await
-    }
-
     /// Called by the UI when the user clicks a choice button.
     pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<ResolveOutcome> {
         // Mark the storage row answered first so the UI/tray updates even if
@@ -531,10 +521,6 @@ impl SignalingBridge {
         });
     }
 
-    /// For tests / introspection: how many choices are parked?
-    pub async fn pending_choice_count(&self) -> usize {
-        self.pending.lock().await.len()
-    }
 }
 
 #[cfg(test)]

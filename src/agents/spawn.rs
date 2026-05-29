@@ -76,11 +76,9 @@ pub enum AgentEvent {
         is_error: bool,
     },
     /// System/init event — agent is ready and reporting its session metadata.
-    Init {
-        model: Option<String>,
-        cwd: Option<String>,
-        session_id: Option<String>,
-    },
+    /// (The wire `SystemEvent::Init` also carries `model`/`cwd`, but no
+    /// consumer reads them, so they are not forwarded here.)
+    Init { session_id: Option<String> },
     /// Process exited. Carries exit-status string for log/observability.
     Exited(String),
     /// Catch-all for fatal errors the supervisor wants to surface.

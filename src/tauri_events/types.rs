@@ -80,43 +80,6 @@ impl ChoiceResolvedEvent {
     pub const EVENT_NAME: &'static str = "session:choice_resolved";
 }
 
-/// Emitted when a new session row is persisted (from Tauri's `create_session`
-/// command path). Dashboards listen to refresh their tile grid.
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct SessionCreatedEvent {
-    pub session_id: String,
-    pub title: String,
-}
-
-impl SessionCreatedEvent {
-    pub const EVENT_NAME: &'static str = "session:created";
-}
-
-/// Emitted when an agent subprocess dies (panic, OOM, kill -9). React
-/// SessionView shows a red banner + "Restart agent" button.
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct SessionSubprocessDiedEvent {
-    pub session_id: String,
-    pub agent: String,
-    pub exit_code: Option<i32>,
-    pub reason: String,
-}
-
-impl SessionSubprocessDiedEvent {
-    pub const EVENT_NAME: &'static str = "session:subprocess_died";
-}
-
-/// Emitted by the plugin loader. Frontend PluginManager reconciles.
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct PluginEvent {
-    pub plugin_id: String,
-    pub kind: String,
-}
-
-impl PluginEvent {
-    pub const EVENT_NAME: &'static str = "plugin:event";
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

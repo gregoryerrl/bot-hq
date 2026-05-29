@@ -128,18 +128,6 @@ impl Storage {
         Ok(rows)
     }
 
-    /// Count pending questions per session. Convenience for the dashboard
-    /// card badge — `[Need User Input] · N`.
-    pub async fn pending_question_count(&self, session_id: &str) -> Result<i64> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM session_questions WHERE session_id = ? AND status = 'pending'",
-        )
-        .bind(session_id)
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(row.0)
-    }
-
     /// Look up a question by its `choice_id`. Returns None if absent.
     pub async fn get_question(&self, choice_id: &str) -> Result<Option<SessionQuestion>> {
         let row = sqlx::query_as::<_, SessionQuestion>(

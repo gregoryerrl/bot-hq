@@ -66,16 +66,9 @@ fn short_line(s: &str) -> String {
 pub fn translate(ev: StreamEvent) -> Vec<AgentEvent> {
     match ev {
         StreamEvent::System(sys) => match sys {
-            SystemEvent::Init {
-                model,
-                cwd,
-                session_id,
-                ..
-            } => vec![AgentEvent::Init {
-                model,
-                cwd,
-                session_id,
-            }],
+            SystemEvent::Init { session_id, .. } => {
+                vec![AgentEvent::Init { session_id }]
+            }
             _ => Vec::new(),
         },
         StreamEvent::Assistant(asst) => asst

@@ -18,7 +18,4 @@ pub mod types;
 
 pub use batch_emitter::BatchEmitter;
 pub use bridge_subscriber::spawn_subscriber;
-pub use types::{
-    AgentMessage, AwaitingUser, ChoiceResolvedEvent, PhaseChangedEvent,
-    PluginEvent, SessionCreatedEvent, SessionSubprocessDiedEvent,
-};
+pub use types::{AgentMessage, AwaitingUser, ChoiceResolvedEvent, PhaseChangedEvent};
