@@ -1,7 +1,7 @@
 import { memo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { authorColorClass } from "./AuthorBadge";
+import { authorColorClass } from "./authorColor";
 import { cn } from "../lib/cn";
 import type { AgentMessage } from "../lib/bindings";
 

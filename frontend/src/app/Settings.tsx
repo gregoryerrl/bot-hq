@@ -3,6 +3,7 @@ import { useBlocker } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
+import { SaveIcon } from "./contextLibraryShared";
 import type { AgentConfigView } from "../lib/bindings";
 
 // Curated provider list for the dropdown. Any provider value not in this
@@ -423,21 +424,3 @@ function formatTimestamp(iso: string): string {
   return d.toLocaleString();
 }
 
-function SaveIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={cn("size-3.5", className)}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
-      <polyline points="17 21 17 13 7 13 7 21" />
-      <polyline points="7 3 7 8 15 8" />
-    </svg>
-  );
-}
