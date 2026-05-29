@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Column list for a `Message` row — shared across the `messages_for_session`
+/// query branches so the projection can't drift between them.
+const MESSAGE_COLUMNS: &str = "id, session_id, author, kind, content, created_at";
+
 impl Storage {
     pub async fn insert_message(
         &self,
@@ -32,20 +36,20 @@ impl Storage {
     ) -> Result<Vec<Message>> {
         let rows = match since_id {
             Some(sid) => {
-                sqlx::query_as::<_, Message>(
-                    "SELECT id, session_id, author, kind, content, created_at \
-                     FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC",
-                )
+                sqlx::query_as::<_, Message>(&format!(
+                    "SELECT {MESSAGE_COLUMNS} FROM messages \
+                     WHERE session_id = ? AND id > ? ORDER BY id ASC"
+                ))
                 .bind(session_id)
                 .bind(sid)
                 .fetch_all(&self.pool)
                 .await?
             }
             None => {
-                sqlx::query_as::<_, Message>(
-                    "SELECT id, session_id, author, kind, content, created_at \
-                     FROM messages WHERE session_id = ? ORDER BY id ASC",
-                )
+                sqlx::query_as::<_, Message>(&format!(
+                    "SELECT {MESSAGE_COLUMNS} FROM messages \
+                     WHERE session_id = ? ORDER BY id ASC"
+                ))
                 .bind(session_id)
                 .fetch_all(&self.pool)
                 .await?

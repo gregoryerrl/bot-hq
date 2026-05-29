@@ -5,6 +5,11 @@
 
 use super::*;
 
+/// Full column projection for a `SessionQuestion` row — shared by
+/// `questions_for_session` and `get_question` so the two can't drift.
+const QUESTION_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
+     options_json, status, picked_option, asked_at, answered_at, supersedes_id";
+
 impl Storage {
     /// Insert a fresh question row in `pending` status. Returns the row id.
     /// `options` is required when kind=Choice (encoded to JSON); ignored
@@ -117,11 +122,10 @@ impl Storage {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionQuestion>> {
-        let rows = sqlx::query_as::<_, SessionQuestion>(
-            "SELECT id, session_id, choice_id, agent, kind, prompt, options_json, \
-                    status, picked_option, asked_at, answered_at, supersedes_id \
-             FROM session_questions WHERE session_id = ? ORDER BY id ASC",
-        )
+        let rows = sqlx::query_as::<_, SessionQuestion>(&format!(
+            "SELECT {QUESTION_COLUMNS} FROM session_questions \
+             WHERE session_id = ? ORDER BY id ASC"
+        ))
         .bind(session_id)
         .fetch_all(&self.pool)
         .await?;
@@ -130,11 +134,9 @@ impl Storage {
 
     /// Look up a question by its `choice_id`. Returns None if absent.
     pub async fn get_question(&self, choice_id: &str) -> Result<Option<SessionQuestion>> {
-        let row = sqlx::query_as::<_, SessionQuestion>(
-            "SELECT id, session_id, choice_id, agent, kind, prompt, options_json, \
-                    status, picked_option, asked_at, answered_at, supersedes_id \
-             FROM session_questions WHERE choice_id = ?",
-        )
+        let row = sqlx::query_as::<_, SessionQuestion>(&format!(
+            "SELECT {QUESTION_COLUMNS} FROM session_questions WHERE choice_id = ?"
+        ))
         .bind(choice_id)
         .fetch_optional(&self.pool)
         .await?;

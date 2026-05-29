@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// Full column projection for a `SessionDocument` row — shared by
+/// `session_documents_for` and `session_document_by_slug`.
+const DOCUMENT_COLUMNS: &str = "id, session_id, slug, body, created_at, updated_at, phase";
+
 impl Storage {
     /// Upsert a per-session document by (session_id, slug). On conflict the
     /// body is overwritten, `phase` is replaced, and `updated_at` is refreshed;
@@ -62,9 +66,8 @@ impl Storage {
         phase: Option<&str>,
     ) -> Result<Vec<SessionDocument>> {
         let like = query.map(|q| format!("%{}%", q.to_lowercase()));
-        let mut sql = String::from(
-            "SELECT id, session_id, slug, body, created_at, updated_at, phase \
-             FROM session_documents WHERE session_id = ?",
+        let mut sql = format!(
+            "SELECT {DOCUMENT_COLUMNS} FROM session_documents WHERE session_id = ?"
         );
         if like.is_some() {
             sql.push_str(" AND (LOWER(slug) LIKE ? OR LOWER(body) LIKE ?)");
@@ -102,11 +105,10 @@ impl Storage {
         session_id: &str,
         slug: &str,
     ) -> Result<Option<SessionDocument>> {
-        let row = sqlx::query_as::<_, SessionDocument>(
-            "SELECT id, session_id, slug, body, created_at, updated_at, phase \
-             FROM session_documents \
-             WHERE session_id = ? AND slug = ?",
-        )
+        let row = sqlx::query_as::<_, SessionDocument>(&format!(
+            "SELECT {DOCUMENT_COLUMNS} FROM session_documents \
+             WHERE session_id = ? AND slug = ?"
+        ))
         .bind(session_id)
         .bind(slug)
         .fetch_optional(&self.pool)
