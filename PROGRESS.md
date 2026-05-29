@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-300 tests passing (251 lib + 32 external MCP + 7 signaling + 10 storage)
-plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
+305 tests passing (256 lib + 32 external MCP + 7 signaling + 10 storage)
+plus 28 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
@@ -20,6 +20,41 @@ plus 14 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-05-29 — Context Library view rework (post-migration UX fixes)
+
+The Tauri v2 migration left the Context Library tab with several regressions vs
+the old Slint UI. Brian + Rain triaged all five user-reported issues (plus
+extras) and shipped four batches, each holding all five gates (cargo test,
+release build, tsc, vitest, vite build):
+
+- `fix: make Context Library files editable with save guards` (`49ff094`) —
+  files were read-only (no `cl_write_file`). Added the command (sharing
+  `cl_read_file`'s path-traversal guard via a new `resolve_existing_cl_file`
+  helper), made the editor a real textarea with dirty tracking + a single
+  primary Save, demoted the description editor to a secondary "Metadata" action
+  (killing the duplicate-Save-button confusion), and added a `binary` flag so
+  non-UTF-8 / truncated files stay read-only (can't be corrupted on save).
+  Renamed the sidebar header "WORKSPACE" → "Library Tree".
+- `add: Context Library recursive folder tree and folder-view` (`0869fe4`) —
+  the tree was a flat per-project file list; rebuilt it as nested collapsible
+  folders (`buildTree`). A folder click now toggles collapse AND opens a
+  folder-view tab that edits the folder's description/tags
+  (`cl_set_folder_description`). `OpenTab` became a file|folder union.
+- `add: register and unregister Context Library projects from the UI`
+  (`d43ce20`) — a sidebar "Register project" modal promotes an arbitrary
+  on-disk folder to a project (`cl_register_project`, path validated as a real
+  dir); the project-root folder-view configures the working-repo + soft-
+  unregisters (`cl_unregister_project`). `cl_path` added to `ProjectView`.
+- `add: Context Library right-click menu and file/folder disk ops` (`b2d1a6c`)
+  — VSCode-style right-click: new file, new folder, rename, delete
+  (`cl_create_file` / `cl_mkdir` / `cl_rename` / `cl_delete_path`, all path-
+  guarded; delete is confirm-gated). Each op runs `cl_rescan` to resync the index.
+
+Net: 15 files, +2076/−134. The Rust side stayed within the existing thin
+`#[tauri::command]`-over-storage/bridge pattern. Deferred: native folder picker
+(text-input path for now — needs the Tauri dialog plugin), rename re-derives
+descriptions, hard delete (no OS trash).
 
 ## 2026-05-29 — round 6 refactor sweep (docs + plugin-module organization)
 
