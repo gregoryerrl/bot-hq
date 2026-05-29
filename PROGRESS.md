@@ -21,6 +21,50 @@ constraint.
 
 ---
 
+## 2026-05-29 — round 6 refactor sweep (docs + plugin-module organization)
+
+Another maintenance sweep. Brian + Rain ran parallel scans; Brian verified each
+finding against the tree before applying. The codebase remains clean after round
+5 (no dead code, no Slint staleness, no unused deps), so the round is small —
+three commits, all zero-behavior-change:
+
+- `docs: fix stale bridge.rs paths and test count` (`c0f5617`) — ARCHITECTURE.md
+  referenced `src/signaling/bridge.rs` at two sites, but Batch 6 split it into
+  the `bridge/` submodule tree; PLAN.md's test count (288) lagged the real suite
+  (300).
+- `refactor: extract InstalledPluginView::from_row constructor` (`267720c`) —
+  `install_plugin_inner` and `list_installed_plugins_inner` built the view from
+  `(row, manifest, heartbeat)` with the same `status_of(id).unwrap_or(Healthy)`
+  resolution; collapse both to a `from_row` constructor. (install previously
+  keyed status off `manifest.id`, list off `row.id` — equal, since the row was
+  just inserted from that manifest.)
+- `refactor: move PluginRegistry to plugins module` (`28de0bf`) — `PluginRegistry`
+  has zero Tauri deps (wraps `plugins::Loader` + `plugins::Heartbeat` over plain
+  `PathBuf`/`Mutex`). Moved the struct + impl + its three runtime tests from
+  `tauri_cmd/plugins.rs` to a new `plugins/registry.rs`, re-exported as
+  `crate::plugins::PluginRegistry`, so the command file holds only Tauri shims.
+
+**Deliberately NOT done** (recorded so they aren't re-proposed): R3 — unifying
+`jsonrpc::parse_optional_phase`'s error message onto `IpavPhase::error_hint()`
+would be an *accuracy regression*: `error_hint()` advertises chip-form
+(`I/P/A/V`), but `parse_optional_phase` accepts only lowercase full names, so the
+message would tell agents to send inputs the validator rejects. A real unify
+(make the two session_doc tools accept chip-form via `parse_phase_arg` +
+normalize) is a behavior change beyond a polish round. F1 — moving the
+`ContextLibrary*` components from `src/app/` to `src/components/` is
+organizational-only with no duplication saved; deferred per the same precedent as
+the Round 2 F8/F9/F10 splits. R4 — `arg_clear_on_empty` is not duplicated (single
+def in `external_jsonrpc.rs`, used twice locally).
+
+Gotcha worth carrying: removing `PathBuf` from `tauri_cmd/plugins.rs`'s top-level
+imports (it lost its last non-test user when the struct moved) cleared an
+`unused_import` warning in the non-test build — but the `#[cfg(test)]` helper
+`write_plugin_source() -> PathBuf` still needed it. A warnings-only or
+non-test-build gate masks this; only a full `cargo test` build surfaces the
+`cannot find type PathBuf`. The fix is a test-module-scoped `use std::path::PathBuf;`.
+
+300 Rust + 14 frontend tests green; release build clean.
+
 ## 2026-05-29 — round 5 refactor sweep (storage / signaling / tauri cleanups)
 
 A maintenance sweep after the Rain fix. The codebase came back clean (zero
