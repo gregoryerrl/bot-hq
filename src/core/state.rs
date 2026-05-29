@@ -173,6 +173,18 @@ impl AppState {
         self.storage.list_active_sessions().await
     }
 
+    /// Clear the awaiting-user halt for a live session: flip the handle's
+    /// atomic AND the bridge's mirror (kept in sync — both point at the same
+    /// `Arc<AtomicBool>`, but the bridge copy is what survives if the
+    /// `SessionHandle` is dropped). Does NOT touch pending-halt rows; callers
+    /// that also answer those call `clear_pending_halts` separately.
+    async fn clear_awaiting(&self, handle: &SessionHandle, session_id: &str) {
+        handle
+            .awaiting
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.bridge.clear_session_awaiting(session_id).await;
+    }
+
     pub async fn broadcast(&self, session_id: &str, text: &str) -> Result<()> {
         // Emma is a solo singleton — route to her single agent, not the duo path.
         if session_id == "emma" {
@@ -200,13 +212,8 @@ impl AppState {
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
         // Clear the awaiting halt BEFORE forwarding the user's reply so the
-        // duo pumps see chunks again. The bridge map is also cleared (kept
-        // in sync) — both point at the same Arc<AtomicBool>, but the bridge
-        // call is what survives if/when SessionHandle is dropped.
-        handle
-            .awaiting
-            .store(false, std::sync::atomic::Ordering::Release);
-        self.bridge.clear_session_awaiting(session_id).await;
+        // duo pumps see chunks again.
+        self.clear_awaiting(handle, session_id).await;
         // Flip every pending `mark_awaiting_user` row to 'answered' — the
         // user's reply IS the answer to a halt. `choice` rows stay pending
         // until the user actually picks an option.
@@ -238,10 +245,7 @@ impl AppState {
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
 
-        handle
-            .awaiting
-            .store(false, std::sync::atomic::Ordering::Release);
-        self.bridge.clear_session_awaiting(session_id).await;
+        self.clear_awaiting(handle, session_id).await;
         if let Err(e) = self.storage.clear_pending_halts(session_id).await {
             tracing::warn!(?e, session_id, "clear_pending_halts (advance_phase) failed");
         }
@@ -258,9 +262,9 @@ impl AppState {
         self.bridge
             .notify_message_persisted(session_id.to_string(), id);
         // And fed to both agents' stdin so they pick it up as a natural prompt.
-        let msg = OutgoingUserMessage::text(notice);
-        let _ = handle.brian.input_tx.send(msg.clone()).await;
-        let _ = handle.rain.input_tx.send(msg).await;
+        handle
+            .send_to_both(OutgoingUserMessage::text(notice))
+            .await;
         Ok(())
     }
 
@@ -292,15 +296,12 @@ impl AppState {
                     // future re-opens of the session view will still see it.
                     return Ok(());
                 };
-                handle
-                    .awaiting
-                    .store(false, std::sync::atomic::Ordering::Release);
-                self.bridge.clear_session_awaiting(&session_id).await;
+                self.clear_awaiting(handle, &session_id).await;
                 let phase = handle.ipav.lock().await.current_phase;
                 let wire = with_phase_envelope(phase, &body);
-                let msg = crate::agents::OutgoingUserMessage::text(wire);
-                let _ = handle.brian.input_tx.send(msg.clone()).await;
-                let _ = handle.rain.input_tx.send(msg).await;
+                handle
+                    .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
+                    .await;
                 Ok(())
             }
         }

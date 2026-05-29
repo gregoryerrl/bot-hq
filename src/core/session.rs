@@ -50,6 +50,16 @@ pub struct SessionHandle {
     _mcp_temp: TempDir,
 }
 
+impl SessionHandle {
+    /// Fan a wire message to both agents' stdin. Send errors are ignored: a
+    /// closed input channel means the subprocess is already gone, which this
+    /// caller can't remediate.
+    pub async fn send_to_both(&self, msg: crate::agents::OutgoingUserMessage) {
+        let _ = self.brian.input_tx.send(msg.clone()).await;
+        let _ = self.rain.input_tx.send(msg).await;
+    }
+}
+
 /// Emma's solo singleton session — different shape from `SessionHandle` because
 /// Emma is a single agent with no duo / peer-forwarding / IPAV state.
 pub struct EmmaHandle {
@@ -424,10 +434,7 @@ pub fn read_system_prompt(
     // 1. Hardcoded role.
     let role = crate::agents::role_for(agent);
     if !role.is_empty() {
-        out.push_str(role);
-        if !out.ends_with("\n\n") {
-            out.push_str("\n\n");
-        }
+        push_section(&mut out, role);
     }
 
     // 2. CL location anchor + index-first workflow. Without this, agents
@@ -472,10 +479,7 @@ pub fn read_system_prompt(
     ));
 
     // 3. Hardcoded universal rules — always present.
-    out.push_str(crate::agents::GENERAL_RULES);
-    if !out.ends_with("\n\n") {
-        out.push_str("\n\n");
-    }
+    push_section(&mut out, crate::agents::GENERAL_RULES);
 
     // 4 + 5. Optional user-editable slots: custom-general-rules.md applies to
     // all agents; agents/<name>/custom-instruction.md is per-agent.
@@ -486,12 +490,7 @@ pub fn read_system_prompt(
     ];
     for slot in slots {
         match std::fs::read_to_string(&slot) {
-            Ok(s) if !s.trim().is_empty() => {
-                out.push_str(&s);
-                if !out.ends_with("\n\n") {
-                    out.push_str("\n\n");
-                }
-            }
+            Ok(s) if !s.trim().is_empty() => push_section(&mut out, &s),
             Ok(_) => {} // empty file — silently skip
             Err(err) => {
                 tracing::debug!(path = %slot.display(), %err, "optional CL slot absent");
@@ -507,12 +506,19 @@ pub fn read_system_prompt(
             .context("resolving project policy")?;
     let block = policy.render_system_prompt_block();
     if !block.is_empty() {
-        out.push_str(&block);
-        if !out.ends_with("\n\n") {
-            out.push_str("\n\n");
-        }
+        push_section(&mut out, &block);
     }
     Ok(out)
+}
+
+/// Append `s` to `out`, then ensure the section ends with one blank line so
+/// the next prompt section is visually separated. No-op on spacing if `s`
+/// already ends with "\n\n".
+fn push_section(out: &mut String, s: &str) {
+    out.push_str(s);
+    if !out.ends_with("\n\n") {
+        out.push_str("\n\n");
+    }
 }
 
 /// Spawn Emma's solo agent against the seeded `"emma"` session row. Single
