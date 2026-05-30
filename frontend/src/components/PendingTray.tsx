@@ -5,7 +5,8 @@ import { cn } from "../lib/cn";
 import type { PendingChoiceView } from "../lib/bindings";
 
 /**
- * Topbar NOTIFIER for parked questions across all sessions. This is a
+ * Topbar NOTIFIER for parked questions AND approval-gates across all sessions
+ * (both arrive as PendingChoices). This is a
  * notify-only surface (per #7): it tells the user which sessions need input
  * and links straight to them — it does NOT answer questions inline. Answering
  * happens in the session chat's questions tray (the sole answer surface), so
@@ -50,23 +51,22 @@ export function PendingTray() {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`Questions tray (${count} pending)`}
+        aria-label={`Notifications (${count} awaiting: questions & approvals)`}
         title={
           count === 0
-            ? "Questions tray — nothing awaiting"
-            : `Questions tray — ${count} awaiting`
+            ? "Notifications — nothing awaiting"
+            : `Notifications — ${count} awaiting (questions & approval gates)`
         }
         className={cn(
-          "relative inline-flex items-center gap-1.5 rounded border px-2 py-1 font-label-caps text-label-caps transition-colors",
+          "relative inline-flex items-center rounded border p-1.5 transition-colors",
           count > 0
             ? "border-primary bg-primary/15 text-primary animate-pulse"
             : "border-outline/40 text-on-surface hover:border-outline hover:text-on-surface",
         )}
       >
         <BellIcon />
-        <span>Questions</span>
         {count > 0 && (
-          <span className="ml-1 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-primary px-1 text-[0.65rem] font-semibold text-on-primary">
+          <span className="absolute -right-1.5 -top-1.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-primary px-1 text-[0.65rem] font-semibold text-on-primary">
             {count}
           </span>
         )}
@@ -74,7 +74,7 @@ export function PendingTray() {
       {open && (
         <div
           role="dialog"
-          aria-label="Pending questions"
+          aria-label="Pending notifications"
           className="absolute right-0 top-full z-40 mt-1 max-h-[60vh] w-96 overflow-auto rounded-lg border border-outline-variant bg-surface-container shadow-2xl"
         >
           <header className="border-b border-outline-variant px-3 py-2 font-label-caps text-label-caps text-on-surface-variant">
@@ -115,8 +115,8 @@ function BellIcon() {
     <svg
       aria-hidden
       viewBox="0 0 16 16"
-      width="14"
-      height="14"
+      width="16"
+      height="16"
       fill="none"
       stroke="currentColor"
       strokeWidth="1.5"
