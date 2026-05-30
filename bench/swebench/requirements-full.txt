@@ -1,0 +1,10 @@
+# The smoke / rollout harness itself needs NOTHING beyond the Python stdlib
+# (it talks to bot-hq over urllib and loads the dataset via the HF
+# datasets-server REST API).
+#
+# Install these ONLY for:
+#   - a full-fidelity 500-instance run (the `datasets` lib avoids the
+#     rows-API cell truncation that can clip long problem statements), and
+#   - Phase 2 scoring (the official SWE-bench evaluation harness + Docker).
+datasets>=2.18
+swebench>=2.1
