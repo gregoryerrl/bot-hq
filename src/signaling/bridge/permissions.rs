@@ -124,3 +124,34 @@ impl SignalingBridge {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{GrantScope, PermissionAction};
+
+    #[tokio::test]
+    async fn grant_list_revoke_session_permission_roundtrip() {
+        // Direct coverage of the grant/list/revoke bridge methods the MCP
+        // `grant_session_permission` tool drives (the "you can push" path).
+        // Relocated here from the now-deleted tauri_cmd/policy.rs when its
+        // frontend Tauri commands were retired alongside the GrantPills.
+        let bridge = SignalingBridge::new();
+        bridge
+            .grant_session_permission("s1", PermissionAction::Push, GrantScope::AllBranches)
+            .await
+            .unwrap();
+        let perms = bridge.list_session_permissions("s1").await;
+        assert!(perms.allows_push("any-branch"));
+        assert!(matches!(perms.commit, GrantScope::None));
+
+        bridge
+            .revoke_session_permission("s1", PermissionAction::Push)
+            .await
+            .unwrap();
+        assert!(!bridge
+            .list_session_permissions("s1")
+            .await
+            .allows_push("any-branch"));
+    }
+}

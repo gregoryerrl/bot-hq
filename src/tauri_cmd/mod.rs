@@ -8,7 +8,6 @@
 //! - [`messages`] — chronological chat fetch
 //! - [`agent_configs`] — Settings page per-agent provider/model/token rows
 //! - [`cl`] — Context Library index + folder search, audit, rescan
-//! - [`policy`] — session-level permission grants
 //! - [`questions`] — pending choices + resolve
 //! - [`docs`] — session documents (IPAV tabs)
 //!
@@ -21,7 +20,6 @@ pub mod docs;
 pub mod error;
 pub mod messages;
 pub mod plugins;
-pub mod policy;
 pub mod questions;
 pub mod screenshot;
 pub mod sessions;

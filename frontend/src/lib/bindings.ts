@@ -324,30 +324,6 @@ async clDeletePath(project: string, path: string) : Promise<Result<null, AppErro
     else return { status: "error", error: e  as any };
 }
 },
-async grantSessionPermission(sessionId: string, action: PermissionActionView, scope: GrantScopeView) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("grant_session_permission", { sessionId, action, scope }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async revokeSessionPermission(sessionId: string, action: PermissionActionView) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("revoke_session_permission", { sessionId, action }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listSessionPermissions(sessionId: string) : Promise<Result<SessionPermissionsView, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_session_permissions", { sessionId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async getToolGateKeywords() : Promise<Result<GatedKeyword[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_tool_gate_keywords") };
@@ -570,14 +546,12 @@ export type GatedKeyword = {
  * Case-insensitive substring matched against the tool name OR command.
  */
 keyword: string; mode: GateMode }
-export type GrantScopeView = { kind: "none" } | { kind: "all_branches" } | { kind: "specific"; branches: string[] }
 /**
  * What the frontend sees for each installed plugin. Combines DB row state,
  * parsed manifest, and live heartbeat status.
  */
 export type InstalledPluginView = { id: string; name: string; version: string; enabled: boolean; status: PluginStatus; manifest: PluginManifest; dir_path: string; installed_at: string }
 export type PendingChoiceView = { choice_id: string; session_id: string; agent: string; question: string; options: string[] }
-export type PermissionActionView = "commit" | "push"
 export type PluginManifest = { id: string; name: string; version: string; entry: string; requested_capabilities?: string[]; slots?: PluginSlot[] }
 export type PluginSlot = { 
 /**
@@ -619,7 +593,6 @@ export type ProjectView = { name: string; display_name: string; working_repo_pat
 cl_path: string | null }
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null }
-export type SessionPermissionsView = { commit: GrantScopeView; push: GrantScopeView }
 
 /** tauri-specta globals **/
 

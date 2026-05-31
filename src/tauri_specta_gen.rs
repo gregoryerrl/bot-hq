@@ -21,7 +21,7 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 }
 
 use crate::tauri_cmd::{
-    agent_configs, cl, docs, messages, plugins, policy, questions, screenshot, sessions, tool_gate,
+    agent_configs, cl, docs, messages, plugins, questions, screenshot, sessions, tool_gate,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -59,10 +59,6 @@ pub fn builder() -> Builder<tauri::Wry> {
         cl::cl_mkdir,
         cl::cl_rename,
         cl::cl_delete_path,
-        // Policy / session permissions
-        policy::grant_session_permission,
-        policy::revoke_session_permission,
-        policy::list_session_permissions,
         // Tool Gate (global gated-Bash keywords)
         tool_gate::get_tool_gate_keywords,
         tool_gate::set_tool_gate_keywords,
