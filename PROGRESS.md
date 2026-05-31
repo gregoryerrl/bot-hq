@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-336 tests passing (287 lib + 32 external MCP + 7 signaling + 10 storage)
-plus 28 frontend Vitest. Release build clean. **Tauri v2 migration landed
+345 tests passing (296 lib + 32 external MCP + 7 signaling + 10 storage)
+plus 29 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
@@ -20,6 +20,39 @@ plus 28 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-01 — CL ⇄ IPAV workflow tightening
+
+Tied session docs and the CL more tightly to the IPAV workflow so each
+phase leaves ONE rewritable doc the next phase builds on, and the CL
+stays fresh without bloating. Three commits:
+
+- **One doc per phase, structurally** (`2d205d0`): `session_doc_write`
+  keys phase-tagged docs by phase via an `effective_slug` helper
+  (`bridge/session_docs.rs`) — repeated writes (even under a varied slug
+  like `plan-v2`) overwrite the single `plan` doc, latest body wins. No
+  migration; untagged scratch docs still key by slug. Tool descriptor
+  (`protocol.rs`) now says "rewrite, never -v2".
+- **Markdown doc preview, no count chips** (`3819c9b`): the chat's
+  react-markdown renderer is extracted to a shared `Markdown.tsx` (GFM,
+  code blocks, new-tab links, Industrial-Terminal styling) and reused in
+  `DocumentPane`; the raw `<pre>` is gone and the per-phase doc-count
+  indicators (`PhasePill` `·{n}` + the `{n} docs` span) are removed.
+  Session docs aren't user-editable, so a rendered preview beats raw text.
+- **Phase-doc chaining + CL model + close-loop** (`03d7615`): prompts now
+  require Plan to build on the Investigate doc, Apply on Plan, Verify on
+  Apply; HANDS authors the single phase doc while Rain reviews in chat (no
+  two-author clobber on the shared, author-less `session_documents` row);
+  CL is framed as "study notes, not a textbook" (a where-things-live map,
+  not a code copy); and a write-then-prune close loop has HANDS append
+  ≤~5 non-obvious one-liner learnings to a project's `notes.md` before
+  `close_session` (user curates later in the CL tab). `ARCHITECTURE.md`
+  softened to match.
+
+Tests: 296 lib (+9: 2 session-doc helper, 4 general_rules anchors, 3
+prompts anchors) + 29 frontend (+2 Markdown, −1 PhasePill count). Agents
+pick up the new prompts and the markdown doc view only after a rebuild +
+app restart.
 
 ## 2026-05-31 — Tool Gate: global gated-Bash keywords + action_gate
 
