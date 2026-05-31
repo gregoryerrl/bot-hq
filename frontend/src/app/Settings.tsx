@@ -4,7 +4,7 @@ import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { SaveIcon } from "./contextLibraryShared";
-import type { AgentConfigView } from "../lib/bindings";
+import type { AgentConfigView, GatedKeyword, GateMode } from "../lib/bindings";
 
 // Curated provider list for the dropdown. Any provider value not in this
 // list flips the dropdown to "Other" and reveals a free-text input so a
@@ -114,6 +114,8 @@ export function Settings() {
           ))}
         </div>
       )}
+
+      <ToolGateSection />
     </div>
   );
 }
@@ -314,6 +316,152 @@ function AgentCard({
           </button>
         </div>
       </div>
+    </section>
+  );
+}
+
+// ============================================================================
+// Tool Gate — global gated-Bash keywords
+// ============================================================================
+
+const GATE_MODES: GateMode[] = ["gate", "auto_allow"];
+
+function ToolGateSection() {
+  const { data: keywords = [], refetch, isLoading } =
+    useTauriQuery<GatedKeyword[]>("get_tool_gate_keywords");
+  const save = useTauriMutation<void, { keywords: GatedKeyword[] }>(
+    "set_tool_gate_keywords",
+  );
+
+  // The server list is the baseline; `draft` holds in-progress edits. Re-
+  // hydrate the draft whenever the server list changes (initial load + after a
+  // save's refetch) so dirty-tracking compares against the persisted state.
+  const serverJson = JSON.stringify(keywords);
+  const [draft, setDraft] = useState<GatedKeyword[]>(keywords);
+  const lastServer = useRef(serverJson);
+  useEffect(() => {
+    if (lastServer.current !== serverJson) {
+      lastServer.current = serverJson;
+      setDraft(keywords);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverJson]);
+
+  const dirty = JSON.stringify(draft) !== serverJson;
+
+  const updateRow = (i: number, patch: Partial<GatedKeyword>) =>
+    setDraft((d) => d.map((k, idx) => (idx === i ? { ...k, ...patch } : k)));
+  const removeRow = (i: number) =>
+    setDraft((d) => d.filter((_, idx) => idx !== i));
+  const addRow = () =>
+    setDraft((d) => [...d, { keyword: "", mode: "gate" }]);
+
+  const onSave = async () => {
+    // Drop blank keywords — they match nothing and only clutter the file.
+    await save.mutateAsync({
+      keywords: draft.filter((k) => k.keyword.trim() !== ""),
+    });
+    refetch();
+  };
+
+  return (
+    <section className="mt-10 border-t border-outline-variant/30 pt-6">
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="font-headline-md text-headline-md text-on-surface">
+            Gated Bash Keywords
+          </h2>
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+            One global list for every session. When an agent's Bash command
+            contains a keyword, <span className="text-primary">Gate</span> blocks
+            it and asks you to Approve/Reject (bot-hq runs it on approve);{" "}
+            <span className="text-emerald-300">Auto-allow</span> lets it run with
+            no prompt. Case-insensitive substring match against the command or
+            tool name; commands with no matching keyword run normally.
+          </p>
+        </div>
+        {dirty && (
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={save.isPending}
+            className="inline-flex shrink-0 items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+          >
+            <SaveIcon />
+            {save.isPending ? "Saving…" : "Save keywords"}
+          </button>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="h-24 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
+      ) : (
+        <div className="rounded-lg border border-outline-variant bg-surface-container p-4">
+          {draft.length === 0 ? (
+            <p className="py-2 font-code-sm text-code-sm text-on-surface-variant">
+              No keywords configured — every Bash command runs ungated. Add one
+              (e.g. <code>gh</code>, <code>git push</code>, <code>rm -rf</code>)
+              to gate or auto-allow matching commands.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {draft.map((k, i) => (
+                <li key={i} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={k.keyword}
+                    onChange={(e) => updateRow(i, { keyword: e.target.value })}
+                    placeholder="keyword (e.g. gh issue, git push, curl)"
+                    className={cn(terminalInputClass, "flex-1")}
+                  />
+                  <div className="flex shrink-0 overflow-hidden rounded border border-outline-variant">
+                    {GATE_MODES.map((m) => {
+                      const active = k.mode === m;
+                      const activeCls =
+                        m === "gate"
+                          ? "bg-primary/15 text-primary"
+                          : "bg-emerald-500/15 text-emerald-300";
+                      return (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => updateRow(i, { mode: m })}
+                          className={cn(
+                            "px-2.5 py-1 font-label-caps text-label-caps transition-colors",
+                            active
+                              ? activeCls
+                              : "bg-transparent text-on-surface-variant hover:text-on-surface",
+                          )}
+                        >
+                          {m === "gate" ? "Gate" : "Auto-allow"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeRow(i)}
+                    aria-label="Remove keyword"
+                    className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="mt-3 flex items-center gap-3">
+            <Button variant="ghost" size="sm" onClick={addRow}>
+              + Add keyword
+            </Button>
+            {dirty && (
+              <span className="font-label-caps text-label-caps text-amber-300">
+                Unsaved changes
+              </span>
+            )}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
