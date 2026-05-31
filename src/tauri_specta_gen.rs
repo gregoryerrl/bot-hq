@@ -29,6 +29,7 @@ pub fn builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new().commands(collect_commands![
         // Sessions
         sessions::create_session,
+        sessions::dispatch_session,
         sessions::get_session,
         sessions::list_sessions,
         sessions::respawn_session,

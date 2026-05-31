@@ -12,7 +12,7 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 346 tests passing (297 lib + 32 external MCP + 7 signaling + 10 storage)
-plus 29 frontend Vitest. Release build clean. **Tauri v2 migration landed
+plus 31 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
@@ -20,6 +20,28 @@ plus 29 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-01 — Maintain CL dispatch button (Context Library)
+
+A "Maintain CL" button in the Context Library sidebar opens a dialog → the
+user picks a project → a Brian + Rain session is dispatched pre-loaded with
+a hardcoded, engineered prompt to maintain that project's CL (audit the
+where-things-live map, sharpen descriptions, prune stale notes — keeping
+the CL lighter than the codebase). Delegating CL upkeep to a session.
+
+- New generic Tauri command `dispatch_session(id, title, project,
+  repo_path, prompt)` (`tauri_cmd/sessions.rs`): create row → register
+  project → `ensure_session_started` (spawn duo) → `broadcast(prompt)` in
+  one atomic call. A fresh session spawns blank (`resume None`) and bot-hq
+  doesn't replay storage to stdin, so the prompt must reach a LIVE session —
+  hence spawn-then-broadcast in the command (avoids both the
+  broadcast-before-spawn "no live session" race and a SessionView
+  route-state hook that could double-send).
+- The engineered prompt is a frontend const (`lib/maintainClPrompt.ts`,
+  vitest-tested) so it's HMR-iterable; the Rust command stays generic.
+- UI: `MaintainCLModal.tsx` (project picker → dispatch → navigate to
+  `/sessions/<id>`), the sidebar button, wired in `ContextLibrary.tsx`.
+- 7 files (3 new, 4 modified); +2 frontend tests (prompt anchors).
 
 ## 2026-06-01 — CL ⇄ IPAV workflow tightening
 

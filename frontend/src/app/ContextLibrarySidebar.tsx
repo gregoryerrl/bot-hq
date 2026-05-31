@@ -43,6 +43,7 @@ interface WorkspaceSidebarProps {
   onOpenFile: (project: string, filePath: string) => void;
   onOpenFolder: (project: string, folderPath: string) => void;
   onRequestRegister: () => void;
+  onRequestMaintain: () => void;
   onContextMenu: (target: CtxTarget, x: number, y: number) => void;
 }
 
@@ -64,6 +65,7 @@ export function WorkspaceSidebar({
   onOpenFile,
   onOpenFolder,
   onRequestRegister,
+  onRequestMaintain,
   onContextMenu,
 }: WorkspaceSidebarProps) {
   const projectIds = Object.keys(byProject).sort();
@@ -138,6 +140,14 @@ export function WorkspaceSidebar({
         >
           <PlusIcon />
           Register project
+        </button>
+        <button
+          type="button"
+          onClick={onRequestMaintain}
+          title="Dispatch a Brian + Rain session to maintain a project's Context Library"
+          className="inline-flex items-center justify-center gap-1.5 rounded border border-primary/50 bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-primary transition-colors hover:bg-surface-container-high"
+        >
+          Maintain CL
         </button>
         {rescanReport && (
           <div className="flex flex-wrap gap-2 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm">

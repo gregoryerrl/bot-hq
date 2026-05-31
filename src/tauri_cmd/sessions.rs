@@ -54,6 +54,41 @@ pub async fn create_session(
     Ok(session.into())
 }
 
+/// Dispatch a session pre-loaded with a first prompt: create the row, register
+/// the project, spawn the duo, and broadcast `prompt` to their stdin — all in
+/// one call so delivery is deterministic. A fresh session spawns blank
+/// (`resume_session_id = None`) and bot-hq does NOT replay storage to stdin, so
+/// the prompt has to be broadcast to a LIVE session — which means spawning
+/// first. `ensure_session_started` inserts the handle before returning, so the
+/// subsequent `broadcast` always finds it; it's idempotent, so the SessionView
+/// mount's `respawn_session` is a harmless no-op.
+///
+/// Generic on purpose — the caller supplies the prompt. The Context Library
+/// "Maintain CL" button calls this with a hardcoded CL-maintenance prompt.
+#[tauri::command]
+#[specta::specta]
+pub async fn dispatch_session(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    storage: tauri::State<'_, Arc<Storage>>,
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    id: String,
+    title: String,
+    project: Option<String>,
+    repo_path: Option<String>,
+    prompt: String,
+) -> Result<SessionInfo, AppError> {
+    let session = storage
+        .create_session(&id, &title, repo_path.as_deref())
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    // Register the project mapping BEFORE spawn so the agents' system prompt
+    // picks up project-scoped CL conventions.
+    bridge.register_session(id.clone(), project).await;
+    core.ensure_session_started(&id).await?;
+    core.broadcast(&id, &prompt).await?;
+    Ok(session.into())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_session(

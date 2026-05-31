@@ -17,6 +17,7 @@ import {
 import { WorkspaceSidebar } from "./ContextLibrarySidebar";
 import { EditorArea } from "./ContextLibraryEditor";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
+import { MaintainCLModal } from "./MaintainCLModal";
 import {
   ActionModal,
   ContextMenu,
@@ -65,6 +66,7 @@ export function ContextLibrary() {
     null,
   );
   const [registerOpen, setRegisterOpen] = useState(false);
+  const [maintainOpen, setMaintainOpen] = useState(false);
 
   // Persist expand/collapse choices across route navigation + restarts. Keyed
   // by collapseKey(project, folderPath) — the project-root node uses "".
@@ -375,6 +377,7 @@ export function ContextLibrary() {
         onOpenFile={openFile}
         onOpenFolder={openFolder}
         onRequestRegister={() => setRegisterOpen(true)}
+        onRequestMaintain={() => setMaintainOpen(true)}
         onContextMenu={(target, x, y) => setMenu({ target, x, y })}
       />
       <EditorArea
@@ -394,6 +397,10 @@ export function ContextLibrary() {
         open={registerOpen}
         onClose={() => setRegisterOpen(false)}
         onRegistered={onProjectChanged}
+      />
+      <MaintainCLModal
+        open={maintainOpen}
+        onClose={() => setMaintainOpen(false)}
       />
       {menu && (
         <ContextMenu
