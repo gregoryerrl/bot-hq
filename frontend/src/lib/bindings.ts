@@ -348,6 +348,22 @@ async listSessionPermissions(sessionId: string) : Promise<Result<SessionPermissi
     else return { status: "error", error: e  as any };
 }
 },
+async getToolGateKeywords() : Promise<Result<GatedKeyword[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_tool_gate_keywords") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setToolGateKeywords(keywords: GatedKeyword[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_tool_gate_keywords", { keywords }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listPendingChoices() : Promise<Result<PendingChoiceView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_pending_choices") };
@@ -531,6 +547,29 @@ export type ComputeApplyDiffResult = { lines: DiffLine[]; note: string | null }
  * classification per [`parse_diff_lines`].
  */
 export type DiffLine = { kind: string; text: string }
+/**
+ * How a matching Bash command is handled.
+ */
+export type GateMode = 
+/**
+ * Block the agent's direct Bash call (PreToolUse exit 2) and route it to
+ * the `action_gate` MCP tool, which surfaces Approve/Reject and — on
+ * approve — executes the command server-side.
+ */
+"gate" | 
+/**
+ * Let the command run normally (PreToolUse exit 0). Used to make
+ * `git commit` / `git push` frictionless.
+ */
+"auto_allow"
+/**
+ * One global keyword entry.
+ */
+export type GatedKeyword = { 
+/**
+ * Case-insensitive substring matched against the tool name OR command.
+ */
+keyword: string; mode: GateMode }
 export type GrantScopeView = { kind: "none" } | { kind: "all_branches" } | { kind: "specific"; branches: string[] }
 /**
  * What the frontend sees for each installed plugin. Combines DB row state,

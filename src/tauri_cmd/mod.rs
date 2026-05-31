@@ -25,5 +25,6 @@ pub mod policy;
 pub mod questions;
 pub mod screenshot;
 pub mod sessions;
+pub mod tool_gate;
 
 pub use error::AppError;
