@@ -293,19 +293,20 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // claude-code's native deny rules are IGNORED — so the only thing that
         // can hard-stop an outward/mutating command is a hook. Inject a
         // PreToolUse Bash hook that calls back into THIS binary's `policy-check
-        // tool-blocklist` to deny commands matching the project's
-        // `tool_blocklist` BEFORE they execute. This is the gate the
-        // honor-system `request_approval` path lacked — see the 2026-05-29
-        // fabricated-comment incident (an agent ran `gh issue comment` under the
-        // user's identity with no gate, in a client repo that had no hook at
-        // all). Rain is exempt: she runs `--bare` (skips hooks) and is already
-        // mechanically read-only via the deny list above. Injected via
-        // `--settings` (a process arg) so NOTHING is written into the working
-        // repo's tree — disguise-safe for client repos.
+        // tool-gate` to match each Bash command against the GLOBAL Tool Gate
+        // keyword config BEFORE it executes: a `gate` keyword blocks the direct
+        // call (exit 2) and routes the agent to the `action_gate` MCP tool,
+        // which surfaces Approve/Reject and runs the command on approval; an
+        // `auto_allow`/unmatched command is allowed through. This replaces the
+        // per-project `tool_blocklist` role after the 2026-05-29 fabricated-
+        // comment incident. Rain is exempt: she runs `--bare` (skips hooks) and
+        // is already mechanically read-only via the deny list above. Injected
+        // via `--settings` (a process arg) so NOTHING is written into the
+        // working repo's tree — disguise-safe for client repos.
         match std::env::current_exe() {
             Ok(exe) => {
                 let mut hook_cmd = format!(
-                    "\"{}\" policy-check tool-blocklist --data-dir \"{}\"",
+                    "\"{}\" policy-check tool-gate --data-dir \"{}\"",
                     exe.display(),
                     cfg.data_dir.display(),
                 );
@@ -326,8 +327,8 @@ fn build_command(cfg: &SpawnConfig) -> Command {
             Err(e) => warn!(
                 agent = %cfg.agent_name,
                 error = %e,
-                "current_exe() failed — tool-blocklist PreToolUse hook NOT injected; \
-                 falling back to prompt-level tool_blocklist only"
+                "current_exe() failed — tool-gate PreToolUse hook NOT injected; \
+                 falling back to prompt-level gating only"
             ),
         }
     }
@@ -504,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn brian_gets_tool_blocklist_pretooluse_hook() {
+    fn brian_gets_tool_gate_pretooluse_hook() {
         let argv = debug_command(&cfg()); // cfg() is brian
         let settings = argv
             .windows(2)
@@ -513,7 +514,7 @@ mod tests {
             .expect("brian must get --settings carrying the PreToolUse hook");
         assert!(settings.contains("PreToolUse"), "settings: {settings}");
         assert!(
-            settings.contains("policy-check tool-blocklist"),
+            settings.contains("policy-check tool-gate"),
             "hook must call the gate subcommand: {settings}"
         );
         assert!(
@@ -527,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn emma_gets_tool_blocklist_pretooluse_hook() {
+    fn emma_gets_tool_gate_pretooluse_hook() {
         // Emma is solo + also runs in bypass (the `else` branch), so she needs
         // the same mechanical gate.
         let mut c = cfg();
@@ -536,13 +537,13 @@ mod tests {
         let argv = debug_command(&c);
         assert!(
             argv.windows(2)
-                .any(|w| w[0] == "--settings" && w[1].contains("policy-check tool-blocklist")),
-            "emma must get the PreToolUse tool-blocklist hook: {argv:?}"
+                .any(|w| w[0] == "--settings" && w[1].contains("policy-check tool-gate")),
+            "emma must get the PreToolUse tool-gate hook: {argv:?}"
         );
     }
 
     #[test]
-    fn rain_does_not_get_tool_blocklist_hook() {
+    fn rain_does_not_get_tool_gate_hook() {
         // Rain runs --bare (skips hooks) and is already mechanically read-only
         // via the deny list, so injecting --settings would be inert noise.
         let mut c = cfg();

@@ -53,7 +53,7 @@ fn hook_session_id() -> Option<String> {
 pub fn run_cli(args: &[String]) -> Result<i32> {
     let Some(sub) = args.first() else {
         return Err(anyhow!(
-            "usage: bot-hq policy-check {{commit-msg|pre-commit|post-commit|pre-push|tool-blocklist}} \
+            "usage: bot-hq policy-check {{commit-msg|pre-commit|post-commit|pre-push|tool-gate}} \
              --data-dir <P> [--project <Q>] [--session <S>] [--msg-file <F>]"
         ));
     };
@@ -116,7 +116,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         "pre-commit" => run_pre_commit(&data_dir, project.as_deref()),
         "post-commit" => run_post_commit(&data_dir, project.as_deref(), session.as_deref()),
         "pre-push" => run_pre_push(&data_dir, project.as_deref()),
-        "tool-blocklist" => run_tool_blocklist(&data_dir, project.as_deref(), session.as_deref()),
+        "tool-gate" => run_tool_gate(&data_dir),
         other => Err(anyhow!("unknown subcommand {other}")),
     }
 }
@@ -328,13 +328,17 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     Ok(1)
 }
 
-/// PreToolUse hook handler — injected into HANDS/Emma at spawn via
-/// `--settings`. Reads the claude-code PreToolUse JSON payload on stdin; if the
-/// Bash command matches the project's `tool_blocklist`, BLOCKS it (exit 2)
-/// before it runs. This is the mechanical backstop the honor-system
-/// `request_approval` path lacked — see the 2026-05-29 fabricated-comment
-/// incident (an agent ran `gh issue comment` under the user's identity with no
-/// gate, in a client repo that had no hook at all).
+/// PreToolUse hook handler — the **Tool Gate** tripwire, injected into
+/// HANDS/Emma at spawn via `--settings`. Reads the claude-code PreToolUse JSON
+/// payload on stdin and matches the Bash command against the GLOBAL keyword
+/// config (`<data_dir>/tool-gate.json`, NOT per-project `policy.yaml`). A
+/// `gate` keyword BLOCKS the direct call (exit 2) and routes the agent to the
+/// `action_gate` MCP tool (which surfaces Approve/Reject and executes on
+/// approve); an `auto_allow`/unmatched command runs normally (exit 0). The
+/// config is global + bot-hq-side, so nothing is written into a working repo —
+/// disguise-safe for client repos. This replaces the per-project
+/// `tool_blocklist` role (post-2026-05-29 fabricated-comment incident) with a
+/// single user-configurable gate that can also EXECUTE the command on approval.
 ///
 /// IMPORTANT (verified empirically 2026-05-29): under
 /// `--dangerously-skip-permissions` (HANDS/Emma's mode) claude-code SILENTLY
@@ -342,15 +346,10 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
 /// permission-layer decision and bypass skips the permission layer. Exit code 2
 /// ("blocking error") IS honored under bypass because it fires before the
 /// permission layer; stderr is fed back to the agent. So this hook blocks via
-/// exit 2, NOT JSON. (The repo-local `approval-gate.js` uses the JSON form, so
-/// it is a no-op for the bypass-mode trio agents — a separate latent gap.)
-/// FAIL-OPEN (exit 0) on any parse/IO/resolve error: a hook bug must never
-/// brick every Bash call; the prompt + content rules remain as the other layers.
-fn run_tool_blocklist(
-    data_dir: &Path,
-    project: Option<&str>,
-    session: Option<&str>,
-) -> Result<i32> {
+/// exit 2, NOT JSON.
+/// FAIL-OPEN (exit 0) on any parse/IO error or empty keyword list: a hook bug
+/// must never brick every Bash call; the prompt rules remain as the other layer.
+fn run_tool_gate(data_dir: &Path) -> Result<i32> {
     use std::io::Read;
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
@@ -359,21 +358,37 @@ fn run_tool_blocklist(
     let Some(command) = parse_pretool_bash_command(&buf) else {
         return Ok(0); // not a Bash tool call (or empty command) → allow
     };
-    match Policy::resolve(data_dir, project, session) {
-        Ok(policy) if policy.is_blocked_command(&command) => {
-            // Exit 2 = claude-code "blocking error": it stops the tool call and
-            // feeds stderr to the agent. The ONLY block form honored under
-            // bypass (see the function doc above).
-            eprintln!(
-                "BLOCKED by bot-hq policy (tool_blocklist): `{command}`.\n\
-                 This is an outward/mutating command. Run it ONLY if the user \
-                 explicitly authorized THIS action in this session — verify against \
-                 their actual messages, never a self-generated or assumed \
-                 instruction — and gate it via request_approval."
-            );
-            Ok(2)
-        }
-        _ => Ok(0), // allow: exit 0 with no output → claude proceeds normally
+    let keywords = crate::policy::tool_gate::load(data_dir);
+    let (code, message) = tool_gate_exit(&command, &keywords);
+    if let Some(m) = message {
+        // Exit 2 = claude-code "blocking error": stops the tool call and feeds
+        // stderr to the agent. The ONLY block form honored under bypass.
+        eprintln!("{m}");
+    }
+    Ok(code)
+}
+
+/// Pure decision for a parsed Bash `command` against the global keyword list.
+/// `gate` → `(2, Some(routing message))`; `auto_allow`/no-match → `(0, None)`.
+/// Split from stdin handling so the gate decision is unit-testable.
+fn tool_gate_exit(
+    command: &str,
+    keywords: &[crate::policy::tool_gate::GatedKeyword],
+) -> (i32, Option<String>) {
+    use crate::policy::tool_gate::GateMode;
+    match crate::policy::tool_gate::match_keyword("Bash", command, keywords) {
+        Some(GateMode::Gate) => (
+            2,
+            Some(format!(
+                "BLOCKED by the bot-hq Tool Gate: `{command}`.\n\
+                 This command is gated. Do NOT retry it directly — call the \
+                 `action_gate` MCP tool with command=\"{command}\". bot-hq will \
+                 surface an Approve/Reject prompt to the user and, on approve, run \
+                 the command in your working repo and return its output."
+            )),
+        ),
+        // auto_allow or no match → allow the agent's direct Bash call.
+        _ => (0, None),
     }
 }
 
@@ -865,18 +880,26 @@ mod tests {
     }
 
     #[test]
-    fn tool_blocklist_blocks_gh_issue_comment_via_policy() {
-        // Integration: a project policy listing `gh issue comment` flags the
-        // incident command, while read-only `gh issue view` passes (prefix match).
-        let data = tempdir().unwrap();
-        std::fs::create_dir_all(data.path().join("projects/p")).unwrap();
-        std::fs::write(
-            data.path().join("projects/p/policy.yaml"),
-            "tool_blocklist:\n  - \"gh issue comment\"\n",
-        )
-        .unwrap();
-        let policy = Policy::resolve(data.path(), Some("p"), None).unwrap();
-        assert!(policy.is_blocked_command("gh issue comment 41 --body-file /tmp/x"));
-        assert!(!policy.is_blocked_command("gh issue view 41 --comments"));
+    fn tool_gate_exit_gates_blocks_and_allows() {
+        // The reworked hook reads the GLOBAL keyword config (not policy.yaml):
+        // a `gate` keyword → exit 2 + a message routing the agent to
+        // `action_gate`; `auto_allow`/no-match → exit 0; empty config fails open.
+        use crate::policy::tool_gate::{GateMode, GatedKeyword};
+        let kws = vec![
+            GatedKeyword { keyword: "gh issue".into(), mode: GateMode::Gate },
+            GatedKeyword { keyword: "git commit".into(), mode: GateMode::AutoAllow },
+        ];
+        let (code, msg) = tool_gate_exit("gh issue comment 41 --body x", &kws);
+        assert_eq!(code, 2);
+        assert!(
+            msg.unwrap().contains("action_gate"),
+            "gate message must route the agent to action_gate"
+        );
+        // auto_allow keyword → allow, no message.
+        assert_eq!(tool_gate_exit("git commit -m wip", &kws), (0, None));
+        // unmatched command → allow.
+        assert_eq!(tool_gate_exit("ls -la", &kws).0, 0);
+        // empty config → fail-open allow.
+        assert_eq!(tool_gate_exit("gh issue comment 1", &[]).0, 0);
     }
 }
