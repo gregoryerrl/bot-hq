@@ -11,13 +11,44 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-314 tests passing (265 lib + 32 external MCP + 7 signaling + 10 storage)
+336 tests passing (287 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 28 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-05-31 — Tool Gate: global gated-Bash keywords + action_gate
+
+Replaced the per-project `tool_blocklist` PreToolUse gate (2026-05-29) with a
+global, user-configurable **Tool Gate**: one keyword list
+(`<data_dir>/tool-gate.json`, edited in Settings → "Gated Bash Keywords") over
+agent Bash commands. A `gate` keyword blocks the command (PreToolUse exit 2) and
+routes the agent to a new `action_gate` MCP tool, which surfaces Approve/Reject
+and — on approve — EXECUTES the command in the session repo and returns its
+output (an action request, not a permission request); `auto_allow`/no-match runs
+normally. Gate-run pushes pre-record a session push grant for the current branch
+so the pre-push hook doesn't double-gate.
+
+- Backend: `src/policy/tool_gate.rs` (config + case-insensitive substring matcher
+  + timeout-bounded executor), `action_gate` MCP tool
+  (`src/signaling/bridge/action_gate.rs`), hook rework `run_tool_blocklist` →
+  `run_tool_gate` (`hooks.rs` + `spawn.rs`).
+- Frontend: Settings "Gated Bash Keywords" section; removed the commit/push
+  GrantPills (+ their now-unused session-permission Tauri commands — the bridge
+  methods + MCP tools are retained).
+- Cleanup: retired `.claude/hooks/approval-gate.js` (+ its settings wiring);
+  `policy.yaml` `tool_blocklist` marked RETIRED (parses, unenforced); reconciled
+  agent prompts + canonical docs.
+
+NB: the global keyword list defaults EMPTY — configure `gh` / `git` / `push` /
+etc. in Settings to restore the 2026-05-29 outward-command protections.
+
+Gates green: cargo test (287 lib + 49 integration), frontend vitest 28, tsc,
+release build, frontend build.
 
 ---
 

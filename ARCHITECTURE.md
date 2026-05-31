@@ -291,8 +291,10 @@ drifts and forgets to call the MCP tool.
 Fields: `forbidden_in_commits`, `push_gate.mode`
 (`auto`|`per_branch_approval`|`always_ask`), `force_push.mode`
 (`blocked`|`token_required`|`allowed`), `force_push.token_format`,
-`tool_blocklist`, `per_action_approval`, `branch_pattern`,
-`commit_style`.
+`per_action_approval`, `branch_pattern`, `commit_style`.
+(`tool_blocklist` is RETIRED — superseded by the global Tool Gate
+below; the field still parses for backward-compat but is no longer
+enforced.)
 
 **Hook details:**
 - `commit-msg`: receives commit message file path as `$1`. Scans for
@@ -310,6 +312,37 @@ Fields: `forbidden_in_commits`, `push_gate.mode`
 **Audit:** `src/policy/audit.rs` hashes each policy file at hook fire.
 A hash change between fires logs a `PolicyMutation` violation
 (audit-only in v1).
+
+---
+
+## Tool Gate
+
+A global, user-configured keyword gate over agent **Bash** tool calls,
+replacing the per-project `tool_blocklist` role (post-2026-05-29
+fabricated-comment incident) with a single list that can also EXECUTE the
+command on approval.
+
+- **Config:** one global list at `<data_dir>/tool-gate.json` —
+  `[{keyword, mode}]`, `mode` ∈ `gate | auto_allow`, edited in Settings
+  ("Gated Bash Keywords"). NOT per-project, NOT in `policy.yaml` —
+  bot-hq-side, so nothing is written into a working repo (disguise-safe).
+  Matching is case-insensitive substring against the tool name or command;
+  `gate` wins over `auto_allow` on conflict.
+- **Tripwire:** the PreToolUse Bash hook (`policy-check tool-gate`, injected
+  into HANDS/Emma at spawn via `--settings` — `src/policy/hooks.rs`
+  `run_tool_gate`) blocks a `gate`-matched command with **exit 2** and routes
+  the agent to the `action_gate` MCP tool; `auto_allow`/no-match exits 0 (runs
+  normally). Exit 2 is the only block form honored under
+  `--dangerously-skip-permissions`.
+- **Execute-on-approve:** `action_gate(command)`
+  (`src/signaling/bridge/action_gate.rs`) re-classifies, surfaces
+  Approve/Reject via the existing `request_approval` machinery, and on approve
+  runs the command itself in the session's `working_repo_path` (from storage),
+  returning combined output to the agent — an action request, not a permission
+  request. A gate-run `git push` first records a session push grant for the
+  repo's current branch so the pre-push hook doesn't double-gate.
+
+The global list defaults EMPTY (no gating until configured in Settings).
 
 ---
 

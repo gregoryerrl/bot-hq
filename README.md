@@ -132,7 +132,8 @@ Bot-hq exposes these to each spawned agent via the per-agent
 |---|---|
 | `ask_user_choice(question, options)` | Park a structured question for the user. Blocks the agent's turn until the user picks. |
 | `mark_awaiting_user(reason)` | Flag the session's `[Need User Input]` badge. Non-blocking. |
-| `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, tool blocklist, per-action approval. |
+| `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, per-action approval. |
+| `action_gate(command)` | Run a Bash command the Tool Gate blocked: bot-hq surfaces Approve/Reject and, on approve, executes it in the session repo and returns the output. |
 | `check_commit_message(message)` | Pre-commit grep for forbidden words. Returns `ok` or `forbidden_word:<word>`. |
 | `close_session()` | Ask the host to close this session. |
 | `list_my_pending_questions()` | List questions THIS agent has parked but haven't been answered. Used to avoid duplicate retries. |
@@ -158,9 +159,10 @@ Bot-hq exposes these to each spawned agent via the per-agent
 | `webview_press_key(key)` | Dispatch a keypress in the webview. |
 
 Role boundary: Rain (EYES) is blocked from `ask_user_choice`,
-`mark_awaiting_user`, `request_approval`, `supersede_question`,
-`grant_session_permission`, `revoke_session_permission` (the
-`HANDS_ONLY_TOOLS` gate), plus `cl_register_folder_description` (the
+`mark_awaiting_user`, `request_approval`, `action_gate`,
+`supersede_question`, `grant_session_permission`,
+`revoke_session_permission` (the `HANDS_ONLY_TOOLS` gate), plus
+`cl_register_folder_description` (the
 `CL_MUTATE_TOOLS` gate — Emma is allowed). Tool calls from Rain to a
 blocked tool return an error. Brian (HANDS) gets the full set.
 
@@ -177,14 +179,23 @@ over `<data_dir>/general-policy.yaml`. Policy fields:
 - `force_push.mode: blocked | token_required | allowed` — controls
   `git push --force`. `token_required` accepts a user-typed token
   matching `force_push.token_format` (supports `{branch}`, `{sha}`).
-- `tool_blocklist: [prefix]` — bash command prefixes that require
-  approval. Matched as a prefix on the full command string.
+- `tool_blocklist: [prefix]` — RETIRED. Superseded by the global
+  **Tool Gate** (Settings → "Gated Bash Keywords" → `action_gate`); the
+  field still parses for backward-compat but is no longer enforced.
 - `per_action_approval: [prefix]` — bash commands that always ask, no
   remembered approval.
 - `branch_pattern: regex` — regex branch names must match. Empty = no
   constraint.
 - `commit_style: text` — free-form note surfaced in the agent's system
   prompt.
+
+**Tool Gate.** Beyond `policy.yaml`, a global keyword list (Settings →
+"Gated Bash Keywords", stored at `<data_dir>/tool-gate.json`) gates agent
+Bash commands. A `gate` keyword blocks the command and routes it to the
+`action_gate` MCP tool (Approve/Reject → bot-hq executes on approve); an
+`auto_allow` keyword lets it run with no prompt. Case-insensitive substring
+match on the command or tool name; the list is global, not per-project, and
+defaults empty.
 
 **Session-level grants** ride alongside this. When the user types
 "you can push" / "you can commit" in chat, the agent calls
