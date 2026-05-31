@@ -265,6 +265,26 @@ fn main() -> Result<()> {
                                 tracing::warn!(?e, %session_id, "close_session via MCP event failed");
                             }
                         }
+                        // Agent self-advance (the `advance_phase` MCP tool) only
+                        // fires AgentAdvancePhase. bridge_subscriber emits the
+                        // frontend chip event, but nothing advanced the backend
+                        // IpavState, so peer-forward envelopes stayed stuck on the
+                        // default phase. Route it to core.advance_phase here — the
+                        // user chip-click path already does this via tauri_cmd.
+                        Ok(SignalingEvent::AgentAdvancePhase { session_id, target, .. }) => {
+                            match bot_hq::core::ipav::IpavPhase::parse(&target) {
+                                Some(phase) => {
+                                    if let Err(e) =
+                                        core_for_close.advance_phase(&session_id, phase).await
+                                    {
+                                        tracing::warn!(?e, %session_id, %target, "advance_phase via MCP event failed");
+                                    }
+                                }
+                                None => {
+                                    tracing::warn!(%target, "advance_phase via MCP event: unparseable target");
+                                }
+                            }
+                        }
                         Ok(_) => {}
                         Err(RecvError::Lagged(n)) => {
                             tracing::warn!(skipped = n, "close-request subscriber lagged");
