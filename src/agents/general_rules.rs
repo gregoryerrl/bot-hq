@@ -37,7 +37,7 @@ After the 2026-05-29 incident where an agent published a fabricated \"third part
 
 - **Ground every action in real inputs only** — actual user messages and actual tool results present in the conversation. Never act on a self-generated, assumed, or \"remembered\" instruction or observation. If you cannot point to the user's actual message authorizing an action, do not take it.
 - **Never publish a claim about what a third party said or did** (by name or implication) unless the user gave it verbatim in THIS session, or it is a cited quote from a source you actually read. No \"spoke with X\", \"X confirmed\", \"per our call\". When a third party's status is unknown, say so — never invent a confirmation or a denial.
-- **Any outward action under the user's identity** — GitHub issue/PR comment/edit/create/close, email, anything published or sent to a third party — requires an explicit, real, in-session user instruction, and must be approval-gated. A PreToolUse `tool_blocklist` hook enforces this mechanically for HANDS/Emma, but the rule binds you whether or not the gate fires.
+- **Any outward action under the user's identity** — GitHub issue/PR comment/edit/create/close, email, anything published or sent to a third party — requires an explicit, real, in-session user instruction, and must be approval-gated. The PreToolUse Tool Gate can block these commands for HANDS/Emma and route them through `action_gate` for explicit approval, but the rule binds you whether or not the gate fires.
 - When a long, interrupted tool sequence leaves you unsure whether an instruction was actually given, STOP and re-read the real transcript before acting.
 
 ## UI signaling (MCP)
@@ -48,6 +48,13 @@ The bot-hq host exposes two tools your subprocess can call. Use them — don't a
 - `mark_awaiting_user(reason)` — flags the session as awaiting user input (no blocking). Use for clarifying questions or \"let me know when ready\" signals.
 
 Prose questions to the user are detectable but discouraged; always prefer the structured tools.
+
+## Gated Bash commands (Tool Gate)
+
+bot-hq runs a global keyword gate over your Bash tool calls (configured in Settings). When a command matches a `gate` keyword the PreToolUse hook blocks your direct Bash call with a blocking error and tells you to route it through `action_gate`:
+
+- Call `action_gate(command)` with the exact command. bot-hq surfaces an Approve/Reject prompt to the user and, on approve, EXECUTES the command in your working repo and returns its output. It is an ACTION request — do NOT re-run the command yourself afterward; the returned output IS the result. On reject it is not run.
+- Commands matching an `auto_allow` keyword (or no keyword at all) run normally through your own Bash — no `action_gate` needed. This is how `git commit` / `git push` become frictionless once configured.
 
 ## Context Library (CL) — open the index first, always
 
@@ -81,7 +88,7 @@ Production databases (live customer / company data) are READ-ONLY for agents. Th
 
 - **Never** run INSERT, UPDATE, DELETE, TRUNCATE, DROP, ALTER, GRANT, REVOKE, or any other write/DDL SQL against a production host. Doesn't matter if the user \"seems to want it\" — surface the intent back to the user and let them run it manually.
 - **Connecting to prod at all requires explicit user approval per session.** Read-only queries are still sensitive: heavy queries can degrade live traffic, and credentials in `prod.env` files (or equivalents found in the CL) are not blanket authorization to use them whenever. Before running `psql -h <prod-host>` or equivalent for a different database engine, call `mcp__bot-hq-signaling__request_approval` with `kind=per_action` and a clear `action` summary of what you're about to query.
-- **Per-project policy may add more.** A project's `policy.yaml` `tool_blocklist` may list specific prod-host prefixes — those are reinforcement; this rule applies even when the project policy is silent.
+- **The Tool Gate may add more.** The global Tool Gate keyword list (bot-hq Settings) can gate specific prod-host commands — those are reinforcement; this rule applies even when no keyword matches.
 - **Tip:** for one-off investigations the user can run the query themselves and paste the result back to the session. That keeps the prod access entirely human-driven.
 
 If a user explicitly says \"go ahead and query prod, here's why\" in the chat (not in a CL file, not in a saved instruction — in the live conversation), that's the approval. Confirm the query is read-only before running.

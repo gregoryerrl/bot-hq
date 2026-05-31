@@ -47,8 +47,11 @@ pub struct Policy {
     #[serde(default)]
     pub force_push: ForcePush,
 
-    /// Bash commands that require approval before running.
-    /// Matched as a prefix on the full command string.
+    /// RETIRED: superseded by the global Tool Gate (`policy::tool_gate` + the
+    /// `action_gate` MCP tool). Kept for `policy.yaml` backward-compat so
+    /// existing files carrying this key still parse; no longer read by the
+    /// PreToolUse hook or rendered into the agent prompt. `is_blocked_command`
+    /// stays for any out-of-band callers + its test.
     #[serde(default)]
     pub tool_blocklist: Vec<String>,
 
@@ -257,18 +260,6 @@ impl Policy {
             ));
         }
 
-        if !self.tool_blocklist.is_empty() {
-            out.push_str("### Blocked bash commands\n\n");
-            out.push_str(
-                "Each of the following requires `request_approval` with \
-                 kind=\"tool_blocklist\" before running:\n\n",
-            );
-            for cmd in &self.tool_blocklist {
-                out.push_str(&format!("- `{cmd}`\n"));
-            }
-            out.push('\n');
-        }
-
         if !self.per_action_approval.is_empty() {
             out.push_str("### Per-action approval (every time)\n\n");
             out.push_str(
@@ -303,7 +294,6 @@ impl Policy {
         self.forbidden_in_commits.is_empty()
             && matches!(self.push_gate.mode, PushGateMode::Auto)
             && matches!(self.force_push.mode, ForcePushMode::Allowed)
-            && self.tool_blocklist.is_empty()
             && self.per_action_approval.is_empty()
             && self.branch_pattern.is_empty()
             && self.commit_style.is_empty()
