@@ -212,6 +212,20 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "action_gate",
+            description: "Execute a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook returned a blocking error telling you to route the command here). bot-hq classifies the command against the GLOBAL gated-keyword list: an `auto_allow`/unmatched command runs immediately, while a `gate` command surfaces an Approve/Reject prompt to the user — and ON APPROVE bot-hq EXECUTES the command in this session's working repo and returns its stdout/stderr/exit code. This is an ACTION request, not a permission request: you do NOT re-run the command yourself afterward — the output you get back IS the result. On reject, the command is not run.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The exact Bash command the gate blocked (e.g., 'gh issue comment 41 --body-file /tmp/x'). bot-hq runs it verbatim in your working repo on approval."
+                    }
+                },
+                "required": ["command"]
+            }),
+        },
+        ToolDescriptor {
             name: "check_commit_message",
             description: "Pre-commit grep against project policy.forbidden_in_commits. Returns 'ok' if clean, or 'forbidden_word: <word>' if the message contains a disallowed phrase. Always call this BEFORE `git commit`. If the result is anything other than 'ok', rewrite the message — do not bypass.",
             input_schema: serde_json::json!({

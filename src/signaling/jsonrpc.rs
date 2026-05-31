@@ -93,6 +93,7 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     "ask_user_choice",
     "mark_awaiting_user",
     "request_approval",
+    "action_gate",
     "supersede_question",
     "grant_session_permission",
     "revoke_session_permission",
@@ -238,6 +239,18 @@ async fn call_tool(
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(picked))
+        }
+        "action_gate" => {
+            let command = arg_required_str(&args, "command")?;
+            let output = bridge
+                .action_gate(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    command,
+                )
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(output))
         }
         "close_session" => {
             let archive = args
@@ -664,6 +677,7 @@ mod tests {
         assert!(names.contains(&"ask_user_choice"));
         assert!(names.contains(&"mark_awaiting_user"));
         assert!(names.contains(&"request_approval"));
+        assert!(names.contains(&"action_gate"));
         assert!(names.contains(&"check_commit_message"));
         assert!(names.contains(&"close_session"));
         assert!(names.contains(&"list_my_pending_questions"));
@@ -713,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn rain_rejected_from_hands_only_tools() {
         let bridge = SignalingBridge::new();
-        for tool in &["mark_awaiting_user", "ask_user_choice", "request_approval"] {
+        for tool in &["mark_awaiting_user", "ask_user_choice", "request_approval", "action_gate"] {
             let res = dispatch(
                 req(
                     "tools/call",
