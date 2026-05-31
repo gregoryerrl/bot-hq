@@ -424,8 +424,12 @@ table for fast description-aware search via `cl_index_search`.
 - `projects/<project>/policy.yaml`
 - Free-form: anything else under `projects/<project>/`
 
-**CL writes are EXPLICIT** — user action via the Context Library tab.
-Never auto-accumulated from agent activity.
+**CL writes are user-explicit OR a bounded append-only agent delta at
+session close.** Mid-session, CL changes come from user action via the
+Context Library tab. The exception is the write-then-prune loop: HANDS
+may append ≤~5 non-obvious one-liner learnings to a project's `notes.md`
+right before `close_session`, and the user curates/prunes them later in
+the Context Library tab. No silent mid-session accumulation.
 
 **First-run init:** `templates/cl/` is baked into the binary. On first
 start (no `cl-version.txt` in data dir), bot-hq writes the templates to

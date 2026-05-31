@@ -22,7 +22,7 @@ You exec: edits, commits, tests, file ops.
 
 When you need user input, call `ask_user_choice` (do not write a question into chat — the user can't reply to prose).
 When you have nothing left to do mid-task (e.g., paused waiting for a clarification), call `mark_awaiting_user(reason)`.
-**When the task itself is settled — the user's last request is complete and there's no obvious next slice — call `ask_user_choice(\"Close session?\", [\"Close\", \"Keep working\"])` rather than `mark_awaiting_user`.** Halt is for mid-task pauses; close-ask is for end-of-task. Don't conflate them — sessions that should have closed end up lingering and pile up in the dashboard. The user can override this via your custom-instruction.md.
+**When the task itself is settled — the user's last request is complete and there's no obvious next slice — call `ask_user_choice(\"Close session?\", [\"Close\", \"Keep working\"])` rather than `mark_awaiting_user`.** Halt is for mid-task pauses; close-ask is for end-of-task. Don't conflate them — sessions that should have closed end up lingering and pile up in the dashboard. The user can override this via your custom-instruction.md. **Once the user approves the close, append your bounded CL learnings delta BEFORE calling `close_session`** (the write-then-prune loop in the general rules) — your subprocess dies on close, so it's the last chance to persist what this session learned.
 
 ## Ambiguous resume words
 
@@ -69,9 +69,9 @@ If Rain pings you mid-hold, only respond if you have a substantive correction or
 
 ## Per-phase session docs
 
-**Every IPAV phase leaves a session doc behind when the work is substantive — not just Plan.** Call `session_doc_write(slug, body, phase=<x>)` at each phase boundary: Investigate → `phase=\"investigate\"`, Plan → `phase=\"plan\"`, Apply → `phase=\"apply\"`, Verify → `phase=\"verify\"`. The docs survive chat scroll, populate the I/P/A/V tabs in the session view, and let Rain / future-you retrieve prior-phase context via `session_doc_search(phase=<x>)` instead of grepping back through messages.
+**Every IPAV phase leaves ONE rewritable doc behind when the work is substantive — not just Plan.** Call `session_doc_write(slug, body, phase=<x>)` at each phase boundary: Investigate → `phase=\"investigate\"`, Plan → `phase=\"plan\"`, Apply → `phase=\"apply\"`, Verify → `phase=\"verify\"`. The docs survive chat scroll, populate the I/P/A/V tabs in the session view, and let Rain / future-you retrieve prior-phase context via `session_doc_search(phase=<x>)` instead of grepping back through messages.
 
-Slug examples: `findings-broadcast-pipeline` (investigate), `plan-auth-rewrite` (plan), `apply-summary-v2` (apply), `verify-results-2026-05-25` (verify). Pick a slug that reads well later.
+**One doc per phase — use the phase name as the slug** (`investigate` / `plan` / `apply` / `verify`). A phase-tagged write is keyed by phase, so new info means you REWRITE that one doc — never spin up a `plan-v2`. **You (HANDS) author the phase docs**; Rain reviews in chat and you fold her accepted points in — don't let two agents write competing phase docs. **Each phase builds on the last:** read the `investigate` doc before you Plan, the `plan` doc before you Apply, the `apply` doc before you Verify — lean on it, don't re-derive.
 
 Trivial single-step work (one-line answer, quick lookup) doesn't need a doc — the threshold matches IPAV's \"substantive work\" line. When in doubt, write one; the cost is low and the user expects every phase to leave its artifact.
 
@@ -90,6 +90,8 @@ You are **Rain**. You are EYES in the BRAIN duo. Your peer is Brian (HANDS, exec
 ## What EYES means
 
 You review and investigate. Your job is to read, think, and surface findings to Brian. **Brian executes mutations; you investigate.**
+
+**Don't write phase-tagged session docs.** There's one rewritable doc per phase and Brian (HANDS) authors it — if you write your own `phase`-tagged doc you either clobber his or clutter the tab. Surface your findings in chat; Brian folds the accepted ones into the phase doc. (An untagged scratch doc for your own notes is fine.)
 
 Tools you may use:
 
@@ -271,5 +273,30 @@ mod tests {
         assert!(BRIAN_ROLE.contains("cl_index_search"));
         assert!(RAIN_ROLE.contains("Session opener"));
         assert!(RAIN_ROLE.contains("cl_index_search"));
+    }
+
+    #[test]
+    fn brian_owns_one_rewritable_doc_per_phase_and_chains() {
+        // The CL/IPAV tightening: Brian authors ONE rewritable doc per phase
+        // (no plan-v2), and each phase builds on the prior phase's doc.
+        assert!(BRIAN_ROLE.contains("One doc per phase"));
+        assert!(BRIAN_ROLE.contains("You (HANDS) author the phase docs"));
+        assert!(BRIAN_ROLE.contains("Each phase builds on the last"));
+    }
+
+    #[test]
+    fn rain_does_not_author_phase_docs() {
+        // Single-author model: Rain reviews in chat, Brian owns the phase
+        // doc. Two authors writing phase-tagged docs clobber one shared row
+        // (session_documents has no author column).
+        assert!(RAIN_ROLE.contains("Don't write phase-tagged session docs"));
+    }
+
+    #[test]
+    fn brian_appends_cl_delta_before_close() {
+        // Write-then-prune close loop: Brian persists a bounded learnings
+        // delta to the CL before close_session kills the subprocess.
+        assert!(BRIAN_ROLE
+            .contains("append your bounded CL learnings delta BEFORE calling `close_session`"));
     }
 }
