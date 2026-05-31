@@ -191,6 +191,22 @@ async clReadFile(project: string, filePath: string) : Promise<Result<ClFileConte
 }
 },
 /**
+ * Overwrite an existing CL file's contents, resolved exactly like
+ * [`cl_read_file`] (same `cl_project_root` + path-traversal guard via
+ * [`resolve_existing_cl_file`]). Edits existing regular files only —
+ * creating new files / directories are separate commands. `content` is
+ * written as UTF-8 bytes; the editor is responsible for not saving a file
+ * it flagged `binary` or `truncated` (either would lose data).
+ */
+async clWriteFile(project: string, filePath: string, content: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_write_file", { project, filePath, content }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Set the description (and optionally tags) on a CL index entry. Used by
  * the ContextLibrary UI's inline edit flow. Underlying call is the same
  * idempotent `upsert_cl_index` the backfill scan uses, so calling on an
@@ -199,6 +215,110 @@ async clReadFile(project: string, filePath: string) : Promise<Result<ClFileConte
 async clSetDescription(project: string, filePath: string, description: string, tags: string | null) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cl_set_description", { project, filePath, description, tags }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Upsert a folder's description + tags (`cl_folders`). Used by the Context
+ * Library folder-view editor. Routes through the bridge helper so the project
+ * row is ensured to exist first (same path as the agent-facing
+ * `cl_register_folder_description` MCP tool). `folder_path = ""` is the
+ * project-root folder's description.
+ */
+async clSetFolderDescription(project: string, folderPath: string, description: string, tags: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_set_folder_description", { project, folderPath, description, tags }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a folder's description row. The folder itself stays in the tree
+ * (it's still on disk); only the CL annotation is removed.
+ */
+async clDeleteFolderDescription(project: string, folderPath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_delete_folder_description", { project, folderPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Register a project, or update an existing one. Used by the Context Library
+ * to promote an arbitrary on-disk folder to a project (`cl_path` = that
+ * folder) and to edit an existing project's working-repo from the folder-view.
+ * `upsert_project` COALESCEs `None` fields, so passing only the values you
+ * want to change preserves the rest. When `cl_path` is supplied it must point
+ * at a real directory (guards against registering a typo'd path).
+ */
+async clRegisterProject(name: string, displayName: string | null, workingRepoPath: string | null, clPath: string | null, description: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_register_project", { name, displayName, workingRepoPath, clPath, description }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Soft-unregister a project: clears `cl_path` + `working_repo_path` but KEEPS
+ * the row and all child CL rows (index, folders, reads). The project stops
+ * being a usable session target; its descriptions survive for re-registration.
+ */
+async clUnregisterProject(name: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_unregister_project", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Create a new empty file. Parent dir must exist; the file must not. The
+ * frontend follows with `cl_rescan` to index it.
+ */
+async clCreateFile(project: string, filePath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_create_file", { project, filePath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Create a new directory. Parent dir must exist; the directory must not.
+ */
+async clMkdir(project: string, folderPath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_mkdir", { project, folderPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Rename / move a file or folder within the project's CL root. Source must
+ * exist; destination's parent must exist and the destination must not.
+ */
+async clRename(project: string, fromPath: string, toPath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_rename", { project, fromPath, toPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a file, or a folder and everything under it. Must exist + resolve
+ * inside the project root. Destructive — the frontend gates this behind a
+ * confirmation dialog.
+ */
+async clDeletePath(project: string, path: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_delete_path", { project, path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -388,7 +508,7 @@ size_bytes: number;
  * Frontend can show a "showing first 1 MB" notice and offer to open
  * in $EDITOR (deferred).
  */
-truncated: boolean;
+truncated: boolean; 
 /**
  * True when the on-disk bytes were NOT valid UTF-8, so `content` is a
  * lossy decode (`from_utf8_lossy` had to allocate replacement chars).
@@ -451,7 +571,13 @@ export type PluginStatus =
  * Project as exposed to the frontend. Drives the project-filter dropdown
  * in ContextLibrary and (eventually) the New-Session repo picker.
  */
-export type ProjectView = { name: string; display_name: string; working_repo_path: string | null; description: string | null; cl_path: string | null }
+export type ProjectView = { name: string; display_name: string; working_repo_path: string | null; description: string | null; 
+/**
+ * Custom CL root. NULL/None = default convention
+ * `<data_dir>/projects/<name>/`. Lets the folder-view show whether a
+ * project was registered at an arbitrary on-disk location.
+ */
+cl_path: string | null }
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null }
 export type SessionPermissionsView = { commit: GrantScopeView; push: GrantScopeView }
