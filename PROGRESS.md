@@ -21,6 +21,35 @@ constraint.
 
 ---
 
+## 2026-05-31 — SWE-bench Verified harness + test-feedback loop
+
+Added `bench/swebench/` — a harness that benchmarks the duo (Brian/Opus-4.8 +
+Rain/DeepSeek-V4-Pro) on SWE-bench Verified by driving the external MCP
+(create_session → send_message → poll snapshot for the SWEBENCH_DONE sentinel →
+`git diff` → predictions.jsonl), then scoring with the stock swebench harness.
+Stdlib-only rollout driver; dataset via the HF datasets-server REST API.
+
+**Result:** 27/39 resolved (69%) across all 12 Verified repos, 0 scoring errors.
+The duo trails strong single-model Opus-4.8 — a structural gap (no test-feedback),
+not the model.
+
+**Test-feedback loop** (`--verify`): after the duo signals done, run the repo's
+EXISTING tests against the patch in the prebuilt container (model_patch only, no
+test_patch — leakage-free), bounce regressions back with their errors, revise,
+cap at K rounds. On 3 known-wrong instances it flips SHALLOW regressions
+(astropy-13398: 6 broken tests → resolved) but not CATASTROPHIC ones (requests:
+43–45 broken tests → unresolved even with error-rich feedback). Also surfaced a
+duo discipline gap: it signalled DONE while existing tests still failed.
+
+Notes: `--instance-ids` (hand-picked diverse sets), incremental-save,
+`.git/info/exclude` artifact guard (an agent's venv got swept into a 39MB diff via
+`git add -A`), datasets-server retry. On Apple Silicon, score with prebuilt images
+under emulation (`--namespace swebench` + `DOCKER_DEFAULT_PLATFORM=linux/amd64`);
+never `--namespace none` (forces a rebuild that hits SWE-bench's bit-rotted
+`setup_env.sh`). Run outputs gitignored.
+
+---
+
 ## 2026-05-29 — Mechanical gate for outward/mutating agent commands
 
 After an agent confabulated a "third party confirmed X" instruction inside its

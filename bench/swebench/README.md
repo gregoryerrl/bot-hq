@@ -63,7 +63,10 @@ Useful flags: `--max-seconds` (hard cap/instance, default 600), `--silence-timeo
 
 ## Phase 2 — scoring (needs Docker)
 
-First scored run of the duo: **4/5 resolved** on astropy (artifacts in `runs/smoke/`).
+First scored runs of the duo: **27/39 resolved (69%)** across all 12 SWE-bench
+Verified repos, 0 scoring errors (artifacts in `runs/combined/`). Per-repo
+highlights: scikit-learn / sphinx / sympy 3/3, xarray 2/2, flask 1/1; weakest
+django / pylint 1/3. The initial 5-instance astropy smoke was 4/5.
 
 ```bash
 pip install -r requirements-full.txt   # datasets + swebench

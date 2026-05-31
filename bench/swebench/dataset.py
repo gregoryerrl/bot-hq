@@ -8,6 +8,7 @@ fidelity (see README / requirements-full.txt).
 from __future__ import annotations
 
 import json
+import time
 import urllib.parse
 import urllib.request
 
@@ -19,8 +20,15 @@ _PAGE = 100  # rows-API max length per request
 
 def _get(url: str) -> dict:
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read())
+    last = None
+    for attempt in range(4):  # the HF datasets-server occasionally times out
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read())
+        except Exception as e:  # noqa: BLE001 — retry transient timeout / 5xx
+            last = e
+            time.sleep(2 * (attempt + 1))
+    raise last
 
 
 def _discover() -> tuple[str, str]:
@@ -33,6 +41,38 @@ def _discover() -> tuple[str, str]:
     if splits:
         return splits[0]["config"], splits[0]["split"]
     raise RuntimeError(f"no splits found for {_DATASET}")
+
+
+def load_by_ids(ids: list[str]) -> tuple[list[dict], int]:
+    """Return (instance dicts matching `ids`, truncated count), preserving input order.
+
+    Scans the dataset pages until all requested ids are found. Lets the harness
+    run a hand-picked diverse set (e.g. N per repo) instead of a contiguous window.
+    """
+    want = [i for i in ids if i]
+    wantset = set(want)
+    config, split = _discover()
+    found: dict[str, dict] = {}
+    truncated = 0
+    offset = 0
+    while len(found) < len(wantset):
+        qs = urllib.parse.urlencode({
+            "dataset": _DATASET, "config": config, "split": split,
+            "offset": offset, "length": _PAGE,
+        })
+        rows = _get(f"{_ROWS}?{qs}").get("rows", [])
+        if not rows:
+            break
+        for entry in rows:
+            row = entry.get("row", {})
+            if row.get("instance_id") in wantset:
+                found[row["instance_id"]] = row
+                if entry.get("truncated_cells"):
+                    truncated += 1
+        offset += len(rows)
+        if len(rows) < _PAGE:
+            break
+    return [found[i] for i in want if i in found], truncated
 
 
 def load_instances(n: int, offset: int = 0) -> tuple[list[dict], int]:

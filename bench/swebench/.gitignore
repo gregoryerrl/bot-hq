@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .venv/
 logs/
+# swebench writes its report to CWD regardless of --report_dir
+bot-hq-duo__*.json

@@ -23,6 +23,7 @@ import dataset as ds
 from bothq_client import BotHqClient, BotHqError
 from completion import evaluate, max_id, pick_choice_option
 from prompt import format_prompt
+from verify import verify_existing_tests
 
 MODEL_NAME = "bot-hq-duo/brian-opus-4.8+rain-deepseek-v4-pro"
 
@@ -38,10 +39,29 @@ def git(repo: pathlib.Path, *args: str, check: bool = True) -> str:
     return r.stdout
 
 
+_ARTIFACT_IGNORES = [
+    "# bot-hq harness — keep agent-created artifacts out of the extracted patch",
+    ".venv*/", "venv/", "env/", "ENV/", ".env/", "__pycache__/", "*.pyc",
+    "*.egg-info/", ".eggs/", "build/", "dist/", ".pytest_cache/", ".tox/",
+    "node_modules/", ".mypy_cache/", ".hypothesis/",
+]
+
+
+def _seed_exclude(repo_dir: pathlib.Path) -> None:
+    """Write artifact patterns to .git/info/exclude — local, untracked, invisible
+    to diffs — so `git add -A` never sweeps an agent-created venv/cache into the
+    patch (sympy-12419 produced a 39MB diff before this). Idempotent."""
+    try:
+        (repo_dir / ".git" / "info" / "exclude").write_text("\n".join(_ARTIFACT_IGNORES) + "\n")
+    except OSError:
+        pass
+
+
 def ensure_repo(repo: str, cache_root: pathlib.Path) -> pathlib.Path:
     """Full clone (cached, reused across instances of the same repo)."""
     dest = cache_root / repo.replace("/", "__")
     if (dest / ".git").exists():
+        _seed_exclude(dest)
         return dest
     cache_root.mkdir(parents=True, exist_ok=True)
     url = f"https://github.com/{repo}.git"
@@ -49,6 +69,7 @@ def ensure_repo(repo: str, cache_root: pathlib.Path) -> pathlib.Path:
     r = subprocess.run(["git", "clone", "--quiet", url, str(dest)], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"clone {url}: {r.stderr.strip()}")
+    _seed_exclude(dest)
     return dest
 
 
@@ -92,11 +113,9 @@ def preflight(client: BotHqClient, args: argparse.Namespace) -> None:
     log("  note: llm_proxy uses an ephemeral port (not pollable) — Rain-liveness is verified per instance.")
 
 
-def run_instance(client: BotHqClient, inst: dict, repo_dir: pathlib.Path, args: argparse.Namespace):
-    iid = inst["instance_id"]
-    sid = client.create_session(title=f"swebench:{iid}", working_repo_path=repo_dir.resolve())
-    log(f"  session {sid}")
-    client.send_message(sid, format_prompt(inst, str(repo_dir.resolve())))
+def _poll_until_done(client: BotHqClient, sid: str, args: argparse.Namespace):
+    """Drive the duo until it signals completion (one solve attempt).
+    Returns (reason, rain_spoke, brian_spoke, choices_resolved)."""
     start = time.monotonic()
     since, last_msg_t = 0, start
     rain_spoke = brian_spoke = False
@@ -157,19 +176,72 @@ def run_instance(client: BotHqClient, inst: dict, repo_dir: pathlib.Path, args: 
         if d.done:
             reason = d.reason
             break
-    elapsed = time.monotonic() - start
+    return reason, rain_spoke, brian_spoke, resolved
+
+
+def _verify_feedback(failing: list[str], details: str) -> str:
+    more = f"\n  …and {len(failing) - 12} more" if len(failing) > 12 else ""
+    body = details or "\n".join(f"  - {t}" for t in failing[:12])
+    return (f"Your change BROKE {len(failing)} existing tests that passed before "
+            "your edit. Here are the failures WITH their errors:\n\n"
+            f"{body}{more}\n\n"
+            "A correct fix must NOT break existing behaviour. Read the errors above, "
+            "identify what your patch changed that caused them, and revise so these "
+            "tests pass again while still resolving the issue. Then call "
+            "mark_awaiting_user('SWEBENCH_DONE') again when done.")
+
+
+def run_instance(client: BotHqClient, inst: dict, repo_dir: pathlib.Path, args: argparse.Namespace):
+    iid = inst["instance_id"]
+    sid = client.create_session(title=f"swebench:{iid}", working_repo_path=repo_dir.resolve())
+    log(f"  session {sid}")
+    client.send_message(sid, format_prompt(inst, str(repo_dir.resolve())))
+    t0 = time.monotonic()
+    rain_spoke = brian_spoke = False
+    resolved = rounds = 0
+    verify_summary = None
+    reason = "loop-exit"
+    while True:
+        reason, rs, bs, res = _poll_until_done(client, sid, args)
+        rain_spoke, brian_spoke, resolved = rain_spoke or rs, brian_spoke or bs, resolved + res
+        diff = extract_patch(repo_dir)
+        if not args.verify or rounds >= args.verify_rounds or not diff.strip():
+            break
+        log(f"  verify round {rounds + 1}: running existing tests against the patch…")
+        try:
+            failing, summary, ok, details = verify_existing_tests(inst, diff)
+        except Exception as e:  # noqa: BLE001
+            log(f"  verify error: {e} (skipping feedback)")
+            break
+        verify_summary = summary
+        if not ok:
+            log(f"  verify inconclusive ({summary}) — not bouncing")
+            break
+        if not failing:
+            log(f"  verify CLEAN ({summary}) — no regressions")
+            break
+        rounds += 1
+        log(f"  verify: {len(failing)} existing-test regressions ({summary}) -> bounce back to duo")
+        try:
+            client.send_message(sid, _verify_feedback(failing, details))
+        except BotHqError as e:
+            log(f"  send_message (verify feedback) failed: {e}")
+            break
+        # loop: re-poll for the duo's revised SWEBENCH_DONE
+    elapsed = time.monotonic() - t0
     patch = extract_patch(repo_dir)
     try:
         client.close_session(sid)
     except BotHqError as e:
         log(f"  close_session: {e}")
-    log(f"  END {iid}: {reason} | patch {len(patch)}B | rain_spoke={rain_spoke} | {elapsed:.0f}s")
+    vinfo = (f" | verify_rounds={rounds}" + (f" ({verify_summary})" if verify_summary else "")) if args.verify else ""
+    log(f"  END {iid}: {reason} | patch {len(patch)}B | rain_spoke={rain_spoke}{vinfo} | {elapsed:.0f}s")
     if not rain_spoke:
         log(f"  WARN Rain never spoke for {iid} — DeepSeek/llm_proxy may be down (EYES half dead).")
     pred = {"instance_id": iid, "model_name_or_path": MODEL_NAME, "model_patch": patch}
     meta = {"instance_id": iid, "reason": reason, "elapsed_s": round(elapsed, 1),
             "patch_bytes": len(patch), "rain_spoke": rain_spoke, "brian_spoke": brian_spoke,
-            "choices_resolved": resolved}
+            "choices_resolved": resolved, "verify_rounds": rounds, "verify_summary": verify_summary}
     return pred, meta
 
 
@@ -177,6 +249,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="SWE-bench Verified rollout harness for the bot-hq duo")
     ap.add_argument("--n", type=int, default=5)
     ap.add_argument("--offset", type=int, default=0, help="dataset offset; deterministic first-N from here")
+    ap.add_argument("--instance-ids", default=None,
+                    help="comma-separated instance_ids to run; overrides --n/--offset")
     ap.add_argument("--out", default="runs/smoke/predictions.jsonl")
     ap.add_argument("--url", default="http://127.0.0.1:7892/mcp")
     ap.add_argument("--token-file", default=None, help="path to mcp-token (default <data_dir>/mcp-token)")
@@ -185,6 +259,10 @@ def main() -> None:
     ap.add_argument("--silence-timeout", type=float, default=120.0, help="end instance after this much silence")
     ap.add_argument("--skip-config-check", action="store_true")
     ap.add_argument("--dry-run", action="store_true", help="preflight + dataset + checkout only; NO sessions, $0")
+    ap.add_argument("--verify", action="store_true",
+                    help="test-feedback loop: after SWEBENCH_DONE, run existing tests against the patch "
+                         "(prebuilt container, no test_patch) and bounce regressions back to revise")
+    ap.add_argument("--verify-rounds", type=int, default=2, help="max verify-and-revise rounds (with --verify)")
     args = ap.parse_args()
 
     out = pathlib.Path(args.out)
@@ -194,46 +272,49 @@ def main() -> None:
 
     preflight(client, args)
 
-    log(f"loading {args.n} instances (offset {args.offset}) from SWE-bench_Verified…")
-    instances, truncated = ds.load_instances(args.n, offset=args.offset)
+    if args.instance_ids:
+        ids = [s.strip() for s in args.instance_ids.split(",") if s.strip()]
+        log(f"loading {len(ids)} instances by id from SWE-bench_Verified…")
+        instances, truncated = ds.load_by_ids(ids)
+    else:
+        log(f"loading {args.n} instances (offset {args.offset}) from SWE-bench_Verified…")
+        instances, truncated = ds.load_instances(args.n, offset=args.offset)
     extra = f"; WARN {truncated} truncated by rows-API (use datasets lib for full fidelity)" if truncated else ""
     log(f"  got {len(instances)} instances{extra}")
 
     predictions, metas = [], []
+    meta_path = out.with_name("meta.jsonl")
+
+    def flush():
+        with out.open("w") as f:
+            for p in predictions:
+                f.write(json.dumps(p) + "\n")
+        with meta_path.open("w") as f:
+            for m in metas:
+                f.write(json.dumps(m) + "\n")
+
     for i, inst in enumerate(instances, 1):
         iid = inst.get("instance_id", f"<row {i}>")
         log(f"[{i}/{len(instances)}] {iid} ({inst.get('repo')})")
+        pred = {"instance_id": iid, "model_name_or_path": MODEL_NAME, "model_patch": ""}
+        meta = {"instance_id": iid, "reason": "?", "patch_bytes": 0}
         try:
             repo_dir = ensure_repo(inst["repo"], cache)
             checkout_base(repo_dir, inst["base_commit"])
-        except Exception as e:  # noqa: BLE001 — record + continue, don't abort the run
-            log(f"  SETUP FAILED: {e}")
-            predictions.append({"instance_id": iid, "model_name_or_path": MODEL_NAME, "model_patch": ""})
-            metas.append({"instance_id": iid, "reason": f"setup-failed: {e}", "patch_bytes": 0})
-            continue
-        if args.dry_run:
-            log(f"  DRY: repo @ {inst['base_commit'][:10]} | issue {len(inst.get('problem_statement') or '')} chars")
-            continue
-        try:
+            if args.dry_run:
+                log(f"  DRY: repo @ {inst['base_commit'][:10]} | issue {len(inst.get('problem_statement') or '')} chars")
+                continue
             pred, meta = run_instance(client, inst, repo_dir, args)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 — record + keep going
             log(f"  INSTANCE FAILED: {e}")
-            pred = {"instance_id": iid, "model_name_or_path": MODEL_NAME, "model_patch": ""}
             meta = {"instance_id": iid, "reason": f"error: {e}", "patch_bytes": 0}
         predictions.append(pred)
         metas.append(meta)
+        flush()  # incremental write — survive a mid-run abort under tight budget
 
     if args.dry_run:
         log("DRY RUN complete — no sessions spawned, no cost.")
         return
-
-    with out.open("w") as f:
-        for p in predictions:
-            f.write(json.dumps(p) + "\n")
-    meta_path = out.with_name("meta.jsonl")
-    with meta_path.open("w") as f:
-        for m in metas:
-            f.write(json.dumps(m) + "\n")
 
     nonempty = sum(1 for p in predictions if p["model_patch"].strip())
     rain_live = sum(1 for m in metas if m.get("rain_spoke"))
