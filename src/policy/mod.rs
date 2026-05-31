@@ -22,11 +22,13 @@ use std::path::Path;
 pub mod audit;
 pub mod hooks;
 pub mod session_permissions;
+pub mod tool_gate;
 pub mod violations;
 
 pub use audit::{audit_policy_files, audit_policy_files_at_root, MutationOutcome};
 pub use hooks::{install_hooks, HookInstallReport};
 pub use session_permissions::{GrantScope, PermissionAction, SessionPermissions};
+pub use tool_gate::{GateMode, GatedKeyword};
 pub use violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 
 /// Resolved policy for a (general + per-project) overlay.
