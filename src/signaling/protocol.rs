@@ -303,13 +303,13 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_write",
-            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. Idempotent on (session_id, slug) — re-writing the same slug overwrites. Use slugs that read well later (e.g. 'plan-v1', 'findings-broadcast'). **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) so the doc surfaces in the matching IPAV document tab in the session view AND is retrievable via `session_doc_search(phase=...)`.** Untagged docs are session-scoped scratch — invisible to tabs and phase searches. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.",
+            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) and the doc is keyed BY PHASE — exactly ONE rewritable doc per phase. Writing that phase again (even under a different slug) overwrites the single doc; if you found new info, rewrite the whole doc, never create a `-v2`.** Phase-tagged docs surface in the matching IPAV document tab and are retrievable via `session_doc_search(phase=...)`. Untagged docs are keyed by `slug` (many allowed) — session-scoped scratch, invisible to tabs and phase searches. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "slug": {
                         "type": "string",
-                        "description": "Stable identifier within this session (e.g. 'plan-v1')."
+                        "description": "Identifier for UNTAGGED scratch docs (many allowed per session). For phase-tagged writes the doc is keyed by `phase`, so slug is only a human label — use the phase name (e.g. 'plan')."
                     },
                     "body": {
                         "type": "string",
@@ -318,7 +318,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     "phase": {
                         "type": "string",
                         "enum": ["investigate", "plan", "apply", "verify"],
-                        "description": "Optional. Tag the doc so it surfaces in the matching IPAV document tab in the session view AND is retrievable via session_doc_search(phase=...)."
+                        "description": "Optional. Tags the doc AND keys it: exactly one rewritable doc per phase. Surfaces in the matching IPAV tab and is retrievable via session_doc_search(phase=...)."
                     }
                 },
                 "required": ["slug", "body"]

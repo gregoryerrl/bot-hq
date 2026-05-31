@@ -1120,18 +1120,20 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "test", None).await.unwrap();
 
-        // Write three docs: two plans, one investigation.
-        for (slug, phase) in [
-            ("plan-v1", "plan"),
-            ("plan-v2", "plan"),
-            ("find-1", "investigate"),
+        // Two writes under phase="plan" (even with different slugs) collapse to
+        // ONE rewritable doc keyed by phase — the latest body wins. A different
+        // phase keeps its own doc.
+        for (slug, body, phase) in [
+            ("plan-v1", "first", "plan"),
+            ("plan-v2", "second", "plan"),
+            ("find-1", "x", "investigate"),
         ] {
             dispatch(
                 req(
                     "tools/call",
                     json!({
                         "name": "session_doc_write",
-                        "arguments": {"slug": slug, "body": "x", "phase": phase}
+                        "arguments": {"slug": slug, "body": body, "phase": phase}
                     }),
                     1,
                 ),
@@ -1143,7 +1145,7 @@ mod tests {
             .unwrap();
         }
 
-        // Search filtered by phase="plan" returns only the two plans.
+        // Search filtered by phase="plan" returns the single consolidated doc.
         let res = dispatch(
             req(
                 "tools/call",
@@ -1162,10 +1164,10 @@ mod tests {
         let v = serde_json::to_value(&res).unwrap();
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
         let rows: Vec<Value> = serde_json::from_str(text).unwrap();
-        assert_eq!(rows.len(), 2, "expected 2 plan docs, got: {text}");
-        for row in &rows {
-            assert_eq!(row["phase"], "plan");
-        }
+        assert_eq!(rows.len(), 1, "phase docs collapse to one per phase, got: {text}");
+        assert_eq!(rows[0]["phase"], "plan");
+        assert_eq!(rows[0]["slug"], "plan", "phase-tagged doc is keyed by phase name");
+        assert_eq!(rows[0]["body"], "second", "latest write wins");
     }
 
     #[tokio::test]
