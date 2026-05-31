@@ -25,15 +25,4 @@ describe("PhasePillRow", () => {
     expect(screen.getByText("A")).toBeInTheDocument();
     expect(screen.getByText("V")).toBeInTheDocument();
   });
-
-  it("shows count chip when count > 0", () => {
-    render(
-      <PhasePillRow
-        selected="plan"
-        onSelect={() => {}}
-        counts={{ plan: 3 }}
-      />,
-    );
-    expect(screen.getByText("·3")).toBeInTheDocument();
-  });
 });

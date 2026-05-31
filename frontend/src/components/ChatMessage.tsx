@@ -1,6 +1,5 @@
 import { memo, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { Markdown } from "./Markdown";
 import { authorColorClass } from "./authorColor";
 import { cn } from "../lib/cn";
 import type { AgentMessage } from "../lib/bindings";
@@ -52,73 +51,7 @@ export const ChatMessage = memo(function ChatMessage({
           </span>
         </header>
       )}
-      <div className="prose-tight text-sm text-on-surface">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            p: ({ children }) => (
-              <p className="mb-2 whitespace-pre-wrap leading-relaxed last:mb-0">
-                {children}
-              </p>
-            ),
-            code: ({ className, children, ...props }) => {
-              const isBlock = (props as { node?: { tagName?: string } }).node
-                ?.tagName === "code"
-                ? !(className ?? "").includes("language-") &&
-                  String(children).indexOf("\n") < 0
-                  ? false
-                  : true
-                : false;
-              if (isBlock) {
-                return (
-                  <pre className="my-2 overflow-x-auto rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.75rem] leading-relaxed text-on-surface">
-                    <code className={className}>{children}</code>
-                  </pre>
-                );
-              }
-              return (
-                <code className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.78rem] text-on-surface">
-                  {children}
-                </code>
-              );
-            },
-            pre: ({ children }) => <>{children}</>,
-            a: ({ href, children }) => (
-              <a
-                href={href}
-                target="_blank"
-                rel="noreferrer"
-                className="text-tertiary underline hover:text-tertiary"
-              >
-                {children}
-              </a>
-            ),
-            ul: ({ children }) => (
-              <ul className="my-2 ml-5 list-disc space-y-1">{children}</ul>
-            ),
-            ol: ({ children }) => (
-              <ol className="my-2 ml-5 list-decimal space-y-1">{children}</ol>
-            ),
-            li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-            blockquote: ({ children }) => (
-              <blockquote className="my-2 border-l-2 border-outline-variant pl-3 italic text-on-surface">
-                {children}
-              </blockquote>
-            ),
-            h1: ({ children }) => (
-              <h1 className="my-2 text-base font-semibold">{children}</h1>
-            ),
-            h2: ({ children }) => (
-              <h2 className="my-2 text-sm font-semibold">{children}</h2>
-            ),
-            h3: ({ children }) => (
-              <h3 className="my-2 text-sm font-semibold">{children}</h3>
-            ),
-          }}
-        >
-          {message.content}
-        </ReactMarkdown>
-      </div>
+      <Markdown>{message.content}</Markdown>
     </article>
   );
 });

@@ -23,10 +23,9 @@ interface PhasePillProps {
   phase: Phase;
   selected: boolean;
   onSelect: (p: Phase) => void;
-  count?: number;
 }
 
-export function PhasePill({ phase, selected, onSelect, count }: PhasePillProps) {
+export function PhasePill({ phase, selected, onSelect }: PhasePillProps) {
   return (
     <button
       onClick={() => onSelect(phase)}
@@ -41,9 +40,6 @@ export function PhasePill({ phase, selected, onSelect, count }: PhasePillProps) 
       title={phase}
     >
       <span>{label[phase]}</span>
-      {count !== undefined && count > 0 && (
-        <span className="text-[0.65rem] text-on-surface-variant">·{count}</span>
-      )}
     </button>
   );
 }
@@ -51,11 +47,9 @@ export function PhasePill({ phase, selected, onSelect, count }: PhasePillProps) 
 export function PhasePillRow({
   selected,
   onSelect,
-  counts,
 }: {
   selected: Phase;
   onSelect: (p: Phase) => void;
-  counts?: Partial<Record<Phase, number>>;
 }) {
   return (
     <div className="flex items-center gap-1">
@@ -65,7 +59,6 @@ export function PhasePillRow({
           phase={p}
           selected={p === selected}
           onSelect={onSelect}
-          count={counts?.[p]}
         />
       ))}
     </div>

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { PhasePillRow, type Phase } from "./PhasePill";
+import { Markdown } from "./Markdown";
 import { cn } from "../lib/cn";
 import type { SessionDocumentView } from "../lib/bindings";
 
@@ -53,27 +54,12 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
     { enabled: !!sessionId && activePhase === "apply" },
   );
 
-  const counts = useMemo(() => {
-    const c: Partial<Record<Phase, number>> = {};
-    for (const d of docs) {
-      if (d.phase) c[d.phase as Phase] = (c[d.phase as Phase] ?? 0) + 1;
-    }
-    return c;
-  }, [docs]);
-
   const activeDocs = docs.filter((d) => d.phase === activePhase);
 
   return (
     <div className="flex h-full min-w-0 flex-col border-l border-outline-variant bg-surface-container-lowest/50">
-      <div className="flex items-center justify-between gap-2 border-b border-outline-variant px-3 py-2">
-        <PhasePillRow
-          selected={activePhase}
-          onSelect={setActivePhase}
-          counts={counts}
-        />
-        <span className="text-[0.65rem] uppercase tracking-wide text-on-surface-variant">
-          {activeDocs.length} doc{activeDocs.length === 1 ? "" : "s"}
-        </span>
+      <div className="flex items-center gap-2 border-b border-outline-variant px-3 py-2">
+        <PhasePillRow selected={activePhase} onSelect={setActivePhase} />
       </div>
       <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
         {activePhase === "apply" && (
@@ -96,9 +82,7 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
                   {doc.updated_at}
                 </span>
               </header>
-              <pre className="whitespace-pre-wrap text-xs leading-relaxed text-on-surface">
-                {doc.body}
-              </pre>
+              <Markdown>{doc.body}</Markdown>
             </article>
           ))
         )}
