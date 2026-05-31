@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-345 tests passing (296 lib + 32 external MCP + 7 signaling + 10 storage)
+346 tests passing (297 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 29 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -53,6 +53,18 @@ Tests: 296 lib (+9: 2 session-doc helper, 4 general_rules anchors, 3
 prompts anchors) + 29 frontend (+2 Markdown, −1 PhasePill count). Agents
 pick up the new prompts and the markdown doc view only after a rebuild +
 app restart.
+
+**Follow-up bug fixes (same session):** `c19e0e0` — `session_doc_write`
+returned a bogus row id on overwrite, because `last_insert_rowid()`
+reports the bumped AUTOINCREMENT value on an upsert's UPDATE branch;
+switched to `INSERT … RETURNING id`. `547d364` — agent self-advance (the
+`advance_phase` MCP tool) only moved the frontend chip:
+`SignalingEvent::AgentAdvancePhase` was consumed solely by the Tauri emit
+subscriber and never routed to `core.advance_phase`, so the backend
+`IpavState` (and every `[PHASE: X]` peer envelope) stayed stuck on the
+default phase — the same no-op class as the old close_session bug. Added
+the missing arm to the main.rs signaling consumer. Tests: 297 lib (+1
+upsert-id regression).
 
 ## 2026-05-31 — Tool Gate: global gated-Bash keywords + action_gate
 
