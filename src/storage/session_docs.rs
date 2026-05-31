@@ -23,13 +23,20 @@ impl Storage {
         phase: Option<&str>,
     ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
-        let res = sqlx::query(
+        // `RETURNING id` yields the row id for BOTH the INSERT and the DO
+        // UPDATE branch (SQLite >= 3.35), so we never trust `last_insert_rowid()`
+        // here: on an upsert that takes the UPDATE branch it can report the
+        // bumped AUTOINCREMENT value of the attempted-but-unused insert rowid
+        // instead of the real row id (observed in prod: a rewrite returned a
+        // five-digit id while actually updating the existing low-id row).
+        let row: (i64,) = sqlx::query_as(
             "INSERT INTO session_documents (session_id, slug, body, created_at, updated_at, phase) \
              VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT(session_id, slug) DO UPDATE SET \
                body = excluded.body, \
                updated_at = excluded.updated_at, \
-               phase = excluded.phase",
+               phase = excluded.phase \
+             RETURNING id",
         )
         .bind(session_id)
         .bind(slug)
@@ -37,23 +44,10 @@ impl Storage {
         .bind(&now)
         .bind(&now)
         .bind(phase)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .with_context(|| format!("upsert session_documents session={session_id} slug={slug}"))?;
-        // last_insert_rowid is 0 on the UPDATE branch; re-fetch when needed.
-        let id = if res.last_insert_rowid() != 0 {
-            res.last_insert_rowid()
-        } else {
-            let row: (i64,) = sqlx::query_as(
-                "SELECT id FROM session_documents WHERE session_id = ? AND slug = ?",
-            )
-            .bind(session_id)
-            .bind(slug)
-            .fetch_one(&self.pool)
-            .await?;
-            row.0
-        };
-        Ok(id)
+        Ok(row.0)
     }
 
     /// Search a session's documents. Optional `query` is a case-insensitive
@@ -252,5 +246,38 @@ mod session_doc_tests {
             .unwrap();
         assert_eq!(doc.body, "v2");
         assert_eq!(doc.phase.as_deref(), Some("apply"));
+    }
+
+    #[tokio::test]
+    async fn upsert_returns_real_row_id_after_autoincrement_bump() {
+        // Regression: a rewrite (DO UPDATE branch) used to return the bumped
+        // AUTOINCREMENT value from `last_insert_rowid()` instead of the real
+        // row id. Insert two docs (bumping the sequence), then rewrite the
+        // first — the returned id must be the first doc's real id.
+        let (s, a, _) = seeded().await;
+        let id_a = s
+            .upsert_session_document(a, "doc-a", "v1", None)
+            .await
+            .unwrap();
+        let id_b = s
+            .upsert_session_document(a, "doc-b", "v1", None)
+            .await
+            .unwrap();
+        assert_ne!(id_a, id_b);
+        let id_a2 = s
+            .upsert_session_document(a, "doc-a", "v2", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            id_a2, id_a,
+            "rewrite must return doc-a's real id, not a bumped autoincrement value"
+        );
+        let doc = s
+            .session_document_by_slug(a, "doc-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(doc.id, id_a);
+        assert_eq!(doc.body, "v2");
     }
 }
