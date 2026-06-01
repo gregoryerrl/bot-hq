@@ -4,7 +4,7 @@
 //! system prompt from CL, spawns Brian + Rain, kicks off the duo event pumps,
 //! and registers the session in `AppState`.
 
-use crate::agents::{spawn_agent, AgentEvent, AgentHandle, SpawnConfig};
+use crate::agents::{spawn_supervised_agent, AgentEvent, AgentHandle, RetryPolicy, SpawnConfig};
 use crate::core::duo::{pump_agent, DuoConfig};
 use crate::core::ipav::IpavState;
 use crate::paths::Paths;
@@ -419,7 +419,9 @@ async fn spawn_agent_for(
         project: project.clone(),
         data_dir: paths.data_dir.clone(),
     };
-    spawn_agent(spawn_cfg).await
+    // Supervised: a transient upstream API error (e.g. 529 Overloaded) auto-
+    // resumes the agent with capped backoff instead of stranding the session.
+    spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await
 }
 
 /// Decide which user MCP servers to expose to an agent at spawn time.

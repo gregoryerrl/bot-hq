@@ -8,9 +8,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Mutex;
+use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::agents::events;
 use crate::agents::input;
@@ -74,6 +75,11 @@ pub enum AgentEvent {
         /// re-triggers the failing agent — an unbounded error-spam loop
         /// (Rain on the DeepSeek gateway, 2026-05-29).
         is_error: bool,
+        /// Upstream API HTTP status when the turn failed on an API error
+        /// (e.g. `529` Overloaded, `503`, `429`). `None` on success or on a
+        /// non-API failure. The retry supervisor reads this to decide whether
+        /// the failure is transient (auto-resume) or permanent (surface it).
+        api_error_status: Option<u16>,
     },
     /// System/init event — agent is ready and reporting its session metadata.
     /// (The wire `SystemEvent::Init` also carries `model`/`cwd`, but no
@@ -83,6 +89,20 @@ pub enum AgentEvent {
     Exited(String),
     /// Catch-all for fatal errors the supervisor wants to surface.
     Error(String),
+}
+
+/// Classify an upstream API HTTP status as transient (worth an automatic
+/// resume + retry) vs. permanent (surface to the user — retrying won't help).
+///
+/// Transient: overload / rate-limit / gateway / timeout statuses that usually
+/// clear on their own within seconds — `408` request timeout, `425` too early,
+/// `429` rate limit, `500` internal, `502` bad gateway, `503` unavailable,
+/// `504` gateway timeout, `529` overloaded (the Anthropic "API Error:
+/// Overloaded" that stranded a session 2026-06-01). Everything else — notably
+/// `400`/`401`/`403`/`404`/`413`/`422` — is a permanent/semantic failure where
+/// a blind retry just re-fails (e.g. the DeepSeek system-role 400).
+pub fn is_transient_api_error(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504 | 529)
 }
 
 #[derive(Debug, Clone)]
@@ -206,6 +226,222 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         input_tx,
         kill_tx: Some(kill_tx),
     })
+}
+
+/// Retry policy for the agent supervisor: how many consecutive transient API
+/// failures to absorb (auto-resume) before surfacing the error and stopping,
+/// plus the backoff schedule between attempts. A successful turn resets the
+/// budget.
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    pub max_retries: u32,
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        // ~2s, 4s, 8s, 16s, 30s — ≈60s of patience over 5 attempts, which
+        // comfortably outlasts a typical Anthropic "Overloaded" blip, then
+        // gives up with a clear message so a real outage doesn't loop forever.
+        Self {
+            max_retries: 5,
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Backoff before the Nth retry (1-based): `base * 2^(n-1)`, capped at
+    /// `max_delay`.
+    pub fn backoff(&self, attempt: u32) -> Duration {
+        let shift = attempt.saturating_sub(1).min(16);
+        self.base_delay
+            .saturating_mul(1u32 << shift)
+            .min(self.max_delay)
+    }
+}
+
+/// Spawn an agent under a retry supervisor. The returned `AgentHandle` exposes
+/// STABLE event/input channels: when a child dies on a *transient* upstream API
+/// error (e.g. `529` Overloaded), the supervisor auto-resumes it
+/// (`--resume <uuid>`) with capped backoff and a continue-nudge — transparently
+/// to the caller and the peer pump, with no channel rewiring. A permanent error
+/// (e.g. `400`), a clean exit, or exhausting `max_retries` ends the supervisor
+/// and closes the channels (the peer pump then unwinds on its own).
+///
+/// The first incarnation is spawned synchronously so spawn failures surface to
+/// the caller via `?`, matching `spawn_agent`'s contract.
+pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Result<AgentHandle> {
+    let (out_event_tx, out_event_rx) = mpsc::channel::<AgentEvent>(256);
+    let (out_input_tx, out_input_rx) = mpsc::channel::<OutgoingUserMessage>(64);
+    let (kill_tx, kill_rx) = oneshot::channel::<()>();
+
+    let name = cfg.agent_name.clone();
+    let first = spawn_agent(cfg.clone()).await?;
+
+    tokio::spawn(supervise(
+        cfg,
+        policy,
+        first,
+        out_event_tx,
+        out_input_rx,
+        kill_rx,
+        spawn_agent,
+    ));
+
+    Ok(AgentHandle {
+        name,
+        event_rx: out_event_rx,
+        input_tx: out_input_tx,
+        kill_tx: Some(kill_tx),
+    })
+}
+
+/// Supervisor task body. Bridges one child incarnation at a time onto the
+/// stable outer channels, retrying transient API failures. Generic over the
+/// respawn fn so the retry logic is testable with fake incarnations.
+#[allow(clippy::too_many_arguments)]
+async fn supervise<S, Fut>(
+    mut cfg: SpawnConfig,
+    policy: RetryPolicy,
+    first: AgentHandle,
+    out_event_tx: mpsc::Sender<AgentEvent>,
+    mut out_input_rx: mpsc::Receiver<OutgoingUserMessage>,
+    mut kill_rx: oneshot::Receiver<()>,
+    mut spawn_next: S,
+) where
+    S: FnMut(SpawnConfig) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<AgentHandle>> + Send,
+{
+    let agent = cfg.agent_name.clone();
+    let mut incarnation = first;
+    let mut consecutive_transient: u32 = 0;
+    let mut pending_nudge: Option<String> = None;
+
+    loop {
+        // A freshly respawned `--resume` child idles until it receives input —
+        // nudge it to pick up the interrupted turn.
+        if let Some(nudge) = pending_nudge.take() {
+            let _ = incarnation
+                .input_tx
+                .send(OutgoingUserMessage::text(nudge))
+                .await;
+        }
+
+        let mut last_error_status: Option<u16> = None;
+
+        // Bridge this incarnation until its event channel CLOSES. Closure (not
+        // the `Exited` event) is the end-of-incarnation signal: the channel
+        // closes only once both the stdout pump and the lifecycle task have
+        // dropped their senders, so every event — including the final
+        // `TurnComplete` carrying the error status — has already been received.
+        // This makes classification race-free regardless of Exited/Result order.
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut kill_rx => {
+                    incarnation.kill();
+                    return;
+                }
+                msg = out_input_rx.recv() => {
+                    match msg {
+                        Some(msg) => { let _ = incarnation.input_tx.send(msg).await; }
+                        None => {
+                            // Caller dropped the handle → tear down.
+                            incarnation.kill();
+                            return;
+                        }
+                    }
+                }
+                ev = incarnation.event_rx.recv() => {
+                    match ev {
+                        // Suppress Exited: forwarding it would make the peer
+                        // pump terminate before a possible retry. Channel close
+                        // below is the real signal.
+                        Some(AgentEvent::Exited(reason)) => {
+                            debug!(agent = %agent, %reason, "incarnation exited; awaiting channel close");
+                        }
+                        Some(ev) => {
+                            match &ev {
+                                AgentEvent::Init { session_id: Some(id) } => {
+                                    cfg.resume_session_id = Some(id.clone());
+                                }
+                                AgentEvent::TurnComplete { is_error, api_error_status, .. } => {
+                                    if *is_error {
+                                        last_error_status = *api_error_status;
+                                    } else {
+                                        // A healthy turn clears the retry budget.
+                                        consecutive_transient = 0;
+                                        last_error_status = None;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            let _ = out_event_tx.send(ev).await;
+                        }
+                        None => break, // incarnation fully ended
+                    }
+                }
+            }
+        }
+
+        let transient = last_error_status.map(is_transient_api_error).unwrap_or(false);
+
+        if transient && consecutive_transient < policy.max_retries {
+            consecutive_transient += 1;
+            let status = last_error_status.unwrap_or(0);
+            let delay = policy.backoff(consecutive_transient);
+            warn!(
+                agent = %agent, status, attempt = consecutive_transient,
+                delay_ms = delay.as_millis() as u64,
+                "agent hit transient API error; auto-resuming after backoff"
+            );
+            tokio::select! {
+                _ = &mut kill_rx => return,
+                _ = tokio::time::sleep(delay) => {}
+            }
+            pending_nudge = Some(format!(
+                "[bot-hq] Your previous turn was interrupted by a transient upstream API error \
+                 (HTTP {status}) and has been automatically resumed. Continue exactly where you \
+                 left off — re-issue the action you were about to take. Do NOT repeat work you \
+                 already completed or committed."
+            ));
+            match spawn_next(cfg.clone()).await {
+                Ok(next) => {
+                    incarnation = next;
+                    continue;
+                }
+                Err(e) => {
+                    warn!(agent = %agent, error = %e, "respawn failed after transient error");
+                    let _ = out_event_tx
+                        .send(AgentEvent::Text(format!(
+                            "⚠️ Could not resume after a transient API error (HTTP {status}): {e}. \
+                             Reopen the session to retry."
+                        )))
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        if transient {
+            // Budget exhausted — a real outage, not a blip. Surface it.
+            let status = last_error_status.unwrap_or(0);
+            warn!(agent = %agent, status, retries = consecutive_transient, "transient API errors exhausted retry budget");
+            let _ = out_event_tx
+                .send(AgentEvent::Text(format!(
+                    "⚠️ Stopped after {consecutive_transient} consecutive transient API errors \
+                     (last: HTTP {status}). The upstream API stayed unavailable — reopen the \
+                     session to resume from here."
+                )))
+                .await;
+        }
+        // Clean exit / permanent error / retries exhausted: returning drops
+        // `out_event_tx`, so the peer pump sees its channel close and unwinds.
+        return;
+    }
 }
 
 fn build_command(cfg: &SpawnConfig) -> Command {
@@ -403,6 +639,242 @@ mod tests {
             project: Some("bcc-ad-manager-ad-exporter".into()),
             data_dir: Path::new("/tmp/data").to_path_buf(),
         }
+    }
+
+    #[test]
+    fn transient_api_statuses_are_retryable() {
+        for s in [408, 425, 429, 500, 502, 503, 504, 529] {
+            assert!(is_transient_api_error(s), "{s} should be transient");
+        }
+    }
+
+    #[test]
+    fn permanent_api_statuses_are_not_retryable() {
+        // 400 = the DeepSeek system-role rejection; auth/forbidden/not-found
+        // and semantic 4xx never clear on a blind retry.
+        for s in [400, 401, 403, 404, 409, 413, 422, 451] {
+            assert!(!is_transient_api_error(s), "{s} should be permanent");
+        }
+    }
+
+    #[test]
+    fn backoff_doubles_then_caps() {
+        let p = RetryPolicy {
+            max_retries: 5,
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(30),
+        };
+        assert_eq!(p.backoff(1), Duration::from_secs(2));
+        assert_eq!(p.backoff(2), Duration::from_secs(4));
+        assert_eq!(p.backoff(3), Duration::from_secs(8));
+        assert_eq!(p.backoff(4), Duration::from_secs(16));
+        assert_eq!(p.backoff(5), Duration::from_secs(30)); // 32 → capped
+        assert_eq!(p.backoff(99), Duration::from_secs(30));
+    }
+
+    // ---- supervisor retry logic (fake incarnations, no real subprocess) ----
+
+    /// A fake `AgentHandle` whose event stream the test drives directly. Push
+    /// events via `ev_tx`; close the incarnation by dropping it. Observe the
+    /// resume-nudge (and any peer input) via `in_rx`.
+    fn fake_incarnation() -> (
+        AgentHandle,
+        mpsc::Sender<AgentEvent>,
+        mpsc::Receiver<OutgoingUserMessage>,
+    ) {
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(16);
+        let (in_tx, in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (kill_tx, _kill_rx) = oneshot::channel::<()>();
+        let handle = AgentHandle {
+            name: "fake".into(),
+            event_rx: ev_rx,
+            input_tx: in_tx,
+            kill_tx: Some(kill_tx),
+        };
+        (handle, ev_tx, in_rx)
+    }
+
+    fn errored_turn(status: u16) -> AgentEvent {
+        AgentEvent::TurnComplete {
+            stop_reason: None,
+            subtype: Some("error_during_execution".into()),
+            is_error: true,
+            api_error_status: Some(status),
+        }
+    }
+
+    fn clean_turn() -> AgentEvent {
+        AgentEvent::TurnComplete {
+            stop_reason: Some("end_turn".into()),
+            subtype: Some("success".into()),
+            is_error: false,
+            api_error_status: None,
+        }
+    }
+
+    fn instant_policy(max_retries: u32) -> RetryPolicy {
+        RetryPolicy {
+            max_retries,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_resumes_after_transient_then_stops_clean() {
+        let (h1, ev1, _in1) = fake_incarnation();
+        let (h2, ev2, mut in2) = fake_incarnation();
+
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(h2);
+        let spawn_next = move |_c: SpawnConfig| {
+            let h = queue.pop_front().expect("unexpected extra respawn");
+            async move { Ok(h) }
+        };
+
+        let (out_ev_tx, mut out_ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (_out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (_kill_tx, kill_rx) = oneshot::channel::<()>();
+
+        let task = tokio::spawn(supervise(
+            cfg(),
+            instant_policy(5),
+            h1,
+            out_ev_tx,
+            out_in_rx,
+            kill_rx,
+            spawn_next,
+        ));
+
+        // Incarnation 1 hits a transient 529, then exits.
+        ev1.send(errored_turn(529)).await.unwrap();
+        drop(ev1);
+
+        // The resumed incarnation is nudged to continue.
+        let nudge = in2.recv().await.expect("resumed incarnation should be nudged");
+        assert!(nudge.message.content.contains("529"), "nudge names the status");
+        assert!(nudge.message.content.to_lowercase().contains("resumed"));
+
+        // Incarnation 2 does real work and finishes cleanly.
+        ev2.send(AgentEvent::Text("resumed work".into())).await.unwrap();
+        ev2.send(clean_turn()).await.unwrap();
+        drop(ev2);
+
+        task.await.unwrap();
+
+        let mut got = Vec::new();
+        while let Some(ev) = out_ev_rx.recv().await {
+            got.push(ev);
+        }
+        assert!(
+            matches!(got.first(), Some(AgentEvent::TurnComplete { is_error: true, .. })),
+            "errored turn is forwarded to the peer pump"
+        );
+        assert!(got
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Text(t) if t == "resumed work")));
+        assert!(got
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnComplete { is_error: false, .. })));
+    }
+
+    #[tokio::test]
+    async fn supervisor_does_not_resume_permanent_error() {
+        let (h1, ev1, _in1) = fake_incarnation();
+        // Empty queue: any respawn pops-and-panics, failing the test.
+        let mut queue: std::collections::VecDeque<AgentHandle> = std::collections::VecDeque::new();
+        let spawn_next = move |_c: SpawnConfig| {
+            let h = queue
+                .pop_front()
+                .expect("permanent error must NOT trigger a respawn");
+            async move { Ok(h) }
+        };
+
+        let (out_ev_tx, mut out_ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (_out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (_kill_tx, kill_rx) = oneshot::channel::<()>();
+
+        let task = tokio::spawn(supervise(
+            cfg(),
+            instant_policy(5),
+            h1,
+            out_ev_tx,
+            out_in_rx,
+            kill_rx,
+            spawn_next,
+        ));
+
+        ev1.send(errored_turn(400)).await.unwrap(); // permanent
+        drop(ev1);
+
+        task.await.unwrap(); // returns without a respawn
+
+        let mut got = Vec::new();
+        while let Some(ev) = out_ev_rx.recv().await {
+            got.push(ev);
+        }
+        assert!(got.iter().any(|e| matches!(
+            e,
+            AgentEvent::TurnComplete { is_error: true, api_error_status: Some(400), .. }
+        )));
+        assert!(
+            !got.iter()
+                .any(|e| matches!(e, AgentEvent::Text(t) if t.contains("Stopped after"))),
+            "permanent error must not emit the transient give-up message"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_gives_up_after_max_retries() {
+        // max_retries = 2 → initial + 2 respawns = 3 incarnations, then surface.
+        let (h1, ev1, _in1) = fake_incarnation();
+        let (h2, ev2, mut in2) = fake_incarnation();
+        let (h3, ev3, mut in3) = fake_incarnation();
+
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(h2);
+        queue.push_back(h3);
+        let spawn_next = move |_c: SpawnConfig| {
+            let h = queue.pop_front().expect("more respawns than budget allows");
+            async move { Ok(h) }
+        };
+
+        let (out_ev_tx, mut out_ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (_out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (_kill_tx, kill_rx) = oneshot::channel::<()>();
+
+        let task = tokio::spawn(supervise(
+            cfg(),
+            instant_policy(2),
+            h1,
+            out_ev_tx,
+            out_in_rx,
+            kill_rx,
+            spawn_next,
+        ));
+
+        ev1.send(errored_turn(529)).await.unwrap();
+        drop(ev1);
+        in2.recv().await.expect("nudge to incarnation 2");
+        ev2.send(errored_turn(503)).await.unwrap();
+        drop(ev2);
+        in3.recv().await.expect("nudge to incarnation 3");
+        ev3.send(errored_turn(529)).await.unwrap();
+        drop(ev3);
+
+        task.await.unwrap();
+
+        let mut got = Vec::new();
+        while let Some(ev) = out_ev_rx.recv().await {
+            got.push(ev);
+        }
+        assert!(
+            got.iter().any(|e| matches!(
+                e,
+                AgentEvent::Text(t) if t.contains("Stopped after") && t.contains('2')
+            )),
+            "expected the give-up message after exhausting 2 retries; got {got:?}"
+        );
     }
 
     #[test]

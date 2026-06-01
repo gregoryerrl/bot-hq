@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-347 tests passing (298 lib + 32 external MCP + 7 signaling + 10 storage)
+354 tests passing (305 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 31 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,42 @@ plus 31 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-02 — Auto-resume agents on transient API errors
+
+A transient upstream API error (e.g. Anthropic `529` Overloaded) killed an
+agent's claude-code subprocess and **nothing respawned it** — the session sat
+dead on "API Error: Overloaded" indefinitely (observed on `s-c9f509d2`:
+Brian died mid-Apply on 2026-06-01 after B1+B2 of the policy redesign had
+landed + pushed). The only restart path in the codebase was the manual
+`restart_emma` tool; an agent that hit a self-clearing blip was stranded.
+
+Root cause: `events.rs` collapsed the result event's `api_error_status` (the
+HTTP code) into a bare `is_error` bool, discarding the transient-vs-permanent
+signal; on the subsequent `Exited`, `pump_agent` drained the buffer and the
+supervisor task simply ended — no retry, no backoff, no respawn.
+
+- **Signal plumbing.** `AgentEvent::TurnComplete` now carries
+  `api_error_status: Option<u16>`; `events.rs::extract_api_status` coerces the
+  wire value (number or string) and `spawn::is_transient_api_error` classifies
+  it (`408/425/429/500/502/503/504/529` transient; `400/401/403/…` permanent —
+  the DeepSeek system-role `400` stays a hard stop).
+- **Retry supervisor.** New `spawn_supervised_agent` wraps the per-incarnation
+  `spawn_agent` in a respawn loop that exposes STABLE event/input channels, so
+  the peer-forward and `SessionHandle` survive a respawn with zero rewiring. On
+  a transient failure it resumes the agent (`--resume <uuid>`, UUID captured
+  from the tapped `init` event) after capped exponential backoff
+  (2/4/8/16/30s, 5 attempts) and nudges it to continue where it left off; a
+  clean turn resets the budget; a permanent error or an exhausted budget
+  surfaces a clear message and unwinds. `Exited` is suppressed mid-retry —
+  channel-close is the race-free end-of-incarnation signal, so the final
+  errored `TurnComplete` is always seen before classifying.
+- `core/session.rs` spawns Brian/Rain via `spawn_supervised_agent`
+  (`RetryPolicy::default()`); `pump_agent` / `duo.rs` behaviour is unchanged
+  (the error text is still persisted for UI visibility and never peer-forwarded).
+- +9 lib tests (classifier ×2, status propagation ×3, backoff cap, supervisor
+  resume-then-clean / permanent-no-resume / give-up-after-cap). Lib suite
+  **305 passing**; clippy clean on touched files; release build green.
 
 ## 2026-06-01 — Fix nested-runtime panic in policy-mutation audit
 

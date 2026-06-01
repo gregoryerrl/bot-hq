@@ -14,4 +14,6 @@ pub mod spawn;
 pub use general_rules::GENERAL_RULES;
 pub use prompts::role_for;
 pub use protocol::{OutgoingUserMessage, StreamEvent};
-pub use spawn::{spawn_agent, AgentEvent, AgentHandle, SpawnConfig};
+pub use spawn::{
+    spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle, RetryPolicy, SpawnConfig,
+};

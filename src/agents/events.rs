@@ -117,14 +117,27 @@ pub fn translate(ev: StreamEvent) -> Vec<AgentEvent> {
             // failure from a non-`success` subtype alone — unknown-but-benign
             // subtypes shouldn't wrongly suppress a legit turn's forward.
             let is_error = r.is_error || r.api_error_status.is_some();
+            let api_error_status = extract_api_status(&r.api_error_status);
             vec![AgentEvent::TurnComplete {
                 stop_reason: r.stop_reason,
                 subtype: r.subtype,
                 is_error,
+                api_error_status,
             }]
         }
         StreamEvent::RateLimit(_) => Vec::new(),
         StreamEvent::Unknown => Vec::new(),
+    }
+}
+
+/// Coerce the wire `api_error_status` — which arrives as a JSON number, or
+/// occasionally a string — into a `u16` HTTP status. `None` when absent or
+/// unparseable. Fed to `spawn::is_transient_api_error` by the retry supervisor.
+fn extract_api_status(v: &Option<serde_json::Value>) -> Option<u16> {
+    match v.as_ref()? {
+        serde_json::Value::Number(n) => n.as_u64().and_then(|n| u16::try_from(n).ok()),
+        serde_json::Value::String(s) => s.trim().parse::<u16>().ok(),
+        _ => None,
     }
 }
 
@@ -220,6 +233,51 @@ mod tests {
                 assert!(!*is_error, "success result must not be marked errored")
             }
             other => panic!("expected one clean TurnComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overloaded_result_propagates_api_status() {
+        // The 2026-06-01 strand: claude-code surfaces an Anthropic 529 as a
+        // result with api_error_status. translate() must carry the numeric
+        // status through so the retry supervisor can classify it transient.
+        let line = r#"{"type":"result","is_error":true,"api_error_status":529,"stop_reason":null}"#;
+        let ev: StreamEvent = serde_json::from_str(line).unwrap();
+        match translate(ev).as_slice() {
+            [AgentEvent::TurnComplete {
+                is_error,
+                api_error_status,
+                ..
+            }] => {
+                assert!(*is_error);
+                assert_eq!(*api_error_status, Some(529));
+            }
+            other => panic!("expected errored TurnComplete with status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_api_status_is_coerced() {
+        // Defensive: some gateways stringify the status.
+        let line = r#"{"type":"result","is_error":true,"api_error_status":"503"}"#;
+        let ev: StreamEvent = serde_json::from_str(line).unwrap();
+        match translate(ev).as_slice() {
+            [AgentEvent::TurnComplete { api_error_status, .. }] => {
+                assert_eq!(*api_error_status, Some(503))
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn success_result_has_no_api_status() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn"}"#;
+        let ev: StreamEvent = serde_json::from_str(line).unwrap();
+        match translate(ev).as_slice() {
+            [AgentEvent::TurnComplete {
+                api_error_status, ..
+            }] => assert_eq!(*api_error_status, None),
+            other => panic!("expected TurnComplete, got {other:?}"),
         }
     }
 

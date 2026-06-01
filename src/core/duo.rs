@@ -408,7 +408,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        ev_tx.send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false }).await.unwrap();
+        ev_tx.send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false, api_error_status: None }).await.unwrap();
 
         // Give the pump a moment, then assert nothing landed in peer_rx.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -453,6 +453,7 @@ mod tests {
                 stop_reason: None,
                 subtype: Some("error_during_execution".into()),
                 is_error: true,
+                api_error_status: None,
             })
             .await
             .unwrap();
@@ -491,7 +492,7 @@ mod tests {
         for word in ["Ok.", "Sure.", "Yep.", "Right.", "Fine.", "Cool."] {
             ev_tx.send(AgentEvent::Text(word.into())).await.unwrap();
             ev_tx
-                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false })
+                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false, api_error_status: None })
                 .await
                 .unwrap();
         }
@@ -533,7 +534,7 @@ mod tests {
         for chunk in seq {
             ev_tx.send(AgentEvent::Text(chunk.into())).await.unwrap();
             ev_tx
-                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false })
+                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false, api_error_status: None })
                 .await
                 .unwrap();
         }
@@ -602,6 +603,7 @@ mod tests {
                 stop_reason: Some("end_turn".into()),
                 subtype: None,
                 is_error: false,
+                api_error_status: None,
             })
             .await
             .unwrap();
@@ -635,6 +637,7 @@ mod tests {
                 stop_reason: Some("end_turn".into()),
                 subtype: None,
                 is_error: false,
+                api_error_status: None,
             })
             .await
             .unwrap();
