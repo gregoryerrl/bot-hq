@@ -285,6 +285,18 @@ impl SignalingBridge {
         )
     }
 
+    /// Delete the canonical session-policy snapshot. Called by
+    /// `core::state::close_session` when the session closes — the snapshot is
+    /// per-session state that must not leak into the next session (which
+    /// re-seeds from the current blueprints). Idempotent; no-ops silently when
+    /// the bridge has no `data_dir` (test bridges).
+    pub async fn cleanup_session_policy(&self, session_id: &str) -> Result<()> {
+        if let Some(data_dir) = &self.data_dir {
+            crate::policy::session_policy::delete_session_policy(data_dir, session_id)?;
+        }
+        Ok(())
+    }
+
     /// Direct access to the violations log (e.g., for the UI's recent-events
     /// panel). None when the bridge was constructed without a log.
     pub fn violations_log(&self) -> Option<&ViolationsLog> {

@@ -24,11 +24,13 @@ use std::path::Path;
 
 pub mod audit;
 pub mod hooks;
+pub mod session_policy;
 pub mod tool_gate;
 pub mod violations;
 
 pub use audit::{audit_policy_files, audit_policy_files_at_root, MutationOutcome};
 pub use hooks::{install_hooks, HookInstallReport};
+pub use session_policy::SessionPolicy;
 pub use tool_gate::{GateMode, GatedKeyword};
 pub use violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 
@@ -111,14 +113,32 @@ impl Policy {
     /// convention (`<data_dir>/projects/<name>/`), which is what the CLI hook
     /// context uses (no storage handle available).
     ///
-    /// `_session_id` is reserved for the canonical session-policy overlay wired
-    /// in a follow-up batch; today the general+project overlay is returned.
+    /// When `session_id` is `Some` AND a canonical session-policy snapshot
+    /// exists for it (seeded at spawn under
+    /// `<data_dir>/.local/session-policies/<sid>.yaml`), that snapshot's
+    /// [`Policy`] is returned VERBATIM — the general+project blueprints are NOT
+    /// re-merged, because the snapshot (incl. any gear-tab user edits) is the
+    /// sole source of truth for a live session. Fail-open: an unreadable /
+    /// malformed snapshot is logged and we fall back to the general+project
+    /// overlay so a glitchy file can't brick a session's policy resolution.
     pub fn resolve_at_root(
         data_dir: &Path,
         project: Option<&str>,
         project_root: Option<&Path>,
-        _session_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> Result<Self> {
+        if let Some(sid) = session_id {
+            match session_policy::read_session_policy(data_dir, sid) {
+                Ok(Some(sp)) => return Ok(sp.policy),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    session_id = sid,
+                    error = %e,
+                    "session-policy unreadable; falling back to general+project"
+                ),
+            }
+        }
+
         let general_path = data_dir.join("general-policy.yaml");
         let base = load_one(&general_path)?.unwrap_or_default();
 
@@ -354,6 +374,51 @@ mod tests {
         );
         let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
         assert!(matches!(p.push_gate, PushGateMode::Ask));
+    }
+
+    #[test]
+    fn session_snapshot_wins_verbatim_over_blueprints() {
+        // With a session-policy snapshot present, resolve returns it VERBATIM —
+        // the general+project blueprints (which DIFFER here) are ignored.
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("general-policy.yaml"),
+            "forbidden_in_commits:\n  - Claude\n",
+        );
+        write(
+            &dir.path().join("projects/foo/policy.yaml"),
+            "forbidden_in_commits:\n  - bot-hq\n",
+        );
+        let snapshot = session_policy::SessionPolicy {
+            policy: Policy {
+                forbidden_in_commits: vec!["SNAPSHOT-ONLY".into()],
+                push_gate: PushGateMode::Ask,
+                ..Policy::default()
+            },
+            tool_gate: Vec::new(),
+        };
+        session_policy::write_session_policy(dir.path(), "sess-1", &snapshot).unwrap();
+
+        let p = Policy::resolve(dir.path(), Some("foo"), Some("sess-1")).unwrap();
+        assert_eq!(p.forbidden_in_commits, vec!["SNAPSHOT-ONLY"]);
+        assert!(matches!(p.push_gate, PushGateMode::Ask));
+    }
+
+    #[test]
+    fn no_snapshot_falls_back_to_blueprint_merge() {
+        // Absent snapshot → the general+project overlay is unchanged, even when
+        // a session_id is threaded through.
+        let dir = tempdir().unwrap();
+        write(
+            &dir.path().join("general-policy.yaml"),
+            "forbidden_in_commits:\n  - Claude\n",
+        );
+        write(
+            &dir.path().join("projects/foo/policy.yaml"),
+            "forbidden_in_commits:\n  - bot-hq\n",
+        );
+        let p = Policy::resolve(dir.path(), Some("foo"), Some("no-snapshot")).unwrap();
+        assert_eq!(p.forbidden_in_commits, vec!["bot-hq"]);
     }
 
     #[test]

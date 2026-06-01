@@ -161,6 +161,12 @@ impl AppState {
             handle.rain.kill();
         }
         self.storage.close_session(id, archive).await?;
+        // Drop the canonical session-policy snapshot. It does not carry into
+        // the next session this user opens — that session re-seeds from the
+        // current general+project blueprints at spawn.
+        if let Err(e) = self.bridge.cleanup_session_policy(id).await {
+            tracing::warn!(?e, session_id = %id, "cleanup_session_policy failed");
+        }
         Ok(())
     }
 

@@ -160,6 +160,50 @@ async fn spawn_session_handle(
         tracing::warn!(%err, "policy audit failed at session spawn");
     }
 
+    // Seed the canonical session-policy snapshot WRITE-IF-ABSENT. Once seeded,
+    // this file (incl. any gear-tab user edits) is the SOLE policy for the
+    // session — `Policy::resolve_at_root` returns it verbatim. Write-if-absent
+    // so re-opening a session preserves edits made during a prior run; a fresh
+    // snapshot freezes the resolved general+project blueprint plus the global
+    // Tool-Gate keyword list at spawn. Best-effort: a write failure is logged
+    // (resolve falls back to the live blueprint merge) but never blocks spawn.
+    match crate::policy::session_policy::read_session_policy(&paths.data_dir, &session.id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            match crate::policy::Policy::resolve_at_root(
+                &paths.data_dir,
+                project.as_deref(),
+                project_root.as_deref(),
+                None,
+            ) {
+                Ok(seed) => {
+                    let tool_gate = crate::policy::tool_gate::load(&paths.data_dir);
+                    let sp = crate::policy::SessionPolicy {
+                        policy: seed,
+                        tool_gate,
+                    };
+                    if let Err(err) = crate::policy::session_policy::write_session_policy(
+                        &paths.data_dir,
+                        &session.id,
+                        &sp,
+                    ) {
+                        tracing::warn!(%err, session_id = %session.id, "failed to seed session-policy snapshot");
+                    }
+                }
+                Err(err) => tracing::warn!(
+                    %err,
+                    session_id = %session.id,
+                    "resolving blueprint policy to seed session snapshot failed"
+                ),
+            }
+        }
+        Err(err) => tracing::warn!(
+            %err,
+            session_id = %session.id,
+            "reading existing session-policy snapshot failed; not re-seeding"
+        ),
+    }
+
     // Install git hooks in the working repo as the mechanical backstop.
     // Per DeepSeek-V4-Pro's review: MCP tools = auditable primary path,
     // git hooks = unconditional enforcement. Failure to install is non-fatal
@@ -536,6 +580,31 @@ pub async fn spawn_emma_handle(
     // project-scoped duo). MCP policy lookups will see no project → resolve
     // to general-policy.yaml only.
     bridge.register_session("emma".into(), None).await;
+
+    // Seed Emma's canonical session-policy snapshot WRITE-IF-ABSENT (same
+    // contract as the duo path). Emma has no project, so the blueprint is just
+    // general-policy.yaml + the global Tool-Gate list. Best-effort.
+    match crate::policy::session_policy::read_session_policy(&paths.data_dir, "emma") {
+        Ok(Some(_)) => {}
+        Ok(None) => match crate::policy::Policy::resolve_at_root(&paths.data_dir, None, None, None) {
+            Ok(seed) => {
+                let tool_gate = crate::policy::tool_gate::load(&paths.data_dir);
+                let sp = crate::policy::SessionPolicy {
+                    policy: seed,
+                    tool_gate,
+                };
+                if let Err(err) =
+                    crate::policy::session_policy::write_session_policy(&paths.data_dir, "emma", &sp)
+                {
+                    tracing::warn!(%err, "failed to seed emma session-policy snapshot");
+                }
+            }
+            Err(err) => tracing::warn!(%err, "resolving blueprint policy to seed emma snapshot failed"),
+        },
+        Err(err) => {
+            tracing::warn!(%err, "reading emma session-policy snapshot failed; not re-seeding")
+        }
+    }
 
     let mcp_temp = TempDir::new().context("creating emma mcp-config temp dir")?;
     let emma_cfg = storage

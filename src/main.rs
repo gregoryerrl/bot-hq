@@ -77,6 +77,14 @@ fn main() -> Result<()> {
     ) = runtime.block_on(async {
         let storage = Storage::open(&paths.db_path).await?;
         let violations = ViolationsLog::new(&paths.data_dir);
+        // Wipe any stale per-session policy snapshots — a leftover file would
+        // leak a prior session's resolved policy into a fresh session that
+        // should re-seed from the current blueprints.
+        if let Err(e) =
+            bot_hq::policy::session_policy::purge_all_session_policies(&paths.data_dir)
+        {
+            tracing::warn!(?e, "purge_all_session_policies failed at startup");
+        }
         let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
         bridge.set_storage(storage.clone()).await;
         if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {

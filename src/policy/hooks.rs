@@ -335,7 +335,17 @@ fn run_tool_gate(data_dir: &Path) -> Result<i32> {
     let Some(command) = parse_pretool_bash_command(&buf) else {
         return Ok(0); // not a Bash tool call (or empty command) → allow
     };
-    let keywords = crate::policy::tool_gate::load(data_dir);
+    // Prefer the session's frozen Tool-Gate list from its canonical
+    // session-policy snapshot (seeded at spawn, gear-tab-editable). Only fall
+    // back to the GLOBAL `tool-gate.json` when there's no session id or no
+    // snapshot on disk. Reading the snapshot is fail-open: any read/parse error
+    // resolves to None → global list, mirroring the rest of this hook's posture.
+    let keywords = match hook_session_id()
+        .and_then(|sid| crate::policy::session_policy::read_session_policy(data_dir, &sid).ok().flatten())
+    {
+        Some(sp) => sp.tool_gate,
+        None => crate::policy::tool_gate::load(data_dir),
+    };
     let (code, message) = tool_gate_exit(&command, &keywords);
     if let Some(m) = message {
         // Exit 2 = claude-code "blocking error": stops the tool call and feeds
