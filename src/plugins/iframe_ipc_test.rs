@@ -43,7 +43,7 @@ fn iframe_origin_denies_uncapped_command() {
     let p = plugin_with("discord", &["cl_index_search"]);
     assert!(CapabilityGen::is_command_allowed(&p, "cl_index_search"));
     assert!(!CapabilityGen::is_command_allowed(&p, "create_session"));
-    assert!(!CapabilityGen::is_command_allowed(&p, "grant_session_permission"));
+    assert!(!CapabilityGen::is_command_allowed(&p, "advance_phase"));
 }
 
 #[test]

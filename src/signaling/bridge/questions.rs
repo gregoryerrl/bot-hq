@@ -4,7 +4,7 @@
 //! biggest slice of the bridge — everything that parks a oneshot, mirrors a
 //! question row, or sets the duo's awaiting-halt flag.
 
-use super::util::{oob_resolution_body, outcome_from_picked, parse_push_branch};
+use super::util::{oob_resolution_body, outcome_from_picked};
 use super::*;
 use crate::storage::{Author, MessageKind};
 use uuid::Uuid;
@@ -311,43 +311,14 @@ impl SignalingBridge {
                         .await;
                 }
 
-                // Approved push_gate via `request_approval` ALSO records a
-                // session-level push grant for the branch — so a second push to
-                // the same branch in this session won't re-prompt. The grant
-                // persists in the in-memory cache + mirrored JSON file; it is
-                // wiped on session close + on bot-hq restart.
-                if let (Some(ctx), Some(_)) = (&p.choice.approval, &self.data_dir) {
-                    if matches!(ctx.kind, crate::policy::ViolationKind::PushGate)
-                        && matches!(outcome, crate::policy::ViolationOutcome::Approved)
-                    {
-                        if let Some(branch) = parse_push_branch(&ctx.action) {
-                            if let Err(e) = self
-                                .add_branch_to_session_grant(
-                                    &p.choice.session_id,
-                                    crate::policy::PermissionAction::Push,
-                                    branch.clone(),
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    ?e,
-                                    branch = %branch,
-                                    session_id = %p.choice.session_id,
-                                    "session-grant update failed; pre-push hook may re-block"
-                                );
-                            }
-                        }
-                    }
-                }
-
                 match p.tx.send(picked) {
                     Ok(()) => Ok(ResolveOutcome::Delivered),
                     Err(picked) => {
                         // The agent's blocking `ask_user_choice` tool call client-side
                         // timed out before we got the user's pick. The answer is still
-                        // captured (violations log + remembered_approvals are already
-                        // written above) — persist an out-of-band synthetic user message
-                        // so the UI / message-poll callers see the resolution.
+                        // captured (the violations log is already written above) —
+                        // persist an out-of-band synthetic user message so the UI /
+                        // message-poll callers see the resolution.
                         // CoreAppState::resolve_choice is the one that ALSO routes the
                         // body through the duo input channels to wake the subprocess.
                         let session_id = p.choice.session_id.clone();
@@ -769,142 +740,6 @@ mod tests {
         assert_eq!(recs[0].kind, ViolationKind::PushGate);
         assert_eq!(recs[0].outcome, ViolationOutcome::Approved);
         assert_eq!(recs[0].action, "git push origin main");
-    }
-
-    #[tokio::test]
-    async fn approved_push_gate_records_session_grant() {
-        // After an approved push_gate via request_approval, the bridge records
-        // a session-level push grant for that branch — so a second push to the
-        // same branch in this session won't re-prompt. The grant lives in the
-        // in-memory cache + a mirrored JSON file the hook can read.
-        let dir = tempfile::tempdir().unwrap();
-        let project = "test-project";
-        let session_id = "session-A";
-        let proj_dir = dir.path().join("projects").join(project);
-        std::fs::create_dir_all(&proj_dir).unwrap();
-        std::fs::write(
-            proj_dir.join("policy.yaml"),
-            "push_gate: ask\n",
-        )
-        .unwrap();
-
-        let log = ViolationsLog::new(dir.path());
-        let bridge = SignalingBridge::with_policy(log, dir.path().to_path_buf());
-        bridge
-            .register_session(session_id.to_string(), Some(project.to_string()))
-            .await;
-
-        let mut sub = bridge.subscribe();
-        let bridge_clone = Arc::clone(&bridge);
-        let ask = tokio::spawn(async move {
-            bridge_clone
-                .request_approval(
-                    session_id.into(),
-                    "brian".into(),
-                    "Approve push?".into(),
-                    vec!["Approve push".into(), "Deny".into()],
-                    ApprovalContext {
-                        kind: ViolationKind::PushGate,
-                        action: "git push origin 346-streamline-onboarding-process".into(),
-                        detail: Some("per_branch_approval".into()),
-                    },
-                )
-                .await
-                .unwrap()
-        });
-        let ev = sub.recv().await.unwrap();
-        let cid = match ev {
-            SignalingEvent::PendingChoice(p) => p.choice_id,
-            other => panic!("expected PendingChoice, got {other:?}"),
-        };
-        bridge
-            .resolve_choice(&cid, "Approve push".into())
-            .await
-            .unwrap();
-        let _ = ask.await.unwrap();
-
-        // Cache: push grant now includes the branch.
-        let perm = bridge.list_session_permissions(session_id).await;
-        assert!(perm.allows_push("346-streamline-onboarding-process"));
-        assert!(!perm.allows_push("some-other-branch"));
-
-        // File mirror: the hook can read the same grant.
-        let mirrored = crate::policy::session_permissions::read_session_permission(
-            dir.path(),
-            session_id,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(mirrored.allows_push("346-streamline-onboarding-process"));
-
-        // cleanup_session_permissions wipes both cache + file.
-        bridge.cleanup_session_permissions(session_id).await.unwrap();
-        let after = bridge.list_session_permissions(session_id).await;
-        assert!(!after.allows_push("346-streamline-onboarding-process"));
-        assert!(crate::policy::session_permissions::read_session_permission(
-            dir.path(),
-            session_id,
-        )
-        .unwrap()
-        .is_none());
-    }
-
-    #[tokio::test]
-    async fn denied_push_gate_does_not_persist() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = "deny-test";
-        let proj_dir = dir.path().join("projects").join(project);
-        std::fs::create_dir_all(&proj_dir).unwrap();
-        std::fs::write(
-            proj_dir.join("policy.yaml"),
-            "push_gate: ask\n",
-        )
-        .unwrap();
-
-        let log = ViolationsLog::new(dir.path());
-        let bridge = SignalingBridge::with_policy(log, dir.path().to_path_buf());
-        bridge
-            .register_session("s".to_string(), Some(project.to_string()))
-            .await;
-
-        let mut sub = bridge.subscribe();
-        let bridge_clone = Arc::clone(&bridge);
-        let ask = tokio::spawn(async move {
-            bridge_clone
-                .request_approval(
-                    "s".into(),
-                    "brian".into(),
-                    "?".into(),
-                    vec!["Approve push".into(), "Deny".into()],
-                    ApprovalContext {
-                        kind: ViolationKind::PushGate,
-                        action: "git push origin denied-branch".into(),
-                        detail: None,
-                    },
-                )
-                .await
-                .unwrap()
-        });
-        let ev = sub.recv().await.unwrap();
-        let cid = match ev {
-            SignalingEvent::PendingChoice(p) => p.choice_id,
-            other => panic!("expected PendingChoice, got {other:?}"),
-        };
-        bridge.resolve_choice(&cid, "Deny".into()).await.unwrap();
-        let _ = ask.await.unwrap();
-
-        // No session grant should have been recorded for the denied branch.
-        let perm = bridge.list_session_permissions("s").await;
-        assert!(!perm.allows_push("denied-branch"));
-        assert!(
-            crate::policy::session_permissions::read_session_permission(
-                dir.path(),
-                "s",
-            )
-            .unwrap()
-            .is_none(),
-            "no permission file should be written for a denied push"
-        );
     }
 
     #[tokio::test]

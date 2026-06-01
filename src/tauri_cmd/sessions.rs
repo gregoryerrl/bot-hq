@@ -169,11 +169,10 @@ pub async fn advance_session_phase(
 
 /// Close a session from the UI. Delegates to `core.close_session`, which is
 /// the single source of truth for closing: it removes the live handle, KILLS
-/// the brian/rain subprocesses, marks the row closed/archived in storage, and
-/// wipes session permission grants. The previous version called
-/// `storage.close_session` directly, so it set `closed_at` but left the
-/// subprocesses running — a session that "closed" in the DB yet kept taking
-/// turns. Routing through core fixes that.
+/// the brian/rain subprocesses, and marks the row closed/archived in storage.
+/// The previous version called `storage.close_session` directly, so it set
+/// `closed_at` but left the subprocesses running — a session that "closed" in
+/// the DB yet kept taking turns. Routing through core fixes that.
 #[tauri::command]
 #[specta::specta]
 pub async fn close_session(

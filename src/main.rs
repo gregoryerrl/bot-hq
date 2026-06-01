@@ -77,11 +77,6 @@ fn main() -> Result<()> {
     ) = runtime.block_on(async {
         let storage = Storage::open(&paths.db_path).await?;
         let violations = ViolationsLog::new(&paths.data_dir);
-        if let Err(e) =
-            bot_hq::policy::session_permissions::purge_all_session_permissions(&paths.data_dir)
-        {
-            tracing::warn!(?e, "purge_all_session_permissions failed at startup");
-        }
         let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
         bridge.set_storage(storage.clone()).await;
         if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {

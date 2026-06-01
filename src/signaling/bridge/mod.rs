@@ -14,7 +14,6 @@
 //! of the bridge's surface and contributes its own `impl SignalingBridge` block:
 //!
 //! - [`questions`]    — user-blocking tools (ask/resolve/supersede/await/phase)
-//! - [`permissions`]  — session commit/push grant cache + file mirror
 //! - [`cl_facade`]    — Context Library index/folder/rescan reads
 //! - [`session_docs`] — per-session scratch documents
 //! - [`util`]         — free helper functions
@@ -30,7 +29,6 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
 mod cl_facade;
-mod permissions;
 mod questions;
 mod session_docs;
 mod util;
@@ -162,13 +160,6 @@ pub struct SignalingBridge {
     /// message poll. None on bridges constructed before storage is wired
     /// (test bridges + the pre-storage window in main).
     storage: Mutex<Option<Storage>>,
-    /// session_id → granted permissions (commit / push grant scopes). The
-    /// in-memory cache is the source of truth; we mirror to a JSON file under
-    /// `<data_dir>/.local/session-permissions/<session_id>.json` so the git
-    /// pre-push hook (a separate subprocess) can read the grant without an
-    /// HTTP roundtrip. Dropped + file deleted by `cleanup_session_permissions`
-    /// on session close.
-    session_permissions: Mutex<HashMap<String, crate::policy::SessionPermissions>>,
     /// Tauri AppHandle, populated from `setup()` once the webview exists.
     /// Internal MCP `webview_*` tools (jsonrpc.rs) reach the webview through
     /// this — bridge is the only shared handle accessible to the per-agent
@@ -191,7 +182,6 @@ impl SignalingBridge {
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
-            session_permissions: Mutex::new(HashMap::new()),
             app_handle: std::sync::OnceLock::new(),
         })
     }

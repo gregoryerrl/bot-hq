@@ -5,9 +5,9 @@
 //! **external** driver server (session-management tools for outside MCP
 //! clients). The internal tool surface — `ask_user_choice`, `advance_phase`,
 //! `request_approval`, `check_commit_message`, `cl_index_search`,
-//! `session_doc_*`, `grant`/`revoke_session_permission`, `webview_*`, and
-//! more — is defined by the descriptors in `protocol.rs`; see ARCHITECTURE.md
-//! and README.md for the full list (26 internal + 21 external tools).
+//! `session_doc_*`, `action_gate`, `webview_*`, and more — is defined by the
+//! descriptors in `protocol.rs`; see ARCHITECTURE.md and README.md for the
+//! full list (26 internal + 21 external tools).
 //!
 //! Transport: streamable HTTP, one server in the GUI process. Each spawned
 //! agent gets a per-agent `mcp-config.json` pointing at

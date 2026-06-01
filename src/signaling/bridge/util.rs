@@ -91,50 +91,6 @@ fn extract_description(path: &Path) -> String {
     "(empty file)".to_string()
 }
 
-/// Parse the branch from a push-gate `action` string. Accepts shapes like
-/// `"git push origin <branch>"`, `"git push --force origin <branch>"`, and
-/// `"git push origin <branch>:<remote-ref>"`. Returns None for unparseable
-/// inputs (no false-positive remembered approvals).
-pub(super) fn parse_push_branch(action: &str) -> Option<String> {
-    let after_push = action.trim().strip_prefix("git push")?.trim_start();
-    let tokens: Vec<&str> = after_push.split_whitespace().collect();
-    // Refuse if the user is doing something other than "push this branch":
-    // --delete/-d removes a remote ref, which we don't want to silently
-    // remember as an approved push target.
-    if tokens.iter().any(|t| *t == "--delete" || *t == "-d") {
-        return None;
-    }
-    // Strip flag-shaped tokens. The first two remaining positional tokens are
-    // <remote> <ref>. If only one is present (e.g. `git push -u origin`), bail
-    // rather than guess.
-    let positionals: Vec<&str> = tokens.iter().copied().filter(|t| !t.starts_with('-')).collect();
-    let branch_arg = match positionals.as_slice() {
-        [_remote, branch, ..] => *branch,
-        _ => return None,
-    };
-    let branch = branch_arg.split(':').next().unwrap_or(branch_arg).trim();
-    if branch.is_empty() {
-        return None;
-    }
-    Some(branch.to_string())
-}
-
-#[cfg(test)]
-#[test]
-fn parse_push_branch_shapes() {
-    assert_eq!(
-        parse_push_branch("git push origin 346-streamline-onboarding-process"),
-        Some("346-streamline-onboarding-process".into())
-    );
-    assert_eq!(
-        parse_push_branch("git push origin main:release"),
-        Some("main".into())
-    );
-    assert_eq!(parse_push_branch("git push --force origin main"), Some("main".into()));
-    assert_eq!(parse_push_branch("not a push command"), None);
-    assert_eq!(parse_push_branch("git push origin --delete x"), None); // safety: refuse flag-looking branches
-}
-
 /// Map a picked option string to an outcome enum. Anything that starts with
 /// "approve" (case-insensitive) counts as Approved; everything else Denied.
 /// Abandoned isn't reachable via resolve_choice (that path requires a pick).

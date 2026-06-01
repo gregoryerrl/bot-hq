@@ -95,8 +95,6 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     "request_approval",
     "action_gate",
     "supersede_question",
-    "grant_session_permission",
-    "revoke_session_permission",
 ];
 
 /// Tools that mutate CL annotations (folder descriptions, etc.). Brian (HANDS)
@@ -494,57 +492,6 @@ async fn call_tool(
                 .map_err(internal_err_no_prefix)?;
             Ok(result_json(&report, "{}"))
         }
-        "grant_session_permission" => {
-            let action = parse_permission_action(args.get("action"))?;
-            let scope_str = args
-                .get("scope")
-                .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing scope"))?;
-            let scope = match scope_str {
-                "all" => crate::policy::GrantScope::AllBranches,
-                "specific" => {
-                    let branches: Vec<String> = args
-                        .get("branches")
-                        .and_then(Value::as_array)
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(str::to_string))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if branches.is_empty() {
-                        return Err(JsonRpcError::new(
-                            JsonRpcError::INVALID_PARAMS,
-                            "scope='specific' requires a non-empty `branches` array",
-                        ));
-                    }
-                    crate::policy::GrantScope::Specific { branches }
-                }
-                other => {
-                    return Err(JsonRpcError::new(
-                        JsonRpcError::INVALID_PARAMS,
-                        format!("unknown scope '{other}' (expected 'all' or 'specific')"),
-                    ));
-                }
-            };
-            bridge
-                .grant_session_permission(&caller.session_id, action, scope)
-                .await
-                .map_err(internal_err_no_prefix)?;
-            Ok(ToolCallResult::text("granted"))
-        }
-        "revoke_session_permission" => {
-            let action = parse_permission_action(args.get("action"))?;
-            bridge
-                .revoke_session_permission(&caller.session_id, action)
-                .await
-                .map_err(internal_err_no_prefix)?;
-            Ok(ToolCallResult::text("revoked"))
-        }
-        "list_session_permissions" => {
-            let perm = bridge.list_session_permissions(&caller.session_id).await;
-            Ok(result_json(&perm, "{}"))
-        }
         "webview_screenshot" => {
             let handle = bridge.app_handle().ok_or_else(|| {
                 JsonRpcError::new(
@@ -596,20 +543,6 @@ fn eval_in_webview(bridge: &Arc<SignalingBridge>, js: &str) -> Result<(), JsonRp
         .eval(js)
         .map_err(internal_err_no_prefix)?;
     Ok(())
-}
-
-fn parse_permission_action(v: Option<&Value>) -> Result<crate::policy::PermissionAction, JsonRpcError> {
-    let s = v
-        .and_then(Value::as_str)
-        .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing action"))?;
-    match s {
-        "commit" => Ok(crate::policy::PermissionAction::Commit),
-        "push" => Ok(crate::policy::PermissionAction::Push),
-        other => Err(JsonRpcError::new(
-            JsonRpcError::INVALID_PARAMS,
-            format!("unknown action '{other}' (expected 'commit' or 'push')"),
-        )),
-    }
 }
 
 fn parse_violation_kind(s: &str) -> Option<ViolationKind> {

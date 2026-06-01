@@ -43,23 +43,9 @@ If `ask_user_choice` errors with a client-side timeout, **do not just call it ag
 
 `list_my_pending_questions` returns a JSON array; pull each `choice_id` + `prompt` to decide. If the array is empty, your previous `ask_user_choice` likely never parked successfully — re-asking once is fine, but if it errors again, fall back to `mark_awaiting_user(\"<inline summary of the question>\")` and let the user type a free-text reply via the chat.
 
-## Session permission grants — recognize + record
+## Push / force-push are policy toggles
 
-When the user grants permission in chat, **call `grant_session_permission` immediately** so the grant takes effect on the next git op. The hooks (and your own `request_approval` discipline) read the grant. Without this tool call, you'd keep asking for approvals you've already been told to skip.
-
-Recognize these patterns (case-insensitive, paraphrased forms welcome):
-
-- `\"you can commit\"` / `\"go ahead and commit\"` / `\"commits don't need approval this session\"` → `grant_session_permission(action=\"commit\", scope=\"all\")`
-- `\"you can push\"` / `\"go ahead and push\"` / `\"don't ask before pushing\"` → `grant_session_permission(action=\"push\", scope=\"all\")`
-- `\"you can commit and push\"` / `\"commit and push freely\"` → two calls: commit + push, both `scope=\"all\"`
-- `\"you can push on main\"` / `\"approve push for branch X\"` → `grant_session_permission(action=\"push\", scope=\"specific\", branches=[\"main\"])`
-- `\"stop pushing on your own\"` / `\"ask before committing again\"` → `revoke_session_permission(action=\"push\"/\"commit\")`
-
-If you're unsure whether the user meant a session grant or a one-off approval (\"approve this push\" vs \"you can push\"), ask via `ask_user_choice`. A grant changes ALL future asks in this session — don't infer it from vague phrasing.
-
-Permanent grants (across sessions) are NOT supported by tool yet — if the user asks for that, tell them to hand-edit `policy.yaml`.
-
-When the user revokes or the session closes, grants disappear. Don't carry an assumption from a previous session.
+Push and force-push are governed by the per-session policy in Session Settings (the gear tab) — `push_gate` (auto/ask) and `force_push` (blocked/allowed), inherited from project + global at spawn. You CANNOT change policy. If a push is blocked, ask the user to flip the push toggle to `auto` in Session Settings; do not look for a grant tool (there isn't one anymore).
 
 ## Silence-on-hold
 
@@ -111,7 +97,7 @@ When unsure if a Bash command mutates: if it changes the working tree, the datab
 
 **The boundary is mutation, not just risk.** If Brian was assigned a slice of work by the user, do not run mutations preemptively to be helpful — even \"safe\" ones like a test run. Surface your read of the situation, propose the plan, and wait for Brian to do the work.
 
-User-facing tools (`ask_user_choice`, `mark_awaiting_user`, `request_approval`, `grant_session_permission`, `revoke_session_permission`) are reserved for Brian. If something needs the user, surface it to Brian and he decides whether to ask. The bridge enforces this at the tool-call layer — if you call one of these you'll get `tool reserved for the HANDS agent`. Don't even reach for them: when the user says \"you can push\" or similar grant phrase, don't try to record the grant yourself — defer to Brian.
+User-facing tools (`ask_user_choice`, `mark_awaiting_user`, `request_approval`) are reserved for Brian. If something needs the user, surface it to Brian and he decides whether to ask. The bridge enforces this at the tool-call layer — if you call one of these you'll get `tool reserved for the HANDS agent`. Don't even reach for them: when the user says \"you can push\" or similar, there's no grant to record — push is a Session Settings policy toggle the user controls; defer to Brian.
 
 ## Silence on transitions and holds
 

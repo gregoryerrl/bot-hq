@@ -28,8 +28,8 @@ Universal conventions every agent (Emma, Brian, Rain) follows. Baked into the bi
 ## Working directory
 
 - Each session pins a `working_repo_path`. Stay within that tree unless asked to look elsewhere.
-- **`git push` requires authorization.** Default: per-action — call `request_approval` before each push. EXCEPT when a **session-level push grant** is active (the user said \"you can push\" and you called `grant_session_permission` to record it). With a grant, push autonomously — don't `request_approval`, don't `ask_user_choice` for the workflow step. The grant IS the authorization for the rest of the session. Check via `list_session_permissions` if unsure.
-- Force-push, `git reset --hard`, branch deletion: per-action explicit user authorization. **No session grant covers these** — always ask.
+- **`git push` is governed by the session's push gate.** `auto` → pushes go through; `ask` → the pre-push hook blocks them. The agent cannot grant itself permission — if a push is blocked, ask the user to enable pushes by flipping the push toggle to `auto` in Session Settings (the gear tab).
+- Force-push, `git reset --hard`, branch deletion: per-action explicit user authorization — always ask.
 
 ## Outward actions + truthfulness (load-bearing)
 

@@ -24,9 +24,10 @@
 //!   already-committed message, or pre-commit/commit-msg bypass), writes a
 //!   `CommitGrep` Denied violation to `violations.jsonl`. Always exits 0
 //!   — the commit already happened; the verifier is audit-only.
-//! - **pre-push**: reads current branch via `git symbolic-ref HEAD`. If
-//!   `push_gate.mode != auto` and the branch is not in `remembered_approvals`,
-//!   exits 1 with a message instructing the agent to call `request_approval`.
+//! - **pre-push**: if `push_gate == auto`, allows the push (exit 0). Otherwise
+//!   blocks (exit 1) with a message telling the agent to ask the user to flip
+//!   the push toggle to `auto` in Session Settings — there is no per-push
+//!   approval and no agent-side grant.
 
 use crate::policy::violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 use crate::policy::Policy;
@@ -39,8 +40,8 @@ use std::process::Command;
 const MANAGED_MARKER: &str = "# managed-by: bot-hq policy-check";
 
 /// Session id surfaced by the agent's subprocess env (set by `spawn.rs`).
-/// Used by `Policy::resolve` to overlay session-scoped approvals so the
-/// pre-push hook sees the branch that was approved during this session.
+/// Threaded into `Policy::resolve` so hooks resolve the same session-scoped
+/// policy snapshot the agent runs under.
 fn hook_session_id() -> Option<String> {
     std::env::var("BOT_HQ_SESSION_ID")
         .ok()
@@ -271,12 +272,10 @@ fn run_post_commit(
     Ok(0)
 }
 
-/// pre-push handler. Allows the push if:
-///   1. push_gate == auto, OR
-///   2. the session has a session-level push grant covering this branch
-///      (read from `.local/session-permissions/<sid>.json`).
-///
-/// Otherwise blocks with a message telling the agent how to unblock.
+/// pre-push handler. Allows the push when `push_gate == auto`; otherwise
+/// blocks (exit 1). There is no per-push approval and no agent-side grant —
+/// the user enables pushes by flipping the push toggle to `auto` in Session
+/// Settings.
 fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-push");
     let session_id = hook_session_id();
@@ -287,34 +286,18 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     }
     let branch = current_branch().unwrap_or_else(|| "<detached>".into());
 
-    // Session-level grant: read the mirrored permissions file (if any).
-    if let Some(sid) = session_id.as_deref() {
-        if let Ok(Some(perm)) =
-            crate::policy::session_permissions::read_session_permission(data_dir, sid)
-        {
-            if perm.allows_push(&branch) {
-                return Ok(0);
-            }
-        }
-    }
-
     eprintln!(
         "{}",
         blocked_banner(
             "pre-push",
             &format!(
-                "Branch '{branch}' is not approved for push (policy.push_gate={mode}).\n\
+                "Branch '{branch}' cannot be pushed: push gate is '{mode}' for this \
+                 session.\n\
                  \n\
-                 Two ways to unblock:\n\
-                 1. Per-push approval: agent calls \
-                 `mcp__bot-hq-signaling__request_approval` with\n\
-                    kind=\"push_gate\", action=\"git push origin {branch}\". User \
-                 clicks Approve.\n\
-                 2. Session-wide grant: user says \"you can push\" in chat → agent \
-                 calls\n\
-                    `mcp__bot-hq-signaling__grant_session_permission` with \
-                 action=\"push\".\n\
-                    All subsequent pushes in this session are auto-allowed.\n",
+                 The USER enables pushes by flipping the push toggle to 'auto' in \
+                 Session Settings (the gear tab) — there is no per-push approval \
+                 and no agent-side grant.\n\
+                 Ask the user to enable pushes if you need to push.\n",
                 mode = policy.push_gate.label()
             )
         )

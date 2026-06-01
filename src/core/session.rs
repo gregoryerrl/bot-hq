@@ -771,7 +771,7 @@ mod tests {
         std::fs::remove_file(tmp.path().join("custom-general-rules.md")).ok();
         let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
         assert!(prompt.contains("Commit hygiene"), "missing commit-hygiene section");
-        assert!(prompt.contains("`git push` requires authorization"), "missing push gate");
+        assert!(prompt.contains("`git push` is governed by the session's push gate"), "missing push gate");
         assert!(prompt.contains("IPAV discipline"), "missing IPAV section");
         assert!(prompt.contains("Production data access"), "missing prod-safety section");
     }
