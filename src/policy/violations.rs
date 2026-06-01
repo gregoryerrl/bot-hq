@@ -12,8 +12,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -81,10 +80,29 @@ impl ViolationsLog {
 
     /// Append one record. Serializes to a single line; tolerates concurrent
     /// callers via an internal mutex so two writes can't interleave bytes.
+    ///
+    /// The body is a tiny blocking file append, so this async method just wraps
+    /// the synchronous [`append_blocking`](Self::append_blocking). Sync callers
+    /// — notably the policy-mutation audit, which runs both inside the app's
+    /// runtime and in a hookless subprocess — call the blocking form directly
+    /// rather than building a nested runtime (which panics inside a runtime).
     pub async fn append(&self, rec: ViolationRecord) -> Result<()> {
+        self.append_blocking(rec)
+    }
+
+    /// Synchronous sibling of [`append`](Self::append). Safe in any context,
+    /// with or without a tokio runtime present.
+    pub fn append_blocking(&self, rec: ViolationRecord) -> Result<()> {
         let line =
             serde_json::to_string(&rec).context("serializing violation record to JSON")?;
-        let _g = self.write_lock.lock().await;
+        // std (not tokio) Mutex: the critical section is a small blocking write
+        // with no await inside, so a sync lock is correct and lets sync and
+        // async callers share one serialization point. Recover from poison so a
+        // writer that panicked mid-append can't permanently wedge the log.
+        let _g = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -107,7 +125,36 @@ impl ViolationsLog {
         outcome: ViolationOutcome,
         detail: Option<String>,
     ) -> Result<()> {
-        let rec = ViolationRecord {
+        self.append(Self::build_record(
+            session_id, agent, kind, action, outcome, detail,
+        ))
+        .await
+    }
+
+    /// Synchronous sibling of [`record`](Self::record).
+    pub fn record_blocking(
+        &self,
+        session_id: impl Into<String>,
+        agent: impl Into<String>,
+        kind: ViolationKind,
+        action: impl Into<String>,
+        outcome: ViolationOutcome,
+        detail: Option<String>,
+    ) -> Result<()> {
+        self.append_blocking(Self::build_record(
+            session_id, agent, kind, action, outcome, detail,
+        ))
+    }
+
+    fn build_record(
+        session_id: impl Into<String>,
+        agent: impl Into<String>,
+        kind: ViolationKind,
+        action: impl Into<String>,
+        outcome: ViolationOutcome,
+        detail: Option<String>,
+    ) -> ViolationRecord {
+        ViolationRecord {
             ts: Utc::now().to_rfc3339(),
             session_id: session_id.into(),
             agent: agent.into(),
@@ -115,8 +162,7 @@ impl ViolationsLog {
             action: action.into(),
             outcome,
             detail,
-        };
-        self.append(rec).await
+        }
     }
 
     /// Read back the entire log. Lines that fail to parse are skipped (logged

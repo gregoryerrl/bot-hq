@@ -163,9 +163,12 @@ fn content_hash(content: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Synchronously append a PolicyMutation entry to the log. The log's normal
-/// API is async; hook subprocesses don't have an outer runtime, so we build
-/// a single-threaded one here. The cost is ~one-time-per-mutation, negligible.
+/// Synchronously append a PolicyMutation entry to the log. This runs from both
+/// the in-process async call sites (`spawn_session_handle`, the signaling
+/// bridge) AND the hookless `policy-check` subprocess, so it must NOT build a
+/// tokio runtime — a nested `block_on` panics inside the app's live runtime.
+/// `ViolationsLog::record_blocking` does a plain blocking append, valid in
+/// every context.
 fn log_sync(
     log: &ViolationsLog,
     session: &str,
@@ -174,26 +177,18 @@ fn log_sync(
     from: &str,
     to: &str,
 ) -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("building runtime for policy-mutation log")?;
-    rt.block_on(async {
-        log.record(
-            session.to_string(),
-            agent.to_string(),
-            ViolationKind::PolicyMutation,
-            path.display().to_string(),
-            ViolationOutcome::Detected,
-            Some(format!(
-                "hash {} → {} (audit-only; review and approve via Settings)",
-                &from[..from.len().min(8)],
-                &to[..to.len().min(8)]
-            )),
-        )
-        .await
-    })?;
-    Ok(())
+    log.record_blocking(
+        session.to_string(),
+        agent.to_string(),
+        ViolationKind::PolicyMutation,
+        path.display().to_string(),
+        ViolationOutcome::Detected,
+        Some(format!(
+            "hash {} → {} (audit-only; review and approve via Settings)",
+            &from[..from.len().min(8)],
+            &to[..to.len().min(8)]
+        )),
+    )
 }
 
 #[cfg(test)]
@@ -243,6 +238,29 @@ mod tests {
         assert_eq!(recs[0].outcome, ViolationOutcome::Detected);
         assert!(recs[0].detail.as_ref().unwrap().contains("hash"));
         assert!(recs[0].action.contains("general-policy.yaml"));
+    }
+
+    #[tokio::test]
+    async fn change_detected_inside_runtime_does_not_panic() {
+        // Regression: audit_policy_files runs from async call sites
+        // (spawn_session_handle, the signaling bridge). The Changed branch must
+        // record the mutation WITHOUT building a nested tokio runtime — doing so
+        // inside the live runtime panics with "Cannot start a runtime from
+        // within a runtime", which wedged session start after policy files
+        // changed (stale hash cache → Changed → log).
+        let data = tempdir().unwrap();
+        let policy = data.path().join("general-policy.yaml");
+        std::fs::write(&policy, "forbidden_in_commits:\n  - Claude\n").unwrap();
+        let log = ViolationsLog::new(data.path());
+        // Baseline read records the first hash.
+        audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
+        // Mutate so the next audit takes the Changed branch → records a mutation.
+        std::fs::write(&policy, "forbidden_in_commits:\n  - Claude\n  - Anthropic\n").unwrap();
+        let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
+        assert!(matches!(outcomes[0].1, MutationOutcome::Changed { .. }));
+        let recs = log.read_all().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].kind, ViolationKind::PolicyMutation);
     }
 
     #[test]

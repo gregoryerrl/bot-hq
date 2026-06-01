@@ -11,13 +11,40 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-346 tests passing (297 lib + 32 external MCP + 7 signaling + 10 storage)
+347 tests passing (298 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 31 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-06-01 — Fix nested-runtime panic in policy-mutation audit
+
+Sending a message to a session panicked the tokio worker with "Cannot start
+a runtime from within a runtime" (`policy/audit.rs:181`), wedging session
+start. Root cause: `log_sync` built a nested tokio runtime and `block_on`'d
+it to append a `PolicyMutation` entry — harmless in the hookless
+`policy-check` subprocess, fatal from the in-process async call sites
+(`spawn_session_handle`, the signaling bridge). The Tool Gate commits had
+rewritten the policy YAML, so the stale `.policy-hashes.json` made the next
+session-start audit take the `Changed` branch → `log_sync` → panic.
+
+- `ViolationsLog`: private `write_lock` switched from `tokio::sync::Mutex`
+  to `std::sync::Mutex` (the guard is never held across an `.await`), and
+  added synchronous `append_blocking` / `record_blocking` siblings sharing a
+  `build_record` helper. The async `append`/`record` keep identical
+  signatures, so all existing callers are unchanged.
+- `audit.rs::log_sync` now calls `record_blocking` directly — no runtime, so
+  it's valid in every context. One fix covers all three call sites.
+- Self-healing: the first post-fix audit logs the (audit-only, non-blocking)
+  `PolicyMutation` for the changed files and refreshes the hash cache; no
+  data files touched.
+- +1 regression test (`change_detected_inside_runtime_does_not_panic`) that
+  runs the audit inside a `#[tokio::test]` runtime — it reproduced the exact
+  panic before the fix. cargo test (347) + release build clean.
 
 ---
 
