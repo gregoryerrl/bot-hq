@@ -7,13 +7,16 @@
 //! ```text
 //! general-policy.yaml                       (defaults — overlay base)
 //! projects/<project>/policy.yaml            (per-project overrides)
+//! .local/session-policies/<sid>.yaml        (per-session canonical snapshot)
 //! ```
 //!
 //! Missing files are not errors. A project with no `policy.yaml` resolves to
-//! [`Policy::default()`] (no forbidden words, no push gate, no blocklist).
+//! [`Policy::default()`] (auto push, no forbidden words, no gates).
 //!
-//! Resolution: project overlays general. Lists are *replaced* not merged
-//! (explicit per-project lists win), so projects can both add and remove.
+//! Resolution: a session's policy is CANONICAL — once seeded at spawn from
+//! general+project it is the sole source for that session (wired in
+//! [`session_policy`]). Outside a session, project overlays general; lists are
+//! *replaced* not merged (explicit per-project lists win).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -31,7 +34,7 @@ pub use session_permissions::{GrantScope, PermissionAction, SessionPermissions};
 pub use tool_gate::{GateMode, GatedKeyword};
 pub use violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 
-/// Resolved policy for a (general + per-project) overlay.
+/// Resolved policy for a (general + per-project) overlay, or a session snapshot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Policy {
     /// Words/phrases that must not appear in commit messages or staged diffs.
@@ -39,23 +42,18 @@ pub struct Policy {
     #[serde(default)]
     pub forbidden_in_commits: Vec<String>,
 
-    /// `git push` approval mode.
+    /// `git push` gate. `auto` = pushes go through; `ask` = the pre-push hook
+    /// blocks until the user enables pushes (the Session Settings toggle).
     #[serde(default)]
-    pub push_gate: PushGate,
+    pub push_gate: PushGateMode,
 
-    /// Force-push behavior.
+    /// Force-push gate. `blocked` = `git push --force`/`--force-with-lease`
+    /// denied; `allowed` = permitted (still subject to `push_gate`).
     #[serde(default)]
-    pub force_push: ForcePush,
+    pub force_push: ForcePushMode,
 
-    /// RETIRED: superseded by the global Tool Gate (`policy::tool_gate` + the
-    /// `action_gate` MCP tool). Kept for `policy.yaml` backward-compat so
-    /// existing files carrying this key still parse; no longer read by the
-    /// PreToolUse hook or rendered into the agent prompt. `is_blocked_command`
-    /// stays for any out-of-band callers + its test.
-    #[serde(default)]
-    pub tool_blocklist: Vec<String>,
-
-    /// Bash commands that always ask, no remembered approval.
+    /// Bash commands that always require approval — `request_approval`
+    /// kind="per_action", every invocation.
     #[serde(default)]
     pub per_action_approval: Vec<String>,
 
@@ -69,63 +67,29 @@ pub struct Policy {
     pub commit_style: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct PushGate {
-    /// `auto` | `per_branch_approval` | `always_ask`.
-    pub mode: PushGateMode,
-    /// Branch names auto-approved after first ask (persisted by the app).
-    pub remembered_approvals: Vec<String>,
-}
-
-impl Default for PushGate {
-    fn default() -> Self {
-        Self {
-            mode: PushGateMode::Auto,
-            remembered_approvals: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// `git push` gate. Set per tier (global/project/session); a session inherits
+/// the resolved value at spawn then can flip it in the gear tab. No per-branch
+/// memory — the user toggles `auto` to enable pushes for the session.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PushGateMode {
     /// No prompt — pushes go through.
+    #[default]
     Auto,
-    /// Prompt once per branch, then remember.
-    PerBranchApproval,
-    /// Prompt every single push.
-    AlwaysAsk,
+    /// Pushes are gated — the pre-push hook blocks until the user flips the
+    /// session push toggle to `auto`.
+    Ask,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct ForcePush {
-    /// `blocked` | `token_required` | `allowed`.
-    pub mode: ForcePushMode,
-    /// Token template (when mode = token_required). Supports `{branch}` and
-    /// `{sha}` placeholders. The user must type a string matching this exact
-    /// format substituted with the actual branch + SHA being pushed.
-    pub token_format: String,
-}
-
-impl Default for ForcePush {
-    /// Permissive default: no policy file = no enforcement. The user opts in
-    /// to blocking by writing `force_push.mode: blocked` (or token_required)
-    /// in policy.yaml. We don't enforce rules the user didn't ask for.
-    fn default() -> Self {
-        Self {
-            mode: ForcePushMode::Allowed,
-            token_format: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+/// Force-push gate.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ForcePushMode {
+    /// `git push --force` / `--force-with-lease` denied.
     Blocked,
-    TokenRequired,
+    /// Permissive default — no policy file = no enforcement. The user opts into
+    /// blocking by writing `force_push: blocked` in policy.yaml.
+    #[default]
     Allowed,
 }
 
@@ -135,11 +99,6 @@ impl Policy {
     /// - If `project` is `Some(p)`, overlays `<data_dir>/projects/<p>/policy.yaml`.
     /// - Either missing → contribute nothing (no error).
     /// - Parse errors return Err (loud — the user needs to know their YAML is broken).
-    ///
-    /// `remembered_approvals` from `policy.yaml` are PERMANENT (user-curated).
-    /// `_session_id` is reserved for a future permanent-permissions-per-session
-    /// overlay; today it's unused. Session-level grants live in a separate
-    /// module ([`crate::policy::session_permissions`]).
     pub fn resolve(
         data_dir: &Path,
         project: Option<&str>,
@@ -149,11 +108,13 @@ impl Policy {
     }
 
     /// Like [`resolve`] but accepts an explicit `project_root` override so
-    /// callers that have already resolved a project's `cl_path` (via
-    /// [`Storage::cl_path_for_project`](crate::storage::Storage::cl_path_for_project))
-    /// don't pay a second DB lookup. `None` for `project_root` reverts to the
-    /// default convention (`<data_dir>/projects/<name>/`), which is what the
-    /// CLI hook context uses (no storage handle available).
+    /// callers that have already resolved a project's `cl_path` don't pay a
+    /// second DB lookup. `None` for `project_root` reverts to the default
+    /// convention (`<data_dir>/projects/<name>/`), which is what the CLI hook
+    /// context uses (no storage handle available).
+    ///
+    /// `_session_id` is reserved for the canonical session-policy overlay wired
+    /// in a follow-up batch; today the general+project overlay is returned.
     pub fn resolve_at_root(
         data_dir: &Path,
         project: Option<&str>,
@@ -175,14 +136,6 @@ impl Policy {
         };
 
         Ok(merge(base, overlay))
-    }
-
-    /// Returns true if `command` matches any prefix in `tool_blocklist`.
-    pub fn is_blocked_command(&self, command: &str) -> bool {
-        let cmd = command.trim();
-        self.tool_blocklist
-            .iter()
-            .any(|prefix| cmd.starts_with(prefix.trim()))
     }
 
     /// Returns true if `command` matches any prefix in `per_action_approval`.
@@ -234,30 +187,22 @@ impl Policy {
             out.push('\n');
         }
 
-        if !matches!(self.push_gate.mode, PushGateMode::Auto) {
+        if matches!(self.push_gate, PushGateMode::Ask) {
             out.push_str("### Push gate\n\n");
-            out.push_str(&format!(
-                "Push mode: **{}**. Before every `git push`, call \
-                 `mcp__bot-hq-signaling__request_approval` with kind=\"push_gate\". \
-                 The user picks Approve / Deny in the bot-hq UI.\n\n",
-                self.push_gate.mode.label()
-            ));
+            out.push_str(
+                "Pushes are GATED this session — the pre-push hook blocks \
+                 `git push`. There is no per-push approval: the user enables \
+                 pushes by flipping the push toggle to `auto` in Session \
+                 Settings. If you need to push, ask the user to enable it.\n\n",
+            );
         }
 
-        if matches!(self.force_push.mode, ForcePushMode::Blocked) {
+        if matches!(self.force_push, ForcePushMode::Blocked) {
             out.push_str("### Force-push\n\n");
             out.push_str(
-                "Force-push is BLOCKED. Do not call `git push --force` / \
+                "Force-push is BLOCKED. Do not run `git push --force` / \
                  `--force-with-lease` under any circumstances.\n\n",
             );
-        } else if matches!(self.force_push.mode, ForcePushMode::TokenRequired) {
-            out.push_str("### Force-push\n\n");
-            out.push_str(&format!(
-                "Force-push requires a verbatim user token. Call \
-                 `mcp__bot-hq-signaling__request_approval` with kind=\"force_push\". \
-                 Token format: `{}`. No token, no force-push.\n\n",
-                self.force_push.token_format
-            ));
         }
 
         if !self.per_action_approval.is_empty() {
@@ -281,10 +226,7 @@ impl Policy {
         }
 
         if !self.commit_style.is_empty() {
-            out.push_str(&format!(
-                "### Commit style\n\n{}\n\n",
-                self.commit_style
-            ));
+            out.push_str(&format!("### Commit style\n\n{}\n\n", self.commit_style));
         }
 
         out
@@ -292,8 +234,8 @@ impl Policy {
 
     fn is_effectively_empty(&self) -> bool {
         self.forbidden_in_commits.is_empty()
-            && matches!(self.push_gate.mode, PushGateMode::Auto)
-            && matches!(self.force_push.mode, ForcePushMode::Allowed)
+            && matches!(self.push_gate, PushGateMode::Auto)
+            && matches!(self.force_push, ForcePushMode::Allowed)
             && self.per_action_approval.is_empty()
             && self.branch_pattern.is_empty()
             && self.commit_style.is_empty()
@@ -304,12 +246,10 @@ impl PushGateMode {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             PushGateMode::Auto => "auto",
-            PushGateMode::PerBranchApproval => "per_branch_approval",
-            PushGateMode::AlwaysAsk => "always_ask",
+            PushGateMode::Ask => "ask",
         }
     }
 }
-
 
 fn load_one(path: &Path) -> Result<Option<Policy>> {
     let body = match std::fs::read_to_string(path) {
@@ -324,7 +264,9 @@ fn load_one(path: &Path) -> Result<Option<Policy>> {
 
 /// Overlay `overlay` onto `base`. Lists are replaced not merged when the
 /// overlay sets them non-empty (so projects can carry their own exact list).
-/// Scalars (push_gate.mode, etc.) are replaced when overlay defines them.
+/// Scalar gates are replaced when the overlay sets a non-default value (so a
+/// project that omits a gate inherits general's; a project can tighten to
+/// `ask`/`blocked` but a default `auto`/`allowed` reads as "not set").
 fn merge(base: Policy, overlay: Option<Policy>) -> Policy {
     let Some(o) = overlay else { return base };
     Policy {
@@ -333,24 +275,15 @@ fn merge(base: Policy, overlay: Option<Policy>) -> Policy {
         } else {
             o.forbidden_in_commits
         },
-        push_gate: if matches!(o.push_gate.mode, PushGateMode::Auto)
-            && o.push_gate.remembered_approvals.is_empty()
-        {
+        push_gate: if matches!(o.push_gate, PushGateMode::Auto) {
             base.push_gate
         } else {
             o.push_gate
         },
-        force_push: if matches!(o.force_push.mode, ForcePushMode::Allowed)
-            && o.force_push.token_format.is_empty()
-        {
+        force_push: if matches!(o.force_push, ForcePushMode::Allowed) {
             base.force_push
         } else {
             o.force_push
-        },
-        tool_blocklist: if o.tool_blocklist.is_empty() {
-            base.tool_blocklist
-        } else {
-            o.tool_blocklist
         },
         per_action_approval: if o.per_action_approval.is_empty() {
             base.per_action_approval
@@ -391,6 +324,13 @@ mod tests {
     }
 
     #[test]
+    fn default_gates_are_auto_and_allowed() {
+        let p = Policy::default();
+        assert!(matches!(p.push_gate, PushGateMode::Auto));
+        assert!(matches!(p.force_push, ForcePushMode::Allowed));
+    }
+
+    #[test]
     fn project_overlays_general() {
         let dir = tempdir().unwrap();
         write(
@@ -404,6 +344,18 @@ mod tests {
         let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
         // overlay replaces (not merges): only project list wins
         assert_eq!(p.forbidden_in_commits, vec!["bot-hq", "brian"]);
+    }
+
+    #[test]
+    fn project_tightens_push_gate_over_general() {
+        let dir = tempdir().unwrap();
+        // general omits push_gate (defaults auto); project tightens to ask.
+        write(
+            &dir.path().join("projects/foo/policy.yaml"),
+            "push_gate: ask\n",
+        );
+        let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
+        assert!(matches!(p.push_gate, PushGateMode::Ask));
     }
 
     #[test]
@@ -429,15 +381,14 @@ mod tests {
     }
 
     #[test]
-    fn is_blocked_command_prefix_match() {
+    fn requires_per_action_approval_prefix_match() {
         let p = Policy {
-            tool_blocklist: vec!["git push".into(), "rm -rf".into()],
+            per_action_approval: vec!["gh release".into(), "terraform apply".into()],
             ..Policy::default()
         };
-        assert!(p.is_blocked_command("git push origin main"));
-        assert!(p.is_blocked_command("rm -rf /tmp/foo"));
-        assert!(!p.is_blocked_command("git status"));
-        assert!(!p.is_blocked_command("ls"));
+        assert!(p.requires_per_action_approval("gh release create v1"));
+        assert!(p.requires_per_action_approval("terraform apply -auto-approve"));
+        assert!(!p.requires_per_action_approval("gh pr list"));
     }
 
     #[test]
@@ -468,21 +419,23 @@ mod tests {
 
     #[test]
     fn render_system_prompt_block_includes_push_gate() {
-        let mut p = Policy::default();
-        p.push_gate.mode = PushGateMode::PerBranchApproval;
+        let p = Policy {
+            push_gate: PushGateMode::Ask,
+            ..Policy::default()
+        };
         let block = p.render_system_prompt_block();
         assert!(block.contains("Push gate"));
-        assert!(block.contains("per_branch_approval"));
-        assert!(block.contains("request_approval"));
+        assert!(block.contains("Session Settings"));
     }
 
     #[test]
-    fn render_system_prompt_block_force_push_token_required() {
-        let mut p = Policy::default();
-        p.force_push.mode = ForcePushMode::TokenRequired;
-        p.force_push.token_format = "force-push-greenlight: {branch}@{sha}".into();
+    fn render_system_prompt_block_force_push_blocked() {
+        let p = Policy {
+            force_push: ForcePushMode::Blocked,
+            ..Policy::default()
+        };
         let block = p.render_system_prompt_block();
         assert!(block.contains("Force-push"));
-        assert!(block.contains("force-push-greenlight"));
+        assert!(block.contains("BLOCKED"));
     }
 }

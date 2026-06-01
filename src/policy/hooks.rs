@@ -272,18 +272,17 @@ fn run_post_commit(
 }
 
 /// pre-push handler. Allows the push if:
-///   1. push_gate.mode == auto, OR
+///   1. push_gate == auto, OR
 ///   2. the session has a session-level push grant covering this branch
-///      (read from `.local/session-permissions/<sid>.json`), OR
-///   3. the branch is in the static `remembered_approvals` list in policy.yaml.
+///      (read from `.local/session-permissions/<sid>.json`).
 ///
-/// Otherwise blocks with a message telling the agent how to ask for a grant.
+/// Otherwise blocks with a message telling the agent how to unblock.
 fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-push");
     let session_id = hook_session_id();
     let policy = Policy::resolve(data_dir, project, session_id.as_deref())?;
     use crate::policy::PushGateMode;
-    if matches!(policy.push_gate.mode, PushGateMode::Auto) {
+    if matches!(policy.push_gate, PushGateMode::Auto) {
         return Ok(0);
     }
     let branch = current_branch().unwrap_or_else(|| "<detached>".into());
@@ -299,17 +298,12 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
         }
     }
 
-    if matches!(policy.push_gate.mode, PushGateMode::PerBranchApproval)
-        && policy.push_gate.remembered_approvals.contains(&branch)
-    {
-        return Ok(0);
-    }
     eprintln!(
         "{}",
         blocked_banner(
             "pre-push",
             &format!(
-                "Branch '{branch}' is not approved for push (policy.push_gate.mode={mode}).\n\
+                "Branch '{branch}' is not approved for push (policy.push_gate={mode}).\n\
                  \n\
                  Two ways to unblock:\n\
                  1. Per-push approval: agent calls \
@@ -321,7 +315,7 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
                     `mcp__bot-hq-signaling__grant_session_permission` with \
                  action=\"push\".\n\
                     All subsequent pushes in this session are auto-allowed.\n",
-                mode = policy.push_gate.mode.label()
+                mode = policy.push_gate.label()
             )
         )
     );
@@ -799,13 +793,13 @@ mod tests {
         std::fs::create_dir_all(data.path().join("projects/foo")).unwrap();
         std::fs::write(
             data.path().join("projects/foo/policy.yaml"),
-            "push_gate:\n  mode: per_branch_approval\n  remembered_approvals: []\n",
+            "push_gate: ask\n",
         )
         .unwrap();
         // We can't easily set the current git branch from inside the test
         // process (the hook reads via `git symbolic-ref` on the cwd). The
-        // function falls back to "<detached>" which is also not in the
-        // empty remembered_approvals list, so the block path fires.
+        // function falls back to "<detached>", which has no session grant, so
+        // the block path fires.
         let code = run_pre_push(data.path(), Some("foo")).unwrap();
         assert_eq!(code, 1);
     }

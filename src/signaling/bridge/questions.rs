@@ -784,7 +784,7 @@ mod tests {
         std::fs::create_dir_all(&proj_dir).unwrap();
         std::fs::write(
             proj_dir.join("policy.yaml"),
-            "push_gate:\n  mode: per_branch_approval\n",
+            "push_gate: ask\n",
         )
         .unwrap();
 
@@ -857,7 +857,7 @@ mod tests {
         std::fs::create_dir_all(&proj_dir).unwrap();
         std::fs::write(
             proj_dir.join("policy.yaml"),
-            "push_gate:\n  mode: per_branch_approval\n",
+            "push_gate: ask\n",
         )
         .unwrap();
 
