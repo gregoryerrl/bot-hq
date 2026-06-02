@@ -51,6 +51,18 @@ async listSessions() : Promise<Result<SessionInfo[], AppError>> {
 }
 },
 /**
+ * All closed sessions (just-closed + archived), most-recently-closed first.
+ * Backs the Settings → Archive tab. Excludes the emma singleton.
+ */
+async listClosedSessions() : Promise<Result<SessionInfo[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_closed_sessions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Spawn (or re-spawn) the agent subprocesses for an existing session row.
  * Idempotent — `core::AppState::ensure_session_started` is a no-op if the
  * session is already live. Mirrors the click-to-respawn flow:

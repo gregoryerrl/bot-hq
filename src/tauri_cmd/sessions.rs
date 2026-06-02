@@ -114,6 +114,20 @@ pub async fn list_sessions(
         .map_err(|e| AppError::DbError(e.to_string()))
 }
 
+/// All closed sessions (just-closed + archived), most-recently-closed first.
+/// Backs the Settings → Archive tab. Excludes the emma singleton.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_closed_sessions(
+    storage: tauri::State<'_, Arc<Storage>>,
+) -> Result<Vec<SessionInfo>, AppError> {
+    storage
+        .list_closed_sessions()
+        .await
+        .map(|v| v.into_iter().map(Into::into).collect())
+        .map_err(|e| AppError::DbError(e.to_string()))
+}
+
 /// Spawn (or re-spawn) the agent subprocesses for an existing session row.
 /// Idempotent — `core::AppState::ensure_session_started` is a no-op if the
 /// session is already live. Mirrors the click-to-respawn flow:

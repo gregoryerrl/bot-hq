@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useBlocker } from "react-router-dom";
+import { Link, useBlocker } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
@@ -11,9 +11,10 @@ import type {
   GatedKeyword,
   GateMode,
   Policy,
+  SessionInfo,
 } from "../lib/bindings";
 
-type SettingsSubTab = "agents" | "claude" | "toolgate" | "policy";
+type SettingsSubTab = "agents" | "claude" | "toolgate" | "policy" | "archive";
 
 /**
  * Settings is a tabbed container. The existing per-agent model/auth cards
@@ -43,6 +44,12 @@ export function Settings() {
         <SubTabButton active={tab === "policy"} onClick={() => setTab("policy")}>
           Policy
         </SubTabButton>
+        <SubTabButton
+          active={tab === "archive"}
+          onClick={() => setTab("archive")}
+        >
+          Archive
+        </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "agents" && "hidden")}>
@@ -56,6 +63,9 @@ export function Settings() {
         </div>
         <div className={cn("h-full", tab !== "policy" && "hidden")}>
           <GlobalPolicyPanel />
+        </div>
+        <div className={cn("h-full", tab !== "archive" && "hidden")}>
+          <ArchivePanel />
         </div>
       </div>
     </div>
@@ -474,6 +484,79 @@ function AgentCard({
         </div>
       </div>
     </section>
+  );
+}
+
+// ============================================================================
+// Archive — closed sessions (just-closed + archived), newest-closed first
+// ============================================================================
+
+function ArchivePanel() {
+  const { data: sessions = [], isLoading } = useTauriQuery<SessionInfo[]>(
+    "list_closed_sessions",
+  );
+  return (
+    <div className="mx-auto h-full max-w-4xl overflow-auto px-6 py-6">
+      <div className="mb-6">
+        <h1 className="font-headline-lg text-headline-lg text-on-surface">
+          Archived Sessions
+        </h1>
+        <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+          Every closed session. Click one to reopen it for review — the duo
+          re-spawns via <code>--resume</code>, though resume can fail for
+          sessions idle more than a few minutes (the session view shows the
+          error if so).
+        </p>
+      </div>
+      {isLoading ? (
+        <div className="space-y-2">
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="h-14 animate-pulse rounded-lg border border-outline-variant bg-surface-container"
+            />
+          ))}
+        </div>
+      ) : sessions.length === 0 ? (
+        <p className="rounded-lg border border-outline-variant bg-surface-container px-4 py-6 text-center font-code-sm text-code-sm text-on-surface-variant">
+          No closed sessions yet.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {sessions.map((s) => (
+            <li key={s.id}>
+              <Link
+                to={`/sessions/${s.id}`}
+                className="flex items-center justify-between gap-3 rounded-lg border border-outline-variant bg-surface-container px-4 py-3 transition-colors hover:border-primary hover:bg-surface-container-high"
+              >
+                <div className="min-w-0">
+                  <p className="truncate font-code-sm text-code-sm text-on-surface">
+                    {s.title || "(untitled session)"}
+                  </p>
+                  <p className="font-code-sm text-code-sm text-on-surface-variant">
+                    <code className="text-on-surface-variant">
+                      {s.id.slice(0, 8)}
+                    </code>
+                    <span className="mx-2 text-on-surface-variant/60">·</span>
+                    closed {formatTimestamp(s.closed_at ?? "")}
+                  </p>
+                </div>
+                <span
+                  className={cn(
+                    "shrink-0 rounded border px-2 py-0.5 font-label-caps text-label-caps",
+                    s.archived
+                      ? "border-outline-variant/40 bg-outline-variant/15 text-on-surface-variant"
+                      : "border-tertiary/40 bg-tertiary/15 text-tertiary",
+                  )}
+                >
+                  {s.archived ? "Archived" : "Closed"}
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

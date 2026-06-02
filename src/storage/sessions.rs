@@ -71,6 +71,26 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Closed sessions (both just-closed and archived), most-recently-closed
+    /// first. Surfaces in the Settings → Archive tab. Like
+    /// [`list_active_sessions`] it excludes the `emma` singleton; the
+    /// complement predicate (`closed_at IS NOT NULL`) covers everything the
+    /// active list omits except emma. `id ASC` tiebreaks the 1-second
+    /// `datetime('now')` granularity for stable ordering.
+    pub async fn list_closed_sessions(&self) -> Result<Vec<Session>> {
+        let rows = sqlx::query_as::<_, Session>(
+            "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
+                    brian_model_at_spawn, rain_model_at_spawn, \
+                    brian_claude_session_id, rain_claude_session_id \
+             FROM sessions \
+             WHERE closed_at IS NOT NULL AND id != 'emma' \
+             ORDER BY closed_at DESC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Record which model each agent was spawned with for this session. Called
     /// by `spawn_session_handle` right after the configs are fetched so the
     /// chat header can display the frozen model name.
@@ -119,5 +139,40 @@ impl Storage {
                 format!("recording {agent} claude session id on session {session_id}")
             })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::Storage;
+
+    #[tokio::test]
+    async fn active_and_closed_lists_partition_sessions() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-a", "Active one", None).await.unwrap();
+        s.create_session("s-b", "Closed one", None).await.unwrap();
+        s.close_session("s-b", false).await.unwrap();
+        s.create_session("s-c", "Archived one", None).await.unwrap();
+        s.close_session("s-c", true).await.unwrap();
+
+        // Active list: only the never-closed session.
+        let active: Vec<String> = s
+            .list_active_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(active, vec!["s-a"]);
+
+        // Closed list: both the plain-closed and the archived session.
+        let closed = s.list_closed_sessions().await.unwrap();
+        let closed_ids: Vec<&str> = closed.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(closed.len(), 2);
+        assert!(closed_ids.contains(&"s-b"));
+        assert!(closed_ids.contains(&"s-c"));
+        // Archived flag preserved so the UI can badge it.
+        assert_eq!(closed.iter().find(|x| x.id == "s-c").unwrap().archived, 1);
+        assert_eq!(closed.iter().find(|x| x.id == "s-b").unwrap().archived, 0);
     }
 }
