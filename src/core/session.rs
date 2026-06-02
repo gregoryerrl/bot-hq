@@ -58,6 +58,18 @@ impl SessionHandle {
         let _ = self.brian.input_tx.send(msg.clone()).await;
         let _ = self.rain.input_tx.send(msg).await;
     }
+
+    /// True once either agent's retry supervisor has terminated — a permanent
+    /// API error (e.g. `400`) or an exhausted retry budget drops the
+    /// supervisor's input receiver, which closes this sender. The handle then
+    /// lingers in the session map but can no longer drive the duo, so callers
+    /// (`ensure_session_started`) evict + re-spawn it instead of treating it as
+    /// live. Stays `false` during a healthy run AND during a transient-retry
+    /// backoff (the supervisor still holds the receiver then), so a recovering
+    /// agent is never wrongly evicted.
+    pub fn is_stale(&self) -> bool {
+        self.brian.input_tx.is_closed() || self.rain.input_tx.is_closed()
+    }
 }
 
 /// Emma's solo singleton session — different shape from `SessionHandle` because
@@ -65,6 +77,15 @@ impl SessionHandle {
 pub struct EmmaHandle {
     pub agent: AgentHandle,
     _mcp_temp: TempDir,
+}
+
+impl EmmaHandle {
+    /// True once Emma's retry supervisor has terminated (permanent error /
+    /// exhausted budget) — the handle lingers but can't drive Emma. See
+    /// [`SessionHandle::is_stale`].
+    pub fn is_stale(&self) -> bool {
+        self.agent.input_tx.is_closed()
+    }
 }
 
 pub async fn open_session(

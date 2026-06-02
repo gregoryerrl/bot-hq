@@ -809,6 +809,14 @@ mod tests {
 
         task.await.unwrap(); // returns without a respawn
 
+        // A terminated supervisor drops its input receiver, so the stable
+        // sender now reads closed — exactly the signal `SessionHandle::is_stale`
+        // uses to evict + re-spawn a crashed session.
+        assert!(
+            _out_in_tx.is_closed(),
+            "terminated supervisor must close the input channel (is_stale signal)"
+        );
+
         let mut got = Vec::new();
         while let Some(ev) = out_ev_rx.recv().await {
             got.push(ev);

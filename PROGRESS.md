@@ -57,6 +57,19 @@ supervisor task simply ended — no retry, no backoff, no respawn.
   resume-then-clean / permanent-no-resume / give-up-after-cap). Lib suite
   **305 passing**; clippy clean on touched files; release build green.
 
+**Follow-up — evict stale session handles.** The supervisor closes its
+channels on a *permanent* death (a non-retryable error or exhausted budget),
+but the dead `SessionHandle` lingered in the in-memory map, so
+`ensure_session_started` fast-pathed on `contains_key` and never re-spawned —
+the session was stuck until an app restart (`ensure_emma_started` had the same
+zombie). Added `SessionHandle::is_stale` / `EmmaHandle::is_stale` (true once a
+supervisor drops its input receiver, closing the stable sender; stays false
+during a healthy run *and* a transient-retry backoff). Both `ensure_*_started`
+now treat a stale handle as absent: evict it (killing already-dead agents is a
+no-op) and re-spawn via the resume path on the next interaction. Transient
+deaths already self-heal via the supervisor; this closes the permanent-death
+case.
+
 ## 2026-06-01 — Fix nested-runtime panic in policy-mutation audit
 
 Sending a message to a session panicked the tokio worker with "Cannot start

@@ -66,8 +66,16 @@ impl AppState {
     /// crash startup.
     pub async fn ensure_emma_started(&self) -> Result<()> {
         let mut emma = self.emma.lock().await;
-        if emma.is_some() {
-            return Ok(());
+        // Healthy + running → done. A stale handle (supervisor terminated on a
+        // permanent error / exhausted retries) is dropped so we re-spawn.
+        if let Some(handle) = emma.as_ref() {
+            if !handle.is_stale() {
+                return Ok(());
+            }
+            if let Some(mut old) = emma.take() {
+                old.agent.kill();
+                tracing::info!("evicted stale Emma handle; re-spawning");
+            }
         }
         let handle = spawn_emma_handle(
             &self.paths,
@@ -127,17 +135,34 @@ impl AppState {
     /// singleton) if not already running. Idempotent — safe to call repeatedly.
     /// Logs and returns Err if spawn fails, but does NOT poison the AppState.
     pub async fn ensure_session_started(&self, session_id: &str) -> Result<()> {
-        // Fast path: already running. No gate needed.
-        if self.sessions.lock().await.contains_key(session_id) {
-            return Ok(());
+        // Fast path: already running AND healthy. A handle whose supervisor has
+        // terminated (permanent API error / exhausted retry budget) lingers in
+        // the map but is stale — fall through to evict + re-spawn so the
+        // session recovers on the next interaction without an app restart.
+        if let Some(handle) = self.sessions.lock().await.get(session_id) {
+            if !handle.is_stale() {
+                return Ok(());
+            }
         }
         // Slow path: take the spawn gate so concurrent callers serialize, then
         // re-check under the gate — a racing call may have spawned while we
         // waited. Without this double-check two callers both pass the fast
         // check and spawn duplicate duos (one gets orphaned).
         let _gate = self.spawn_gate.lock().await;
-        if self.sessions.lock().await.contains_key(session_id) {
-            return Ok(());
+        {
+            let mut sessions = self.sessions.lock().await;
+            if let Some(handle) = sessions.get(session_id) {
+                if !handle.is_stale() {
+                    return Ok(());
+                }
+                // Evict the stale (crashed) handle before re-spawning. Killing
+                // already-dead agents is a no-op.
+                if let Some(mut stale) = sessions.remove(session_id) {
+                    stale.brian.kill();
+                    stale.rain.kill();
+                    tracing::info!(session_id, "evicted stale session handle; re-spawning");
+                }
+            }
         }
         let handle = spawn_existing_session(
             session_id,
