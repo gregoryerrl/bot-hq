@@ -21,6 +21,7 @@ pub mod docs;
 pub mod error;
 pub mod messages;
 pub mod plugins;
+pub mod policy;
 pub mod questions;
 pub mod screenshot;
 pub mod sessions;

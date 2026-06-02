@@ -374,6 +374,54 @@ async setToolGateKeywords(keywords: GatedKeyword[]) : Promise<Result<null, AppEr
     else return { status: "error", error: e  as any };
 }
 },
+async getGeneralPolicy() : Promise<Result<Policy, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_general_policy") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setGeneralPolicy(policy: Policy) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_general_policy", { policy }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getProjectPolicy(project: string) : Promise<Result<Policy, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_project_policy", { project }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setProjectPolicy(project: string, policy: Policy) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_project_policy", { project, policy }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getSessionPolicy(sessionId: string) : Promise<Result<Policy, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_session_policy", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setSessionPolicy(sessionId: string, policy: Policy) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_session_policy", { sessionId, policy }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async claudeConfigRead() : Promise<Result<ClaudeConfigView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("claude_config_read") };
@@ -682,6 +730,19 @@ export type DiffLine = { kind: string; text: string }
  */
 export type FileStat = { present: boolean; path: string; bytes: number }
 /**
+ * Force-push gate.
+ */
+export type ForcePushMode = 
+/**
+ * `git push --force` / `--force-with-lease` denied.
+ */
+"blocked" | 
+/**
+ * Permissive default — no policy file = no enforcement. The user opts into
+ * blocking by writing `force_push: blocked` in policy.yaml.
+ */
+"allowed"
+/**
  * How a matching Bash command is handled.
  */
 export type GateMode = 
@@ -820,6 +881,39 @@ export type PluginStatus =
  */
 { kind: "Crashed" }
 /**
+ * Resolved policy for a (general + per-project) overlay, or a session snapshot.
+ */
+export type Policy = { 
+/**
+ * Words/phrases that must not appear in commit messages or staged diffs.
+ * Pre-commit grep blocks the commit if any match.
+ */
+forbidden_in_commits?: string[]; 
+/**
+ * `git push` gate. `auto` = pushes go through; `ask` = the pre-push hook
+ * blocks until the user enables pushes (the Session Settings toggle).
+ */
+push_gate?: PushGateMode; 
+/**
+ * Force-push gate. `blocked` = `git push --force`/`--force-with-lease`
+ * denied; `allowed` = permitted (still subject to `push_gate`).
+ */
+force_push?: ForcePushMode; 
+/**
+ * Bash commands that always require approval — `request_approval`
+ * kind="per_action", every invocation.
+ */
+per_action_approval?: string[]; 
+/**
+ * Regex pattern branch names must match. Empty = no constraint.
+ */
+branch_pattern?: string; 
+/**
+ * Free-form commit style note (imperative, conventional, etc).
+ * Surfaced to the agent in its system prompt.
+ */
+commit_style?: string }
+/**
  * Project as exposed to the frontend. Drives the project-filter dropdown
  * in ContextLibrary and (eventually) the New-Session repo picker.
  */
@@ -830,6 +924,21 @@ export type ProjectView = { name: string; display_name: string; working_repo_pat
  * project was registered at an arbitrary on-disk location.
  */
 cl_path: string | null }
+/**
+ * `git push` gate. Set per tier (global/project/session); a session inherits
+ * the resolved value at spawn then can flip it in the gear tab. No per-branch
+ * memory — the user toggles `auto` to enable pushes for the session.
+ */
+export type PushGateMode = 
+/**
+ * No prompt — pushes go through.
+ */
+"auto" | 
+/**
+ * Pushes are gated — the pre-push hook blocks until the user flips the
+ * session push toggle to `auto`.
+ */
+"ask"
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null }
 /**

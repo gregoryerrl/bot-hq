@@ -20,7 +20,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub mod audit;
 pub mod hooks;
@@ -35,7 +35,7 @@ pub use tool_gate::{GateMode, GatedKeyword};
 pub use violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 
 /// Resolved policy for a (general + per-project) overlay, or a session snapshot.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct Policy {
     /// Words/phrases that must not appear in commit messages or staged diffs.
     /// Pre-commit grep blocks the commit if any match.
@@ -70,7 +70,7 @@ pub struct Policy {
 /// `git push` gate. Set per tier (global/project/session); a session inherits
 /// the resolved value at spawn then can flip it in the gear tab. No per-branch
 /// memory — the user toggles `auto` to enable pushes for the session.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum PushGateMode {
     /// No prompt — pushes go through.
@@ -82,7 +82,7 @@ pub enum PushGateMode {
 }
 
 /// Force-push gate.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ForcePushMode {
     /// `git push --force` / `--force-with-lease` denied.
@@ -278,6 +278,33 @@ fn load_one(path: &Path) -> Result<Option<Policy>> {
     let parsed: Policy = serde_yaml::from_str(&body)
         .with_context(|| format!("parsing {} as YAML", path.display()))?;
     Ok(Some(parsed))
+}
+
+/// Path to the global blueprint policy file (`<data_dir>/general-policy.yaml`).
+pub fn general_policy_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("general-policy.yaml")
+}
+
+/// Read a single blueprint policy file (global or project) as a [`Policy`].
+/// Returns [`Policy::default`] when the file is absent — an unwritten blueprint
+/// resolves to the permissive default, matching [`Policy::resolve`]. Parse
+/// errors surface loud (the user needs to know their YAML is broken).
+pub fn read_policy_file(path: &Path) -> Result<Policy> {
+    Ok(load_one(path)?.unwrap_or_default())
+}
+
+/// Write a [`Policy`] to `path` as YAML, creating parent dirs. Overwrites any
+/// existing file. Used by the user-only Tauri policy editors (global +
+/// project); callers should follow with [`audit::record_policy_write`] so the
+/// write doesn't read back as an unauthorized mutation on the next audit.
+pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent dir for {}", path.display()))?;
+    }
+    let body = serde_yaml::to_string(policy).with_context(|| "serializing policy")?;
+    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 /// Overlay `overlay` onto `base`. Lists are replaced not merged when the

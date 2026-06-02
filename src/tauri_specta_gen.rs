@@ -21,8 +21,8 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 }
 
 use crate::tauri_cmd::{
-    agent_configs, claude_config, cl, docs, messages, plugins, questions, screenshot, sessions,
-    tool_gate,
+    agent_configs, claude_config, cl, docs, messages, plugins, policy, questions, screenshot,
+    sessions, tool_gate,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -65,6 +65,13 @@ pub fn builder() -> Builder<tauri::Wry> {
         // Tool Gate (global gated-Bash keywords)
         tool_gate::get_tool_gate_keywords,
         tool_gate::set_tool_gate_keywords,
+        // Policy (3-tier toggles: global / project / session — user-only)
+        policy::get_general_policy,
+        policy::set_general_policy,
+        policy::get_project_policy,
+        policy::set_project_policy,
+        policy::get_session_policy,
+        policy::set_session_policy,
         // Claude Config (surface + override the config agents inherit)
         claude_config::claude_config_read,
         claude_config::get_claude_overrides,

@@ -156,6 +156,29 @@ fn audit_one(
     Ok(outcome)
 }
 
+/// Record a policy file's current content hash in the cache WITHOUT logging a
+/// mutation. Called by the user-only Tauri policy editors right after they
+/// write `general-policy.yaml` / `projects/<p>/policy.yaml`, so the authorized
+/// edit doesn't read back as an unauthorized `PolicyMutation` on the next
+/// hook/audit pass (the v2 "authorized via Settings UI" distinction anticipated
+/// in this module's header). Absent file → cache entry removed (a deleted
+/// policy resets to FirstSeen on next read). Best-effort; errors propagate so
+/// the command can surface them.
+pub fn record_policy_write(data_dir: &Path, path: &Path) -> Result<()> {
+    let mut cache = HashCache::load(data_dir)?;
+    let key = path.display().to_string();
+    match std::fs::read_to_string(path) {
+        Ok(body) => {
+            cache.entries.insert(key, content_hash(&body));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            cache.entries.remove(&key);
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+    cache.save(data_dir)
+}
+
 fn content_hash(content: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -305,6 +328,44 @@ mod tests {
         assert!(cache_file.exists());
         let body = std::fs::read_to_string(&cache_file).unwrap();
         assert!(body.contains("general-policy.yaml"));
+    }
+
+    #[test]
+    fn record_policy_write_suppresses_spurious_mutation() {
+        // Simulate the user editing policy via the Settings/CL editor: write the
+        // file, then record_policy_write. The next audit must read Unchanged —
+        // NOT Changed — so no spurious PolicyMutation violation is logged.
+        let data = tempdir().unwrap();
+        let pol = data.path().join("general-policy.yaml");
+        std::fs::write(&pol, "forbidden_in_commits:\n  - Claude\n").unwrap();
+        let log = ViolationsLog::new(data.path());
+        // Baseline read records the first hash.
+        audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
+        // User edits via the editor command → write + record.
+        std::fs::write(&pol, "forbidden_in_commits:\n  - Claude\n  - bot-hq\n").unwrap();
+        record_policy_write(data.path(), &pol).unwrap();
+        // Next audit sees the recorded hash → Unchanged, no violation.
+        let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "agent").unwrap();
+        assert_eq!(outcomes[0].1, MutationOutcome::Unchanged);
+        assert!(
+            log.read_all().unwrap().is_empty(),
+            "authorized edit recorded via record_policy_write must not log a mutation"
+        );
+    }
+
+    #[test]
+    fn record_policy_write_on_absent_file_clears_entry() {
+        let data = tempdir().unwrap();
+        let pol = data.path().join("general-policy.yaml");
+        std::fs::write(&pol, "a: 1\n").unwrap();
+        audit_policy_files(data.path(), None, None, "s", "t").unwrap();
+        // Delete the file, then record — entry should be dropped so a later
+        // re-create reads FirstSeen (not Changed).
+        std::fs::remove_file(&pol).unwrap();
+        record_policy_write(data.path(), &pol).unwrap();
+        std::fs::write(&pol, "a: 2\n").unwrap();
+        let outcomes = audit_policy_files(data.path(), None, None, "s", "t").unwrap();
+        assert_eq!(outcomes[0].1, MutationOutcome::FirstSeen);
     }
 
     #[test]
