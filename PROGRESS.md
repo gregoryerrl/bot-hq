@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-393 tests passing (344 lib + 32 external MCP + 7 signaling + 10 storage)
+395 tests passing (346 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,34 @@ plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-03 — Durable tray (session_questions → session_tray) + execute-on-approve anytime
+
+Renamed `session_questions` → `session_tray` (it outgrew "questions" — it durably mirrors every
+awaiting-input tray item: questions, approvals, action_gate gated commands, halts) and made an
+approved action_gate command execute whenever it's resolved — hours/days later, or after a restart
+— not just within the in-memory oneshot's lifetime. Closes the gap `ae79f3a` documented (the
+post-restart `None` branch couldn't execute because the command wasn't persisted).
+
+- migration `0010`: `ALTER TABLE session_questions RENAME TO session_tray` + `ADD COLUMN
+  command_text TEXT` + recreate the partial pending index under the new name. (Type
+  `SessionQuestion` → `SessionTrayEntry`; method names kept to bound churn. The type isn't surfaced
+  via tauri-specta, so bindings.ts / the frontend are untouched.)
+- `command_text` persists the gated command on the row (set for ToolBlocklist approvals in
+  `ask_user_choice_inner`, extracted before `approval` moves into `PendingChoice`).
+- `resolve_choice` executes the approved command from the durable row on BOTH receiver-gone paths —
+  the same-session timeout `Err` arm (generalizes `ae79f3a`) and the post-restart `None` arm — via a
+  shared `maybe_run_gated` helper. The `Delivered` (in-band) path is excluded (action_gate's own
+  future runs it there) → no double-fire.
+- Exactly-once is now durable: gated on `answer_question`'s atomic pending→answered flip
+  (`rows_affected == 1`), so a duplicate / stale / post-restart resolve can't re-run the command.
+  Replaces the in-memory oneshot's exactly-once guarantee with a DB one.
+
+Tests: `post_restart_action_gate_executes_from_durable_row` (None arm runs from `command_text`),
+`resolve_twice_executes_gated_command_once` (exactly-once via the flip gate), plus the existing
+`timed_out_action_gate_still_executes_on_approve` (now flip-gated).
+
+push-gate unchanged: it blocks a live `git push` and can't be deferred days; stays now-or-times-out.
 
 ## 2026-06-03 — action_gate executes on approve even after a client timeout
 

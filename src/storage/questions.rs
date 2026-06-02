@@ -1,14 +1,14 @@
-//! `session_questions` table: durable mirror of the in-chat tray. Every
+//! `session_tray` table: durable mirror of the in-chat tray. Every
 //! `ask_user_choice` / `mark_awaiting_user` / phase-request writes a row here
 //! so the tray + dashboard counter survive restart, and answers/withdrawals/
 //! supersedes flip the row's status.
 
 use super::*;
 
-/// Full column projection for a `SessionQuestion` row — shared by
+/// Full column projection for a `SessionTrayEntry` row — shared by
 /// `questions_for_session` and `get_question` so the two can't drift.
 const QUESTION_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
-     options_json, status, picked_option, asked_at, answered_at, supersedes_id";
+     options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text";
 
 impl Storage {
     /// Insert a fresh question row in `pending` status. Returns the row id.
@@ -25,14 +25,15 @@ impl Storage {
         prompt: &str,
         options: Option<&[String]>,
         supersedes_id: Option<i64>,
+        command_text: Option<&str>,
     ) -> Result<i64> {
         let options_json = options
             .filter(|_| matches!(kind, QuestionKind::Choice))
             .map(|opts| serde_json::to_string(opts).unwrap_or_else(|_| "[]".into()));
         let res = sqlx::query(
-            "INSERT INTO session_questions \
-                (session_id, choice_id, agent, kind, prompt, options_json, supersedes_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO session_tray \
+                (session_id, choice_id, agent, kind, prompt, options_json, supersedes_id, command_text) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(choice_id)
@@ -41,6 +42,7 @@ impl Storage {
         .bind(prompt)
         .bind(options_json)
         .bind(supersedes_id)
+        .bind(command_text)
         .execute(&self.pool)
         .await
         .with_context(|| format!("inserting question {choice_id} for session {session_id}"))?;
@@ -56,7 +58,7 @@ impl Storage {
         picked: &str,
     ) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_questions \
+            "UPDATE session_tray \
              SET status = 'answered', picked_option = ?, answered_at = datetime('now') \
              WHERE choice_id = ? AND status = 'pending'",
         )
@@ -74,7 +76,7 @@ impl Storage {
     /// `choice` and other kinds are NOT touched (they wait on a real pick).
     pub async fn clear_pending_halts(&self, session_id: &str) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_questions \
+            "UPDATE session_tray \
              SET status = 'answered', \
                  answered_at = datetime('now'), \
                  picked_option = '(user replied)' \
@@ -90,7 +92,7 @@ impl Storage {
     /// Mark a question as withdrawn (agent abandons it; never to be answered).
     pub async fn withdraw_question(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_questions \
+            "UPDATE session_tray \
              SET status = 'withdrawn' \
              WHERE choice_id = ? AND status = 'pending'",
         )
@@ -104,7 +106,7 @@ impl Storage {
     /// Mark a question as superseded by another (agent rephrased).
     pub async fn supersede_question(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_questions \
+            "UPDATE session_tray \
              SET status = 'superseded' \
              WHERE choice_id = ? AND status = 'pending'",
         )
@@ -121,9 +123,9 @@ impl Storage {
     pub async fn questions_for_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<SessionQuestion>> {
-        let rows = sqlx::query_as::<_, SessionQuestion>(&format!(
-            "SELECT {QUESTION_COLUMNS} FROM session_questions \
+    ) -> Result<Vec<SessionTrayEntry>> {
+        let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {QUESTION_COLUMNS} FROM session_tray \
              WHERE session_id = ? ORDER BY id ASC"
         ))
         .bind(session_id)
@@ -133,9 +135,9 @@ impl Storage {
     }
 
     /// Look up a question by its `choice_id`. Returns None if absent.
-    pub async fn get_question(&self, choice_id: &str) -> Result<Option<SessionQuestion>> {
-        let row = sqlx::query_as::<_, SessionQuestion>(&format!(
-            "SELECT {QUESTION_COLUMNS} FROM session_questions WHERE choice_id = ?"
+    pub async fn get_question(&self, choice_id: &str) -> Result<Option<SessionTrayEntry>> {
+        let row = sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {QUESTION_COLUMNS} FROM session_tray WHERE choice_id = ?"
         ))
         .bind(choice_id)
         .fetch_optional(&self.pool)

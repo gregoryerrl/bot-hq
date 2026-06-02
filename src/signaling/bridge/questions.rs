@@ -165,6 +165,14 @@ impl SignalingBridge {
         supersedes_id: Option<i64>,
     ) -> Result<String> {
         let choice_id = Uuid::new_v4().to_string();
+        // Persist the command for an action_gate (ToolBlocklist) approval so it
+        // can still execute on approve after the in-memory oneshot is gone
+        // (client timeout / restart). Extracted before `approval` moves into
+        // PendingChoice below.
+        let command_text = approval.as_ref().and_then(|a| {
+            matches!(a.kind, crate::policy::ViolationKind::ToolBlocklist)
+                .then(|| a.action.clone())
+        });
         let (tx, rx) = oneshot::channel::<String>();
         let choice = PendingChoice {
             choice_id: choice_id.clone(),
@@ -195,6 +203,7 @@ impl SignalingBridge {
             &question,
             Some(&options),
             supersedes_id,
+            command_text.as_deref(),
         )
         .await;
 
@@ -231,13 +240,23 @@ impl SignalingBridge {
         prompt: &str,
         options: Option<&[String]>,
         supersedes_id: Option<i64>,
+        command_text: Option<&str>,
     ) {
         let storage_guard = self.storage.lock().await;
         let Some(storage) = storage_guard.as_ref() else {
             return;
         };
         if let Err(e) = storage
-            .insert_question(session_id, choice_id, agent, kind, prompt, options, supersedes_id)
+            .insert_question(
+                session_id,
+                choice_id,
+                agent,
+                kind,
+                prompt,
+                options,
+                supersedes_id,
+                command_text,
+            )
             .await
         {
             tracing::warn!(?e, choice_id, "persist_question failed");
@@ -268,7 +287,7 @@ impl SignalingBridge {
     pub async fn list_questions_for_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::storage::SessionQuestion>> {
+    ) -> Result<Vec<crate::storage::SessionTrayEntry>> {
         let storage_guard = self.storage.lock().await;
         let Some(storage) = storage_guard.as_ref() else {
             return Ok(Vec::new());
@@ -278,17 +297,25 @@ impl SignalingBridge {
 
     /// Called by the UI when the user clicks a choice button.
     pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<ResolveOutcome> {
-        // Mark the storage row answered first so the UI/tray updates even if
-        // the in-memory parked entry has already been cleaned up (e.g. after
-        // a restart that replays from the table).
-        {
+        // Flip the row pending→answered first (so the UI/tray updates even if the
+        // in-memory parked entry is gone — e.g. after a restart). `rows == 1`
+        // means THIS call won the atomic transition; gate resolve-time
+        // gated-command execution on it so a duplicate / stale resolve can't
+        // double-run. This is the durable exactly-once that replaces the
+        // in-memory oneshot's guarantee.
+        let flipped = {
             let storage_guard = self.storage.lock().await;
-            if let Some(storage) = storage_guard.as_ref() {
-                if let Err(e) = storage.answer_question(choice_id, &picked).await {
-                    tracing::warn!(?e, choice_id, "answer_question storage update failed");
-                }
+            match storage_guard.as_ref() {
+                Some(storage) => match storage.answer_question(choice_id, &picked).await {
+                    Ok(rows) => rows == 1,
+                    Err(e) => {
+                        tracing::warn!(?e, choice_id, "answer_question storage update failed");
+                        false
+                    }
+                },
+                None => false,
             }
-        }
+        };
         let parked = self.pending.lock().await.remove(choice_id);
         match parked {
             Some(p) => {
@@ -324,32 +351,19 @@ impl SignalingBridge {
                         let session_id = p.choice.session_id.clone();
                         let mut body =
                             oob_resolution_body(&p.choice.agent, &p.choice.question, &picked);
-                        // If this was an `action_gate` approval (kind=ToolBlocklist),
-                        // its server-side `execute_gated` never ran — the request
-                        // future that would have called it in-band was cancelled when
-                        // the client timed out. Run the gated command NOW and append
-                        // its output so the agent gets the real result via the OOB
-                        // message, not just the pick. In-band approvals execute in
-                        // `action_gate` itself; the two paths are mutually exclusive on
-                        // this one `tx.send`, so the command runs exactly once. Done
-                        // before the storage lock below — `execute_gated` locks storage
-                        // internally to resolve the working repo.
-                        if let Some(ctx) = &p.choice.approval {
-                            if matches!(ctx.kind, crate::policy::ViolationKind::ToolBlocklist)
-                                && matches!(outcome, crate::policy::ViolationOutcome::Approved)
-                            {
-                                body.push_str(
-                                    "\n\n(Your action_gate request timed out client-side but was \
-                                     approved; bot-hq executed it — output below.)\n",
-                                );
-                                match self.execute_gated(&session_id, &ctx.action).await {
-                                    Ok(output) => body.push_str(&output),
-                                    Err(e) => body.push_str(&format!(
-                                        "action_gate could not run `{}`: {e}",
-                                        ctx.action
-                                    )),
-                                }
-                            }
+                        // The agent's blocking call timed out, so its request future
+                        // (which would run an action_gate command in-band) was
+                        // cancelled before executing. Run the gated command now from
+                        // the in-memory approval ctx, gated on the atomic flip so a
+                        // duplicate resolve can't double-run. Done before the storage
+                        // lock — execute_gated locks storage internally.
+                        if flipped {
+                            let command = p.choice.approval.as_ref().and_then(|c| {
+                                matches!(c.kind, crate::policy::ViolationKind::ToolBlocklist)
+                                    .then_some(c.action.as_str())
+                            });
+                            self.maybe_run_gated(&session_id, command, &picked, &mut body)
+                                .await;
                         }
                         let storage_guard = self.storage.lock().await;
                         if let Some(storage) = storage_guard.as_ref() {
@@ -403,7 +417,21 @@ impl SignalingBridge {
                 let Some(q) = q else {
                     return Err(anyhow::anyhow!("no pending choice with id {choice_id}"));
                 };
-                let body = oob_resolution_body(&q.agent, &q.prompt, &picked);
+                let mut body = oob_resolution_body(&q.agent, &q.prompt, &picked);
+                // Post-restart / reopened path: the in-memory oneshot is gone, so
+                // execution can only come from the durable row. If it carries an
+                // action_gate command and the pick is Approved, run it now — gated
+                // on the atomic flip. This is the "approve hours/days later or after
+                // a restart and it still executes" case.
+                if flipped {
+                    self.maybe_run_gated(
+                        &q.session_id,
+                        q.command_text.as_deref(),
+                        &picked,
+                        &mut body,
+                    )
+                    .await;
+                }
                 {
                     let storage_guard = self.storage.lock().await;
                     if let Some(storage) = storage_guard.as_ref() {
@@ -424,6 +452,35 @@ impl SignalingBridge {
                     body,
                 })
             }
+        }
+    }
+
+    /// Run an approved action_gate (ToolBlocklist) command at resolve time and
+    /// append its output to the OOB `body`. Used on the receiver-gone paths
+    /// (client timeout / post-restart) where action_gate's own future was
+    /// cancelled before it could execute in-band. `command` is None for any
+    /// non-executing tray item; a no-op unless the pick is Approved. Callers
+    /// gate this on the atomic status flip so it runs exactly once.
+    async fn maybe_run_gated(
+        &self,
+        session_id: &str,
+        command: Option<&str>,
+        picked: &str,
+        body: &mut String,
+    ) {
+        let Some(command) = command else { return };
+        if !matches!(
+            outcome_from_picked(picked),
+            crate::policy::ViolationOutcome::Approved
+        ) {
+            return;
+        }
+        body.push_str(
+            "\n\n(Your action_gate request was approved; bot-hq executed it — output below.)\n",
+        );
+        match self.execute_gated(session_id, command).await {
+            Ok(output) => body.push_str(&output),
+            Err(e) => body.push_str(&format!("action_gate could not run `{command}`: {e}")),
         }
     }
 
@@ -455,6 +512,7 @@ impl SignalingBridge {
             &agent,
             crate::storage::QuestionKind::Halt,
             &reason,
+            None,
             None,
             None,
         )
@@ -508,6 +566,7 @@ impl SignalingBridge {
             &agent,
             crate::storage::QuestionKind::Halt,
             &body,
+            None,
             None,
             None,
         )
@@ -598,6 +657,7 @@ mod tests {
                 crate::storage::QuestionKind::Choice,
                 "Ship it?",
                 Some(&opts),
+                None,
                 None,
             )
             .await
@@ -923,6 +983,7 @@ mod tests {
                 crate::storage::QuestionKind::Choice,
                 "stale prompt",
                 Some(&["a".to_string(), "b".to_string()]),
+                None,
                 None,
             )
             .await

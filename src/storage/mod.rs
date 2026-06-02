@@ -27,7 +27,7 @@ mod sessions;
 
 pub use model::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Plugin, Project,
-    QuestionKind, QuestionStatus, Session, SessionDocument, SessionQuestion,
+    QuestionKind, QuestionStatus, Session, SessionDocument, SessionTrayEntry,
 };
 
 #[derive(Clone)]

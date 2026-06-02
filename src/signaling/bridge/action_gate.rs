@@ -298,4 +298,97 @@ mod tests {
             "approved command must execute on the dropped-receiver (timeout) path"
         );
     }
+
+    #[tokio::test]
+    async fn post_restart_action_gate_executes_from_durable_row() {
+        // Durability case: an action_gate approval persisted before a restart —
+        // command_text on the row, NO in-memory Parked. Resolving Approve must
+        // execute from the durable row (the `None` branch). This is the
+        // "approve hours/days later / after a restart and it still runs" guarantee.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let marker = repo.path().join("ran.txt");
+        let cmd = format!("touch {}", marker.display());
+        let bridge =
+            SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage
+            .create_session("s1", "t", Some(&repo.path().display().to_string()))
+            .await
+            .unwrap();
+        let opts = vec!["Approve".to_string(), "Reject".to_string()];
+        storage
+            .insert_question(
+                "s1",
+                "cid-1",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Run gated command in this session's repo?",
+                Some(&opts),
+                None,
+                Some(&cmd), // command_text — the durable execution context
+            )
+            .await
+            .unwrap();
+
+        // No in-memory Parked for cid-1 → resolve hits the None (post-restart) arm.
+        let outcome = bridge.resolve_choice("cid-1", "Approve".into()).await.unwrap();
+        match outcome {
+            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => assert!(
+                body.contains("exit 0"),
+                "durable row must execute + carry output via OOB: {body}"
+            ),
+            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+        }
+        assert!(
+            marker.exists(),
+            "command must execute from the durable row (post-restart path)"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_twice_executes_gated_command_once() {
+        // Durable exactly-once: a duplicate/stale resolve must not re-run the
+        // command. The first resolve wins the pending→answered flip and executes;
+        // the second sees `flipped == false` and is a no-op.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let marker = repo.path().join("ran.txt");
+        let cmd = format!("touch {}", marker.display());
+        let bridge =
+            SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage
+            .create_session("s1", "t", Some(&repo.path().display().to_string()))
+            .await
+            .unwrap();
+        let opts = vec!["Approve".to_string(), "Reject".to_string()];
+        storage
+            .insert_question(
+                "s1",
+                "cid-2",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Run?",
+                Some(&opts),
+                None,
+                Some(&cmd),
+            )
+            .await
+            .unwrap();
+
+        let body_of = |o| match o {
+            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => body,
+            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+        };
+        let first = body_of(bridge.resolve_choice("cid-2", "Approve".into()).await.unwrap());
+        let second = body_of(bridge.resolve_choice("cid-2", "Approve".into()).await.unwrap());
+        assert!(first.contains("output below"), "first resolve must execute: {first}");
+        assert!(
+            !second.contains("output below"),
+            "second resolve must NOT re-execute (exactly-once): {second}"
+        );
+    }
 }

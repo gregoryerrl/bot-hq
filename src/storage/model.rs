@@ -175,10 +175,11 @@ impl QuestionStatus {
     }
 }
 
-/// A row from the `session_questions` table. Mirrors a question the agent
-/// has surfaced to the user via the per-session questions tray.
+/// A row from the `session_tray` table. Mirrors a tray item the agent has
+/// surfaced to the user — a question, an approval, an action_gate gated
+/// command, or a `mark_awaiting_user` halt — via the per-session tray.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct SessionQuestion {
+pub struct SessionTrayEntry {
     pub id: i64,
     pub session_id: String,
     pub choice_id: String,
@@ -192,9 +193,15 @@ pub struct SessionQuestion {
     pub asked_at: String,
     pub answered_at: Option<String>,
     pub supersedes_id: Option<i64>,
+    /// The command to run on approve, for an action_gate (ToolBlocklist)
+    /// approval. Persisted so the command executes at resolve time even after
+    /// the in-memory oneshot is gone (client timeout / restart). NULL for any
+    /// non-executing tray item.
+    #[serde(default)]
+    pub command_text: Option<String>,
 }
 
-impl SessionQuestion {
+impl SessionTrayEntry {
     pub fn kind_typed(&self) -> Option<QuestionKind> {
         QuestionKind::parse(&self.kind)
     }
