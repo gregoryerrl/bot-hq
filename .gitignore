@@ -22,6 +22,9 @@ bot-hq.db
 .DS_Store
 *.pem
 
+# Local Claude Code harness state (per-repo settings, locks) — not for commit
+.claude/
+
 # Stale coder configs
 .bot-hq-coder-*-mcp.json
 
