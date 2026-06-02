@@ -423,7 +423,16 @@ async fn spawn_agent_for(
     let system_prompt =
         read_system_prompt(paths, agent_name, project.as_deref(), project_root)?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
-    let user_servers = user_mcp_servers_for_agent(agent_name);
+    let mut user_servers = user_mcp_servers_for_agent(agent_name);
+    // Apply per-agent MCP overrides (Settings → Claude Config): a server the
+    // user disabled for this agent is dropped from its forwarded mcp-config.
+    let agent_override = crate::claude_config::resolve_agent_overrides(
+        &crate::claude_config::load_overrides(&paths.data_dir),
+        agent_name,
+    );
+    for name in crate::claude_config::overrides::disabled_mcp(&agent_override) {
+        user_servers.remove(&name);
+    }
     let json = mcp_config_json(signaling_addr, session_id, agent_name, &user_servers);
     std::fs::write(&mcp_config_path, json)
         .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;

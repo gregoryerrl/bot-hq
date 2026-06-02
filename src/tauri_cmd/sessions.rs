@@ -129,6 +129,20 @@ pub async fn respawn_session(
     Ok(())
 }
 
+/// Force-restart a live session's agents so they pick up a Claude-config change
+/// (overrides + inherited settings are read at spawn). Unlike `respawn_session`
+/// this is NOT a no-op on a healthy session — it evicts and re-spawns. Agents
+/// resume their prior conversation via `--resume`.
+#[tauri::command]
+#[specta::specta]
+pub async fn restart_session(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+) -> Result<(), AppError> {
+    core.restart_session(&session_id).await?;
+    Ok(())
+}
+
 /// Read the current IPAV phase for a session. Returns one of "investigate" /
 /// "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
 /// state is in-memory only — restart loses it). Frontend SessionView header

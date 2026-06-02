@@ -4,7 +4,84 @@ import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { SaveIcon } from "./contextLibraryShared";
+import { ClaudeConfigPanel } from "./ClaudeConfig";
 import type { AgentConfigView, GatedKeyword, GateMode } from "../lib/bindings";
+
+type SettingsSubTab = "agents" | "claude" | "toolgate";
+
+/**
+ * Settings is a tabbed container. The existing per-agent model/auth cards
+ * ("Agents") and the global Tool-Gate list ("Tool Gate") sit alongside the new
+ * "Claude Config" subtab, which surfaces the Claude Code config the agents
+ * inherit + the per-agent override layer. All three stay mounted (toggled with
+ * `hidden`) so in-progress edits — and the Agents route-blocker — survive a
+ * subtab switch.
+ */
+export function Settings() {
+  const [tab, setTab] = useState<SettingsSubTab>("agents");
+  return (
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
+        <SubTabButton active={tab === "agents"} onClick={() => setTab("agents")}>
+          Agents
+        </SubTabButton>
+        <SubTabButton active={tab === "claude"} onClick={() => setTab("claude")}>
+          Claude Config
+        </SubTabButton>
+        <SubTabButton
+          active={tab === "toolgate"}
+          onClick={() => setTab("toolgate")}
+        >
+          Tool Gate
+        </SubTabButton>
+      </div>
+      <div className="min-h-0 flex-1">
+        <div className={cn("h-full", tab !== "agents" && "hidden")}>
+          <AgentsPanel />
+        </div>
+        <div className={cn("h-full", tab !== "claude" && "hidden")}>
+          <ClaudeConfigPanel />
+        </div>
+        <div className={cn("h-full", tab !== "toolgate" && "hidden")}>
+          <ToolGatePanel />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SubTabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "border-b-2 px-3 py-2.5 font-code-sm text-code-sm transition-colors",
+        active
+          ? "border-primary text-primary"
+          : "border-transparent text-on-surface-variant hover:text-on-surface",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ToolGatePanel() {
+  return (
+    <div className="mx-auto h-full max-w-7xl overflow-auto px-6 py-6">
+      <ToolGateSection />
+    </div>
+  );
+}
 
 // Curated provider list for the dropdown. Any provider value not in this
 // list flips the dropdown to "Other" and reveals a free-text input so a
@@ -16,7 +93,7 @@ const KNOWN_PROVIDERS = [
   "local",
 ] as const;
 
-export function Settings() {
+function AgentsPanel() {
   const { data: configs = [], refetch, isLoading } = useTauriQuery<
     AgentConfigView[]
   >("list_agent_configs");
@@ -114,8 +191,6 @@ export function Settings() {
           ))}
         </div>
       )}
-
-      <ToolGateSection />
     </div>
   );
 }

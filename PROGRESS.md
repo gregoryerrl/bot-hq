@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-354 tests passing (305 lib + 32 external MCP + 7 signaling + 10 storage)
-plus 31 frontend Vitest. Release build clean. **Tauri v2 migration landed
+380 tests passing (331 lib + 32 external MCP + 7 signaling + 10 storage)
+plus 35 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
@@ -20,6 +20,54 @@ plus 31 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-02 — Surface + control Claude Code config in Settings
+
+bot-hq's agents are `claude-code` headless subprocesses, so the user's
+`~/.claude` config (skills, plugins, hooks, CLAUDE.md/memory, MCP, effort)
+**leaks into the agents** — a self-invoking skill or a plugin hook can derail a
+Brian/Rain workflow, and that inherited config was invisible in the UI. New
+**Settings → Claude Config** subtab surfaces it and lets the user control it,
+both globally (edit their real `~/.claude`) and per-agent (an override layer
+bot-hq injects at spawn), without bot-hq ever writing its own config into
+`~/.claude`. Design: [`docs/plans/2026-06-02-claude-config-surface-design.md`](docs/plans/2026-06-02-claude-config-surface-design.md).
+
+- **Read/resolve layer** (`src/claude_config/reader.rs`): resolves the config
+  dir (honors `CLAUDE_CONFIG_DIR`), reads `settings.json` + `~/.claude.json` +
+  `CLAUDE.md`/memory + `skills/` + `enabledPlugins`, with secret masking and the
+  known traps flagged (e.g. `settings.json` `mcpServers` is ignored by
+  claude-code — it loads MCP from `~/.claude.json`; bot-hq forwards both).
+- **Inheritance lens** (`src/claude_config/mod.rs`): the single source of truth
+  for which agents pick up each surface (Brian/Emma inherit; Rain `--bare` skips
+  skills/plugins/hooks/CLAUDE.md; model/permissions overridden). Drives the
+  per-surface badges in the UI.
+- **Override store** (`src/claude_config/overrides.rs`):
+  `<data_dir>/claude-overrides.json` (0600), `_all` fan-out + per-agent entries.
+  Wired into `spawn.rs::build_command` (merged into the injected `--settings`
+  `skillOverrides`/`enabledPlugins`/`ultracode` + effort/auto-memory/CLAUDE.md
+  env) and `session.rs` (per-agent MCP filtering). `skillOverrides` (verified on
+  claude 2.1.160) is the clean lever for "disable a self-invoking skill for the
+  agents only" — the headline use case.
+- **Global write-back** (`src/claude_config/writer.rs`): read-modify-write of
+  `settings.json` that preserves all other keys + secrets; typed commands for
+  string/bool knobs + plugin enablement. Malformed `settings.json` errors
+  without clobbering.
+- **UI** (`frontend/src/app/ClaudeConfig.tsx`): the Settings tab is now tabbed
+  (Agents · Claude Config · Tool Gate). Claude Config is a 2-pane tree
+  (surface-first) reusing the Context Library shell idiom, with the inheritance
+  lens, global editors, and per-agent override controls. **All edits (global +
+  override) batch behind one Save** (review before writing `~/.claude`); after
+  saving, a banner offers to **restart running agents** so they pick up the new
+  config (read at spawn). New `export-bindings` CLI subcommand regenerates the
+  frontend bindings headlessly.
+- **Force-restart primitive**: `CoreAppState::restart_session` + the
+  `restart_session` Tauri command evict a live duo and re-spawn it (re-reading
+  overrides + per-agent mcp-config; agents resume via `--resume`). Distinct from
+  `respawn_session`, which is the idempotent on-mount "ensure started" and a
+  no-op on a healthy session.
+- **Out of scope** (deferred, noted in the design): SKILL.md global edit, MCP
+  list/markdown/hooks rich widgets, full precedence engine. `policy.yaml` is
+  intentionally excluded (bot-hq-internal, not user Claude config).
 
 ## 2026-06-02 — Auto-resume agents on transient API errors
 

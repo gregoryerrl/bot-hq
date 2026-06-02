@@ -13,6 +13,27 @@ async createSession(id: string, title: string, repoPath: string | null, project:
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Dispatch a session pre-loaded with a first prompt: create the row, register
+ * the project, spawn the duo, and broadcast `prompt` to their stdin — all in
+ * one call so delivery is deterministic. A fresh session spawns blank
+ * (`resume_session_id = None`) and bot-hq does NOT replay storage to stdin, so
+ * the prompt has to be broadcast to a LIVE session — which means spawning
+ * first. `ensure_session_started` inserts the handle before returning, so the
+ * subsequent `broadcast` always finds it; it's idempotent, so the SessionView
+ * mount's `respawn_session` is a harmless no-op.
+ * 
+ * Generic on purpose — the caller supplies the prompt. The Context Library
+ * "Maintain CL" button calls this with a hardcoded CL-maintenance prompt.
+ */
+async dispatchSession(id: string, title: string, project: string | null, repoPath: string | null, prompt: string) : Promise<Result<SessionInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dispatch_session", { id, title, project, repoPath, prompt }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getSession(sessionId: string) : Promise<Result<SessionInfo | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_session", { sessionId }) };
@@ -39,6 +60,20 @@ async listSessions() : Promise<Result<SessionInfo[], AppError>> {
 async respawnSession(sessionId: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("respawn_session", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Force-restart a live session's agents so they pick up a Claude-config change
+ * (overrides + inherited settings are read at spawn). Unlike `respawn_session`
+ * this is NOT a no-op on a healthy session — it evicts and re-spawns. Agents
+ * resume their prior conversation via `--resume`.
+ */
+async restartSession(sessionId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restart_session", { sessionId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -76,11 +111,10 @@ async advanceSessionPhase(sessionId: string, target: string) : Promise<Result<nu
 /**
  * Close a session from the UI. Delegates to `core.close_session`, which is
  * the single source of truth for closing: it removes the live handle, KILLS
- * the brian/rain subprocesses, marks the row closed/archived in storage, and
- * wipes session permission grants. The previous version called
- * `storage.close_session` directly, so it set `closed_at` but left the
- * subprocesses running — a session that "closed" in the DB yet kept taking
- * turns. Routing through core fixes that.
+ * the brian/rain subprocesses, and marks the row closed/archived in storage.
+ * The previous version called `storage.close_session` directly, so it set
+ * `closed_at` but left the subprocesses running — a session that "closed" in
+ * the DB yet kept taking turns. Routing through core fixes that.
  */
 async closeSession(sessionId: string, archive: boolean) : Promise<Result<null, AppError>> {
     try {
@@ -340,6 +374,66 @@ async setToolGateKeywords(keywords: GatedKeyword[]) : Promise<Result<null, AppEr
     else return { status: "error", error: e  as any };
 }
 },
+async claudeConfigRead() : Promise<Result<ClaudeConfigView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_config_read") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getClaudeOverrides() : Promise<Result<ClaudeOverrides, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_claude_overrides") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setClaudeOverrides(overrides: ClaudeOverrides) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_claude_overrides", { overrides }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set/remove a string-valued settings.json key (e.g. `effortLevel`,
+ * `editorMode`, `env.CLAUDE_CODE_MAX_OUTPUT_TOKENS`). `None` removes it.
+ */
+async claudeConfigSetString(key: string, value: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_config_set_string", { key, value }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set/remove a bool-valued settings.json key (e.g. `alwaysThinkingEnabled`,
+ * `voiceEnabled`). `None` removes it.
+ */
+async claudeConfigSetBool(key: string, value: boolean | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_config_set_bool", { key, value }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Enable/disable a plugin globally in `enabledPlugins` (`None` removes the
+ * entry → marketplace default).
+ */
+async claudeConfigSetPluginEnabled(key: string, enabled: boolean | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_config_set_plugin_enabled", { key, enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listPendingChoices() : Promise<Result<PendingChoiceView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_pending_choices") };
@@ -456,6 +550,38 @@ export type AgentConfigView = { agent_name: string; provider: string; model_name
  * whatever date library it picks.
  */
 export type AgentMessage = { id: number; session_id: string; author: string; kind: string; content: string; created_at: string }
+/**
+ * The override set for one agent (or the `_all` fan-out default).
+ */
+export type AgentOverride = { 
+/**
+ * skill name → visibility. Maps to `skillOverrides` in `--settings`.
+ */
+skills?: Partial<{ [key in string]: SkillVisibility }>; 
+/**
+ * plugin key (`name@marketplace`) → enabled. Maps to `enabledPlugins`.
+ */
+plugins?: Partial<{ [key in string]: boolean }>; 
+/**
+ * MCP server name → forwarded. `false` removes it from the agent's mcp-config.
+ */
+mcp?: Partial<{ [key in string]: boolean }>; 
+/**
+ * Effort level (low/medium/high/xhigh/max). Maps to `CLAUDE_CODE_EFFORT_LEVEL`.
+ */
+effort?: string | null; 
+/**
+ * ultracode toggle. Maps to `"ultracode": true` in `--settings`.
+ */
+ultracode?: boolean | null; 
+/**
+ * Disable auto-memory. Maps to `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+ */
+disable_auto_memory?: boolean | null; 
+/**
+ * Disable ALL CLAUDE.md autodiscovery. Maps to `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`.
+ */
+disable_claude_md?: boolean | null }
 export type AppError = 
 /**
  * Bad input. Frontend should highlight the offending field if it knows
@@ -512,6 +638,34 @@ export type ClFolderView = { id: number; project_id: string; folder_path: string
 export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
 /**
+ * The full resolved view of the user's Claude Code config.
+ */
+export type ClaudeConfigView = { 
+/**
+ * Resolved config dir (CLAUDE_CONFIG_DIR or `~/.claude`).
+ */
+config_dir: string; 
+/**
+ * "CLAUDE_CONFIG_DIR" if the env var is set, else "default (~/.claude)".
+ */
+config_dir_source: string; 
+/**
+ * `~/.claude.json` exists (the file claude-code actually loads MCP from).
+ */
+home_claude_json: FileStat; 
+/**
+ * A managed/enterprise policy was detected (it beats everything, incl. bot-hq).
+ */
+managed_settings_present: boolean; core_knobs: SettingItem[]; skills: SkillItem[]; plugins: PluginItem[]; mcp_servers: McpServerItem[]; memory: MemoryView; permissions: PermissionsView; 
+/**
+ * Non-fatal notices (unparseable files, ignored mcpServers, managed policy…).
+ */
+warnings: string[] }
+/**
+ * The full override store: a fan-out `_all` default plus per-agent entries.
+ */
+export type ClaudeOverrides = { _all?: AgentOverride; brian?: AgentOverride; rain?: AgentOverride; emma?: AgentOverride }
+/**
  * Result of `compute_apply_diff`: the classified diff lines plus an
  * optional human-readable note (e.g., the session-start anchor was lost
  * and we fell back to `git diff HEAD`).
@@ -523,6 +677,10 @@ export type ComputeApplyDiffResult = { lines: DiffLine[]; note: string | null }
  * classification per [`parse_diff_lines`].
  */
 export type DiffLine = { kind: string; text: string }
+/**
+ * Stat for a single config file (present / path / size).
+ */
+export type FileStat = { present: boolean; path: string; bytes: number }
 /**
  * How a matching Bash command is handled.
  */
@@ -547,11 +705,92 @@ export type GatedKeyword = {
  */
 keyword: string; mode: GateMode }
 /**
+ * Which agents pick up a given config surface from `~/.claude` at spawn, and
+ * which don't. Drives the per-surface inheritance badges in the UI. This is
+ * the canonical mapping derived from `spawn.rs::build_command` behavior:
+ * Brian/Emma run full claude-code (inherit), Rain runs `--bare` (skips
+ * skills/plugins/hooks/CLAUDE.md), MCP is forwarded to Brian/Emma only, and
+ * model/permissions are overridden per-agent by bot-hq.
+ */
+export type Inheritance = { 
+/**
+ * Agents that inherit this surface from `~/.claude` at spawn.
+ */
+inherited_by: string[]; 
+/**
+ * Agents that do NOT (Rain via `--bare`, or because bot-hq overrides it).
+ */
+skipped_by: string[]; 
+/**
+ * Short human note for the badge tooltip.
+ */
+note: string; 
+/**
+ * Whether bot-hq can override this surface per-agent at spawn (Phase 2).
+ */
+overridable: boolean }
+/**
  * What the frontend sees for each installed plugin. Combines DB row state,
  * parsed manifest, and live heartbeat status.
  */
 export type InstalledPluginView = { id: string; name: string; version: string; enabled: boolean; status: PluginStatus; manifest: PluginManifest; dir_path: string; installed_at: string }
+/**
+ * One MCP server visible to the user's claude-code, with the trap flagged.
+ */
+export type McpServerItem = { name: string; 
+/**
+ * "http" | "sse" | "stdio" | "unknown".
+ */
+transport: string; 
+/**
+ * Human source: "~/.claude.json", "~/.claude/settings.json (ignored)", "both".
+ */
+loaded_from: string; 
+/**
+ * Whether claude-code actually loads it (settings.json mcpServers is ignored).
+ */
+effective: boolean; 
+/**
+ * Masked one-line detail (url or command), secrets redacted.
+ */
+detail: string; 
+/**
+ * Agents bot-hq forwards it into (Brian/Emma; reserved keys excluded).
+ */
+forwarded_to_agents: string[]; 
+/**
+ * True if bot-hq filters this server from agents (bot-hq / claude-in-chrome).
+ */
+reserved_filtered: boolean }
+/**
+ * CLAUDE.md + auto-memory presence summary.
+ */
+export type MemoryView = { 
+/**
+ * `<config_dir>/CLAUDE.md` (user-global instructions).
+ */
+user_claude_md: FileStat; 
+/**
+ * `~/CLAUDE.md` (home-root, project-checked-in global rules).
+ */
+home_claude_md: FileStat; 
+/**
+ * Number of `projects/<slug>/memory/` dirs with a MEMORY.md.
+ */
+projects_with_memory: number; inheritance: Inheritance }
 export type PendingChoiceView = { choice_id: string; session_id: string; agent: string; question: string; options: string[] }
+/**
+ * Permission posture summary (counts only; bot-hq overrides per agent anyway).
+ */
+export type PermissionsView = { default_mode: string | null; allow: number; ask: number; deny: number; additional_directories: number; inheritance: Inheritance }
+/**
+ * One installed plugin and its enablement.
+ */
+export type PluginItem = { 
+/**
+ * `name@marketplace` key as used in `enabledPlugins`.
+ */
+key: string; enabled: boolean; inheritance: Inheritance }
 export type PluginManifest = { id: string; name: string; version: string; entry: string; requested_capabilities?: string[]; slots?: PluginSlot[] }
 export type PluginSlot = { 
 /**
@@ -593,6 +832,58 @@ export type ProjectView = { name: string; display_name: string; working_repo_pat
 cl_path: string | null }
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null }
+/**
+ * One scalar/env setting with provenance + inheritance.
+ */
+export type SettingItem = { 
+/**
+ * Dotted settings key, e.g. `effortLevel` or `env.CLAUDE_CODE_MAX_OUTPUT_TOKENS`.
+ */
+key: string; label: string; 
+/**
+ * Effective value (masked if secret). `None` = unset (uses default).
+ */
+value: string | null; 
+/**
+ * Where the value resolved from, or "unset (default)".
+ */
+source: string; inheritance: Inheritance }
+/**
+ * One skill (user-dir skill or plugin-bundled skill).
+ */
+export type SkillItem = { name: string; 
+/**
+ * "user" (a dir under `<config>/skills/`) or "plugin" (bundled).
+ */
+kind: string; 
+/**
+ * From SKILL.md frontmatter `disable-model-invocation` (user skills).
+ */
+disable_model_invocation: boolean; description: string | null; 
+/**
+ * SKILL.md path (user skills only).
+ */
+path: string | null; inheritance: Inheritance }
+/**
+ * Per-skill visibility — mirrors claude-code's `skillOverrides` states.
+ */
+export type SkillVisibility = 
+/**
+ * Default — listed to the model + in the `/` menu.
+ */
+"on" | 
+/**
+ * Name only listed to the model; still in the `/` menu.
+ */
+"name-only" | 
+/**
+ * Hidden from the model (no auto-invoke); still manually invocable.
+ */
+"user-invocable-only" | 
+/**
+ * Fully disabled (no auto-invoke, not in the `/` menu).
+ */
+"off"
 
 /** tauri-specta globals **/
 

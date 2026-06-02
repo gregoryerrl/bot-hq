@@ -455,6 +455,15 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         .arg("--verbose")
         .args(["--append-system-prompt", &cfg.system_prompt]);
 
+    // Per-agent Claude-config overrides (Settings → Claude Config). Resolved
+    // from `<data_dir>/claude-overrides.json`; merged into the `--settings`
+    // JSON + env below so a user can disable an inherited skill/plugin/MCP/
+    // effort for THIS agent without touching their own ~/.claude. Fail-open.
+    let agent_override = crate::claude_config::resolve_agent_overrides(
+        &crate::claude_config::load_overrides(&cfg.data_dir),
+        &cfg.agent_name,
+    );
+
     if let Some(mcp) = &cfg.mcp_config_path {
         cmd.args(["--mcp-config", &mcp.display().to_string()])
             .arg("--strict-mcp-config");
@@ -550,7 +559,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
                     hook_cmd.push_str(&format!(" --project \"{project}\""));
                 }
                 hook_cmd.push_str(&format!(" --session \"{}\"", cfg.session_id));
-                let settings = serde_json::json!({
+                let mut settings = serde_json::json!({
                     "hooks": {
                         "PreToolUse": [{
                             "matcher": "Bash",
@@ -558,6 +567,17 @@ fn build_command(cfg: &SpawnConfig) -> Command {
                         }],
                     }
                 });
+                // Fold in the agent's override fragment (skillOverrides /
+                // enabledPlugins / ultracode). Built with serde_json so the
+                // payload is always valid — avoids claude-code's silent-ignore
+                // of malformed `--settings` in `-p` mode.
+                if let serde_json::Value::Object(ref mut map) = settings {
+                    for (k, v) in
+                        crate::claude_config::overrides::settings_fragment(&agent_override)
+                    {
+                        map.insert(k, v);
+                    }
+                }
                 cmd.args(["--settings", &settings.to_string()]);
             }
             Err(e) => warn!(
@@ -591,6 +611,13 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         crate::agents::llm_proxy::proxy_addr(),
     ) {
         cmd.env("ANTHROPIC_BASE_URL", base);
+    }
+
+    // Per-agent override env (effort / auto-memory / CLAUDE.md suppression).
+    // Applied to ALL agents, including Rain (--bare still reads env), though
+    // skill/plugin fragments above are moot for Rain (bare skips them).
+    for (k, v) in crate::claude_config::overrides::env_vars(&agent_override) {
+        cmd.env(k, v);
     }
 
     if let Some(wd) = &cfg.working_dir {
@@ -670,6 +697,69 @@ mod tests {
         assert_eq!(p.backoff(4), Duration::from_secs(16));
         assert_eq!(p.backoff(5), Duration::from_secs(30)); // 32 → capped
         assert_eq!(p.backoff(99), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn overrides_merge_into_settings_and_env() {
+        use crate::claude_config::{save_overrides, ClaudeOverrides, SkillVisibility};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ClaudeOverrides::default();
+        store
+            .brian
+            .skills
+            .insert("note".into(), SkillVisibility::UserInvocableOnly);
+        store.brian.effort = Some("high".into());
+        save_overrides(dir.path(), &store).unwrap();
+
+        let mut c = cfg(); // brian (non-rain → gets --settings)
+        c.data_dir = dir.path().to_path_buf();
+
+        // The injected --settings carries the override fragment alongside the hook.
+        let args = debug_command(&c);
+        let settings_arg = args
+            .iter()
+            .skip_while(|a| *a != "--settings")
+            .nth(1)
+            .expect("--settings present");
+        assert!(settings_arg.contains("skillOverrides"), "got {settings_arg}");
+        assert!(settings_arg.contains("user-invocable-only"), "got {settings_arg}");
+        assert!(settings_arg.contains("PreToolUse"), "hook must survive merge");
+
+        // Effort override is injected as env.
+        let cmd = build_command(&c);
+        let has_effort = cmd.as_std().get_envs().any(|(k, v)| {
+            k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL")
+                && v == Some(std::ffi::OsStr::new("high"))
+        });
+        assert!(has_effort, "effort env should be set from override");
+    }
+
+    #[test]
+    fn rain_gets_override_env_but_no_settings_fragment() {
+        use crate::claude_config::{save_overrides, ClaudeOverrides};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ClaudeOverrides::default();
+        store.all.disable_auto_memory = Some(true); // fan-out default
+        save_overrides(dir.path(), &store).unwrap();
+
+        let mut c = cfg();
+        c.agent_name = "rain".into();
+        c.config.agent_name = "rain".into();
+        c.data_dir = dir.path().to_path_buf();
+
+        let args = debug_command(&c);
+        assert!(args.iter().any(|a| a == "--bare"), "rain runs --bare");
+        assert!(
+            !args.iter().any(|a| a == "--settings"),
+            "rain gets no --settings (skill/plugin fragments are moot under --bare)"
+        );
+        // env-based overrides still apply to Rain.
+        let cmd = build_command(&c);
+        let has = cmd.as_std().get_envs().any(|(k, v)| {
+            k == std::ffi::OsStr::new("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+                && v == Some(std::ffi::OsStr::new("1"))
+        });
+        assert!(has, "auto-memory disable env should apply to Rain too");
     }
 
     // ---- supervisor retry logic (fake incarnations, no real subprocess) ----

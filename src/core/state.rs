@@ -179,6 +179,27 @@ impl AppState {
         Ok(())
     }
 
+    /// Force-restart a session's duo: evict the live handle (killing both
+    /// agents) and re-spawn from the CURRENT config. Agent overrides + the
+    /// inherited Claude config are read at spawn, so this is how a running
+    /// session picks up a Claude-config change made in Settings. Each agent
+    /// resumes its prior claude-code conversation via `--resume`, so context
+    /// is preserved. Unlike `close_session`, the session row stays open.
+    pub async fn restart_session(&self, session_id: &str) -> Result<()> {
+        {
+            let mut sessions = self.sessions.lock().await;
+            if let Some(mut handle) = sessions.remove(session_id) {
+                handle.brian.kill();
+                handle.rain.kill();
+                tracing::info!(session_id, "restarting session to apply config change");
+            }
+        }
+        // Handle now absent → ensure_session_started re-spawns from scratch
+        // (re-running build_command, which re-reads claude-overrides.json + the
+        // per-agent mcp-config).
+        self.ensure_session_started(session_id).await
+    }
+
     pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
         if let Some(mut handle) = sessions.remove(id) {

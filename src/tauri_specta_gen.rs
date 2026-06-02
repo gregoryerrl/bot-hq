@@ -21,7 +21,8 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 }
 
 use crate::tauri_cmd::{
-    agent_configs, cl, docs, messages, plugins, questions, screenshot, sessions, tool_gate,
+    agent_configs, claude_config, cl, docs, messages, plugins, questions, screenshot, sessions,
+    tool_gate,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -33,6 +34,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::get_session,
         sessions::list_sessions,
         sessions::respawn_session,
+        sessions::restart_session,
         sessions::get_session_phase,
         sessions::advance_session_phase,
         sessions::close_session,
@@ -63,6 +65,13 @@ pub fn builder() -> Builder<tauri::Wry> {
         // Tool Gate (global gated-Bash keywords)
         tool_gate::get_tool_gate_keywords,
         tool_gate::set_tool_gate_keywords,
+        // Claude Config (surface + override the config agents inherit)
+        claude_config::claude_config_read,
+        claude_config::get_claude_overrides,
+        claude_config::set_claude_overrides,
+        claude_config::claude_config_set_string,
+        claude_config::claude_config_set_bool,
+        claude_config::claude_config_set_plugin_enabled,
         // Questions / choices
         questions::list_pending_choices,
         questions::resolve_choice,

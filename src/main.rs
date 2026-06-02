@@ -46,6 +46,19 @@ fn main() -> Result<()> {
     if args.len() >= 2 && args[1] == "install-hooks" {
         return run_install_hooks_cli(&args[2..]);
     }
+    // Regenerate the frontend TypeScript bindings without launching the GUI
+    // (dev/CI). The GUI also exports these on startup; this is the headless path.
+    if args.len() >= 2 && args[1] == "export-bindings" {
+        let builder = bot_hq::tauri_specta_gen::builder();
+        builder
+            .export(
+                bot_hq::tauri_specta_gen::typescript_config(),
+                "frontend/src/lib/bindings.ts",
+            )
+            .map_err(|e| anyhow::anyhow!("tauri-specta export failed: {e}"))?;
+        println!("bindings exported to frontend/src/lib/bindings.ts");
+        return Ok(());
+    }
 
     init_logging();
     tracing::info!("bot-hq starting");

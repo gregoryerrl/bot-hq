@@ -15,6 +15,7 @@
 //! .invoke_handler(tauri_specta_gen::builder().build())`.
 
 pub mod agent_configs;
+pub mod claude_config;
 pub mod cl;
 pub mod docs;
 pub mod error;
