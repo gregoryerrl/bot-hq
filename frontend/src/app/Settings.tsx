@@ -5,9 +5,15 @@ import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { SaveIcon } from "./contextLibraryShared";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
-import type { AgentConfigView, GatedKeyword, GateMode } from "../lib/bindings";
+import { PolicyForm } from "../components/PolicyForm";
+import type {
+  AgentConfigView,
+  GatedKeyword,
+  GateMode,
+  Policy,
+} from "../lib/bindings";
 
-type SettingsSubTab = "agents" | "claude" | "toolgate";
+type SettingsSubTab = "agents" | "claude" | "toolgate" | "policy";
 
 /**
  * Settings is a tabbed container. The existing per-agent model/auth cards
@@ -34,6 +40,9 @@ export function Settings() {
         >
           Tool Gate
         </SubTabButton>
+        <SubTabButton active={tab === "policy"} onClick={() => setTab("policy")}>
+          Policy
+        </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "agents" && "hidden")}>
@@ -44,6 +53,9 @@ export function Settings() {
         </div>
         <div className={cn("h-full", tab !== "toolgate" && "hidden")}>
           <ToolGatePanel />
+        </div>
+        <div className={cn("h-full", tab !== "policy" && "hidden")}>
+          <GlobalPolicyPanel />
         </div>
       </div>
     </div>
@@ -79,6 +91,76 @@ function ToolGatePanel() {
   return (
     <div className="mx-auto h-full max-w-7xl overflow-auto px-6 py-6">
       <ToolGateSection />
+    </div>
+  );
+}
+
+// ============================================================================
+// Policy — global tier (general-policy.yaml), the base every project + session
+// inherits from at spawn. Project overrides live in the Context Library; the
+// per-session snapshot lives in the session gear panel.
+// ============================================================================
+
+function GlobalPolicyPanel() {
+  const { data: server, refetch, isLoading } = useTauriQuery<Policy>(
+    "get_general_policy",
+  );
+  const save = useTauriMutation<void, { policy: Policy }>("set_general_policy");
+
+  const serverJson = JSON.stringify(server ?? {});
+  const [draft, setDraft] = useState<Policy>(server ?? {});
+  const lastServer = useRef(serverJson);
+  useEffect(() => {
+    if (lastServer.current !== serverJson) {
+      lastServer.current = serverJson;
+      setDraft(server ?? {});
+    }
+  }, [serverJson, server]);
+
+  const dirty = JSON.stringify(draft) !== serverJson;
+
+  const onSave = async () => {
+    await save.mutateAsync({ policy: draft });
+    refetch();
+  };
+
+  return (
+    <div className="mx-auto h-full max-w-4xl overflow-auto px-6 py-6">
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="font-headline-lg text-headline-lg text-on-surface">
+            Global Policy
+          </h1>
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+            The base policy every project and session inherits at spawn
+            (<code>general-policy.yaml</code>). Projects can tighten it in the
+            Context Library; a live session can override it in the gear panel.
+          </p>
+        </div>
+        {dirty && (
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={save.isPending}
+            className="inline-flex shrink-0 items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+          >
+            <SaveIcon />
+            {save.isPending ? "Saving…" : "Save policy"}
+          </button>
+        )}
+      </div>
+      {isLoading ? (
+        <div className="h-48 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
+      ) : (
+        <div className="rounded-lg border border-outline-variant bg-surface-container p-5">
+          <PolicyForm value={draft} onChange={setDraft} disabled={save.isPending} />
+        </div>
+      )}
+      {save.error && (
+        <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          Save failed: {save.error.message}
+        </p>
+      )}
     </div>
   );
 }
