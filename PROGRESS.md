@@ -21,6 +21,21 @@ constraint.
 
 ---
 
+## 2026-06-03 — Tray tab → actionable pending inbox (not a history log)
+
+Reframed the session Tray tab (shipped read-only in `a91a603`) into an actionable **pending
+inbox**: it shows only PENDING items and answers them inline. Pending questions / approvals / gated
+commands accumulate there (durable — survive AFK + restart) and the user resolves them from the tab
+when they return. Resolved history is intentionally dropped (it was noise — an inbox, not an audit
+log).
+
+- `DocumentPane` `TrayList`: filter to `status === "pending"` (removed the resolved-history
+  rendering), reuse the shared `ChoicePrompt` (preset options + mandatory "Other") per item, wire to
+  `resolve_choice(choice_id, picked)` and invalidate the `list_session_tray` query on settle so the
+  answered item drops out. action_gate rows show the gated command above the prompt.
+- Notifications (header `PendingTray`) deliberately stay notify-only (go-to-session CTA); a
+  per-session "needs your input [N]" count is a planned follow-up.
+
 ## 2026-06-03 — Session-view Tray tab (Tray · I · P · A · V)
 
 Surfaced the durable `session_tray` as a tab before the IPAV phase tabs, so every accumulated

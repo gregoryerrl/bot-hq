@@ -1,9 +1,16 @@
 import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { PhasePillRow, type Phase } from "./PhasePill";
+import { ChoicePrompt } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { cn } from "../lib/cn";
-import type { SessionDocumentView, SessionTrayView } from "../lib/bindings";
+import type {
+  SessionDocumentView,
+  SessionTrayView,
+  PendingChoiceView,
+} from "../lib/bindings";
 
 interface DocumentPaneProps {
   sessionId: string;
@@ -32,10 +39,10 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
   const [activePhase, setActivePhase] = useState<Phase>(
     sessionPhase ?? "investigate",
   );
-  // The Tray tab sits before I/P/A/V and is phase-independent: it shows the
-  // session's durable tray (every question / approval / gated command —
-  // pending + resolved history). A phase transition updates the underlying
-  // phase but does NOT yank the user off the Tray.
+  // The Tray tab sits before I/P/A/V and is phase-independent: it's the
+  // session's pending inbox — questions / approvals / gated commands awaiting
+  // the user's input, answered inline. A phase transition updates the
+  // underlying phase but does NOT yank the user off the Tray.
   const [showTray, setShowTray] = useState(false);
 
   // Follow the session's phase whenever it changes (the fix for #3). Firing
@@ -174,100 +181,109 @@ function TrayPill({
           ? "border-on-surface/70 bg-surface-container-high/80 text-on-surface"
           : "border-transparent bg-transparent text-on-surface-variant hover:text-on-surface",
       )}
-      title="Session tray — pending questions, approvals & gated commands (and resolved history)"
+      title="Session tray — pending questions, approvals & gated commands awaiting your input"
     >
       Tray
     </button>
   );
 }
 
-const trayStatusClass: Record<string, string> = {
-  pending: "border-primary/70 text-primary",
-  answered: "border-tertiary/60 text-tertiary",
-  withdrawn: "border-outline-variant text-on-surface-variant",
-  superseded: "border-outline-variant text-on-surface-variant",
-};
-
+// Actionable pending inbox: pending tray items for this session, answered
+// inline. Resolved history is intentionally NOT shown (it's noise — the tray
+// is an inbox, not an audit log). Reads the durable table so items that
+// accumulated while the user was AFK (and survived a restart) still appear.
 function TrayList({ sessionId }: { sessionId: string }) {
+  const queryClient = useQueryClient();
   const { data: entries = [] } = useTauriQuery<SessionTrayView[]>(
     "list_session_tray",
     { sessionId },
   );
-  if (entries.length === 0) {
+  // Track which (choiceId, option) is mid-resolve so the clicked option shows
+  // "…" and the row disables until resolve_choice settles + the tray refetches
+  // (the answered item then drops out of the pending filter).
+  const [resolving, setResolving] = useState<Map<string, string>>(new Map());
+
+  const onResolve = (choiceId: string, picked: string) => {
+    setResolving((m) => new Map(m).set(choiceId, picked));
+    invoke("resolve_choice", { choiceId, picked })
+      .catch((e) => console.error("resolve_choice failed", e))
+      .finally(() => {
+        setResolving((m) => {
+          const next = new Map(m);
+          next.delete(choiceId);
+          return next;
+        });
+        void queryClient.invalidateQueries({
+          queryKey: ["list_session_tray", { sessionId }],
+        });
+      });
+  };
+
+  const pending = entries.filter((e) => e.status === "pending");
+  if (pending.length === 0) {
     return (
       <p className="text-sm text-on-surface-variant">
-        Tray is empty — no questions, approvals, or gated commands yet.
+        No pending input — you're all caught up.
       </p>
     );
   }
-  // Pending first, then resolved most-recent-first (rows arrive oldest-first).
-  const pending = entries.filter((e) => e.status === "pending");
-  const resolved = entries.filter((e) => e.status !== "pending").reverse();
   return (
     <ul className="space-y-3">
-      {[...pending, ...resolved].map((e) => (
-        <TrayItem key={e.id} entry={e} />
+      {pending.map((e) => (
+        <li key={e.id}>
+          <TrayChoice
+            entry={e}
+            sessionId={sessionId}
+            pendingOption={resolving.get(e.choice_id)}
+            onResolve={onResolve}
+          />
+        </li>
       ))}
     </ul>
   );
 }
 
-function TrayItem({ entry }: { entry: SessionTrayView }) {
-  const isPending = entry.status === "pending";
+// One pending tray item, answered via the shared ChoicePrompt (preset options
+// + mandatory "Other"). Shows the kind/agent and, for an action_gate approval,
+// the gated command above the prompt for context.
+function TrayChoice({
+  entry,
+  sessionId,
+  pendingOption,
+  onResolve,
+}: {
+  entry: SessionTrayView;
+  sessionId: string;
+  pendingOption: string | undefined;
+  onResolve: (choiceId: string, picked: string) => void;
+}) {
+  const choice: PendingChoiceView = {
+    choice_id: entry.choice_id,
+    session_id: sessionId,
+    agent: entry.agent,
+    question: entry.prompt,
+    options: entry.options,
+  };
   return (
-    <li
-      className={cn(
-        "rounded border bg-surface-container-lowest px-3 py-2",
-        isPending ? "border-primary/50" : "border-outline-variant",
-      )}
-    >
-      <div className="mb-1 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="rounded bg-surface-container-high px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wide text-on-surface-variant">
-            {entry.kind}
-          </span>
-          <span className="text-[0.7rem] text-on-surface-variant">
-            {entry.agent}
-          </span>
-        </div>
-        <span
-          className={cn(
-            "rounded border-t-2 px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase",
-            trayStatusClass[entry.status] ??
-              "border-outline-variant text-on-surface-variant",
-          )}
-        >
-          {entry.status}
+    <div>
+      <div className="mb-1 flex items-center gap-2">
+        <span className="rounded bg-surface-container-high px-1.5 py-0.5 text-[0.6rem] uppercase tracking-wide text-on-surface-variant">
+          {entry.kind}
+        </span>
+        <span className="text-[0.7rem] text-on-surface-variant">
+          {entry.agent}
         </span>
       </div>
-      <p className="text-sm text-on-surface">{entry.prompt}</p>
       {entry.command_text && (
-        <pre className="mt-1 overflow-x-auto rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
+        <pre className="mb-1 overflow-x-auto rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
           {entry.command_text}
         </pre>
       )}
-      {entry.options.length > 0 && (
-        <div className="mt-1 flex flex-wrap gap-1">
-          {entry.options.map((opt) => (
-            <span
-              key={opt}
-              className={cn(
-                "rounded px-1.5 py-0.5 text-[0.65rem]",
-                entry.picked_option === opt
-                  ? "bg-primary/20 text-primary"
-                  : "bg-surface-container-high text-on-surface-variant",
-              )}
-            >
-              {opt}
-              {entry.picked_option === opt ? " ✓" : ""}
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="mt-1 text-[0.6rem] text-on-surface-variant">
-        {entry.asked_at}
-        {entry.answered_at ? ` → ${entry.answered_at}` : ""}
-      </div>
-    </li>
+      <ChoicePrompt
+        choice={choice}
+        pendingOption={pendingOption}
+        onResolve={onResolve}
+      />
+    </div>
   );
 }
