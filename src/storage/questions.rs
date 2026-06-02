@@ -144,4 +144,22 @@ impl Storage {
         .await?;
         Ok(row)
     }
+
+    /// All pending tray rows for OPEN sessions, oldest-first. Excludes closed
+    /// sessions (leftover pending on a closed session is noise) and the emma
+    /// singleton (matches active-session listing). Powers the durable
+    /// per-session notification count — survives restart, unlike the in-memory
+    /// pending map.
+    pub async fn pending_tray_open_sessions(&self) -> Result<Vec<SessionTrayEntry>> {
+        let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {QUESTION_COLUMNS} FROM session_tray \
+             WHERE status = 'pending' \
+               AND session_id IN \
+                   (SELECT id FROM sessions WHERE closed_at IS NULL AND id != 'emma') \
+             ORDER BY id ASC"
+        ))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
 }

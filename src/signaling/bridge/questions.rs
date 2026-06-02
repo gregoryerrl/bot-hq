@@ -295,6 +295,20 @@ impl SignalingBridge {
         storage.questions_for_session(session_id).await
     }
 
+    /// All pending tray rows across OPEN sessions (closed sessions + the emma
+    /// singleton excluded). Durable source for the header notifier's per-session
+    /// "needs your input [N]" counts — survives restart, unlike the in-memory
+    /// pending map.
+    pub async fn list_pending_tray_open(
+        &self,
+    ) -> Result<Vec<crate::storage::SessionTrayEntry>> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        storage.pending_tray_open_sessions().await
+    }
+
     /// Called by the UI when the user clicks a choice button.
     pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<ResolveOutcome> {
         // Flip the row pending→answered first (so the UI/tray updates even if the

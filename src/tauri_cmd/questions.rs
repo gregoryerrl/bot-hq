@@ -55,6 +55,7 @@ pub async fn resolve_choice(
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct SessionTrayView {
     pub id: i64,
+    pub session_id: String,
     pub choice_id: String,
     pub agent: String,
     pub kind: String,
@@ -73,6 +74,7 @@ impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
         let options = e.options().unwrap_or_default();
         Self {
             id: e.id,
+            session_id: e.session_id,
             choice_id: e.choice_id,
             agent: e.agent,
             kind: e.kind,
@@ -97,6 +99,20 @@ pub async fn list_session_tray(
     session_id: String,
 ) -> Result<Vec<SessionTrayView>, AppError> {
     let rows = bridge.list_questions_for_session(&session_id).await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+/// All pending tray rows for OPEN sessions across the whole app — powers the
+/// header notifier's per-session "needs your input [N]" counts. Durable, so it
+/// survives a restart (unlike the in-memory `list_pending_choices`). Closed
+/// sessions + the emma singleton are excluded so dead-session pending isn't
+/// surfaced as noise.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_pending_tray(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+) -> Result<Vec<SessionTrayView>, AppError> {
+    let rows = bridge.list_pending_tray_open().await?;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 

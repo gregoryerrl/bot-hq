@@ -21,6 +21,17 @@ constraint.
 
 ---
 
+## 2026-06-03 — Notifications grouped per session ("Session-X needs your input [N]")
+
+The header notification tray (`PendingTray`) now groups pending across sessions: one row per
+session — "Session {id8} · needs your input [N]" with the per-session pending count and a
+go-to-session CTA — instead of one row per item. The bell badge counts SESSIONS awaiting input (not
+raw items). Stays notify-only (decision #7): answering happens on that session's Tray tab.
+
+Source is the live in-memory `list_pending_choices` (covers the normal AFK-while-running case).
+Reflecting durable pending that survived a restart would need a global durable pending query —
+flagged follow-up.
+
 ## 2026-06-03 — Tray tab → actionable pending inbox (not a history log)
 
 Reframed the session Tray tab (shipped read-only in `a91a603`) into an actionable **pending

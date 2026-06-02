@@ -29,6 +29,35 @@ async fn emma_seed_is_idempotent_across_open() {
 }
 
 #[tokio::test]
+async fn pending_tray_open_sessions_excludes_closed_and_emma() {
+    use bot_hq::storage::QuestionKind;
+    let s = Storage::memory().await.unwrap();
+    s.create_session("open-s", "open", Some("/tmp/r")).await.unwrap();
+    s.create_session("closed-s", "closed", Some("/tmp/r")).await.unwrap();
+
+    let opts = vec!["Approve".to_string(), "Reject".to_string()];
+    // One pending each: an open session, a (soon-)closed session, and emma.
+    for (sid, cid) in [
+        ("open-s", "c-open"),
+        ("closed-s", "c-closed"),
+        ("emma", "c-emma"),
+    ] {
+        s.insert_question(sid, cid, "brian", QuestionKind::Choice, "go?", Some(&opts), None, None)
+            .await
+            .unwrap();
+    }
+    s.close_session("closed-s", false).await.unwrap();
+
+    let pending = s.pending_tray_open_sessions().await.unwrap();
+    let ids: Vec<&str> = pending.iter().map(|p| p.choice_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["c-open"],
+        "only the open, non-emma session's pending should surface; closed + emma excluded"
+    );
+}
+
+#[tokio::test]
 async fn message_round_trip() {
     let s = Storage::memory().await.unwrap();
     s.create_session("sess1", "test session", Some("/tmp/repo"))
