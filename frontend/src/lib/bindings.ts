@@ -541,6 +541,19 @@ async resolveChoice(choiceId: string, picked: string) : Promise<Result<null, App
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * All tray rows for a session, oldest-first (the Tab filters/render decide
+ * what to show). Reads the durable table via the bridge, so it survives
+ * restarts and includes resolved history.
+ */
+async listSessionTray(sessionId: string) : Promise<Result<SessionTrayView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_session_tray", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async sessionDocSearch(sessionId: string, query: string | null, phase: string | null) : Promise<Result<SessionDocumentView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("session_doc_search", { sessionId, query, phase }) };
@@ -934,7 +947,8 @@ export type Policy = {
 forbidden_in_commits?: string[]; 
 /**
  * `git push` gate. `auto` = pushes go through; `ask` = the pre-push hook
- * blocks until the user enables pushes (the Session Settings toggle).
+ * surfaces a per-push Approve/Reject prompt to the user and blocks on their
+ * pick (the user may also flip the Session Settings toggle to `auto`).
  */
 push_gate?: PushGateMode; 
 /**
@@ -978,12 +992,24 @@ export type PushGateMode =
  */
 "auto" | 
 /**
- * Pushes are gated — the pre-push hook blocks until the user flips the
- * session push toggle to `auto`.
+ * Pushes are gated — the pre-push hook surfaces a per-push Approve/Reject
+ * prompt and blocks on the user's pick (fail-closed if the app is
+ * unreachable). The user may also flip the session toggle to `auto`.
  */
 "ask"
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null }
+/**
+ * One durable `session_tray` row, projected for the session-view Tray tab.
+ * Unlike [`PendingChoiceView`] (live in-memory pending only), this surfaces
+ * every tray item for the session — pending AND resolved history — so the tab
+ * shows what accumulated even across restarts.
+ */
+export type SessionTrayView = { id: number; choice_id: string; agent: string; kind: string; prompt: string; options: string[]; status: string; picked_option: string | null; 
+/**
+ * The gated command (action_gate / ToolBlocklist approvals); null otherwise.
+ */
+command_text: string | null; asked_at: string; answered_at: string | null }
 /**
  * One scalar/env setting with provenance + inheritance.
  */

@@ -85,6 +85,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         // Questions / choices
         questions::list_pending_choices,
         questions::resolve_choice,
+        questions::list_session_tray,
         // Session documents
         docs::session_doc_search,
         docs::session_doc_read,

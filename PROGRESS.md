@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-395 tests passing (346 lib + 32 external MCP + 7 signaling + 10 storage)
+396 tests passing (347 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,23 @@ plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-03 — Session-view Tray tab (Tray · I · P · A · V)
+
+Surfaced the durable `session_tray` as a tab before the IPAV phase tabs, so every accumulated
+question / approval / gated command (pending + resolved history) is visible per session — including
+items that survived a restart.
+
+- `tauri_cmd/questions.rs`: `SessionTrayView` + `list_session_tray(session_id)` reading the durable
+  rows via `bridge.list_questions_for_session` (decodes `options_json`; carries `command_text` /
+  status / kind / timestamps). Registered in `tauri_specta_gen.rs`; `bindings.ts` regenerated.
+- `DocumentPane.tsx`: a phase-independent `Tray` pill before `PhasePillRow` (now `selected: Phase |
+  null` so no phase highlights while Tray is active). Read-only v1: kind/agent/status badges, prompt,
+  gated command, options + picked, timestamps; pending highlighted + ordered first. A phase
+  transition updates the underlying phase but does NOT pull the user off the Tray.
+
+Read-only for now — inline Approve/Reject from the tab is a possible follow-up (the in-chat
+`ChoicePrompt` already resolves the active pending choice).
 
 ## 2026-06-03 — Durable tray (session_questions → session_tray) + execute-on-approve anytime
 

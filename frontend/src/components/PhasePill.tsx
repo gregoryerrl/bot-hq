@@ -48,7 +48,8 @@ export function PhasePillRow({
   selected,
   onSelect,
 }: {
-  selected: Phase;
+  // `null` = no phase highlighted (e.g. the sibling Tray tab is active).
+  selected: Phase | null;
   onSelect: (p: Phase) => void;
 }) {
   return (
