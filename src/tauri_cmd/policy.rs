@@ -18,6 +18,7 @@
 //! so an authorized edit doesn't read back as an unauthorized `PolicyMutation`
 //! on the next audit pass.
 
+use crate::policy::tool_gate::GatedKeyword;
 use crate::policy::{self, Policy, SessionPolicy};
 use crate::signaling::SignalingBridge;
 use crate::storage::Storage;
@@ -125,6 +126,53 @@ pub async fn set_session_policy(
     Ok(())
 }
 
+/// Read the session's frozen Tool-Gate keyword list. Mirrors
+/// [`get_session_policy`]'s fallback: the snapshot's `tool_gate` when seeded,
+/// else the GLOBAL `tool-gate.json` (what a fresh spawn would seed + what the
+/// hook falls back to). User-only.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_session_tool_gate(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    session_id: String,
+) -> Result<Vec<GatedKeyword>, AppError> {
+    let dd = data_dir(&bridge)?;
+    Ok(
+        match policy::session_policy::read_session_policy(&dd, &session_id)? {
+            Some(sp) => sp.tool_gate,
+            None => policy::tool_gate::load(&dd),
+        },
+    )
+}
+
+/// Override the session's Tool-Gate keywords for THIS session only — the exact
+/// mirror of [`set_session_policy`], swapping the preserved field: it keeps the
+/// snapshot's [`Policy`] and replaces `tool_gate`. When no snapshot exists yet,
+/// the Policy is seeded from the resolved blueprint (NOT defaulted) so the
+/// inherited push/force/forbidden values aren't lost. Blank keywords are
+/// dropped, matching the global Tool-Gate editor. The enforcement hook sources
+/// from this snapshot first, so the change is live on the next Bash call.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_session_tool_gate(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    session_id: String,
+    keywords: Vec<GatedKeyword>,
+) -> Result<(), AppError> {
+    let dd = data_dir(&bridge)?;
+    let policy = match policy::session_policy::read_session_policy(&dd, &session_id)? {
+        Some(sp) => sp.policy,
+        None => bridge.resolve_policy_for(&session_id).await?,
+    };
+    let tool_gate: Vec<GatedKeyword> = keywords
+        .into_iter()
+        .filter(|k| !k.keyword.trim().is_empty())
+        .collect();
+    let sp = SessionPolicy { policy, tool_gate };
+    policy::session_policy::write_session_policy(&dd, &session_id, &sp)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     // The Tauri wrappers are thin (bridge/storage → policy file helpers); the
@@ -197,5 +245,38 @@ mod tests {
         let loaded = read_session_policy(dir.path(), "s1").unwrap().unwrap();
         assert_eq!(loaded.policy, sample_policy());
         assert_eq!(loaded.tool_gate, frozen, "frozen tool_gate must be preserved");
+    }
+
+    #[test]
+    fn set_session_tool_gate_swaps_gate_preserves_policy() {
+        // The inverse invariant of set_session_policy: editing the session
+        // tool_gate must replace ONLY the keywords and keep the Policy intact.
+        let dir = tempdir().unwrap();
+        write_session_policy(
+            dir.path(),
+            "s1",
+            &SessionPolicy {
+                policy: sample_policy(),
+                tool_gate: vec![GatedKeyword { keyword: "sql".into(), mode: GateMode::Gate }],
+            },
+        )
+        .unwrap();
+
+        // Mirror set_session_tool_gate's read-preserve-write with new keywords.
+        let existing = read_session_policy(dir.path(), "s1").unwrap().unwrap();
+        let next = SessionPolicy {
+            policy: existing.policy,
+            tool_gate: vec![
+                GatedKeyword { keyword: "rm -rf".into(), mode: GateMode::Gate },
+                GatedKeyword { keyword: "gh issue comment".into(), mode: GateMode::Gate },
+            ],
+        };
+        write_session_policy(dir.path(), "s1", &next).unwrap();
+
+        let loaded = read_session_policy(dir.path(), "s1").unwrap().unwrap();
+        assert_eq!(loaded.policy, sample_policy(), "policy must be preserved");
+        assert_eq!(loaded.tool_gate.len(), 2);
+        assert_eq!(loaded.tool_gate[0].keyword, "rm -rf");
+        assert_eq!(loaded.tool_gate[1].keyword, "gh issue comment");
     }
 }

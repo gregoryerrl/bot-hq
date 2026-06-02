@@ -422,6 +422,37 @@ async setSessionPolicy(sessionId: string, policy: Policy) : Promise<Result<null,
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Read the session's frozen Tool-Gate keyword list. Mirrors
+ * [`get_session_policy`]'s fallback: the snapshot's `tool_gate` when seeded,
+ * else the GLOBAL `tool-gate.json` (what a fresh spawn would seed + what the
+ * hook falls back to). User-only.
+ */
+async getSessionToolGate(sessionId: string) : Promise<Result<GatedKeyword[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_session_tool_gate", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Override the session's Tool-Gate keywords for THIS session only — the exact
+ * mirror of [`set_session_policy`], swapping the preserved field: it keeps the
+ * snapshot's [`Policy`] and replaces `tool_gate`. When no snapshot exists yet,
+ * the Policy is seeded from the resolved blueprint (NOT defaulted) so the
+ * inherited push/force/forbidden values aren't lost. Blank keywords are
+ * dropped, matching the global Tool-Gate editor. The enforcement hook sources
+ * from this snapshot first, so the change is live on the next Bash call.
+ */
+async setSessionToolGate(sessionId: string, keywords: GatedKeyword[]) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_session_tool_gate", { sessionId, keywords }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async claudeConfigRead() : Promise<Result<ClaudeConfigView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("claude_config_read") };

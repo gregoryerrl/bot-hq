@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
-import type { Policy } from "../lib/bindings";
+import type { GatedKeyword, GateMode, Policy } from "../lib/bindings";
 import { PolicyForm } from "../components/PolicyForm";
 import { CloseIcon, SaveIcon } from "./contextLibraryShared";
 import { cn } from "../lib/cn";
+
+const GATE_MODES: GateMode[] = ["gate", "auto_allow"];
 
 /**
  * Right-side drawer for editing a session's canonical policy snapshot
@@ -126,9 +128,7 @@ export function SessionPolicyPanel({
           MCP tools re-read this snapshot on every call. The agents' own
           system-prompt copy was fixed at spawn, so restart the session if you
           want them to <em>see</em> the new rules (enforcement applies either
-          way). Gated-Bash keywords are managed globally in{" "}
-          <span className="text-on-surface">Settings → Tool Gate</span> and are
-          preserved here.
+          way).
         </p>
         {isLoading ? (
           <div className="h-40 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
@@ -140,7 +140,169 @@ export function SessionPolicyPanel({
             Save failed: {save.error.message}
           </p>
         )}
+
+        <SessionToolGateSection sessionId={sessionId} />
       </div>
     </aside>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Per-session gated-Bash keywords. Seeded from the global Tool Gate at spawn;
+// editable here for THIS session only (global stays the default for new
+// sessions). The enforcement hook sources from this snapshot first, so edits
+// are live on the next Bash call.
+// ----------------------------------------------------------------------------
+
+function SessionToolGateSection({ sessionId }: { sessionId: string }) {
+  const { data: server = [], refetch, isLoading } = useTauriQuery<
+    GatedKeyword[]
+  >("get_session_tool_gate", { sessionId }, { enabled: !!sessionId });
+  const save = useTauriMutation<
+    void,
+    { sessionId: string; keywords: GatedKeyword[] }
+  >("set_session_tool_gate");
+
+  const serverJson = JSON.stringify(server);
+  const [draft, setDraft] = useState<GatedKeyword[]>(server);
+  const lastServer = useRef(serverJson);
+  useEffect(() => {
+    if (lastServer.current !== serverJson) {
+      lastServer.current = serverJson;
+      setDraft(server);
+    }
+  }, [serverJson, server]);
+
+  const dirty = JSON.stringify(draft) !== serverJson;
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    if (!saved) return;
+    const id = setTimeout(() => setSaved(false), 2000);
+    return () => clearTimeout(id);
+  }, [saved]);
+
+  const updateRow = (i: number, patch: Partial<GatedKeyword>) =>
+    setDraft((d) => d.map((k, idx) => (idx === i ? { ...k, ...patch } : k)));
+  const removeRow = (i: number) =>
+    setDraft((d) => d.filter((_, idx) => idx !== i));
+  const addRow = () => setDraft((d) => [...d, { keyword: "", mode: "gate" }]);
+
+  const onSave = async () => {
+    await save.mutateAsync({
+      sessionId,
+      keywords: draft.filter((k) => k.keyword.trim() !== ""),
+    });
+    setSaved(true);
+    refetch();
+  };
+
+  return (
+    <section className="mt-8 border-t border-outline-variant/30 pt-5">
+      <div className="mb-3 flex items-start justify-between gap-4">
+        <div>
+          <h3 className="font-headline-md text-headline-md text-on-surface">
+            Gated commands — this session
+          </h3>
+          <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+            Seeded from the global Tool Gate at spawn; edits apply to this
+            session only.{" "}
+            <span className="text-primary">Gate</span> blocks a matching Bash
+            command and asks you to Approve/Reject;{" "}
+            <span className="text-emerald-300">Auto-allow</span> runs it with no
+            prompt. Case-insensitive substring match.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {saved && !dirty && (
+            <span className="rounded border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-emerald-300">
+              Saved ✓
+            </span>
+          )}
+          {dirty && (
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={save.isPending}
+              className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+            >
+              <SaveIcon />
+              {save.isPending ? "Saving…" : "Save keywords"}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="h-20 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
+      ) : (
+        <div className="rounded-lg border border-outline-variant bg-surface-container p-3">
+          {draft.length === 0 ? (
+            <p className="py-1 font-code-sm text-code-sm text-on-surface-variant">
+              No keywords — every Bash command runs ungated for this session.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {draft.map((k, i) => (
+                <li key={i} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={k.keyword}
+                    onChange={(e) => updateRow(i, { keyword: e.target.value })}
+                    placeholder="keyword (e.g. gh issue comment, rm -rf)"
+                    className="min-w-0 flex-1 border-0 border-b border-outline-variant bg-transparent rounded-none px-0 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant caret-primary focus:border-primary focus:outline-none"
+                  />
+                  <div className="flex shrink-0 overflow-hidden rounded border border-outline-variant">
+                    {GATE_MODES.map((m) => {
+                      const active = k.mode === m;
+                      const activeCls =
+                        m === "gate"
+                          ? "bg-primary/15 text-primary"
+                          : "bg-emerald-500/15 text-emerald-300";
+                      return (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => updateRow(i, { mode: m })}
+                          className={cn(
+                            "px-2.5 py-1 font-label-caps text-label-caps transition-colors",
+                            active
+                              ? activeCls
+                              : "bg-transparent text-on-surface-variant hover:text-on-surface",
+                          )}
+                        >
+                          {m === "gate" ? "Gate" : "Auto-allow"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeRow(i)}
+                    aria-label="Remove keyword"
+                    className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="mt-3">
+            <button
+              type="button"
+              onClick={addRow}
+              className="rounded border border-outline-variant bg-transparent px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+            >
+              + Add keyword
+            </button>
+          </div>
+        </div>
+      )}
+      {save.error && (
+        <p className="mt-3 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          Save failed: {save.error.message}
+        </p>
+      )}
+    </section>
   );
 }
