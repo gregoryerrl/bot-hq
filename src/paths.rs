@@ -49,6 +49,12 @@ pub struct Paths {
     /// UUIDv4 with 0o600 perms. Persists across restarts; user can rotate by
     /// editing the file and restarting bot-hq.
     pub mcp_token_path: PathBuf,
+    /// The internal signaling server's bound address (e.g. `127.0.0.1:54321`),
+    /// written at startup so the git pre-push hook — a separate subprocess that
+    /// can't reach the running app's bridge directly — can POST `/hooks/pre-push`
+    /// to surface a per-push approval prompt under `push_gate=ask`. Lives under
+    /// `.local/` (runtime state, not user content); removed on clean shutdown.
+    pub signaling_addr_path: PathBuf,
 }
 
 impl Paths {
@@ -68,6 +74,7 @@ impl Paths {
         let lock_path = local_dir.join("lock");
         let cl_version_path = data_dir.join("cl-version.txt");
         let mcp_token_path = data_dir.join("mcp-token");
+        let signaling_addr_path = local_dir.join("signaling-addr");
         Self {
             data_dir,
             local_dir,
@@ -75,6 +82,7 @@ impl Paths {
             lock_path,
             cl_version_path,
             mcp_token_path,
+            signaling_addr_path,
         }
     }
 
@@ -86,6 +94,23 @@ impl Paths {
         let raw = fs::read_to_string(&self.mcp_token_path)
             .with_context(|| format!("reading mcp-token at {}", self.mcp_token_path.display()))?;
         Ok(raw.trim().to_string())
+    }
+
+    /// Persist the internal signaling server's bound address so the git
+    /// pre-push hook subprocess can reach the running app (see
+    /// [`read_signaling_addr`]). Overwritten on every startup so it always
+    /// reflects the live ephemeral port. Best-effort cleanup on clean shutdown
+    /// lives in `SignalingServer::Drop`.
+    pub fn write_signaling_addr(&self, addr: std::net::SocketAddr) -> Result<()> {
+        if let Some(parent) = self.signaling_addr_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("creating parent for {}", self.signaling_addr_path.display())
+            })?;
+        }
+        fs::write(&self.signaling_addr_path, format!("{addr}\n")).with_context(|| {
+            format!("writing signaling addr at {}", self.signaling_addr_path.display())
+        })?;
+        Ok(())
     }
 
     /// Idempotent. Creates the data dir + CL skeleton on first run, repairs
@@ -172,6 +197,21 @@ fn home_dir() -> Result<PathBuf> {
 /// Default data dir = `~/.bot-hq/`.
 fn default_data_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".bot-hq"))
+}
+
+/// Read the persisted signaling-server address (`<data_dir>/.local/signaling-addr`)
+/// for the git pre-push hook. Returns `None` when the file is missing or empty
+/// (bot-hq not running) — the hook then fail-closes (blocks the push). Free fn
+/// (not a `Paths` method) because the hook subprocess only has `--data-dir`.
+pub fn read_signaling_addr(data_dir: &Path) -> Option<String> {
+    let path = data_dir.join(".local").join("signaling-addr");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Expand a leading `~` (and optionally `~/`) in a path string. Shared with
@@ -372,6 +412,21 @@ mod tests {
         let contents = fs::read_to_string(&lock_path).unwrap();
         assert!(contents.contains(&std::process::id().to_string()));
         drop(guard);
+    }
+
+    #[test]
+    fn signaling_addr_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        // Absent before the server writes it → None (hook fail-closes).
+        assert!(read_signaling_addr(tmp.path()).is_none());
+        let addr: std::net::SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        paths.write_signaling_addr(addr).unwrap();
+        assert_eq!(
+            read_signaling_addr(tmp.path()).as_deref(),
+            Some("127.0.0.1:54321")
+        );
     }
 
     #[test]

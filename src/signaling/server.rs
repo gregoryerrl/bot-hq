@@ -10,12 +10,13 @@
 //! at the agent-specific URL. The path carries the caller identity used to
 //! attribute tool calls.
 
-use crate::signaling::bridge::SignalingBridge;
+use crate::policy::ViolationKind;
+use crate::signaling::bridge::{ApprovalContext, SignalingBridge};
 use crate::signaling::jsonrpc::{dispatch, CallerIdentity};
 use crate::signaling::response::{decode_jsonrpc_body, dispatch_outcome_to_response, text_response};
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -23,6 +24,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::json;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -32,6 +34,10 @@ pub struct SignalingServer {
     pub local_addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     pub bridge: Arc<SignalingBridge>,
+    /// Path to the persisted `signaling-addr` file (set by `set_addr_file` at
+    /// startup). Removed on clean shutdown so a stale file doesn't outlive the
+    /// process. `None` in tests / when the addr was never persisted.
+    addr_file: Option<PathBuf>,
 }
 
 impl SignalingServer {
@@ -40,12 +46,26 @@ impl SignalingServer {
             let _ = tx.send(());
         }
     }
+
+    /// Record the path of the persisted `signaling-addr` file so it can be
+    /// removed when the server drops. Called from `main.rs` after the address
+    /// has been written.
+    pub fn set_addr_file(&mut self, path: PathBuf) {
+        self.addr_file = Some(path);
+    }
 }
 
 impl Drop for SignalingServer {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
+        }
+        // Best-effort cleanup of the persisted address. (Crash paths skip Drop;
+        // the next startup overwrites the file, and the hook's HTTP path is
+        // unreachable without a live session anyway, so a stale file is
+        // self-correcting — this just keeps clean exits tidy.)
+        if let Some(path) = self.addr_file.take() {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -97,6 +117,7 @@ pub async fn start_signaling_server(bridge: Arc<SignalingBridge>) -> Result<Sign
         local_addr,
         shutdown: Some(sd_tx),
         bridge,
+        addr_file: None,
     })
 }
 
@@ -110,6 +131,13 @@ async fn handle_request(
 
     if method != Method::POST {
         return Ok(text_response(StatusCode::METHOD_NOT_ALLOWED, "POST only"));
+    }
+
+    // Dedicated route for the git pre-push hook subprocess (push_gate=ask). It
+    // is NOT an agent and has no per-(session,agent) MCP identity, so it bypasses
+    // the JSON-RPC + HANDS-only tool gate and calls `request_approval` directly.
+    if path == "/hooks/pre-push" {
+        return Ok(handle_pre_push(req.into_body(), bridge).await);
     }
 
     let caller = match parse_path(&path) {
@@ -134,6 +162,83 @@ async fn handle_request(
         dispatch(rpc, &caller, &bridge).await,
         id_for_err,
     ))
+}
+
+/// Handle `POST /hooks/pre-push` from the git pre-push hook subprocess. Body:
+/// `{ "session_id": "...", "agent": "brian", "branch": "..."? }`. Surfaces a
+/// `request_approval` (kind=push_gate) prompt and blocks until the user picks,
+/// then replies `{ "approved": <bool> }`. The hook maps `approved` → exit 0
+/// (push proceeds) / not-approved → exit 1 (blocked). Reuses the same
+/// `PendingChoice` → `resolve_choice` → `PushGate` violation path as the
+/// agent-facing `request_approval` MCP tool, but without the HANDS-only gate
+/// (the hook isn't an agent).
+async fn handle_pre_push(
+    body: Incoming,
+    bridge: Arc<SignalingBridge>,
+) -> Response<Full<Bytes>> {
+    let bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => return text_response(StatusCode::BAD_REQUEST, &format!("body read failed: {e}")),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return text_response(StatusCode::BAD_REQUEST, &format!("bad json: {e}")),
+    };
+    let Some(session_id) = v.get("session_id").and_then(|s| s.as_str()) else {
+        return text_response(StatusCode::BAD_REQUEST, "missing session_id");
+    };
+    // Only HANDS (brian) / the solo helper (emma) push; default to brian if the
+    // hook couldn't read BOT_HQ_AGENT (graceful — affects only the tray label).
+    let agent = v
+        .get("agent")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("brian");
+    let branch = v
+        .get("branch")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let (action, question) = match &branch {
+        Some(b) => (
+            format!("git push ({b})"),
+            format!("Allow `git push` to `{b}` in this session's repo?"),
+        ),
+        None => (
+            "git push".to_string(),
+            "Allow `git push` in this session's repo?".to_string(),
+        ),
+    };
+    let ctx = ApprovalContext {
+        kind: ViolationKind::PushGate,
+        action,
+        detail: branch,
+    };
+
+    let approved = match bridge
+        .request_approval(
+            session_id.to_string(),
+            agent.to_string(),
+            question,
+            vec!["Approve".to_string(), "Reject".to_string()],
+            ctx,
+        )
+        .await
+    {
+        Ok(picked) => picked == "Approve",
+        Err(e) => {
+            // Canceled before the user picked (e.g. superseded). Treat as not
+            // approved — the hook fail-closes and blocks the push.
+            warn!(%session_id, error = %e, "pre-push request_approval did not resolve to a pick");
+            false
+        }
+    };
+
+    text_response(
+        StatusCode::OK,
+        &json!({ "approved": approved }).to_string(),
+    )
 }
 
 fn parse_path(path: &str) -> Option<CallerIdentity> {
@@ -272,6 +377,90 @@ mod tests {
         assert!(parse_path("/").is_none());
         assert!(parse_path("/sessions/abc/brian").is_none());
         assert!(parse_path("/other/abc/brian/mcp").is_none());
+    }
+
+    #[tokio::test]
+    async fn pre_push_route_approve_then_reject() {
+        use crate::policy::ViolationsLog;
+        use crate::signaling::SignalingEvent;
+
+        let data = tempfile::tempdir().unwrap();
+        let log = ViolationsLog::new(data.path());
+        // with_policy already returns Arc<Self> (matches the action_gate tests).
+        let bridge = SignalingBridge::with_policy(log, data.path().to_path_buf());
+        let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+        let url = format!("http://{}/hooks/pre-push", server.local_addr);
+        let client = reqwest::Client::new();
+
+        // Approve → {"approved": true}. reqwest here lacks the `json` feature,
+        // so send a raw body + parse the response text.
+        let mut sub = bridge.subscribe();
+        let url_a = url.clone();
+        let client_a = client.clone();
+        let call = tokio::spawn(async move {
+            let body = json!({ "session_id": "s1", "agent": "brian", "branch": "main" }).to_string();
+            let resp = client_a
+                .post(&url_a)
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            let txt = resp.text().await.unwrap();
+            serde_json::from_str::<serde_json::Value>(&txt).unwrap()
+        });
+        let cid = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
+        let resp = call.await.unwrap();
+        assert_eq!(resp["approved"], json!(true), "approve → approved:true");
+
+        // Reject → {"approved": false}. Also covers the no-branch body shape.
+        let mut sub = bridge.subscribe();
+        let call = tokio::spawn(async move {
+            let body = json!({ "session_id": "s1", "agent": "brian" }).to_string();
+            let resp = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            let txt = resp.text().await.unwrap();
+            serde_json::from_str::<serde_json::Value>(&txt).unwrap()
+        });
+        let cid = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        bridge.resolve_choice(&cid, "Reject".into()).await.unwrap();
+        let resp = call.await.unwrap();
+        assert_eq!(resp["approved"], json!(false), "reject → approved:false");
+    }
+
+    #[tokio::test]
+    async fn pre_push_route_missing_session_id_is_400() {
+        use crate::policy::ViolationsLog;
+        let data = tempfile::tempdir().unwrap();
+        let log = ViolationsLog::new(data.path());
+        // with_policy already returns Arc<Self> (matches the action_gate tests).
+        let bridge = SignalingBridge::with_policy(log, data.path().to_path_buf());
+        let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+        let url = format!("http://{}/hooks/pre-push", server.local_addr);
+        let resp = reqwest::Client::new()
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(json!({ "agent": "brian" }).to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
     }
 
     #[test]

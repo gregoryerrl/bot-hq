@@ -288,10 +288,11 @@ drifts and forgets to call the MCP tool.
 - `<data_dir>/projects/<project>/policy.yaml` — per-project overlay
   (lists are replaced, not merged).
 
-Fields: `forbidden_in_commits`, `push_gate.mode`
-(`auto`|`per_branch_approval`|`always_ask`), `force_push.mode`
-(`blocked`|`token_required`|`allowed`), `force_push.token_format`,
-`per_action_approval`, `branch_pattern`, `commit_style`.
+Fields: `forbidden_in_commits`, `push_gate` (scalar `auto`|`ask`),
+`force_push` (scalar `blocked`|`allowed`), `per_action_approval`,
+`branch_pattern`, `commit_style`. (push_gate/force_push are per-tier
+toggles inherited general→project→session; there are no per-branch
+"remembered approvals" or agent-side grants.)
 (`tool_blocklist` is RETIRED — superseded by the global Tool Gate
 below; the field still parses for backward-compat but is no longer
 enforced.)
@@ -304,10 +305,14 @@ enforced.)
 - `post-commit`: read-only audit. Writes `CommitGrep` violation if a
   forbidden word slipped through (--amend, --no-verify bypass). Exits
   0 — the commit already happened.
-- `pre-push`: reads `BOT_HQ_SESSION_ID`, loads the session's
-  permissions JSON file, allows push if (a) `push_gate.mode == auto`,
-  (b) session has an active grant covering the branch, or (c) branch
-  is in `policy.push_gate.remembered_approvals`.
+- `pre-push`: resolves the session's policy. `push_gate == auto` →
+  allow (exit 0). `push_gate == ask` AND `BOT_HQ_SESSION_ID` is set →
+  POST the running app's `/hooks/pre-push` route (addr read from
+  `<data_dir>/.local/signaling-addr`), which surfaces a per-push
+  Approve/Reject prompt via `request_approval` and blocks on the user's
+  pick: approve → exit 0, reject → exit 1. Fail-closed (exit 1 + a
+  `PushGate`/Denied violation) if the app is unreachable; a push with no
+  session context is blocked with guidance.
 
 **Audit:** `src/policy/audit.rs` hashes each policy file at hook fire.
 A hash change between fires logs a `PolicyMutation` violation

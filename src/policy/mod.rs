@@ -43,7 +43,8 @@ pub struct Policy {
     pub forbidden_in_commits: Vec<String>,
 
     /// `git push` gate. `auto` = pushes go through; `ask` = the pre-push hook
-    /// blocks until the user enables pushes (the Session Settings toggle).
+    /// surfaces a per-push Approve/Reject prompt to the user and blocks on their
+    /// pick (the user may also flip the Session Settings toggle to `auto`).
     #[serde(default)]
     pub push_gate: PushGateMode,
 
@@ -76,8 +77,9 @@ pub enum PushGateMode {
     /// No prompt — pushes go through.
     #[default]
     Auto,
-    /// Pushes are gated — the pre-push hook blocks until the user flips the
-    /// session push toggle to `auto`.
+    /// Pushes are gated — the pre-push hook surfaces a per-push Approve/Reject
+    /// prompt and blocks on the user's pick (fail-closed if the app is
+    /// unreachable). The user may also flip the session toggle to `auto`.
     Ask,
 }
 
@@ -208,10 +210,12 @@ impl Policy {
         if matches!(self.push_gate, PushGateMode::Ask) {
             out.push_str("### Push gate\n\n");
             out.push_str(
-                "Pushes are GATED this session — the pre-push hook blocks \
-                 `git push`. There is no per-push approval: the user enables \
-                 pushes by flipping the push toggle to `auto` in Session \
-                 Settings. If you need to push, ask the user to enable it.\n\n",
+                "Pushes are GATED this session. Just run `git push` normally — the \
+                 pre-push hook surfaces an Approve/Reject prompt to the user for each \
+                 push and blocks until they pick. On approve the push proceeds; on \
+                 reject it's blocked. You do NOT call any grant tool and you do NOT \
+                 flip a toggle — the prompt is automatic. (The user can set the push \
+                 toggle to `auto` in Session Settings to make pushes frictionless.)\n\n",
             );
         }
 
@@ -257,15 +261,6 @@ impl Policy {
             && self.per_action_approval.is_empty()
             && self.branch_pattern.is_empty()
             && self.commit_style.is_empty()
-    }
-}
-
-impl PushGateMode {
-    pub(crate) fn label(&self) -> &'static str {
-        match self {
-            PushGateMode::Auto => "auto",
-            PushGateMode::Ask => "ask",
-        }
     }
 }
 

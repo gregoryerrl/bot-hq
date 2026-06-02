@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-380 tests passing (331 lib + 32 external MCP + 7 signaling + 10 storage)
-plus 35 frontend Vitest. Release build clean. **Tauri v2 migration landed
+392 tests passing (343 lib + 32 external MCP + 7 signaling + 10 storage)
+plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
@@ -20,6 +20,48 @@ plus 35 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-03 — push_gate "ask" prompts per-push instead of hard-blocking
+
+`push_gate: ask` used to make the `pre-push` git hook hard-block every `git push`
+(exit 1, "flip the toggle to auto") — it never actually asked, unlike `action_gate`
+for other gated commands. Now `ask` surfaces a per-push Approve/Reject prompt to the
+user (reusing the `request_approval` → `PendingChoice` → `resolve_choice` →
+`PushGate`-violation path) and blocks on their pick: approve → push proceeds, reject
+→ blocked.
+
+The `pre-push` hook runs as a separate subprocess that can't reach the running app's
+bridge, so:
+- `src/main.rs` persists the internal signaling server's bound address to
+  `<data_dir>/.local/signaling-addr` at startup (`paths.rs::write_signaling_addr` +
+  free `read_signaling_addr`); `SignalingServer` removes it on clean shutdown (Drop).
+- `src/signaling/server.rs` adds a dedicated `POST /hooks/pre-push` route that calls
+  `bridge.request_approval(kind=push_gate)` directly (no HANDS-only MCP gate, no agent
+  identity in the URL path) and replies `{"approved": bool}`.
+- `src/agents/spawn.rs` exports `BOT_HQ_AGENT` so the prompt attributes to the pushing
+  agent (covers solo Emma; Rain can't push).
+- `src/policy/hooks.rs::run_pre_push` POSTs that route inside a current-thread runtime
+  (reqwest, 30-min timeout) and maps Approve→0 / Reject→1. Fail-closed (exit 1 + its
+  own `PushGate`/Denied violation, distinct reason per failure: no addr / connect /
+  timeout / non-200 / malformed) when the app is unreachable. A push with no
+  `BOT_HQ_SESSION_ID` (manual human terminal push) stays hard-blocked with guidance —
+  avoids an `env -u BOT_HQ_SESSION_ID` bypass.
+
+Lockstep prompt/doc text (7 spots) flipped from "ask = hard block, flip the toggle" to
+"just run `git push`; the hook prompts the user Approve/Reject per push; you don't call
+a grant tool or flip a toggle": `policy/mod.rs` (field doc, `Ask` variant, system-prompt
+block), `policy/hooks.rs` (module + `run_pre_push` doc), `agents/general_rules.rs`,
+`agents/prompts.rs`. ARCHITECTURE.md + README.md push-gate sections corrected (also fixed
+adjacent pre-existing B-series drift: `push_gate`/`force_push` are scalar `auto|ask` /
+`blocked|allowed`, no `.mode` / `remembered_approvals`).
+
+Known follow-up: ARCHITECTURE.md's "Session permissions" / `grant_session_permission`
+section + the Tool-Gate push-grant reconcile line still describe the pre-B-series grant
+mechanism (removed when push/force-push became pure toggles) — left for a separate
+doc-sync pass, out of scope here.
+
+Tests: +1 paths (addr round-trip), +2 server (`/hooks/pre-push` approve/reject + missing
+session_id → 400), +2 hooks (ask-without-session block, no-addr fail-closed Blocked).
 
 ## 2026-06-02 — Surface + control Claude Code config in Settings
 

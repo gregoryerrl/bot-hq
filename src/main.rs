@@ -103,8 +103,16 @@ fn main() -> Result<()> {
         if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {
             tracing::warn!(?e, "cl startup init failed — index may be partial");
         }
-        let server = start_signaling_server(bridge.clone()).await?;
+        let mut server = start_signaling_server(bridge.clone()).await?;
         tracing::info!(addr = %server.local_addr, "signaling server up");
+        // Persist the bound address so the git pre-push hook (a separate
+        // subprocess) can POST `/hooks/pre-push` to surface a per-push approval
+        // prompt under `push_gate=ask`. Non-fatal; the hook fail-closes if the
+        // file is absent. Registered on the server so it's removed on clean exit.
+        if let Err(e) = paths.write_signaling_addr(server.local_addr) {
+            tracing::warn!(?e, "failed to persist signaling addr for the pre-push hook");
+        }
+        server.set_addr_file(paths.signaling_addr_path.clone());
 
         // Local normalizing proxy for agents on a non-Anthropic gateway
         // (Rain → DeepSeek): strips request-build-time `role:"system"`

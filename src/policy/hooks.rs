@@ -24,10 +24,13 @@
 //!   already-committed message, or pre-commit/commit-msg bypass), writes a
 //!   `CommitGrep` Denied violation to `violations.jsonl`. Always exits 0
 //!   — the commit already happened; the verifier is audit-only.
-//! - **pre-push**: if `push_gate == auto`, allows the push (exit 0). Otherwise
-//!   blocks (exit 1) with a message telling the agent to ask the user to flip
-//!   the push toggle to `auto` in Session Settings — there is no per-push
-//!   approval and no agent-side grant.
+//! - **pre-push**: if `push_gate == auto`, allows the push (exit 0). When
+//!   `push_gate == ask` and the push comes from inside a live session, it POSTs
+//!   the running app's `/hooks/pre-push` route to surface a per-push
+//!   Approve/Reject prompt and blocks on the user's pick (Approve → exit 0,
+//!   Reject → exit 1). Fail-closed (exit 1 + a `PushGate`/Denied violation) when
+//!   the app is unreachable; a push with no session context is blocked with
+//!   guidance.
 
 use crate::policy::violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 use crate::policy::Policy;
@@ -272,10 +275,15 @@ fn run_post_commit(
     Ok(0)
 }
 
-/// pre-push handler. Allows the push when `push_gate == auto`; otherwise
-/// blocks (exit 1). There is no per-push approval and no agent-side grant —
-/// the user enables pushes by flipping the push toggle to `auto` in Session
-/// Settings.
+/// pre-push handler. Allows the push when `push_gate == auto` (exit 0). When
+/// `push_gate == ask` AND the push originates inside a live bot-hq session, it
+/// POSTs the running app's `/hooks/pre-push` route to surface a per-push
+/// Approve/Reject prompt (reusing the same `request_approval` machinery as the
+/// agent-facing tools), blocking until the user picks: Approve → exit 0,
+/// Reject → exit 1. Fail-closed (exit 1 + a `PushGate`/Denied violation) when
+/// the app can't be reached. A push with no `BOT_HQ_SESSION_ID` (e.g. a human
+/// pushing from a terminal) is blocked with guidance — `ask` only prompts a
+/// session's user.
 fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-push");
     let session_id = hook_session_id();
@@ -284,25 +292,212 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     if matches!(policy.push_gate, PushGateMode::Auto) {
         return Ok(0);
     }
-    let branch = current_branch().unwrap_or_else(|| "<detached>".into());
 
-    eprintln!(
-        "{}",
-        blocked_banner(
-            "pre-push",
-            &format!(
-                "Branch '{branch}' cannot be pushed: push gate is '{mode}' for this \
-                 session.\n\
+    let branch = current_branch();
+
+    // No session id → not an agent push inside a live session (e.g. a human at a
+    // terminal). `ask` can only prompt a session's user, so block with guidance
+    // rather than allowing — allowing here would let an agent bypass via
+    // `env -u BOT_HQ_SESSION_ID git push`.
+    let Some(session_id) = session_id else {
+        eprintln!(
+            "{}",
+            blocked_banner(
+                "pre-push",
+                "Push blocked: push gate is 'ask' but this push has no bot-hq session \
+                 context (BOT_HQ_SESSION_ID unset).\n\
                  \n\
-                 The USER enables pushes by flipping the push toggle to 'auto' in \
-                 Session Settings (the gear tab) — there is no per-push approval \
-                 and no agent-side grant.\n\
-                 Ask the user to enable pushes if you need to push.\n",
-                mode = policy.push_gate.label()
+                 push_gate='ask' surfaces a per-push Approve/Reject prompt only inside a \
+                 live bot-hq session. To push from outside a session, flip the push toggle \
+                 to 'auto' in Session Settings, or push from within a session.\n"
             )
-        )
+        );
+        return Ok(1);
+    };
+
+    let agent = std::env::var("BOT_HQ_AGENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "brian".to_string());
+
+    // One non-alarming line so the agent doesn't mistake the wait for a block and
+    // try to work around it. Silent until the user answers.
+    eprintln!(
+        "bot-hq pre-push: awaiting user approval for `git push`{} (session {session_id})…",
+        branch
+            .as_deref()
+            .map(|b| format!(" to `{b}`"))
+            .unwrap_or_default()
     );
-    Ok(1)
+
+    // The hook is a fresh subprocess that can't reach the running app's bridge
+    // directly — POST `/hooks/pre-push` and block on the user's pick. One
+    // current-thread runtime drives both the HTTP call and the fail-closed
+    // violation log (mirrors run_post_commit).
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                blocked_banner(
+                    "pre-push",
+                    &format!("Push blocked: could not start the approval client ({e}).\n")
+                )
+            );
+            return Ok(1);
+        }
+    };
+
+    match rt.block_on(decide_push(data_dir, &session_id, &agent, branch.as_deref())) {
+        PushDecision::Approved => Ok(0),
+        PushDecision::Rejected => {
+            eprintln!(
+                "{}",
+                blocked_banner(
+                    "pre-push",
+                    "Push rejected by the user.\n\
+                     \n\
+                     The user declined this `git push`. Do not retry it — ask the user what \
+                     they'd like to do instead.\n"
+                )
+            );
+            Ok(1)
+        }
+        PushDecision::Blocked(reason) => {
+            // Fail-closed: the prompt couldn't be surfaced. The happy path's
+            // violation is written by the bridge's resolve_choice; this records
+            // our own so a blocked push still leaves an audit trail.
+            rt.block_on(log_push_block(
+                data_dir,
+                &session_id,
+                &agent,
+                branch.as_deref(),
+                &reason,
+            ));
+            eprintln!(
+                "{}",
+                blocked_banner(
+                    "pre-push",
+                    &format!(
+                        "Push blocked: {reason}.\n\
+                         \n\
+                         push_gate='ask' needs the bot-hq app running to surface the approval \
+                         prompt. Make sure bot-hq is running, or ask the user to flip the push \
+                         toggle to 'auto' in Session Settings.\n"
+                    )
+                )
+            );
+            Ok(1)
+        }
+    }
+}
+
+/// Outcome of asking the running app to approve a push.
+enum PushDecision {
+    Approved,
+    Rejected,
+    /// The prompt couldn't be surfaced (app down / network / bad response). The
+    /// `String` is a human-readable reason for the audit trail + banner.
+    Blocked(String),
+}
+
+/// POST `{session_id, agent, branch}` to the running app's `/hooks/pre-push`
+/// route and block until the user picks (or a transport failure). Distinct
+/// `Blocked` reasons so the audit trail separates "app down" from "timeout"
+/// from "bad response". reqwest here lacks the `json` feature, so the body is
+/// sent raw and the response parsed from text.
+async fn decide_push(
+    data_dir: &Path,
+    session_id: &str,
+    agent: &str,
+    branch: Option<&str>,
+) -> PushDecision {
+    let Some(addr) = crate::paths::read_signaling_addr(data_dir) else {
+        return PushDecision::Blocked("bot-hq is not running (no signaling address)".into());
+    };
+    let url = format!("http://{addr}/hooks/pre-push");
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "agent": agent,
+        "branch": branch,
+    })
+    .to_string();
+
+    // Generous timeout — the user may take minutes to decide; a push isn't
+    // time-critical.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return PushDecision::Blocked(format!("approval client init failed: {e}")),
+    };
+
+    let resp = match client
+        .post(&url)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) if e.is_timeout() => {
+            return PushDecision::Blocked("approval timed out (no answer)".into())
+        }
+        Err(e) if e.is_connect() => {
+            return PushDecision::Blocked("could not connect to bot-hq".into())
+        }
+        Err(e) => return PushDecision::Blocked(format!("request to bot-hq failed: {e}")),
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        return PushDecision::Blocked(format!("bot-hq returned HTTP {}", status.as_u16()));
+    }
+
+    let txt = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => return PushDecision::Blocked(format!("could not read bot-hq response: {e}")),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&txt) {
+        Ok(v) => v,
+        Err(e) => return PushDecision::Blocked(format!("malformed bot-hq response: {e}")),
+    };
+    match v.get("approved").and_then(|b| b.as_bool()) {
+        Some(true) => PushDecision::Approved,
+        Some(false) => PushDecision::Rejected,
+        None => PushDecision::Blocked("bot-hq response missing 'approved'".into()),
+    }
+}
+
+/// Best-effort fail-closed violation record (`PushGate` / Denied) for a push
+/// the hook blocked because the prompt couldn't be surfaced.
+async fn log_push_block(
+    data_dir: &Path,
+    session_id: &str,
+    agent: &str,
+    branch: Option<&str>,
+    reason: &str,
+) {
+    let action = match branch {
+        Some(b) => format!("git push ({b})"),
+        None => "git push".to_string(),
+    };
+    let log = ViolationsLog::new(data_dir);
+    let _ = log
+        .record(
+            session_id.to_string(),
+            agent.to_string(),
+            ViolationKind::PushGate,
+            action,
+            ViolationOutcome::Denied,
+            Some(format!("pre-push blocked: {reason}")),
+        )
+        .await;
 }
 
 /// PreToolUse hook handler — the **Tool Gate** tripwire, injected into
@@ -781,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn run_pre_push_blocks_when_mode_enforced_and_branch_unknown() {
+    fn run_pre_push_blocks_ask_without_session() {
         let data = tempdir().unwrap();
         std::fs::create_dir_all(data.path().join("projects/foo")).unwrap();
         std::fs::write(
@@ -789,12 +984,23 @@ mod tests {
             "push_gate: ask\n",
         )
         .unwrap();
-        // We can't easily set the current git branch from inside the test
-        // process (the hook reads via `git symbolic-ref` on the cwd). The
-        // function falls back to "<detached>", which has no session grant, so
-        // the block path fires.
+        // The cargo test process has no BOT_HQ_SESSION_ID, so this push has no
+        // session context → blocked with guidance (exit 1) before any HTTP call.
         let code = run_pre_push(data.path(), Some("foo")).unwrap();
         assert_eq!(code, 1);
+    }
+
+    #[tokio::test]
+    async fn decide_push_blocks_when_app_not_running() {
+        // No signaling-addr file → the app isn't reachable → fail-closed Blocked,
+        // with a reason naming the cause (no network call attempted).
+        let data = tempdir().unwrap();
+        match decide_push(data.path(), "s1", "brian", Some("main")).await {
+            PushDecision::Blocked(reason) => {
+                assert!(reason.contains("not running"), "reason: {reason}");
+            }
+            _ => panic!("expected Blocked when no signaling addr is present"),
+        }
     }
 
     #[test]

@@ -174,11 +174,12 @@ over `<data_dir>/general-policy.yaml`. Policy fields:
 
 - `forbidden_in_commits: [string]` — words/phrases that must not appear
   in commit messages or staged diffs.
-- `push_gate.mode: auto | per_branch_approval | always_ask` — controls
-  whether agents must call `request_approval` before `git push`.
-- `force_push.mode: blocked | token_required | allowed` — controls
-  `git push --force`. `token_required` accepts a user-typed token
-  matching `force_push.token_format` (supports `{branch}`, `{sha}`).
+- `push_gate: auto | ask` — `auto` lets pushes through; `ask` makes the
+  `pre-push` hook surface a per-push Approve/Reject prompt to the user and
+  block on their pick (the user can also flip it to `auto` in Session
+  Settings). Scalar, not a nested `.mode`.
+- `force_push: blocked | allowed` — controls `git push --force` /
+  `--force-with-lease`. Scalar.
 - `tool_blocklist: [prefix]` — RETIRED. Superseded by the global
   **Tool Gate** (Settings → "Gated Bash Keywords" → `action_gate`); the
   field still parses for backward-compat but is no longer enforced.
@@ -197,13 +198,13 @@ Bash commands. A `gate` keyword blocks the command and routes it to the
 match on the command or tool name; the list is global, not per-project, and
 defaults empty.
 
-**Session-level grants** ride alongside this. When the user types
-"you can push" / "you can commit" in chat, the agent calls
-`grant_session_permission` which mirrors a JSON file to
-`<data_dir>/.local/session-permissions/<session_id>.json`. The
-`pre-push` git hook reads this file (via `BOT_HQ_SESSION_ID` env var) to
-decide whether to allow the push without re-prompting. Grants are wiped
-on session close and on bot-hq startup.
+**Per-push approval.** Under `push_gate: ask`, the agent just runs
+`git push` and the `pre-push` git hook (via `BOT_HQ_SESSION_ID`) POSTs the
+running app's `/hooks/pre-push` route, which surfaces an Approve/Reject
+prompt to the user and blocks on their pick — approve lets the push
+proceed, reject blocks it (fail-closed if bot-hq isn't running).
+`push_gate` / `force_push` are per-session policy toggles (Session
+Settings gear tab); there are no agent-side grants.
 
 **Two-layer enforcement:**
 1. MCP tools (`check_commit_message`, `request_approval`, …) — agents

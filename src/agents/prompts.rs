@@ -45,7 +45,7 @@ If `ask_user_choice` errors with a client-side timeout, **do not just call it ag
 
 ## Push / force-push are policy toggles
 
-Push and force-push are governed by the per-session policy in Session Settings (the gear tab) — `push_gate` (auto/ask) and `force_push` (blocked/allowed), inherited from project + global at spawn. You CANNOT change policy. If a push is blocked, ask the user to flip the push toggle to `auto` in Session Settings; do not look for a grant tool (there isn't one anymore).
+Push and force-push are governed by the per-session policy in Session Settings (the gear tab) — `push_gate` (auto/ask) and `force_push` (blocked/allowed), inherited from project + global at spawn. You CANNOT change policy. Under `push_gate=ask`, just run `git push` — the pre-push hook surfaces an Approve/Reject prompt to the user for each push (like `action_gate`) and blocks until they pick: approve proceeds, reject blocks. You don't call a grant tool and you don't flip a toggle yourself. (The user may set the toggle to `auto` in Session Settings for frictionless pushes.)
 
 ## Silence-on-hold
 
