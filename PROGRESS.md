@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-392 tests passing (343 lib + 32 external MCP + 7 signaling + 10 storage)
+393 tests passing (344 lib + 32 external MCP + 7 signaling + 10 storage)
 plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,34 @@ plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-03 — action_gate executes on approve even after a client timeout
+
+`action_gate`'s approved command runs server-side via `execute_gated`, which lived only inside the
+MCP request future. When claude-code's MCP client timed out (~30s) waiting on a human, that future
+was cancelled before `execute_gated` ran, and the OOB fallback (`resolve_choice`) re-delivered only
+"Approve" — so a gated command the user approved would silently never execute. (Surfaced live while
+testing the push-gate work: a timed-out `gh api user` approval returned no output.)
+
+Fix: run the approved command at resolve time, decoupled from the dead request future.
+- `bridge/action_gate.rs`: `execute_gated` → `pub(super)` so the sibling `bridge::questions` module
+  can call it (private-to-module otherwise → E0624).
+- `bridge/questions.rs` `resolve_choice`, receiver-dropped arm: when the parked approval is an
+  `action_gate` request (`ViolationKind::ToolBlocklist`) resolved `Approved`, run `execute_gated`
+  and append its output to the OOB message body. In-band (`Delivered`) and dropped (`Err`) paths are
+  mutually exclusive on one `tx.send`, so the command runs exactly once. Scoped to ToolBlocklist —
+  `ask_user_choice`, `per_action`, and `push_gate` paths are unchanged.
+
+Distinct from the June-1 fix (#2), which made the OOB fallback deliver the user's *decision* — that
+works (verified). This covers the one tool whose *action* executes server-side.
+
+Test: `timed_out_action_gate_still_executes_on_approve` aborts the request future to simulate the
+client timeout, then resolves Approve and asserts the command ran (marker file) + output is in the
+OOB body.
+
+Known limitation: the reopened-session branch of `resolve_choice` (bridge lost the in-memory Parked)
+can't execute — the durable `session_questions` row stores prompt/agent/session but not the command
+string. Rare (needs a bridge restart between ask and answer); would need the command re-issued.
 
 ## 2026-06-03 — push_gate "ask" prompts per-push instead of hard-blocking
 

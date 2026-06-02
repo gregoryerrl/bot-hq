@@ -62,7 +62,12 @@ impl SignalingBridge {
 
     /// Resolve the session's working repo, then run the command and format the
     /// combined output.
-    async fn execute_gated(&self, session_id: &str, command: &str) -> Result<String> {
+    ///
+    /// `pub(super)` so `resolve_choice` (sibling module `bridge::questions`) can
+    /// run an approved gated command on the receiver-dropped path — when the
+    /// agent's `action_gate` tool call timed out client-side, its request future
+    /// (which would have called this in-band) was already cancelled.
+    pub(super) async fn execute_gated(&self, session_id: &str, command: &str) -> Result<String> {
         let cwd = self.session_working_repo(session_id).await.ok_or_else(|| {
             anyhow::anyhow!(
                 "action_gate: session {session_id} has no working_repo_path — cannot execute `{command}`"
@@ -247,4 +252,50 @@ mod tests {
         assert!(marker.exists(), "approved command should have run");
     }
 
+    #[tokio::test]
+    async fn timed_out_action_gate_still_executes_on_approve() {
+        // Regression for the client-timeout gap: the agent's `action_gate` request
+        // future is cancelled (here: aborted) before the user approves — simulating
+        // claude-code's MCP client giving up. The parked receiver is dropped, but the
+        // command must NOT be lost: resolve_choice runs `execute_gated` on the
+        // fallback path and delivers the output via the OOB body.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let marker = repo.path().join("ran.txt");
+        let cmd = format!("touch {}", marker.display());
+        let bridge = bridge_with(
+            data.path(),
+            &[gk("touch", GateMode::Gate)],
+            "s1",
+            repo.path(),
+        )
+        .await;
+        let mut sub = bridge.subscribe();
+        let b2 = Arc::clone(&bridge);
+        let call = tokio::spawn(async move { b2.action_gate("s1".into(), "brian".into(), cmd).await });
+        let cid = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        // Client timeout: abort the request future → drops the parked receiver
+        // (the PendingChoice stays in `pending`). Await the handle so the cancel lands.
+        call.abort();
+        let _ = call.await;
+        tokio::task::yield_now().await;
+
+        let outcome = bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
+        match outcome {
+            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => assert!(
+                body.contains("exit 0"),
+                "OOB body must carry the executed command output: {body}"
+            ),
+            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+        }
+        assert!(
+            marker.exists(),
+            "approved command must execute on the dropped-receiver (timeout) path"
+        );
+    }
 }

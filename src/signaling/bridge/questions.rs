@@ -322,8 +322,35 @@ impl SignalingBridge {
                         // CoreAppState::resolve_choice is the one that ALSO routes the
                         // body through the duo input channels to wake the subprocess.
                         let session_id = p.choice.session_id.clone();
-                        let body =
+                        let mut body =
                             oob_resolution_body(&p.choice.agent, &p.choice.question, &picked);
+                        // If this was an `action_gate` approval (kind=ToolBlocklist),
+                        // its server-side `execute_gated` never ran — the request
+                        // future that would have called it in-band was cancelled when
+                        // the client timed out. Run the gated command NOW and append
+                        // its output so the agent gets the real result via the OOB
+                        // message, not just the pick. In-band approvals execute in
+                        // `action_gate` itself; the two paths are mutually exclusive on
+                        // this one `tx.send`, so the command runs exactly once. Done
+                        // before the storage lock below — `execute_gated` locks storage
+                        // internally to resolve the working repo.
+                        if let Some(ctx) = &p.choice.approval {
+                            if matches!(ctx.kind, crate::policy::ViolationKind::ToolBlocklist)
+                                && matches!(outcome, crate::policy::ViolationOutcome::Approved)
+                            {
+                                body.push_str(
+                                    "\n\n(Your action_gate request timed out client-side but was \
+                                     approved; bot-hq executed it — output below.)\n",
+                                );
+                                match self.execute_gated(&session_id, &ctx.action).await {
+                                    Ok(output) => body.push_str(&output),
+                                    Err(e) => body.push_str(&format!(
+                                        "action_gate could not run `{}`: {e}",
+                                        ctx.action
+                                    )),
+                                }
+                            }
+                        }
                         let storage_guard = self.storage.lock().await;
                         if let Some(storage) = storage_guard.as_ref() {
                             if let Err(e) = storage
