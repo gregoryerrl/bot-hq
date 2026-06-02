@@ -10,6 +10,7 @@ import { ChatMessage } from "../components/ChatMessage";
 import { ChoicePrompt } from "../components/ChoicePrompt";
 import { DocumentPane } from "../components/DocumentPane";
 import { PhasePillRow, type Phase } from "../components/PhasePill";
+import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
 import type {
   AgentMessage,
@@ -82,6 +83,7 @@ export function SessionView() {
   const [resolvingChoice, setResolvingChoice] = useState<
     Map<string, string>
   >(new Map());
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleResolveChoice = async (choiceId: string, picked: string) => {
     setResolvingChoice((s) => new Map(s).set(choiceId, picked));
@@ -240,6 +242,15 @@ export function SessionView() {
             >
               {screenshotPending ? "…" : "📸"}
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Session settings — policy & push gate"
+              aria-label="Session settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              ⚙️
+            </Button>
           </div>
         </header>
 
@@ -352,6 +363,12 @@ export function SessionView() {
       </section>
 
       <DocumentPane sessionId={sessionId} sessionPhase={phase} />
+
+      <SessionPolicyPanel
+        sessionId={sessionId}
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   );
 }
