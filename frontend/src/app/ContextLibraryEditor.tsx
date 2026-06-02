@@ -1,11 +1,12 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
+import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import type {
   ClFileContentView,
   ClFolderView,
   ClIndexEntryView,
+  Policy,
   ProjectView,
 } from "../lib/bindings";
 import {
@@ -19,6 +20,12 @@ import {
   terminalInputClass,
 } from "./contextLibraryShared";
 import { FolderView } from "./ContextLibraryFolderView";
+import { PolicyForm } from "../components/PolicyForm";
+
+/** A CL file is a project policy blueprint when its basename is `policy.yaml`. */
+function isPolicyFile(filePath: string): boolean {
+  return filePath.split("/").pop() === "policy.yaml";
+}
 
 // ============================================================================
 // EditorArea — tab strip + active tab content
@@ -74,6 +81,13 @@ export function EditorArea({
           onSaved={onRefetchFolders}
           onProjectChanged={onProjectChanged}
         />
+      ) : isPolicyFile(activeTab.filePath) ? (
+        <ProjectPolicyEditor
+          key={tabKey(activeTab)}
+          tab={activeTab}
+          entries={entries}
+          onRefetchIndex={onRefetchIndex}
+        />
       ) : (
         <EditorPane
           key={tabKey(activeTab)}
@@ -81,6 +95,126 @@ export function EditorArea({
           entries={entries}
           onRefetchIndex={onRefetchIndex}
         />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// ProjectPolicyEditor — structured project-policy editor for `policy.yaml`,
+// with a Raw YAML escape hatch back to the plain text editor. The structured
+// form (default) always writes valid YAML via set_project_policy; the raw view
+// is for hand-editing comments / fields the form doesn't model.
+// ============================================================================
+
+function ProjectPolicyEditor({
+  tab,
+  entries,
+  onRefetchIndex,
+}: {
+  tab: Extract<OpenTab, { kind: "file" }>;
+  entries: ClIndexEntryView[];
+  onRefetchIndex: () => void;
+}) {
+  const [view, setView] = useState<"form" | "raw">("form");
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-2">
+        <div className="min-w-0">
+          <p className="truncate font-code-sm text-code-sm text-on-surface">
+            {tab.filePath}
+          </p>
+          <p className="font-code-sm text-code-sm text-on-surface-variant">
+            {tab.project} · project policy
+          </p>
+        </div>
+        <div className="flex shrink-0 overflow-hidden rounded border border-outline-variant">
+          {(["form", "raw"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setView(v)}
+              className={cn(
+                "px-3 py-1 font-label-caps text-label-caps transition-colors",
+                view === v
+                  ? "bg-primary/15 text-primary"
+                  : "bg-transparent text-on-surface-variant hover:text-on-surface",
+              )}
+            >
+              {v === "form" ? "Form" : "Raw YAML"}
+            </button>
+          ))}
+        </div>
+      </div>
+      {view === "form" ? (
+        <ProjectPolicyForm project={tab.project} />
+      ) : (
+        <EditorPane
+          tab={tab}
+          entries={entries}
+          onRefetchIndex={onRefetchIndex}
+        />
+      )}
+    </div>
+  );
+}
+
+function ProjectPolicyForm({ project }: { project: string }) {
+  const { data: server, refetch, isLoading } = useTauriQuery<Policy>(
+    "get_project_policy",
+    { project },
+  );
+  const save = useTauriMutation<void, { project: string; policy: Policy }>(
+    "set_project_policy",
+  );
+
+  const serverJson = JSON.stringify(server ?? {});
+  const [draft, setDraft] = useState<Policy>(server ?? {});
+  const lastServer = useRef(serverJson);
+  useEffect(() => {
+    if (lastServer.current !== serverJson) {
+      lastServer.current = serverJson;
+      setDraft(server ?? {});
+    }
+  }, [serverJson, server]);
+
+  const dirty = JSON.stringify(draft) !== serverJson;
+
+  const onSave = async () => {
+    await save.mutateAsync({ project, policy: draft });
+    await refetch();
+  };
+
+  return (
+    <div className="min-h-0 flex-1 overflow-auto px-5 py-5">
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <p className="max-w-prose font-body-md text-body-md text-on-surface-variant">
+          Per-project overrides on top of the global policy. Empty fields
+          inherit the global tier; non-empty lists / non-default toggles
+          replace it. The form rewrites <code>policy.yaml</code> as clean YAML
+          on save — switch to Raw YAML to preserve comments or hand-edit.
+        </p>
+        {dirty && (
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={save.isPending}
+            className="inline-flex shrink-0 items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+          >
+            <SaveIcon />
+            {save.isPending ? "Saving…" : "Save policy"}
+          </button>
+        )}
+      </div>
+      {isLoading ? (
+        <div className="h-48 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
+      ) : (
+        <PolicyForm value={draft} onChange={setDraft} disabled={save.isPending} />
+      )}
+      {save.error && (
+        <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          Save failed: {save.error.message}
+        </p>
       )}
     </div>
   );
