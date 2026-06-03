@@ -213,6 +213,9 @@ impl AppState {
         if let Err(e) = self.bridge.cleanup_session_policy(id).await {
             tracing::warn!(?e, session_id = %id, "cleanup_session_policy failed");
         }
+        // Tell the UI the session is closed so it can navigate away from the
+        // (now-closed) session view + refresh its session lists.
+        self.bridge.notify_session_closed(id.to_string());
         Ok(())
     }
 

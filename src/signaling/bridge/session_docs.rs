@@ -25,13 +25,20 @@ impl SignalingBridge {
         body: &str,
         phase: Option<&str>,
     ) -> Result<i64> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
-            return Err(anyhow::anyhow!("storage not configured"));
+        let id = {
+            let storage_guard = self.storage.lock().await;
+            let Some(storage) = storage_guard.as_ref() else {
+                return Err(anyhow::anyhow!("storage not configured"));
+            };
+            storage
+                .upsert_session_document(session_id, effective_slug(slug, phase), body, phase)
+                .await?
         };
-        storage
-            .upsert_session_document(session_id, effective_slug(slug, phase), body, phase)
-            .await
+        // Notify the UI so the doc pane refreshes without a manual tab-switch.
+        let _ = self.event_tx.send(SignalingEvent::DocChanged {
+            session_id: session_id.to_string(),
+        });
+        Ok(id)
     }
 
     /// Agent-callable: search this session's docs (slug + body substring).

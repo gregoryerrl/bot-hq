@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-398 tests passing (348 lib + 32 external MCP + 7 signaling + 11 storage)
+400 tests passing (350 lib + 32 external MCP + 7 signaling + 11 storage)
 plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,28 @@ plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-03 — Event-driven UI reactivity (no more "stale until tab-switch")
+
+The UI only refetched on mount/tab-switch, so backend state changes didn't show until the user
+navigated away and back: new session docs, a tray answer reflected in chat, and session close
+(which stranded the user inside the now-closed session). Fixed event-driven — emit an event for
+every relevant change + invalidate queries on it, no polling. (Supersedes the 2s Tray poll
+`83385fe`.)
+
+- Backend: new `SignalingEvent::DocChanged` + `SessionClosed` (+ `tauri_events` types +
+  `bridge_subscriber` routes → `session:doc_changed` / `session:closed`). `session_doc_write` emits
+  DocChanged; `core::close_session` emits SessionClosed via `bridge.notify_session_closed`.
+  `resolve_choice`'s two OOB arms now call `notify_message_persisted` (capturing the insert id) →
+  fires `agent:messages:batch`, so a tray-answered choice shows in the chat live.
+- Frontend: `GlobalEventSync` (in `Providers`, inside `QueryClientProvider`) listens to the
+  `session:*` events and `invalidateQueries()` (all) — event-driven, no timers. Dropped the Tray
+  `refetchInterval`. `SessionView` navigates to the dashboard on `session:closed` for the current
+  session. `agent:messages:batch` is excluded from the global invalidation (the chat consumes it
+  directly; invalidating everything on each message batch would be wasteful).
+
+Tests: `bridge_subscriber` routes for the 2 new events; the OOB-fallback test now asserts
+`MessagePersisted` fires.
 
 ## 2026-06-03 — Tray tab live-refreshes (2s poll)
 

@@ -102,6 +102,13 @@ pub enum SignalingEvent {
         agent: String,
         target: String,
     },
+    /// A session document was written/updated (`session_doc_write`). The UI
+    /// invalidates its doc queries so a freshly-written phase doc appears
+    /// without a manual tab-switch.
+    DocChanged { session_id: String },
+    /// A session finished closing (after `core.close_session`). The UI
+    /// navigates away from a now-closed session and refreshes its lists.
+    SessionClosed { session_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -360,6 +367,14 @@ impl SignalingBridge {
             session_id,
             message_id,
         });
+    }
+
+    /// Fire a `SessionClosed` event after a session finished closing, so the UI
+    /// can leave the closed session view + refresh its lists. Fire-and-forget.
+    pub fn notify_session_closed(&self, session_id: String) {
+        let _ = self
+            .event_tx
+            .send(SignalingEvent::SessionClosed { session_id });
     }
 
     /// Called by the MCP `tools/call` handler for `close_session`. Broadcasts

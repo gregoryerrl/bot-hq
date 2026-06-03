@@ -95,6 +95,28 @@ impl PendingChoiceEvent {
     pub const EVENT_NAME: &'static str = "session:pending_choice";
 }
 
+/// Emitted when a session document is written/updated (`session_doc_write`),
+/// so the doc pane refreshes without a manual tab-switch.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct DocChangedEvent {
+    pub session_id: String,
+}
+
+impl DocChangedEvent {
+    pub const EVENT_NAME: &'static str = "session:doc_changed";
+}
+
+/// Emitted when a session finished closing, so the UI can navigate away from
+/// the now-closed session and refresh its session lists.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct SessionClosedEvent {
+    pub session_id: String,
+}
+
+impl SessionClosedEvent {
+    pub const EVENT_NAME: &'static str = "session:closed";
+}
+
 /// Plugin lifecycle event names emitted to the frontend PluginManager, which
 /// listens for the same strings. Centralized so an emit site and the listener
 /// can't drift independently.

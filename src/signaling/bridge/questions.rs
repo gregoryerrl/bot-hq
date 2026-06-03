@@ -381,29 +381,42 @@ impl SignalingBridge {
                             self.maybe_run_gated(&session_id, command, &picked, &mut body)
                                 .await;
                         }
-                        let storage_guard = self.storage.lock().await;
-                        if let Some(storage) = storage_guard.as_ref() {
-                            if let Err(e) = storage
-                                .insert_message(
-                                    &session_id,
-                                    Author::User,
-                                    MessageKind::Text,
-                                    &body,
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    ?e,
-                                    %session_id,
-                                    "out-of-band choice-resolution message failed to persist"
-                                );
+                        let inserted_id = {
+                            let storage_guard = self.storage.lock().await;
+                            match storage_guard.as_ref() {
+                                Some(storage) => match storage
+                                    .insert_message(
+                                        &session_id,
+                                        Author::User,
+                                        MessageKind::Text,
+                                        &body,
+                                    )
+                                    .await
+                                {
+                                    Ok(id) => Some(id),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            ?e,
+                                            %session_id,
+                                            "out-of-band choice-resolution message failed to persist"
+                                        );
+                                        None
+                                    }
+                                },
+                                None => {
+                                    tracing::warn!(
+                                        %session_id,
+                                        "resolve_choice: agent receiver dropped AND no storage wired — \
+                                         pick recorded but not delivered"
+                                    );
+                                    None
+                                }
                             }
-                        } else {
-                            tracing::warn!(
-                                %session_id,
-                                "resolve_choice: agent receiver dropped AND no storage wired — \
-                                 pick recorded but not delivered"
-                            );
+                        };
+                        // Fire the message event so the chat reflects the OOB
+                        // resolution without a manual tab-switch.
+                        if let Some(id) = inserted_id {
+                            self.notify_message_persisted(session_id.clone(), id);
                         }
                         Ok(ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body })
                     }
@@ -448,20 +461,28 @@ impl SignalingBridge {
                     )
                     .await;
                 }
-                {
+                let inserted_id = {
                     let storage_guard = self.storage.lock().await;
-                    if let Some(storage) = storage_guard.as_ref() {
-                        if let Err(e) = storage
+                    match storage_guard.as_ref() {
+                        Some(storage) => match storage
                             .insert_message(&q.session_id, Author::User, MessageKind::Text, &body)
                             .await
                         {
-                            tracing::warn!(
-                                ?e,
-                                session_id = %q.session_id,
-                                "OOB (reopened-session) choice-resolution message failed to persist"
-                            );
-                        }
+                            Ok(id) => Some(id),
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?e,
+                                    session_id = %q.session_id,
+                                    "OOB (reopened-session) choice-resolution message failed to persist"
+                                );
+                                None
+                            }
+                        },
+                        None => None,
                     }
+                };
+                if let Some(id) = inserted_id {
+                    self.notify_message_persisted(q.session_id.clone(), id);
                 }
                 Ok(ResolveOutcome::AgentReceiverDroppedFellBack {
                     session_id: q.session_id,
@@ -771,6 +792,26 @@ mod tests {
         assert_eq!(oob.author, "user");
         assert!(oob.content.contains("User picked:"));
         assert!(oob.content.contains("A"));
+
+        // The OOB insert must fire MessagePersisted so the chat reflects the
+        // answer live (event-driven), not only after a manual tab-switch.
+        let mut saw_persisted = false;
+        for _ in 0..8 {
+            match sub.try_recv() {
+                Ok(SignalingEvent::MessagePersisted { session_id, .. })
+                    if session_id == "s-fallback" =>
+                {
+                    saw_persisted = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(_) => break,
+            }
+        }
+        assert!(
+            saw_persisted,
+            "OOB resolve must fire MessagePersisted so the chat live-updates"
+        );
     }
 
     #[tokio::test]

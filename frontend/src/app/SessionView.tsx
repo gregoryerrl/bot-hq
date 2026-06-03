@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
@@ -57,6 +57,7 @@ const EMPTY_MESSAGES: AgentMessage[] = [];
 
 export function SessionView() {
   const { sessionId = "" } = useParams<{ sessionId: string }>();
+  const navigate = useNavigate();
 
   const { data: session, error: sessionError } = useTauriQuery<
     SessionInfo | null
@@ -163,6 +164,15 @@ export function SessionView() {
       if (next) setPhase(next);
     },
     [sessionId],
+  );
+  // When THIS session finishes closing, leave its (now-closed) view for the
+  // dashboard instead of stranding the user inside a dead session.
+  useTauriEvent<{ session_id: string }>(
+    "session:closed",
+    (payload) => {
+      if (payload.session_id === sessionId) navigate("/");
+    },
+    [sessionId, navigate],
   );
 
   // Auto-scroll on new messages when user is at-bottom; show "↓ N new" jump

@@ -20,7 +20,8 @@ use crate::signaling::{SignalingBridge, SignalingEvent};
 use crate::storage::Storage;
 use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
-    AwaitingUser, ChoiceResolvedEvent, PendingChoiceEvent, PhaseChangedEvent,
+    AwaitingUser, ChoiceResolvedEvent, DocChangedEvent, PendingChoiceEvent, PhaseChangedEvent,
+    SessionClosedEvent,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -102,9 +103,22 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
         SignalingEvent::SessionCloseRequest { .. } => {
             // Not this subscriber's job — the dedicated close handler in
             // main.rs (which owns Arc<CoreAppState>) routes this to
-            // core.close_session. This subscriber only does Tauri emits and
-            // has no CoreAppState handle. UI sees the close downstream via the
-            // session row update once core.close_session completes.
+            // core.close_session. That, once done, fires `SessionClosed`
+            // (below) which IS what the UI reacts to.
+        }
+        SignalingEvent::DocChanged { session_id } => {
+            let payload = DocChangedEvent { session_id };
+            emit_event(
+                DocChangedEvent::EVENT_NAME,
+                serde_json::to_value(&payload).unwrap_or(Value::Null),
+            );
+        }
+        SignalingEvent::SessionClosed { session_id } => {
+            let payload = SessionClosedEvent { session_id };
+            emit_event(
+                SessionClosedEvent::EVENT_NAME,
+                serde_json::to_value(&payload).unwrap_or(Value::Null),
+            );
         }
     }
 }
@@ -198,5 +212,37 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, PhaseChangedEvent::EVENT_NAME);
         assert_eq!(captured[0].1["target"], "Apply");
+    }
+
+    #[tokio::test]
+    async fn route_doc_changed_emits_typed_event() {
+        let storage = test_storage().await;
+        let captured_events: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let ev_cap = captured_events.clone();
+        let emitter = BatchEmitter::new(|_| {}, storage);
+        let ev = SignalingEvent::DocChanged { session_id: "s1".into() };
+        route(ev, &emitter, &move |name: &str, payload: Value| {
+            ev_cap.lock().unwrap().push((name.to_string(), payload));
+        });
+        let captured = captured_events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, DocChangedEvent::EVENT_NAME);
+        assert_eq!(captured[0].1["session_id"], "s1");
+    }
+
+    #[tokio::test]
+    async fn route_session_closed_emits_typed_event() {
+        let storage = test_storage().await;
+        let captured_events: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let ev_cap = captured_events.clone();
+        let emitter = BatchEmitter::new(|_| {}, storage);
+        let ev = SignalingEvent::SessionClosed { session_id: "s1".into() };
+        route(ev, &emitter, &move |name: &str, payload: Value| {
+            ev_cap.lock().unwrap().push((name.to_string(), payload));
+        });
+        let captured = captured_events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, SessionClosedEvent::EVENT_NAME);
+        assert_eq!(captured[0].1["session_id"], "s1");
     }
 }
