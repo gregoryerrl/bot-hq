@@ -16,18 +16,21 @@ impl Storage {
         description: &str,
         tags: Option<&str>,
     ) -> Result<i64> {
+        let now = now_utc();
         let res = sqlx::query(
-            "INSERT INTO cl_index (project_id, file_path, description, tags) \
-             VALUES (?, ?, ?, ?) \
+            "INSERT INTO cl_index (project_id, file_path, description, tags, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT(project_id, file_path) DO UPDATE SET \
                 description = excluded.description, \
                 tags = excluded.tags, \
-                updated_at = CURRENT_TIMESTAMP",
+                updated_at = excluded.updated_at",
         )
         .bind(project_id)
         .bind(file_path)
         .bind(description)
         .bind(tags)
+        .bind(&now)
+        .bind(&now)
         .execute(&self.pool)
         .await
         .with_context(|| format!("upserting cl_index {project_id}/{file_path}"))?;
@@ -106,11 +109,12 @@ impl Storage {
         agent: &str,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO cl_reads (cl_index_id, session_id, agent) VALUES (?, ?, ?)",
+            "INSERT INTO cl_reads (cl_index_id, session_id, agent, read_at) VALUES (?, ?, ?, ?)",
         )
         .bind(cl_index_id)
         .bind(session_id)
         .bind(agent)
+        .bind(now_utc())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -128,18 +132,21 @@ impl Storage {
         description: &str,
         tags: Option<&str>,
     ) -> Result<i64> {
+        let now = now_utc();
         let res = sqlx::query(
-            "INSERT INTO cl_folders (project_id, folder_path, description, tags) \
-             VALUES (?, ?, ?, ?) \
+            "INSERT INTO cl_folders (project_id, folder_path, description, tags, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT(project_id, folder_path) DO UPDATE SET \
                 description = excluded.description, \
                 tags = excluded.tags, \
-                updated_at = CURRENT_TIMESTAMP",
+                updated_at = excluded.updated_at",
         )
         .bind(project)
         .bind(folder_path)
         .bind(description)
         .bind(tags)
+        .bind(&now)
+        .bind(&now)
         .execute(&self.pool)
         .await
         .with_context(|| format!("upserting cl_folders {project}/{folder_path}"))?;

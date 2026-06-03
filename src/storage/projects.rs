@@ -24,8 +24,8 @@ impl Storage {
         cl_path: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT INTO projects (name, display_name, working_repo_path, description, cl_path) \
-             VALUES (?, ?, ?, ?, ?) \
+            "INSERT INTO projects (name, display_name, working_repo_path, description, cl_path, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT(name) DO UPDATE SET \
                 display_name = excluded.display_name, \
                 working_repo_path = COALESCE(excluded.working_repo_path, projects.working_repo_path), \
@@ -37,6 +37,7 @@ impl Storage {
         .bind(working_repo_path)
         .bind(description)
         .bind(cl_path)
+        .bind(now_utc())
         .execute(&self.pool)
         .await
         .with_context(|| format!("upserting project {name}"))?;

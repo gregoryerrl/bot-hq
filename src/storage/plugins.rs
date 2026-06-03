@@ -16,14 +16,15 @@ impl Storage {
         dir_path: &str,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT OR REPLACE INTO plugins (id, name, version, manifest_json, dir_path) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO plugins (id, name, version, manifest_json, dir_path, installed_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(name)
         .bind(version)
         .bind(manifest_json)
         .bind(dir_path)
+        .bind(now_utc())
         .execute(&self.pool)
         .await
         .with_context(|| format!("inserting plugin {id}"))?;
