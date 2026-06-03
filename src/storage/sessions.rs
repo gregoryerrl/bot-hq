@@ -10,13 +10,16 @@ impl Storage {
         title: &str,
         working_repo_path: Option<&str>,
     ) -> Result<Session> {
-        sqlx::query("INSERT INTO sessions (id, title, working_repo_path) VALUES (?, ?, ?)")
-            .bind(id)
-            .bind(title)
-            .bind(working_repo_path)
-            .execute(&self.pool)
-            .await
-            .with_context(|| format!("creating session {id}"))?;
+        sqlx::query(
+            "INSERT INTO sessions (id, title, working_repo_path, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(working_repo_path)
+        .bind(now_utc())
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("creating session {id}"))?;
         self.get_session(id)
             .await?
             .context("session row vanished immediately after insert")
@@ -37,9 +40,10 @@ impl Storage {
 
     pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
         sqlx::query(
-            "UPDATE sessions SET closed_at = datetime('now'), archived = ? \
+            "UPDATE sessions SET closed_at = ?, archived = ? \
              WHERE id = ? AND closed_at IS NULL",
         )
+        .bind(now_utc())
         .bind(if archive { 1 } else { 0 })
         .bind(id)
         .execute(&self.pool)

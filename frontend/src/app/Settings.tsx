@@ -3,6 +3,7 @@ import { Link, useBlocker } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
+import { parseUtcMs } from "../lib/time";
 import { SaveIcon } from "./contextLibraryShared";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { PolicyForm } from "../components/PolicyForm";
@@ -807,8 +808,9 @@ function agentIcon(name: string): string {
 
 function formatTimestamp(iso: string): string {
   if (!iso) return "—";
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return iso;
-  return d.toLocaleString();
+  // Zone-safe: legacy rows can be zone-less; treat them as UTC.
+  const ms = parseUtcMs(iso);
+  if (!Number.isFinite(ms)) return iso;
+  return new Date(ms).toLocaleString();
 }
 

@@ -31,6 +31,10 @@ Universal conventions every agent (Emma, Brian, Rain) follows. Baked into the bi
 - **`git push` is governed by the session's push gate.** `auto` → pushes go through; `ask` → just run `git push` and the pre-push hook surfaces an Approve/Reject prompt to the user per push (like `action_gate`): approve lets it through, reject blocks it. You don't call a grant tool and you don't flip a toggle — the prompt is automatic. (The user can set the push toggle to `auto` in Session Settings — the gear tab — for frictionless pushes.)
 - Force-push, `git reset --hard`, branch deletion: per-action explicit user authorization — always ask.
 
+## Time and timezones (reason in UTC)
+
+Every timestamp you see — bot-hq's own rows, tool outputs, MCP results, `git`/`gh` output — is UTC. When you reason about elapsed time or staleness, treat \"now\" as UTC; do NOT assume your local timezone. Two clock readings in different zones can be the SAME instant: `07:40 UTC` and `15:40 UTC+8` are identical — that is not staleness. Before calling anything \"stale\", convert both sides to UTC and compare. If you genuinely need the user's local time, fetch it explicitly rather than guessing an offset.
+
 ## Outward actions + truthfulness (load-bearing)
 
 After the 2026-05-29 incident where an agent published a fabricated \"third party confirmed X\" comment to a GitHub issue under the user's identity — it had confabulated the instruction inside its own reasoning:
@@ -225,6 +229,20 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("study notes, not a textbook"),
             "CL section must frame CL as high-signal study notes"
+        );
+    }
+
+    #[test]
+    fn time_section_pins_utc_reasoning() {
+        // Timezone hallucination (07:40 UTC vs 15:40 UTC+8 read as 8h stale):
+        // agents must be told all timestamps are UTC and to compare in UTC.
+        assert!(
+            GENERAL_RULES.contains("Time and timezones (reason in UTC)"),
+            "GENERAL_RULES must carry the UTC-reasoning section"
+        );
+        assert!(
+            GENERAL_RULES.contains("that is not staleness"),
+            "UTC rule must call out same-instant-different-zone is not staleness"
         );
     }
 }

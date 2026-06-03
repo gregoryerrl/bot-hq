@@ -32,8 +32,8 @@ impl Storage {
             .map(|opts| serde_json::to_string(opts).unwrap_or_else(|_| "[]".into()));
         let res = sqlx::query(
             "INSERT INTO session_tray \
-                (session_id, choice_id, agent, kind, prompt, options_json, supersedes_id, command_text) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, choice_id, agent, kind, prompt, options_json, supersedes_id, command_text, asked_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(choice_id)
@@ -43,6 +43,7 @@ impl Storage {
         .bind(options_json)
         .bind(supersedes_id)
         .bind(command_text)
+        .bind(now_utc())
         .execute(&self.pool)
         .await
         .with_context(|| format!("inserting question {choice_id} for session {session_id}"))?;
@@ -59,10 +60,11 @@ impl Storage {
     ) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE session_tray \
-             SET status = 'answered', picked_option = ?, answered_at = datetime('now') \
+             SET status = 'answered', picked_option = ?, answered_at = ? \
              WHERE choice_id = ? AND status = 'pending'",
         )
         .bind(picked)
+        .bind(now_utc())
         .bind(choice_id)
         .execute(&self.pool)
         .await
@@ -78,10 +80,11 @@ impl Storage {
         let res = sqlx::query(
             "UPDATE session_tray \
              SET status = 'answered', \
-                 answered_at = datetime('now'), \
+                 answered_at = ?, \
                  picked_option = '(user replied)' \
              WHERE session_id = ? AND status = 'pending' AND kind = 'halt'",
         )
+        .bind(now_utc())
         .bind(session_id)
         .execute(&self.pool)
         .await

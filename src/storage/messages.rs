@@ -15,12 +15,14 @@ impl Storage {
         content: &str,
     ) -> Result<i64> {
         let res = sqlx::query(
-            "INSERT INTO messages (session_id, author, kind, content) VALUES (?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, author, kind, content, created_at) \
+             VALUES (?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(author.as_str())
         .bind(kind.as_str())
         .bind(content)
+        .bind(now_utc())
         .execute(&self.pool)
         .await
         .with_context(|| format!("inserting message into session {session_id}"))?;

@@ -24,11 +24,13 @@ mod projects;
 mod questions;
 mod session_docs;
 mod sessions;
+mod time;
 
 pub use model::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Plugin, Project,
     QuestionKind, QuestionStatus, Session, SessionDocument, SessionTrayEntry,
 };
+pub(crate) use time::now_utc;
 
 #[derive(Clone)]
 pub struct Storage {

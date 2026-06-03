@@ -27,7 +27,7 @@ impl Storage {
     pub async fn upsert_agent_config(&self, cfg: &AgentConfig) -> Result<()> {
         sqlx::query(
             "INSERT INTO agent_configs (agent_name, provider, model_name, base_url, auth_token, updated_at) \
-             VALUES (?, ?, ?, ?, ?, datetime('now')) \
+             VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT(agent_name) DO UPDATE SET \
                  provider = excluded.provider, \
                  model_name = excluded.model_name, \
@@ -40,6 +40,7 @@ impl Storage {
         .bind(&cfg.model_name)
         .bind(&cfg.base_url)
         .bind(&cfg.auth_token)
+        .bind(now_utc())
         .execute(&self.pool)
         .await
         .with_context(|| format!("upserting agent_config {}", cfg.agent_name))?;
