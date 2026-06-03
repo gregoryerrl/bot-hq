@@ -32,9 +32,17 @@ export function ModelsPanel() {
     string | null
   >("get_default_model_id");
 
+  const { data: rainDisabledDefault, refetch: refetchRainDefault } =
+    useTauriQuery<string | null>("get_app_setting", {
+      key: "rain_disabled_default",
+    });
+
   const upsert = useTauriMutation<void, { model: ModelView }>("upsert_model");
   const setDefault = useTauriMutation<void, { id: string }>(
     "set_default_model_id",
+  );
+  const setAppSetting = useTauriMutation<void, { key: string; value: string }>(
+    "set_app_setting",
   );
 
   const addModel = async () => {
@@ -92,6 +100,23 @@ export function ModelsPanel() {
             </option>
           ))}
         </select>
+        <label className="ml-auto flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={rainDisabledDefault === "1"}
+            onChange={async (e) => {
+              await setAppSetting.mutateAsync({
+                key: "rain_disabled_default",
+                value: e.target.checked ? "1" : "",
+              });
+              refetchRainDefault();
+            }}
+            className="size-4 accent-primary"
+          />
+          <span className="font-body-md text-body-md text-on-surface">
+            Disable Rain by default
+          </span>
+        </label>
       </div>
 
       {isLoading ? (

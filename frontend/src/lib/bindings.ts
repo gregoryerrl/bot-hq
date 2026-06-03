@@ -221,6 +221,22 @@ async setDefaultModelId(id: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getAppSetting(key: string) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_app_setting", { key }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setAppSetting(key: string, value: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_app_setting", { key, value }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async clIndexSearch(project: string | null, query: string | null) : Promise<Result<ClIndexEntryView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cl_index_search", { project, query }) };

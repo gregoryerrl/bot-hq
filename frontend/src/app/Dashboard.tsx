@@ -4,11 +4,14 @@ import { SessionTile } from "../components/SessionTile";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
+  ModelView,
   PendingChoiceView,
   ProjectView,
   SessionInfo,
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
+
+const RAIN_DISABLED_DEFAULT_KEY = "rain_disabled_default";
 
 /**
  * Thin wrapper that drives the per-session phase query, so `SessionTile`
@@ -59,6 +62,20 @@ export function Dashboard() {
     { refetchInterval: 60_000 },
   );
 
+  // Saved models for the per-agent pickers, plus the configured defaults.
+  const { data: models = [] } = useTauriQuery<ModelView[]>(
+    "list_models",
+    {},
+    { refetchInterval: 60_000 },
+  );
+  const { data: defaultModelId } = useTauriQuery<string | null>(
+    "get_default_model_id",
+  );
+  const { data: rainDisabledDefault } = useTauriQuery<string | null>(
+    "get_app_setting",
+    { key: RAIN_DISABLED_DEFAULT_KEY },
+  );
+
   const createSession = useTauriMutation<
     SessionInfo,
     {
@@ -66,6 +83,9 @@ export function Dashboard() {
       title: string;
       repoPath: string | null;
       project: string | null;
+      rainEnabled: boolean;
+      brianModelId: string | null;
+      rainModelId: string | null;
     }
   >("create_session");
 
@@ -84,6 +104,11 @@ export function Dashboard() {
   // working_repo_path and pass it as repoPath to create_session.
   const [selectedProject, setSelectedProject] = useState("");
   const [filter, setFilter] = useState("");
+  // Per-agent model picks ("" = fall back to the agent's saved config) and the
+  // Rain toggle. Seeded from the configured defaults when the dialog opens.
+  const [brianModelId, setBrianModelId] = useState("");
+  const [rainModelId, setRainModelId] = useState("");
+  const [disableRain, setDisableRain] = useState(false);
 
   // Case-insensitive substring filter on session title. In-memory so no
   // debounce needed — the list isn't a paginated query.
@@ -92,6 +117,16 @@ export function Dashboard() {
     if (!q) return sessions;
     return sessions.filter((s) => s.title.toLowerCase().includes(q));
   }, [sessions, filter]);
+
+  // Seed the model pickers + Rain toggle from the configured defaults each time
+  // the dialog opens (not on every query change, so user edits aren't clobbered).
+  useEffect(() => {
+    if (!creating) return;
+    setBrianModelId(defaultModelId ?? "");
+    setRainModelId(defaultModelId ?? "");
+    setDisableRain(rainDisabledDefault === "1");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [creating]);
 
   const handleCreate = async () => {
     if (!title.trim()) return;
@@ -102,6 +137,9 @@ export function Dashboard() {
       title: title.trim(),
       repoPath: proj?.working_repo_path ?? null,
       project: selectedProject || null,
+      rainEnabled: !disableRain,
+      brianModelId: brianModelId || null,
+      rainModelId: disableRain ? null : rainModelId || null,
     });
     setTitle("");
     setSelectedProject("");
@@ -209,6 +247,59 @@ export function Dashboard() {
                   policy. Leave blank for ad-hoc scopes.
                 </span>
               </label>
+              <label className="block">
+                <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                  Brian model
+                </span>
+                <select
+                  value={brianModelId}
+                  onChange={(e) => setBrianModelId(e.target.value)}
+                  className={cn(
+                    "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                    "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+                  )}
+                >
+                  <option value="">(agent default)</option>
+                  {models.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.display_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={disableRain}
+                  onChange={(e) => setDisableRain(e.target.checked)}
+                  className="size-4 accent-primary"
+                />
+                <span className="font-body-md text-body-md text-on-surface">
+                  Disable Rain (solo Brian — saves credits)
+                </span>
+              </label>
+              {!disableRain && (
+                <label className="block">
+                  <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                    Rain model
+                  </span>
+                  <select
+                    value={rainModelId}
+                    onChange={(e) => setRainModelId(e.target.value)}
+                    className={cn(
+                      "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                      "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+                    )}
+                  >
+                    <option value="">(agent default)</option>
+                    {models.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setCreating(false)}>

@@ -129,6 +129,34 @@ pub async fn set_default_model_id(
         .map_err(|e| AppError::DbError(e.to_string()))
 }
 
+/// Key in `app_settings`: "1" pre-checks "Disable Rain" in the create dialog.
+pub const RAIN_DISABLED_DEFAULT_KEY: &str = "rain_disabled_default";
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_app_setting(
+    storage: tauri::State<'_, Arc<Storage>>,
+    key: String,
+) -> Result<Option<String>, AppError> {
+    storage
+        .get_setting(&key)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_app_setting(
+    storage: tauri::State<'_, Arc<Storage>>,
+    key: String,
+    value: String,
+) -> Result<(), AppError> {
+    storage
+        .set_setting(&key, &value)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

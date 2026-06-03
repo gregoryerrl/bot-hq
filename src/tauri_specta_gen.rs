@@ -52,6 +52,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         models::delete_model,
         models::get_default_model_id,
         models::set_default_model_id,
+        models::get_app_setting,
+        models::set_app_setting,
         // CL
         cl::cl_index_search,
         cl::cl_folder_search,
