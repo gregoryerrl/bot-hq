@@ -29,7 +29,8 @@ impl Storage {
         let row = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
                     brian_model_at_spawn, rain_model_at_spawn, \
-                    brian_claude_session_id, rain_claude_session_id \
+                    brian_claude_session_id, rain_claude_session_id, \
+                    rain_enabled, brian_model_id, rain_model_id \
              FROM sessions WHERE id = ?",
         )
         .bind(id)
@@ -65,7 +66,8 @@ impl Storage {
         let rows = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
                     brian_model_at_spawn, rain_model_at_spawn, \
-                    brian_claude_session_id, rain_claude_session_id \
+                    brian_claude_session_id, rain_claude_session_id, \
+                    rain_enabled, brian_model_id, rain_model_id \
              FROM sessions \
              WHERE archived = 0 AND closed_at IS NULL AND id != 'emma' \
              ORDER BY created_at DESC, id ASC",
@@ -85,7 +87,8 @@ impl Storage {
         let rows = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
                     brian_model_at_spawn, rain_model_at_spawn, \
-                    brian_claude_session_id, rain_claude_session_id \
+                    brian_claude_session_id, rain_claude_session_id, \
+                    rain_enabled, brian_model_id, rain_model_id \
              FROM sessions \
              WHERE closed_at IS NOT NULL AND id != 'emma' \
              ORDER BY closed_at DESC, id ASC",
@@ -114,6 +117,31 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording spawn models on session {session_id}"))?;
+        Ok(())
+    }
+
+    /// Record a session's Rain toggle + per-agent model selections, chosen in
+    /// the create dialog. Called once right after `create_session`, BEFORE
+    /// spawn, so `spawn_session_handle` reads the chosen models off the row.
+    pub async fn set_session_spawn_config(
+        &self,
+        session_id: &str,
+        rain_enabled: bool,
+        brian_model_id: Option<&str>,
+        rain_model_id: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions \
+             SET rain_enabled = ?, brian_model_id = ?, rain_model_id = ? \
+             WHERE id = ?",
+        )
+        .bind(if rain_enabled { 1 } else { 0 })
+        .bind(brian_model_id)
+        .bind(rain_model_id)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("recording spawn config on session {session_id}"))?;
         Ok(())
     }
 

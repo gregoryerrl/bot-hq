@@ -45,12 +45,34 @@ pub async fn create_session(
     title: String,
     repo_path: Option<String>,
     project: Option<String>,
+    // Create-dialog choices. Defaults preserve the historical duo behavior so
+    // older callers that omit them keep spawning Rain with agent-config models.
+    rain_enabled: Option<bool>,
+    brian_model_id: Option<String>,
+    rain_model_id: Option<String>,
 ) -> Result<SessionInfo, AppError> {
-    let session = storage
+    storage
         .create_session(&id, &title, repo_path.as_deref())
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
+    // Persist the Rain toggle + per-agent model picks on the row BEFORE the
+    // session is spawned (respawn_session reads them off the row).
+    storage
+        .set_session_spawn_config(
+            &id,
+            rain_enabled.unwrap_or(true),
+            brian_model_id.as_deref(),
+            rain_model_id.as_deref(),
+        )
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
     bridge.register_session(id.clone(), project).await;
+    // Re-fetch so the returned SessionInfo reflects the persisted config.
+    let session = storage
+        .get_session(&id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?
+        .ok_or_else(|| AppError::DbError("session vanished after create".into()))?;
     Ok(session.into())
 }
 

@@ -70,7 +70,9 @@ impl DuoConfig {
 pub async fn pump_agent(
     cfg: DuoConfig,
     mut event_rx: mpsc::Receiver<AgentEvent>,
-    peer_input_tx: mpsc::Sender<OutgoingUserMessage>,
+    // None = solo session (Rain disabled): events still persist to storage, but
+    // there's no peer to forward prose to.
+    peer_input_tx: Option<mpsc::Sender<OutgoingUserMessage>>,
     storage: Storage,
     ipav_state: Arc<Mutex<IpavState>>,
 ) {
@@ -87,7 +89,7 @@ pub async fn pump_agent(
             Some(deadline) => {
                 let now = Instant::now();
                 if deadline <= now {
-                    flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
                     continue;
                 }
                 let remaining = deadline - now;
@@ -95,7 +97,7 @@ pub async fn pump_agent(
                     biased;
                     ev = event_rx.recv() => ev,
                     _ = tokio::time::sleep(remaining) => {
-                        flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                        flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
                         continue;
                     }
                 }
@@ -181,7 +183,7 @@ pub async fn pump_agent(
                     flush_at = None;
                 } else {
                     // Always flush on a successful turn-complete, both phases.
-                    flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
                 }
             }
             AgentEvent::Init { session_id, .. } => {
@@ -201,7 +203,7 @@ pub async fn pump_agent(
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");
-                flush_buffer(&cfg, &mut buffer, &peer_input_tx, &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
                 break;
             }
             AgentEvent::Error(msg) => {
@@ -214,7 +216,7 @@ pub async fn pump_agent(
 async fn flush_buffer(
     cfg: &DuoConfig,
     buffer: &mut String,
-    peer_input_tx: &mpsc::Sender<OutgoingUserMessage>,
+    peer_input_tx: Option<&mpsc::Sender<OutgoingUserMessage>>,
     flush_at: &mut Option<Instant>,
     ipav_state: &Arc<Mutex<IpavState>>,
     consecutive_short: &mut u32,
@@ -224,6 +226,13 @@ async fn flush_buffer(
         buffer.clear();
         return;
     }
+    // Solo session (Rain disabled): no peer. Chunks were already persisted to
+    // storage in the Text arm, so just drop the forward buffer.
+    let Some(peer_input_tx) = peer_input_tx else {
+        buffer.clear();
+        *flush_at = None;
+        return;
+    };
     let body = std::mem::take(buffer);
     // Halt: while the duo is awaiting the user, persist the agent's chunks
     // to storage (so the user sees what they were saying) but DO NOT forward
@@ -397,7 +406,7 @@ mod tests {
         let task = tokio::spawn(pump_agent(
             fast_cfg(Author::Rain, Author::Brian),
             ev_rx,
-            peer_tx,
+            Some(peer_tx),
             storage.clone(),
             state.clone(),
         ));
@@ -439,7 +448,7 @@ mod tests {
         let task = tokio::spawn(pump_agent(
             fast_cfg(Author::Rain, Author::Brian),
             ev_rx,
-            peer_tx,
+            Some(peer_tx),
             storage.clone(),
             state.clone(),
         ));
@@ -483,7 +492,7 @@ mod tests {
         let task = tokio::spawn(pump_agent(
             fast_cfg(Author::Rain, Author::Brian),
             ev_rx,
-            peer_tx,
+            Some(peer_tx),
             storage.clone(),
             state.clone(),
         ));
@@ -523,7 +532,7 @@ mod tests {
         let task = tokio::spawn(pump_agent(
             fast_cfg(Author::Rain, Author::Brian),
             ev_rx,
-            peer_tx,
+            Some(peer_tx),
             storage.clone(),
             state.clone(),
         ));
@@ -559,7 +568,7 @@ mod tests {
         let task = tokio::spawn(pump_agent(
             fast_cfg(Author::Brian, Author::Rain),
             ev_rx,
-            peer_tx,
+            Some(peer_tx),
             storage.clone(),
             state.clone(),
         ));
@@ -587,7 +596,7 @@ mod tests {
         let task = tokio::spawn(pump_agent(
             fast_cfg(Author::Brian, Author::Rain),
             ev_rx,
-            peer_tx,
+            Some(peer_tx),
             storage.clone(),
             state.clone(),
         ));
@@ -625,7 +634,7 @@ mod tests {
         let task = tokio::spawn(pump_agent(
             fast_cfg(Author::Brian, Author::Rain),
             ev_rx,
-            peer_tx,
+            Some(peer_tx),
             storage,
             state,
         ));
@@ -662,7 +671,7 @@ mod tests {
             awaiting: Some(Arc::clone(&awaiting)),
             ..fast_cfg(Author::Brian, Author::Rain)
         };
-        let task = tokio::spawn(pump_agent(cfg, ev_rx, peer_tx, storage.clone(), state));
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, Some(peer_tx), storage.clone(), state));
 
         // While awaiting, this text is persisted but NOT forwarded.
         ev_tx.send(AgentEvent::Text("halted line".into())).await.unwrap();
@@ -691,7 +700,7 @@ mod tests {
         let task = tokio::spawn(pump_agent(
             fast_cfg(Author::Brian, Author::Rain),
             ev_rx,
-            peer_tx,
+            Some(peer_tx),
             storage.clone(),
             state,
         ));

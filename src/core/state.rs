@@ -114,10 +114,10 @@ impl AppState {
         title: impl Into<String>,
         working_repo_path: Option<std::path::PathBuf>,
     ) -> Result<String> {
-        let req = OpenSessionRequest {
-            title: title.into(),
-            working_repo_path,
-        };
+        // External-driver entry: duo defaults (Rain on, models from agent
+        // config). The UI create path persists per-agent model + Rain toggle on
+        // the row, then spawns via spawn_existing_session.
+        let req = OpenSessionRequest::duo(title, working_repo_path);
         let handle = open_session(
             req,
             &self.paths,
@@ -159,7 +159,9 @@ impl AppState {
                 // already-dead agents is a no-op.
                 if let Some(mut stale) = sessions.remove(session_id) {
                     stale.brian.kill();
-                    stale.rain.kill();
+                    if let Some(rain) = stale.rain.as_mut() {
+                        rain.kill();
+                    }
                     tracing::info!(session_id, "evicted stale session handle; re-spawning");
                 }
             }
@@ -190,7 +192,9 @@ impl AppState {
             let mut sessions = self.sessions.lock().await;
             if let Some(mut handle) = sessions.remove(session_id) {
                 handle.brian.kill();
-                handle.rain.kill();
+                if let Some(rain) = handle.rain.as_mut() {
+                    rain.kill();
+                }
                 tracing::info!(session_id, "restarting session to apply config change");
             }
         }
@@ -204,7 +208,9 @@ impl AppState {
         let mut sessions = self.sessions.lock().await;
         if let Some(mut handle) = sessions.remove(id) {
             handle.brian.kill();
-            handle.rain.kill();
+            if let Some(rain) = handle.rain.as_mut() {
+                rain.kill();
+            }
         }
         self.storage.close_session(id, archive).await?;
         // The session's pending tray items are moot now the agents are gone —
@@ -282,7 +288,7 @@ impl AppState {
             text,
             phase,
             &handle.brian.input_tx,
-            &handle.rain.input_tx,
+            handle.rain.as_ref().map(|r| &r.input_tx),
         )
         .await?;
         self.bridge

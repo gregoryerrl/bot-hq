@@ -5,9 +5,9 @@
 
 
 export const commands = {
-async createSession(id: string, title: string, repoPath: string | null, project: string | null) : Promise<Result<SessionInfo, AppError>> {
+async createSession(id: string, title: string, repoPath: string | null, project: string | null, rainEnabled: boolean | null, brianModelId: string | null, rainModelId: string | null) : Promise<Result<SessionInfo, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project }) };
+    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, rainEnabled, brianModelId, rainModelId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

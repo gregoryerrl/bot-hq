@@ -23,7 +23,8 @@ pub async fn broadcast_user_message(
     text: &str,
     phase: IpavPhase,
     brian_input: &mpsc::Sender<OutgoingUserMessage>,
-    rain_input: &mpsc::Sender<OutgoingUserMessage>,
+    // None for a solo session (Rain disabled) — Brian still receives the message.
+    rain_input: Option<&mpsc::Sender<OutgoingUserMessage>>,
 ) -> Result<i64> {
     let id = storage
         .insert_message(session_id, Author::User, MessageKind::Text, text)
@@ -39,8 +40,10 @@ pub async fn broadcast_user_message(
     if let Err(e) = brian_input.send(msg.clone()).await {
         warn!(agent = "brian", error = %e, "user broadcast not delivered (input pump closed)");
     }
-    if let Err(e) = rain_input.send(msg).await {
-        warn!(agent = "rain", error = %e, "user broadcast not delivered (input pump closed)");
+    if let Some(rain_input) = rain_input {
+        if let Err(e) = rain_input.send(msg).await {
+            warn!(agent = "rain", error = %e, "user broadcast not delivered (input pump closed)");
+        }
     }
     Ok(id)
 }
@@ -76,7 +79,7 @@ mod tests {
         s.create_session("s1", "test", None).await.unwrap();
         let (btx, mut brx) = mpsc::channel(8);
         let (rtx, mut rrx) = mpsc::channel(8);
-        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, &btx, &rtx)
+        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, &btx, Some(&rtx))
             .await
             .unwrap();
         let bm = brx.recv().await.unwrap();
@@ -99,7 +102,7 @@ mod tests {
         s.create_session("sess-b", "b", None).await.unwrap();
         let (btx, _brx) = mpsc::channel(8);
         let (rtx, _rrx) = mpsc::channel(8);
-        broadcast_user_message(&s, "sess-a", "msg-into-a", IpavPhase::Investigate, &btx, &rtx)
+        broadcast_user_message(&s, "sess-a", "msg-into-a", IpavPhase::Investigate, &btx, Some(&rtx))
             .await
             .unwrap();
 
@@ -108,6 +111,21 @@ mod tests {
         assert_eq!(a_msgs.len(), 1);
         assert_eq!(a_msgs[0].content, "msg-into-a");
         assert!(b_msgs.is_empty(), "broadcast leaked into other session: {:?}", b_msgs);
+    }
+
+    #[tokio::test]
+    async fn broadcast_solo_delivers_to_brian_only() {
+        // Rain disabled: rain_input is None. Brian still receives the message
+        // and it's persisted exactly once — no panic on the absent peer.
+        let s = Storage::memory().await.unwrap();
+        s.create_session("solo", "test", None).await.unwrap();
+        let (btx, mut brx) = mpsc::channel(8);
+        broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, &btx, None)
+            .await
+            .unwrap();
+        let bm = brx.recv().await.unwrap();
+        assert_eq!(bm.message.content, "[PHASE: Apply]\nhi");
+        assert_eq!(s.messages_for_session("solo", None).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

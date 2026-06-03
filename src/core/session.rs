@@ -23,6 +23,24 @@ use uuid::Uuid;
 pub struct OpenSessionRequest {
     pub title: String,
     pub working_repo_path: Option<PathBuf>,
+    /// Run the duo (true) or solo-Brian (false). Defaults to true.
+    pub rain_enabled: bool,
+    /// Saved-model ids for each agent (None = fall back to per-agent config).
+    pub brian_model_id: Option<String>,
+    pub rain_model_id: Option<String>,
+}
+
+impl OpenSessionRequest {
+    /// The historical duo default: Rain on, models resolved from agent config.
+    pub fn duo(title: impl Into<String>, working_repo_path: Option<PathBuf>) -> Self {
+        Self {
+            title: title.into(),
+            working_repo_path,
+            rain_enabled: true,
+            brian_model_id: None,
+            rain_model_id: None,
+        }
+    }
 }
 
 /// A live session — the handles owned by `AppState`.
@@ -40,7 +58,8 @@ pub struct SessionHandle {
     pub session_start_sha: Option<String>,
     pub ipav: Arc<Mutex<IpavState>>,
     pub brian: AgentHandle,
-    pub rain: AgentHandle,
+    /// None when this session runs solo-Brian (Rain disabled at create).
+    pub rain: Option<AgentHandle>,
     /// Shared "duo is awaiting user input" flag. Set by the bridge when any
     /// user-blocking MCP tool fires; checked by the duo pumps before they
     /// forward Brian↔Rain chunks; cleared by `core::AppState::broadcast` when
@@ -56,7 +75,9 @@ impl SessionHandle {
     /// caller can't remediate.
     pub async fn send_to_both(&self, msg: crate::agents::OutgoingUserMessage) {
         let _ = self.brian.input_tx.send(msg.clone()).await;
-        let _ = self.rain.input_tx.send(msg).await;
+        if let Some(rain) = &self.rain {
+            let _ = rain.input_tx.send(msg).await;
+        }
     }
 
     /// True once either agent's retry supervisor has terminated — a permanent
@@ -68,7 +89,11 @@ impl SessionHandle {
     /// backoff (the supervisor still holds the receiver then), so a recovering
     /// agent is never wrongly evicted.
     pub fn is_stale(&self) -> bool {
-        self.brian.input_tx.is_closed() || self.rain.input_tx.is_closed()
+        self.brian.input_tx.is_closed()
+            || self
+                .rain
+                .as_ref()
+                .is_some_and(|r| r.input_tx.is_closed())
     }
 }
 
@@ -96,7 +121,7 @@ pub async fn open_session(
     signaling_addr: SocketAddr,
 ) -> Result<SessionHandle> {
     let id = Uuid::new_v4().to_string();
-    let session = storage
+    let mut session = storage
         .create_session(
             &id,
             &req.title,
@@ -104,6 +129,22 @@ pub async fn open_session(
         )
         .await
         .context("creating session row")?;
+
+    // Persist the create-dialog choices on the row BEFORE spawn so
+    // spawn_session_handle (and any later respawn) reads them. Mirror onto the
+    // in-memory struct so we don't need a re-fetch.
+    storage
+        .set_session_spawn_config(
+            &id,
+            req.rain_enabled,
+            req.brian_model_id.as_deref(),
+            req.rain_model_id.as_deref(),
+        )
+        .await
+        .context("recording session spawn config")?;
+    session.rain_enabled = if req.rain_enabled { 1 } else { 0 };
+    session.brian_model_id = req.brian_model_id;
+    session.rain_model_id = req.rain_model_id;
 
     spawn_session_handle(
         session,
@@ -292,20 +333,28 @@ async fn spawn_session_handle(
 
     let mcp_temp = TempDir::new().context("creating mcp-config temp dir")?;
 
-    let brian_cfg = storage
-        .get_agent_config("brian")
-        .await?
-        .unwrap_or_else(default_agent_config("brian"));
-    let rain_cfg = storage
-        .get_agent_config("rain")
-        .await?
-        .unwrap_or_else(default_agent_config("rain"));
+    // Resolve each agent's spawn config from its chosen saved model (create
+    // dialog), falling back to the per-agent config. Rain is skipped entirely
+    // when the session runs solo-Brian.
+    let rain_enabled = session.rain_enabled != 0;
+    let brian_cfg =
+        resolve_spawn_config(&storage, "brian", session.brian_model_id.as_deref()).await;
+    let rain_cfg = if rain_enabled {
+        Some(resolve_spawn_config(&storage, "rain", session.rain_model_id.as_deref()).await)
+    } else {
+        None
+    };
 
     // Record the model names we're about to spawn with. Session header reads
     // these so it reflects the live (frozen-at-spawn) model, not the current
-    // DB value, which can drift after a config swap.
+    // DB value, which can drift after a config swap. Rain's is empty for a solo
+    // session.
+    let rain_model_name = rain_cfg
+        .as_ref()
+        .map(|c| c.model_name.clone())
+        .unwrap_or_default();
     if let Err(e) = storage
-        .set_session_spawn_models(&session.id, &brian_cfg.model_name, &rain_cfg.model_name)
+        .set_session_spawn_models(&session.id, &brian_cfg.model_name, &rain_model_name)
         .await
     {
         warn!(?e, "set_session_spawn_models");
@@ -331,19 +380,26 @@ async fn spawn_session_handle(
         brian_resume,
     )
     .await?;
-    let rain = spawn_agent_for(
-        &session.id,
-        "rain",
-        rain_cfg,
-        paths,
-        &project,
-        project_root.as_deref(),
-        signaling_addr,
-        mcp_temp.path(),
-        working_repo_path.clone(),
-        rain_resume,
-    )
-    .await?;
+    let rain = if let Some(rc) = rain_cfg {
+        Some(
+            spawn_agent_for(
+                &session.id,
+                "rain",
+                rc,
+                paths,
+                &project,
+                project_root.as_deref(),
+                signaling_addr,
+                mcp_temp.path(),
+                working_repo_path.clone(),
+                rain_resume,
+            )
+            .await?,
+        )
+    } else {
+        info!(session_id = %session.id, "solo-Brian session (Rain disabled)");
+        None
+    };
 
     let ipav = Arc::new(Mutex::new(IpavState::default()));
     let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -359,38 +415,44 @@ async fn spawn_session_handle(
     // pull the receivers + input senders here. The handles keep their other
     // fields (kill signal, etc.).
     let mut brian_handle = brian;
-    let mut rain_handle = rain;
-
     let brian_events =
         std::mem::replace(&mut brian_handle.event_rx, tokio::sync::mpsc::channel(1).1);
-    let rain_events = std::mem::replace(&mut rain_handle.event_rx, tokio::sync::mpsc::channel(1).1);
 
-    let rain_input = rain_handle.input_tx.clone();
-    let brian_input = brian_handle.input_tx.clone();
+    // Rain (optional): pull its receiver + input sender when present.
+    let mut rain_handle = rain;
+    let rain_input = rain_handle.as_ref().map(|r| r.input_tx.clone());
+    let rain_events = rain_handle
+        .as_mut()
+        .map(|r| std::mem::replace(&mut r.event_rx, tokio::sync::mpsc::channel(1).1));
 
+    // Brian's pump: peer is Rain's input when present, else None (solo).
     let storage_clone = storage.clone();
     let ipav_clone = Arc::clone(&ipav);
     let session_id_clone = session.id.clone();
-    let brian_cfg = DuoConfig {
+    let brian_duo = DuoConfig {
         awaiting: Some(Arc::clone(&awaiting)),
         bridge: Some(Arc::clone(&bridge)),
         ..DuoConfig::new(session_id_clone, Author::Brian, Author::Rain)
     };
     tokio::spawn(async move {
-        pump_agent(brian_cfg, brian_events, rain_input, storage_clone, ipav_clone).await;
+        pump_agent(brian_duo, brian_events, rain_input, storage_clone, ipav_clone).await;
     });
 
-    let storage_clone = storage.clone();
-    let ipav_clone = Arc::clone(&ipav);
-    let session_id_clone = session.id.clone();
-    let rain_cfg = DuoConfig {
-        awaiting: Some(Arc::clone(&awaiting)),
-        bridge: Some(Arc::clone(&bridge)),
-        ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
-    };
-    tokio::spawn(async move {
-        pump_agent(rain_cfg, rain_events, brian_input, storage_clone, ipav_clone).await;
-    });
+    // Rain's pump only runs in a duo session.
+    if let Some(rain_events) = rain_events {
+        let brian_input = brian_handle.input_tx.clone();
+        let storage_clone = storage.clone();
+        let ipav_clone = Arc::clone(&ipav);
+        let session_id_clone = session.id.clone();
+        let rain_duo = DuoConfig {
+            awaiting: Some(Arc::clone(&awaiting)),
+            bridge: Some(Arc::clone(&bridge)),
+            ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
+        };
+        tokio::spawn(async move {
+            pump_agent(rain_duo, rain_events, Some(brian_input), storage_clone, ipav_clone).await;
+        });
+    }
 
     info!(session_id = %session.id, title = %session.title, "session opened");
 
@@ -756,6 +818,41 @@ fn default_agent_config(name: &str) -> impl FnOnce() -> AgentConfig {
         auth_token: None,
         updated_at: String::new(),
     }
+}
+
+/// Resolve the `AgentConfig` to spawn an agent with. Prefers an explicit
+/// saved-model id (chosen in the create dialog, stored on the session row); a
+/// missing/empty id or a deleted model falls back to the per-agent config, then
+/// the hardcoded default. Keeps the legacy path intact for sessions created
+/// before per-agent model selection existed (`*_model_id` is NULL there).
+async fn resolve_spawn_config(
+    storage: &Storage,
+    agent_name: &str,
+    model_id: Option<&str>,
+) -> AgentConfig {
+    if let Some(id) = model_id.filter(|s| !s.is_empty()) {
+        if let Ok(Some(m)) = storage.get_model(id).await {
+            return AgentConfig {
+                agent_name: agent_name.to_string(),
+                provider: m.provider,
+                model_name: m.model_name,
+                base_url: m.base_url,
+                auth_token: m.auth_token,
+                updated_at: m.updated_at,
+            };
+        }
+        tracing::warn!(
+            agent = agent_name,
+            model_id = id,
+            "chosen model not found; falling back to agent config"
+        );
+    }
+    storage
+        .get_agent_config(agent_name)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(default_agent_config(agent_name))
 }
 
 #[cfg(test)]

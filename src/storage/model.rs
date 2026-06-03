@@ -81,6 +81,11 @@ pub struct Session {
     pub rain_model_at_spawn: Option<String>,
     pub brian_claude_session_id: Option<String>,
     pub rain_claude_session_id: Option<String>,
+    /// 0 = solo Brian (Rain disabled for this session); 1 = duo. Default 1.
+    pub rain_enabled: i64,
+    /// Saved-model ids chosen at create time (NULL = fall back to agent config).
+    pub brian_model_id: Option<String>,
+    pub rain_model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
