@@ -21,6 +21,15 @@ constraint.
 
 ---
 
+## 2026-06-03 — Tray pill count + pulse; remove the in-chat question popup
+
+Final tray polish:
+- The in-chat `ChoicePrompt` popup (`SessionView`) is removed — the Tray tab is the sole answer
+  surface now. Dropped the now-dead `list_pending_choices` query, resolve handler, and state.
+- The Tray pill shows a pending-count badge and pulses (bell-style `animate-pulse` + primary tint)
+  when count > 0, so accumulated input is visible from any tab without opening the Tray. Count comes
+  from `list_session_tray` (shared query cache; `GlobalEventSync` keeps it live event-driven).
+
 ## 2026-06-03 — Event-driven UI reactivity (no more "stale until tab-switch")
 
 The UI only refetched on mount/tab-switch, so backend state changes didn't show until the user

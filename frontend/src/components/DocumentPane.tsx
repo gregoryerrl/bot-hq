@@ -68,10 +68,26 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
 
   const activeDocs = docs.filter((d) => d.phase === activePhase);
 
+  // Pending count for the Tray pill badge — shows even on the I/P/A/V tabs so
+  // accumulated input is visible without opening the Tray. Shares the
+  // list_session_tray cache with TrayList (same query key); GlobalEventSync
+  // invalidates it event-driven, so the badge updates live.
+  const { data: trayEntries = [] } = useTauriQuery<SessionTrayView[]>(
+    "list_session_tray",
+    { sessionId },
+  );
+  const pendingTrayCount = trayEntries.filter(
+    (e) => e.status === "pending",
+  ).length;
+
   return (
     <div className="flex h-full min-w-0 flex-col border-l border-outline-variant bg-surface-container-lowest/50">
       <div className="flex items-center gap-1 border-b border-outline-variant px-3 py-2">
-        <TrayPill selected={showTray} onSelect={() => setShowTray(true)} />
+        <TrayPill
+          selected={showTray}
+          onSelect={() => setShowTray(true)}
+          count={pendingTrayCount}
+        />
         <span className="mx-1 h-4 w-px bg-outline-variant" aria-hidden />
         <PhasePillRow
           selected={showTray ? null : activePhase}
@@ -168,22 +184,32 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
 function TrayPill({
   selected,
   onSelect,
+  count,
 }: {
   selected: boolean;
   onSelect: () => void;
+  count: number;
 }) {
+  const hasPending = count > 0;
   return (
     <button
       onClick={onSelect}
       className={cn(
-        "inline-flex items-center rounded px-2 py-1 text-xs font-semibold uppercase border-t-2",
+        "inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold uppercase border-t-2",
         selected
           ? "border-on-surface/70 bg-surface-container-high/80 text-on-surface"
-          : "border-transparent bg-transparent text-on-surface-variant hover:text-on-surface",
+          : hasPending
+            ? "border-primary/70 bg-primary/10 text-primary animate-pulse"
+            : "border-transparent bg-transparent text-on-surface-variant hover:text-on-surface",
       )}
       title="Session tray — pending questions, approvals & gated commands awaiting your input"
     >
       Tray
+      {hasPending && (
+        <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-primary px-1 text-[0.6rem] font-semibold text-on-primary">
+          {count}
+        </span>
+      )}
     </button>
   );
 }

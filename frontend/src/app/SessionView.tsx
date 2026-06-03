@@ -7,7 +7,6 @@ import { useScreenshotCapture } from "../hooks/useScreenshotCapture";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
 import { ChatMessage } from "../components/ChatMessage";
-import { ChoicePrompt } from "../components/ChoicePrompt";
 import { DocumentPane } from "../components/DocumentPane";
 import { PhasePillRow, type Phase } from "../components/PhasePill";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
@@ -15,7 +14,6 @@ import { cn } from "../lib/cn";
 import type {
   AgentMessage,
   AppError,
-  PendingChoiceView,
   SessionInfo,
 } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
@@ -77,27 +75,8 @@ export function SessionView() {
     error: screenshotError,
     dismissError: dismissScreenshotError,
   } = useScreenshotCapture(sessionId);
-  // Track which (choiceId, option) is mid-resolve so the clicked button can
-  // show "…" and ALL options for that choice disable until the invoke
-  // settles. Banner naturally disappears on the next list_pending_choices
-  // refresh after resolve_choice lands.
-  const [resolvingChoice, setResolvingChoice] = useState<
-    Map<string, string>
-  >(new Map());
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const handleResolveChoice = async (choiceId: string, picked: string) => {
-    setResolvingChoice((s) => new Map(s).set(choiceId, picked));
-    try {
-      await invoke("resolve_choice", { choiceId, picked });
-    } finally {
-      setResolvingChoice((s) => {
-        const next = new Map(s);
-        next.delete(choiceId);
-        return next;
-      });
-    }
-  };
   useEffect(() => {
     if (!sessionId) return;
     setRespawnError(null);
@@ -135,13 +114,6 @@ export function SessionView() {
       if (forSession.length > 0) applyBatch(forSession);
     },
     [sessionId, applyBatch],
-  );
-
-  const { data: pendingChoices = [] } = useTauriQuery<PendingChoiceView[]>(
-    "list_pending_choices",
-  );
-  const choicesForSession = pendingChoices.filter(
-    (c) => c.session_id === sessionId,
   );
 
   // IPAV phase indicator. Initial value comes from `get_session_phase`
@@ -293,27 +265,6 @@ export function SessionView() {
             >
               dismiss
             </button>
-          </div>
-        )}
-
-        {choicesForSession.length > 0 && (
-          <div className="border-b border-outline-variant bg-surface-container px-4 py-3">
-            <div className="mb-2 flex items-center gap-2 font-label-caps text-label-caps text-secondary">
-              <span className="inline-block h-2 w-2 rounded-full bg-secondary motion-safe:animate-pulse" />
-              {choicesForSession.length === 1
-                ? "Awaiting your input"
-                : `Awaiting your input · ${choicesForSession.length}`}
-            </div>
-            <div className="space-y-2">
-              {choicesForSession.map((choice) => (
-                <ChoicePrompt
-                  key={choice.choice_id}
-                  choice={choice}
-                  pendingOption={resolvingChoice.get(choice.choice_id)}
-                  onResolve={handleResolveChoice}
-                />
-              ))}
-            </div>
           </div>
         )}
 
