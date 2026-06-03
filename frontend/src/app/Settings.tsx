@@ -6,6 +6,7 @@ import { cn } from "../lib/cn";
 import { parseUtcMs } from "../lib/time";
 import { SaveIcon } from "./contextLibraryShared";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
+import { ModelsPanel } from "./ModelsPanel";
 import { PolicyForm } from "../components/PolicyForm";
 import type {
   AgentConfigView,
@@ -15,7 +16,13 @@ import type {
   SessionInfo,
 } from "../lib/bindings";
 
-type SettingsSubTab = "agents" | "claude" | "toolgate" | "policy" | "archive";
+type SettingsSubTab =
+  | "agents"
+  | "models"
+  | "claude"
+  | "toolgate"
+  | "policy"
+  | "archive";
 
 /**
  * Settings is a tabbed container. The existing per-agent model/auth cards
@@ -32,6 +39,9 @@ export function Settings() {
       <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
         <SubTabButton active={tab === "agents"} onClick={() => setTab("agents")}>
           Agents
+        </SubTabButton>
+        <SubTabButton active={tab === "models"} onClick={() => setTab("models")}>
+          Models
         </SubTabButton>
         <SubTabButton active={tab === "claude"} onClick={() => setTab("claude")}>
           Claude Config
@@ -55,6 +65,9 @@ export function Settings() {
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "agents" && "hidden")}>
           <AgentsPanel />
+        </div>
+        <div className={cn("h-full", tab !== "models" && "hidden")}>
+          <ModelsPanel />
         </div>
         <div className={cn("h-full", tab !== "claude" && "hidden")}>
           <ClaudeConfigPanel />
