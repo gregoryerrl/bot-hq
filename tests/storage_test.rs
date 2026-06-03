@@ -58,6 +58,34 @@ async fn pending_tray_open_sessions_excludes_closed_and_emma() {
 }
 
 #[tokio::test]
+async fn withdraw_pending_tray_for_session_scoped_and_only_pending() {
+    use bot_hq::storage::QuestionKind;
+    let s = Storage::memory().await.unwrap();
+    s.create_session("a", "a", None).await.unwrap();
+    s.create_session("b", "b", None).await.unwrap();
+    let opts = vec!["Yes".to_string(), "No".to_string()];
+    for (sid, cid) in [("a", "ca1"), ("a", "ca2"), ("b", "cb1")] {
+        s.insert_question(sid, cid, "brian", QuestionKind::Choice, "q", Some(&opts), None, None)
+            .await
+            .unwrap();
+    }
+    // Answer one of a's so the withdraw only touches the still-pending row.
+    s.answer_question("ca1", "Yes").await.unwrap();
+
+    let n = s.withdraw_pending_tray_for_session("a").await.unwrap();
+    assert_eq!(n, 1, "only a's remaining pending row is withdrawn");
+
+    let a = s.questions_for_session("a").await.unwrap();
+    let ca1 = a.iter().find(|r| r.choice_id == "ca1").unwrap();
+    let ca2 = a.iter().find(|r| r.choice_id == "ca2").unwrap();
+    assert_eq!(ca1.status, "answered", "already-answered row untouched");
+    assert_eq!(ca2.status, "withdrawn");
+    // Session b is untouched.
+    let b = s.questions_for_session("b").await.unwrap();
+    assert_eq!(b[0].status, "pending");
+}
+
+#[tokio::test]
 async fn message_round_trip() {
     let s = Storage::memory().await.unwrap();
     s.create_session("sess1", "test session", Some("/tmp/repo"))

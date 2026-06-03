@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-400 tests passing (350 lib + 32 external MCP + 7 signaling + 11 storage)
+401 tests passing (350 lib + 32 external MCP + 7 signaling + 12 storage)
 plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,18 @@ plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-03 — close_session withdraws pending; backfill stale closed-session pending
+
+`close_session` left a session's pending tray rows as `pending` forever, so already-closed sessions
+accumulated dead pending (61 rows across ~55 old sessions). Fixed:
+- `core::close_session` now calls `storage.withdraw_pending_tray_for_session` after marking the
+  session closed → a closing session's pending questions/approvals/gated commands are withdrawn.
+- migration `0011`: one-time backfill — withdraws pending rows belonging to already-closed sessions
+  (clears the existing 61; no-op on a fresh DB and after the first run).
+
+Test: `withdraw_pending_tray_for_session` is session-scoped + only touches pending (already-answered
+rows untouched).
 
 ## 2026-06-03 — Tray pill count + pulse; remove the in-chat question popup
 

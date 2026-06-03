@@ -207,6 +207,11 @@ impl AppState {
             handle.rain.kill();
         }
         self.storage.close_session(id, archive).await?;
+        // The session's pending tray items are moot now the agents are gone —
+        // withdraw them so a closed session doesn't leave dead `pending` rows.
+        if let Err(e) = self.storage.withdraw_pending_tray_for_session(id).await {
+            tracing::warn!(?e, session_id = %id, "withdraw_pending_tray_for_session failed");
+        }
         // Drop the canonical session-policy snapshot. It does not carry into
         // the next session this user opens — that session re-seeds from the
         // current general+project blueprints at spawn.

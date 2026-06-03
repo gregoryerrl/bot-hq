@@ -162,4 +162,20 @@ impl Storage {
         .await?;
         Ok(rows)
     }
+
+    /// Withdraw every pending row for a session — called when the session
+    /// closes, since its pending questions / approvals / gated commands are
+    /// moot once the agents are gone. Returns the number of rows withdrawn.
+    /// Prevents closed sessions from leaving dead `pending` rows behind.
+    pub async fn withdraw_pending_tray_for_session(&self, session_id: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET status = 'withdrawn' \
+             WHERE session_id = ? AND status = 'pending'",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("withdrawing pending tray for session {session_id}"))?;
+        Ok(res.rows_affected())
+    }
 }
