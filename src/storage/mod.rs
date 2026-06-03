@@ -19,6 +19,7 @@ pub mod model;
 mod agent_config;
 mod cl_index;
 mod messages;
+mod models;
 mod plugins;
 mod projects;
 mod questions;
@@ -27,8 +28,8 @@ mod sessions;
 mod time;
 
 pub use model::{
-    AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Plugin, Project,
-    QuestionKind, QuestionStatus, Session, SessionDocument, SessionTrayEntry,
+    AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Model, Plugin,
+    Project, QuestionKind, QuestionStatus, Session, SessionDocument, SessionTrayEntry,
 };
 pub(crate) use time::now_utc;
 

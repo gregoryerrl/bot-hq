@@ -112,6 +112,21 @@ pub struct AgentConfig {
     pub updated_at: String,
 }
 
+/// A saved model in the user-managed registry (`models` table). Bundles the
+/// provider + model id + optional gateway (`base_url`) and credential
+/// (`auth_token`) an agent spawns with. Referenced by id from session-create.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Model {
+    pub id: String,
+    pub display_name: String,
+    pub provider: String,
+    pub model_name: String,
+    pub base_url: Option<String>,
+    pub auth_token: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// Surface type of a question parked for the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -21,8 +21,8 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 }
 
 use crate::tauri_cmd::{
-    agent_configs, claude_config, cl, docs, messages, plugins, policy, questions, screenshot,
-    sessions, tool_gate,
+    agent_configs, claude_config, cl, docs, messages, models, plugins, policy, questions,
+    screenshot, sessions, tool_gate,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -46,6 +46,12 @@ pub fn builder() -> Builder<tauri::Wry> {
         agent_configs::get_agent_config,
         agent_configs::list_agent_configs,
         agent_configs::upsert_agent_config,
+        // Models registry + default-model setting
+        models::list_models,
+        models::upsert_model,
+        models::delete_model,
+        models::get_default_model_id,
+        models::set_default_model_id,
         // CL
         cl::cl_index_search,
         cl::cl_folder_search,

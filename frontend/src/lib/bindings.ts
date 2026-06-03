@@ -181,6 +181,46 @@ async upsertAgentConfig(cfg: AgentConfigView) : Promise<Result<null, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
+async listModels() : Promise<Result<ModelView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async upsertModel(model: ModelView) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("upsert_model", { model }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async deleteModel(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_model", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async getDefaultModelId() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_default_model_id") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setDefaultModelId(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_default_model_id", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async clIndexSearch(project: string | null, query: string | null) : Promise<Result<ClIndexEntryView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cl_index_search", { project, query }) };
@@ -554,6 +594,21 @@ async listSessionTray(sessionId: string) : Promise<Result<SessionTrayView[], App
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * All pending tray rows for OPEN sessions across the whole app — powers the
+ * header notifier's per-session "needs your input [N]" counts. Durable, so it
+ * survives a restart (unlike the in-memory `list_pending_choices`). Closed
+ * sessions + the emma singleton are excluded so dead-session pending isn't
+ * surfaced as noise.
+ */
+async listPendingTray() : Promise<Result<SessionTrayView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_pending_tray") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async sessionDocSearch(sessionId: string, query: string | null, phase: string | null) : Promise<Result<SessionDocumentView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("session_doc_search", { sessionId, query, phase }) };
@@ -895,6 +950,11 @@ home_claude_md: FileStat;
  * Number of `projects/<slug>/memory/` dirs with a MEMORY.md.
  */
 projects_with_memory: number; inheritance: Inheritance }
+/**
+ * Frontend-facing shape of a saved model. `auth_token` is exposed (the desktop
+ * UI is local + trusted, like the AgentCard token field).
+ */
+export type ModelView = { id: string; display_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; created_at: string; updated_at: string }
 export type PendingChoiceView = { choice_id: string; session_id: string; agent: string; question: string; options: string[] }
 /**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
@@ -1005,7 +1065,7 @@ export type SessionInfo = { id: string; title: string; working_repo_path: string
  * every tray item for the session — pending AND resolved history — so the tab
  * shows what accumulated even across restarts.
  */
-export type SessionTrayView = { id: number; choice_id: string; agent: string; kind: string; prompt: string; options: string[]; status: string; picked_option: string | null; 
+export type SessionTrayView = { id: number; session_id: string; choice_id: string; agent: string; kind: string; prompt: string; options: string[]; status: string; picked_option: string | null; 
 /**
  * The gated command (action_gate / ToolBlocklist approvals); null otherwise.
  */
