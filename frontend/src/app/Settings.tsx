@@ -190,16 +190,6 @@ function GlobalPolicyPanel() {
   );
 }
 
-// Curated provider list for the dropdown. Any provider value not in this
-// list flips the dropdown to "Other" and reveals a free-text input so a
-// user can name any vendor (or a self-hosted endpoint).
-const KNOWN_PROVIDERS = [
-  "anthropic",
-  "openai",
-  "deepseek",
-  "local",
-] as const;
-
 function AgentsPanel() {
   const { data: configs = [], refetch, isLoading } = useTauriQuery<
     AgentConfigView[]
@@ -320,11 +310,7 @@ function AgentCard({
   saveAllSignal: number;
 }) {
   const [draft, setDraft] = useState(cfg);
-  const [tokenVisible, setTokenVisible] = useState(false);
   const [saved, setSaved] = useState(false);
-  // Force the custom (free-text) view even when the draft happens to match a
-  // saved model — set when the user explicitly picks "Custom…".
-  const [customMode, setCustomMode] = useState(false);
   const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
 
   // Rain-only "disable by default" preference (app_settings). The hooks run for
@@ -337,7 +323,6 @@ function AgentCard({
     "set_app_setting",
   );
 
-  const isEmma = cfg.agent_name === "emma";
   // Which saved model (if any) the current config corresponds to. Exact match
   // on the spawn-relevant fields so the dropdown reflects the agent's model.
   const selectedModelId =
@@ -347,9 +332,6 @@ function AgentCard({
         m.model_name === draft.model_name &&
         (m.base_url ?? "") === (draft.base_url ?? ""),
     )?.id ?? "";
-  // Show free-text detail fields for Emma always, or when no saved model
-  // matches / the user chose Custom.
-  const showCustom = isEmma || customMode || selectedModelId === "";
 
   // Save-all fan-out: parent increments saveAllSignal; each dirty row
   // triggers its own save. Skipping initial mount via a ref guards against
@@ -379,10 +361,6 @@ function AgentCard({
     onDirtyChange(dirty);
     if (dirty) setSaved(false);
   }
-
-  const providerIsCustom = !KNOWN_PROVIDERS.includes(
-    draft.provider as (typeof KNOWN_PROVIDERS)[number],
-  );
 
   return (
     <section
@@ -416,139 +394,55 @@ function AgentCard({
 
       {/* Form fields */}
       <div className="flex flex-1 flex-col gap-4">
-        {/* Brian + Rain pick from saved models; their choice IS their default
-            model for new sessions. Emma keeps free-text (out of scope). */}
-        {!isEmma && (
-          <label className="block">
-            <FieldLabel>Model</FieldLabel>
-            <select
-              value={showCustom ? "__custom__" : selectedModelId}
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === "__custom__") {
-                  setCustomMode(true);
-                  return;
-                }
-                const m = models.find((x) => x.id === v);
-                if (m) {
-                  setCustomMode(false);
-                  setDraft({
-                    ...draft,
-                    provider: m.provider,
-                    model_name: m.model_name,
-                    base_url: m.base_url,
-                    auth_token: m.auth_token,
-                  });
-                }
-              }}
-              className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-            >
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.display_name}
-                  {m.model_name ? ` — ${m.model_name}` : ""}
-                </option>
-              ))}
-              <option value="__custom__">Custom…</option>
-            </select>
-            {models.length === 0 ? (
-              <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
-                No saved models yet — add them in the Models tab.
-              </span>
-            ) : (
-              !showCustom && (
-                <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
-                  {draft.provider}
-                  {draft.base_url ? ` · ${draft.base_url}` : ""}
-                </span>
-              )
+        {/* Model is chosen from the saved-model registry (Models tab). The
+            provider / endpoint / credential all live on the model — there are
+            no per-agent free-text fields. */}
+        <label className="block">
+          <FieldLabel>Model</FieldLabel>
+          <select
+            value={selectedModelId}
+            onChange={(e) => {
+              const m = models.find((x) => x.id === e.target.value);
+              if (m) {
+                setDraft({
+                  ...draft,
+                  provider: m.provider,
+                  model_name: m.model_name,
+                  base_url: m.base_url,
+                  auth_token: m.auth_token,
+                });
+              }
+            }}
+            className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+          >
+            {selectedModelId === "" && (
+              <option value="" disabled>
+                {models.length === 0 ? "(no saved models)" : "(select a model)"}
+              </option>
             )}
-          </label>
-        )}
-
-        {showCustom && (
-          <>
-            <label className="block">
-              <FieldLabel>Provider</FieldLabel>
-              <select
-                value={providerIsCustom ? "other" : draft.provider}
-                onChange={(e) => {
-                  if (e.target.value === "other") {
-                    setDraft({ ...draft, provider: "" });
-                  } else {
-                    setDraft({ ...draft, provider: e.target.value });
-                  }
-                }}
-                className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-              >
-                <option value="anthropic">Anthropic</option>
-                <option value="openai">OpenAI</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="local">Local (llama.cpp)</option>
-                <option value="other">Other (custom)</option>
-              </select>
-              {providerIsCustom && (
-                <input
-                  type="text"
-                  value={draft.provider}
-                  onChange={(e) =>
-                    setDraft({ ...draft, provider: e.target.value })
-                  }
-                  placeholder="Custom provider"
-                  className={cn("mt-2", terminalInputClass)}
-                />
-              )}
-            </label>
-
-            <label className="block">
-              <FieldLabel>Model Name</FieldLabel>
-              <input
-                type="text"
-                value={draft.model_name}
-                onChange={(e) =>
-                  setDraft({ ...draft, model_name: e.target.value })
-                }
-                placeholder="claude-opus-4-7"
-                className={terminalInputClass}
-              />
-            </label>
-
-            <label className="block">
-              <FieldLabel>Base URL</FieldLabel>
-              <input
-                type="text"
-                value={draft.base_url ?? ""}
-                onChange={(e) =>
-                  setDraft({ ...draft, base_url: e.target.value || null })
-                }
-                placeholder="(provider default)"
-                className={terminalInputClass}
-              />
-            </label>
-
-            <label className="block">
-              <FieldLabel>Auth Token</FieldLabel>
-              <div className="relative">
-                <input
-                  type={tokenVisible ? "text" : "password"}
-                  value={draft.auth_token ?? ""}
-                  onChange={(e) =>
-                    setDraft({ ...draft, auth_token: e.target.value || null })
-                  }
-                  placeholder="(unset — uses provider env vars)"
-                  className={cn(terminalInputClass, "pr-12")}
-                />
-                <button
-                  type="button"
-                  onClick={() => setTokenVisible((v) => !v)}
-                  className="absolute inset-y-0 right-0 px-2 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
-                >
-                  {tokenVisible ? "Hide" : "Show"}
-                </button>
-              </div>
-            </label>
-          </>
-        )}
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.display_name}
+                {m.model_name ? ` — ${m.model_name}` : ""}
+              </option>
+            ))}
+          </select>
+          {models.length === 0 ? (
+            <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+              No saved models yet — add them in the Models tab.
+            </span>
+          ) : selectedModelId !== "" ? (
+            <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+              {draft.provider}
+              {draft.base_url ? ` · ${draft.base_url}` : ""}
+            </span>
+          ) : (
+            <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+              Current model isn’t in the registry — pick one, or add it in the
+              Models tab.
+            </span>
+          )}
+        </label>
 
         {cfg.agent_name === "rain" && (
           <label className="flex items-center gap-2 pt-1">
@@ -582,7 +476,6 @@ function AgentCard({
             disabled={!dirty || isSaving}
             onClick={() => {
               setDraft(cfg);
-              setTokenVisible(false);
               onDirtyChange(false);
             }}
             className="rounded border border-outline-variant bg-transparent px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
