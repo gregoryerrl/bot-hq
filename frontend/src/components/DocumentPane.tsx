@@ -194,9 +194,13 @@ function TrayPill({
 // accumulated while the user was AFK (and survived a restart) still appear.
 function TrayList({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
+  // Poll while the Tray tab is open (same cadence as the bell) so newly-parked
+  // pending appear and answered items drop without a manual tab-switch — the
+  // query only mounts when the Tray tab is shown, so this is idle otherwise.
   const { data: entries = [] } = useTauriQuery<SessionTrayView[]>(
     "list_session_tray",
     { sessionId },
+    { refetchInterval: 2_000 },
   );
   // Track which (choiceId, option) is mid-resolve so the clicked option shows
   // "…" and the row disables until resolve_choice settles + the tray refetches

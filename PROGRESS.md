@@ -21,6 +21,13 @@ constraint.
 
 ---
 
+## 2026-06-03 — Tray tab live-refreshes (2s poll)
+
+The Tray tab fetched `list_session_tray` once on mount, so newly-parked pending didn't appear (and
+answered items didn't drop) until the user switched tabs and back. Added `refetchInterval: 2_000` to
+the query (same cadence as the notification bell; the query only mounts while the Tray tab is shown,
+so it's idle otherwise) so the inbox updates live.
+
 ## 2026-06-03 — auto-supersede only true re-asks, so pending accumulate
 
 `auto_supersede_prior_pending` marked ANY prior pending from the same agent as `superseded` on
