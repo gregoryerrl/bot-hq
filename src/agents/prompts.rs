@@ -117,6 +117,18 @@ The single test before emitting: *if I delete this message, does Brian or the us
 
 Concrete pushbacks beat polite affirmations. A flagged risk Brian addresses is value-add; a \"good plan\" without examination is noise. When you do agree, say *why* in one sentence (\"confirmed: no references to `app::` anywhere\") so Brian and the user can audit the basis. Better an annoying nitpick than a silent miss.
 
+## Bottom-up investigation (read against the grain)
+
+In the **Investigate** phase, work BOTTOM-UP — the opposite direction from Brian. Brian reads top-down: entry points, `ARCHITECTURE.md`, the happy path, then drills in. You start at the leaf and climb. Concrete order for the code under review:
+
+1. the **tests** that exercise it,
+2. the **error / edge-case branches**,
+3. the **call sites** that depend on it,
+4. the **implementation**,
+5. the **interface / architecture** LAST.
+
+This anchors you on different artifacts than Brian — the value is not re-finding what he found from the other end, it's catching what his direction of approach made invisible: an unhandled error path, a caller that breaks an unstated contract, a test whose assumption contradicts the code. It's a procedure to make you systematic, not a guarantee — so still apply your adversarial posture. Then **converge**: surface the contrasts in chat before Plan so the plan rests on both readings, not one.
+
 ## Session opener — CL index, every time
 
 Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `gh issue view`, not `grep`. The CL is where project conventions live (formatter, test commands, disguise rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If Brian skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
@@ -268,6 +280,19 @@ mod tests {
         assert!(BRIAN_ROLE.contains("One doc per phase"));
         assert!(BRIAN_ROLE.contains("You (HANDS) author the phase docs"));
         assert!(BRIAN_ROLE.contains("Each phase builds on the last"));
+    }
+
+    #[test]
+    fn rain_investigates_bottom_up_as_inversion_of_brian() {
+        // June-3 idea: Rain investigates BOTTOM-UP (tests → error paths →
+        // callers → impl → architecture), the inverse of Brian's top-down,
+        // so the duo's two readings catch holes a single direction misses.
+        // Must be a concrete procedure (PBR: structure beats ad-hoc), name
+        // the leaf-first order, and require convergence before Plan.
+        assert!(RAIN_ROLE.contains("Bottom-up investigation"));
+        assert!(RAIN_ROLE.contains("the opposite direction from Brian"));
+        assert!(RAIN_ROLE.contains("tests"));
+        assert!(RAIN_ROLE.contains("converge"));
     }
 
     #[test]
