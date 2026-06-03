@@ -32,7 +32,7 @@ impl SignalingBridge {
         options: Vec<String>,
     ) -> Result<String> {
         let supersedes_id = self
-            .auto_supersede_prior_pending(&session_id, &agent)
+            .auto_supersede_prior_pending(&session_id, &agent, &question)
             .await;
         self.ask_user_choice_inner(session_id, agent, question, options, None, supersedes_id)
             .await
@@ -51,7 +51,7 @@ impl SignalingBridge {
         ctx: ApprovalContext,
     ) -> Result<String> {
         let supersedes_id = self
-            .auto_supersede_prior_pending(&session_id, &agent)
+            .auto_supersede_prior_pending(&session_id, &agent, &question)
             .await;
         self.ask_user_choice_inner(
             session_id,
@@ -117,20 +117,22 @@ impl SignalingBridge {
         .await
     }
 
-    /// Mark the latest pending question from `(session_id, agent)` as
-    /// superseded + remove it from `pending`. Returns the internal id of the
-    /// superseded row so the caller can link the new question via
-    /// `supersedes_id`. None means no prior pending was found.
+    /// Dedupe a true RE-ASK: mark a prior pending question from
+    /// `(session_id, agent)` with the SAME `prompt` as superseded + remove it
+    /// from `pending`. Returns that row's internal id (for the new row's
+    /// `supersedes_id`), or None when there's no matching prior pending.
     ///
-    /// Used by `ask_user_choice` / `request_approval` to auto-deduplicate
-    /// when the same agent re-asks (G2 in the per-session-question-cache
-    /// design — kills the timeout-retry-duplicate cascade at the bridge
-    /// layer regardless of whether the agent remembered to call
-    /// `withdraw_question` first).
+    /// Matching on `prompt` is load-bearing: it kills the timeout-retry
+    /// duplicate cascade (G2 — the agent re-issues the SAME ask after a
+    /// client-side timeout) WITHOUT collapsing DISTINCT questions/gates. Distinct
+    /// pending from one agent must accumulate in the tray so the user can answer
+    /// them all when they return from AFK — superseding them on every new ask
+    /// (the old behavior) defeated that.
     async fn auto_supersede_prior_pending(
         &self,
         session_id: &str,
         agent: &str,
+        prompt: &str,
     ) -> Option<i64> {
         let storage_guard = self.storage.lock().await;
         let storage = storage_guard.as_ref()?;
@@ -138,7 +140,7 @@ impl SignalingBridge {
         let latest = rows
             .into_iter()
             .rev()
-            .find(|q| q.agent == agent && q.status == "pending")?;
+            .find(|q| q.agent == agent && q.status == "pending" && q.prompt == prompt)?;
         let stale_choice_id = latest.choice_id.clone();
         let stale_internal_id = latest.id;
         // Mark in storage first so the UI tray drops it on its next poll.
@@ -910,11 +912,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_user_choice_auto_supersedes_prior_pending() {
-        // G2: when the same agent re-asks in the same session, the prior
-        // pending question gets flipped to 'superseded' automatically and
-        // the new row links back via supersedes_id. Without this, a
-        // timed-out re-ask would accumulate duplicates in the tray.
+    async fn ask_user_choice_auto_supersedes_reask_same_prompt() {
+        // G2: when the same agent re-asks the SAME question (timeout-retry), the
+        // prior pending row flips to 'superseded' and the new row links back via
+        // supersedes_id — so a re-issue doesn't duplicate in the tray. Match is
+        // on prompt: a re-ask has the same prompt.
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::open(&dir.path().join("test.db")).await.unwrap();
         storage.create_session("s1", "test", None).await.unwrap();
@@ -928,23 +930,22 @@ mod tests {
                 .ask_user_choice(
                     "s1".into(),
                     "brian".into(),
-                    "first".into(),
+                    "same question".into(),
                     vec!["a".into(), "b".into()],
                 )
                 .await
         });
-        // Give the first ask a moment to land in storage.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        // Second ask from same agent should auto-supersede the first.
+        // Re-ask the SAME prompt → supersedes the first.
         let bridge_clone = Arc::clone(&bridge);
         let second = tokio::spawn(async move {
             bridge_clone
                 .ask_user_choice(
                     "s1".into(),
                     "brian".into(),
-                    "second".into(),
-                    vec!["x".into(), "y".into()],
+                    "same question".into(),
+                    vec!["a".into(), "b".into()],
                 )
                 .await
         });
@@ -954,9 +955,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "two question rows expected");
         let first_row = &rows[0];
         let second_row = &rows[1];
-        assert_eq!(first_row.prompt, "first");
         assert_eq!(first_row.status, "superseded");
-        assert_eq!(second_row.prompt, "second");
         assert_eq!(second_row.status, "pending");
         assert_eq!(
             second_row.supersedes_id,
@@ -964,15 +963,63 @@ mod tests {
             "new row should link back to the superseded row"
         );
 
-        // The first ask's oneshot was dropped by auto-supersede; its task
-        // will resolve with an error. The second task is still parked —
-        // resolve it so the test cleans up.
         bridge
-            .resolve_choice(&second_row.choice_id, "x".into())
+            .resolve_choice(&second_row.choice_id, "a".into())
             .await
             .unwrap();
         let _ = first.await.unwrap();
         let _ = second.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn distinct_prompts_accumulate_not_superseded() {
+        // The AFK-accumulate goal: two DIFFERENT questions from the same agent
+        // both stay pending — auto-supersede only collapses a true re-ask of the
+        // same prompt, not distinct questions.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("test.db")).await.unwrap();
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+
+        let b1 = Arc::clone(&bridge);
+        let q1 = tokio::spawn(async move {
+            b1.ask_user_choice(
+                "s1".into(),
+                "brian".into(),
+                "question one".into(),
+                vec!["a".into(), "b".into()],
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let b2 = Arc::clone(&bridge);
+        let q2 = tokio::spawn(async move {
+            b2.ask_user_choice(
+                "s1".into(),
+                "brian".into(),
+                "question two".into(),
+                vec!["a".into(), "b".into()],
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let rows = storage.questions_for_session("s1").await.unwrap();
+        let pending: Vec<_> = rows.iter().filter(|r| r.status == "pending").collect();
+        assert_eq!(
+            pending.len(),
+            2,
+            "distinct prompts must both stay pending, got: {rows:?}"
+        );
+
+        // Clean up both parked oneshots.
+        for r in &rows {
+            let _ = bridge.resolve_choice(&r.choice_id, "a".into()).await;
+        }
+        let _ = q1.await.unwrap();
+        let _ = q2.await.unwrap();
     }
 
     #[tokio::test]

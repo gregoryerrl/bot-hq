@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-396 tests passing (347 lib + 32 external MCP + 7 signaling + 10 storage)
+398 tests passing (348 lib + 32 external MCP + 7 signaling + 11 storage)
 plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
@@ -20,6 +20,23 @@ plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-03 — auto-supersede only true re-asks, so pending accumulate
+
+`auto_supersede_prior_pending` marked ANY prior pending from the same agent as `superseded` on
+every new ask — so distinct questions/gates collapsed to the latest, defeating the "pending
+accumulate while the user is AFK" goal (the tray showed only the most recent of an agent's asks).
+Now it matches on `prompt`: a re-ask of the SAME prompt (the timeout-retry case it was built for)
+still supersedes, but distinct prompts both stay pending and accumulate.
+
+- `bridge/questions.rs`: `auto_supersede_prior_pending` gains a `prompt` param; the find filter adds
+  `q.prompt == prompt`. Callers (`ask_user_choice`, `request_approval`) pass the new question.
+- Tests: re-ask of same prompt supersedes + links via supersedes_id; two distinct prompts both stay
+  pending.
+
+Known related (not yet fixed): `close_session` doesn't withdraw a closed session's pending tray
+rows, so they linger as `pending` forever (currently 61 across ~55 old closed sessions). Harmless —
+the notifier's open-session filter hides them — but worth a cleanup + a close-time withdraw.
 
 ## 2026-06-03 — Notifications grouped per session ("Session-X needs your input [N]")
 
