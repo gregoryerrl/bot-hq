@@ -51,9 +51,6 @@ impl From<ModelView> for Model {
     }
 }
 
-/// Key in `app_settings` for the default model new sessions use for Brian + Rain.
-pub const DEFAULT_MODEL_KEY: &str = "default_model_id";
-
 #[tauri::command]
 #[specta::specta]
 pub async fn list_models(
@@ -89,43 +86,6 @@ pub async fn delete_model(
         .delete_model(&id)
         .await
         .map(|_| ())
-        .map_err(|e| AppError::DbError(e.to_string()))?;
-    // If the deleted model was the default, clear the dangling pointer.
-    let current = storage
-        .get_setting(DEFAULT_MODEL_KEY)
-        .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
-    if current.as_deref() == Some(id.as_str()) {
-        storage
-            .set_setting(DEFAULT_MODEL_KEY, "")
-            .await
-            .map_err(|e| AppError::DbError(e.to_string()))?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn get_default_model_id(
-    storage: tauri::State<'_, Arc<Storage>>,
-) -> Result<Option<String>, AppError> {
-    let v = storage
-        .get_setting(DEFAULT_MODEL_KEY)
-        .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
-    // Treat the empty sentinel (cleared default) as "no default".
-    Ok(v.filter(|s| !s.is_empty()))
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn set_default_model_id(
-    storage: tauri::State<'_, Arc<Storage>>,
-    id: String,
-) -> Result<(), AppError> {
-    storage
-        .set_setting(DEFAULT_MODEL_KEY, &id)
-        .await
         .map_err(|e| AppError::DbError(e.to_string()))
 }
 

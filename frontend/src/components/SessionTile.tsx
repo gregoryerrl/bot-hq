@@ -69,6 +69,14 @@ export function SessionTile({
               {formatSessionId(session.id)}
             </code>
             <SessionPhaseChip phase={phase} closed={closed} />
+            {!session.rain_enabled && (
+              <span
+                className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"
+                title="Solo Brian — Rain disabled"
+              >
+                SOLO
+              </span>
+            )}
           </div>
           <span className="shrink-0 font-code-sm text-code-sm text-on-surface-variant">
             {formatRelative(session.created_at)}

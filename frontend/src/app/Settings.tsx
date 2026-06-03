@@ -12,6 +12,7 @@ import type {
   AgentConfigView,
   GatedKeyword,
   GateMode,
+  ModelView,
   Policy,
   SessionInfo,
 } from "../lib/bindings";
@@ -203,6 +204,7 @@ function AgentsPanel() {
   const { data: configs = [], refetch, isLoading } = useTauriQuery<
     AgentConfigView[]
   >("list_agent_configs");
+  const { data: models = [] } = useTauriQuery<ModelView[]>("list_models");
   const upsert = useTauriMutation<void, { cfg: AgentConfigView }>(
     "upsert_agent_config",
   );
@@ -285,6 +287,7 @@ function AgentsPanel() {
             <AgentCard
               key={c.agent_name}
               cfg={c}
+              models={models}
               onSave={async (next) => {
                 await upsert.mutateAsync({ cfg: next });
                 setDirty(c.agent_name, false);
@@ -303,12 +306,14 @@ function AgentsPanel() {
 
 function AgentCard({
   cfg,
+  models,
   onSave,
   onDirtyChange,
   isSaving,
   saveAllSignal,
 }: {
   cfg: AgentConfigView;
+  models: ModelView[];
   onSave: (next: AgentConfigView) => Promise<void>;
   onDirtyChange: (dirty: boolean) => void;
   isSaving?: boolean;
@@ -317,7 +322,34 @@ function AgentCard({
   const [draft, setDraft] = useState(cfg);
   const [tokenVisible, setTokenVisible] = useState(false);
   const [saved, setSaved] = useState(false);
+  // Force the custom (free-text) view even when the draft happens to match a
+  // saved model — set when the user explicitly picks "Custom…".
+  const [customMode, setCustomMode] = useState(false);
   const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
+
+  // Rain-only "disable by default" preference (app_settings). The hooks run for
+  // every card (React Query dedupes) but only Rain renders the checkbox.
+  const { data: rainDisabledDefault, refetch: refetchRainDefault } =
+    useTauriQuery<string | null>("get_app_setting", {
+      key: "rain_disabled_default",
+    });
+  const setAppSetting = useTauriMutation<void, { key: string; value: string }>(
+    "set_app_setting",
+  );
+
+  const isEmma = cfg.agent_name === "emma";
+  // Which saved model (if any) the current config corresponds to. Exact match
+  // on the spawn-relevant fields so the dropdown reflects the agent's model.
+  const selectedModelId =
+    models.find(
+      (m) =>
+        m.provider === draft.provider &&
+        m.model_name === draft.model_name &&
+        (m.base_url ?? "") === (draft.base_url ?? ""),
+    )?.id ?? "";
+  // Show free-text detail fields for Emma always, or when no saved model
+  // matches / the user chose Custom.
+  const showCustom = isEmma || customMode || selectedModelId === "";
 
   // Save-all fan-out: parent increments saveAllSignal; each dirty row
   // triggers its own save. Skipping initial mount via a ref guards against
@@ -384,85 +416,159 @@ function AgentCard({
 
       {/* Form fields */}
       <div className="flex flex-1 flex-col gap-4">
-        <label className="block">
-          <FieldLabel>Provider</FieldLabel>
-          <select
-            value={providerIsCustom ? "other" : draft.provider}
-            onChange={(e) => {
-              if (e.target.value === "other") {
-                setDraft({ ...draft, provider: "" });
-              } else {
-                setDraft({ ...draft, provider: e.target.value });
-              }
-            }}
-            className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-          >
-            <option value="anthropic">Anthropic</option>
-            <option value="openai">OpenAI</option>
-            <option value="deepseek">DeepSeek</option>
-            <option value="local">Local (llama.cpp)</option>
-            <option value="other">Other (custom)</option>
-          </select>
-          {providerIsCustom && (
-            <input
-              type="text"
-              value={draft.provider}
-              onChange={(e) =>
-                setDraft({ ...draft, provider: e.target.value })
-              }
-              placeholder="Custom provider"
-              className={cn("mt-2", terminalInputClass)}
-            />
-          )}
-        </label>
-
-        <label className="block">
-          <FieldLabel>Model Name</FieldLabel>
-          <input
-            type="text"
-            value={draft.model_name}
-            onChange={(e) =>
-              setDraft({ ...draft, model_name: e.target.value })
-            }
-            placeholder="claude-opus-4-7"
-            className={terminalInputClass}
-          />
-        </label>
-
-        <label className="block">
-          <FieldLabel>Base URL</FieldLabel>
-          <input
-            type="text"
-            value={draft.base_url ?? ""}
-            onChange={(e) =>
-              setDraft({ ...draft, base_url: e.target.value || null })
-            }
-            placeholder="(provider default)"
-            className={terminalInputClass}
-          />
-        </label>
-
-        <label className="block">
-          <FieldLabel>Auth Token</FieldLabel>
-          <div className="relative">
-            <input
-              type={tokenVisible ? "text" : "password"}
-              value={draft.auth_token ?? ""}
-              onChange={(e) =>
-                setDraft({ ...draft, auth_token: e.target.value || null })
-              }
-              placeholder="(unset — uses provider env vars)"
-              className={cn(terminalInputClass, "pr-12")}
-            />
-            <button
-              type="button"
-              onClick={() => setTokenVisible((v) => !v)}
-              className="absolute inset-y-0 right-0 px-2 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
+        {/* Brian + Rain pick from saved models; their choice IS their default
+            model for new sessions. Emma keeps free-text (out of scope). */}
+        {!isEmma && (
+          <label className="block">
+            <FieldLabel>Model</FieldLabel>
+            <select
+              value={showCustom ? "__custom__" : selectedModelId}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v === "__custom__") {
+                  setCustomMode(true);
+                  return;
+                }
+                const m = models.find((x) => x.id === v);
+                if (m) {
+                  setCustomMode(false);
+                  setDraft({
+                    ...draft,
+                    provider: m.provider,
+                    model_name: m.model_name,
+                    base_url: m.base_url,
+                    auth_token: m.auth_token,
+                  });
+                }
+              }}
+              className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
             >
-              {tokenVisible ? "Hide" : "Show"}
-            </button>
-          </div>
-        </label>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.display_name}
+                  {m.model_name ? ` — ${m.model_name}` : ""}
+                </option>
+              ))}
+              <option value="__custom__">Custom…</option>
+            </select>
+            {models.length === 0 ? (
+              <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+                No saved models yet — add them in the Models tab.
+              </span>
+            ) : (
+              !showCustom && (
+                <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+                  {draft.provider}
+                  {draft.base_url ? ` · ${draft.base_url}` : ""}
+                </span>
+              )
+            )}
+          </label>
+        )}
+
+        {showCustom && (
+          <>
+            <label className="block">
+              <FieldLabel>Provider</FieldLabel>
+              <select
+                value={providerIsCustom ? "other" : draft.provider}
+                onChange={(e) => {
+                  if (e.target.value === "other") {
+                    setDraft({ ...draft, provider: "" });
+                  } else {
+                    setDraft({ ...draft, provider: e.target.value });
+                  }
+                }}
+                className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+              >
+                <option value="anthropic">Anthropic</option>
+                <option value="openai">OpenAI</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="local">Local (llama.cpp)</option>
+                <option value="other">Other (custom)</option>
+              </select>
+              {providerIsCustom && (
+                <input
+                  type="text"
+                  value={draft.provider}
+                  onChange={(e) =>
+                    setDraft({ ...draft, provider: e.target.value })
+                  }
+                  placeholder="Custom provider"
+                  className={cn("mt-2", terminalInputClass)}
+                />
+              )}
+            </label>
+
+            <label className="block">
+              <FieldLabel>Model Name</FieldLabel>
+              <input
+                type="text"
+                value={draft.model_name}
+                onChange={(e) =>
+                  setDraft({ ...draft, model_name: e.target.value })
+                }
+                placeholder="claude-opus-4-7"
+                className={terminalInputClass}
+              />
+            </label>
+
+            <label className="block">
+              <FieldLabel>Base URL</FieldLabel>
+              <input
+                type="text"
+                value={draft.base_url ?? ""}
+                onChange={(e) =>
+                  setDraft({ ...draft, base_url: e.target.value || null })
+                }
+                placeholder="(provider default)"
+                className={terminalInputClass}
+              />
+            </label>
+
+            <label className="block">
+              <FieldLabel>Auth Token</FieldLabel>
+              <div className="relative">
+                <input
+                  type={tokenVisible ? "text" : "password"}
+                  value={draft.auth_token ?? ""}
+                  onChange={(e) =>
+                    setDraft({ ...draft, auth_token: e.target.value || null })
+                  }
+                  placeholder="(unset — uses provider env vars)"
+                  className={cn(terminalInputClass, "pr-12")}
+                />
+                <button
+                  type="button"
+                  onClick={() => setTokenVisible((v) => !v)}
+                  className="absolute inset-y-0 right-0 px-2 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
+                >
+                  {tokenVisible ? "Hide" : "Show"}
+                </button>
+              </div>
+            </label>
+          </>
+        )}
+
+        {cfg.agent_name === "rain" && (
+          <label className="flex items-center gap-2 pt-1">
+            <input
+              type="checkbox"
+              checked={rainDisabledDefault === "1"}
+              onChange={async (e) => {
+                await setAppSetting.mutateAsync({
+                  key: "rain_disabled_default",
+                  value: e.target.checked ? "1" : "",
+                });
+                refetchRainDefault();
+              }}
+              className="size-4 accent-primary"
+            />
+            <span className="font-body-md text-body-md text-on-surface">
+              Disable Rain by default (new sessions start solo)
+            </span>
+          </label>
+        )}
       </div>
 
       {/* Footer: updated-at + reset/save */}

@@ -13,6 +13,7 @@ const session: SessionInfo = {
   closed_at: null,
   brian_model_at_spawn: null,
   rain_model_at_spawn: null,
+  rain_enabled: true,
 };
 
 const binaryChoice: PendingChoiceView = {

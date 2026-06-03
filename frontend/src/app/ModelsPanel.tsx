@@ -20,30 +20,16 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * Settings → Models. A user-managed registry of LLM endpoints. Each saved model
- * bundles provider + model id + optional base_url/auth_token; sessions pick a
- * model for Brian and Rain at create time (defaulting to the one chosen here).
- * Emma is out of scope — she keeps her own per-agent config on the Agents tab.
+ * Settings → Models. A pure registry of saved LLM endpoints (display name +
+ * provider + model id + optional base_url/auth_token). Agents pick from these
+ * on their own card in the Agents tab; sessions pick at create time. No default
+ * lives here — each agent's selected model on the Agents tab IS its default.
  */
 export function ModelsPanel() {
   const { data: models = [], refetch, isLoading } =
     useTauriQuery<ModelView[]>("list_models");
-  const { data: defaultId, refetch: refetchDefault } = useTauriQuery<
-    string | null
-  >("get_default_model_id");
-
-  const { data: rainDisabledDefault, refetch: refetchRainDefault } =
-    useTauriQuery<string | null>("get_app_setting", {
-      key: "rain_disabled_default",
-    });
 
   const upsert = useTauriMutation<void, { model: ModelView }>("upsert_model");
-  const setDefault = useTauriMutation<void, { id: string }>(
-    "set_default_model_id",
-  );
-  const setAppSetting = useTauriMutation<void, { key: string; value: string }>(
-    "set_app_setting",
-  );
 
   const addModel = async () => {
     const id = crypto.randomUUID();
@@ -70,53 +56,13 @@ export function ModelsPanel() {
             Models
           </h1>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
-            Saved LLM endpoints. Sessions pick a model for Brian and Rain at
-            create time; the default below is pre-selected for new sessions.
+            Saved LLM endpoints. Assign one to each agent on the Agents tab, or
+            pick per-agent when you create a session.
           </p>
         </div>
         <Button variant="primary" onClick={addModel} disabled={upsert.isPending}>
           + Add model
         </Button>
-      </div>
-
-      {/* Default model for new sessions */}
-      <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-outline-variant bg-surface-container px-4 py-3">
-        <span className="font-label-caps text-label-caps text-on-surface-variant">
-          Default for new sessions
-        </span>
-        <select
-          value={defaultId ?? ""}
-          onChange={async (e) => {
-            await setDefault.mutateAsync({ id: e.target.value });
-            refetchDefault();
-          }}
-          disabled={models.length === 0}
-          className={cn(selectClass, "max-w-xs")}
-        >
-          <option value="">(none)</option>
-          {models.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.display_name}
-            </option>
-          ))}
-        </select>
-        <label className="ml-auto flex items-center gap-2">
-          <input
-            type="checkbox"
-            checked={rainDisabledDefault === "1"}
-            onChange={async (e) => {
-              await setAppSetting.mutateAsync({
-                key: "rain_disabled_default",
-                value: e.target.checked ? "1" : "",
-              });
-              refetchRainDefault();
-            }}
-            className="size-4 accent-primary"
-          />
-          <span className="font-body-md text-body-md text-on-surface">
-            Disable Rain by default
-          </span>
-        </label>
       </div>
 
       {isLoading ? (
@@ -130,22 +76,12 @@ export function ModelsPanel() {
         </div>
       ) : models.length === 0 ? (
         <p className="font-body-md text-body-md text-on-surface-variant">
-          No saved models yet. Add one to assign it to Brian or Rain on a new
-          session.
+          No saved models yet. Add one to assign it to an agent.
         </p>
       ) : (
         <div className="grid grid-cols-1 gap-gutter xl:grid-cols-3">
           {models.map((m) => (
-            <ModelCard
-              key={m.id}
-              model={m}
-              isDefault={m.id === defaultId}
-              onSaved={refetch}
-              onDeleted={() => {
-                refetch();
-                refetchDefault();
-              }}
-            />
+            <ModelCard key={m.id} model={m} onSaved={refetch} onDeleted={refetch} />
           ))}
         </div>
       )}
@@ -155,12 +91,10 @@ export function ModelsPanel() {
 
 function ModelCard({
   model,
-  isDefault,
   onSaved,
   onDeleted,
 }: {
   model: ModelView;
-  isDefault: boolean;
   onSaved: () => void;
   onDeleted: () => void;
 }) {
@@ -180,11 +114,6 @@ function ModelCard({
         <h2 className="truncate font-headline-md text-headline-md text-on-surface">
           {draft.display_name || "Untitled model"}
         </h2>
-        {isDefault && (
-          <span className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary">
-            Default
-          </span>
-        )}
       </div>
 
       <div className="flex flex-1 flex-col gap-4">

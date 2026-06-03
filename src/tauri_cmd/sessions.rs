@@ -19,6 +19,8 @@ pub struct SessionInfo {
     pub closed_at: Option<String>,
     pub brian_model_at_spawn: Option<String>,
     pub rain_model_at_spawn: Option<String>,
+    /// False = solo-Brian session (Rain disabled at create).
+    pub rain_enabled: bool,
 }
 
 impl From<Session> for SessionInfo {
@@ -32,6 +34,7 @@ impl From<Session> for SessionInfo {
             closed_at: s.closed_at,
             brian_model_at_spawn: s.brian_model_at_spawn,
             rain_model_at_spawn: s.rain_model_at_spawn,
+            rain_enabled: s.rain_enabled != 0,
         }
     }
 }

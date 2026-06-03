@@ -4,6 +4,7 @@ import { SessionTile } from "../components/SessionTile";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
+  AgentConfigView,
   ModelView,
   PendingChoiceView,
   ProjectView,
@@ -68,8 +69,14 @@ export function Dashboard() {
     {},
     { refetchInterval: 60_000 },
   );
-  const { data: defaultModelId } = useTauriQuery<string | null>(
-    "get_default_model_id",
+  // Each agent's configured model (Agents tab) is its default for new sessions.
+  const { data: brianConfig } = useTauriQuery<AgentConfigView | null>(
+    "get_agent_config",
+    { agentName: "brian" },
+  );
+  const { data: rainConfig } = useTauriQuery<AgentConfigView | null>(
+    "get_agent_config",
+    { agentName: "rain" },
   );
   const { data: rainDisabledDefault } = useTauriQuery<string | null>(
     "get_app_setting",
@@ -122,8 +129,15 @@ export function Dashboard() {
   // the dialog opens (not on every query change, so user edits aren't clobbered).
   useEffect(() => {
     if (!creating) return;
-    setBrianModelId(defaultModelId ?? "");
-    setRainModelId(defaultModelId ?? "");
+    const modelIdFor = (cfg: AgentConfigView | null | undefined) =>
+      models.find(
+        (m) =>
+          m.provider === cfg?.provider &&
+          m.model_name === cfg?.model_name &&
+          (m.base_url ?? "") === (cfg?.base_url ?? ""),
+      )?.id ?? "";
+    setBrianModelId(modelIdFor(brianConfig));
+    setRainModelId(modelIdFor(rainConfig));
     setDisableRain(rainDisabledDefault === "1");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creating]);

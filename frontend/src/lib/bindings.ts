@@ -205,22 +205,6 @@ async deleteModel(id: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async getDefaultModelId() : Promise<Result<string | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_default_model_id") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async setDefaultModelId(id: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_default_model_id", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async getAppSetting(key: string) : Promise<Result<string | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_app_setting", { key }) };
@@ -1074,7 +1058,11 @@ export type PushGateMode =
  */
 "ask"
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
-export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null }
+export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null; 
+/**
+ * False = solo-Brian session (Rain disabled at create).
+ */
+rain_enabled: boolean }
 /**
  * One durable `session_tray` row, projected for the session-view Tray tab.
  * Unlike [`PendingChoiceView`] (live in-memory pending only), this surfaces
