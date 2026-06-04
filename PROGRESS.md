@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(storage): cl_index/cl_folders upsert returns the real id (F1).** Both
+  `upsert_cl_index` and `upsert_folder_description` returned `last_insert_rowid()`,
+  which on an upsert that takes the DO UPDATE branch can report the bumped (unused)
+  AUTOINCREMENT value instead of the real row id — the exact footgun already fixed
+  in `session_docs.rs`. Switched both to `RETURNING id`. Latent (no caller trusts
+  the returned id today), so zero behavior change — purely removes the landmine.
 - **fix(ui): Enter sends in the chat; Shift+Enter for a newline (D8).** The chat
   textarea required ⌘/Ctrl+Enter — bare Enter just inserted a newline, which read
   as "Enter doesn't work". Now bare Enter sends (⌘/Ctrl+Enter still works as an

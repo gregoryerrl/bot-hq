@@ -17,13 +17,18 @@ impl Storage {
         tags: Option<&str>,
     ) -> Result<i64> {
         let now = now_utc();
-        let res = sqlx::query(
+        // RETURNING id yields the real row id on BOTH the INSERT and the DO
+        // UPDATE branch; `last_insert_rowid()` can report the bumped (unused)
+        // AUTOINCREMENT value on an upsert that took the UPDATE branch (same
+        // footgun fixed in session_docs.rs).
+        let row: (i64,) = sqlx::query_as(
             "INSERT INTO cl_index (project_id, file_path, description, tags, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT(project_id, file_path) DO UPDATE SET \
                 description = excluded.description, \
                 tags = excluded.tags, \
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at \
+             RETURNING id",
         )
         .bind(project_id)
         .bind(file_path)
@@ -31,10 +36,10 @@ impl Storage {
         .bind(tags)
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .with_context(|| format!("upserting cl_index {project_id}/{file_path}"))?;
-        Ok(res.last_insert_rowid())
+        Ok(row.0)
     }
 
     /// Update only the updated_at timestamp — used by lazy stat sync when
@@ -133,13 +138,14 @@ impl Storage {
         tags: Option<&str>,
     ) -> Result<i64> {
         let now = now_utc();
-        let res = sqlx::query(
+        let row: (i64,) = sqlx::query_as(
             "INSERT INTO cl_folders (project_id, folder_path, description, tags, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT(project_id, folder_path) DO UPDATE SET \
                 description = excluded.description, \
                 tags = excluded.tags, \
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at \
+             RETURNING id",
         )
         .bind(project)
         .bind(folder_path)
@@ -147,10 +153,10 @@ impl Storage {
         .bind(tags)
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
         .with_context(|| format!("upserting cl_folders {project}/{folder_path}"))?;
-        Ok(res.last_insert_rowid())
+        Ok(row.0)
     }
 
     pub async fn delete_folder_description(
