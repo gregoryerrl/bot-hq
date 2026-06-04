@@ -275,31 +275,35 @@ fn main() -> Result<()> {
             // consumer: it routes the event to core.close_session, which kills
             // the subprocesses, marks the row closed/archived, and wipes the
             // session's permission grants.
-            let core_for_close = Arc::clone(&core_for_setup);
-            let mut close_rx = core_for_close.subscribe_signaling();
+            // Control-event consumer for the agent-facing `close_session` /
+            // `advance_phase` MCP tools (they only broadcast a SignalingEvent;
+            // bridge_subscriber deliberately skips SessionCloseRequest and only
+            // emits the frontend chip for AgentAdvancePhase, so without this the
+            // backend close/advance never happens). The slow work (close kills
+            // subprocesses) runs on a SEPARATE serial worker fed by an unbounded
+            // queue — the broadcast recv loop only matches + hands off, so it
+            // never blocks. A blocking handler used to let a MessagePersisted
+            // flood lag the shared channel and silently DROP a close/advance.
+            let core_for_worker = Arc::clone(&core_for_setup);
+            let mut close_rx = core_for_setup.subscribe_signaling();
+            let (ctrl_tx, mut ctrl_rx) =
+                tokio::sync::mpsc::unbounded_channel::<bot_hq::signaling::SignalingEvent>();
             tokio::spawn(async move {
                 use bot_hq::signaling::SignalingEvent;
-                use tokio::sync::broadcast::error::RecvError;
-                loop {
-                    match close_rx.recv().await {
-                        Ok(SignalingEvent::SessionCloseRequest { session_id, archive, .. }) => {
+                while let Some(ev) = ctrl_rx.recv().await {
+                    match ev {
+                        SignalingEvent::SessionCloseRequest { session_id, archive, .. } => {
                             if let Err(e) =
-                                core_for_close.close_session(&session_id, archive).await
+                                core_for_worker.close_session(&session_id, archive).await
                             {
                                 tracing::warn!(?e, %session_id, "close_session via MCP event failed");
                             }
                         }
-                        // Agent self-advance (the `advance_phase` MCP tool) only
-                        // fires AgentAdvancePhase. bridge_subscriber emits the
-                        // frontend chip event, but nothing advanced the backend
-                        // IpavState, so peer-forward envelopes stayed stuck on the
-                        // default phase. Route it to core.advance_phase here — the
-                        // user chip-click path already does this via tauri_cmd.
-                        Ok(SignalingEvent::AgentAdvancePhase { session_id, target, .. }) => {
+                        SignalingEvent::AgentAdvancePhase { session_id, target, .. } => {
                             match bot_hq::core::ipav::IpavPhase::parse(&target) {
                                 Some(phase) => {
                                     if let Err(e) =
-                                        core_for_close.advance_phase(&session_id, phase).await
+                                        core_for_worker.advance_phase(&session_id, phase).await
                                     {
                                         tracing::warn!(?e, %session_id, %target, "advance_phase via MCP event failed");
                                     }
@@ -309,9 +313,25 @@ fn main() -> Result<()> {
                                 }
                             }
                         }
+                        _ => {}
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                use bot_hq::signaling::SignalingEvent;
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    match close_rx.recv().await {
+                        Ok(
+                            ev @ (SignalingEvent::SessionCloseRequest { .. }
+                            | SignalingEvent::AgentAdvancePhase { .. }),
+                        ) => {
+                            // Unbounded hand-off → never blocks the broadcast drain.
+                            let _ = ctrl_tx.send(ev);
+                        }
                         Ok(_) => {}
                         Err(RecvError::Lagged(n)) => {
-                            tracing::warn!(skipped = n, "close-request subscriber lagged");
+                            tracing::warn!(skipped = n, "control subscriber lagged");
                         }
                         Err(RecvError::Closed) => break,
                     }

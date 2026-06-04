@@ -26,6 +26,17 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(core): stop dropping control events under load (A3).** `SessionCloseRequest`
+  / `AgentAdvancePhase` shared the one 64-slot broadcast channel with per-chunk
+  `MessagePersisted`, and the main.rs handler `.await`ed the slow core work (close
+  kills subprocesses) INLINE in the recv loop — so a chunk flood during a close
+  could lag the channel and silently drop a close/advance (subprocess kept
+  running / phase never advanced on the backend). Now the recv loop only matches +
+  hands off to a serial unbounded worker (never blocks), and the channel headroom
+  went 64→1024. (E2 — dropping the redundant tray/phase polls — stays deferred:
+  the *frontend* subscriber still only logs on Lagged without re-syncing, so the
+  polls remain a cheap safety net; low value now that E1 made invalidation
+  targeted.)
 - **fix(agents): recover a deaf agent instead of bridging to it forever (A2).** Root
   of the #4 user→HANDS desync. The supervisor holds the public input receiver and
   forwards to the per-incarnation stdin pump with `let _ =`; when that pump died

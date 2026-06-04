@@ -180,7 +180,14 @@ impl SignalingBridge {
         violations: Option<ViolationsLog>,
         data_dir: Option<PathBuf>,
     ) -> Arc<Self> {
-        let (event_tx, _) = broadcast::channel(64);
+        // Sized generously: every stream chunk fires MessagePersisted and several
+        // consumers share this one channel (the Tauri subscriber, external
+        // wait_for_change, the main.rs control handler). A small buffer let a
+        // brief consumer stall drop low-frequency-but-critical control events
+        // (SessionCloseRequest / AgentAdvancePhase) under a chunk flood. 1024
+        // gives wide headroom; the main.rs handler also no longer blocks its
+        // recv loop on slow work (it hands off to a serial worker).
+        let (event_tx, _) = broadcast::channel(1024);
         Arc::new(Self {
             event_tx,
             pending: Mutex::new(HashMap::new()),
