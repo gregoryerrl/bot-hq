@@ -22,7 +22,9 @@ impl Storage {
         body: &str,
         phase: Option<&str>,
     ) -> Result<i64> {
-        let now = chrono::Utc::now().to_rfc3339();
+        // Project standard: RFC3339-Z via now_utc() (matches every other write
+        // site + the time.rs baseline), not chrono's `+00:00` offset form.
+        let now = now_utc();
         // `RETURNING id` yields the row id for BOTH the INSERT and the DO
         // UPDATE branch (SQLite >= 3.35), so we never trust `last_insert_rowid()`
         // here: on an upsert that takes the UPDATE branch it can report the

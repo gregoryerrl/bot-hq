@@ -26,6 +26,15 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **tidy: session_doc timestamp + dedup push-gate action string (F2, C4).** F2:
+  `upsert_session_document` used `chrono::Utc::now().to_rfc3339()` (`+00:00`) instead
+  of the project-standard `now_utc()` (`Z`) — cosmetic, but it broke the single
+  UTC-baseline invariant. C4: the `git push (<branch>)` violation/approval action
+  string was built independently in `policy::hooks` and `signaling::server`; hoisted
+  to one `policy::push_gate_action` helper so the audit log can't show two shapes.
+  (F1 — cl_index `last_insert_rowid` → `RETURNING id` — left as-is: it's latent, no
+  caller trusts the returned id, and the table's PK shape makes the change higher
+  risk than the dormant landmine warrants.)
 - **docs: correct the PluginManager status (finding 33).** ARCHITECTURE.md called
   the Plugins tab "Placeholder UI" and PLAN.md said the frontend install/heartbeat
   wiring "is not" done — both stale: `PluginManager.tsx` has working

@@ -324,6 +324,17 @@ pub(crate) fn check_unknown_policy_keys(path: &Path, body: &str, known: &[&str])
     unknown
 }
 
+/// The canonical `action` string for a push-gate violation/approval. The
+/// git-hook denial path (`policy::hooks`) and the live approval prompt
+/// (`signaling::server`) both record this, so they must agree on its shape —
+/// build it in one place.
+pub fn push_gate_action(branch: Option<&str>) -> String {
+    match branch {
+        Some(b) => format!("git push ({b})"),
+        None => "git push".to_string(),
+    }
+}
+
 fn load_one(path: &Path) -> Result<Option<Policy>> {
     let body = match std::fs::read_to_string(path) {
         Ok(s) => s,

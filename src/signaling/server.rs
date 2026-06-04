@@ -200,15 +200,10 @@ async fn handle_pre_push(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    let (action, question) = match &branch {
-        Some(b) => (
-            format!("git push ({b})"),
-            format!("Allow `git push` to `{b}` in this session's repo?"),
-        ),
-        None => (
-            "git push".to_string(),
-            "Allow `git push` in this session's repo?".to_string(),
-        ),
+    let action = crate::policy::push_gate_action(branch.as_deref());
+    let question = match &branch {
+        Some(b) => format!("Allow `git push` to `{b}` in this session's repo?"),
+        None => "Allow `git push` in this session's repo?".to_string(),
     };
     let ctx = ApprovalContext {
         kind: ViolationKind::PushGate,

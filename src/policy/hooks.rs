@@ -483,10 +483,7 @@ async fn log_push_block(
     branch: Option<&str>,
     reason: &str,
 ) {
-    let action = match branch {
-        Some(b) => format!("git push ({b})"),
-        None => "git push".to_string(),
-    };
+    let action = crate::policy::push_gate_action(branch);
     let log = ViolationsLog::new(data_dir);
     let _ = log
         .record(
