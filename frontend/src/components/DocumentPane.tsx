@@ -52,19 +52,19 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
     if (sessionPhase) setActivePhase(sessionPhase);
   }, [sessionPhase]);
 
-  const { data: docs = [] } = useTauriQuery<SessionDocumentView[]>(
-    "session_doc_search",
-    { sessionId, phase: activePhase },
-  );
+  const { data: docs = [], error: docsError } = useTauriQuery<
+    SessionDocumentView[]
+  >("session_doc_search", { sessionId, phase: activePhase });
 
   // Apply tab gets a live git diff above the phase=apply session docs.
   // Refetches on session change; Apply tab visibility doesn't matter for the
   // query — TanStack Query caches it for instant switch-back.
-  const { data: applyDiff } = useTauriQuery<ComputeApplyDiffResult>(
-    "compute_apply_diff",
-    { sessionId },
-    { enabled: !!sessionId && activePhase === "apply" },
-  );
+  const { data: applyDiff, error: diffError } =
+    useTauriQuery<ComputeApplyDiffResult>(
+      "compute_apply_diff",
+      { sessionId },
+      { enabled: !!sessionId && activePhase === "apply" },
+    );
 
   const activeDocs = docs.filter((d) => d.phase === activePhase);
 
@@ -102,11 +102,20 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
           <TrayList sessionId={sessionId} />
         ) : (
           <>
-            {activePhase === "apply" && (
-              <ApplyDiffBlock diff={applyDiff ?? null} />
-            )}
+            {activePhase === "apply" &&
+              (diffError ? (
+                <p className="mb-3 text-sm text-on-error-container">
+                  Couldn't compute the diff: {diffError.message}
+                </p>
+              ) : (
+                <ApplyDiffBlock diff={applyDiff ?? null} />
+              ))}
             {activeDocs.length === 0 ? (
-              activePhase === "apply" && applyDiff?.lines.length ? null : (
+              docsError ? (
+                <p className="text-sm text-on-error-container">
+                  Couldn't load {activePhase} documents: {docsError.message}
+                </p>
+              ) : activePhase === "apply" && applyDiff?.lines.length ? null : (
                 <p className="text-sm text-on-surface-variant">
                   No {activePhase} documents yet.
                 </p>

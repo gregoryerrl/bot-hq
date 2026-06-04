@@ -26,6 +26,10 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(ui): distinguish DocumentPane load errors from empty (D6).** The
+  `session_doc_search` and `compute_apply_diff` queries didn't expose `error`, so a
+  failed fetch rendered identically to a genuine empty ("No {phase} documents yet."
+  / a blank diff). Surface the error text distinctly for each.
 - **tidy: session_doc timestamp + dedup push-gate action string (F2, C4).** F2:
   `upsert_session_document` used `chrono::Utc::now().to_rfc3339()` (`+00:00`) instead
   of the project-standard `now_utc()` (`Z`) — cosmetic, but it broke the single
