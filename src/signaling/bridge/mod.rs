@@ -240,6 +240,16 @@ impl SignalingBridge {
         }
     }
 
+    /// Drop a session's bridge-side state (project mapping + awaiting flag) when
+    /// it closes. Without this, `session_projects` + `session_awaiting` grow
+    /// unbounded across open→close cycles — each closed session leaks a map entry
+    /// (and a dangling `Arc<AtomicBool>`) for the process lifetime. Idempotent —
+    /// absent entries are fine. Called from `core::close_session`.
+    pub async fn unregister_session(&self, session_id: &str) {
+        self.session_projects.lock().await.remove(session_id);
+        self.session_awaiting.lock().await.remove(session_id);
+    }
+
     // ---- Project helpers --------------------------------------------
 
     /// Best-effort lookup. Returns the registered project (if any) or None

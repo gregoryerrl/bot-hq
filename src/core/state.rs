@@ -224,6 +224,9 @@ impl AppState {
         if let Err(e) = self.bridge.cleanup_session_policy(id).await {
             tracing::warn!(?e, session_id = %id, "cleanup_session_policy failed");
         }
+        // Drop the bridge's in-memory per-session state (project map + awaiting
+        // flag) so closed sessions don't leak map entries for the process life.
+        self.bridge.unregister_session(id).await;
         // Tell the UI the session is closed so it can navigate away from the
         // (now-closed) session view + refresh its session lists.
         self.bridge.notify_session_closed(id.to_string());
@@ -265,7 +268,12 @@ impl AppState {
             self.bridge
                 .notify_message_persisted("emma".into(), id);
             let msg = crate::agents::OutgoingUserMessage::text(text);
-            let _ = handle.agent.input_tx.send(msg).await;
+            if let Err(e) = handle.agent.input_tx.send(msg).await {
+                // Pump gone — the message is persisted + shown in chat but Emma
+                // never sees it. Log instead of swallowing so the desync is
+                // diagnosable (same class as the duo broadcast/desync path).
+                tracing::warn!(?e, "emma broadcast send failed; input pump gone");
+            }
             return Ok(());
         }
         let sessions = self.sessions.lock().await;
@@ -346,7 +354,12 @@ impl AppState {
                     if let Some(handle) = emma.as_ref() {
                         // Emma is solo — no IPAV phase tracked; send raw.
                         let msg = crate::agents::OutgoingUserMessage::text(&body);
-                        let _ = handle.agent.input_tx.send(msg).await;
+                        if let Err(e) = handle.agent.input_tx.send(msg).await {
+                            tracing::warn!(
+                                ?e,
+                                "emma OOB resolve send failed; input pump gone"
+                            );
+                        }
                     }
                     return Ok(());
                 }

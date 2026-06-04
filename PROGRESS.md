@@ -26,6 +26,15 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(core): prune bridge session maps on close; log swallowed Emma sends (A4, A5).**
+  `close_session` cleaned the sessions map, tray, and policy snapshot but never the
+  bridge's `session_projects` / `session_awaiting` maps — each open→close leaked a
+  map entry + a dangling `Arc<AtomicBool>` for the process life. Added
+  `bridge.unregister_session` and call it from `core::close_session`. Also two
+  Emma stdin sends (`broadcast` + the OOB resolve-wake) used `let _ = …send()` with
+  no log — if Emma's input pump died the message persisted + showed in chat but she
+  never saw it, zero signal; now logged (same diagnosability fix as the duo desync
+  paths).
 - **fix(policy): make silent policy-disarm visible (B1, B2).** Two paths could
   silently weaken enforcement with no signal. (B1) `Policy`/`SessionPolicy` had no
   unknown-key handling, so a typo (`push-gate:`, a mistyped `tool_gate:`) was
