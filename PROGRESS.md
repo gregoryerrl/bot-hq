@@ -26,6 +26,13 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(ui): share the clock-time formatter (C5, partial + zone bugfix).** Emma's
+  overlay had its own `formatClockTime` that used `new Date(iso)` directly — NOT
+  zone-safe, so a zone-less timestamp misparsed (the staleness-bug class the
+  `parseUtcMs` baseline exists to prevent). Moved a zone-safe `formatClockTime` into
+  `lib/time.ts` and used it. (Left as-is: the SessionView↔Emma respawn-banner / jump
+  button extraction is pure maintainability; Emma's author-color maps use a
+  deliberately different terminal palette, NOT a dup of `authorColor.ts`.)
 - **fix(agents): align Rain's prompt with her enforced tool blocks (C1).** RAIN_ROLE
   listed `git branch`, `gh pr view`, `gh pr list`, `gh issue view`, `gh issue list`
   as allowed read-only investigation — but `spawn.rs --disallowedTools` blanket-blocks

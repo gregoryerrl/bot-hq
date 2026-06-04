@@ -45,3 +45,11 @@ export function formatTimestamp(iso: string): string {
   if (!Number.isFinite(ms)) return iso;
   return new Date(ms).toLocaleString();
 }
+
+/** Local time-of-day label (24h HH:MM:SS). Zone-safe via {@link parseUtcMs}. */
+export function formatClockTime(iso: string): string {
+  if (!iso) return "";
+  const ms = parseUtcMs(iso);
+  if (!Number.isFinite(ms)) return "";
+  return new Date(ms).toLocaleTimeString("en-US", { hour12: false });
+}

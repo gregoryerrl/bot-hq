@@ -11,6 +11,7 @@ import type {
   PendingChoiceView,
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
+import { formatClockTime } from "../lib/time";
 
 const EMMA_SESSION_ID = "emma";
 // Stable reference so the zustand selector doesn't return a fresh `[]` per
@@ -329,13 +330,6 @@ function EmmaTerminalMessage({ message, groupedWithPrev }: EmmaTerminalMessagePr
       </div>
     </article>
   );
-}
-
-function formatClockTime(iso: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return "";
-  return d.toLocaleTimeString("en-US", { hour12: false });
 }
 
 // ============================================================================
