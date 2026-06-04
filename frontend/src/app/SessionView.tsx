@@ -100,6 +100,7 @@ export function SessionView() {
   );
   const setMessages = useChatStore((s) => s.setMessages);
   const applyBatch = useChatStore((s) => s.applyBatch);
+  const clearChat = useChatStore((s) => s.clear);
 
   useEffect(() => {
     if (initialMsgs.length > 0) {
@@ -137,14 +138,17 @@ export function SessionView() {
     },
     [sessionId],
   );
-  // When THIS session finishes closing, leave its (now-closed) view for the
-  // dashboard instead of stranding the user inside a dead session.
+  // When THIS session finishes closing, purge its messages from the store
+  // (closed sessions otherwise accumulate forever) and leave its now-dead
+  // view for the dashboard instead of stranding the user inside it.
   useTauriEvent<{ session_id: string }>(
     "session:closed",
     (payload) => {
-      if (payload.session_id === sessionId) navigate("/");
+      if (payload.session_id !== sessionId) return;
+      clearChat(sessionId);
+      navigate("/");
     },
-    [sessionId, navigate],
+    [sessionId, navigate, clearChat],
   );
 
   // Auto-scroll on new messages when user is at-bottom; show "↓ N new" jump
