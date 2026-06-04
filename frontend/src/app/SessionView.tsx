@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useChatStore } from "../stores/chat";
@@ -69,6 +69,28 @@ export function SessionView() {
   );
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+
+  const onCloseSession = async () => {
+    if (
+      !window.confirm(
+        "Close this session? Brian + Rain stop (their subprocesses are killed) " +
+          "and it moves to Settings → Archive. Reopening later resumes them via --resume.",
+      )
+    )
+      return;
+    setClosing(true);
+    setCloseError(null);
+    try {
+      // On success the `session:closed` event (listener below) navigates back
+      // to the dashboard, so this component unmounts — no need to reset state.
+      await invoke("close_session", { sessionId, archive: true });
+    } catch (e) {
+      setCloseError(errorMessage(e));
+      setClosing(false);
+    }
+  };
 
   useEffect(() => {
     if (!sessionId) return;
@@ -205,6 +227,16 @@ export function SessionView() {
             >
               ⚙️
             </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Close session — ends Brian + Rain and archives it"
+              aria-label="Close session"
+              disabled={closing}
+              onClick={onCloseSession}
+            >
+              {closing ? "…" : "✕"}
+            </Button>
           </div>
         </header>
 
@@ -223,6 +255,18 @@ export function SessionView() {
               }}
             >
               retry
+            </button>
+          </div>
+        )}
+
+        {closeError && (
+          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">
+            <span className="font-semibold">Close failed:</span> {closeError}
+            <button
+              className="ml-2 underline hover:text-error"
+              onClick={() => setCloseError(null)}
+            >
+              dismiss
             </button>
           </div>
         )}

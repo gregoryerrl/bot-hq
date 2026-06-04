@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **add(ui): close-session action in the SessionView header (D1).** The
+  `close_session` command had zero UI callers — a human could start/configure a
+  session but never end one (only an agent could, via MCP). Added a confirm-gated
+  "✕" close button (kills Brian + Rain, archives the session); the existing
+  `session:closed` listener navigates back to the dashboard, and the Archive tab
+  can reopen it (resumes via --resume). Surfaces a close-failed inline error.
 - **fix(ui): confirm destructive actions; drop dead CL "New file" button (D5, D12).**
   Saved-model Delete (removes the stored auth token, irreversible) and Unregister
   Project now require a `window.confirm` (matching the plugin-uninstall pattern).
