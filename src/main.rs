@@ -422,8 +422,6 @@ fn run_install_hooks_cli(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-const LEGACY_CL_ROOT: &str = ".bot-hq-legacy-2026-05-15";
-
 async fn cl_startup_init(
     storage: &Storage,
     bridge: &Arc<SignalingBridge>,
@@ -446,30 +444,6 @@ async fn cl_startup_init(
         }
     }
 
-    // Legacy bcc-ad-manager import — one-shot, non-destructive.
-    if let Some(base) = directories::BaseDirs::new() {
-        let legacy_bcc = base
-            .home_dir()
-            .join(LEGACY_CL_ROOT)
-            .join("projects")
-            .join("bcc-ad-manager");
-        if legacy_bcc.is_dir() {
-            let target = data_dir.join("projects").join("bcc-ad-manager");
-            std::fs::create_dir_all(&target).ok();
-            let imported = mirror_dir_non_destructive(&legacy_bcc, &target)?;
-            if imported > 0 {
-                tracing::info!(
-                    imported,
-                    "imported {} new files from legacy bcc-ad-manager CL",
-                    imported
-                );
-                storage
-                    .upsert_project("bcc-ad-manager", "bcc-ad-manager", None, None, None)
-                    .await?;
-            }
-        }
-    }
-
     let projects = storage.list_projects().await?;
     for p in projects {
         if let Err(e) = bridge.cl_rescan(&p.name).await {
@@ -477,32 +451,6 @@ async fn cl_startup_init(
         }
     }
     Ok(())
-}
-
-fn mirror_dir_non_destructive(
-    src: &std::path::Path,
-    dst: &std::path::Path,
-) -> std::io::Result<usize> {
-    let mut copied = 0usize;
-    for entry in std::fs::read_dir(src)?.flatten() {
-        let src_path = entry.path();
-        let name = match src_path.file_name() {
-            Some(n) => n.to_os_string(),
-            None => continue,
-        };
-        if name.to_str().is_some_and(|n| n.starts_with('.')) {
-            continue;
-        }
-        let dst_path = dst.join(&name);
-        if src_path.is_dir() {
-            std::fs::create_dir_all(&dst_path)?;
-            copied += mirror_dir_non_destructive(&src_path, &dst_path)?;
-        } else if !dst_path.exists() {
-            std::fs::copy(&src_path, &dst_path)?;
-            copied += 1;
-        }
-    }
-    Ok(copied)
 }
 
 fn load_env_file(path: &std::path::Path) -> std::io::Result<()> {
