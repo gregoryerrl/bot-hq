@@ -276,6 +276,19 @@ impl AppState {
             }
             return Ok(());
         }
+        // Auto-heal: if the duo went stale (e.g. an agent's stdin pump died,
+        // closing the public input channel — a now-deaf agent that would silently
+        // drop this message), evict + respawn it before delivering so the user's
+        // message isn't lost. `ensure_session_started` is a no-op on a healthy
+        // session.
+        let stale = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(session_id).is_some_and(|h| h.is_stale())
+        };
+        if stale {
+            tracing::info!(session_id, "session stale on broadcast; respawning before delivery");
+            self.ensure_session_started(session_id).await?;
+        }
         let sessions = self.sessions.lock().await;
         let handle = sessions
             .get(session_id)

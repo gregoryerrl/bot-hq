@@ -26,6 +26,17 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(agents): recover a deaf agent instead of bridging to it forever (A2).** Root
+  of the #4 user→HANDS desync. The supervisor holds the public input receiver and
+  forwards to the per-incarnation stdin pump with `let _ =`; when that pump died
+  (stdin write failed) the error was swallowed, the public `input_tx` stayed open
+  (so `is_stale()` read false), and the supervisor kept bridging to a now-deaf
+  child as long as its event channel lingered — Brian silently ignored all input
+  while Rain kept working, with no signal and no recovery. Now: a failed forward
+  tears the supervisor down (kill + return) so the public channel closes →
+  `is_stale()` true; and `core::broadcast` respawns a stale handle before
+  delivering, so the next user message auto-heals the session. Test:
+  `supervisor_terminates_when_incarnation_input_pump_dies`.
 - **fix(core): prune bridge session maps on close; log swallowed Emma sends (A4, A5).**
   `close_session` cleaned the sessions map, tray, and policy snapshot but never the
   bridge's `session_projects` / `session_awaiting` maps — each open→close leaked a

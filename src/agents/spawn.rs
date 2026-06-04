@@ -347,7 +347,23 @@ async fn supervise<S, Fut>(
                 }
                 msg = out_input_rx.recv() => {
                     match msg {
-                        Some(msg) => { let _ = incarnation.input_tx.send(msg).await; }
+                        Some(msg) => {
+                            if let Err(e) = incarnation.input_tx.send(msg).await {
+                                // The incarnation's stdin pump has died (its
+                                // receiver dropped), so the child is now deaf to
+                                // ALL input — yet its event channel can stay open
+                                // while stdout lingers, so the `None => break`
+                                // path below would NOT catch it. Bridging on would
+                                // silently drop every user/peer message (the #4
+                                // user→HANDS desync, invisible + unrecoverable).
+                                // Tear down instead: dropping `out_input_rx` closes
+                                // the public sender → `is_stale()` → the next
+                                // `ensure_session_started` evicts + respawns.
+                                warn!(agent = %agent, error = %e, "incarnation input pump died; terminating supervisor so the session goes stale and respawns");
+                                incarnation.kill();
+                                return;
+                            }
+                        }
                         None => {
                             // Caller dropped the handle → tear down.
                             incarnation.kill();
@@ -870,6 +886,55 @@ mod tests {
         assert!(got
             .iter()
             .any(|e| matches!(e, AgentEvent::TurnComplete { is_error: false, .. })));
+    }
+
+    #[tokio::test]
+    async fn supervisor_terminates_when_incarnation_input_pump_dies() {
+        // The incarnation's stdin pump death = its input receiver dropped, while
+        // its EVENT channel stays open (child still emitting). The supervisor must
+        // NOT bridge to a now-deaf child forever (the #4 user→HANDS desync) — it
+        // tears down so the public input channel closes (the is_stale signal),
+        // WITHOUT a respawn-in-place.
+        let (h1, _ev1, in1) = fake_incarnation();
+        drop(in1); // kill the incarnation's stdin pump (receiver gone)
+
+        let mut queue: std::collections::VecDeque<AgentHandle> =
+            std::collections::VecDeque::new();
+        let spawn_next = move |_c: SpawnConfig| {
+            let h = queue
+                .pop_front()
+                .expect("input-pump death must NOT trigger a respawn-in-place");
+            async move { Ok(h) }
+        };
+
+        let (out_ev_tx, _out_ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (_kill_tx, kill_rx) = oneshot::channel::<()>();
+
+        let task = tokio::spawn(supervise(
+            cfg(),
+            instant_policy(5),
+            h1,
+            out_ev_tx,
+            out_in_rx,
+            kill_rx,
+            spawn_next,
+        ));
+
+        // A user message arrives; forwarding it to the dead incarnation pump
+        // fails, which must terminate the supervisor. `_ev1` is kept alive so the
+        // event channel stays OPEN — only the input-pump path can end the loop.
+        out_in_tx
+            .send(OutgoingUserMessage::text("hello"))
+            .await
+            .unwrap();
+
+        task.await.unwrap();
+
+        assert!(
+            out_in_tx.is_closed(),
+            "input-pump death must terminate the supervisor so the session goes stale"
+        );
     }
 
     #[tokio::test]
