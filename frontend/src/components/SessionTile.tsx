@@ -1,6 +1,4 @@
-import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
 import type { PendingChoiceView, SessionInfo } from "../lib/bindings";
@@ -22,7 +20,6 @@ export function SessionTile({
   const navigate = useNavigate();
   const closed = session.closed_at !== null;
   const needsInput = pendingChoices.length > 0;
-  const firstChoice = pendingChoices[0];
   const tint = phaseTintClasses(phase, closed);
 
   const open = () => navigate(`/sessions/${session.id}`);
@@ -93,24 +90,22 @@ export function SessionTile({
           {describe(session)}
         </p>
 
-        {/* Slot 7: [Need User Input] pill */}
+        {/* Slot 7: pending-input indicator. The tile only INDICATES that this
+            session has items awaiting the user (asks, gates, approvals); the
+            user answers them on the session's Tray tab — the single answer
+            surface — not inline here. */}
         {needsInput && (
-          <div className="mt-3 inline-flex items-center gap-1.5 rounded border border-error/30 bg-error-container/20 px-2 py-1 font-label-caps text-label-caps text-error">
+          <div
+            className="mt-3 inline-flex items-center gap-1.5 rounded border border-error/30 bg-error-container/20 px-2 py-1 font-label-caps text-label-caps text-error"
+            title="Open the session's Tray tab to respond"
+          >
             <AlertIcon />
-            [Need User Input]
+            [Need User Input · {pendingChoices.length}]
           </div>
         )}
       </div>
 
-      {/* Slot 8: inline ask_user_choice banner */}
-      {needsInput && firstChoice && (
-        <ChoiceBanner
-          choice={firstChoice}
-          extraCount={pendingChoices.length - 1}
-        />
-      )}
-
-      {/* Slot 9: Quickview footer */}
+      {/* Slot 8: Quickview footer */}
       <div className="border-t border-outline-variant/30 px-4 py-2">
         <div className="font-label-caps text-label-caps text-on-surface-variant">
           Quickview
@@ -119,102 +114,6 @@ export function SessionTile({
           {quickviewFor(phase, closed)}
         </div>
       </div>
-    </div>
-  );
-}
-
-interface ChoiceBannerProps {
-  choice: PendingChoiceView;
-  extraCount: number;
-}
-
-function ChoiceBanner({ choice, extraCount }: ChoiceBannerProps) {
-  const [other, setOther] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  const submit = async (picked: string) => {
-    if (submitting || !picked.trim()) return;
-    setSubmitting(true);
-    try {
-      await invoke("resolve_choice", {
-        choiceId: choice.choice_id,
-        picked,
-      });
-      setOther("");
-    } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error("resolve_choice failed", err);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const isBinary = choice.options.length === 2;
-
-  return (
-    <div
-      className="border-t border-outline-variant/50 bg-surface-container-low p-3"
-      onClick={(e) => e.stopPropagation()}
-      onKeyDown={(e) => e.stopPropagation()}
-    >
-      <div className="mb-2 font-code-sm text-code-sm text-on-surface">
-        {choice.question}
-      </div>
-
-      {isBinary ? (
-        <div className="flex gap-2">
-          {choice.options.map((opt, i) => (
-            <button
-              key={opt}
-              type="button"
-              disabled={submitting}
-              onClick={() => submit(opt)}
-              className={cn(
-                "flex-1 rounded border py-1 font-code-sm text-code-sm transition-colors disabled:opacity-50",
-                i === 0
-                  ? "border-primary/50 bg-primary/20 text-primary hover:bg-primary/30"
-                  : "border-outline-variant bg-surface-variant text-on-surface hover:bg-surface-container-high",
-              )}
-            >
-              {opt}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {choice.options.map((opt) => (
-            <button
-              key={opt}
-              type="button"
-              disabled={submitting}
-              onClick={() => submit(opt)}
-              className="group/btn flex w-full items-center justify-between rounded border border-outline-variant bg-surface-container px-3 py-2 font-code-sm text-code-sm text-on-surface transition-colors hover:bg-surface-variant disabled:opacity-50"
-            >
-              <span className="text-left">{opt}</span>
-              <ChevronIcon className="text-primary opacity-0 transition-opacity group-hover/btn:opacity-100" />
-            </button>
-          ))}
-        </div>
-      )}
-
-      <input
-        type="text"
-        value={other}
-        onChange={(e) => setOther(e.target.value)}
-        onKeyDown={(e) => {
-          e.stopPropagation();
-          if (e.key === "Enter") submit(other);
-        }}
-        placeholder="Other:"
-        disabled={submitting}
-        className="mt-2 w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
-      />
-
-      {extraCount > 0 && (
-        <div className="mt-2 font-label-caps text-label-caps text-on-surface-variant">
-          +{extraCount} more pending
-        </div>
-      )}
     </div>
   );
 }
@@ -257,23 +156,6 @@ function AlertIcon({ className }: { className?: string }) {
       <path d="M12 9v4" />
       <path d="M12 17h.01" />
       <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
-    </svg>
-  );
-}
-
-function ChevronIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={cn("size-4", className)}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M9 18l6-6-6-6" />
     </svg>
   );
 }

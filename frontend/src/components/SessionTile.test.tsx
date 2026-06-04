@@ -56,10 +56,21 @@ describe("SessionTile", () => {
     expect(screen.queryByText(/need user input/i)).not.toBeInTheDocument();
   });
 
-  it("renders the inline question and option buttons for a pending choice", () => {
+  it("indicates pending input without an inline answer surface", () => {
+    // The tile only INDICATES; the question + options live on the Tray tab.
     renderTile({ pendingChoices: [binaryChoice] });
-    expect(screen.getByText(/approve the planned override/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^approve$/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^reject$/i })).toBeInTheDocument();
+    expect(
+      screen.queryByText(/approve the planned override/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^approve$/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the pending count in the indicator", () => {
+    renderTile({
+      pendingChoices: [binaryChoice, { ...binaryChoice, choice_id: "c2" }],
+    });
+    expect(screen.getByText(/need user input · 2/i)).toBeInTheDocument();
   });
 });
