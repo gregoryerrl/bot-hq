@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(ui): don't offer file/folder creation under the `_globals` root (D12 rem.).**
+  The CL right-click menu offered "New file/New folder" on the `_globals` virtual
+  bucket (cross-project system files), which would create files at the CL system
+  root. Guarded. (Left as intentional/low-value: D11 bell counts sessions — by
+  design, the dropdown already shows per-session item counts; #31 ok/yes→Approved —
+  reasonable approval semantics.)
 - **perf(cl): de-quadratic cl_rescan + parallelize all-projects rescan (E5).**
   Backend: `cl_rescan` did an `existing.iter().find()` per on-disk file (O(disk ×
   index)); now builds a `HashMap<path,&row>` once for O(1) lookup. Frontend: the

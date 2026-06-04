@@ -148,16 +148,22 @@ export function ContextLibrary() {
 
   const menuItems = (target: CtxTarget): ContextMenuItem[] => {
     if (target.kind === "folder") {
-      const items: ContextMenuItem[] = [
-        {
-          label: "New file",
-          onSelect: () => setAction({ mode: "newFile", target }),
-        },
-        {
-          label: "New folder",
-          onSelect: () => setAction({ mode: "newFolder", target }),
-        },
-      ];
+      const items: ContextMenuItem[] = [];
+      // `_globals` is a virtual bucket for cross-project system files (general
+      // rules, agent instructions), not a real project dir — don't offer
+      // file/folder creation under it.
+      if (target.project !== "_globals") {
+        items.push(
+          {
+            label: "New file",
+            onSelect: () => setAction({ mode: "newFile", target }),
+          },
+          {
+            label: "New folder",
+            onSelect: () => setAction({ mode: "newFolder", target }),
+          },
+        );
+      }
       // The project-root folder can't be renamed/deleted from here.
       if (target.path !== "") {
         items.push({
