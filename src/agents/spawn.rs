@@ -518,7 +518,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         cmd.args(["--permission-mode", "dontAsk"]);
         cmd.args([
             "--allowedTools",
-            "Read Grep Glob WebFetch WebSearch TodoWrite BashOutput KillShell Bash mcp__bot-hq-signaling",
+            "Read Grep Glob WebFetch WebSearch ToolSearch TodoWrite BashOutput KillShell Bash mcp__bot-hq-signaling",
         ]);
         cmd.args([
             "--disallowedTools",
@@ -1018,7 +1018,13 @@ mod tests {
             .find(|w| w[0] == "--allowedTools")
             .map(|w| w[1].clone())
             .expect("--allowedTools present");
-        for t in ["Read", "Grep", "Glob", "Bash", "mcp__bot-hq-signaling"] {
+        // Web/reference tools must match Rain's role prompt (prompts.rs) — the
+        // prompt promises WebFetch/WebSearch/ToolSearch, so the allowlist must
+        // grant all three or claude-code silently blocks what the prompt offers.
+        for t in [
+            "Read", "Grep", "Glob", "Bash", "mcp__bot-hq-signaling", "WebFetch", "WebSearch",
+            "ToolSearch",
+        ] {
             assert!(allowed.contains(t), "allowlist missing {t}: {allowed}");
         }
         // Denylist covers the mutation surface from the 2026-05-28 incident.
