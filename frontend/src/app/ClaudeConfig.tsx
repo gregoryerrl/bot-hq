@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { SaveIcon } from "./contextLibraryShared";
@@ -101,16 +101,24 @@ export function ClaudeConfigPanel() {
   // config (overrides + inherited settings are read at agent SPAWN, so a live
   // session keeps its old config until respawned).
   const [showRestart, setShowRestart] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
   const { data: sessions } = useTauriQuery<SessionInfo[]>("list_sessions");
   const respawn = useTauriMutation<void, { sessionId: string }>("restart_session");
   const activeSessions = (sessions ?? []).filter(
     (s) => !s.archived && !s.closed_at,
   );
   const onRestartAgents = async () => {
-    for (const s of activeSessions) {
-      await respawn.mutateAsync({ sessionId: s.id });
+    setRestartError(null);
+    try {
+      for (const s of activeSessions) {
+        await respawn.mutateAsync({ sessionId: s.id });
+      }
+      setShowRestart(false);
+    } catch (e) {
+      // A failed respawn aborts the loop — surface it instead of leaving the
+      // banner silently stuck (some sessions may already have restarted).
+      setRestartError(errorMessage(e));
     }
-    setShowRestart(false);
   };
 
   const [surface, setSurface] = useState<SurfaceId>("overview");
@@ -229,6 +237,11 @@ export function ClaudeConfigPanel() {
             {activeSessions.length > 0
               ? `${activeSessions.length} agent session(s) are running — restart them to apply the new config now.`
               : "Applies to new agent sessions. Restart Claude Code itself for restart-only settings (model, thinking)."}
+            {restartError && (
+              <span className="ml-2 text-on-error-container">
+                — restart failed: {restartError}
+              </span>
+            )}
           </span>
           <div className="flex gap-2">
             {activeSessions.length > 0 && (

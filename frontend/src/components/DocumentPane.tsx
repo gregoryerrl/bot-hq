@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useTauriQuery } from "../hooks/useInvoke";
+import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { PhasePillRow, type Phase } from "./PhasePill";
 import { ChoicePrompt } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
@@ -231,11 +231,15 @@ function TrayList({ sessionId }: { sessionId: string }) {
   // "…" and the row disables until resolve_choice settles + the tray refetches
   // (the answered item then drops out of the pending filter).
   const [resolving, setResolving] = useState<Map<string, string>>(new Map());
+  const [resolveError, setResolveError] = useState<string | null>(null);
 
   const onResolve = (choiceId: string, picked: string) => {
     setResolving((m) => new Map(m).set(choiceId, picked));
+    setResolveError(null);
     invoke("resolve_choice", { choiceId, picked })
-      .catch((e) => console.error("resolve_choice failed", e))
+      // Surface the failure — answering is the core HITL action, and a silent
+      // console.error left the item stuck pending with no signal to the user.
+      .catch((e) => setResolveError(errorMessage(e)))
       .finally(() => {
         setResolving((m) => {
           const next = new Map(m);
@@ -257,8 +261,25 @@ function TrayList({ sessionId }: { sessionId: string }) {
     );
   }
   return (
-    <ul className="space-y-3">
-      {pending.map((e) => (
+    <>
+      {resolveError && (
+        <div
+          role="alert"
+          className="mb-3 rounded border border-error/40 bg-error-container/30 px-3 py-1.5 text-xs text-on-error-container"
+        >
+          <span className="font-semibold">Couldn't submit your answer:</span>{" "}
+          {resolveError}
+          <button
+            type="button"
+            className="ml-2 underline hover:text-error"
+            onClick={() => setResolveError(null)}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
+      <ul className="space-y-3">
+        {pending.map((e) => (
         <li key={e.id}>
           <TrayChoice
             entry={e}
@@ -267,8 +288,9 @@ function TrayList({ sessionId }: { sessionId: string }) {
             onResolve={onResolve}
           />
         </li>
-      ))}
-    </ul>
+        ))}
+      </ul>
+    </>
   );
 }
 

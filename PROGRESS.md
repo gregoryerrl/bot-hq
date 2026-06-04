@@ -26,6 +26,13 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(ui): surface errors on the silent HITL paths (D3, #32).** Three core
+  human-in-the-loop actions failed silently: broadcast-send (`ChatInput` try/finally
+  with no catch → unhandled rejection, user thought the message sent), tray-resolve
+  (`DocumentPane` `console.error` only → answer stuck pending, no signal), and
+  config restart-agents (`ClaudeConfig` loop with no catch). Each now catches and
+  shows a dismissible inline error; the broadcast fix lives in shared `ChatInput`
+  so it covers both SessionView and the Emma overlay.
 - **perf(ui): scope event-driven query invalidation + concat chat batches (E1, E3).**
   `GlobalEventSync` called `invalidateQueries()` with no key on every `session:*`
   event → an app-wide refetch storm (10-20+ queries incl. `compute_apply_diff`

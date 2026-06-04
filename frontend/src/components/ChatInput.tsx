@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Button } from "./ui/Button";
 import { Textarea } from "./ui/Textarea";
+import { errorMessage } from "../hooks/useInvoke";
 
 interface ChatInputProps {
   placeholder?: string;
@@ -21,6 +22,7 @@ const modKeyLabel = isMac ? "⌘" : "Ctrl";
 export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-grow: reset to `auto` so scrollHeight reflects actual content height,
@@ -38,9 +40,14 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
     const text = value.trim();
     if (!text || disabled || sending) return;
     setSending(true);
+    setError(null);
     try {
       await onSend(text);
       setValue("");
+    } catch (err) {
+      // Keep `value` so the user can retry without retyping, and surface the
+      // failure — a silent reject made the user think the message was sent.
+      setError(errorMessage(err));
     } finally {
       setSending(false);
     }
@@ -50,7 +57,23 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
   const hint = useMemo(() => `${modKeyLabel}↵`, []);
 
   return (
-    <form onSubmit={handleSubmit} className="flex items-end gap-2 p-3">
+    <>
+      {error && (
+        <div
+          role="alert"
+          className="mx-3 mt-2 rounded border border-error/40 bg-error-container/30 px-3 py-1.5 text-xs text-on-error-container"
+        >
+          <span className="font-semibold">Send failed:</span> {error}
+          <button
+            type="button"
+            className="ml-2 underline hover:text-error"
+            onClick={() => setError(null)}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
+      <form onSubmit={handleSubmit} className="flex items-end gap-2 p-3">
       <div className="relative flex-1">
         <Textarea
           ref={textareaRef}
@@ -86,6 +109,7 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
       >
         {sending ? "Sending…" : "Send"}
       </Button>
-    </form>
+      </form>
+    </>
   );
 }
