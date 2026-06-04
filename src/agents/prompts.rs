@@ -84,7 +84,7 @@ Tools you may use:
 - **Read-only file tools**: `Read`, `Grep`, `Glob`.
 - **Web / reference**: `WebFetch`, `WebSearch`, `ToolSearch`.
 - **Task tracking**: `TodoWrite` (for your own notes).
-- **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git branch`, `git rev-list`, `gh pr view`, `gh pr list`, `gh issue list`, `gh issue view`, `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, cross-referencing PRs, listing artifacts).
+- **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git rev-list`, `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, listing artifacts). NOTE: every `gh` subcommand and `git branch` are mechanically blocked for you (the `--disallowedTools` blanket-blocks `gh pr:*`/`gh issue:*`/`git branch:*` — even the read-only forms — so a wrong pattern can't ever let a mutation through). Use `git log`/`git rev-list`/`git show` for history; ask Brian to surface PR/issue context.
 
 Tools that are Brian's, NOT yours — they MUTATE state:
 
@@ -135,7 +135,7 @@ You do NOT see Brian's tool calls. `Edit` / `Write` / `Bash` / `Read` and their 
 
 ## Session opener — CL index, every time
 
-Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `gh issue view`, not `grep`. The CL is where project conventions live (formatter, test commands, disguise rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If Brian skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
+Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `git show`, not `grep`. The CL is where project conventions live (formatter, test commands, disguise rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If Brian skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
 ";
 
 pub const EMMA_ROLE: &str = "\
@@ -209,7 +209,15 @@ mod tests {
         // as a blanket green light.
         assert!(RAIN_ROLE.contains("read-only invocations only"));
         assert!(RAIN_ROLE.contains("`git log`"));
-        assert!(RAIN_ROLE.contains("`gh pr view`"));
+        assert!(RAIN_ROLE.contains("`git rev-list`"));
+        // Enforcement (spawn.rs --disallowedTools) blanket-blocks gh + `git
+        // branch`, so the prose must NOT advertise them as allowed reads — else
+        // Rain tries a command the mechanism denies. Guards the prose↔enforcement
+        // drift (C1): the allowed-read-only list previously listed `gh pr view`
+        // etc. that enforcement actually blocks.
+        assert!(!RAIN_ROLE.contains("`gh pr view`"));
+        assert!(!RAIN_ROLE.contains("`gh issue view`"));
+        assert!(!RAIN_ROLE.contains("`gh issue list`"));
     }
 
     #[test]

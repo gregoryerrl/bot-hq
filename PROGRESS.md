@@ -26,6 +26,17 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(agents): align Rain's prompt with her enforced tool blocks (C1).** RAIN_ROLE
+  listed `git branch`, `gh pr view`, `gh pr list`, `gh issue view`, `gh issue list`
+  as allowed read-only investigation — but `spawn.rs --disallowedTools` blanket-blocks
+  `git branch:*` / `gh pr:*` / `gh issue:*`, so Rain was told she could run commands
+  the mechanism denies. Tightened the prose to match enforcement (kept the security
+  boundary intact — enumerating "safe" gh subcommands would risk missing a mutating
+  one like `gh pr comment`/`review`). Guard test asserts the blocked commands aren't
+  advertised as allowed. (Deferred: F3 — `auto_supersede_prior_pending`'s supersede
+  +insert aren't transactional; the proper fix is a combined atomic storage op, a
+  moderate refactor on the critical tray path to close a microsecond crash window —
+  poor ROI/risk for a sweep.)
 - **fix(ui): distinguish DocumentPane load errors from empty (D6).** The
   `session_doc_search` and `compute_apply_diff` queries didn't expose `error`, so a
   failed fetch rendered identically to a genuine empty ("No {phase} documents yet."
