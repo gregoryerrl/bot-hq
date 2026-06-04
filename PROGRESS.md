@@ -26,6 +26,14 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(ui): confirm destructive actions; drop dead CL "New file" button (D5, D12).**
+  Saved-model Delete (removes the stored auth token, irreversible) and Unregister
+  Project now require a `window.confirm` (matching the plugin-uninstall pattern).
+  Removed the permanently-disabled "New file — backend not yet wired" sidebar
+  button — creation is wired via right-click (which has the folder + name context
+  the header button lacked). (Deferred: guarding new-file/folder on the `_globals`
+  virtual root — lives in the ContextLibrary menu builder, folded into a later CL
+  batch; harmless meanwhile.)
 - **remove(ui): dead top-bar search + dead footer links (D2).** The "Search
   sessions, agents, tasks…" topbar input stored state but never filtered or
   navigated anything, and the footer "API Docs"/"Support" were `href="#"`

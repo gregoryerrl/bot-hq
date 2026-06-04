@@ -80,15 +80,8 @@ export function WorkspaceSidebar({
         <span className="font-label-caps text-label-caps text-on-surface-variant">
           Library Tree
         </span>
-        <button
-          type="button"
-          disabled
-          title="New file — backend not yet wired"
-          aria-label="New file (disabled)"
-          className="rounded p-1 text-on-surface-variant transition-colors hover:text-on-surface disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <PlusIcon />
-        </button>
+        {/* New file/folder is created via right-click on a project/folder node
+            (it needs the target folder + a name) — no header button. */}
       </header>
 
       <div className="flex flex-col gap-2 border-b border-outline-variant px-3 py-2">

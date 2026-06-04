@@ -216,6 +216,12 @@ function ModelCard({
             size="sm"
             disabled={del.isPending}
             onClick={async () => {
+              if (
+                !window.confirm(
+                  `Delete saved model "${model.display_name}"? This also removes its stored auth token and can't be undone.`,
+                )
+              )
+                return;
               await del.mutateAsync({ id: model.id });
               onDeleted();
             }}

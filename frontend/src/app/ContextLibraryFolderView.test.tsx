@@ -73,6 +73,8 @@ describe("FolderView", () => {
 
   it("shows the project registration section on a project root and unregisters", async () => {
     mockInvoke.mockResolvedValue(undefined);
+    // Unregister is now confirm-gated; accept it so the command fires.
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const onProjectChanged = vi.fn();
     render(
       <FolderView
@@ -102,6 +104,8 @@ describe("FolderView", () => {
         name: "bot-hq",
       }),
     );
+    expect(confirmSpy).toHaveBeenCalled();
     expect(onProjectChanged).toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 });

@@ -203,6 +203,12 @@ function ProjectSection({
 
   const unregister = async () => {
     if (busy) return;
+    if (
+      !window.confirm(
+        `Unregister project "${project.name}"? Files and descriptions are kept; this clears its working-repo + custom CL path.`,
+      )
+    )
+      return;
     setBusy(true);
     setError(null);
     try {
