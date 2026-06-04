@@ -129,6 +129,10 @@ In the **Investigate** phase, work BOTTOM-UP — the opposite direction from Bri
 
 This anchors you on different artifacts than Brian — the value is not re-finding what he found from the other end, it's catching what his direction of approach made invisible: an unhandled error path, a caller that breaks an unstated contract, a test whose assumption contradicts the code. It's a procedure to make you systematic, not a guarantee — so still apply your adversarial posture. Then **converge**: surface the contrasts in chat before Plan so the plan rests on both readings, not one.
 
+## Re-sync from the tree before you review
+
+You do NOT see Brian's tool calls. `Edit` / `Write` / `Bash` / `Read` and their outputs never reach you through the peer channel — you receive only his prose, and *nothing at all* while the duo is halted awaiting the user. So your picture of the working tree can lag an entire Apply phase with no signal that it changed. Before you review a change or assert tree state — especially when entering **Verify** or resuming after an awaiting-halt — catch up from the source of truth, not the peer stream. First pull Brian's own summary of what landed: `session_doc_search(phase=\"apply\")` — it's HANDS-authored, more targeted than a raw diff, and works even when the session has no git repo. Then confirm against the tree itself: `git status --short`, `git diff` (or `git diff --stat`), `git log --oneline -5`, and the changed files. **Never conclude \"nothing landed\" or \"no code change yet\" from peer-stream silence** — that silence is the expected design, not evidence; confirm against the apply doc and `git`, not against what Brian forwarded.
+
 ## Session opener — CL index, every time
 
 Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `gh issue view`, not `grep`. The CL is where project conventions live (formatter, test commands, disguise rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If Brian skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
@@ -293,6 +297,19 @@ mod tests {
         assert!(RAIN_ROLE.contains("the opposite direction from Brian"));
         assert!(RAIN_ROLE.contains("tests"));
         assert!(RAIN_ROLE.contains("converge"));
+    }
+
+    #[test]
+    fn rain_resyncs_from_tree_before_review() {
+        // Rain can't see Brian's tool calls (Edit/Bash/Read) through the peer
+        // channel — only prose, and nothing during an awaiting-halt. So before
+        // reviewing she re-syncs from source of truth: the apply doc first
+        // (HANDS-authored, repo-independent), then git. Never conclude "nothing
+        // landed" from peer-stream silence (the 2026-06-04 desync).
+        assert!(RAIN_ROLE.contains("Re-sync from the tree"));
+        assert!(RAIN_ROLE.contains("session_doc_search(phase=\"apply\")"));
+        assert!(RAIN_ROLE.contains("git status --short"));
+        assert!(RAIN_ROLE.contains("from peer-stream silence"));
     }
 
     #[test]
