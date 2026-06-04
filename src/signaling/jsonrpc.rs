@@ -546,15 +546,10 @@ fn eval_in_webview(bridge: &Arc<SignalingBridge>, js: &str) -> Result<(), JsonRp
 }
 
 fn parse_violation_kind(s: &str) -> Option<ViolationKind> {
-    Some(match s {
-        "push_gate" => ViolationKind::PushGate,
-        "commit_grep" => ViolationKind::CommitGrep,
-        "force_push" => ViolationKind::ForcePush,
-        "tool_blocklist" => ViolationKind::ToolBlocklist,
-        "per_action" => ViolationKind::PerAction,
-        "generic_approval" => ViolationKind::GenericApproval,
-        _ => return None,
-    })
+    // Parse through serde so the wire names can't drift from `ViolationKind`'s
+    // own `#[serde(rename_all = "snake_case")]` derive (a hand-written match
+    // had to be kept in lockstep with the enum). Unknown string → None.
+    serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
 }
 
 #[cfg(test)]

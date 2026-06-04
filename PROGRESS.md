@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **refactor: parse ViolationKind via serde, not a hand match (C3).** The
+  request_approval `kind` parser (`jsonrpc::parse_violation_kind`) duplicated the
+  enum's snake_case wire names in a hand-written match that had to be kept in
+  lockstep with `ViolationKind`. Parse through serde so it can't drift. (Only delta:
+  it now also accepts `policy_mutation` — benign, since command execution gates on
+  `ToolBlocklist` specifically, not on the kind being parseable.)
 - **a11y(ui): focus-trap the dialog modals (D7).** New `useFocusTrap` hook: focuses
   the first focusable on open, traps Tab/Shift+Tab inside the dialog, and restores
   focus to the trigger on close. Applied to the four dialog modals (ActionModal,
