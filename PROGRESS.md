@@ -12,7 +12,7 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 410 tests passing (359 lib + 32 external MCP + 7 signaling + 12 storage)
-plus 52 frontend Vitest. Release build clean. **Tauri v2 migration landed
+plus 53 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
@@ -20,6 +20,46 @@ plus 52 frontend Vitest. Release build clean. **Tauri v2 migration landed
 constraint.
 
 ---
+
+## 2026-06-04 — codebase + docs cleanliness pass
+
+Swept the codebase, CL, and docs for redundancy/staleness/dead code (clippy was
+already near-clean; the debt was mostly stale docs + small frontend dup). 9
+commits, gated per batch; no behavior change except the two UI fixes below.
+
+- **Docs synced to reality.** ARCHITECTURE.md/README.md documented 3 tools that
+  no longer exist (`grant`/`revoke`/`list_session_permissions` — the subsystem
+  was deleted); "26 internal tools" was actually 24 and omitted `action_gate`;
+  the `questions` table was renamed `session_tray` (migration 0010); the whole
+  Claude Config surface + `models`/`app_settings` registry + `llm_proxy` were
+  undocumented; one event name used illegal dots. Rewrote the "Session
+  permissions" section for the current `session_policy.rs` frozen-snapshot model
+  and fixed the in-repo `CLAUDE.md` push-grant + data-path references. Pruned
+  PLAN.md (dropped hardcoded test counts; noted shipped model/Claude-config work).
+- **`fix`: ToolSearch added to Rain's allowlist** — her role prompt promised it
+  but `spawn.rs` blocked it (WebSearch was already allowed). Test locks the
+  prompt↔allowlist contract.
+- **`tidy`: dedup + clippy-clean** — hoisted the hand-synced
+  `AGENT_FILTERED_MCP`/`RESERVED_MCP_KEYS` pair to one crate constant, refreshed
+  stale `session_tray` comments, collapsed identical `HookKind::filename`/
+  `subcommand`, resolved all clippy nits.
+- **`refactor`: `storage::model` → `row_types`** — the module holds all 15 row
+  types, not one Model; the name collided with the sibling `models.rs`.
+- **`chore`: deleted dead frontend** — `PluginSlot.tsx` + `stores/layout.ts`
+  (zero consumers).
+- **`refactor(ui)`: extracted `GatedKeywordList`** shared by Settings + the
+  session policy panel; dropped a `formatTimestamp` shadow of `lib/time`.
+- **`fix(ui)`: purge a closed session's messages** from the chat store on
+  `session:closed` (was a latent leak — `clear()` was test-only).
+- **`refactor(ui)`: SessionTile indicates, doesn't answer** — removed the inline
+  `ChoiceBanner` (a second answer surface duplicating the Tray tab); the tile now
+  shows a `[Need User Input · N]` count and points to the session's Tray tab.
+- **`refactor`: dropped the completed legacy-CL startup import** (one-shot
+  `~/.bot-hq-legacy-2026-05-15` mirror; the dir is gone, so it was a no-op).
+
+Verified-no-change (reported, not edited): push_gate `ask` docs already match the
+code (the June-2 hard-block issue was fixed by the June-3 tray work); the two
+`resolve_agent_overrides` call sites are intentional layering, not a double-resolve.
 
 ## 2026-06-03 — close_session withdraws pending; backfill stale closed-session pending
 
