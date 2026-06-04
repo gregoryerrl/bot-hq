@@ -21,6 +21,17 @@ constraint.
 
 ---
 
+## 2026-06-04 — remove user-facing screenshot button
+
+The 📸 "share window" button (SessionView header + Emma overlay) was designed as
+an agent context tool, not a user action — YAGNI for humans, who have no real
+use-case for it. Removed the button + dismissible error banner + the shared
+`useScreenshotCapture` hook (deleted, zero consumers) from both surfaces, plus
+the frontend-only `capture_window_screenshot` Tauri command (+ its specta
+registration + regenerated binding). The `webview_screenshot` MCP tool — the
+agents' "eyes on the UI" — is unaffected: it uses the separate `capture_main_window`
+helper, which stays.
+
 ## 2026-06-04 — remove UI manual phase-advance
 
 User-directed removal of the UI's ability to advance a session's IPAV phase. The

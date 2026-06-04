@@ -628,14 +628,6 @@ async computeApplyDiff(sessionId: string) : Promise<Result<ComputeApplyDiffResul
     else return { status: "error", error: e  as any };
 }
 },
-async captureWindowScreenshot(sessionId: string) : Promise<Result<string, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("capture_window_screenshot", { sessionId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async installPlugin(source: string) : Promise<Result<InstalledPluginView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source }) };

@@ -1,43 +1,20 @@
-//! Capture the bot-hq main window and share the PNG as a chat message.
+//! Capture the bot-hq main window to a PNG for the `webview_screenshot`
+//! MCP tool (agent-triggered "eyes on the UI").
 //!
 //! Wraps macOS `screencapture -R` with the window's logical geometry from
 //! Tauri (physical pixels divided by scale factor — Retina-safe). The PNG
-//! lands under `<data_dir>/screenshots/<timestamp>.png`. The path is
-//! broadcast into the target session via `CoreAppState::broadcast` so
-//! Brian + Rain see the message and can Read the file as an image.
+//! lands under `<data_dir>/screenshots/<timestamp>.png`; the caller reads
+//! the file back as an image.
 
-use crate::core::AppState as CoreAppState;
-use crate::tauri_cmd::error::AppError;
 use anyhow::Context;
 use chrono::Utc;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use tauri::Manager;
 
-#[tauri::command]
-#[specta::specta]
-pub async fn capture_window_screenshot(
-    app_handle: tauri::AppHandle,
-    core: tauri::State<'_, Arc<CoreAppState>>,
-    session_id: String,
-) -> Result<String, AppError> {
-    let data_dir = core.paths.data_dir.clone();
-    let path = capture_main_window(&app_handle, &data_dir)
-        .map_err(|e| AppError::Internal(format!("screenshot capture: {e}")))?;
-
-    let text = format!("[Screenshot from user]\n{}", path.display());
-    core.broadcast(&session_id, &text)
-        .await
-        .map_err(|e| AppError::Internal(format!("broadcast: {e}")))?;
-
-    Ok(path.display().to_string())
-}
-
 /// Capture the main bot-hq window to a PNG under `<data_dir>/screenshots/`.
-/// Shared by the Tauri command (user-triggered, also broadcasts a message)
-/// and the external MCP tool `webview_screenshot` (agent-triggered, just
-/// returns the path).
+/// Used by the `webview_screenshot` MCP tool (agent-triggered) — returns the
+/// path; the agent reads the PNG back as an image.
 pub(crate) fn capture_main_window(
     app_handle: &tauri::AppHandle,
     data_dir: &Path,

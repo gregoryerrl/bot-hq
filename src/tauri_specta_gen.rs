@@ -21,8 +21,8 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 }
 
 use crate::tauri_cmd::{
-    agent_configs, claude_config, cl, docs, messages, models, plugins, policy, questions,
-    screenshot, sessions, tool_gate,
+    agent_configs, claude_config, cl, docs, messages, models, plugins, policy, questions, sessions,
+    tool_gate,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -96,8 +96,6 @@ pub fn builder() -> Builder<tauri::Wry> {
         docs::session_doc_search,
         docs::session_doc_read,
         docs::compute_apply_diff,
-        // Screenshot
-        screenshot::capture_window_screenshot,
         // Plugins
         plugins::install_plugin,
         plugins::list_installed_plugins,

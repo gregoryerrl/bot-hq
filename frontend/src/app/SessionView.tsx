@@ -3,7 +3,6 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
-import { useScreenshotCapture } from "../hooks/useScreenshotCapture";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
 import { ChatMessage } from "../components/ChatMessage";
@@ -69,12 +68,6 @@ export function SessionView() {
     "respawn_session",
   );
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
-  const {
-    capture: captureScreenshot,
-    pending: screenshotPending,
-    error: screenshotError,
-    dismissError: dismissScreenshotError,
-  } = useScreenshotCapture(sessionId);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
@@ -206,15 +199,6 @@ export function SessionView() {
             <Button
               variant="ghost"
               size="sm"
-              title="Capture the bot-hq window and share with Brian + Rain"
-              disabled={screenshotPending}
-              onClick={captureScreenshot}
-            >
-              {screenshotPending ? "…" : "📸"}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
               title="Session settings — policy & push gate"
               aria-label="Session settings"
               onClick={() => setSettingsOpen(true)}
@@ -239,19 +223,6 @@ export function SessionView() {
               }}
             >
               retry
-            </button>
-          </div>
-        )}
-
-        {screenshotError && (
-          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">
-            <span className="font-semibold">Screenshot failed:</span>{" "}
-            {screenshotError}
-            <button
-              className="ml-2 underline hover:text-error"
-              onClick={dismissScreenshotError}
-            >
-              dismiss
             </button>
           </div>
         )}

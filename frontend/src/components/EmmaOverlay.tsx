@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
-import { useScreenshotCapture } from "../hooks/useScreenshotCapture";
 import { useEmmaStore } from "../stores/emma";
 import { useChatStore } from "../stores/chat";
 import type {
@@ -31,12 +30,6 @@ export function EmmaOverlay() {
     "respawn_session",
   );
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
-  const {
-    capture: handleScreenshot,
-    pending: screenshotPending,
-    error: screenshotError,
-    dismissError: dismissScreenshotError,
-  } = useScreenshotCapture(EMMA_SESSION_ID);
   useEffect(() => {
     if (!open) return;
     setRespawnError(null);
@@ -168,16 +161,6 @@ export function EmmaOverlay() {
           </div>
           <button
             type="button"
-            onClick={handleScreenshot}
-            disabled={screenshotPending}
-            aria-label="Share view"
-            title="Capture the bot-hq window and share with Emma"
-            className="rounded p-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface disabled:opacity-50"
-          >
-            {screenshotPending ? "…" : "📸"}
-          </button>
-          <button
-            type="button"
             onClick={() => setOpen(false)}
             aria-label="Close Emma"
             className="rounded p-1 text-on-surface-variant transition-colors hover:text-on-surface"
@@ -205,19 +188,6 @@ export function EmmaOverlay() {
           </button>
         </div>
       )}
-      {screenshotError && (
-        <div className="flex-shrink-0 border-b border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
-          <span className="font-semibold">Screenshot failed:</span>{" "}
-          {screenshotError}
-          <button
-            className="ml-2 underline hover:text-error"
-            onClick={dismissScreenshotError}
-          >
-            dismiss
-          </button>
-        </div>
-      )}
-
       <div
         ref={scrollRef}
         className="relative flex-1 overflow-auto px-4 py-4"
