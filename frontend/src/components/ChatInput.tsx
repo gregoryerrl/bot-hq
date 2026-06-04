@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "./ui/Button";
 import { Textarea } from "./ui/Textarea";
 import { errorMessage } from "../hooks/useInvoke";
@@ -8,16 +8,6 @@ interface ChatInputProps {
   onSend: (text: string) => Promise<void> | void;
   disabled?: boolean;
 }
-
-// macOS uses ⌘; everywhere else show "Ctrl". Detection is best-effort:
-// `navigator.platform` is deprecated but still populated; falling back to
-// userAgent keeps the hint correct on common platforms without pulling in a
-// dep. Computed once at module-load — no need to track changes.
-const isMac =
-  typeof navigator !== "undefined" &&
-  (/Mac|iPhone|iPad/i.test(navigator.platform) ||
-    /Mac|iPhone|iPad/i.test(navigator.userAgent));
-const modKeyLabel = isMac ? "⌘" : "Ctrl";
 
 export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
   const [value, setValue] = useState("");
@@ -53,8 +43,7 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
     }
   };
 
-  // Stable identity so the hint <kbd> elements don't reflow on every render.
-  const hint = useMemo(() => `${modKeyLabel}↵`, []);
+  const hint = "↵";
 
   return (
     <>
@@ -82,7 +71,14 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            // Enter sends; Shift+Enter inserts a newline (so multi-line messages
+            // aren't lost). ⌘/Ctrl+Enter also sends. Skip while an IME is
+            // composing so multibyte input isn't cut off mid-character.
+            if (
+              e.key === "Enter" &&
+              !e.shiftKey &&
+              !e.nativeEvent.isComposing
+            ) {
               e.preventDefault();
               handleSubmit(e as unknown as FormEvent);
             }
@@ -94,7 +90,7 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
         <kbd
           aria-hidden
           className="pointer-events-none absolute bottom-1.5 right-2 select-none rounded border border-outline-variant bg-surface-container-lowest px-1.5 py-0.5 font-mono text-[0.65rem] text-on-surface-variant"
-          title="Send"
+          title="Enter to send · Shift+Enter for a newline"
         >
           {hint}
         </kbd>

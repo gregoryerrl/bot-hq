@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(ui): Enter sends in the chat; Shift+Enter for a newline (D8).** The chat
+  textarea required ⌘/Ctrl+Enter — bare Enter just inserted a newline, which read
+  as "Enter doesn't work". Now bare Enter sends (⌘/Ctrl+Enter still works as an
+  alternate), Shift+Enter inserts a newline, and IME composition is respected so
+  multibyte input isn't cut off. Hint updated to `↵`. (Emma's single-line input
+  already sent on Enter.)
 - **refactor: parse ViolationKind via serde, not a hand match (C3).** The
   request_approval `kind` parser (`jsonrpc::parse_violation_kind`) duplicated the
   enum's snake_case wire names in a hand-written match that had to be kept in
