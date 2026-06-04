@@ -113,6 +113,9 @@ mod tests {
     #[tokio::test]
     async fn upsert_get_list_delete_roundtrip() {
         let s = Storage::memory().await.unwrap();
+        // Migration 0016 seeds the registry, so measure against the live
+        // baseline rather than an absolute count.
+        let seeded = s.list_models().await.unwrap().len();
         s.upsert_model(&model("m1", "Opus")).await.unwrap();
         s.upsert_model(&model("m2", "Sonnet")).await.unwrap();
 
@@ -122,9 +125,10 @@ mod tests {
         assert!(got.created_at.ends_with('Z'), "got {}", got.created_at);
 
         let all = s.list_models().await.unwrap();
-        assert_eq!(all.len(), 2);
-        // Ordered by display name: Opus before Sonnet.
-        assert_eq!(all[0].id, "m1");
+        assert_eq!(all.len(), seeded + 2);
+        // Ordered by display name COLLATE NOCASE: "Opus" sorts before "Sonnet".
+        let pos = |id: &str| all.iter().position(|m| m.id == id).unwrap();
+        assert!(pos("m1") < pos("m2"));
 
         let removed = s.delete_model("m1").await.unwrap();
         assert_eq!(removed, 1);
