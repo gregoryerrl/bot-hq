@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
-import type { GatedKeyword, GateMode, Policy } from "../lib/bindings";
+import type { GatedKeyword, Policy } from "../lib/bindings";
 import { PolicyForm } from "../components/PolicyForm";
+import { GatedKeywordList } from "../components/GatedKeywordList";
 import { CloseIcon, SaveIcon } from "./contextLibraryShared";
 import { cn } from "../lib/cn";
-
-const GATE_MODES: GateMode[] = ["gate", "auto_allow"];
 
 /**
  * Right-side drawer for editing a session's canonical policy snapshot
@@ -181,12 +180,6 @@ function SessionToolGateSection({ sessionId }: { sessionId: string }) {
     return () => clearTimeout(id);
   }, [saved]);
 
-  const updateRow = (i: number, patch: Partial<GatedKeyword>) =>
-    setDraft((d) => d.map((k, idx) => (idx === i ? { ...k, ...patch } : k)));
-  const removeRow = (i: number) =>
-    setDraft((d) => d.filter((_, idx) => idx !== i));
-  const addRow = () => setDraft((d) => [...d, { keyword: "", mode: "gate" }]);
-
   const onSave = async () => {
     await save.mutateAsync({
       sessionId,
@@ -236,66 +229,28 @@ function SessionToolGateSection({ sessionId }: { sessionId: string }) {
         <div className="h-20 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
       ) : (
         <div className="rounded-lg border border-outline-variant bg-surface-container p-3">
-          {draft.length === 0 ? (
-            <p className="py-1 font-code-sm text-code-sm text-on-surface-variant">
-              No keywords — every Bash command runs ungated for this session.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-2">
-              {draft.map((k, i) => (
-                <li key={i} className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={k.keyword}
-                    onChange={(e) => updateRow(i, { keyword: e.target.value })}
-                    placeholder="keyword (e.g. gh issue comment, rm -rf)"
-                    className="min-w-0 flex-1 border-0 border-b border-outline-variant bg-transparent rounded-none px-0 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant caret-primary focus:border-primary focus:outline-none"
-                  />
-                  <div className="flex shrink-0 overflow-hidden rounded border border-outline-variant">
-                    {GATE_MODES.map((m) => {
-                      const active = k.mode === m;
-                      const activeCls =
-                        m === "gate"
-                          ? "bg-primary/15 text-primary"
-                          : "bg-emerald-500/15 text-emerald-300";
-                      return (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => updateRow(i, { mode: m })}
-                          className={cn(
-                            "px-2.5 py-1 font-label-caps text-label-caps transition-colors",
-                            active
-                              ? activeCls
-                              : "bg-transparent text-on-surface-variant hover:text-on-surface",
-                          )}
-                        >
-                          {m === "gate" ? "Gate" : "Auto-allow"}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => removeRow(i)}
-                    aria-label="Remove keyword"
-                    className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          <div className="mt-3">
-            <button
-              type="button"
-              onClick={addRow}
-              className="rounded border border-outline-variant bg-transparent px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-            >
-              + Add keyword
-            </button>
-          </div>
+          <GatedKeywordList
+            value={draft}
+            onChange={setDraft}
+            placeholder="keyword (e.g. gh issue comment, rm -rf)"
+            inputClassName="min-w-0 flex-1 border-0 border-b border-outline-variant bg-transparent rounded-none px-0 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant caret-primary focus:border-primary focus:outline-none"
+            emptyState={
+              <p className="py-1 font-code-sm text-code-sm text-on-surface-variant">
+                No keywords — every Bash command runs ungated for this session.
+              </p>
+            }
+            footer={(addRow) => (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={addRow}
+                  className="rounded border border-outline-variant bg-transparent px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+                >
+                  + Add keyword
+                </button>
+              </div>
+            )}
+          />
         </div>
       )}
       {save.error && (

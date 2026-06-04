@@ -3,15 +3,15 @@ import { Link, useBlocker } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
-import { parseUtcMs } from "../lib/time";
+import { formatTimestamp } from "../lib/time";
 import { SaveIcon } from "./contextLibraryShared";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { ModelsPanel } from "./ModelsPanel";
 import { PolicyForm } from "../components/PolicyForm";
+import { GatedKeywordList } from "../components/GatedKeywordList";
 import type {
   AgentConfigView,
   GatedKeyword,
-  GateMode,
   ModelView,
   Policy,
   SessionInfo,
@@ -468,7 +468,7 @@ function AgentCard({
       {/* Footer: updated-at + reset/save */}
       <div className="mt-4 flex items-center justify-between gap-2 border-t border-outline-variant/30 pt-3">
         <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
-          updated {formatTimestamp(cfg.updated_at)}
+          updated {formatTimestamp(cfg.updated_at) || "—"}
         </span>
         <div className="flex shrink-0 gap-2">
           <button
@@ -551,7 +551,7 @@ function ArchivePanel() {
                       {s.id.slice(0, 8)}
                     </code>
                     <span className="mx-2 text-on-surface-variant/60">·</span>
-                    closed {formatTimestamp(s.closed_at ?? "")}
+                    closed {formatTimestamp(s.closed_at ?? "") || "—"}
                   </p>
                 </div>
                 <span
@@ -577,8 +577,6 @@ function ArchivePanel() {
 // Tool Gate — global gated-Bash keywords
 // ============================================================================
 
-const GATE_MODES: GateMode[] = ["gate", "auto_allow"];
-
 function ToolGateSection() {
   const { data: keywords = [], refetch, isLoading } =
     useTauriQuery<GatedKeyword[]>("get_tool_gate_keywords");
@@ -601,13 +599,6 @@ function ToolGateSection() {
   }, [serverJson]);
 
   const dirty = JSON.stringify(draft) !== serverJson;
-
-  const updateRow = (i: number, patch: Partial<GatedKeyword>) =>
-    setDraft((d) => d.map((k, idx) => (idx === i ? { ...k, ...patch } : k)));
-  const removeRow = (i: number) =>
-    setDraft((d) => d.filter((_, idx) => idx !== i));
-  const addRow = () =>
-    setDraft((d) => [...d, { keyword: "", mode: "gate" }]);
 
   const onSave = async () => {
     // Drop blank keywords — they match nothing and only clutter the file.
@@ -650,69 +641,30 @@ function ToolGateSection() {
         <div className="h-24 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
       ) : (
         <div className="rounded-lg border border-outline-variant bg-surface-container p-4">
-          {draft.length === 0 ? (
-            <p className="py-2 font-code-sm text-code-sm text-on-surface-variant">
-              No keywords configured — every Bash command runs ungated. Add one
-              (e.g. <code>gh</code>, <code>git push</code>, <code>rm -rf</code>)
-              to gate or auto-allow matching commands.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-2">
-              {draft.map((k, i) => (
-                <li key={i} className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={k.keyword}
-                    onChange={(e) => updateRow(i, { keyword: e.target.value })}
-                    placeholder="keyword (e.g. gh issue, git push, curl)"
-                    className={cn(terminalInputClass, "flex-1")}
-                  />
-                  <div className="flex shrink-0 overflow-hidden rounded border border-outline-variant">
-                    {GATE_MODES.map((m) => {
-                      const active = k.mode === m;
-                      const activeCls =
-                        m === "gate"
-                          ? "bg-primary/15 text-primary"
-                          : "bg-emerald-500/15 text-emerald-300";
-                      return (
-                        <button
-                          key={m}
-                          type="button"
-                          onClick={() => updateRow(i, { mode: m })}
-                          className={cn(
-                            "px-2.5 py-1 font-label-caps text-label-caps transition-colors",
-                            active
-                              ? activeCls
-                              : "bg-transparent text-on-surface-variant hover:text-on-surface",
-                          )}
-                        >
-                          {m === "gate" ? "Gate" : "Auto-allow"}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => removeRow(i)}
-                    aria-label="Remove keyword"
-                    className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-          <div className="mt-3 flex items-center gap-3">
-            <Button variant="ghost" size="sm" onClick={addRow}>
-              + Add keyword
-            </Button>
-            {dirty && (
-              <span className="font-label-caps text-label-caps text-amber-300">
-                Unsaved changes
-              </span>
+          <GatedKeywordList
+            value={draft}
+            onChange={setDraft}
+            inputClassName={cn(terminalInputClass, "flex-1")}
+            emptyState={
+              <p className="py-2 font-code-sm text-code-sm text-on-surface-variant">
+                No keywords configured — every Bash command runs ungated. Add
+                one (e.g. <code>gh</code>, <code>git push</code>,{" "}
+                <code>rm -rf</code>) to gate or auto-allow matching commands.
+              </p>
+            }
+            footer={(addRow) => (
+              <div className="mt-3 flex items-center gap-3">
+                <Button variant="ghost" size="sm" onClick={addRow}>
+                  + Add keyword
+                </Button>
+                {dirty && (
+                  <span className="font-label-caps text-label-caps text-amber-300">
+                    Unsaved changes
+                  </span>
+                )}
+              </div>
             )}
-          </div>
+          />
         </div>
       )}
     </section>
@@ -818,11 +770,4 @@ function agentIcon(name: string): string {
   }
 }
 
-function formatTimestamp(iso: string): string {
-  if (!iso) return "—";
-  // Zone-safe: legacy rows can be zone-less; treat them as UTC.
-  const ms = parseUtcMs(iso);
-  if (!Number.isFinite(ms)) return iso;
-  return new Date(ms).toLocaleString();
-}
 
