@@ -354,6 +354,17 @@ impl SignalingBridge {
                         .await;
                 }
 
+                // Clear the awaiting halt the matching ask set, BEFORE delivering
+                // the pick. The agent's blocking call returns on `p.tx.send`, so
+                // the duo pump must already see `awaiting == false` by the time the
+                // resumed agent's first chunk arrives — else `duo::flush_buffer`
+                // suppresses that chunk (and every later Brian<->Rain peer-forward)
+                // until the user types free text or advances a phase (the duo goes
+                // silent right after the user answers). The bridge set the flag
+                // (set_session_awaiting), so the bridge clears it on resolve. Also
+                // covers the Err fall-through below (core then re-clears + wakes
+                // stdin — harmlessly redundant).
+                self.clear_session_awaiting(&p.choice.session_id).await;
                 match p.tx.send(picked) {
                     Ok(()) => Ok(ResolveOutcome::Delivered),
                     Err(picked) => {
@@ -839,6 +850,52 @@ mod tests {
         let outcome = bridge.resolve_choice(&choice_id, "b".into()).await.unwrap();
         let _ = ask.await.unwrap();
         assert!(matches!(outcome, ResolveOutcome::Delivered));
+    }
+
+    #[tokio::test]
+    async fn resolve_choice_delivered_clears_awaiting() {
+        // Regression for "the duo goes silent after the user answers": a Delivered
+        // resolve must clear the awaiting halt the ask set, or the duo pump keeps
+        // dropping every Brian<->Rain peer-forward (duo::flush_buffer is gated on
+        // this flag).
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let bridge = SignalingBridge::new();
+        let flag = Arc::new(AtomicBool::new(false));
+        bridge
+            .register_session_awaiting("s1".into(), Arc::clone(&flag))
+            .await;
+        let mut sub = bridge.subscribe();
+        let bridge_clone = Arc::clone(&bridge);
+        let ask = tokio::spawn(async move {
+            bridge_clone
+                .ask_user_choice(
+                    "s1".into(),
+                    "brian".into(),
+                    "pick".into(),
+                    vec!["a".into(), "b".into()],
+                )
+                .await
+                .unwrap()
+        });
+        let choice_id = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        // ask_user_choice halts the duo; set_session_awaiting runs before the
+        // PendingChoice event emits, so this read is race-free.
+        assert!(
+            flag.load(Ordering::Acquire),
+            "ask_user_choice should set the awaiting halt"
+        );
+        let outcome = bridge.resolve_choice(&choice_id, "b".into()).await.unwrap();
+        let _ = ask.await.unwrap();
+        assert!(matches!(outcome, ResolveOutcome::Delivered));
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "a Delivered resolve must clear the awaiting halt so the duo resumes"
+        );
     }
 
     #[tokio::test]

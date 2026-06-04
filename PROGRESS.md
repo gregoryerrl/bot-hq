@@ -21,6 +21,27 @@ constraint.
 
 ---
 
+## 2026-06-04 — fix: resume the duo after the user answers a choice
+
+The Brian↔Rain peer-forward went silent after the user clicked an
+`ask_user_choice`/`request_approval` button, staying frozen until the user typed
+free text or advanced a phase. Root cause: `ask_user_choice`/`request_approval`
+set a shared `awaiting` `AtomicBool` (via `bridge::set_session_awaiting`), but the
+common resolve path — `bridge::resolve_choice` → `ResolveOutcome::Delivered`
+(oneshot send succeeds, agent resumes via the tool return) — never cleared it, so
+`duo::flush_buffer` (gated on the flag) kept dropping every peer-forward. Only the
+OOB-fallback arm, `broadcast`, and `advance_phase` cleared it. Likely the root of
+the long-standing "answer didn't round-trip" symptom (notes #2).
+
+Fix: `bridge::resolve_choice` now clears the halt (`clear_session_awaiting`) right
+before delivering the pick — the bridge owns the awaiting map and set the flag, so
+it clears it symmetrically. Clearing *before* `p.tx.send` (not after) avoids a
+1-chunk race where the resumed agent's first reply could be suppressed before the
+flag flipped; it also covers the Err/OOB fall-through (core then re-clears + wakes
+stdin, harmlessly redundant). Covers choices, approvals (incl. pre-push), and
+`action_gate`. Regression test `resolve_choice_delivered_clears_awaiting` asserts
+the flag is set after the ask and cleared after a Delivered resolve.
+
 ## 2026-06-04 — remove user-facing screenshot button
 
 The 📸 "share window" button (SessionView header + Emma overlay) was designed as
