@@ -14,7 +14,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::path::Path;
 use std::str::FromStr;
 
-pub mod model;
+pub mod row_types;
 
 mod agent_config;
 mod cl_index;
@@ -27,7 +27,7 @@ mod session_docs;
 mod sessions;
 mod time;
 
-pub use model::{
+pub use row_types::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Model, Plugin,
     Project, QuestionKind, QuestionStatus, Session, SessionDocument, SessionTrayEntry,
 };
