@@ -26,6 +26,14 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **perf(cl): de-quadratic cl_rescan + parallelize all-projects rescan (E5).**
+  Backend: `cl_rescan` did an `existing.iter().find()` per on-disk file (O(disk ×
+  index)); now builds a `HashMap<path,&row>` once for O(1) lookup. Frontend: the
+  "rescan all" button ran each project's rescan serially (`for…await`); now
+  `Promise.all` with per-project error isolation. (Left: wrapping the per-row
+  upsert/touch/delete writes in one transaction — cl_rescan is on-demand with a
+  modest row count, so the sequential awaits aren't worth threading a tx through
+  three storage methods.)
 - **fix(ui): share the clock-time formatter (C5, partial + zone bugfix).** Emma's
   overlay had its own `formatClockTime` that used `new Date(iso)` directly — NOT
   zone-safe, so a zone-less timestamp misparsed (the staleness-bug class the

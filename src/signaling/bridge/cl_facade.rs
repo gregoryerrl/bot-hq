@@ -142,9 +142,12 @@ impl SignalingBridge {
         let existing_paths: HashSet<String> =
             existing.iter().map(|e| e.file_path.clone()).collect();
 
-        // Adds + touches.
+        // Adds + touches. Index existing rows by path for O(1) lookup — this was
+        // an O(disk × index) linear scan (`existing.iter().find`) per on-disk file.
+        let by_path: HashMap<&str, &_> =
+            existing.iter().map(|e| (e.file_path.as_str(), e)).collect();
         for (rel, (mtime, snippet)) in &on_disk {
-            match existing.iter().find(|e| &e.file_path == rel) {
+            match by_path.get(rel.as_str()) {
                 None => {
                     storage
                         .upsert_cl_index(project, rel, snippet, None)

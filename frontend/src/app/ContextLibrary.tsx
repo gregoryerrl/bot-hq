@@ -317,26 +317,27 @@ export function ContextLibrary() {
         });
         setRescanReport(report);
       } else {
-        // All-projects rescan: iterate over every project we know about
-        // (derived from current results — same caveat as before).
+        // All-projects rescan: each project's rescan is independent, so run
+        // them in parallel (was a serial for…await). Per-project failures are
+        // contained so one bad project doesn't abort the rest.
         const projectIds = Object.keys(byProject);
-        const agg: ClRescanReportView = {
-          added: [],
-          touched: [],
-          orphaned: [],
-        };
-        for (const p of projectIds) {
-          try {
-            const r = await invoke<ClRescanReportView>("cl_rescan", {
-              project: p,
-            });
-            agg.added.push(...r.added);
-            agg.touched.push(...r.touched);
-            agg.orphaned.push(...r.orphaned);
-          } catch (e) {
-            // eslint-disable-next-line no-console
-            console.warn(`cl_rescan(${p}) failed`, e);
-          }
+        const reports = await Promise.all(
+          projectIds.map((p) =>
+            invoke<ClRescanReportView>("cl_rescan", { project: p }).catch(
+              (e) => {
+                // eslint-disable-next-line no-console
+                console.warn(`cl_rescan(${p}) failed`, e);
+                return null;
+              },
+            ),
+          ),
+        );
+        const agg: ClRescanReportView = { added: [], touched: [], orphaned: [] };
+        for (const r of reports) {
+          if (!r) continue;
+          agg.added.push(...r.added);
+          agg.touched.push(...r.touched);
+          agg.orphaned.push(...r.orphaned);
         }
         setRescanReport(agg);
       }
