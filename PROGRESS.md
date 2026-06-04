@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **docs: correct the PluginManager status (finding 33).** ARCHITECTURE.md called
+  the Plugins tab "Placeholder UI" and PLAN.md said the frontend install/heartbeat
+  wiring "is not" done — both stale: `PluginManager.tsx` has working
+  install/enable/disable/uninstall + a `plugin:crashed` heartbeat indicator. What
+  actually remains is live plugin *execution* (the per-plugin iframes + ping/pong;
+  `PluginSlot` was removed as dead code). Updated both docs to match.
 - **fix(core): stop dropping control events under load (A3).** `SessionCloseRequest`
   / `AgentAdvancePhase` shared the one 64-slot broadcast channel with per-chunk
   `MessagePersisted`, and the main.rs handler `.await`ed the slow core work (close

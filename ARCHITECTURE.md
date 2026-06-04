@@ -197,10 +197,14 @@ file / new folder / rename / delete (`cl_create_file` / `cl_mkdir` / `cl_rename`
 / `cl_delete_path`, each followed by `cl_rescan`). Substring search + project
 filter.
 
-**Plugins tab:** Placeholder UI surfaced from `tauri_cmd/plugins.rs`
-(landing later). Rust scaffold in `src/plugins/` ships the manifest
-parser, loader, capability JSON generator, and host-side heartbeat
-watcher.
+**Plugins tab:** Functional management UI (`PluginManager.tsx`) over
+`tauri_cmd/plugins.rs` — install from a local path, enable / disable /
+uninstall, and a heartbeat-driven crash indicator (subscribes to the
+`plugin:crashed` event emitted by the host-side watcher). Rust scaffold in
+`src/plugins/` ships the manifest parser, loader, capability JSON
+generator, and heartbeat watcher. What's NOT wired yet: live plugin
+*execution* — the per-plugin iframes at `https://plugin-<id>.localhost`
+and their ping/pong channel (`PluginSlot` was removed as dead code).
 
 **Settings tab:** subtabs for the saved-model registry (Models), the
 default-model + disable-Rain-by-default app settings, the global Tool

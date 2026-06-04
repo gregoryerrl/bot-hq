@@ -30,9 +30,12 @@ The Tauri v2 migration merged to main (see PROGRESS.md), and the
 follow-on `broadcast_message` command + `compute_apply_diff` A-tab diff
 shipped. Remaining follow-ups:
 
-- Plugin install flow + iframe ping/pong frontend channel for the
-  heartbeat watcher. The `tauri_cmd/plugins.rs` backend is live; the
-  frontend install/heartbeat wiring is not.
+- Live plugin *execution*: the per-plugin iframes at
+  `https://plugin-<id>.localhost` + their ping/pong channel. The
+  management UI (install / enable / disable / uninstall) and the
+  heartbeat-driven crash indicator already shipped in `PluginManager.tsx`;
+  what remains is rendering + driving the plugin iframes themselves
+  (`PluginSlot` was removed as dead code and needs rebuilding for this).
 - Replace the placeholder `icons/icon.png` with the real bot-hq mark.
 
 The Context Library editor write-back + folder-view + right-click disk ops
