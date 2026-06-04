@@ -21,6 +21,22 @@ constraint.
 
 ---
 
+## 2026-06-04 — audit remediation (continuous pass)
+
+Working through the full-codebase audit (findings in the session's investigate doc),
+priority order, one commit per cohesive batch. Newest bullet first.
+
+- **perf(ui): scope event-driven query invalidation + concat chat batches (E1, E3).**
+  `GlobalEventSync` called `invalidateQueries()` with no key on every `session:*`
+  event → an app-wide refetch storm (10-20+ queries incl. `compute_apply_diff`
+  spawning `git`) on a single choice-resolve. Now each event invalidates only the
+  query families it can affect (tray / phase+docs+diff / close lists). Also
+  `chat.ts applyBatch` spread `[...current, msg]` inside the per-message loop
+  (O(N·K) — a 20-msg batch copied the history up to 20×); now accumulates per
+  session and concats once. (E2 poll-removal deferred until the lossy-channel fix
+  A3 — the bridge subscriber drops `session:*` events on `Lagged` without
+  re-syncing, so the safety polls stay load-bearing until then.)
+
 ## 2026-06-04 — fix: resume the duo after the user answers a choice
 
 The Brian↔Rain peer-forward went silent after the user clicked an

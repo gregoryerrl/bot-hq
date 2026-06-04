@@ -30,14 +30,21 @@ export const useChatStore = create<ChatState>((set) => ({
       if (msgs.length === 0) return s;
       const messages = { ...s.messages };
       const watermarks = { ...s.watermarks };
-      // Group by session_id; append in order, skipping any that don't
-      // advance the watermark (defensive against duplicate events).
+      // Accumulate per-session appends first, then splice each session's array
+      // ONCE. Spreading `[...current, msg]` inside the loop was O(N·K): a
+      // 20-message batch (BatchEmitter's FLUSH_AT_N) for one session copied the
+      // full length-N history up to 20 times. Skip any id that doesn't advance
+      // the watermark (defensive against duplicate events).
+      const appends: Record<string, AgentMessage[]> = {};
       for (const msg of msgs) {
-        const current = messages[msg.session_id] ?? [];
         const wm = watermarks[msg.session_id] ?? 0;
         if (msg.id <= wm) continue;
-        messages[msg.session_id] = [...current, msg];
+        (appends[msg.session_id] ??= []).push(msg);
         watermarks[msg.session_id] = msg.id;
+      }
+      for (const sessionId of Object.keys(appends)) {
+        const current = messages[sessionId] ?? [];
+        messages[sessionId] = current.concat(appends[sessionId]);
       }
       return { messages, watermarks };
     }),
