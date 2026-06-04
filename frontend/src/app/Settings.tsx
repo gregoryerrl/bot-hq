@@ -35,52 +35,63 @@ type SettingsSubTab =
  */
 export function Settings() {
   const [tab, setTab] = useState<SettingsSubTab>("agents");
+  // Lazy-mount-then-keep: a panel mounts only once its tab has been visited, then
+  // STAYS mounted (CSS `hidden` when inactive) so in-progress edits survive a
+  // subtab switch. This skips firing the queries of tabs the user never opens —
+  // the old code mounted all 6 panels (and all their queries) on first visit.
+  const [visited, setVisited] = useState<Set<SettingsSubTab>>(
+    () => new Set<SettingsSubTab>(["agents"]),
+  );
+  const select = (t: SettingsSubTab) => {
+    setTab(t);
+    setVisited((v) => (v.has(t) ? v : new Set(v).add(t)));
+  };
   return (
     <div className="flex h-full flex-col bg-background">
       <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
-        <SubTabButton active={tab === "agents"} onClick={() => setTab("agents")}>
+        <SubTabButton active={tab === "agents"} onClick={() => select("agents")}>
           Agents
         </SubTabButton>
-        <SubTabButton active={tab === "models"} onClick={() => setTab("models")}>
+        <SubTabButton active={tab === "models"} onClick={() => select("models")}>
           Models
         </SubTabButton>
-        <SubTabButton active={tab === "claude"} onClick={() => setTab("claude")}>
+        <SubTabButton active={tab === "claude"} onClick={() => select("claude")}>
           Claude Config
         </SubTabButton>
         <SubTabButton
           active={tab === "toolgate"}
-          onClick={() => setTab("toolgate")}
+          onClick={() => select("toolgate")}
         >
           Tool Gate
         </SubTabButton>
-        <SubTabButton active={tab === "policy"} onClick={() => setTab("policy")}>
+        <SubTabButton active={tab === "policy"} onClick={() => select("policy")}>
           Policy
         </SubTabButton>
         <SubTabButton
           active={tab === "archive"}
-          onClick={() => setTab("archive")}
+          onClick={() => select("archive")}
         >
           Archive
         </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "agents" && "hidden")}>
-          <AgentsPanel />
+          {visited.has("agents") && <AgentsPanel />}
         </div>
         <div className={cn("h-full", tab !== "models" && "hidden")}>
-          <ModelsPanel />
+          {visited.has("models") && <ModelsPanel />}
         </div>
         <div className={cn("h-full", tab !== "claude" && "hidden")}>
-          <ClaudeConfigPanel />
+          {visited.has("claude") && <ClaudeConfigPanel />}
         </div>
         <div className={cn("h-full", tab !== "toolgate" && "hidden")}>
-          <ToolGatePanel />
+          {visited.has("toolgate") && <ToolGatePanel />}
         </div>
         <div className={cn("h-full", tab !== "policy" && "hidden")}>
-          <GlobalPolicyPanel />
+          {visited.has("policy") && <GlobalPolicyPanel />}
         </div>
         <div className={cn("h-full", tab !== "archive" && "hidden")}>
-          <ArchivePanel />
+          {visited.has("archive") && <ArchivePanel />}
         </div>
       </div>
     </div>

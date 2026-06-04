@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **perf(ui): lazy-mount Settings subtabs, keep once visited (E8).** Settings
+  rendered all 6 panels up front (CSS-`hidden`), firing every panel's queries on
+  first visit. Now a panel mounts only once its tab is visited and then stays
+  mounted — so the default "agents" tab's queries fire on open, the rest only when
+  the user actually clicks that tab. Keeps the intentional edit-survival across
+  subtab switches (panels stay mounted once shown).
 - **fix(storage): cl_index/cl_folders upsert returns the real id (F1).** Both
   `upsert_cl_index` and `upsert_folder_description` returned `last_insert_rowid()`,
   which on an upsert that takes the DO UPDATE branch can report the bumped (unused)
