@@ -35,7 +35,23 @@ impl HashCache {
     fn load(data_dir: &Path) -> Result<Self> {
         let p = data_dir.join(HASH_CACHE_FILE);
         match std::fs::read_to_string(&p) {
-            Ok(s) => Ok(serde_json::from_str(&s).unwrap_or_default()),
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(cache) => Ok(cache),
+                // Stay resilient (a corrupt cache shouldn't brick the audit), but
+                // make the reset LOUD: with an empty cache every policy file
+                // re-registers as `FirstSeen` instead of `Changed`, so this
+                // cycle's policy-mutation tamper detection is disarmed. A silent
+                // `unwrap_or_default()` hid exactly that.
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        path = %p.display(),
+                        "policy hash cache is corrupt — resetting to empty; \
+                         policy-mutation detection is disarmed for this cycle"
+                    );
+                    Ok(Self::default())
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("reading hash cache at {}", p.display())),
         }

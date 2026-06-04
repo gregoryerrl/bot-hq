@@ -264,12 +264,73 @@ impl Policy {
     }
 }
 
+/// Top-level keys a standalone policy file may carry. serde silently ignores
+/// anything else (every field is `#[serde(default)]`), so a typo like
+/// `push-gate:` would resolve to the permissive default with no signal — we warn
+/// instead (see [`check_unknown_policy_keys`]). `tool_blocklist` is the retired
+/// 3-tier key (gating moved to the global Tool Gate); it's tolerated so old
+/// on-disk files don't warn.
+pub(crate) const POLICY_KNOWN_KEYS: &[&str] = &[
+    "forbidden_in_commits",
+    "push_gate",
+    "force_push",
+    "per_action_approval",
+    "branch_pattern",
+    "commit_style",
+    "tool_blocklist",
+];
+
+/// As [`POLICY_KNOWN_KEYS`] but for a session snapshot (flattened `Policy` plus
+/// the `tool_gate` block).
+pub(crate) const SESSION_POLICY_KNOWN_KEYS: &[&str] = &[
+    "forbidden_in_commits",
+    "push_gate",
+    "force_push",
+    "per_action_approval",
+    "branch_pattern",
+    "commit_style",
+    "tool_blocklist",
+    "tool_gate",
+];
+
+/// Warn (do NOT fail) on top-level YAML keys outside `known`, returning the
+/// offenders. Non-breaking by design: parse still succeeds and unknown keys fall
+/// back to defaults — but the operator gets a log line instead of a silent
+/// disarm (a mistyped `tool_gate:` / `push_gate:` otherwise vanishes with no
+/// signal). Deliberately NOT `#[serde(deny_unknown_fields)]`: that would (a)
+/// break older on-disk files carrying the retired `tool_blocklist`, silently
+/// failing policy parse → disarming the git-hook enforcement, and (b) is
+/// unsupported alongside `SessionPolicy`'s `#[serde(flatten)]`.
+pub(crate) fn check_unknown_policy_keys(path: &Path, body: &str, known: &[&str]) -> Vec<String> {
+    let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(body)
+    else {
+        return Vec::new();
+    };
+    let mut unknown: Vec<String> = map
+        .keys()
+        .filter_map(|k| k.as_str())
+        .filter(|k| !known.contains(k))
+        .map(|k| k.to_string())
+        .collect();
+    unknown.sort();
+    for key in &unknown {
+        tracing::warn!(
+            file = %path.display(),
+            key = %key,
+            "policy file has an unrecognized top-level key — it is SILENTLY \
+             IGNORED (typo?); that setting falls back to the permissive default"
+        );
+    }
+    unknown
+}
+
 fn load_one(path: &Path) -> Result<Option<Policy>> {
     let body = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
+    check_unknown_policy_keys(path, &body, POLICY_KNOWN_KEYS);
     let parsed: Policy = serde_yaml::from_str(&body)
         .with_context(|| format!("parsing {} as YAML", path.display()))?;
     Ok(Some(parsed))
@@ -368,6 +429,31 @@ mod tests {
         let p = Policy::default();
         assert!(matches!(p.push_gate, PushGateMode::Auto));
         assert!(matches!(p.force_push, ForcePushMode::Allowed));
+    }
+
+    #[test]
+    fn unknown_policy_keys_are_reported() {
+        let path = Path::new("policy.yaml");
+        // Typo'd `push_gate` (hyphen) + a bogus key are flagged; valid keys and
+        // the retired-but-tolerated `tool_blocklist` are not.
+        let body =
+            "push-gate: ask\nforbidden_in_commits: [foo]\ntool_blocklist: [x]\nbogus: 1\n";
+        let unknown = check_unknown_policy_keys(path, body, POLICY_KNOWN_KEYS);
+        assert_eq!(unknown, vec!["bogus".to_string(), "push-gate".to_string()]);
+    }
+
+    #[test]
+    fn known_policy_keys_are_silent() {
+        let path = Path::new("policy.yaml");
+        let body = "push_gate: ask\nforce_push: blocked\ncommit_style: imperative\n";
+        assert!(check_unknown_policy_keys(path, body, POLICY_KNOWN_KEYS).is_empty());
+        // tool_gate is allowed only for the session-snapshot key set.
+        let with_gate = "tool_gate: []\npush_gate: auto\n";
+        assert!(check_unknown_policy_keys(path, with_gate, POLICY_KNOWN_KEYS)
+            == vec!["tool_gate".to_string()]);
+        assert!(
+            check_unknown_policy_keys(path, with_gate, SESSION_POLICY_KNOWN_KEYS).is_empty()
+        );
     }
 
     #[test]

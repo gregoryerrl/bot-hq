@@ -26,6 +26,19 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **fix(policy): make silent policy-disarm visible (B1, B2).** Two paths could
+  silently weaken enforcement with no signal. (B1) `Policy`/`SessionPolicy` had no
+  unknown-key handling, so a typo (`push-gate:`, a mistyped `tool_gate:`) was
+  dropped and the setting resolved to the permissive default. Added a loud
+  `tracing::warn` on unrecognized top-level keys in the policy + session-snapshot
+  load paths — deliberately NOT `#[serde(deny_unknown_fields)]`, which would break
+  older files carrying the retired `tool_blocklist` (failing parse → disarming the
+  git-hook enforcement) and is unsupported alongside `SessionPolicy`'s
+  `#[serde(flatten)]`. (B2) `audit.rs` `unwrap_or_default()` silently reset the
+  policy-hash cache on a corrupt file → every file re-registered as `FirstSeen`,
+  disarming mutation detection for that cycle; now logs the reset loudly.
+  Non-breaking — enforcement behavior unchanged, the disarm is just no longer
+  silent. Tests cover the key-detection.
 - **add(ui): close-session action in the SessionView header (D1).** The
   `close_session` command had zero UI callers — a human could start/configure a
   session but never end one (only an agent could, via MCP). Added a confirm-gated

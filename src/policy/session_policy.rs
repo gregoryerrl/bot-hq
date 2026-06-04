@@ -74,6 +74,9 @@ pub fn read_session_policy(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err).with_context(|| format!("reading {}", path.display())),
     };
+    // Warn on a mistyped key (e.g. `tool_gate:` -> `toolgate:`) before parsing —
+    // serde would silently drop it and the gate would resolve empty (disarmed).
+    super::check_unknown_policy_keys(&path, &body, super::SESSION_POLICY_KNOWN_KEYS);
     let policy: SessionPolicy = serde_yaml::from_str(&body)
         .with_context(|| format!("parsing {}", path.display()))?;
     Ok(Some(policy))
