@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { maintainClPrompt } from "../lib/maintainClPrompt";
@@ -29,6 +30,7 @@ export function MaintainCLModal({ open, onClose }: MaintainCLModalProps) {
   const [dispatching, setDispatching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selectRef = useRef<HTMLSelectElement | null>(null);
+  const trapRef = useFocusTrap<HTMLDivElement>();
 
   // Focus the project select on open + Escape-to-dismiss. Mirrors the New
   // Session dialog in Dashboard.
@@ -78,12 +80,14 @@ export function MaintainCLModal({ open, onClose }: MaintainCLModalProps) {
         aria-hidden
       />
       <div
+        ref={trapRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         aria-label="Dispatch CL maintenance"
         className={cn(
           "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] -translate-x-1/2 -translate-y-1/2",
-          "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl",
+          "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
         )}
       >
         <div className="mb-4 flex items-center justify-between">

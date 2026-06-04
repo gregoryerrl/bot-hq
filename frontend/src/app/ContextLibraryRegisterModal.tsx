@@ -2,6 +2,7 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
 import { baseName, terminalInputClass } from "./contextLibraryShared";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 // ============================================================================
 // RegisterProjectModal — promote an arbitrary on-disk folder to a Context
@@ -25,6 +26,7 @@ export function RegisterProjectModal({
   const [workingRepo, setWorkingRepo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const trapRef = useFocusTrap<HTMLDivElement>();
 
   if (!open) return null;
 
@@ -76,7 +78,9 @@ export function RegisterProjectModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded border border-outline-variant bg-surface-container p-4 shadow-lg"
+        ref={trapRef}
+        tabIndex={-1}
+        className="w-full max-w-md rounded border border-outline-variant bg-surface-container p-4 shadow-lg focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="font-headline-md text-headline-md text-on-surface">

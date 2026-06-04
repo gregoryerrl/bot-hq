@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { terminalInputClass } from "./contextLibraryShared";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 // ============================================================================
 // ContextMenu — VSCode-style right-click menu, fixed at the cursor. Closes on
@@ -98,6 +99,7 @@ export function ActionModal({
   onClose: () => void;
 }) {
   const [value, setValue] = useState(initialValue ?? "");
+  const trapRef = useFocusTrap<HTMLDivElement>();
   const hasInput = inputLabel != null;
   const canConfirm = !busy && (!hasInput || value.trim().length > 0);
   const submit = () => {
@@ -114,7 +116,9 @@ export function ActionModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-sm rounded border border-outline-variant bg-surface-container p-4 shadow-lg"
+        ref={trapRef}
+        tabIndex={-1}
+        className="w-full max-w-sm rounded border border-outline-variant bg-surface-container p-4 shadow-lg focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <h2 className="font-headline-md text-headline-md text-on-surface">

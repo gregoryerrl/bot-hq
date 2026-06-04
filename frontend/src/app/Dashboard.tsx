@@ -11,6 +11,7 @@ import type {
   SessionInfo,
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 const RAIN_DISABLED_DEFAULT_KEY = "rain_disabled_default";
 
@@ -105,6 +106,7 @@ export function Dashboard() {
   }, [pending]);
 
   const [creating, setCreating] = useState(false);
+  const dialogRef = useFocusTrap<HTMLDivElement>(creating);
   const [title, setTitle] = useState("");
   // Selected project name (matches ProjectView.name). Empty string = no
   // project (no working repo). When set, we look up the project's
@@ -200,12 +202,14 @@ export function Dashboard() {
             aria-hidden
           />
           <div
+            ref={dialogRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-label="New session"
             className={cn(
               "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] -translate-x-1/2 -translate-y-1/2",
-              "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl",
+              "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
             )}
           >
             <div className="mb-4 flex items-center justify-between">

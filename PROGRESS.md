@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **a11y(ui): focus-trap the dialog modals (D7).** New `useFocusTrap` hook: focuses
+  the first focusable on open, traps Tab/Shift+Tab inside the dialog, and restores
+  focus to the trigger on close. Applied to the four dialog modals (ActionModal,
+  New-session, MaintainCL, Register) — keyboard/screen-reader users could
+  previously Tab out into the obscured page behind the scrim. (The Emma/Policy
+  slide-over drawers follow the same pattern — left for a focused follow-up.)
 - **fix(ui): don't offer file/folder creation under the `_globals` root (D12 rem.).**
   The CL right-click menu offered "New file/New folder" on the `_globals` virtual
   bucket (cross-project system files), which would create files at the CL system
