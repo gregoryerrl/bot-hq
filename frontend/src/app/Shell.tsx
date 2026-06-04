@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { useEmmaStore } from "../stores/emma";
@@ -8,7 +7,6 @@ import { PendingTray } from "../components/PendingTray";
 export function Shell() {
   const toggleEmma = useEmmaStore((s) => s.toggle);
   const emmaOpen = useEmmaStore((s) => s.open);
-  const [search, setSearch] = useState("");
 
   return (
     <div className="flex h-screen flex-col bg-background font-body-md text-on-background">
@@ -33,21 +31,6 @@ export function Shell() {
           </nav>
         </div>
         <div className="flex items-center gap-4">
-          <div className="relative hidden sm:block">
-            <SearchIcon className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-on-surface-variant" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search sessions, agents, tasks…"
-              className={cn(
-                "w-64 rounded border border-outline-variant bg-surface-container",
-                "py-1 pl-8 pr-3 font-code-sm text-code-sm text-on-surface",
-                "placeholder:text-on-surface-variant",
-                "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-              )}
-            />
-          </div>
           <PendingTray />
           <div className="ml-2 flex items-center border-l border-outline-variant pl-4">
             <button
@@ -83,18 +66,6 @@ export function Shell() {
             <span className="size-2 rounded-full bg-emerald-500" />
             Status: Online
           </span>
-          <a
-            href="#"
-            className="hidden font-code-sm text-code-sm text-on-surface-variant hover:text-primary sm:block"
-          >
-            API Docs
-          </a>
-          <a
-            href="#"
-            className="hidden font-code-sm text-code-sm text-on-surface-variant hover:text-primary sm:block"
-          >
-            Support
-          </a>
         </div>
       </footer>
       <EmmaOverlay />
@@ -109,24 +80,6 @@ const navLinkClass = ({ isActive }: { isActive: boolean }) =>
       ? "border-b-2 border-primary text-primary"
       : "text-on-surface-variant hover:bg-surface-variant/50",
   );
-
-function SearchIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={cn("size-[18px]", className)}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <circle cx={11} cy={11} r={7} />
-      <path d="M21 21l-4.35-4.35" />
-    </svg>
-  );
-}
 
 function PersonIcon({ className }: { className?: string }) {
   return (

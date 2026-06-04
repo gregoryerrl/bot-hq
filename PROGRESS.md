@@ -26,6 +26,12 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **remove(ui): dead top-bar search + dead footer links (D2).** The "Search
+  sessions, agents, tasks…" topbar input stored state but never filtered or
+  navigated anything, and the footer "API Docs"/"Support" were `href="#"`
+  placeholders. Removed both (+ the now-unused `SearchIcon`/`useState`). Real
+  session search is a clean follow-up feature if wanted — left out here since it
+  promised searching agents/tasks (not first-class entities) and crosses routes.
 - **fix(ui): surface errors on the silent HITL paths (D3, #32).** Three core
   human-in-the-loop actions failed silently: broadcast-send (`ChatInput` try/finally
   with no catch → unhandled rejection, user thought the message sent), tray-resolve
