@@ -347,14 +347,11 @@ async fn spawn_session_handle(
 
     // Record the model names we're about to spawn with. Session header reads
     // these so it reflects the live (frozen-at-spawn) model, not the current
-    // DB value, which can drift after a config swap. Rain's is empty for a solo
+    // DB value, which can drift after a config swap. Rain's is NULL for a solo
     // session.
-    let rain_model_name = rain_cfg
-        .as_ref()
-        .map(|c| c.model_name.clone())
-        .unwrap_or_default();
+    let rain_model_name = rain_cfg.as_ref().map(|c| c.model_name.as_str());
     if let Err(e) = storage
-        .set_session_spawn_models(&session.id, &brian_cfg.model_name, &rain_model_name)
+        .set_session_spawn_models(&session.id, &brian_cfg.model_name, rain_model_name)
         .await
     {
         warn!(?e, "set_session_spawn_models");
@@ -704,7 +701,7 @@ pub async fn spawn_emma_handle(
     let emma_cfg = storage
         .get_agent_config("emma")
         .await?
-        .unwrap_or_else(default_agent_config("emma"));
+        .unwrap_or_else(|| default_agent_config("emma"));
     let agent = spawn_agent_for(
         "emma", // session_id matches the seeded row
         "emma", // agent_name → hardcoded EMMA_ROLE + agents/emma/custom-instruction.md
@@ -808,10 +805,16 @@ async fn pump_emma_agent(
     }
 }
 
-fn default_agent_config(name: &str) -> impl FnOnce() -> AgentConfig {
-    let name = name.to_string();
-    move || AgentConfig {
-        agent_name: name,
+/// Last-resort spawn config when an agent has neither a chosen saved model nor
+/// a stored `agent_config` row (near-unreachable — agent configs seed in
+/// migration 0001). Intentionally Anthropic for EVERY agent: at this tier we
+/// hold no gateway credentials (`base_url`/`auth_token`), and Anthropic's
+/// ambient auth is the only provider that works without them. Labeling a
+/// non-Anthropic agent here (e.g. Rain on her DeepSeek gateway) would ship a
+/// dead, unreachable config, so the universal Anthropic default is deliberate.
+fn default_agent_config(name: &str) -> AgentConfig {
+    AgentConfig {
+        agent_name: name.to_string(),
         provider: "anthropic".into(),
         model_name: "claude-opus-4-7".into(),
         base_url: None,
@@ -852,7 +855,7 @@ async fn resolve_spawn_config(
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(default_agent_config(agent_name))
+        .unwrap_or_else(|| default_agent_config(agent_name))
 }
 
 #[cfg(test)]

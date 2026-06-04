@@ -100,12 +100,13 @@ impl Storage {
 
     /// Record which model each agent was spawned with for this session. Called
     /// by `spawn_session_handle` right after the configs are fetched so the
-    /// chat header can display the frozen model name.
+    /// chat header can display the frozen model name. `rain_model` is `None` for
+    /// a solo-Brian session, stored as SQL NULL (not an empty string).
     pub async fn set_session_spawn_models(
         &self,
         session_id: &str,
         brian_model: &str,
-        rain_model: &str,
+        rain_model: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
             "UPDATE sessions SET brian_model_at_spawn = ?, rain_model_at_spawn = ? \

@@ -197,10 +197,17 @@ async fn set_session_spawn_models_round_trip() {
     assert!(before.brian_model_at_spawn.is_none());
     assert!(before.rain_model_at_spawn.is_none());
 
-    s.set_session_spawn_models("sess-x", "claude-opus-4-7", "deepseek-v4-pro")
+    s.set_session_spawn_models("sess-x", "claude-opus-4-7", Some("deepseek-v4-pro"))
         .await
         .unwrap();
     let after = s.get_session("sess-x").await.unwrap().unwrap();
     assert_eq!(after.brian_model_at_spawn.as_deref(), Some("claude-opus-4-7"));
     assert_eq!(after.rain_model_at_spawn.as_deref(), Some("deepseek-v4-pro"));
+
+    // A solo-Brian session passes None for Rain — stored as SQL NULL, not "".
+    s.set_session_spawn_models("sess-x", "claude-opus-4-7", None)
+        .await
+        .unwrap();
+    let solo = s.get_session("sess-x").await.unwrap().unwrap();
+    assert!(solo.rain_model_at_spawn.is_none());
 }
