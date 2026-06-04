@@ -75,7 +75,7 @@ export function EmmaOverlay() {
   const { data: pending = [] } = useTauriQuery<PendingChoiceView[]>(
     "list_pending_choices",
     {},
-    { refetchInterval: 3_000, enabled: open },
+    { enabled: open },
   );
   const status = useMemo<"idle" | "thinking" | "awaiting">(() => {
     if (pending.some((p) => p.session_id === EMMA_SESSION_ID)) return "awaiting";

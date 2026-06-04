@@ -72,6 +72,14 @@ function GlobalEventSync() {
   const onPhase = useCallback(() => invalidate(PHASE_KEYS), [invalidate]);
   const onDoc = useCallback(() => invalidate(DOC_KEYS), [invalidate]);
   const onClose = useCallback(() => invalidate(CLOSE_KEYS), [invalidate]);
+  // Recovery: the backend emits `session:resync` when its broadcast receiver
+  // lagged and dropped events — refetch every event-backed query so the UI
+  // can't be left stale. This is what lets us drop the fixed-interval safety
+  // polls (PendingTray/phase/pending-choices) that previously filled this gap.
+  const onResync = useCallback(
+    () => invalidate([...TRAY_KEYS, ...PHASE_KEYS, ...DOC_KEYS, ...CLOSE_KEYS]),
+    [invalidate],
+  );
 
   useTauriEvent("session:pending_choice", onTray, [onTray]);
   useTauriEvent("session:choice_resolved", onTray, [onTray]);
@@ -79,6 +87,7 @@ function GlobalEventSync() {
   useTauriEvent("session:phase_changed", onPhase, [onPhase]);
   useTauriEvent("session:doc_changed", onDoc, [onDoc]);
   useTauriEvent("session:closed", onClose, [onClose]);
+  useTauriEvent("session:resync", onResync, [onResync]);
 
   return null;
 }

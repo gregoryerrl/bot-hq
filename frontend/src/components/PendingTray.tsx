@@ -28,7 +28,6 @@ export function PendingTray() {
   const { data: pending = [] } = useTauriQuery<PendingTrayRow[]>(
     "list_pending_tray",
     {},
-    { refetchInterval: 2_000 },
   );
 
   // Group pending by session so the notifier reads "Session-X needs your input

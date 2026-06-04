@@ -31,7 +31,6 @@ function SessionTileLoader({
   const { data: phase = null } = useTauriQuery<string | null>(
     "get_session_phase",
     { sessionId: session.id },
-    { refetchInterval: 5_000 },
   );
   return (
     <SessionTile
@@ -53,7 +52,6 @@ export function Dashboard() {
   const { data: pending = [] } = useTauriQuery<PendingChoiceView[]>(
     "list_pending_choices",
     {},
-    { refetchInterval: 5_000 },
   );
 
   // Project dropdown source for the New Session dialog. Refreshes on a

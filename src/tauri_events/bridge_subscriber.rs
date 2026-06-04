@@ -54,6 +54,11 @@ pub fn spawn_subscriber<EM, EB>(
                         skipped,
                         "tauri bridge subscriber lagged; broadcast receiver skipped events"
                     );
+                    // We may have dropped session:* events the UI relies on. Emit
+                    // a resync so the frontend refetches its event-backed queries
+                    // and a lagged burst can't leave the UI stale — this is what
+                    // lets us drop the redundant safety-net refetch polls.
+                    emit_event.as_ref()("session:resync", Value::Null);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }

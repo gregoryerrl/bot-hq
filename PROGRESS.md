@@ -26,6 +26,15 @@ constraint.
 Working through the full-codebase audit (findings in the session's investigate doc),
 priority order, one commit per cohesive batch. Newest bullet first.
 
+- **perf(ui): lag-resync recovery, then drop the redundant polls (E2).** The
+  PendingTray 2s, Dashboard per-tile phase 5s + pending-choices 5s, and Emma 3s
+  `refetchInterval` polls were the only recovery if the bridge subscriber dropped a
+  `session:*` event on `Lagged` (it just logged). Added that recovery properly: the
+  subscriber now emits a `session:resync` on `Lagged`, and `GlobalEventSync`
+  invalidates every event-backed query on it — so a dropped burst self-heals. With
+  that net in place the four event-backed polls are redundant and dropped (the
+  60s/10s polls on projects/models/plugins stay — no event source). Net: no constant
+  background refetch churn, and lag is now self-healing instead of silently stale.
 - **perf(ui): lazy-mount Settings subtabs, keep once visited (E8).** Settings
   rendered all 6 panels up front (CSS-`hidden`), firing every panel's queries on
   first visit. Now a panel mounts only once its tab is visited and then stays
