@@ -11,14 +11,16 @@ For recent changes see [`PROGRESS.md`](PROGRESS.md).
 
 ## Current state (TL;DR)
 
-bot-hq is built and used. The rebuild milestone (v0.1.0) shipped, the
-session-permission grants work landed, and the **Tauri v2 migration
-landed 2026-05-26** on branch `tauri-v2-migration` (7 batches; see
-PROGRESS.md). React frontend in `frontend/`, Slint deleted, Rust core
-untouched.
+bot-hq is built and used. The rebuild milestone (v0.1.0) shipped and the
+**Tauri v2 migration landed 2026-05-26** on branch `tauri-v2-migration`
+(7 batches; see PROGRESS.md). React frontend in `frontend/`, Slint
+deleted, Rust core untouched. Since then: the 3-tier session-policy
+toggles, the global Tool Gate, the saved-model registry + per-session
+model pickers + solo-Brian toggle, and the Claude Config surface all
+shipped (see PROGRESS.md).
 
-300 Rust tests passing (251 lib + 32 external_mcp + 7 signaling + 10
-storage) plus 14 frontend Vitest. Release build clean.
+Test + build status (live counts) lives in PROGRESS.md, not here — it
+drifts every commit.
 
 ---
 
@@ -130,9 +132,9 @@ loading for the icon font.
   transitions are visible in chat as synthetic user messages, but the
   per-session phase history isn't queryable. Worth keeping for
   retrospectives (which phases consumed the most time).
-- **Question tray garbage collection.** The `questions` table grows
-  unbounded — resolved questions stay forever. A periodic purge of
-  resolved rows older than N days would keep it bounded.
+- **Tray garbage collection.** The `session_tray` table grows
+  unbounded — resolved rows stay forever. A periodic purge of resolved
+  rows older than N days would keep it bounded.
 
 ---
 

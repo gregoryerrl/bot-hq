@@ -103,19 +103,21 @@ bot-hq/
   state.
 - **Two MCP servers:**
   - **Internal** at `127.0.0.1:<ephemeral>` — UI-signaling tools served
-    to child agents (26 tools — see "Internal MCP tools" below).
+    to child agents (24 tools — see "Internal MCP tools" below).
   - **External** at `127.0.0.1:7892` — driver tools served to any
     bearer-token-authenticated MCP client (see "Driving bot-hq from
     another MCP client" below).
 - **Storage:** sqlite via sqlx. Tables: `messages`, `sessions`,
-  `agent_configs`, `questions` (per-session question tray),
-  `cl_index` (searchable CL file index). Emma is a singleton session row
-  (`id="emma"`).
+  `agent_configs`, `models` + `app_settings` (saved-model registry +
+  key/value app settings), `session_tray` (per-session durable tray —
+  questions/approvals/gated commands), `session_documents` (IPAV scratch
+  docs), `plugins`, `cl_index` (searchable CL file index). Emma is a
+  singleton session row (`id="emma"`).
 - **IPAV:** in-memory `HashMap<SessionId, IpavState>`. Phases I/P use a
   1.5s buffered peer-forward; A/V is pure turn-based.
 - **Policy enforcement (`src/policy/`):** two-layer enforcement of
-  per-project rules (forbidden words, push gate, force-push, tool
-  blocklist, branch pattern). Layer 1: MCP tool calls
+  per-project rules (forbidden words, push gate, force-push, branch
+  pattern). Layer 1: MCP tool calls
   (`check_commit_message`, `request_approval`, …) — probabilistic primary
   path, audited via `violations.jsonl`. Layer 2: git hooks
   (`commit-msg`, `pre-commit`, `post-commit`, `pre-push`) installed in
@@ -141,9 +143,6 @@ Bot-hq exposes these to each spawned agent via the per-agent
 | `cl_index_search(project, query?)` | Search the SQLite-backed Context Library index. |
 | `cl_register_read(project, file_path)` | Audit insert recording which CL file the agent read. |
 | `cl_rescan(project)` | Re-stat a project's CL directory after creating new files. |
-| `grant_session_permission(action, scope, branches?)` | Record a session-level commit/push grant so subsequent ops skip approval. |
-| `revoke_session_permission(action)` | Revoke a previously granted commit/push permission. |
-| `list_session_permissions()` | List the current session's commit/push grants. |
 | `advance_phase(target)` | Move the IPAV phase chip yourself — no user gate. |
 | `request_phase_advance(target, reason)` | Request a user-acknowledged phase advance before an irreversible step. |
 | `supersede_question(choice_id, …)` | Replace a parked question with a rephrased one (links old→new). |
@@ -160,11 +159,10 @@ Bot-hq exposes these to each spawned agent via the per-agent
 
 Role boundary: Rain (EYES) is blocked from `ask_user_choice`,
 `mark_awaiting_user`, `request_approval`, `action_gate`,
-`supersede_question`, `grant_session_permission`,
-`revoke_session_permission` (the `HANDS_ONLY_TOOLS` gate), plus
-`cl_register_folder_description` (the
-`CL_MUTATE_TOOLS` gate — Emma is allowed). Tool calls from Rain to a
-blocked tool return an error. Brian (HANDS) gets the full set.
+`supersede_question` (the `HANDS_ONLY_TOOLS` gate), plus
+`cl_register_folder_description` (the `CL_MUTATE_TOOLS` gate — Emma is
+allowed). Tool calls from Rain to a blocked tool return an error. Brian
+(HANDS) gets the full set.
 
 ## Policy enforcement
 

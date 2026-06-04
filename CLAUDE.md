@@ -73,11 +73,12 @@ done; work is now incremental.
 - **No `--no-verify` or hook-skipping.** Fix root causes.
 - **Imperative-mood commit subjects, ≤72 chars** (`fix: foo`, `add:
   bar`, NOT `Added foo`). One logical change per commit.
-- **Only push when the user explicitly authorizes it.** Per-action
-  authorization OR a session-level grant via
-  `grant_session_permission(action="push", scope="all")` recorded
-  earlier in the conversation. Don't push because permission feels
-  implicit.
+- **Push is governed by the session's `push_gate` policy toggle**
+  (`auto` | `ask`, inherited general→project→session, editable in the
+  gear tab). Under `ask`, just run `git push` — the pre-push hook
+  surfaces a per-push Approve/Reject prompt and blocks on the user's
+  pick. There are no agent-side push grants. Don't push because
+  permission feels implicit.
 
 ---
 
@@ -89,7 +90,7 @@ Keep `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` in `.env`. The default
 `<data_dir>` layout (see ARCHITECTURE.md for the full list):
 - `.local/bot-hq.db` — sqlite
 - `.local/lock` — single-instance lock
-- `.local/session-permissions/<sid>.json` — per-session grant mirrors
+- `.local/session-policies/<sid>.yaml` — per-session policy snapshots
 - `mcp-token` — external MCP bearer token (UUIDv4, 0600)
 - `violations.jsonl` — policy audit trail
 - `agents/<name>/custom-instruction.md`, `general-rules.md`,

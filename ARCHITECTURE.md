@@ -76,10 +76,21 @@ layer. claude-code's own permission prompts would double-gate and hang
 the agent (the bot-hq policy gates already prompt the user). Enforcement
 is provided by the policy layer + git hooks.
 
-Per-agent model swap via env-vars sourced from the `agent_configs`
-table: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`.
-`BOT_HQ_SESSION_ID` is also injected so git-hook subprocesses can read
-session-scoped state.
+Per-agent model swap via env-vars: `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`. The model is resolved per
+session from the picker stored on the `sessions` row (`brian_model_id` /
+`rain_model_id`) against the saved-model `models` registry, falling back
+to the `agent_configs` table then a built-in default (see "Per-agent
+model selection"). `BOT_HQ_SESSION_ID` is also injected so git-hook
+subprocesses can read session-scoped state.
+
+**LLM proxy (`src/agents/llm_proxy.rs`):** agents pointed at a
+non-Anthropic Anthropic-compatible gateway (e.g. Rain → DeepSeek) route
+their `ANTHROPIC_BASE_URL` through a local normalizing reverse-proxy. It
+hoists the `role:"system"` entry claude-code injects into the
+`messages[]` array (from a SessionStart hook's `additionalContext`) up
+into the top-level `system` field, which strict gateways require.
+Agents on the real Anthropic API (Brian/Emma) bypass it.
 
 ---
 
@@ -171,7 +182,7 @@ via the `compute_apply_diff` Tauri command (`src/tauri_cmd/docs.rs`,
 parser `parse_diff_lines`), consumed by `DocumentPane.tsx`.
 
 **Emma overlay:** fixed half-pane on the right, toggled from the topbar.
-Subscribes to the `agent.messages.batch` event filtered to
+Subscribes to the `agent:messages:batch` event filtered to
 `session_id="emma"`.
 
 **Context Library tab:** 2-pane "Library Tree" sidebar + tabbed editor. The
@@ -191,9 +202,34 @@ filter.
 parser, loader, capability JSON generator, and host-side heartbeat
 watcher.
 
-**Settings tab:** per-agent config (provider, model, base_url,
-auth_token). Per-row accent dot keyed to author color. Plaintext-token
+**Settings tab:** subtabs for the saved-model registry (Models), the
+default-model + disable-Rain-by-default app settings, the global Tool
+Gate keyword list, the global Claude Config surface, and a closed-session
+Archive. Per-row accent dot keyed to author color. Plaintext-token
 warning preserved.
+
+**Per-agent model selection:** the user maintains a registry of saved
+models (`models` table — label + provider + base_url + auth_token) in
+Settings → Models. A `default_model_id` app setting picks the fleet
+default; the New-session dialog exposes a Brian + Rain model dropdown
+(defaulting to it) plus a "disable Rain" checkbox (solo Brian), with a
+`rain_disabled_default` app setting. The picks persist on the `sessions`
+row (`brian_model_id` / `rain_model_id` / `rain_enabled`) and
+`resolve_spawn_config` resolves them at spawn (registry → `agent_configs`
+→ built-in default). `agent_configs` is now effectively the picker
+fallback.
+
+**Claude Config surface** (`src/claude_config/`,
+`tauri_cmd/claude_config.rs`, `frontend/src/app/ClaudeConfig.tsx`):
+surfaces the user's `~/.claude` config that leaks into the headless
+agent subprocesses — skills, plugins, hooks, CLAUDE.md/memory, MCP
+servers, reasoning effort. The user controls it two ways: globally
+(write-back to the real `~/.claude` via `claude_config/writer.rs`) and
+per-agent via an override layer (`<data_dir>/claude-overrides.json`,
+`claude_config/overrides.rs`) merged into the spawn-time `--settings`
+JSON + env injection — so an inherited skill/plugin/MCP/effort can be
+disabled for one agent without touching the user's own `~/.claude`.
+Design: `docs/plans/2026-06-02-claude-config-surface-design.md`.
 
 **Plugin model:** iframes at per-plugin origin
 (`https://plugin-<id>.localhost`) via Tauri custom URI scheme; each gets
@@ -215,15 +251,14 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**26 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**24 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the full list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `advance_phase`, `request_phase_advance`,
-`request_approval`, `check_commit_message`, `close_session`,
-`list_my_pending_questions`, `withdraw_question`, `supersede_question`,
-`session_doc_write`, `session_doc_search`, `session_doc_read`,
-`cl_index_search`, `cl_register_read`, `cl_rescan`, `cl_folder_search`,
-`cl_register_folder_description`, `grant_session_permission`,
-`revoke_session_permission`, `list_session_permissions`,
+`request_approval`, `action_gate`, `check_commit_message`,
+`close_session`, `list_my_pending_questions`, `withdraw_question`,
+`supersede_question`, `session_doc_write`, `session_doc_search`,
+`session_doc_read`, `cl_index_search`, `cl_register_read`, `cl_rescan`,
+`cl_folder_search`, `cl_register_folder_description`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
 
@@ -239,8 +274,9 @@ boundary is structural, not just convention.
 - Per-session `awaiting` halt flag (shared `Arc<AtomicBool>` with duo
   pump).
 - Session permissions cache (mirrored to disk for hooks).
-- Question tray storage (`questions` table — persists `ask_user_choice`
-  prompts so they survive app restart).
+- Tray storage (`session_tray` table — persists awaiting-input items
+  (`ask_user_choice` / `request_approval` / gated commands) so they
+  survive app restart).
 
 ---
 
@@ -266,8 +302,8 @@ list (21 driver tools including `list_sessions`, `create_session`,
 ## Policy enforcement
 
 **Goal:** enforce per-project rules (forbidden commit words, push gate,
-force-push tokens, tool blocklist) reliably even when an agent's context
-drifts and forgets to call the MCP tool.
+force-push gate) reliably even when an agent's context drifts and
+forgets to call the MCP tool.
 
 **Two layers** (`src/policy/`):
 
@@ -351,27 +387,31 @@ The global list defaults EMPTY (no gating until configured in Settings).
 
 ---
 
-## Session permissions
+## Session policy
 
-Session-level commit/push grants live separately from the static
-`policy.yaml` `remembered_approvals` list. They exist for the chat
-pattern: user types "you can push" → Brian calls
-`grant_session_permission(action="push", scope="all")` → all subsequent
-pushes in this session bypass the per-action approval prompt.
+Each session freezes a **policy snapshot** at spawn — the resolved
+general → project → session-overlay stack (`push_gate`, `force_push`,
+forbidden words, `tool_gate`). The user edits it per-session in the gear
+tab (Session Settings); agents cannot write policy. There are no
+agent-side commit/push grants — push and force-push are pure per-tier
+toggles (`push_gate: auto|ask`, `force_push: blocked|allowed`)
+inherited general → project → session.
 
-**Storage** (`src/policy/session_permissions.rs`):
-- In-memory cache on the `SignalingBridge` is the source of truth.
-- Mirrored to `<data_dir>/.local/session-permissions/<session_id>.json`
-  so the `pre-push` hook subprocess can read without HTTP-ing back.
-- All files purged on bot-hq startup (cache is gone after restart;
-  leftover files would let fresh sessions inherit grants they never
-  earned).
-- Per-session file deleted on `close_session`.
+**Storage** (`src/policy/session_policy.rs`):
+- Snapshot written to `<data_dir>/.local/session-policies/<session_id>.yaml`.
+  Seeded WRITE-IF-ABSENT at spawn (`core/session.rs`) by resolving the
+  blueprint with `session_id=None`, so re-opening a session preserves
+  gear-tab edits.
+- The git hooks (`pre-push`, `commit-msg`, …) read this snapshot via
+  `Policy::resolve_at_root` (threaded `BOT_HQ_SESSION_ID`), so a hook
+  subprocess sees the same session-scoped policy the agent runs under.
+- Purged on bot-hq startup (`main.rs`) and on `close_session`
+  (`core/state.rs` → `bridge::cleanup_session_policy`).
 
-**Scope** (`GrantScope` enum):
-- `None` — default. Ask every time.
-- `AllBranches` — granted for any branch in this session.
-- `Specific { branches }` — granted only for listed branches.
+The per-session **Tool Gate** keyword list is part of the same snapshot
+(see "Tool Gate" above): `hooks.rs::run_tool_gate` reads the frozen
+snapshot first, so editing the global `tool-gate.json` only affects NEW
+sessions.
 
 ---
 
@@ -383,13 +423,25 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
 - `messages` (id PK, session_id, author, kind, content, created_at) —
   full chat history. Index on `(session_id, created_at)`.
 - `sessions` (id PK, title, working_repo_path, project, phase,
-  created_at, closed_at, archived).
+  created_at, closed_at, archived, rain_enabled, brian_model_id,
+  rain_model_id) — the last three drive per-session model selection +
+  the solo-Brian (disable-Rain) toggle.
 - `agent_configs` (agent_name PK, provider, model_name, base_url,
   auth_token). CHECK constraint enforces `agent_name ∈
-  {'emma','brian','rain'}`.
-- `questions` (choice_id PK, session_id, agent, kind, prompt,
-  options_json, asked_at, resolved_at, picked) — durable question
-  tray. Survives app restart.
+  {'emma','brian','rain'}`. Now a fallback for the `models` registry
+  below (see "Per-agent model selection").
+- `models` (id PK, label, provider, model_name, base_url, auth_token) —
+  saved-model registry the per-session pickers reference by id.
+- `app_settings` (key PK, value) — key/value app settings
+  (`default_model_id`, `rain_disabled_default`, …).
+- `session_tray` (choice_id PK, session_id, agent, kind, prompt,
+  options_json, command_text, status, supersedes_id, asked_at,
+  resolved_at, picked) — durable awaiting-input tray
+  (choices/approvals/gated commands). Survives app restart. Renamed from
+  `session_questions`/`questions` in migration 0010.
+- `session_documents` (id PK, session_id, slug, body, phase, …) —
+  per-session IPAV scratch docs.
+- `plugins` — installed-plugin registry (scaffold).
 - `cl_index` (file_path PK, project, description, tags, size,
   modified_at, indexed_at) — SQLite-backed CL search index.
 
@@ -452,7 +504,8 @@ Defaults (env-overridable via `BOT_HQ_DATA_DIR`):
 - **Single-instance lock:** `<data_dir>/.local/lock`
 - **Violations log:** `<data_dir>/violations.jsonl`
 - **External MCP token:** `<data_dir>/mcp-token`
-- **Session permissions mirror:** `<data_dir>/.local/session-permissions/<sid>.json`
+- **Session policy snapshot:** `<data_dir>/.local/session-policies/<sid>.yaml`
+- **Tool Gate config:** `<data_dir>/tool-gate.json`
 
 **Dev:** `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` keeps dev data separate from a
 production install.
@@ -509,10 +562,10 @@ Plugin contract TBD per plugin.
   external tool servers. Bot-hq runs two MCP servers in-process.
 - **Policy:** machine-readable subset of CL rules — `general-policy.yaml`
   + project overlay. Drives forbidden-word grep, push gate, force-push
-  gate, tool blocklist.
-- **Session permission grant:** per-session commit/push authorization
-  recorded by `grant_session_permission`. Distinct from
-  `policy.yaml`'s static `remembered_approvals`.
+  gate.
+- **Session policy snapshot:** the resolved general → project → session
+  policy frozen per-session at spawn (`session_policy.rs`), editable in
+  the gear tab. Push/force-push are pure toggles — no agent-side grants.
 - **Awaiting flag:** per-session `Arc<AtomicBool>` set by user-blocking
   tools (`mark_awaiting_user`, `ask_user_choice`, `request_approval`).
   When set, duo coordinator suppresses peer-forwarding —
@@ -520,6 +573,7 @@ Plugin contract TBD per plugin.
 - **Violations log:** append-only `violations.jsonl` at the data-dir
   root recording policy enforcement events (denied tool calls, post-
   commit greps that fired, policy file mutations).
-- **Question tray:** the `questions` table — durable record of
-  ask_user_choice / mark_awaiting_user / request_approval prompts so
-  they survive app restart.
+- **Tray (`session_tray`):** durable per-session record of awaiting-input
+  items — `ask_user_choice` / `request_approval` / gated commands — so
+  they survive app restart. Renamed from `session_questions` (migration
+  0010).
