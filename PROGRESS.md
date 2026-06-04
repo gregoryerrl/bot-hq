@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-401 tests passing (350 lib + 32 external MCP + 7 signaling + 12 storage)
-plus 42 frontend Vitest. Release build clean. **Tauri v2 migration landed
+410 tests passing (359 lib + 32 external MCP + 7 signaling + 12 storage)
+plus 52 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
