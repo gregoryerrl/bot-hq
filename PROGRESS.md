@@ -21,6 +21,19 @@ constraint.
 
 ---
 
+## 2026-06-04 — remove UI manual phase-advance
+
+User-directed removal of the UI's ability to advance a session's IPAV phase. The
+interactive `PhasePillRow` in the `SessionView` header (which called the
+`advance_session_phase` Tauri command) is gone; the backing command was
+frontend-webview-only, so it was removed end-to-end — command + `IpavPhase`
+import + specta registration + regenerated binding — rather than left dead. The
+header still *displays* the current phase (read-only) and the
+`session:phase_changed` listener stays: agents still drive phases via the
+`advance_phase` MCP tool → `AgentAdvancePhase` → `core.advance_phase` (untouched).
+Resolves the "double phase-control surface" gap — the identical-looking
+`DocumentPane` pills are a view-only tab selector and stay.
+
 ## 2026-06-04 — codebase + docs cleanliness pass
 
 Swept the codebase, CL, and docs for redundancy/staleness/dead code (clippy was

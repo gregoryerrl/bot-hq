@@ -107,20 +107,6 @@ async getSessionPhase(sessionId: string) : Promise<Result<string | null, AppErro
 }
 },
 /**
- * Advance the IPAV phase from the UI. Target accepts single-letter chips
- * (`I`/`P`/`A`/`V`) or full names (`Investigate`/`Plan`/`Apply`/`Verify`).
- * Synthesizes a phase-change message in storage + feeds the transition
- * notice to both agents' stdin so they pick up the new phase as a prompt.
- */
-async advanceSessionPhase(sessionId: string, target: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("advance_session_phase", { sessionId, target }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Close a session from the UI. Delegates to `core.close_session`, which is
  * the single source of truth for closing: it removes the live handle, KILLS
  * the brian/rain subprocesses, and marks the row closed/archived in storage.

@@ -1,6 +1,5 @@
 //! Session lifecycle commands.
 
-use crate::core::ipav::IpavPhase;
 use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingBridge;
 use crate::storage::{Session, Storage};
@@ -200,27 +199,6 @@ pub async fn get_session_phase(
         .current_phase(&session_id)
         .await
         .map(|p| p.name().to_ascii_lowercase()))
-}
-
-/// Advance the IPAV phase from the UI. Target accepts single-letter chips
-/// (`I`/`P`/`A`/`V`) or full names (`Investigate`/`Plan`/`Apply`/`Verify`).
-/// Synthesizes a phase-change message in storage + feeds the transition
-/// notice to both agents' stdin so they pick up the new phase as a prompt.
-#[tauri::command]
-#[specta::specta]
-pub async fn advance_session_phase(
-    core: tauri::State<'_, Arc<CoreAppState>>,
-    session_id: String,
-    target: String,
-) -> Result<(), AppError> {
-    let phase = IpavPhase::parse(&target).ok_or_else(|| {
-        AppError::Validation(format!(
-            "invalid phase {target:?} \u{2014} expected {}",
-            IpavPhase::error_hint()
-        ))
-    })?;
-    core.advance_phase(&session_id, phase).await?;
-    Ok(())
 }
 
 /// Close a session from the UI. Delegates to `core.close_session`, which is

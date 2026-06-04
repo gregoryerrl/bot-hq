@@ -8,7 +8,7 @@ import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
 import { ChatMessage } from "../components/ChatMessage";
 import { DocumentPane } from "../components/DocumentPane";
-import { PhasePillRow, type Phase } from "../components/PhasePill";
+import { type Phase } from "../components/PhasePill";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
 import type {
@@ -203,22 +203,6 @@ export function SessionView() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <PhasePillRow
-              selected={phase ?? "investigate"}
-              onSelect={(next) => {
-                setPhase(next);
-                invoke("advance_session_phase", {
-                  sessionId,
-                  target: next,
-                }).catch((e) => {
-                  // Roll back optimistic state; the next event refresh
-                  // will reconcile if the bridge state actually advanced.
-                  setPhase(normalizePhase(initialPhase));
-                  // eslint-disable-next-line no-console
-                  console.warn("advance_session_phase failed", e);
-                });
-              }}
-            />
             <Button
               variant="ghost"
               size="sm"

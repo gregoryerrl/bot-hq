@@ -37,7 +37,6 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::respawn_session,
         sessions::restart_session,
         sessions::get_session_phase,
-        sessions::advance_session_phase,
         sessions::close_session,
         // Messages
         messages::get_session_messages,
