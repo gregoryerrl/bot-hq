@@ -7,12 +7,19 @@
 //! - [`sessions`] — session CRUD + lifecycle
 //! - [`messages`] — chronological chat fetch
 //! - [`agent_configs`] — Settings page per-agent provider/model/token rows
+//! - [`models`] — saved-model registry + default-model app setting
 //! - [`cl`] — Context Library index + folder search, audit, rescan
+//! - [`claude_config`] — Claude Config surface (global + per-agent overrides)
 //! - [`questions`] — pending choices + resolve
 //! - [`docs`] — session documents (IPAV tabs)
+//! - [`policy`] — session/global/project policy get + set
+//! - [`tool_gate`] — global + per-session Tool Gate keyword lists
+//! - [`plugins`] — plugin install/enable/disable
+//! - [`screenshot`] — webview capture for agent-driven UI testing
+//! - [`error`] — the shared [`error::AppError`] type
 //!
-//! Batch 4's `main.rs` wires the full set into `tauri::Builder::default()
-//! .invoke_handler(tauri_specta_gen::builder().build())`.
+//! `tauri_specta_gen::builder()` wires the full set into the Tauri builder's
+//! invoke handler at startup (`main.rs`).
 
 pub mod agent_configs;
 pub mod claude_config;

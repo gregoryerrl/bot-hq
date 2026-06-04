@@ -298,7 +298,7 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
     ]);
-    &*TOOLS
+    &TOOLS
 }
 
 /// Block server-side until the session has at least one new message past

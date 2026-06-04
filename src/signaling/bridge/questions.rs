@@ -284,7 +284,7 @@ impl SignalingBridge {
         was_parked
     }
 
-    /// Snapshot the questions table for a session. Convenience for the UI
+    /// Snapshot the `session_tray` table for a session. Convenience for the UI
     /// + the agent-facing `list_my_pending_questions` MCP tool.
     pub async fn list_questions_for_session(
         &self,
@@ -431,7 +431,7 @@ impl SignalingBridge {
                 // this arm errored, so `answer_question` (above) cleared the
                 // tray but the pick never reached the live agent — it waited
                 // forever. Instead, reconstruct the question from the durable
-                // session_questions row and fall back to OOB stdin delivery so
+                // session_tray row and fall back to OOB stdin delivery so
                 // CoreAppState injects the answer into the live (respawned)
                 // session. Stdin injection is the only channel to a resumed
                 // subprocess — re-parking a oneshot across a PID boundary is
@@ -537,7 +537,7 @@ impl SignalingBridge {
     /// is async (was previously sync) because we need to set the halt flag
     /// before the agent's next chunk can volley.
     ///
-    /// Also writes a `kind=halt` row to `session_questions` so the per-session
+    /// Also writes a `kind=halt` row to `session_tray` so the per-session
     /// tray surfaces the wait alongside any actual choice/open-ask questions
     /// and the dashboard `[Need User Input] · N` counter reflects it.
     pub async fn mark_awaiting_user(&self, session_id: String, agent: String, reason: String) {

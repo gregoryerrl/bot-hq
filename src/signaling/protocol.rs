@@ -506,7 +506,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
     ]);
-    &*TOOLS
+    &TOOLS
 }
 
 /// What an MCP server returns from `tools/call`.

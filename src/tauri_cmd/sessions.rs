@@ -41,6 +41,8 @@ impl From<Session> for SessionInfo {
 
 #[tauri::command]
 #[specta::specta]
+// Param count is inflated by Tauri-injected `State` handles, not real fan-out.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_session(
     storage: tauri::State<'_, Arc<Storage>>,
     bridge: tauri::State<'_, Arc<SignalingBridge>>,
@@ -92,6 +94,7 @@ pub async fn create_session(
 /// "Maintain CL" button calls this with a hardcoded CL-maintenance prompt.
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_session(
     core: tauri::State<'_, Arc<CoreAppState>>,
     storage: tauri::State<'_, Arc<Storage>>,

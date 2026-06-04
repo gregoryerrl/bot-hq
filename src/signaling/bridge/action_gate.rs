@@ -5,6 +5,7 @@
 //! against the GLOBAL keyword list and:
 //!   - `auto_allow` / no-match → runs it immediately in the session's repo,
 //!   - `gate`                  → surfaces Approve/Reject; on approve, runs it.
+//!
 //! Either way bot-hq EXECUTES the command server-side (in the session's
 //! `working_repo_path`, resolved from storage) and returns combined output to
 //! the agent — it's an ACTION request, not a permission request. The agent does

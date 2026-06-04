@@ -23,7 +23,9 @@ pub enum ViolationKind {
     CommitGrep,
     /// `git push --force` / `--force-with-lease`.
     ForcePush,
-    /// Bash command matched `tool_blocklist`.
+    /// Tool Gate / `action_gate` approval (legacy wire name `tool_blocklist`,
+    /// kept for back-compat; the per-project `tool_blocklist` it was named for
+    /// is retired — see the Tool Gate).
     ToolBlocklist,
     /// Bash command matched `per_action_approval`.
     PerAction,

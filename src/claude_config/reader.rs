@@ -12,11 +12,6 @@ use super::{
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
-/// Mirror of `signaling::server::RESERVED_MCP_KEYS` — servers bot-hq strips
-/// from agent MCP config (recursive driver loop / reserved name crash). Kept in
-/// sync by hand with that constant.
-const AGENT_FILTERED_MCP: &[&str] = &["bot-hq", "claude-in-chrome"];
-
 /// Substrings that mark a JSON key as secret-bearing (case-insensitive).
 const SECRET_KEY_HINTS: &[&str] = &[
     "token", "secret", "password", "authorization", "apikey", "api_key", "bearer",
@@ -266,7 +261,8 @@ fn mcp_servers(
                 .and_then(|m| m.get(name))
                 .or_else(|| settings_mcp.and_then(|m| m.get(name)));
             let (transport, detail) = entry.map(mcp_detail).unwrap_or(("unknown".into(), String::new()));
-            let reserved_filtered = AGENT_FILTERED_MCP.contains(&name.as_str());
+            let reserved_filtered =
+                crate::signaling::RESERVED_MCP_KEYS.contains(&name.as_str());
             // bot-hq's load_user_mcp_servers reads BOTH files, so any non-reserved
             // server (even a settings.json-only one) is forwarded to Brian/Emma.
             let forwarded_to_agents = if reserved_filtered {

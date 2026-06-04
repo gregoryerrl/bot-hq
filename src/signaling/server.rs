@@ -285,18 +285,6 @@ pub fn mcp_config_json(
         .unwrap_or_else(|_| "{}".into())
 }
 
-/// Names that must be filtered from the merged user MCP map before being
-/// written to a subagent's mcp-config.json.
-///
-/// - `bot-hq`: the user's top-level bot-hq MCP. Exposing it inside a
-///   bot-hq-spawned agent creates a recursive driver loop; the agent
-///   already has `bot-hq-signaling` for the per-(session,agent) channel.
-/// - `claude-in-chrome`: claude-code rejects this name as reserved when
-///   it appears in a `--mcp-config` file, so the whole subprocess exits
-///   on startup. (The capability is still available to the parent
-///   claude-code session via its own built-in path.)
-const RESERVED_MCP_KEYS: &[&str] = &["bot-hq", "claude-in-chrome"];
-
 /// Read the user's claude-code MCP server config (across both locations
 /// claude-code uses) and return the merged `mcpServers` map so spawned
 /// subagents inherit the same MCP surface as the user's own claude-code
@@ -310,8 +298,8 @@ const RESERVED_MCP_KEYS: &[&str] = &["bot-hq", "claude-in-chrome"];
 /// `settings.json` copy is often stale (e.g. an older `--browser-url`
 /// port).
 ///
-/// Filters out any entry whose key is in [`RESERVED_MCP_KEYS`] — see that
-/// constant for the rationale.
+/// Filters out any entry whose key is in [`super::RESERVED_MCP_KEYS`] — see
+/// that constant for the rationale.
 ///
 /// Missing files / parse errors / missing `mcpServers` keys are tolerated
 /// silently (with a debug log). We never fail spawn on this; the subagent
@@ -339,7 +327,7 @@ pub fn load_user_mcp_servers(
             continue;
         };
         for (k, v) in map {
-            if RESERVED_MCP_KEYS.contains(&k.as_str()) {
+            if super::RESERVED_MCP_KEYS.contains(&k.as_str()) {
                 continue;
             }
             merged.insert(k.clone(), v.clone());

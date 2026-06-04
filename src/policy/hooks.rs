@@ -660,15 +660,10 @@ enum HookKind {
 }
 
 impl HookKind {
+    /// The git hook filename. By design this doubles as the `policy-check`
+    /// subcommand name the hook body invokes (`bot-hq policy-check <name>`),
+    /// so there's one canonical string per kind.
     fn filename(self) -> &'static str {
-        match self {
-            HookKind::CommitMsg => "commit-msg",
-            HookKind::PreCommit => "pre-commit",
-            HookKind::PostCommit => "post-commit",
-            HookKind::PrePush => "pre-push",
-        }
-    }
-    fn subcommand(self) -> &'static str {
         match self {
             HookKind::CommitMsg => "commit-msg",
             HookKind::PreCommit => "pre-commit",
@@ -732,7 +727,7 @@ fn render_hook_body(
 ) -> String {
     let mut cmd = format!(
         "{bot_hq_bin} policy-check {sub} --data-dir {dd}",
-        sub = kind.subcommand(),
+        sub = kind.filename(),
         dd = shell_quote(&data_dir.display().to_string())
     );
     if let Some(p) = project {

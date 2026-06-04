@@ -217,7 +217,7 @@ async fn handle_proxy(req: Request<Incoming>) -> Result<Response<ProxyBody>, Inf
             let stream = resp
                 .bytes_stream()
                 .map_ok(hyper::body::Frame::data)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+                .map_err(io::Error::other);
             let body = http_body_util::StreamBody::new(stream).boxed_unsync();
             match builder.body(body) {
                 Ok(r) => Ok(r),
@@ -327,7 +327,7 @@ fn extract_text(content: Option<&Value>) -> String {
                 let is_text = b
                     .get("type")
                     .and_then(|t| t.as_str())
-                    .map_or(true, |ty| ty == "text");
+                    .is_none_or(|ty| ty == "text");
                 if is_text {
                     if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
                         parts.push(t.to_string());
@@ -372,7 +372,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Option<String> {
-    if s.is_empty() || s.len() % 2 != 0 {
+    if s.is_empty() || !s.len().is_multiple_of(2) {
         return None;
     }
     let bytes = s.as_bytes();

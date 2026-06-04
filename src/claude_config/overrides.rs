@@ -283,9 +283,11 @@ mod tests {
 
     #[test]
     fn env_and_mcp_helpers() {
-        let mut ov = AgentOverride::default();
-        ov.effort = Some("max".into());
-        ov.disable_auto_memory = Some(true);
+        let mut ov = AgentOverride {
+            effort: Some("max".into()),
+            disable_auto_memory: Some(true),
+            ..Default::default()
+        };
         ov.mcp.insert("discord".into(), false);
         ov.mcp.insert("github".into(), true);
         let env = env_vars(&ov);
