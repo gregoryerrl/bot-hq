@@ -424,6 +424,14 @@ impl SignalingBridge {
                         if let Some(id) = inserted_id {
                             self.notify_message_persisted(session_id.clone(), id);
                         }
+                        // The agent's in-band ask call already timed out, so nothing
+                        // else emits ChoiceResolved for this OOB resolution. Without
+                        // it the row flips to `answered` in the DB but the cached
+                        // pending counts (bell + tray) never invalidate. Fire it here.
+                        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+                            choice_id: choice_id.to_string(),
+                            picked: picked.clone(),
+                        });
                         Ok(ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body })
                     }
                 }
@@ -490,6 +498,12 @@ impl SignalingBridge {
                 if let Some(id) = inserted_id {
                     self.notify_message_persisted(q.session_id.clone(), id);
                 }
+                // Same as the timed-out branch above: invalidate the bell / tray
+                // caches for the post-restart / reopened-session OOB path.
+                let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+                    choice_id: choice_id.to_string(),
+                    picked: picked.clone(),
+                });
                 Ok(ResolveOutcome::AgentReceiverDroppedFellBack {
                     session_id: q.session_id,
                     body,
@@ -737,6 +751,53 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(q.status, "answered");
+    }
+
+    #[tokio::test]
+    async fn resolve_choice_oob_emits_choice_resolved() {
+        // Regression: the out-of-band resolve paths (agent timed out, or a
+        // post-restart reopened session) must emit ChoiceResolved so the bell /
+        // tray caches invalidate. The in-band path emits it via the inner ask
+        // future; the OOB branches used to only persist a synthetic message
+        // (MessagePersisted → agent:messages:batch, which the UI excludes from
+        // tray invalidation), leaving the bell stuck on a stale count.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s-oob", "t", None).await.unwrap();
+        let opts = vec!["Yes".to_string(), "No".to_string()];
+        storage
+            .insert_question(
+                "s-oob",
+                "cid-oob",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Ship it?",
+                Some(&opts),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // No parked oneshot → exercises the `None` OOB branch.
+        let mut sub = bridge.subscribe();
+        bridge.resolve_choice("cid-oob", "Yes".into()).await.unwrap();
+
+        // Drain buffered events; one must be ChoiceResolved for our choice.
+        let mut saw_resolved = false;
+        while let Ok(ev) = sub.try_recv() {
+            if let SignalingEvent::ChoiceResolved { choice_id, picked } = ev {
+                if choice_id == "cid-oob" && picked == "Yes" {
+                    saw_resolved = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_resolved,
+            "OOB resolve must emit ChoiceResolved so the bell/tray invalidate"
+        );
     }
 
     #[tokio::test]
