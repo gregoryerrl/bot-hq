@@ -4,8 +4,7 @@ use crate::agents::OutgoingUserMessage;
 use crate::core::broadcast::{broadcast_user_message, with_phase_envelope};
 use crate::core::ipav::IpavPhase;
 use crate::core::session::{
-    open_session, spawn_emma_handle, spawn_existing_session, EmmaHandle, OpenSessionRequest,
-    SessionHandle,
+    open_session, spawn_existing_session, OpenSessionRequest, SessionHandle,
 };
 use crate::paths::Paths;
 use crate::signaling::{ExternalServer, SignalingBridge, SignalingEvent, SignalingServer};
@@ -31,7 +30,6 @@ pub struct AppState {
     /// so close_session can't reap them). Only the spawn path takes this; the
     /// fast already-running check short-circuits before acquiring it.
     spawn_gate: Mutex<()>,
-    pub emma: Mutex<Option<EmmaHandle>>,
     /// External MCP server handle. None when disabled or port-busy at startup;
     /// the binary stays usable in that case (internal MCP keeps working).
     pub external_server: Mutex<Option<ExternalServer>>,
@@ -55,58 +53,9 @@ impl AppState {
             signaling_server: Mutex::new(Some(server)),
             sessions: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
-            emma: Mutex::new(None),
             external_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
         }
-    }
-
-    /// Spawn Emma's solo agent if not already running. Idempotent. Logs +
-    /// returns Err on spawn failure (e.g., missing `claude` CLI), does NOT
-    /// crash startup.
-    pub async fn ensure_emma_started(&self) -> Result<()> {
-        let mut emma = self.emma.lock().await;
-        // Healthy + running → done. A stale handle (supervisor terminated on a
-        // permanent error / exhausted retries) is dropped so we re-spawn.
-        if let Some(handle) = emma.as_ref() {
-            if !handle.is_stale() {
-                return Ok(());
-            }
-            if let Some(mut old) = emma.take() {
-                old.agent.kill();
-                tracing::info!("evicted stale Emma handle; re-spawning");
-            }
-        }
-        let handle = spawn_emma_handle(
-            &self.paths,
-            self.storage.clone(),
-            Arc::clone(&self.bridge),
-            self.signaling_addr,
-        )
-        .await?;
-        *emma = Some(handle);
-        Ok(())
-    }
-
-    /// Kill Emma's current subprocess and respawn with the latest agent_configs
-    /// row. Used when the user swaps Emma's model — env vars are baked in at
-    /// spawn time, so the only way to apply a config change is to restart the
-    /// subprocess. Brian/Rain don't need this path because their model swaps
-    /// apply on next session spawn.
-    pub async fn restart_emma(&self) -> Result<()> {
-        let mut emma = self.emma.lock().await;
-        if let Some(mut old) = emma.take() {
-            old.agent.kill();
-        }
-        let handle = spawn_emma_handle(
-            &self.paths,
-            self.storage.clone(),
-            Arc::clone(&self.bridge),
-            self.signaling_addr,
-        )
-        .await?;
-        *emma = Some(handle);
-        Ok(())
     }
 
     pub async fn open_session(
@@ -131,8 +80,8 @@ impl AppState {
         Ok(id)
     }
 
-    /// Spawn subprocesses for an existing session row (e.g., the seeded Emma
-    /// singleton) if not already running. Idempotent — safe to call repeatedly.
+    /// Spawn subprocesses for an existing session row if not already running.
+    /// Idempotent — safe to call repeatedly.
     /// Logs and returns Err if spawn fails, but does NOT poison the AppState.
     pub async fn ensure_session_started(&self, session_id: &str) -> Result<()> {
         // Fast path: already running AND healthy. A handle whose supervisor has
@@ -250,32 +199,6 @@ impl AppState {
     }
 
     pub async fn broadcast(&self, session_id: &str, text: &str) -> Result<()> {
-        // Emma is a solo singleton — route to her single agent, not the duo path.
-        if session_id == "emma" {
-            let emma = self.emma.lock().await;
-            let handle = emma
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("emma not started"))?;
-            let id = self
-                .storage
-                .insert_message(
-                    "emma",
-                    crate::storage::Author::User,
-                    crate::storage::MessageKind::Text,
-                    text,
-                )
-                .await?;
-            self.bridge
-                .notify_message_persisted("emma".into(), id);
-            let msg = crate::agents::OutgoingUserMessage::text(text);
-            if let Err(e) = handle.agent.input_tx.send(msg).await {
-                // Pump gone — the message is persisted + shown in chat but Emma
-                // never sees it. Log instead of swallowing so the desync is
-                // diagnosable (same class as the duo broadcast/desync path).
-                tracing::warn!(?e, "emma broadcast send failed; input pump gone");
-            }
-            return Ok(());
-        }
         // Auto-heal: if the duo went stale (e.g. an agent's stdin pump died,
         // closing the public input channel — a now-deaf agent that would silently
         // drop this message), evict + respawn it before delivering so the user's
@@ -286,7 +209,10 @@ impl AppState {
             sessions.get(session_id).is_some_and(|h| h.is_stale())
         };
         if stale {
-            tracing::info!(session_id, "session stale on broadcast; respawning before delivery");
+            tracing::info!(
+                session_id,
+                "session stale on broadcast; respawning before delivery"
+            );
             self.ensure_session_started(session_id).await?;
         }
         let sessions = self.sessions.lock().await;
@@ -344,9 +270,7 @@ impl AppState {
         self.bridge
             .notify_message_persisted(session_id.to_string(), id);
         // And fed to both agents' stdin so they pick it up as a natural prompt.
-        handle
-            .send_to_both(OutgoingUserMessage::text(notice))
-            .await;
+        handle.send_to_both(OutgoingUserMessage::text(notice)).await;
         Ok(())
     }
 
@@ -362,20 +286,6 @@ impl AppState {
                 // agents' input_tx so their stdin receives a wake message.
                 // We deliberately do NOT call broadcast_user_message (which
                 // re-inserts) — the storage row already exists.
-                if session_id == "emma" {
-                    let emma = self.emma.lock().await;
-                    if let Some(handle) = emma.as_ref() {
-                        // Emma is solo — no IPAV phase tracked; send raw.
-                        let msg = crate::agents::OutgoingUserMessage::text(&body);
-                        if let Err(e) = handle.agent.input_tx.send(msg).await {
-                            tracing::warn!(
-                                ?e,
-                                "emma OOB resolve send failed; input pump gone"
-                            );
-                        }
-                    }
-                    return Ok(());
-                }
                 let sessions = self.sessions.lock().await;
                 let Some(handle) = sessions.get(&session_id) else {
                     // Session closed in the gap between resolve and wake —

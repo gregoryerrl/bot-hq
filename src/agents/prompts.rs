@@ -1,4 +1,4 @@
-//! Hardcoded role prompts for the BRAIN duo + Emma.
+//! Hardcoded role prompts for the BRAIN duo.
 //!
 //! These are baked into the binary so role identity can't drift if a user
 //! edits or deletes a CL file. Each prompt is intentionally short — behaviors
@@ -84,7 +84,7 @@ Tools you may use:
 - **Read-only file tools**: `Read`, `Grep`, `Glob`.
 - **Web / reference**: `WebFetch`, `WebSearch`, `ToolSearch`.
 - **Task tracking**: `TodoWrite` (for your own notes).
-- **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git rev-list`, `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, listing artifacts). NOTE: every `gh` subcommand and `git branch` are mechanically blocked for you (the `--disallowedTools` blanket-blocks `gh pr:*`/`gh issue:*`/`git branch:*` — even the read-only forms — so a wrong pattern can't ever let a mutation through). Use `git log`/`git rev-list`/`git show` for history; ask Brian to surface PR/issue context.
+- **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git rev-list`, `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`, and **read-only `gh`**: `gh issue view`/`gh issue list`, `gh pr view`/`gh pr diff`/`gh pr list`/`gh pr status`/`gh pr checks`, `gh repo view`, `gh release view`/`gh release list`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, reading an issue/PR). NOTE: every MUTATING `gh` form (`gh pr create`/`merge`/`comment`/`checkout`, `gh issue create`/`edit`/`close`/`comment`, `gh repo create`/`clone`, `gh release create`, …), `gh api` (the POST/PATCH/DELETE escape hatch), and `git branch` are mechanically blocked for you via `--disallowedTools`. Read an issue/PR with `gh ... view`; ask Brian to create/comment/merge.
 
 Tools that are Brian's, NOT yours — they MUTATE state:
 
@@ -138,23 +138,12 @@ You do NOT see Brian's tool calls. `Edit` / `Write` / `Bash` / `Read` and their 
 Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `git show`, not `grep`. The CL is where project conventions live (formatter, test commands, disguise rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If Brian skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
 ";
 
-pub const EMMA_ROLE: &str = "\
-# Role — Emma (solo)
-
-You are **Emma**. You are the solo helper — no duo, no peer. Independent of the BRAIN duo (Brian + Rain).
-
-Help the user with anything that doesn't fit a structured session: quick questions, lookups, drafting, general assistance.
-
-When you have nothing left to do, call `mark_awaiting_user(reason)` so the user knows you're idle.
-";
-
 /// Pick the role string for a given agent name. Unknown names get an empty
 /// string — the spawn path will still apply general-rules + custom-instruction.
 pub fn role_for(agent: &str) -> &'static str {
     match agent {
         "brian" => BRIAN_ROLE,
         "rain" => RAIN_ROLE,
-        "emma" => EMMA_ROLE,
         _ => "",
     }
 }
@@ -167,7 +156,6 @@ mod tests {
     fn role_for_known_agents() {
         assert!(role_for("brian").contains("HANDS"));
         assert!(role_for("rain").contains("EYES"));
-        assert!(role_for("emma").contains("solo"));
         assert_eq!(role_for("unknown"), "");
     }
 
@@ -210,14 +198,16 @@ mod tests {
         assert!(RAIN_ROLE.contains("read-only invocations only"));
         assert!(RAIN_ROLE.contains("`git log`"));
         assert!(RAIN_ROLE.contains("`git rev-list`"));
-        // Enforcement (spawn.rs --disallowedTools) blanket-blocks gh + `git
-        // branch`, so the prose must NOT advertise them as allowed reads — else
-        // Rain tries a command the mechanism denies. Guards the prose↔enforcement
-        // drift (C1): the allowed-read-only list previously listed `gh pr view`
-        // etc. that enforcement actually blocks.
-        assert!(!RAIN_ROLE.contains("`gh pr view`"));
-        assert!(!RAIN_ROLE.contains("`gh issue view`"));
-        assert!(!RAIN_ROLE.contains("`gh issue list`"));
+        // Prose↔enforcement alignment (C1): enforcement (spawn.rs
+        // --disallowedTools) now denies gh by WRITE VERB, so read-only gh forms
+        // ARE allowed and the prose advertises them — while mutating gh, `gh
+        // api`, and `git branch` stay blocked. The prose must match: list the
+        // read forms, and still mark the write forms / `gh api` / `git branch`
+        // as blocked so Rain doesn't try a denied command.
+        assert!(RAIN_ROLE.contains("`gh issue view`"));
+        assert!(RAIN_ROLE.contains("`gh pr view`"));
+        assert!(RAIN_ROLE.contains("`gh api`"));
+        assert!(RAIN_ROLE.contains("`git branch` are mechanically blocked"));
     }
 
     #[test]

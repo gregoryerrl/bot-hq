@@ -54,22 +54,18 @@ impl Storage {
     }
 
     /// Active sessions: not archived, not closed. Ordered most-recent first.
-    /// Emma is included (she's always active). `id ASC` is the tiebreaker —
-    /// `datetime('now')` has 1-second granularity, so sessions created in the
-    /// same second tied on `created_at` alone and SQLite returned them in
-    /// non-deterministic order, causing dashboard tiles to swap places on
-    /// every refresh.
+    /// `id ASC` is the tiebreaker — `datetime('now')` has 1-second granularity,
+    /// so sessions created in the same second tied on `created_at` alone and
+    /// SQLite returned them in non-deterministic order, causing dashboard tiles
+    /// to swap places on every refresh.
     pub async fn list_active_sessions(&self) -> Result<Vec<Session>> {
-        // Exclude the special `emma` singleton — she's a chat overlay, not a
-        // duo session. She'd otherwise satisfy `archived=0 AND closed_at IS
-        // NULL` and surface as a phantom tile on the Dashboard.
         let rows = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
                     brian_model_at_spawn, rain_model_at_spawn, \
                     brian_claude_session_id, rain_claude_session_id, \
                     rain_enabled, brian_model_id, rain_model_id \
              FROM sessions \
-             WHERE archived = 0 AND closed_at IS NULL AND id != 'emma' \
+             WHERE archived = 0 AND closed_at IS NULL \
              ORDER BY created_at DESC, id ASC",
         )
         .fetch_all(&self.pool)
@@ -78,11 +74,8 @@ impl Storage {
     }
 
     /// Closed sessions (both just-closed and archived), most-recently-closed
-    /// first. Surfaces in the Settings → Archive tab. Like
-    /// [`list_active_sessions`] it excludes the `emma` singleton; the
-    /// complement predicate (`closed_at IS NOT NULL`) covers everything the
-    /// active list omits except emma. `id ASC` tiebreaks the 1-second
-    /// `datetime('now')` granularity for stable ordering.
+    /// first. Surfaces in the Settings → Archive tab. `id ASC` tiebreaks the
+    /// 1-second `datetime('now')` granularity for stable ordering.
     pub async fn list_closed_sessions(&self) -> Result<Vec<Session>> {
         let rows = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
@@ -90,7 +83,7 @@ impl Storage {
                     brian_claude_session_id, rain_claude_session_id, \
                     rain_enabled, brian_model_id, rain_model_id \
              FROM sessions \
-             WHERE closed_at IS NOT NULL AND id != 'emma' \
+             WHERE closed_at IS NOT NULL \
              ORDER BY closed_at DESC, id ASC",
         )
         .fetch_all(&self.pool)
@@ -207,5 +200,14 @@ mod tests {
         // Archived flag preserved so the UI can badge it.
         assert_eq!(closed.iter().find(|x| x.id == "s-c").unwrap().archived, 1);
         assert_eq!(closed.iter().find(|x| x.id == "s-b").unwrap().archived, 0);
+    }
+
+    #[tokio::test]
+    async fn migration_0017_purges_emma_seed() {
+        // 0001 seeds an 'emma' session + agent_config; 0017 deletes both. A
+        // freshly migrated DB must come up Emma-free.
+        let s = Storage::memory().await.unwrap();
+        assert!(s.get_session("emma").await.unwrap().is_none());
+        assert!(s.get_agent_config("emma").await.unwrap().is_none());
     }
 }

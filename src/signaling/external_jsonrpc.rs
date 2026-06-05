@@ -9,8 +9,8 @@
 use crate::core::AppState as CoreAppState;
 use crate::signaling::bridge::SignalingEvent;
 use crate::signaling::protocol::{
-    parse_phase_arg, JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION,
-    ToolCallResult, ToolDescriptor,
+    parse_phase_arg, JsonRpcError, JsonRpcRequest, JsonRpcResponse, ToolCallResult, ToolDescriptor,
+    PROTOCOL_VERSION,
 };
 use crate::signaling::response::{internal_err, ok_response, result_json};
 use crate::signaling::tool_args::arg_required_str;
@@ -66,9 +66,14 @@ pub async fn dispatch_external(
             let name = params
                 .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing tool name"))?
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing tool name")
+                })?
                 .to_string();
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             let result = call_external_tool(&name, args, core).await?;
             Ok(Some(JsonRpcResponse::ok(
                 id,
@@ -84,10 +89,11 @@ pub async fn dispatch_external(
 }
 
 /// Full driver toolset: session lifecycle + phase control + choice resolution
-/// + Emma + status + admin (agent configs, violations log).
+/// + status + admin (agent configs, violations log).
 pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
     use std::sync::LazyLock;
-    static TOOLS: LazyLock<Vec<ToolDescriptor>> = LazyLock::new(|| vec![
+    static TOOLS: LazyLock<Vec<ToolDescriptor>> = LazyLock::new(|| {
+        vec![
         ToolDescriptor {
             name: "list_sessions",
             description: "List active bot-hq sessions (not archived, not closed). Each entry includes id, title, working_repo_path, created_at, and the brian_model_at_spawn / rain_model_at_spawn fields if recorded.",
@@ -107,11 +113,11 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "send_message",
-            description: "Send a user-authored message to a session. The message is persisted, fed to both agents (Brian + Rain), and clears any 'awaiting user' halt. For Emma, use session_id=\"emma\".",
+            description: "Send a user-authored message to a session. The message is persisted, fed to both agents (Brian + Rain), and clears any 'awaiting user' halt.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "session_id": { "type": "string", "description": "Target session id (UUID for duos, literal \"emma\" for the singleton helper)." },
+                    "session_id": { "type": "string", "description": "Target session id." },
                     "text": { "type": "string", "description": "Message body. No formatting required." }
                 },
                 "required": ["session_id", "text"]
@@ -119,11 +125,11 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "get_session_messages",
-            description: "Read messages for a session in chronological order. Optional `since_id` returns only messages with id > since_id — use for polling. Each message has id, author (user|emma|brian|rain), kind (text|tool_use|tool_result|phase_change), content, created_at.",
+            description: "Read messages for a session in chronological order. Optional `since_id` returns only messages with id > since_id — use for polling. Each message has id, author (user|brian|rain), kind (text|tool_use|tool_result|phase_change), content, created_at.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "session_id": { "type": "string", "description": "Session id (or \"emma\")." },
+                    "session_id": { "type": "string", "description": "Session id." },
                     "since_id": { "type": "integer", "description": "Optional: return only messages with id > this value." }
                 },
                 "required": ["session_id"]
@@ -166,42 +172,27 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
-            name: "restart_emma",
-            description: "Kill Emma's subprocess and respawn with the current agent_configs row. Use after editing Emma's model/auth via the database directly. Returns ok on success; error if the spawn fails (e.g., missing `claude` binary).",
-            input_schema: json!({ "type": "object", "properties": {} }),
-        },
-        ToolDescriptor {
-            name: "get_emma_messages",
-            description: "Read Emma's chat in chronological order. Same shape as get_session_messages but always targets the singleton emma session row.",
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "since_id": { "type": "integer", "description": "Optional: return only messages with id > this value." }
-                }
-            }),
-        },
-        ToolDescriptor {
             name: "get_pending_choices",
             description: "List every choice currently parked in the signaling bridge — choices that an agent is blocking on. Each entry includes choice_id (needed for resolve_choice), session_id, agent, question, and the picker options.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
             name: "get_status",
-            description: "Snapshot of bot-hq runtime state — version, signaling address, external MCP address, count of active duo sessions, whether Emma is spawned, and a millisecond-resolution wall-clock timestamp. Useful for client health checks.",
+            description: "Snapshot of bot-hq runtime state — version, signaling address, external MCP address, count of active duo sessions, and a millisecond-resolution wall-clock timestamp. Useful for client health checks.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
             name: "get_agent_configs",
-            description: "List all three agent configs (emma, brian, rain) — provider, model_name, base_url, updated_at. The auth_token is REDACTED: returned as `<unset>` if empty, or `<set:****abcd>` showing only the last 4 chars to confirm which key is loaded. Full secret retrieval is intentionally not exposed.",
+            description: "List both agent configs (brian, rain) — provider, model_name, base_url, updated_at. The auth_token is REDACTED: returned as `<unset>` if empty, or `<set:****abcd>` showing only the last 4 chars to confirm which key is loaded. Full secret retrieval is intentionally not exposed.",
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
             name: "set_agent_config",
-            description: "Upsert an agent config row. agent_name must be one of emma/brian/rain. Pass auth_token to set a new credential; pass empty string to clear. Other fields (provider, model_name, base_url) are optional — omit to keep the current value.",
+            description: "Upsert an agent config row. agent_name must be brian or rain. Pass auth_token to set a new credential; pass empty string to clear. Other fields (provider, model_name, base_url) are optional — omit to keep the current value.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "agent_name": { "type": "string", "enum": ["emma", "brian", "rain"] },
+                    "agent_name": { "type": "string", "enum": ["brian", "rain"] },
                     "provider": { "type": "string", "description": "Optional. e.g. 'anthropic'. Omit to keep current value." },
                     "model_name": { "type": "string", "description": "Optional. e.g. 'claude-opus-4-7'. Omit to keep current value." },
                     "base_url": { "type": "string", "description": "Optional. e.g. 'https://api.anthropic.com/v1'. Empty string clears. Omit to keep current value." },
@@ -226,7 +217,7 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "session_id": { "type": "string", "description": "Session id (or \"emma\")." },
+                    "session_id": { "type": "string", "description": "Session id." },
                     "since_id": { "type": "integer", "description": "Wait for messages with id > this value. Omit to wait for any new message starting from current state." },
                     "timeout_ms": { "type": "integer", "description": "Max time to block server-side, milliseconds. Default 30000, clamped to [100, 60000]." }
                 },
@@ -297,7 +288,8 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
                 "required": ["key"]
             }),
         },
-    ]);
+    ]
+    });
     &TOOLS
 }
 
@@ -389,9 +381,10 @@ async fn call_external_tool(
 ) -> Result<ToolCallResult, JsonRpcError> {
     match name {
         "list_sessions" => {
-            let sessions = core.list_active_sessions().await.map_err(|e| {
-                internal_err("list_active_sessions", e)
-            })?;
+            let sessions = core
+                .list_active_sessions()
+                .await
+                .map_err(|e| internal_err("list_active_sessions", e))?;
             let arr: Vec<_> = sessions
                 .into_iter()
                 .map(|s| {
@@ -417,17 +410,15 @@ async fn call_external_tool(
             let session_id = core
                 .open_session(title, working_repo_path)
                 .await
-                .map_err(|e| {
-                    internal_err("open_session", e)
-                })?;
+                .map_err(|e| internal_err("open_session", e))?;
             Ok(result_json(&json!({ "session_id": session_id }), "{}"))
         }
         "send_message" => {
             let session_id = arg_required_str(&args, "session_id")?;
             let text = arg_required_str(&args, "text")?;
-            core.broadcast(&session_id, &text).await.map_err(|e| {
-                internal_err("broadcast", e)
-            })?;
+            core.broadcast(&session_id, &text)
+                .await
+                .map_err(|e| internal_err("broadcast", e))?;
             Ok(ok_response())
         }
         "get_session_messages" => {
@@ -437,60 +428,34 @@ async fn call_external_tool(
                 .storage
                 .messages_for_session(&session_id, since_id)
                 .await
-                .map_err(|e| {
-                    internal_err("messages_for_session", e)
-                })?;
-            let arr: Vec<_> = msgs
-                .iter()
-                .map(message_to_json)
-                .collect();
+                .map_err(|e| internal_err("messages_for_session", e))?;
+            let arr: Vec<_> = msgs.iter().map(message_to_json).collect();
             Ok(result_json(&json!({ "messages": arr }), "{}"))
         }
         "advance_phase" => {
             let session_id = arg_required_str(&args, "session_id")?;
             let phase_str = arg_required_str(&args, "phase")?;
             let phase = parse_phase_arg("phase", &phase_str)?;
-            core.advance_phase(&session_id, phase).await.map_err(|e| {
-                internal_err("advance_phase", e)
-            })?;
+            core.advance_phase(&session_id, phase)
+                .await
+                .map_err(|e| internal_err("advance_phase", e))?;
             Ok(ok_response())
         }
         "resolve_choice" => {
             let choice_id = arg_required_str(&args, "choice_id")?;
             let picked = arg_required_str(&args, "picked")?;
-            core.resolve_choice(&choice_id, picked).await.map_err(|e| {
-                internal_err("resolve_choice", e)
-            })?;
+            core.resolve_choice(&choice_id, picked)
+                .await
+                .map_err(|e| internal_err("resolve_choice", e))?;
             Ok(ok_response())
         }
         "close_session" => {
             let session_id = arg_required_str(&args, "session_id")?;
             let archive = args.get("archive").and_then(Value::as_bool).unwrap_or(true);
-            core.close_session(&session_id, archive).await.map_err(|e| {
-                internal_err("close_session", e)
-            })?;
-            Ok(ok_response())
-        }
-        "restart_emma" => {
-            core.restart_emma().await.map_err(|e| {
-                internal_err("restart_emma", e)
-            })?;
-            Ok(ok_response())
-        }
-        "get_emma_messages" => {
-            let since_id = args.get("since_id").and_then(Value::as_i64);
-            let msgs = core
-                .storage
-                .messages_for_session("emma", since_id)
+            core.close_session(&session_id, archive)
                 .await
-                .map_err(|e| {
-                    internal_err("messages_for_session(emma)", e)
-                })?;
-            let arr: Vec<_> = msgs
-                .iter()
-                .map(message_to_json)
-                .collect();
-            Ok(result_json(&json!({ "messages": arr }), "{}"))
+                .map_err(|e| internal_err("close_session", e))?;
+            Ok(ok_response())
         }
         "get_pending_choices" => {
             let choices = core.bridge.list_pending_choices().await;
@@ -510,7 +475,6 @@ async fn call_external_tool(
         }
         "get_status" => {
             let session_count = core.sessions.lock().await.len();
-            let emma_started = core.emma.lock().await.is_some();
             let external_addr = core
                 .external_server
                 .lock()
@@ -522,15 +486,16 @@ async fn call_external_tool(
                 "signaling_addr": core.signaling_addr.to_string(),
                 "external_mcp_addr": external_addr,
                 "active_duo_sessions": session_count,
-                "emma_started": emma_started,
                 "now": chrono::Utc::now().to_rfc3339(),
             });
             Ok(result_json(&payload, "{}"))
         }
         "get_agent_configs" => {
-            let cfgs = core.storage.list_agent_configs().await.map_err(|e| {
-                internal_err("list_agent_configs", e)
-            })?;
+            let cfgs = core
+                .storage
+                .list_agent_configs()
+                .await
+                .map_err(|e| internal_err("list_agent_configs", e))?;
             let arr: Vec<_> = cfgs
                 .into_iter()
                 .map(|c| {
@@ -548,10 +513,10 @@ async fn call_external_tool(
         }
         "set_agent_config" => {
             let agent_name = arg_required_str(&args, "agent_name")?;
-            if !["emma", "brian", "rain"].contains(&agent_name.as_str()) {
+            if !["brian", "rain"].contains(&agent_name.as_str()) {
                 return Err(JsonRpcError::new(
                     JsonRpcError::INVALID_PARAMS,
-                    format!("agent_name must be emma/brian/rain, got {agent_name}"),
+                    format!("agent_name must be brian/rain, got {agent_name}"),
                 ));
             }
             // Load current, then overlay any provided fields.
@@ -559,9 +524,7 @@ async fn call_external_tool(
                 .storage
                 .get_agent_config(&agent_name)
                 .await
-                .map_err(|e| {
-                    internal_err("get_agent_config", e)
-                })?
+                .map_err(|e| internal_err("get_agent_config", e))?
                 .unwrap_or_else(|| DbAgentConfig {
                     agent_name: agent_name.clone(),
                     provider: "anthropic".to_string(),
@@ -592,9 +555,10 @@ async fn call_external_tool(
                 auth_token,
                 updated_at: String::new(), // upsert sets datetime('now')
             };
-            core.storage.upsert_agent_config(&cfg).await.map_err(|e| {
-                internal_err("upsert_agent_config", e)
-            })?;
+            core.storage
+                .upsert_agent_config(&cfg)
+                .await
+                .map_err(|e| internal_err("upsert_agent_config", e))?;
             Ok(ok_response())
         }
         "get_violations" => {
@@ -609,9 +573,9 @@ async fn call_external_tool(
                     "violations log not configured (bridge built without policy)",
                 )
             })?;
-            let mut records = log.read_all().map_err(|e| {
-                internal_err("violations read_all", e)
-            })?;
+            let mut records = log
+                .read_all()
+                .map_err(|e| internal_err("violations read_all", e))?;
             // Most-recent first; cap to `limit`.
             records.reverse();
             records.truncate(limit);
@@ -627,13 +591,8 @@ async fn call_external_tool(
                 .clamp(100, 60_000) as u64;
             let messages = wait_for_change(core, &session_id, since_id, timeout_ms)
                 .await
-                .map_err(|e| {
-                    internal_err("wait_for_change", e)
-                })?;
-            let arr: Vec<_> = messages
-                .iter()
-                .map(message_to_json)
-                .collect();
+                .map_err(|e| internal_err("wait_for_change", e))?;
+            let arr: Vec<_> = messages.iter().map(message_to_json).collect();
             Ok(result_json(&json!({ "messages": arr }), "{}"))
         }
         "get_session_snapshot" => {
@@ -644,16 +603,16 @@ async fn call_external_tool(
                 .unwrap_or(50)
                 .clamp(1, 500) as usize;
 
-            let session_row = core.storage.get_session(&session_id).await.map_err(|e| {
-                internal_err("get_session", e)
-            })?;
+            let session_row = core
+                .storage
+                .get_session(&session_id)
+                .await
+                .map_err(|e| internal_err("get_session", e))?;
             let mut messages = core
                 .storage
                 .messages_for_session(&session_id, None)
                 .await
-                .map_err(|e| {
-                    internal_err("messages_for_session", e)
-                })?;
+                .map_err(|e| internal_err("messages_for_session", e))?;
             // Keep only last msg_limit entries (already in chronological order).
             if messages.len() > msg_limit {
                 let drop = messages.len() - msg_limit;
@@ -685,10 +644,7 @@ async fn call_external_tool(
                     })
                 })
                 .collect();
-            let msg_arr: Vec<_> = messages
-                .iter()
-                .map(message_to_json)
-                .collect();
+            let msg_arr: Vec<_> = messages.iter().map(message_to_json).collect();
             let snapshot = json!({
                 "session": session_row.map(|s| json!({
                     "id": s.id,
@@ -710,14 +666,13 @@ async fn call_external_tool(
             let handle = core.app_handle.get().ok_or_else(|| {
                 JsonRpcError::new(
                     JsonRpcError::INTERNAL_ERROR,
-                    "Tauri AppHandle not yet initialized (called before Tauri setup completed)".to_string(),
+                    "Tauri AppHandle not yet initialized (called before Tauri setup completed)"
+                        .to_string(),
                 )
             })?;
-            let path = crate::tauri_cmd::screenshot::capture_main_window(
-                handle,
-                &core.paths.data_dir,
-            )
-            .map_err(|e| internal_err("webview_screenshot", e))?;
+            let path =
+                crate::tauri_cmd::screenshot::capture_main_window(handle, &core.paths.data_dir)
+                    .map_err(|e| internal_err("webview_screenshot", e))?;
             Ok(result_json(
                 &json!({ "path": path.display().to_string() }),
                 "{}",
@@ -764,10 +719,7 @@ mod tests {
 
     #[test]
     fn descriptors_include_all_iters() {
-        let names: Vec<&str> = external_tool_descriptors()
-            .iter()
-            .map(|d| d.name)
-            .collect();
+        let names: Vec<&str> = external_tool_descriptors().iter().map(|d| d.name).collect();
         // iter 1
         assert!(names.contains(&"list_sessions"));
         assert!(names.contains(&"create_session"));
@@ -777,8 +729,6 @@ mod tests {
         assert!(names.contains(&"advance_phase"));
         assert!(names.contains(&"resolve_choice"));
         assert!(names.contains(&"close_session"));
-        assert!(names.contains(&"restart_emma"));
-        assert!(names.contains(&"get_emma_messages"));
         assert!(names.contains(&"get_pending_choices"));
         assert!(names.contains(&"get_status"));
         // iter 3
@@ -794,7 +744,7 @@ mod tests {
         assert!(names.contains(&"webview_type"));
         assert!(names.contains(&"webview_scroll"));
         assert!(names.contains(&"webview_press_key"));
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 19);
     }
 
     #[test]

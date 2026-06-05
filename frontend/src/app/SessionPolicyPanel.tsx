@@ -8,8 +8,8 @@ import { cn } from "../lib/cn";
 
 /**
  * Right-side drawer for editing a session's canonical policy snapshot
- * (`.local/session-policies/<sid>.yaml`). Mirrors the EmmaOverlay drawer idiom
- * (fixed inset-y, Escape-to-close). Reads via `get_session_policy` — which
+ * (`.local/session-policies/<sid>.yaml`). A fixed inset-y right-side drawer
+ * with Escape-to-close. Reads via `get_session_policy` — which
  * returns the snapshot verbatim when seeded, else the resolved general+project
  * blueprint, so the form shows real values even before the agents finish
  * spawning. Writes via `set_session_policy`, which preserves the frozen

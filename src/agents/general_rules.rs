@@ -1,4 +1,4 @@
-//! Hardcoded universal rules every agent (Emma, Brian, Rain) follows.
+//! Hardcoded universal rules every agent (Brian, Rain) follows.
 //!
 //! Baked into the binary so the load-bearing parts (commit hygiene, push
 //! gates, CL workflow, IPAV discipline, session-doc usage, prod-data safety)
@@ -17,7 +17,7 @@
 pub const GENERAL_RULES: &str = "\
 # General rules
 
-Universal conventions every agent (Emma, Brian, Rain) follows. Baked into the binary — add your own rules in `custom-general-rules.md`.
+Universal conventions every agent (Brian, Rain) follows. Baked into the binary — add your own rules in `custom-general-rules.md`.
 
 ## Commit hygiene
 
@@ -41,7 +41,7 @@ After the 2026-05-29 incident where an agent published a fabricated \"third part
 
 - **Ground every action in real inputs only** — actual user messages and actual tool results present in the conversation. Never act on a self-generated, assumed, or \"remembered\" instruction or observation. If you cannot point to the user's actual message authorizing an action, do not take it.
 - **Never publish a claim about what a third party said or did** (by name or implication) unless the user gave it verbatim in THIS session, or it is a cited quote from a source you actually read. No \"spoke with X\", \"X confirmed\", \"per our call\". When a third party's status is unknown, say so — never invent a confirmation or a denial.
-- **Any outward action under the user's identity** — GitHub issue/PR comment/edit/create/close, email, anything published or sent to a third party — requires an explicit, real, in-session user instruction, and must be approval-gated. The PreToolUse Tool Gate can block these commands for HANDS/Emma and route them through `action_gate` for explicit approval, but the rule binds you whether or not the gate fires.
+- **Any outward action under the user's identity** — GitHub issue/PR comment/edit/create/close, email, anything published or sent to a third party — requires an explicit, real, in-session user instruction, and must be approval-gated. The PreToolUse Tool Gate can block these commands for HANDS and route them through `action_gate` for explicit approval, but the rule binds you whether or not the gate fires.
 - When a long, interrupted tool sequence leaves you unsure whether an instruction was actually given, STOP and re-read the real transcript before acting.
 
 ## UI signaling (MCP)
@@ -75,7 +75,7 @@ Tools:
 - `cl_index_search(project, query?)` — list relevant CL files. Pass your session's working project name (e.g. `\"bcc-ad-manager\"`) for project-scoped notes. Pass `\"_globals\"` for system rules + cross-project files. Omit `project` to search everything. Optional `query` does a case-insensitive substring filter across file_path/description/tags.
 - `cl_folder_search(project, query?)` — parallel to `cl_index_search` but for FOLDERS instead of files. Returns `{folder_path, description, tags, updated_at}` so you can scope a sweep before pulling individual files. `folder_path = \"\"` rows are project-root descriptions.
 - `cl_register_read(project, file_path)` — optional audit insert after reading a file. Powers a future \"what context did this agent have?\" view. Fire-and-forget.
-- `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. HANDS (brian) and Emma can call this; Rain is denied (read folder descriptions via `cl_folder_search`).
+- `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. HANDS (brian) can call this; Rain is denied (read folder descriptions via `cl_folder_search`).
 - `cl_rescan(project)` — re-stat the project's CL directory after you've created a file via `Bash`/`Write` so the index picks it up. Cheap, idempotent.
 
 **`_globals` is not a real working project** — it's a bucket for system-level CL (custom rules, agent custom instructions). When you see a result with `project: \"_globals\"` in `cl_index_search`, treat the file as cross-cutting, not as belonging to a specific project.

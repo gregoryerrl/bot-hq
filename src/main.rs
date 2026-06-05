@@ -2,10 +2,10 @@ use anyhow::Result;
 use bot_hq::core::AppState as CoreAppState;
 use bot_hq::paths::{LockGuard, Paths};
 use bot_hq::plugins::Heartbeat;
+use bot_hq::plugins::PluginRegistry;
 use bot_hq::policy::{hooks, ViolationsLog};
 use bot_hq::signaling::{start_external_server, start_signaling_server, SignalingBridge};
 use bot_hq::storage::Storage;
-use bot_hq::plugins::PluginRegistry;
 use bot_hq::tauri_events;
 use bot_hq::tauri_events::types::AgentMessage;
 use serde_json::Value;
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
 
     // Chain a panic hook that SIGKILLs every registered claude-code child
     // BEFORE the original hook prints the panic + unwind reaches the FFI
-    // barrier and aborts. Without this, a panic leaves brian/rain/emma
+    // barrier and aborts. Without this, a panic leaves brian/rain
     // orphaned to launchd (the ghost-Brian incident).
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -83,68 +83,65 @@ fn main() -> Result<()> {
         .build()?;
     let rt = runtime.handle().clone();
 
-    let (core, storage_arc, bridge_arc): (
-        Arc<CoreAppState>,
-        Arc<Storage>,
-        Arc<SignalingBridge>,
-    ) = runtime.block_on(async {
-        let storage = Storage::open(&paths.db_path).await?;
-        let violations = ViolationsLog::new(&paths.data_dir);
-        // Wipe any stale per-session policy snapshots — a leftover file would
-        // leak a prior session's resolved policy into a fresh session that
-        // should re-seed from the current blueprints.
-        if let Err(e) =
-            bot_hq::policy::session_policy::purge_all_session_policies(&paths.data_dir)
-        {
-            tracing::warn!(?e, "purge_all_session_policies failed at startup");
-        }
-        let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
-        bridge.set_storage(storage.clone()).await;
-        if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {
-            tracing::warn!(?e, "cl startup init failed — index may be partial");
-        }
-        let mut server = start_signaling_server(bridge.clone()).await?;
-        tracing::info!(addr = %server.local_addr, "signaling server up");
-        // Persist the bound address so the git pre-push hook (a separate
-        // subprocess) can POST `/hooks/pre-push` to surface a per-push approval
-        // prompt under `push_gate=ask`. Non-fatal; the hook fail-closes if the
-        // file is absent. Registered on the server so it's removed on clean exit.
-        if let Err(e) = paths.write_signaling_addr(server.local_addr) {
-            tracing::warn!(?e, "failed to persist signaling addr for the pre-push hook");
-        }
-        server.set_addr_file(paths.signaling_addr_path.clone());
-
-        // Local normalizing proxy for agents on a non-Anthropic gateway
-        // (Rain → DeepSeek): strips request-build-time `role:"system"`
-        // injections that strict gateways 400 on. Soft-fail — if it can't
-        // bind, those agents hit their gateway directly and the rest of
-        // bot-hq is unaffected. Started before any agent spawns so the addr
-        // is installed by the time `build_command` reads it.
-        match bot_hq::agents::llm_proxy::start_llm_proxy().await {
-            Ok(proxy) => {
-                tracing::info!(addr = %proxy.local_addr, "llm normalizing proxy up");
-                bot_hq::agents::llm_proxy::install_global(proxy);
+    let (core, storage_arc, bridge_arc): (Arc<CoreAppState>, Arc<Storage>, Arc<SignalingBridge>) =
+        runtime.block_on(async {
+            let storage = Storage::open(&paths.db_path).await?;
+            // Boot-time tray reconciliation: withdraw pending rows left on closed or
+            // orphaned sessions (cruft from a close under a pre-fix binary). Keeps
+            // the notification bell honest without waiting on a one-shot migration.
+            match storage.withdraw_pending_tray_for_closed_or_orphaned().await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(withdrawn = n, "swept stale pending tray rows at startup")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(?e, "startup tray sweep failed"),
             }
-            Err(e) => tracing::warn!(
-                ?e,
-                "llm proxy failed to start — agents on custom gateways will hit them directly"
-            ),
-        }
-        let storage_arc = Arc::new(storage.clone());
-        let bridge_arc = bridge.clone();
-        let core = Arc::new(CoreAppState::new(paths.clone(), storage, server).await);
-        Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc))
-    })?;
+            let violations = ViolationsLog::new(&paths.data_dir);
+            // Wipe any stale per-session policy snapshots — a leftover file would
+            // leak a prior session's resolved policy into a fresh session that
+            // should re-seed from the current blueprints.
+            if let Err(e) =
+                bot_hq::policy::session_policy::purge_all_session_policies(&paths.data_dir)
+            {
+                tracing::warn!(?e, "purge_all_session_policies failed at startup");
+            }
+            let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
+            bridge.set_storage(storage.clone()).await;
+            if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {
+                tracing::warn!(?e, "cl startup init failed — index may be partial");
+            }
+            let mut server = start_signaling_server(bridge.clone()).await?;
+            tracing::info!(addr = %server.local_addr, "signaling server up");
+            // Persist the bound address so the git pre-push hook (a separate
+            // subprocess) can POST `/hooks/pre-push` to surface a per-push approval
+            // prompt under `push_gate=ask`. Non-fatal; the hook fail-closes if the
+            // file is absent. Registered on the server so it's removed on clean exit.
+            if let Err(e) = paths.write_signaling_addr(server.local_addr) {
+                tracing::warn!(?e, "failed to persist signaling addr for the pre-push hook");
+            }
+            server.set_addr_file(paths.signaling_addr_path.clone());
 
-    // Auto-spawn Emma (singleton chat helper). Non-fatal on failure.
-    runtime.block_on(async {
-        if let Err(e) = core.ensure_emma_started().await {
-            tracing::warn!(
-                error = ?e,
-                "failed to spawn emma — chat will be inactive until restart"
-            );
-        }
-    });
+            // Local normalizing proxy for agents on a non-first-party gateway
+            // (Rain → DeepSeek): strips request-build-time `role:"system"`
+            // injections that strict gateways 400 on. Soft-fail — if it can't
+            // bind, those agents hit their gateway directly and the rest of
+            // bot-hq is unaffected. Started before any agent spawns so the addr
+            // is installed by the time `build_command` reads it.
+            match bot_hq::agents::llm_proxy::start_llm_proxy().await {
+                Ok(proxy) => {
+                    tracing::info!(addr = %proxy.local_addr, "llm normalizing proxy up");
+                    bot_hq::agents::llm_proxy::install_global(proxy);
+                }
+                Err(e) => tracing::warn!(
+                    ?e,
+                    "llm proxy failed to start — agents on custom gateways will hit them directly"
+                ),
+            }
+            let storage_arc = Arc::new(storage.clone());
+            let bridge_arc = bridge.clone();
+            let core = Arc::new(CoreAppState::new(paths.clone(), storage, server).await);
+            Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc))
+        })?;
 
     // External MCP server — driver tools surface. Soft-fail on port
     // conflict or when explicitly disabled.
@@ -170,7 +167,11 @@ fn main() -> Result<()> {
                 core.external_server.lock().await.replace(server);
             }
             Err(e) => {
-                tracing::warn!(?e, port, "external MCP port unavailable — skipping startup; internal MCP is unaffected");
+                tracing::warn!(
+                    ?e,
+                    port,
+                    "external MCP port unavailable — skipping startup; internal MCP is unaffected"
+                );
             }
         }
     });
@@ -206,7 +207,10 @@ fn main() -> Result<()> {
         bot_hq::tauri_specta_gen::typescript_config(),
         "frontend/src/lib/bindings.ts",
     ) {
-        tracing::warn!(?e, "tauri-specta bindings export failed (frontend may have stale types)");
+        tracing::warn!(
+            ?e,
+            "tauri-specta bindings export failed (frontend may have stale types)"
+        );
     }
 
     // Plugin registry — scans `<data_dir>/plugins/` and owns the heartbeat
@@ -373,8 +377,8 @@ fn main() -> Result<()> {
 }
 
 fn init_logging() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info,bot_hq=debug"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,bot_hq=debug"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
@@ -406,7 +410,8 @@ fn run_install_hooks_cli(args: &[String]) -> Result<()> {
         match args[i].as_str() {
             "--repo" => {
                 repo = Some(std::path::PathBuf::from(
-                    args.get(i + 1).ok_or_else(|| anyhow::anyhow!("--repo needs value"))?,
+                    args.get(i + 1)
+                        .ok_or_else(|| anyhow::anyhow!("--repo needs value"))?,
                 ));
                 i += 2;
             }
@@ -458,9 +463,7 @@ async fn cl_startup_init(
                 Some(n) if !n.starts_with('.') => n,
                 _ => continue,
             };
-            storage
-                .upsert_project(name, name, None, None, None)
-                .await?;
+            storage.upsert_project(name, name, None, None, None).await?;
         }
     }
 
@@ -493,4 +496,3 @@ fn load_env_file(path: &std::path::Path) -> std::io::Result<()> {
     }
     Ok(())
 }
-

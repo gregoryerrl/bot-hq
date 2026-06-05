@@ -79,8 +79,6 @@ pub struct ClaudeOverrides {
     pub brian: AgentOverride,
     #[serde(default)]
     pub rain: AgentOverride,
-    #[serde(default)]
-    pub emma: AgentOverride,
 }
 
 /// `<data_dir>/claude-overrides.json`.
@@ -136,7 +134,6 @@ pub fn resolve_agent_overrides(store: &ClaudeOverrides, agent: &str) -> AgentOve
     let specific = match agent {
         "brian" => &store.brian,
         "rain" => &store.rain,
-        "emma" => &store.emma,
         _ => return store.all.clone(),
     };
     let mut merged = store.all.clone();

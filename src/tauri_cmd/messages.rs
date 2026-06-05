@@ -23,8 +23,7 @@ pub async fn get_session_messages(
 }
 
 /// Send a user message to a session. For the duo session this fans out to
-/// both Brian and Rain (with phase envelope); for Emma's solo session it
-/// goes to her singleton agent. Persists the raw text + notifies the bridge.
+/// both Brian and Rain (with phase envelope). Persists the raw text + notifies the bridge.
 #[tauri::command]
 #[specta::specta]
 pub async fn broadcast_message(
@@ -55,8 +54,7 @@ mod tests {
             .unwrap();
 
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
-        let agent_msgs: Vec<AgentMessage> =
-            msgs.into_iter().map(AgentMessage::from).collect();
+        let agent_msgs: Vec<AgentMessage> = msgs.into_iter().map(AgentMessage::from).collect();
         assert_eq!(agent_msgs.len(), 2);
         assert_eq!(agent_msgs[0].content, "a");
         assert_eq!(agent_msgs[0].author, "brian");
@@ -76,10 +74,7 @@ mod tests {
             .await
             .unwrap();
 
-        let after = storage
-            .messages_for_session("s1", Some(id1))
-            .await
-            .unwrap();
+        let after = storage.messages_for_session("s1", Some(id1)).await.unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].content, "second");
     }

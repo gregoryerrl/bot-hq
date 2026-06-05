@@ -2,9 +2,9 @@
 
 Desktop GUI for driving AI-assisted coding sessions through a bilateral-duo
 agent model: **Brian** (HANDS — edits, commits, runs commands) and **Rain**
-(EYES — adversarial review). Optional solo helper **Emma** for one-off
-questions. The user is the orchestrator; the app is the conductor between
-user and agents.
+(EYES — adversarial review). The user is the orchestrator; the app is the
+conductor between user and agents. (The former solo helper Emma was removed
+in favor of the plugin model — TBD.)
 
 Each agent runs as a `claude-code` subprocess. The app wires bidirectional
 stream-json between subprocesses, persists chat history to sqlite, and
@@ -111,8 +111,7 @@ bot-hq/
   `agent_configs`, `models` + `app_settings` (saved-model registry +
   key/value app settings), `session_tray` (per-session durable tray —
   questions/approvals/gated commands), `session_documents` (IPAV scratch
-  docs), `plugins`, `cl_index` (searchable CL file index). Emma is a
-  singleton session row (`id="emma"`).
+  docs), `plugins`, `cl_index` (searchable CL file index).
 - **IPAV:** in-memory `HashMap<SessionId, IpavState>`. Phases I/P use a
   1.5s buffered peer-forward; A/V is pure turn-based.
 - **Policy enforcement (`src/policy/`):** two-layer enforcement of
@@ -150,7 +149,7 @@ Bot-hq exposes these to each spawned agent via the per-agent
 | `session_doc_search(query?, phase?)` | List this session's scratch docs; `phase` filter for cross-phase retrieval. |
 | `session_doc_read(slug)` | Read a session doc by slug. |
 | `cl_folder_search(project, query?)` | Search CL folder descriptions (folder-level parallel to `cl_index_search`). |
-| `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (HANDS/Emma only). |
+| `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (HANDS only). |
 | `webview_screenshot()` | Capture the bot-hq webview for agent-driven UI testing. |
 | `webview_click(selector)` | Synthesize a click on a DOM element in the webview. |
 | `webview_type(selector, text)` | Type into a webview element. |
@@ -160,9 +159,9 @@ Bot-hq exposes these to each spawned agent via the per-agent
 Role boundary: Rain (EYES) is blocked from `ask_user_choice`,
 `mark_awaiting_user`, `request_approval`, `action_gate`,
 `supersede_question` (the `HANDS_ONLY_TOOLS` gate), plus
-`cl_register_folder_description` (the `CL_MUTATE_TOOLS` gate — Emma is
-allowed). Tool calls from Rain to a blocked tool return an error. Brian
-(HANDS) gets the full set.
+`cl_register_folder_description` (the `CL_MUTATE_TOOLS` gate). Tool calls
+from Rain to a blocked tool return an error. Brian (HANDS) gets the full
+set.
 
 ## Policy enforcement
 
@@ -256,14 +255,12 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 |---|---|
 | `list_sessions` | Read active sessions (id, title, phase, models). |
 | `create_session(title, working_repo_path?)` | Spawn a Brian+Rain duo. |
-| `send_message(session_id, text)` | Broadcast to a session (or `"emma"`). |
+| `send_message(session_id, text)` | Broadcast to a session. |
 | `get_session_messages(session_id, since_id?)` | Read chat in order. |
-| `get_emma_messages(since_id?)` | Same, for Emma. |
 | `advance_phase(session_id, phase)` | Move through I/P/A/V. |
 | `resolve_choice(choice_id, picked)` | Answer a parked `ask_user_choice`. |
 | `get_pending_choices` | List parked choices with their choice_ids. |
 | `close_session(session_id, archive?)` | Kill duo + mark closed. |
-| `restart_emma` | Kill + respawn Emma (e.g. after config swap). |
 | `get_status` | Version, addresses, session count, uptime. |
 | `get_agent_configs` | Read agent configs (auth_token redacted to last 4 chars). |
 | `set_agent_config(agent_name, …)` | Upsert a row; empty string clears a field. |

@@ -53,10 +53,7 @@ pub async fn dispatch(
         "ping" => Ok(Some(JsonRpcResponse::ok(id, json!({})))),
         "tools/list" => {
             let tools = tool_descriptors();
-            Ok(Some(JsonRpcResponse::ok(
-                id,
-                json!({ "tools": tools }),
-            )))
+            Ok(Some(JsonRpcResponse::ok(id, json!({ "tools": tools }))))
         }
         "tools/call" => {
             let params = req
@@ -65,7 +62,9 @@ pub async fn dispatch(
             let name = params
                 .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing tool name"))?
+                .ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "missing tool name")
+                })?
                 .to_string();
             let args = params
                 .get("arguments")
@@ -98,7 +97,7 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
 ];
 
 /// Tools that mutate CL annotations (folder descriptions, etc.). Brian (HANDS)
-/// and Emma (solo helper) own mutations; Rain (EYES) reviews via the read
+/// owns mutations; Rain (EYES) reviews via the read
 /// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
 const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
 
@@ -115,10 +114,7 @@ fn parse_optional_phase(args: &Value) -> Result<Option<String>, JsonRpcError> {
         if !VALID_PHASES.contains(&p) {
             return Err(JsonRpcError::new(
                 JsonRpcError::INVALID_PARAMS,
-                format!(
-                    "phase must be one of {:?}, got {:?}",
-                    VALID_PHASES, p
-                ),
+                format!("phase must be one of {:?}, got {:?}", VALID_PHASES, p),
             ));
         }
     }
@@ -139,7 +135,7 @@ async fn call_tool(
     }
     if CL_MUTATE_TOOLS.contains(&name) && caller.agent == "rain" {
         return Ok(ToolCallResult::error(format!(
-            "tool '{name}' is reserved for HANDS (brian) and the solo helper (emma); rain is EYES — read folder descriptions via cl_folder_search instead",
+            "tool '{name}' is reserved for HANDS (brian); rain is EYES — read folder descriptions via cl_folder_search instead",
         )));
     }
     match name {
@@ -177,11 +173,7 @@ async fn call_tool(
         "advance_phase" => {
             let target = arg_required_str(&args, "target")?;
             parse_phase_arg("target", &target)?;
-            bridge.agent_advance_phase(
-                caller.session_id.clone(),
-                caller.agent.clone(),
-                target,
-            );
+            bridge.agent_advance_phase(caller.session_id.clone(), caller.agent.clone(), target);
             Ok(ToolCallResult::text("phase advanced"))
         }
         "request_phase_advance" => {
@@ -241,11 +233,7 @@ async fn call_tool(
         "action_gate" => {
             let command = arg_required_str(&args, "command")?;
             let output = bridge
-                .action_gate(
-                    caller.session_id.clone(),
-                    caller.agent.clone(),
-                    command,
-                )
+                .action_gate(caller.session_id.clone(), caller.agent.clone(), command)
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(output))
@@ -255,11 +243,7 @@ async fn call_tool(
                 .get("archive")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            bridge.request_session_close(
-                caller.session_id.clone(),
-                caller.agent.clone(),
-                archive,
-            );
+            bridge.request_session_close(caller.session_id.clone(), caller.agent.clone(), archive);
             Ok(ToolCallResult::text(
                 "session close requested — your subprocess will be terminated shortly",
             ))
@@ -539,9 +523,7 @@ fn eval_in_webview(bridge: &Arc<SignalingBridge>, js: &str) -> Result<(), JsonRp
             "main webview not found".to_string(),
         )
     })?;
-    window
-        .eval(js)
-        .map_err(internal_err_no_prefix)?;
+    window.eval(js).map_err(internal_err_no_prefix)?;
     Ok(())
 }
 
@@ -610,8 +592,11 @@ mod tests {
         assert!(names.contains(&"close_session"));
         assert!(names.contains(&"list_my_pending_questions"));
         assert!(names.contains(&"withdraw_question"));
-        assert_eq!(tools.len(), names.iter().collect::<std::collections::HashSet<_>>().len(),
-            "tool names should be unique");
+        assert_eq!(
+            tools.len(),
+            names.iter().collect::<std::collections::HashSet<_>>().len(),
+            "tool names should be unique"
+        );
     }
 
     #[tokio::test]
@@ -631,10 +616,17 @@ mod tests {
         .unwrap()
         .unwrap();
         let v = serde_json::to_value(&res).unwrap();
-        assert!(v["result"]["content"][0]["text"].as_str().unwrap().contains("close requested"));
+        assert!(v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("close requested"));
         let ev = sub.recv().await.unwrap();
         match ev {
-            SignalingEvent::SessionCloseRequest { session_id, agent, archive } => {
+            SignalingEvent::SessionCloseRequest {
+                session_id,
+                agent,
+                archive,
+            } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(agent, "brian");
                 assert!(!archive);
@@ -655,7 +647,12 @@ mod tests {
     #[tokio::test]
     async fn rain_rejected_from_hands_only_tools() {
         let bridge = SignalingBridge::new();
-        for tool in &["mark_awaiting_user", "ask_user_choice", "request_approval", "action_gate"] {
+        for tool in &[
+            "mark_awaiting_user",
+            "ask_user_choice",
+            "request_approval",
+            "action_gate",
+        ] {
             let res = dispatch(
                 req(
                     "tools/call",
@@ -679,7 +676,8 @@ mod tests {
             .unwrap();
             let v = serde_json::to_value(&res).unwrap();
             assert_eq!(
-                v["result"]["isError"], json!(true),
+                v["result"]["isError"],
+                json!(true),
                 "tool {tool} should return is_error=true for rain"
             );
             let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
@@ -821,7 +819,10 @@ mod tests {
         let ev = sub.recv().await.unwrap();
         match ev {
             SignalingEvent::AwaitingUser { reason, .. } => {
-                assert!(reason.contains("PHASE REQUEST -> Apply"), "reason: {reason}");
+                assert!(
+                    reason.contains("PHASE REQUEST -> Apply"),
+                    "reason: {reason}"
+                );
                 assert!(reason.contains("plan done"), "reason: {reason}");
             }
             other => panic!("expected AwaitingUser, got {other:?}"),
@@ -872,7 +873,8 @@ mod tests {
         .unwrap();
         let v = serde_json::to_value(&res).unwrap();
         assert_eq!(
-            v["result"]["isError"], json!(false),
+            v["result"]["isError"],
+            json!(false),
             "rain should be allowed to call request_phase_advance"
         );
     }
@@ -1013,7 +1015,10 @@ mod tests {
         .unwrap();
         let v = serde_json::to_value(&read_res).unwrap();
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("\"body\":\"the plan body\""), "read returned: {text}");
+        assert!(
+            text.contains("\"body\":\"the plan body\""),
+            "read returned: {text}"
+        );
     }
 
     #[tokio::test]
@@ -1092,9 +1097,16 @@ mod tests {
         let v = serde_json::to_value(&res).unwrap();
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
         let rows: Vec<Value> = serde_json::from_str(text).unwrap();
-        assert_eq!(rows.len(), 1, "phase docs collapse to one per phase, got: {text}");
+        assert_eq!(
+            rows.len(),
+            1,
+            "phase docs collapse to one per phase, got: {text}"
+        );
         assert_eq!(rows[0]["phase"], "plan");
-        assert_eq!(rows[0]["slug"], "plan", "phase-tagged doc is keyed by phase name");
+        assert_eq!(
+            rows[0]["slug"], "plan",
+            "phase-tagged doc is keyed by phase name"
+        );
         assert_eq!(rows[0]["body"], "second", "latest write wins");
     }
 
@@ -1190,9 +1202,10 @@ mod tests {
         )
         .unwrap();
         let log = crate::policy::ViolationsLog::new(tmp.path());
-        let bridge =
-            SignalingBridge::with_policy(log.clone(), tmp.path().to_path_buf());
-        bridge.register_session("s1".into(), Some("foo".into())).await;
+        let bridge = SignalingBridge::with_policy(log.clone(), tmp.path().to_path_buf());
+        bridge
+            .register_session("s1".into(), Some("foo".into()))
+            .await;
 
         let res = dispatch(
             req(

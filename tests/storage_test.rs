@@ -5,46 +5,38 @@ async fn migration_runs_on_empty_db() {
     let s = Storage::memory().await.unwrap();
     let cfgs = s.list_agent_configs().await.unwrap();
     let names: Vec<_> = cfgs.iter().map(|c| c.agent_name.as_str()).collect();
-    assert!(names.contains(&"emma"));
     assert!(names.contains(&"brian"));
     assert!(names.contains(&"rain"));
+    // Emma was removed: no emma agent_config is seeded anymore.
+    assert!(!names.contains(&"emma"));
 }
 
 #[tokio::test]
-async fn emma_singleton_seeded() {
-    let s = Storage::memory().await.unwrap();
-    let emma = s.get_session("emma").await.unwrap();
-    assert!(emma.is_some(), "emma session must be seeded by migration");
-    let emma = emma.unwrap();
-    assert_eq!(emma.title, "Emma");
-    assert!(emma.working_repo_path.is_none());
-}
-
-#[tokio::test]
-async fn emma_seed_is_idempotent_across_open() {
-    let s1 = Storage::memory().await.unwrap();
-    let s2 = Storage::memory().await.unwrap();
-    assert!(s1.get_session("emma").await.unwrap().is_some());
-    assert!(s2.get_session("emma").await.unwrap().is_some());
-}
-
-#[tokio::test]
-async fn pending_tray_open_sessions_excludes_closed_and_emma() {
+async fn pending_tray_open_sessions_excludes_closed() {
     use bot_hq::storage::QuestionKind;
     let s = Storage::memory().await.unwrap();
-    s.create_session("open-s", "open", Some("/tmp/r")).await.unwrap();
-    s.create_session("closed-s", "closed", Some("/tmp/r")).await.unwrap();
+    s.create_session("open-s", "open", Some("/tmp/r"))
+        .await
+        .unwrap();
+    s.create_session("closed-s", "closed", Some("/tmp/r"))
+        .await
+        .unwrap();
 
     let opts = vec!["Approve".to_string(), "Reject".to_string()];
-    // One pending each: an open session, a (soon-)closed session, and emma.
-    for (sid, cid) in [
-        ("open-s", "c-open"),
-        ("closed-s", "c-closed"),
-        ("emma", "c-emma"),
-    ] {
-        s.insert_question(sid, cid, "brian", QuestionKind::Choice, "go?", Some(&opts), None, None)
-            .await
-            .unwrap();
+    // One pending each: an open session and a (soon-)closed session.
+    for (sid, cid) in [("open-s", "c-open"), ("closed-s", "c-closed")] {
+        s.insert_question(
+            sid,
+            cid,
+            "brian",
+            QuestionKind::Choice,
+            "go?",
+            Some(&opts),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     }
     s.close_session("closed-s", false).await.unwrap();
 
@@ -53,7 +45,7 @@ async fn pending_tray_open_sessions_excludes_closed_and_emma() {
     assert_eq!(
         ids,
         vec!["c-open"],
-        "only the open, non-emma session's pending should surface; closed + emma excluded"
+        "only the open session's pending should surface; closed excluded"
     );
 }
 
@@ -65,9 +57,18 @@ async fn withdraw_pending_tray_for_session_scoped_and_only_pending() {
     s.create_session("b", "b", None).await.unwrap();
     let opts = vec!["Yes".to_string(), "No".to_string()];
     for (sid, cid) in [("a", "ca1"), ("a", "ca2"), ("b", "cb1")] {
-        s.insert_question(sid, cid, "brian", QuestionKind::Choice, "q", Some(&opts), None, None)
-            .await
-            .unwrap();
+        s.insert_question(
+            sid,
+            cid,
+            "brian",
+            QuestionKind::Choice,
+            "q",
+            Some(&opts),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     }
     // Answer one of a's so the withdraw only touches the still-pending row.
     s.answer_question("ca1", "Yes").await.unwrap();
@@ -139,16 +140,13 @@ async fn close_session_marks_closed() {
 }
 
 #[tokio::test]
-async fn active_sessions_excludes_closed_and_emma() {
+async fn active_sessions_excludes_closed() {
     let s = Storage::memory().await.unwrap();
     s.create_session("active1", "a", None).await.unwrap();
     s.create_session("closed1", "c", None).await.unwrap();
     s.close_session("closed1", true).await.unwrap();
     let active = s.list_active_sessions().await.unwrap();
     let ids: Vec<_> = active.iter().map(|s| s.id.as_str()).collect();
-    // Emma is a chat-overlay singleton — explicitly filtered out so she
-    // doesn't surface as a phantom Dashboard tile alongside duo sessions.
-    assert!(!ids.contains(&"emma"));
     assert!(ids.contains(&"active1"));
     assert!(!ids.contains(&"closed1"));
 }
@@ -167,8 +165,9 @@ async fn upsert_agent_config_overwrites() {
 
 #[tokio::test]
 async fn upsert_agent_config_inserts_new_via_constructor() {
-    // agent_configs has a CHECK constraint allowing only emma/brian/rain.
-    // Use the pre-seeded "rain" row as the canonical upsert target.
+    // agent_configs' legacy CHECK constraint still lists emma/brian/rain, but
+    // only brian/rain are seeded post-removal. Use the seeded "rain" row as the
+    // canonical upsert target.
     let s = Storage::memory().await.unwrap();
     let cfg = AgentConfig {
         agent_name: "rain".into(),
@@ -201,8 +200,14 @@ async fn set_session_spawn_models_round_trip() {
         .await
         .unwrap();
     let after = s.get_session("sess-x").await.unwrap().unwrap();
-    assert_eq!(after.brian_model_at_spawn.as_deref(), Some("claude-opus-4-7"));
-    assert_eq!(after.rain_model_at_spawn.as_deref(), Some("deepseek-v4-pro"));
+    assert_eq!(
+        after.brian_model_at_spawn.as_deref(),
+        Some("claude-opus-4-7")
+    );
+    assert_eq!(
+        after.rain_model_at_spawn.as_deref(),
+        Some("deepseek-v4-pro")
+    );
 
     // A solo-Brian session passes None for Rain — stored as SQL NULL, not "".
     s.set_session_spawn_models("sess-x", "claude-opus-4-7", None)

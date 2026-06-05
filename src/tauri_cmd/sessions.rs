@@ -142,7 +142,7 @@ pub async fn list_sessions(
 }
 
 /// All closed sessions (just-closed + archived), most-recently-closed first.
-/// Backs the Settings → Archive tab. Excludes the emma singleton.
+/// Backs the Settings → Archive tab.
 #[tauri::command]
 #[specta::specta]
 pub async fn list_closed_sessions(

@@ -14,7 +14,13 @@ use std::path::{Path, PathBuf};
 
 /// Substrings that mark a JSON key as secret-bearing (case-insensitive).
 const SECRET_KEY_HINTS: &[&str] = &[
-    "token", "secret", "password", "authorization", "apikey", "api_key", "bearer",
+    "token",
+    "secret",
+    "password",
+    "authorization",
+    "apikey",
+    "api_key",
+    "bearer",
 ];
 
 /// Read the user's Claude Code config, resolving the config dir from the
@@ -260,15 +266,16 @@ fn mcp_servers(
             let entry = home_mcp
                 .and_then(|m| m.get(name))
                 .or_else(|| settings_mcp.and_then(|m| m.get(name)));
-            let (transport, detail) = entry.map(mcp_detail).unwrap_or(("unknown".into(), String::new()));
-            let reserved_filtered =
-                crate::signaling::RESERVED_MCP_KEYS.contains(&name.as_str());
+            let (transport, detail) = entry
+                .map(mcp_detail)
+                .unwrap_or(("unknown".into(), String::new()));
+            let reserved_filtered = crate::signaling::RESERVED_MCP_KEYS.contains(&name.as_str());
             // bot-hq's load_user_mcp_servers reads BOTH files, so any non-reserved
-            // server (even a settings.json-only one) is forwarded to Brian/Emma.
+            // server (even a settings.json-only one) is forwarded to Brian.
             let forwarded_to_agents = if reserved_filtered {
                 Vec::new()
             } else {
-                vec!["brian".to_string(), "emma".to_string()]
+                vec!["brian".to_string()]
             };
             McpServerItem {
                 name: name.clone(),
@@ -293,7 +300,11 @@ fn mcp_servers(
 fn mcp_detail(entry: &Value) -> (String, String) {
     let declared = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(url) = entry.get("url").and_then(|v| v.as_str()) {
-        let transport = if declared.is_empty() { "http" } else { declared };
+        let transport = if declared.is_empty() {
+            "http"
+        } else {
+            declared
+        };
         return (transport.to_string(), url.to_string());
     }
     if let Some(cmd) = entry.get("command").and_then(|v| v.as_str()) {
@@ -477,7 +488,11 @@ mod tests {
     #[test]
     fn core_knobs_resolve_values_and_unset() {
         let v = view();
-        let effort = v.core_knobs.iter().find(|k| k.key == "effortLevel").unwrap();
+        let effort = v
+            .core_knobs
+            .iter()
+            .find(|k| k.key == "effortLevel")
+            .unwrap();
         assert_eq!(effort.value.as_deref(), Some("xhigh"));
         let model = v.core_knobs.iter().find(|k| k.key == "model").unwrap();
         assert_eq!(model.value, None);
@@ -503,7 +518,11 @@ mod tests {
     #[test]
     fn plugins_reflect_enabled_map() {
         let v = view();
-        let sp = v.plugins.iter().find(|p| p.key == "superpowers@mkt").unwrap();
+        let sp = v
+            .plugins
+            .iter()
+            .find(|p| p.key == "superpowers@mkt")
+            .unwrap();
         assert!(sp.enabled);
         let warp = v.plugins.iter().find(|p| p.key == "warp@mkt").unwrap();
         assert!(!warp.enabled);
@@ -516,13 +535,17 @@ mod tests {
         let discord = v.mcp_servers.iter().find(|m| m.name == "discord").unwrap();
         assert!(discord.effective);
         assert!(!discord.reserved_filtered);
-        assert_eq!(discord.forwarded_to_agents, vec!["brian", "emma"]);
+        assert_eq!(discord.forwarded_to_agents, vec!["brian"]);
         // bot-hq is reserved → filtered from agents.
         let bothq = v.mcp_servers.iter().find(|m| m.name == "bot-hq").unwrap();
         assert!(bothq.reserved_filtered);
         assert!(bothq.forwarded_to_agents.is_empty());
         // stale-only lives only in settings.json → ignored by claude-code.
-        let stale = v.mcp_servers.iter().find(|m| m.name == "stale-only").unwrap();
+        let stale = v
+            .mcp_servers
+            .iter()
+            .find(|m| m.name == "stale-only")
+            .unwrap();
         assert!(!stale.effective);
         assert!(stale.loaded_from.contains("ignored"));
         assert!(v.warnings.iter().any(|w| w.contains("settings.json")));

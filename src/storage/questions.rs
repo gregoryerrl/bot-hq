@@ -53,11 +53,7 @@ impl Storage {
     /// Mark a question as answered + record the picked option (for choices)
     /// or the typed reply (for open_ask). Idempotent on already-answered:
     /// returns Ok with 0 rows affected so callers don't have to guard.
-    pub async fn answer_question(
-        &self,
-        choice_id: &str,
-        picked: &str,
-    ) -> Result<u64> {
+    pub async fn answer_question(&self, choice_id: &str, picked: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE session_tray \
              SET status = 'answered', picked_option = ?, answered_at = ? \
@@ -123,10 +119,7 @@ impl Storage {
     /// Read all questions for a session, ordered oldest-first. Use for the
     /// in-chat tray (filter to status=pending in the UI) and the dashboard
     /// counter (count where status=pending).
-    pub async fn questions_for_session(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<SessionTrayEntry>> {
+    pub async fn questions_for_session(&self, session_id: &str) -> Result<Vec<SessionTrayEntry>> {
         let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
             "SELECT {QUESTION_COLUMNS} FROM session_tray \
              WHERE session_id = ? ORDER BY id ASC"
@@ -149,16 +142,15 @@ impl Storage {
     }
 
     /// All pending tray rows for OPEN sessions, oldest-first. Excludes closed
-    /// sessions (leftover pending on a closed session is noise) and the emma
-    /// singleton (matches active-session listing). Powers the durable
-    /// per-session notification count — survives restart, unlike the in-memory
-    /// pending map.
+    /// sessions (leftover pending on a closed session is noise). Powers the
+    /// durable per-session notification count — survives restart, unlike the
+    /// in-memory pending map.
     pub async fn pending_tray_open_sessions(&self) -> Result<Vec<SessionTrayEntry>> {
         let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
             "SELECT {QUESTION_COLUMNS} FROM session_tray \
              WHERE status = 'pending' \
                AND session_id IN \
-                   (SELECT id FROM sessions WHERE closed_at IS NULL AND id != 'emma') \
+                   (SELECT id FROM sessions WHERE closed_at IS NULL) \
              ORDER BY id ASC"
         ))
         .fetch_all(&self.pool)
@@ -180,5 +172,102 @@ impl Storage {
         .await
         .with_context(|| format!("withdrawing pending tray for session {session_id}"))?;
         Ok(res.rows_affected())
+    }
+
+    /// Boot-time reconciliation: withdraw every pending tray row that belongs to
+    /// a CLOSED or non-existent (orphaned) session. `close_session` already
+    /// withdraws at close time and migration 0011 did a one-shot backfill — but
+    /// a one-shot migration runs once and `close_session` only fires for closes
+    /// going forward, so rows orphaned by a pre-fix binary (a session that
+    /// closed while an older build was running) survive as cruft. The
+    /// notifier's open-session filter already hides them, but they're dead
+    /// weight and would show in a closed session's tray. Running this every boot
+    /// self-heals: it clears the existing backlog AND any future close-path
+    /// miss. Returns the number of rows withdrawn (0 on a clean DB).
+    pub async fn withdraw_pending_tray_for_closed_or_orphaned(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET status = 'withdrawn' \
+             WHERE status = 'pending' \
+               AND (session_id NOT IN (SELECT id FROM sessions) \
+                    OR session_id IN (SELECT id FROM sessions WHERE closed_at IS NOT NULL))",
+        )
+        .execute(&self.pool)
+        .await
+        .context("withdrawing pending tray for closed/orphaned sessions")?;
+        Ok(res.rows_affected())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn pending_count(s: &Storage, session_id: &str) -> usize {
+        s.questions_for_session(session_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|q| q.status == "pending")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn boot_sweep_withdraws_closed_keeps_open() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("open-1", "Open", None).await.unwrap();
+        s.create_session("closed-1", "Closed", None).await.unwrap();
+        let opts = vec!["A".to_string(), "B".to_string()];
+        s.insert_question(
+            "open-1",
+            "c-open",
+            "brian",
+            QuestionKind::Choice,
+            "q?",
+            Some(&opts),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        s.insert_question(
+            "closed-1",
+            "c-closed",
+            "brian",
+            QuestionKind::Choice,
+            "q?",
+            Some(&opts),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        s.close_session("closed-1", false).await.unwrap();
+
+        let withdrawn = s
+            .withdraw_pending_tray_for_closed_or_orphaned()
+            .await
+            .unwrap();
+        assert_eq!(
+            withdrawn, 1,
+            "only the closed session's pending row is swept"
+        );
+        assert_eq!(
+            pending_count(&s, "open-1").await,
+            1,
+            "open session untouched"
+        );
+        assert_eq!(
+            pending_count(&s, "closed-1").await,
+            0,
+            "closed session swept"
+        );
+
+        // Idempotent: a second run withdraws nothing more.
+        assert_eq!(
+            s.withdraw_pending_tray_for_closed_or_orphaned()
+                .await
+                .unwrap(),
+            0
+        );
     }
 }

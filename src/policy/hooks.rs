@@ -70,7 +70,9 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
     while i < args.len() {
         match args[i].as_str() {
             "--data-dir" => {
-                let v = args.get(i + 1).ok_or_else(|| anyhow!("--data-dir needs value"))?;
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow!("--data-dir needs value"))?;
                 data_dir = Some(crate::paths::expand_tilde(v)?);
                 i += 2;
             }
@@ -92,7 +94,8 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
             }
             "--msg-file" => {
                 msg_file = Some(PathBuf::from(
-                    args.get(i + 1).ok_or_else(|| anyhow!("--msg-file needs value"))?,
+                    args.get(i + 1)
+                        .ok_or_else(|| anyhow!("--msg-file needs value"))?,
                 ));
                 i += 2;
             }
@@ -136,11 +139,7 @@ fn blocked_banner(hook: &str, body: &str) -> String {
 /// commit-msg handler. Scans the message file (passed by git as $1) for
 /// forbidden words. Exits 1 if any found — blocks the commit reliably,
 /// even when `git commit -m "..."` is used.
-fn run_commit_msg(
-    data_dir: &Path,
-    project: Option<&str>,
-    msg_path: &Path,
-) -> Result<i32> {
+fn run_commit_msg(data_dir: &Path, project: Option<&str>, msg_path: &Path) -> Result<i32> {
     audit_at_hook(data_dir, project, "commit-msg");
     let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
     if policy.forbidden_in_commits.is_empty() {
@@ -149,7 +148,11 @@ fn run_commit_msg(
     let msg = std::fs::read_to_string(msg_path)
         .with_context(|| format!("reading commit message file {}", msg_path.display()))?;
     // Strip comment lines (#) — they don't end up in the final commit.
-    let cleaned: String = msg.lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n");
+    let cleaned: String = msg
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
     match policy.first_forbidden_word(&cleaned) {
         None => Ok(0),
         Some(word) => {
@@ -228,11 +231,7 @@ fn added_lines_only(diff: &str) -> String {
 /// post-commit verifier. Writes a violation if a forbidden word made it
 /// through pre-commit (e.g., via --amend, or pre-commit was bypassed).
 /// Always exits 0; the commit already happened.
-fn run_post_commit(
-    data_dir: &Path,
-    project: Option<&str>,
-    session: Option<&str>,
-) -> Result<i32> {
+fn run_post_commit(data_dir: &Path, project: Option<&str>, session: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "post-commit");
     let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
     if policy.forbidden_in_commits.is_empty() {
@@ -352,7 +351,12 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
         }
     };
 
-    match rt.block_on(decide_push(data_dir, &session_id, &agent, branch.as_deref())) {
+    match rt.block_on(decide_push(
+        data_dir,
+        &session_id,
+        &agent,
+        branch.as_deref(),
+    )) {
         PushDecision::Approved => Ok(0),
         PushDecision::Rejected => {
             eprintln!(
@@ -498,7 +502,7 @@ async fn log_push_block(
 }
 
 /// PreToolUse hook handler — the **Tool Gate** tripwire, injected into
-/// HANDS/Emma at spawn via `--settings`. Reads the claude-code PreToolUse JSON
+/// HANDS at spawn via `--settings`. Reads the claude-code PreToolUse JSON
 /// payload on stdin and matches the Bash command against the GLOBAL keyword
 /// config (`<data_dir>/tool-gate.json`, NOT per-project `policy.yaml`). A
 /// `gate` keyword BLOCKS the direct call (exit 2) and routes the agent to the
@@ -510,7 +514,7 @@ async fn log_push_block(
 /// single user-configurable gate that can also EXECUTE the command on approval.
 ///
 /// IMPORTANT (verified empirically 2026-05-29): under
-/// `--dangerously-skip-permissions` (HANDS/Emma's mode) claude-code SILENTLY
+/// `--dangerously-skip-permissions` (HANDS's mode) claude-code SILENTLY
 /// IGNORES a JSON `{"decision":"deny"}` PreToolUse result — that is a
 /// permission-layer decision and bypass skips the permission layer. Exit code 2
 /// ("blocking error") IS honored under bypass because it fires before the
@@ -532,9 +536,11 @@ fn run_tool_gate(data_dir: &Path) -> Result<i32> {
     // back to the GLOBAL `tool-gate.json` when there's no session id or no
     // snapshot on disk. Reading the snapshot is fail-open: any read/parse error
     // resolves to None → global list, mirroring the rest of this hook's posture.
-    let keywords = match hook_session_id()
-        .and_then(|sid| crate::policy::session_policy::read_session_policy(data_dir, &sid).ok().flatten())
-    {
+    let keywords = match hook_session_id().and_then(|sid| {
+        crate::policy::session_policy::read_session_policy(data_dir, &sid)
+            .ok()
+            .flatten()
+    }) {
         Some(sp) => sp.tool_gate,
         None => crate::policy::tool_gate::load(data_dir),
     };
@@ -731,7 +737,11 @@ fn render_hook_body(
         cmd.push_str(&format!(" --project {}", shell_quote(p)));
     }
     // commit-msg gets $1 = path to message file. Forward it.
-    let tail = if kind.passes_dollar_one() { " \"$1\"" } else { "" };
+    let tail = if kind.passes_dollar_one() {
+        " \"$1\""
+    } else {
+        ""
+    };
     format!(
         "#!/bin/sh\n\
          {marker}\n\
@@ -744,7 +754,9 @@ fn render_hook_body(
 }
 
 fn shell_quote(s: &str) -> String {
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || "/_.-:~@".contains(c)) {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/_.-:~@".contains(c))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -865,10 +877,19 @@ mod tests {
                     -old line with FORBID\n\
                     +new line lowercase forbid\n";
         let added = added_lines_only(diff);
-        assert!(!added.contains("FORBID"), "deletion must not be scanned: {added:?}");
+        assert!(
+            !added.contains("FORBID"),
+            "deletion must not be scanned: {added:?}"
+        );
         assert!(added.contains("new line lowercase forbid"));
-        assert!(!added.contains("+++"), "+++ header must not appear: {added:?}");
-        assert!(!added.contains("context line"), "context must not appear: {added:?}");
+        assert!(
+            !added.contains("+++"),
+            "+++ header must not appear: {added:?}"
+        );
+        assert!(
+            !added.contains("context line"),
+            "context must not appear: {added:?}"
+        );
     }
 
     #[test]
@@ -1071,8 +1092,14 @@ mod tests {
         // `action_gate`; `auto_allow`/no-match → exit 0; empty config fails open.
         use crate::policy::tool_gate::{GateMode, GatedKeyword};
         let kws = vec![
-            GatedKeyword { keyword: "gh issue".into(), mode: GateMode::Gate },
-            GatedKeyword { keyword: "git commit".into(), mode: GateMode::AutoAllow },
+            GatedKeyword {
+                keyword: "gh issue".into(),
+                mode: GateMode::Gate,
+            },
+            GatedKeyword {
+                keyword: "git commit".into(),
+                mode: GateMode::AutoAllow,
+            },
         ];
         let (code, msg) = tool_gate_exit("gh issue comment 41 --body x", &kws);
         assert_eq!(code, 2);

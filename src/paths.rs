@@ -8,7 +8,7 @@
 //!   cl-version.txt                 ("1" for v1)
 //!   custom-general-rules.md        (optional user additions; hardcoded core
 //!                                   lives in agents::general_rules)
-//!   agents/<name>/custom-instruction.md  (emma, brian, rain — user tweaks)
+//!   agents/<name>/custom-instruction.md  (brian, rain — user tweaks)
 //!   projects/<p>/conventions.md
 //!   projects/<p>/notes.md
 //!   mcp-token                      (external MCP bearer token, 0600)
@@ -108,7 +108,10 @@ impl Paths {
             })?;
         }
         fs::write(&self.signaling_addr_path, format!("{addr}\n")).with_context(|| {
-            format!("writing signaling addr at {}", self.signaling_addr_path.display())
+            format!(
+                "writing signaling addr at {}",
+                self.signaling_addr_path.display()
+            )
         })?;
         Ok(())
     }
@@ -157,15 +160,15 @@ impl Paths {
         // file exists, leave it alone (user might have rotated).
         if !self.mcp_token_path.exists() {
             let token = uuid::Uuid::new_v4().to_string();
-            fs::write(&self.mcp_token_path, format!("{token}\n"))
-                .with_context(|| format!("writing mcp-token at {}", self.mcp_token_path.display()))?;
+            fs::write(&self.mcp_token_path, format!("{token}\n")).with_context(|| {
+                format!("writing mcp-token at {}", self.mcp_token_path.display())
+            })?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let perms = fs::Permissions::from_mode(0o600);
-                fs::set_permissions(&self.mcp_token_path, perms).with_context(|| {
-                    format!("0o600 perms on {}", self.mcp_token_path.display())
-                })?;
+                fs::set_permissions(&self.mcp_token_path, perms)
+                    .with_context(|| format!("0o600 perms on {}", self.mcp_token_path.display()))?;
             }
             if !first_run {
                 repaired_slots.push("mcp-token".to_string());
@@ -241,10 +244,6 @@ fn default_cl_files(root: &Path) -> Vec<(PathBuf, &'static str)> {
         (
             root.join("custom-general-rules.md"),
             include_str!("../templates/cl/custom-general-rules.md"),
-        ),
-        (
-            root.join("agents/emma/custom-instruction.md"),
-            include_str!("../templates/cl/agents/emma/custom-instruction.md"),
         ),
         (
             root.join("agents/brian/custom-instruction.md"),
@@ -432,7 +431,10 @@ mod tests {
     #[test]
     fn tilde_expansion() {
         let expanded = expand_tilde("~/foo").unwrap();
-        let home = directories::BaseDirs::new().unwrap().home_dir().to_path_buf();
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
         assert_eq!(expanded, home.join("foo"));
     }
 }

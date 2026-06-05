@@ -4,13 +4,14 @@
 //! system prompt from CL, spawns Brian + Rain, kicks off the duo event pumps,
 //! and registers the session in `AppState`.
 
-use crate::agents::{spawn_supervised_agent, AgentEvent, AgentHandle, RetryPolicy, SpawnConfig};
+use crate::agents::{spawn_supervised_agent, AgentHandle, RetryPolicy, SpawnConfig};
 use crate::core::duo::{pump_agent, DuoConfig};
 use crate::core::ipav::IpavState;
 use crate::paths::Paths;
-use crate::signaling::{default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge};
-use crate::storage::{AgentConfig, Author, MessageKind, Session, Storage};
-use tokio::sync::mpsc;
+use crate::signaling::{
+    default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge,
+};
+use crate::storage::{AgentConfig, Author, Session, Storage};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -90,26 +91,7 @@ impl SessionHandle {
     /// agent is never wrongly evicted.
     pub fn is_stale(&self) -> bool {
         self.brian.input_tx.is_closed()
-            || self
-                .rain
-                .as_ref()
-                .is_some_and(|r| r.input_tx.is_closed())
-    }
-}
-
-/// Emma's solo singleton session — different shape from `SessionHandle` because
-/// Emma is a single agent with no duo / peer-forwarding / IPAV state.
-pub struct EmmaHandle {
-    pub agent: AgentHandle,
-    _mcp_temp: TempDir,
-}
-
-impl EmmaHandle {
-    /// True once Emma's retry supervisor has terminated (permanent error /
-    /// exhausted budget) — the handle lingers but can't drive Emma. See
-    /// [`SessionHandle::is_stale`].
-    pub fn is_stale(&self) -> bool {
-        self.agent.input_tx.is_closed()
+            || self.rain.as_ref().is_some_and(|r| r.input_tx.is_closed())
     }
 }
 
@@ -157,8 +139,8 @@ pub async fn open_session(
     .await
 }
 
-/// Spawn subprocesses for a session row that ALREADY EXISTS in storage (e.g.,
-/// the seeded Emma singleton). Idempotency check belongs to the caller — this
+/// Spawn subprocesses for a session row that ALREADY EXISTS in storage.
+/// Idempotency check belongs to the caller — this
 /// always spawns a fresh handle.
 pub async fn spawn_existing_session(
     session_id: &str,
@@ -173,8 +155,15 @@ pub async fn spawn_existing_session(
         .context("looking up session row")?
         .ok_or_else(|| anyhow::anyhow!("session {session_id} not found"))?;
     let working_repo_path = session.working_repo_path.as_ref().map(PathBuf::from);
-    spawn_session_handle(session, working_repo_path, paths, storage, bridge, signaling_addr)
-        .await
+    spawn_session_handle(
+        session,
+        working_repo_path,
+        paths,
+        storage,
+        bridge,
+        signaling_addr,
+    )
+    .await
 }
 
 /// Shared spawn logic for both fresh and existing sessions: spawn Brian + Rain,
@@ -432,7 +421,14 @@ async fn spawn_session_handle(
         ..DuoConfig::new(session_id_clone, Author::Brian, Author::Rain)
     };
     tokio::spawn(async move {
-        pump_agent(brian_duo, brian_events, rain_input, storage_clone, ipav_clone).await;
+        pump_agent(
+            brian_duo,
+            brian_events,
+            rain_input,
+            storage_clone,
+            ipav_clone,
+        )
+        .await;
     });
 
     // Rain's pump only runs in a duo session.
@@ -447,7 +443,14 @@ async fn spawn_session_handle(
             ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
         };
         tokio::spawn(async move {
-            pump_agent(rain_duo, rain_events, Some(brian_input), storage_clone, ipav_clone).await;
+            pump_agent(
+                rain_duo,
+                rain_events,
+                Some(brian_input),
+                storage_clone,
+                ipav_clone,
+            )
+            .await;
         });
     }
 
@@ -479,8 +482,7 @@ async fn spawn_agent_for(
     working_dir: Option<PathBuf>,
     resume_session_id: Option<String>,
 ) -> Result<AgentHandle> {
-    let system_prompt =
-        read_system_prompt(paths, agent_name, project.as_deref(), project_root)?;
+    let system_prompt = read_system_prompt(paths, agent_name, project.as_deref(), project_root)?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
     let mut user_servers = user_mcp_servers_for_agent(agent_name);
     // Apply per-agent MCP overrides (Settings → Claude Config): a server the
@@ -525,12 +527,10 @@ async fn spawn_agent_for(
 /// `WebSearch`, `ToolSearch`, `TodoWrite`), which are what
 /// EYES needs to review HANDS' work.
 ///
-/// HANDS (Brian) and the singleton Emma get the full merged set from the
+/// HANDS (Brian) gets the full merged set from the
 /// user's claude-code config so they can drive browsers, talk to Discord,
 /// etc.
-pub fn user_mcp_servers_for_agent(
-    agent_name: &str,
-) -> serde_json::Map<String, serde_json::Value> {
+pub fn user_mcp_servers_for_agent(agent_name: &str) -> serde_json::Map<String, serde_json::Value> {
     if agent_name == "rain" {
         serde_json::Map::new()
     } else {
@@ -622,7 +622,8 @@ pub fn read_system_prompt(
     // all agents; agents/<name>/custom-instruction.md is per-agent.
     let slots = [
         paths.data_dir.join("custom-general-rules.md"),
-        paths.data_dir
+        paths
+            .data_dir
             .join(format!("agents/{agent}/custom-instruction.md")),
     ];
     for slot in slots {
@@ -655,153 +656,6 @@ fn push_section(out: &mut String, s: &str) {
     out.push_str(s);
     if !out.ends_with("\n\n") {
         out.push_str("\n\n");
-    }
-}
-
-/// Spawn Emma's solo agent against the seeded `"emma"` session row. Single
-/// agent, no peer, no IPAV. Kicks a lightweight pump that just persists Emma's
-/// events to the messages table.
-pub async fn spawn_emma_handle(
-    paths: &Paths,
-    storage: Storage,
-    bridge: Arc<SignalingBridge>,
-    signaling_addr: SocketAddr,
-) -> Result<EmmaHandle> {
-    // Register Emma's session (no project — she's the global helper, not a
-    // project-scoped duo). MCP policy lookups will see no project → resolve
-    // to general-policy.yaml only.
-    bridge.register_session("emma".into(), None).await;
-
-    // Seed Emma's canonical session-policy snapshot WRITE-IF-ABSENT (same
-    // contract as the duo path). Emma has no project, so the blueprint is just
-    // general-policy.yaml + the global Tool-Gate list. Best-effort.
-    match crate::policy::session_policy::read_session_policy(&paths.data_dir, "emma") {
-        Ok(Some(_)) => {}
-        Ok(None) => match crate::policy::Policy::resolve_at_root(&paths.data_dir, None, None, None) {
-            Ok(seed) => {
-                let tool_gate = crate::policy::tool_gate::load(&paths.data_dir);
-                let sp = crate::policy::SessionPolicy {
-                    policy: seed,
-                    tool_gate,
-                };
-                if let Err(err) =
-                    crate::policy::session_policy::write_session_policy(&paths.data_dir, "emma", &sp)
-                {
-                    tracing::warn!(%err, "failed to seed emma session-policy snapshot");
-                }
-            }
-            Err(err) => tracing::warn!(%err, "resolving blueprint policy to seed emma snapshot failed"),
-        },
-        Err(err) => {
-            tracing::warn!(%err, "reading emma session-policy snapshot failed; not re-seeding")
-        }
-    }
-
-    let mcp_temp = TempDir::new().context("creating emma mcp-config temp dir")?;
-    let emma_cfg = storage
-        .get_agent_config("emma")
-        .await?
-        .unwrap_or_else(|| default_agent_config("emma"));
-    let agent = spawn_agent_for(
-        "emma", // session_id matches the seeded row
-        "emma", // agent_name → hardcoded EMMA_ROLE + agents/emma/custom-instruction.md
-        emma_cfg,
-        paths,
-        &None, // no project
-        None,  // no project_root
-        signaling_addr,
-        mcp_temp.path(),
-        None, // no working dir
-        None, // emma: fresh claude session every app start; resume not wired
-    )
-    .await?;
-
-    // Pull event_rx out so we can drive the persistence pump.
-    let mut agent_handle = agent;
-    let event_rx = std::mem::replace(&mut agent_handle.event_rx, tokio::sync::mpsc::channel(1).1);
-    let storage_clone = storage.clone();
-    let bridge_clone = Arc::clone(&bridge);
-    tokio::spawn(async move {
-        pump_emma_agent(event_rx, storage_clone, bridge_clone).await;
-    });
-
-    info!("emma solo session spawned");
-
-    Ok(EmmaHandle {
-        agent: agent_handle,
-        _mcp_temp: mcp_temp,
-    })
-}
-
-/// Persist-only pump for Emma's solo agent. No peer forwarding, no IPAV
-/// buffering — just stream events into the messages table. Fires
-/// `MessagePersisted` events on the bridge so external `wait_for_change`
-/// callers wake up without polling.
-async fn pump_emma_agent(
-    mut event_rx: mpsc::Receiver<AgentEvent>,
-    storage: Storage,
-    bridge: Arc<SignalingBridge>,
-) {
-    while let Some(event) = event_rx.recv().await {
-        match event {
-            AgentEvent::Text(text) => {
-                match storage
-                    .insert_message("emma", Author::Emma, MessageKind::Text, &text)
-                    .await
-                {
-                    Ok(id) => bridge.notify_message_persisted("emma".into(), id),
-                    Err(e) => warn!(?e, "persisting emma text"),
-                }
-            }
-            AgentEvent::ToolUse { id, name, input } => {
-                let payload = serde_json::json!({
-                    "tool_use_id": id,
-                    "name": name,
-                    "input": input,
-                });
-                match storage
-                    .insert_message(
-                        "emma",
-                        Author::Emma,
-                        MessageKind::ToolUse,
-                        &payload.to_string(),
-                    )
-                    .await
-                {
-                    Ok(id) => bridge.notify_message_persisted("emma".into(), id),
-                    Err(e) => warn!(?e, "persisting emma tool_use"),
-                }
-            }
-            AgentEvent::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            } => {
-                let payload = serde_json::json!({
-                    "tool_use_id": tool_use_id,
-                    "content": content,
-                    "is_error": is_error,
-                });
-                match storage
-                    .insert_message(
-                        "emma",
-                        Author::Emma,
-                        MessageKind::ToolResult,
-                        &payload.to_string(),
-                    )
-                    .await
-                {
-                    Ok(id) => bridge.notify_message_persisted("emma".into(), id),
-                    Err(e) => warn!(?e, "persisting emma tool_result"),
-                }
-            }
-            AgentEvent::TurnComplete { .. } | AgentEvent::Init { .. } => {}
-            AgentEvent::Exited(msg) => {
-                warn!(msg = %msg, "emma agent exited");
-                break;
-            }
-            AgentEvent::Error(msg) => warn!(msg = %msg, "emma agent error"),
-        }
     }
 }
 
@@ -875,8 +729,6 @@ mod tests {
         let brian = user_mcp_servers_for_agent("brian");
         let expected_brian = load_user_mcp_servers(&default_user_settings_paths());
         assert_eq!(brian, expected_brian);
-        let emma = user_mcp_servers_for_agent("emma");
-        assert_eq!(emma, expected_brian);
     }
 
     #[test]
@@ -971,10 +823,19 @@ mod tests {
         paths.init().unwrap();
         std::fs::remove_file(tmp.path().join("custom-general-rules.md")).ok();
         let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
-        assert!(prompt.contains("Commit hygiene"), "missing commit-hygiene section");
-        assert!(prompt.contains("`git push` is governed by the session's push gate"), "missing push gate");
+        assert!(
+            prompt.contains("Commit hygiene"),
+            "missing commit-hygiene section"
+        );
+        assert!(
+            prompt.contains("`git push` is governed by the session's push gate"),
+            "missing push gate"
+        );
         assert!(prompt.contains("IPAV discipline"), "missing IPAV section");
-        assert!(prompt.contains("Production data access"), "missing prod-safety section");
+        assert!(
+            prompt.contains("Production data access"),
+            "missing prod-safety section"
+        );
     }
 
     #[test]
@@ -994,6 +855,9 @@ mod tests {
         // Custom additions come AFTER the hardcoded core.
         let core_pos = prompt.find("Commit hygiene").unwrap();
         let custom_pos = prompt.find("MY_ORG_RULE_X7P").unwrap();
-        assert!(custom_pos > core_pos, "custom rules should append after hardcoded core");
+        assert!(
+            custom_pos > core_pos,
+            "custom rules should append after hardcoded core"
+        );
     }
 }

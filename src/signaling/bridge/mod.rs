@@ -75,7 +75,7 @@ pub enum SignalingEvent {
         picked: String,
     },
     /// A new message row was persisted to storage. Fired by the per-agent
-    /// pumps (duo + emma) after `storage.insert_message` returns. Lets the
+    /// pumps (duo) after `storage.insert_message` returns. Lets the
     /// external MCP's `wait_for_change` tool block server-side instead of
     /// asking clients to poll.
     MessagePersisted {
@@ -105,10 +105,14 @@ pub enum SignalingEvent {
     /// A session document was written/updated (`session_doc_write`). The UI
     /// invalidates its doc queries so a freshly-written phase doc appears
     /// without a manual tab-switch.
-    DocChanged { session_id: String },
+    DocChanged {
+        session_id: String,
+    },
     /// A session finished closing (after `core.close_session`). The UI
     /// navigates away from a now-closed session and refreshes its lists.
-    SessionClosed { session_id: String },
+    SessionClosed {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -176,10 +180,7 @@ pub struct SignalingBridge {
 }
 
 impl SignalingBridge {
-    fn new_with(
-        violations: Option<ViolationsLog>,
-        data_dir: Option<PathBuf>,
-    ) -> Arc<Self> {
+    fn new_with(violations: Option<ViolationsLog>, data_dir: Option<PathBuf>) -> Arc<Self> {
         // Sized generously: every stream chunk fires MessagePersisted and several
         // consumers share this one channel (the Tauri subscriber, external
         // wait_for_change, the main.rs control handler). A small buffer let a
@@ -221,7 +222,10 @@ impl SignalingBridge {
     /// project policy when this session's agents call policy-aware MCP tools.
     /// Idempotent — re-registering overwrites.
     pub async fn register_session(&self, session_id: String, project: Option<String>) {
-        self.session_projects.lock().await.insert(session_id, project);
+        self.session_projects
+            .lock()
+            .await
+            .insert(session_id, project);
     }
 
     /// Wire the storage handle so the bridge can write out-of-band messages
@@ -260,7 +264,7 @@ impl SignalingBridge {
     // ---- Project helpers --------------------------------------------
 
     /// Best-effort lookup. Returns the registered project (if any) or None
-    /// if the session isn't registered yet (e.g., the seeded `"emma"` row).
+    /// if the session isn't registered yet.
     pub async fn project_for_session(&self, session_id: &str) -> Option<String> {
         self.session_projects
             .lock()

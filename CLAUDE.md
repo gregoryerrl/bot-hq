@@ -2,8 +2,9 @@
 
 You are working on **bot-hq**, a Tauri v2 + React + Rust desktop GUI app
 for driving AI-assisted coding sessions through a bilateral-duo agent
-model (Brian = HANDS, Rain = EYES) with policy enforcement. Emma is an
-optional solo helper agent.
+model (Brian = HANDS, Rain = EYES) with policy enforcement. A former
+solo helper agent, Emma, was removed from the core (planned to return as
+the first bot-hq plugin — TBD).
 
 The original from-scratch rebuild shipped at v0.1.0; subsequent work
 added a UI redesign, an external driver MCP server, and a two-layer

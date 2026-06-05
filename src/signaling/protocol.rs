@@ -108,7 +108,8 @@ pub struct ToolDescriptor {
 /// Hand-built JSON Schemas for our tools. We don't pull in `schemars`.
 pub fn tool_descriptors() -> &'static [ToolDescriptor] {
     use std::sync::LazyLock;
-    static TOOLS: LazyLock<Vec<ToolDescriptor>> = LazyLock::new(|| vec![
+    static TOOLS: LazyLock<Vec<ToolDescriptor>> = LazyLock::new(|| {
+        vec![
         ToolDescriptor {
             name: "ask_user_choice",
             description: "Ask the user to pick one option from a list. Blocks the agent's turn until the user picks. Use this whenever a decision belongs to the user.",
@@ -427,7 +428,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_register_folder_description",
-            description: "Upsert a description for a CL folder. Mirrors cl_register_read's role for files but writes a stored description instead of an audit row. HANDS (brian) + Emma can call this; Rain (EYES) is denied — Rain reviews via cl_folder_search. `folder_path = \"\"` writes the project-root description.",
+            description: "Upsert a description for a CL folder. Mirrors cl_register_read's role for files but writes a stored description instead of an audit row. HANDS (brian) can call this; Rain (EYES) is denied — Rain reviews via cl_folder_search. `folder_path = \"\"` writes the project-root description.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -505,7 +506,8 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "required": ["key"]
             }),
         },
-    ]);
+    ]
+    });
     &TOOLS
 }
 

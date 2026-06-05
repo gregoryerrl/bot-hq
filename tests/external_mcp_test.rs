@@ -84,7 +84,13 @@ fn auth_header(token: &str) -> (&'static str, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_rejects_no_token() {
     let env = setup().await;
-    let (status, _body) = http_post(env.addr(), "/mcp", &[], r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#).await;
+    let (status, _body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[],
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+    )
+    .await;
     assert!(status.contains("401"), "got: {status}");
 }
 
@@ -103,7 +109,10 @@ async fn idless_request_is_notification_no_response() {
         r#"{"jsonrpc":"2.0","method":"initialize"}"#,
     )
     .await;
-    assert!(status.contains("202"), "expected 202 Accepted, got: {status}");
+    assert!(
+        status.contains("202"),
+        "expected 202 Accepted, got: {status}"
+    );
     assert!(
         !body.contains("\"result\""),
         "notification must not return a result body; got: {body}"
@@ -173,7 +182,10 @@ async fn notification_returns_202_accepted() {
     )
     .await;
     assert!(status.contains("202"), "got: {status}");
-    assert!(body.is_empty(), "expected empty body for 202, got: {body:?}");
+    assert!(
+        body.is_empty(),
+        "expected empty body for 202, got: {body:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -211,8 +223,13 @@ async fn tools_list_returns_iter1_set() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn list_sessions_excludes_emma() {
+async fn list_sessions_includes_created_session() {
     let env = setup().await;
+    env._core
+        .storage
+        .create_session("s-listed", "Listed", None)
+        .await
+        .unwrap();
     let h = auth_header(&env.token);
     let (status, body) = http_post(
         env.addr(),
@@ -222,25 +239,29 @@ async fn list_sessions_excludes_emma() {
     )
     .await;
     assert!(status.contains("200"), "got: {status}");
-    // Emma is a chat-overlay singleton, not a duo session — explicitly
-    // filtered out of `list_active_sessions`. Inner JSON is escaped inside
-    // the text-content block, so we look for the escaped key:value.
-    assert!(!body.contains(r#"\"id\":\"emma\""#), "body: {body}");
+    // A created (open) session surfaces in list_active_sessions. Inner JSON is
+    // escaped inside the text-content block, so we match the escaped key:value.
+    assert!(body.contains(r#"\"id\":\"s-listed\""#), "body: {body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn get_session_messages_for_emma() {
+async fn get_session_messages_for_session() {
     let env = setup().await;
+    env._core
+        .storage
+        .create_session("s-msgs", "Test", None)
+        .await
+        .unwrap();
     let h = auth_header(&env.token);
     let (status, body) = http_post(
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_session_messages","arguments":{"session_id":"emma"}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_session_messages","arguments":{"session_id":"s-msgs"}}}"#,
     )
     .await;
     assert!(status.contains("200"), "got: {status}");
-    // Fresh DB — emma has no messages yet. Inner JSON is escaped in the
+    // Freshly-created session has no messages yet. Inner JSON is escaped in the
     // outer JSON-RPC response.
     assert!(body.contains(r#"messages\":[]"#), "body: {body}");
 }
@@ -277,28 +298,11 @@ async fn tools_list_returns_all_iter2_tools() {
         "advance_phase",
         "resolve_choice",
         "close_session",
-        "restart_emma",
-        "get_emma_messages",
         "get_pending_choices",
         "get_status",
     ] {
         assert!(body.contains(tool), "tool {tool} missing from tools/list");
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn get_emma_messages_returns_empty_on_fresh_install() {
-    let env = setup().await;
-    let h = auth_header(&env.token);
-    let (status, body) = http_post(
-        env.addr(),
-        "/mcp",
-        &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"get_emma_messages","arguments":{}}}"#,
-    )
-    .await;
-    assert!(status.contains("200"));
-    assert!(body.contains(r#"messages\":[]"#), "body: {body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -331,7 +335,6 @@ async fn get_status_includes_version_and_addrs() {
     assert!(body.contains(r#"version\":"#), "body: {body}");
     assert!(body.contains(r#"signaling_addr\":"#), "body: {body}");
     assert!(body.contains(r#"active_duo_sessions\":0"#), "body: {body}");
-    assert!(body.contains(r#"emma_started\":false"#), "body: {body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -342,7 +345,7 @@ async fn advance_phase_invalid_phase_errors() {
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"advance_phase","arguments":{"session_id":"emma","phase":"X"}}}"#,
+        r#"{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"advance_phase","arguments":{"session_id":"s-any","phase":"X"}}}"#,
     )
     .await;
     assert!(status.contains("200"));
@@ -470,7 +473,7 @@ async fn set_agent_config_updates_and_keeps_unspecified_fields() {
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"set_agent_config","arguments":{"agent_name":"emma","model_name":"claude-haiku-4-5-20251001"}}}"#,
+        r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"set_agent_config","arguments":{"agent_name":"brian","model_name":"claude-haiku-4-5-20251001"}}}"#,
     )
     .await;
     assert!(status.contains("200"));
@@ -480,7 +483,7 @@ async fn set_agent_config_updates_and_keeps_unspecified_fields() {
     let cfg = env
         ._core
         .storage
-        .get_agent_config("emma")
+        .get_agent_config("brian")
         .await
         .unwrap()
         .unwrap();
@@ -497,11 +500,11 @@ async fn set_agent_config_rejects_unknown_agent_name() {
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"set_agent_config","arguments":{"agent_name":"bogus","model_name":"x"}}}"#,
+        r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"set_agent_config","arguments":{"agent_name":"zzz","model_name":"x"}}}"#,
     )
     .await;
     assert!(status.contains("200"));
-    assert!(body.contains("must be emma/brian/rain"), "body: {body}");
+    assert!(body.contains("must be brian/rain"), "body: {body}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -589,7 +592,12 @@ async fn wait_for_change_returns_immediately_when_messages_exist() {
     use bot_hq::storage::{Author, MessageKind};
     env._core
         .storage
-        .insert_message("emma", Author::User, MessageKind::Text, "hello before")
+        .create_session("s-wait1", "Test", None)
+        .await
+        .unwrap();
+    env._core
+        .storage
+        .insert_message("s-wait1", Author::User, MessageKind::Text, "hello before")
         .await
         .unwrap();
     let h = auth_header(&env.token);
@@ -598,7 +606,7 @@ async fn wait_for_change_returns_immediately_when_messages_exist() {
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"emma","since_id":0,"timeout_ms":5000}}}"#,
+        r#"{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"s-wait1","since_id":0,"timeout_ms":5000}}}"#,
     )
     .await;
     let elapsed = t0.elapsed();
@@ -614,6 +622,11 @@ async fn wait_for_change_returns_immediately_when_messages_exist() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wait_for_change_returns_empty_on_timeout() {
     let env = setup().await;
+    env._core
+        .storage
+        .create_session("s-wait2", "Test", None)
+        .await
+        .unwrap();
     let h = auth_header(&env.token);
     let t0 = std::time::Instant::now();
     // since_id huge so no messages match; short timeout.
@@ -621,7 +634,7 @@ async fn wait_for_change_returns_empty_on_timeout() {
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"emma","since_id":999999,"timeout_ms":300}}}"#,
+        r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"s-wait2","since_id":999999,"timeout_ms":300}}}"#,
     )
     .await;
     let elapsed = t0.elapsed();
@@ -637,6 +650,11 @@ async fn wait_for_change_returns_empty_on_timeout() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wait_for_change_wakes_up_on_persisted_event() {
     let env = setup().await;
+    env._core
+        .storage
+        .create_session("s-wait3", "Test", None)
+        .await
+        .unwrap();
     let h = auth_header(&env.token);
 
     // Concurrent task: insert + fire the bridge event ~100ms after we start waiting.
@@ -646,12 +664,12 @@ async fn wait_for_change_wakes_up_on_persisted_event() {
         use bot_hq::storage::{Author, MessageKind};
         let id = core_clone
             .storage
-            .insert_message("emma", Author::User, MessageKind::Text, "arrived late")
+            .insert_message("s-wait3", Author::User, MessageKind::Text, "arrived late")
             .await
             .unwrap();
         core_clone
             .bridge
-            .notify_message_persisted("emma".into(), id);
+            .notify_message_persisted("s-wait3".into(), id);
     });
 
     let t0 = std::time::Instant::now();
@@ -659,7 +677,7 @@ async fn wait_for_change_wakes_up_on_persisted_event() {
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"emma","since_id":0,"timeout_ms":5000}}}"#,
+        r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"wait_for_change","arguments":{"session_id":"s-wait3","since_id":0,"timeout_ms":5000}}}"#,
     )
     .await;
     let elapsed = t0.elapsed();
@@ -676,11 +694,16 @@ async fn wait_for_change_wakes_up_on_persisted_event() {
 async fn get_session_snapshot_combines_everything() {
     let env = setup().await;
     use bot_hq::storage::{Author, MessageKind};
-    // Seed a few emma messages.
+    env._core
+        .storage
+        .create_session("s-snap1", "Test", None)
+        .await
+        .unwrap();
+    // Seed a few messages.
     for body in ["msg1", "msg2", "msg3"] {
         env._core
             .storage
-            .insert_message("emma", Author::User, MessageKind::Text, body)
+            .insert_message("s-snap1", Author::User, MessageKind::Text, body)
             .await
             .unwrap();
     }
@@ -690,14 +713,20 @@ async fn get_session_snapshot_combines_everything() {
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"get_session_snapshot","arguments":{"session_id":"emma","msg_limit":10}}}"#,
+        r#"{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"get_session_snapshot","arguments":{"session_id":"s-snap1","msg_limit":10}}}"#,
     )
     .await;
     assert!(status.contains("200"));
     // Snapshot contains all 5 expected sections.
-    assert!(body.contains(r#"session\""#), "session block missing: {body}");
+    assert!(
+        body.contains(r#"session\""#),
+        "session block missing: {body}"
+    );
     assert!(body.contains(r#"phase\""#), "phase field missing: {body}");
-    assert!(body.contains(r#"awaiting\""#), "awaiting field missing: {body}");
+    assert!(
+        body.contains(r#"awaiting\""#),
+        "awaiting field missing: {body}"
+    );
     assert!(
         body.contains(r#"pending_choices\""#),
         "pending_choices field missing: {body}"
@@ -712,15 +741,15 @@ async fn get_session_snapshot_combines_everything() {
 async fn get_session_snapshot_msg_limit_keeps_most_recent() {
     let env = setup().await;
     use bot_hq::storage::{Author, MessageKind};
+    env._core
+        .storage
+        .create_session("s-snap2", "Test", None)
+        .await
+        .unwrap();
     for i in 0..10 {
         env._core
             .storage
-            .insert_message(
-                "emma",
-                Author::User,
-                MessageKind::Text,
-                &format!("m{i}"),
-            )
+            .insert_message("s-snap2", Author::User, MessageKind::Text, &format!("m{i}"))
             .await
             .unwrap();
     }
@@ -730,12 +759,18 @@ async fn get_session_snapshot_msg_limit_keeps_most_recent() {
         env.addr(),
         "/mcp",
         &[(h.0, &h.1)],
-        r#"{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"get_session_snapshot","arguments":{"session_id":"emma","msg_limit":3}}}"#,
+        r#"{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"get_session_snapshot","arguments":{"session_id":"s-snap2","msg_limit":3}}}"#,
     )
     .await;
     // Oldest three should be gone, newest three kept.
-    assert!(!body.contains(r#"\"content\":\"m0\""#), "m0 should be trimmed");
-    assert!(!body.contains(r#"\"content\":\"m6\""#), "m6 should be trimmed");
+    assert!(
+        !body.contains(r#"\"content\":\"m0\""#),
+        "m0 should be trimmed"
+    );
+    assert!(
+        !body.contains(r#"\"content\":\"m6\""#),
+        "m6 should be trimmed"
+    );
     assert!(body.contains(r#"\"content\":\"m7\""#), "m7 kept: {body}");
     assert!(body.contains(r#"\"content\":\"m8\""#), "m8 kept: {body}");
     assert!(body.contains(r#"\"content\":\"m9\""#), "m9 kept: {body}");

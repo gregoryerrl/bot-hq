@@ -2,11 +2,11 @@
 //! MCP-signaling server. Returns an `AgentHandle` the core layer drives.
 
 use anyhow::{Context, Result};
-use std::sync::LazyLock;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::process::Command;
@@ -124,7 +124,7 @@ pub struct SpawnConfig {
     /// a fresh UUID — we capture that one in the next `init` event.
     pub resume_session_id: Option<String>,
     /// Project name (CL / policy key) this session targets, if any. Threaded so
-    /// HANDS/Emma can be spawned with a PreToolUse `tool-blocklist` hook bound to
+    /// HANDS can be spawned with a PreToolUse `tool-blocklist` hook bound to
     /// the project's `policy.yaml`. `None` for the projectless singleton.
     pub project: Option<String>,
     /// bot-hq data dir — the injected PreToolUse hook needs it to resolve the
@@ -179,7 +179,10 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     // already been reaped — the registration is best-effort either way.
     let child_pid = child.id();
     if let Some(pid) = child_pid {
-        CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).insert(pid);
+        CHILD_PIDS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(pid);
     }
 
     let stdin = child.stdin.take().context("subprocess missing stdin")?;
@@ -403,7 +406,9 @@ async fn supervise<S, Fut>(
             }
         }
 
-        let transient = last_error_status.map(is_transient_api_error).unwrap_or(false);
+        let transient = last_error_status
+            .map(is_transient_api_error)
+            .unwrap_or(false);
 
         if transient && consecutive_transient < policy.max_retries {
             consecutive_transient += 1;
@@ -495,7 +500,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
 
     // Permission posture is role-dependent.
     //
-    // Brian (HANDS) + Emma (solo) run with `--dangerously-skip-permissions`:
+    // Brian (HANDS) runs with `--dangerously-skip-permissions`:
     // bot-hq is their permission layer (policy.yaml + UI dialogs + git hooks),
     // and letting claude-code prompt in parallel would double-gate, leak
     // prompts into stream-json (never reaching our UI), and hang the agent.
@@ -529,13 +534,22 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // the injection on claude-code >= 2.1.156 — a fresh --bare Rain still
         // 400s on a fixed messages[11], which is why the proxy exists.
         // `--bare` still honors --mcp-config (signaling) + ANTHROPIC_AUTH_TOKEN
-        // bearer auth. Brian/Emma hit real Anthropic, so they skip --bare.
+        // bearer auth. Brian hits the real first-party API, so it skips --bare.
         cmd.arg("--bare");
         cmd.args(["--permission-mode", "dontAsk"]);
         cmd.args([
             "--allowedTools",
             "Read Grep Glob WebFetch WebSearch ToolSearch TodoWrite BashOutput KillShell Bash mcp__bot-hq-signaling",
         ]);
+        // `gh` is denied by WRITE VERB, not blanket noun — so Rain keeps the
+        // read forms the issue asks for (`gh issue view/list`, `gh pr view/diff/
+        // list/status/checks`, `gh repo view`, `gh release view/list`) while every
+        // mutating subcommand is blocked. Deny wins over allow, so a blanket
+        // `Bash(gh issue:*)` would also kill `gh issue view`; enumerating write
+        // verbs is the only way to allow reads under `dontAsk`. `gh api` stays
+        // FULLY denied — it's the escape hatch that can POST/PATCH/DELETE
+        // anything. New gh write verbs must be appended here (covered by
+        // `rain_denies_gh_write_allows_gh_read`).
         cmd.args([
             "--disallowedTools",
             "Edit Write NotebookEdit Task \
@@ -544,13 +558,25 @@ fn build_command(cfg: &SpawnConfig) -> Command {
              Bash(git merge:*) Bash(git rebase:*) Bash(git add:*) \
              Bash(git stash:*) Bash(git restore:*) Bash(git rm:*) \
              Bash(git tag:*) Bash(git cherry-pick:*) Bash(git apply:*) \
-             Bash(gh pr:*) Bash(gh issue:*) Bash(gh release:*) \
-             Bash(gh api:*) Bash(gh repo:*)",
+             Bash(gh pr create:*) Bash(gh pr edit:*) Bash(gh pr close:*) \
+             Bash(gh pr reopen:*) Bash(gh pr merge:*) Bash(gh pr ready:*) \
+             Bash(gh pr review:*) Bash(gh pr comment:*) Bash(gh pr lock:*) \
+             Bash(gh pr unlock:*) Bash(gh pr delete:*) Bash(gh pr checkout:*) \
+             Bash(gh issue create:*) Bash(gh issue edit:*) Bash(gh issue close:*) \
+             Bash(gh issue reopen:*) Bash(gh issue comment:*) Bash(gh issue delete:*) \
+             Bash(gh issue transfer:*) Bash(gh issue pin:*) Bash(gh issue unpin:*) \
+             Bash(gh issue lock:*) Bash(gh issue unlock:*) Bash(gh issue develop:*) \
+             Bash(gh release create:*) Bash(gh release edit:*) Bash(gh release delete:*) \
+             Bash(gh release upload:*) Bash(gh release download:*) \
+             Bash(gh repo create:*) Bash(gh repo edit:*) Bash(gh repo delete:*) \
+             Bash(gh repo fork:*) Bash(gh repo sync:*) Bash(gh repo rename:*) \
+             Bash(gh repo archive:*) Bash(gh repo clone:*) \
+             Bash(gh api:*)",
         ]);
     } else {
         cmd.arg("--dangerously-skip-permissions");
 
-        // Mechanical backstop for HANDS/Emma. They run in bypass mode, where
+        // Mechanical backstop for HANDS. It runs in bypass mode, where
         // claude-code's native deny rules are IGNORED — so the only thing that
         // can hard-stop an outward/mutating command is a hook. Inject a
         // PreToolUse Bash hook that calls back into THIS binary's `policy-check
@@ -611,8 +637,8 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // session-scoped approvals onto the resolved policy.
     cmd.env("BOT_HQ_SESSION_ID", &cfg.session_id);
     // BOT_HQ_AGENT lets the pre-push hook attribute the push-approval prompt to
-    // the pushing agent (matters for the solo Emma session; Rain can't push).
-    // All agents route through build_command, so this lands for brian/rain/emma.
+    // the pushing agent (only HANDS/Brian pushes; Rain can't push).
+    // All agents route through build_command, so this lands for brian/rain.
     cmd.env("BOT_HQ_AGENT", &cfg.agent_name);
     if let Some(token) = &cfg.config.auth_token {
         if !token.is_empty() {
@@ -624,7 +650,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // build time is hoisted out before it reaches a stricter gateway that
     // would 400 on it (Rain → DeepSeek). See `agents::llm_proxy` for the full
     // rationale. Falls back to the raw base_url if the proxy didn't start.
-    // Agents with no base_url (Brian/Emma → real Anthropic) get no override
+    // Agents with no base_url (Brian → real first-party API) get no override
     // and never touch the proxy.
     if let Some(base) = crate::agents::llm_proxy::resolve_anthropic_base_url(
         cfg.config.base_url.as_deref(),
@@ -741,9 +767,18 @@ mod tests {
             .skip_while(|a| *a != "--settings")
             .nth(1)
             .expect("--settings present");
-        assert!(settings_arg.contains("skillOverrides"), "got {settings_arg}");
-        assert!(settings_arg.contains("user-invocable-only"), "got {settings_arg}");
-        assert!(settings_arg.contains("PreToolUse"), "hook must survive merge");
+        assert!(
+            settings_arg.contains("skillOverrides"),
+            "got {settings_arg}"
+        );
+        assert!(
+            settings_arg.contains("user-invocable-only"),
+            "got {settings_arg}"
+        );
+        assert!(
+            settings_arg.contains("PreToolUse"),
+            "hook must survive merge"
+        );
 
         // Effort override is injected as env.
         let cmd = build_command(&c);
@@ -861,12 +896,20 @@ mod tests {
         drop(ev1);
 
         // The resumed incarnation is nudged to continue.
-        let nudge = in2.recv().await.expect("resumed incarnation should be nudged");
-        assert!(nudge.message.content.contains("529"), "nudge names the status");
+        let nudge = in2
+            .recv()
+            .await
+            .expect("resumed incarnation should be nudged");
+        assert!(
+            nudge.message.content.contains("529"),
+            "nudge names the status"
+        );
         assert!(nudge.message.content.to_lowercase().contains("resumed"));
 
         // Incarnation 2 does real work and finishes cleanly.
-        ev2.send(AgentEvent::Text("resumed work".into())).await.unwrap();
+        ev2.send(AgentEvent::Text("resumed work".into()))
+            .await
+            .unwrap();
         ev2.send(clean_turn()).await.unwrap();
         drop(ev2);
 
@@ -877,15 +920,22 @@ mod tests {
             got.push(ev);
         }
         assert!(
-            matches!(got.first(), Some(AgentEvent::TurnComplete { is_error: true, .. })),
+            matches!(
+                got.first(),
+                Some(AgentEvent::TurnComplete { is_error: true, .. })
+            ),
             "errored turn is forwarded to the peer pump"
         );
         assert!(got
             .iter()
             .any(|e| matches!(e, AgentEvent::Text(t) if t == "resumed work")));
-        assert!(got
-            .iter()
-            .any(|e| matches!(e, AgentEvent::TurnComplete { is_error: false, .. })));
+        assert!(got.iter().any(|e| matches!(
+            e,
+            AgentEvent::TurnComplete {
+                is_error: false,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -898,8 +948,7 @@ mod tests {
         let (h1, _ev1, in1) = fake_incarnation();
         drop(in1); // kill the incarnation's stdin pump (receiver gone)
 
-        let mut queue: std::collections::VecDeque<AgentHandle> =
-            std::collections::VecDeque::new();
+        let mut queue: std::collections::VecDeque<AgentHandle> = std::collections::VecDeque::new();
         let spawn_next = move |_c: SpawnConfig| {
             let h = queue
                 .pop_front()
@@ -982,7 +1031,11 @@ mod tests {
         }
         assert!(got.iter().any(|e| matches!(
             e,
-            AgentEvent::TurnComplete { is_error: true, api_error_status: Some(400), .. }
+            AgentEvent::TurnComplete {
+                is_error: true,
+                api_error_status: Some(400),
+                ..
+            }
         )));
         assert!(
             !got.iter()
@@ -1050,12 +1103,20 @@ mod tests {
         assert_eq!(argv[0], "claude");
         assert!(argv.iter().any(|a| a == "-p"));
         assert!(argv.iter().any(|a| a == "--verbose"));
-        assert!(argv.windows(2).any(|w| w[0] == "--input-format" && w[1] == "stream-json"));
-        assert!(argv.windows(2).any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
-        assert!(argv.windows(2).any(|w| w[0] == "--mcp-config" && w[1] == "/tmp/mcp.json"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--input-format" && w[1] == "stream-json"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--mcp-config" && w[1] == "/tmp/mcp.json"));
         assert!(argv.iter().any(|a| a == "--strict-mcp-config"));
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
-        assert!(argv.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == "be terse"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "--append-system-prompt" && w[1] == "be terse"));
         // No resume flag when SpawnConfig.resume_session_id is None.
         assert!(!argv.iter().any(|a| a == "--resume"));
     }
@@ -1074,7 +1135,8 @@ mod tests {
             "Rain must not run in bypass mode (it ignores deny rules): {argv:?}"
         );
         assert!(
-            argv.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "dontAsk"),
+            argv.windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "dontAsk"),
             "expected `--permission-mode dontAsk`: {argv:?}"
         );
         // Allowlist keeps read-only investigation + the signaling MCP.
@@ -1087,7 +1149,13 @@ mod tests {
         // prompt promises WebFetch/WebSearch/ToolSearch, so the allowlist must
         // grant all three or claude-code silently blocks what the prompt offers.
         for t in [
-            "Read", "Grep", "Glob", "Bash", "mcp__bot-hq-signaling", "WebFetch", "WebSearch",
+            "Read",
+            "Grep",
+            "Glob",
+            "Bash",
+            "mcp__bot-hq-signaling",
+            "WebFetch",
+            "WebSearch",
             "ToolSearch",
         ] {
             assert!(allowed.contains(t), "allowlist missing {t}: {allowed}");
@@ -1098,8 +1166,88 @@ mod tests {
             .find(|w| w[0] == "--disallowedTools")
             .map(|w| w[1].clone())
             .expect("--disallowedTools present");
-        for t in ["Edit", "Write", "NotebookEdit", "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh issue:*)", "Bash(gh pr:*)"] {
+        for t in [
+            "Edit",
+            "Write",
+            "NotebookEdit",
+            "Bash(git commit:*)",
+            "Bash(git push:*)",
+            "Bash(gh issue create:*)",
+            "Bash(gh pr merge:*)",
+        ] {
             assert!(denied.contains(t), "denylist missing {t}: {denied}");
+        }
+    }
+
+    #[test]
+    fn rain_denies_gh_write_allows_gh_read() {
+        // Issue (2026-06-05): Rain should keep read-only `gh` (view/list/diff)
+        // while every mutating `gh` form stays blocked. Deny wins over allow, so
+        // the denylist must NOT contain a blanket `gh <noun>:*` (that would also
+        // kill the read forms) and MUST enumerate the write verbs.
+        let mut c = cfg();
+        c.agent_name = "rain".into();
+        c.config.agent_name = "rain".into();
+        let argv = debug_command(&c);
+        let denied = argv
+            .windows(2)
+            .find(|w| w[0] == "--disallowedTools")
+            .map(|w| w[1].clone())
+            .expect("--disallowedTools present");
+
+        // Every mutating gh verb is blocked.
+        for t in [
+            "Bash(gh pr create:*)",
+            "Bash(gh pr edit:*)",
+            "Bash(gh pr close:*)",
+            "Bash(gh pr merge:*)",
+            "Bash(gh pr comment:*)",
+            "Bash(gh pr checkout:*)",
+            "Bash(gh issue create:*)",
+            "Bash(gh issue edit:*)",
+            "Bash(gh issue close:*)",
+            "Bash(gh issue comment:*)",
+            "Bash(gh issue delete:*)",
+            "Bash(gh release create:*)",
+            "Bash(gh release delete:*)",
+            "Bash(gh repo create:*)",
+            "Bash(gh repo delete:*)",
+            "Bash(gh repo clone:*)",
+            // The escape hatch — gh api can POST/PATCH/DELETE anything.
+            "Bash(gh api:*)",
+        ] {
+            assert!(
+                denied.contains(t),
+                "gh write verb not denied: {t}\n{denied}"
+            );
+        }
+
+        // No blanket noun deny survives (it would block the read forms).
+        for blanket in [
+            "Bash(gh pr:*)",
+            "Bash(gh issue:*)",
+            "Bash(gh repo:*)",
+            "Bash(gh release:*)",
+        ] {
+            assert!(
+                !denied.contains(blanket),
+                "blanket gh deny would block read forms: {blanket}"
+            );
+        }
+
+        // Read forms have no dedicated deny entry, so they fall through to the
+        // allowed `Bash` (a `view`/`list`/`diff` substring must not appear as a
+        // denied pattern).
+        for read in [
+            "Bash(gh issue view:*)",
+            "Bash(gh pr view:*)",
+            "Bash(gh pr diff:*)",
+            "Bash(gh repo view:*)",
+        ] {
+            assert!(
+                !denied.contains(read),
+                "read form should not be explicitly denied: {read}"
+            );
         }
     }
 
@@ -1144,7 +1292,8 @@ mod tests {
         c.resume_session_id = Some("abc-123-uuid".into());
         let argv = debug_command(&c);
         assert!(
-            argv.windows(2).any(|w| w[0] == "--resume" && w[1] == "abc-123-uuid"),
+            argv.windows(2)
+                .any(|w| w[0] == "--resume" && w[1] == "abc-123-uuid"),
             "expected `--resume abc-123-uuid` in argv: {argv:?}"
         );
     }
@@ -1169,21 +1318,6 @@ mod tests {
         assert!(
             settings.contains("\"matcher\":\"Bash\""),
             "hook must match the Bash tool: {settings}"
-        );
-    }
-
-    #[test]
-    fn emma_gets_tool_gate_pretooluse_hook() {
-        // Emma is solo + also runs in bypass (the `else` branch), so she needs
-        // the same mechanical gate.
-        let mut c = cfg();
-        c.agent_name = "emma".into();
-        c.config.agent_name = "emma".into();
-        let argv = debug_command(&c);
-        assert!(
-            argv.windows(2)
-                .any(|w| w[0] == "--settings" && w[1].contains("policy-check tool-gate")),
-            "emma must get the PreToolUse tool-gate hook: {argv:?}"
         );
     }
 

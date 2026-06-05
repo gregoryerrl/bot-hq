@@ -8,7 +8,6 @@ use sqlx::FromRow;
 #[serde(rename_all = "snake_case")]
 pub enum Author {
     User,
-    Emma,
     Brian,
     Rain,
 }
@@ -17,7 +16,6 @@ impl Author {
     pub fn as_str(&self) -> &'static str {
         match self {
             Author::User => "user",
-            Author::Emma => "emma",
             Author::Brian => "brian",
             Author::Rain => "rain",
         }
@@ -26,7 +24,6 @@ impl Author {
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "user" => Author::User,
-            "emma" => Author::Emma,
             "brian" => Author::Brian,
             "rain" => Author::Rain,
             _ => return None,

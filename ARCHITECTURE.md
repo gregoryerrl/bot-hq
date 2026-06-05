@@ -22,9 +22,9 @@ session spawns two `claude-code` subprocess agents:
   `--disallowedTools` on her claude-code subprocess; HANDS-only signaling
   MCP tools are additionally gated server-side.
 
-A third agent, **Emma**, is a singleton solo helper (not a duo). User
-summons her for one-off questions; she lives at `session_id="emma"` and
-persists across app restarts.
+bot-hq is a two-agent duo (Brian + Rain). A former solo helper agent,
+**Emma**, has been removed from the core (code + data purged); she is
+slated to return as the first bot-hq plugin — TBD.
 
 The user is the orchestrator; the app is the conductor between user and
 agents. Policy enforcement runs at two layers (MCP tool calls + git
@@ -53,11 +53,11 @@ multi-thread runtime. Tauri owns the OS main thread.
                     │   └─────────────────────────────────┘  │
                     └────────┬────────────┬──────────────────┘
                              │            │
-                ┌────────────▼─┐  ┌───────▼─────┐  ┌──────────────┐
-                │ claude-code  │  │ claude-code │  │ claude-code  │
-                │   (Brian)    │  │   (Rain)    │  │   (Emma)     │
-                │ stream-json  │  │ stream-json │  │ stream-json  │
-                └──────────────┘  └─────────────┘  └──────────────┘
+                    ┌────────▼─────┐  ┌───▼─────────┐
+                    │ claude-code  │  │ claude-code │
+                    │   (Brian)    │  │   (Rain)    │
+                    │ stream-json  │  │ stream-json │
+                    └──────────────┘  └─────────────┘
 ```
 
 Each agent subprocess is spawned with:
@@ -90,13 +90,13 @@ their `ANTHROPIC_BASE_URL` through a local normalizing reverse-proxy. It
 hoists the `role:"system"` entry claude-code injects into the
 `messages[]` array (from a SessionStart hook's `additionalContext`) up
 into the top-level `system` field, which strict gateways require.
-Agents on the real Anthropic API (Brian/Emma) bypass it.
+Agents on the real first-party API (Brian) bypass it.
 
 ---
 
 ## Agent role prompts (hardcoded)
 
-Role prompts (Brian/Rain/Emma identity) are baked into the binary at
+Role prompts (Brian/Rain identity) are baked into the binary at
 `src/agents/prompts.rs`. They are NOT CL-loaded. Reasoning:
 
 - Role boundary (Brian writes, Rain reviews) is structural — a typo in a
@@ -110,7 +110,7 @@ prompt is the floor; CL extends it.
 
 System-prompt layering at session spawn (`src/core/session.rs::read_system_prompt`):
 
-1. Hardcoded role prompt (Brian/Rain/Emma)
+1. Hardcoded role prompt (Brian/Rain)
 2. CL location anchor (`<data_dir>` path)
 3. `<data_dir>/general-rules.md`
 4. `<data_dir>/agents/<name>/custom-instruction.md`
@@ -159,8 +159,7 @@ broadcast-subscriber bridge in `src/tauri_events/` translates
 `messages_for_session(session_id, since_id)`) goes through a
 `BatchEmitter` (N=20 / 50ms coalesce).
 
-**Topbar:** `Dashboard | Context Library | Plugins | Settings` + Emma
-button.
+**Topbar:** `Dashboard | Context Library | Plugins | Settings`.
 
 **Dashboard:** grid of session tiles. Each tile shows title, last
 activity, `[Needs Input]` badge tinting the border red. Click tile →
@@ -170,7 +169,7 @@ the session with the bridge.
 **Session view:** 60/40 split — chat (left) + DocumentPane (right).
 Header: title + back link. Chronological chat: all messages (user,
 Brian, Rain, phase_change) interleaved by `created_at` with author color
-coding (brian=orange, rain=purple, emma=green, user=blue, system=muted).
+coding (brian=orange, rain=purple, user=blue, system=muted).
 Pending-choice banner (purple) renders above the input with inline
 choice buttons.
 
@@ -180,10 +179,6 @@ choice buttons.
 renders the live color-coded `git diff` for the session's working repo
 via the `compute_apply_diff` Tauri command (`src/tauri_cmd/docs.rs`,
 parser `parse_diff_lines`), consumed by `DocumentPane.tsx`.
-
-**Emma overlay:** fixed half-pane on the right, toggled from the topbar.
-Subscribes to the `agent:messages:batch` event filtered to
-`session_id="emma"`.
 
 **Context Library tab:** 2-pane "Library Tree" sidebar + tabbed editor. The
 tree renders nested collapsible folders (`cl_index_search` + `cl_folder_search`).
@@ -374,7 +369,7 @@ command on approval.
   Matching is case-insensitive substring against the tool name or command;
   `gate` wins over `auto_allow` on conflict.
 - **Tripwire:** the PreToolUse Bash hook (`policy-check tool-gate`, injected
-  into HANDS/Emma at spawn via `--settings` — `src/policy/hooks.rs`
+  into HANDS at spawn via `--settings` — `src/policy/hooks.rs`
   `run_tool_gate`) blocks a `gate`-matched command with **exit 2** and routes
   the agent to the `action_gate` MCP tool; `auto_allow`/no-match exits 0 (runs
   normally). Exit 2 is the only block form honored under
@@ -431,9 +426,11 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   rain_model_id) — the last three drive per-session model selection +
   the solo-Brian (disable-Rain) toggle.
 - `agent_configs` (agent_name PK, provider, model_name, base_url,
-  auth_token). CHECK constraint enforces `agent_name ∈
-  {'emma','brian','rain'}`. Now a fallback for the `models` registry
-  below (see "Per-agent model selection").
+  auth_token). CHECK constraint still lists `agent_name ∈
+  {'emma','brian','rain'}` (migration 0001 created it permissive;
+  migration 0017 purges the `emma` row but leaves the CHECK as-is for
+  legacy reasons) — only `brian`/`rain` are used. Now a fallback for the
+  `models` registry below (see "Per-agent model selection").
 - `models` (id PK, label, provider, model_name, base_url, auth_token) —
   saved-model registry the per-session pickers reference by id.
 - `app_settings` (key PK, value) — key/value app settings
@@ -449,13 +446,11 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
 - `cl_index` (file_path PK, project, description, tags, size,
   modified_at, indexed_at) — SQLite-backed CL search index.
 
-**Author enum:** `user` / `emma` / `brian` / `rain`. NO `system` author —
-phase changes synthesize as `author=user` ("phase advanced to PLAN") so
-chat history reads coherently and agents see them as natural switch
-prompts.
-
-**Emma:** singleton row (`id="emma"`), seeded by migration, never
-closes. Auto-spawned at startup; respawned by `restart_emma`.
+**Author enum:** `user` / `brian` / `rain`. (The `messages.author` CHECK
+still permits `'emma'` for legacy reasons, but the Rust enum no longer
+has it.) NO `system` author — phase changes synthesize as `author=user`
+("phase advanced to PLAN") so chat history reads coherently and agents
+see them as natural switch prompts.
 
 ---
 
@@ -463,8 +458,7 @@ closes. Auto-spawned at startup; respawned by `restart_emma`.
 
 In-memory cache: `HashMap<SessionId, IpavState>` where `IpavState {
 current_phase, phase_log }`. Not persisted. Subprocesses die with the
-app; restart = fresh sessions (but Emma persists since her row + history
-are durable).
+app; restart = fresh sessions.
 
 ---
 
@@ -555,8 +549,8 @@ Plugin contract TBD per plugin.
   notes. Indexed in SQLite for description-aware search.
 - **Session:** a scope-keyed work container, holding a duo of agent
   subprocesses + chat history.
-- **Emma:** chat helper agent. Singleton (one per app). Solo (no Rain
-  peer, no IPAV).
+- **Emma:** removed (former solo helper agent; planned to return as the
+  first bot-hq plugin — TBD).
 - **claude-code:** the upstream CLI tool that wraps a language model.
   One subprocess per agent.
 - **stream-json:** claude-code's `--output-format stream-json` mode.

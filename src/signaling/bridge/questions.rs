@@ -172,8 +172,7 @@ impl SignalingBridge {
         // (client timeout / restart). Extracted before `approval` moves into
         // PendingChoice below.
         let command_text = approval.as_ref().and_then(|a| {
-            matches!(a.kind, crate::policy::ViolationKind::ToolBlocklist)
-                .then(|| a.action.clone())
+            matches!(a.kind, crate::policy::ViolationKind::ToolBlocklist).then(|| a.action.clone())
         });
         let (tx, rx) = oneshot::channel::<String>();
         let choice = PendingChoice {
@@ -297,13 +296,11 @@ impl SignalingBridge {
         storage.questions_for_session(session_id).await
     }
 
-    /// All pending tray rows across OPEN sessions (closed sessions + the emma
-    /// singleton excluded). Durable source for the header notifier's per-session
+    /// All pending tray rows across OPEN sessions (closed sessions are
+    /// excluded). Durable source for the header notifier's per-session
     /// "needs your input [N]" counts — survives restart, unlike the in-memory
     /// pending map.
-    pub async fn list_pending_tray_open(
-        &self,
-    ) -> Result<Vec<crate::storage::SessionTrayEntry>> {
+    pub async fn list_pending_tray_open(&self) -> Result<Vec<crate::storage::SessionTrayEntry>> {
         let storage_guard = self.storage.lock().await;
         let Some(storage) = storage_guard.as_ref() else {
             return Ok(Vec::new());
@@ -339,9 +336,7 @@ impl SignalingBridge {
                 // so the audit trail captures the decision even if the agent
                 // crashes immediately after receiving the result.
                 let outcome = outcome_from_picked(&picked);
-                if let (Some(log), Some(ctx)) =
-                    (self.violations.as_ref(), &p.choice.approval)
-                {
+                if let (Some(log), Some(ctx)) = (self.violations.as_ref(), &p.choice.approval) {
                     let _ = log
                         .record(
                             p.choice.session_id.clone(),
@@ -593,10 +588,15 @@ impl SignalingBridge {
         {
             let storage_guard = self.storage.lock().await;
             if let Some(storage) = storage_guard.as_ref() {
-                let author = crate::storage::Author::parse(&agent)
-                    .unwrap_or(crate::storage::Author::User);
+                let author =
+                    crate::storage::Author::parse(&agent).unwrap_or(crate::storage::Author::User);
                 match storage
-                    .insert_message(&session_id, author, crate::storage::MessageKind::Text, &body)
+                    .insert_message(
+                        &session_id,
+                        author,
+                        crate::storage::MessageKind::Text,
+                        &body,
+                    )
                     .await
                 {
                     Ok(id) => self.notify_message_persisted(session_id.clone(), id),
@@ -625,7 +625,6 @@ impl SignalingBridge {
             reason: body,
         });
     }
-
 }
 
 #[cfg(test)]
@@ -671,18 +670,17 @@ mod tests {
             .mark_awaiting_user("s1".into(), "brian".into(), "ping".into())
             .await;
         let ev = sub.recv().await.unwrap();
-        assert!(matches!(ev, SignalingEvent::AwaitingUser { session_id, agent, reason }
-            if session_id == "s1" && agent == "brian" && reason == "ping"));
+        assert!(
+            matches!(ev, SignalingEvent::AwaitingUser { session_id, agent, reason }
+            if session_id == "s1" && agent == "brian" && reason == "ping")
+        );
     }
 
     #[tokio::test]
     async fn resolve_unknown_choice_errors() {
         // No storage + no parked oneshot → genuinely unknown id → error.
         let bridge = SignalingBridge::new();
-        let err = bridge
-            .resolve_choice("nope", "x".into())
-            .await
-            .unwrap_err();
+        let err = bridge.resolve_choice("nope", "x".into()).await.unwrap_err();
         assert!(err.to_string().contains("no pending choice"));
     }
 
@@ -725,12 +723,19 @@ mod tests {
             other => panic!("expected OOB fallback, got {other:?}"),
         }
         // OOB message persisted for the agent to read on its next turn.
-        let msgs = storage.messages_for_session("s-reopen", None).await.unwrap();
+        let msgs = storage
+            .messages_for_session("s-reopen", None)
+            .await
+            .unwrap();
         assert!(msgs
             .iter()
             .any(|m| m.content.contains("(out-of-band)") && m.content.contains("Yes")));
         // Question row marked answered so the tray clears.
-        let q = storage.get_question("old-choice-id").await.unwrap().unwrap();
+        let q = storage
+            .get_question("old-choice-id")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(q.status, "answered");
     }
 
@@ -971,7 +976,10 @@ mod tests {
             SignalingEvent::PendingChoice(p) => p.choice_id,
             other => panic!("expected PendingChoice, got {other:?}"),
         };
-        bridge.resolve_choice(&choice_id, "Deny".into()).await.unwrap();
+        bridge
+            .resolve_choice(&choice_id, "Deny".into())
+            .await
+            .unwrap();
         ask.await.unwrap();
         let recs = log.read_all().unwrap();
         assert_eq!(recs[0].outcome, ViolationOutcome::Denied);

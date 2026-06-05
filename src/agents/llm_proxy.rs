@@ -26,8 +26,8 @@
 //! response straight back. Source-agnostic: it strips the alien role no
 //! matter which hook/mechanism injected it.
 //!
-//! Only agents with a custom `base_url` route through it; Brian/Emma hit the
-//! real Anthropic API directly and never touch the proxy.
+//! Only agents with a custom `base_url` route through it; Brian hits the
+//! real first-party API directly and never touches the proxy.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -191,7 +191,12 @@ async fn handle_proxy(req: Request<Incoming>) -> Result<Response<ProxyBody>, Inf
 
     let raw_body = match req.into_body().collect().await {
         Ok(c) => c.to_bytes(),
-        Err(e) => return Ok(text_resp(StatusCode::BAD_REQUEST, &format!("read body: {e}"))),
+        Err(e) => {
+            return Ok(text_resp(
+                StatusCode::BAD_REQUEST,
+                &format!("read body: {e}"),
+            ))
+        }
     };
     let body = normalize_messages_body(&raw_body).into_owned();
 
@@ -446,9 +451,7 @@ mod tests {
         let msgs = parsed["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2, "system message removed from messages[]");
         assert!(
-            !msgs
-                .iter()
-                .any(|m| m["role"] == "system"),
+            !msgs.iter().any(|m| m["role"] == "system"),
             "no role:system remains"
         );
         assert_eq!(parsed["system"], json!("INJECTED CONTEXT"));
@@ -514,7 +517,10 @@ mod tests {
         });
         let raw = body.to_string();
         let out = normalize_messages_body(raw.as_bytes());
-        assert!(matches!(out, std::borrow::Cow::Borrowed(_)), "no copy when clean");
+        assert!(
+            matches!(out, std::borrow::Cow::Borrowed(_)),
+            "no copy when clean"
+        );
         assert_eq!(out.as_ref(), raw.as_bytes());
     }
 
@@ -562,8 +568,9 @@ mod tests {
                                 .ok()
                                 .and_then(|v| {
                                     v.get("messages").and_then(|m| m.as_array()).map(|a| {
-                                        a.iter().any(|m| m.get("role").and_then(|r| r.as_str())
-                                            == Some("system"))
+                                        a.iter().any(|m| {
+                                            m.get("role").and_then(|r| r.as_str()) == Some("system")
+                                        })
                                     })
                                 })
                                 .unwrap_or(false);

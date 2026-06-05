@@ -5,7 +5,7 @@ use super::*;
 use std::path::PathBuf;
 
 impl Storage {
-    /// Upsert a project. Used by Emma's registration flow and by the
+    /// Upsert a project. Used by the project-registration flow and by the
     /// startup backfill (which auto-creates a row for every projects/<name>
     /// directory it scans).
     ///
@@ -46,11 +46,7 @@ impl Storage {
 
     /// Set or clear `cl_path` on an existing project row. Pass `None` to
     /// revert to the default convention (`<data_dir>/projects/<name>/`).
-    pub async fn set_project_cl_path(
-        &self,
-        name: &str,
-        cl_path: Option<&str>,
-    ) -> Result<()> {
+    pub async fn set_project_cl_path(&self, name: &str, cl_path: Option<&str>) -> Result<()> {
         sqlx::query("UPDATE projects SET cl_path = ? WHERE name = ?")
             .bind(cl_path)
             .bind(name)
@@ -65,13 +61,11 @@ impl Storage {
     /// folder reverts to "just a folder" in the tree but its descriptions
     /// stay so the user can re-register without losing context.
     pub async fn unregister_project(&self, name: &str) -> Result<()> {
-        sqlx::query(
-            "UPDATE projects SET cl_path = NULL, working_repo_path = NULL WHERE name = ?",
-        )
-        .bind(name)
-        .execute(&self.pool)
-        .await
-        .with_context(|| format!("unregistering project {name}"))?;
+        sqlx::query("UPDATE projects SET cl_path = NULL, working_repo_path = NULL WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("unregistering project {name}"))?;
         Ok(())
     }
 
@@ -80,11 +74,7 @@ impl Storage {
     /// back to the default convention `<data_dir>/projects/<name>/`. Missing
     /// rows also fall back to the convention so callers can use the helper
     /// uniformly without pre-checking existence.
-    pub async fn cl_path_for_project(
-        &self,
-        data_dir: &Path,
-        project: &str,
-    ) -> Result<PathBuf> {
+    pub async fn cl_path_for_project(&self, data_dir: &Path, project: &str) -> Result<PathBuf> {
         if project == Project::GLOBALS {
             return Ok(data_dir.to_path_buf());
         }

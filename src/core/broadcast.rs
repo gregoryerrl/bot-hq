@@ -60,7 +60,6 @@ pub async fn peer_forward_message(
     let prefix = match peer_author {
         Author::Brian => "[Brian]\n",
         Author::Rain => "[Rain]\n",
-        Author::Emma => "[Emma]\n",
         Author::User => "",
     };
     let inner = format!("{prefix}{text}");
@@ -88,7 +87,10 @@ mod tests {
         assert_eq!(rm.message.content, "[PHASE: Apply]\nhello");
         let msgs = s.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].content, "hello", "storage keeps raw text, no envelope");
+        assert_eq!(
+            msgs[0].content, "hello",
+            "storage keeps raw text, no envelope"
+        );
         assert_eq!(msgs[0].author, "user");
     }
 
@@ -102,15 +104,26 @@ mod tests {
         s.create_session("sess-b", "b", None).await.unwrap();
         let (btx, _brx) = mpsc::channel(8);
         let (rtx, _rrx) = mpsc::channel(8);
-        broadcast_user_message(&s, "sess-a", "msg-into-a", IpavPhase::Investigate, &btx, Some(&rtx))
-            .await
-            .unwrap();
+        broadcast_user_message(
+            &s,
+            "sess-a",
+            "msg-into-a",
+            IpavPhase::Investigate,
+            &btx,
+            Some(&rtx),
+        )
+        .await
+        .unwrap();
 
         let a_msgs = s.messages_for_session("sess-a", None).await.unwrap();
         let b_msgs = s.messages_for_session("sess-b", None).await.unwrap();
         assert_eq!(a_msgs.len(), 1);
         assert_eq!(a_msgs[0].content, "msg-into-a");
-        assert!(b_msgs.is_empty(), "broadcast leaked into other session: {:?}", b_msgs);
+        assert!(
+            b_msgs.is_empty(),
+            "broadcast leaked into other session: {:?}",
+            b_msgs
+        );
     }
 
     #[tokio::test]

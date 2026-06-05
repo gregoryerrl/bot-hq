@@ -842,7 +842,7 @@ function McpPane({
     <div>
       <PaneHeader
         title="MCP servers"
-        blurb="Servers forwarded into Brian/Emma (bot-hq + claude-in-chrome are always filtered; Rain gets none). 'settings.json (ignored)' means claude-code itself doesn't load it — but bot-hq still forwards it."
+        blurb="Servers forwarded into Brian (bot-hq + claude-in-chrome are always filtered; Rain gets none). 'settings.json (ignored)' means claude-code itself doesn't load it — but bot-hq still forwards it."
       />
       {config.mcp_servers.length === 0 ? (
         <Empty>No MCP servers configured.</Empty>
@@ -923,7 +923,7 @@ function MemoryPane({
     <div>
       <PaneHeader
         title="Memory & instructions"
-        blurb="CLAUDE.md + auto-memory your agents autodiscover. Suppress them for agents (Brian/Emma; Rain already skips them via --bare)."
+        blurb="CLAUDE.md + auto-memory your agents autodiscover. Suppress them for agents (Brian; Rain already skips them via --bare)."
       />
       <ul className="mb-4 flex flex-col gap-2">
         <FileRow label="User CLAUDE.md" stat={m.user_claude_md} />

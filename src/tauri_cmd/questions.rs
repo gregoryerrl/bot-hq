@@ -105,7 +105,7 @@ pub async fn list_session_tray(
 /// All pending tray rows for OPEN sessions across the whole app — powers the
 /// header notifier's per-session "needs your input [N]" counts. Durable, so it
 /// survives a restart (unlike the in-memory `list_pending_choices`). Closed
-/// sessions + the emma singleton are excluded so dead-session pending isn't
+/// sessions are excluded so dead-session pending isn't
 /// surfaced as noise.
 #[tauri::command]
 #[specta::specta]

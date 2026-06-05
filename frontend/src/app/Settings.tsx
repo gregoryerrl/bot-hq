@@ -274,8 +274,8 @@ function AgentsPanel() {
         )}
       </div>
       {isLoading ? (
-        <div className="grid grid-cols-1 gap-gutter xl:grid-cols-3">
-          {[0, 1, 2].map((i) => (
+        <div className="grid grid-cols-1 gap-gutter xl:grid-cols-2">
+          {[0, 1].map((i) => (
             <div
               key={i}
               className="h-64 animate-pulse rounded-lg border border-outline-variant bg-surface-container"
@@ -283,7 +283,7 @@ function AgentsPanel() {
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-gutter xl:grid-cols-3">
+        <div className="grid grid-cols-1 gap-gutter xl:grid-cols-2">
           {configs.map((c) => (
             <AgentCard
               key={c.agent_name}
@@ -738,13 +738,6 @@ function roleStyle(name: string): {
         text: "text-on-surface-variant",
         border: "border-outline-variant/30",
       };
-    case "emma":
-      return {
-        label: "PRIMARY",
-        bg: "bg-secondary/15",
-        text: "text-secondary",
-        border: "border-secondary/30",
-      };
     default:
       return {
         label: name.toUpperCase(),
@@ -759,8 +752,6 @@ function roleBorder(name: string): string {
   switch (name) {
     case "brian":
       return "border-primary/60";
-    case "emma":
-      return "border-secondary/60";
     case "rain":
       return "border-outline-variant";
     default:
@@ -774,8 +765,6 @@ function agentIcon(name: string): string {
       return "👷";
     case "rain":
       return "💧";
-    case "emma":
-      return "🤖";
     default:
       return "⚙️";
   }

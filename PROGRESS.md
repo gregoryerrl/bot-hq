@@ -21,6 +21,27 @@ constraint.
 
 ---
 
+## 2026-06-05 — Rain read-only gh, bell self-heal, Emma removed
+
+- **feat(policy): give Rain read-only `gh` access (write-verbs denied).** Rain
+  (EYES) could not touch `gh` at all. Loosened to read-only: write verbs (e.g.
+  `pr create`/`merge`, `issue close`, `release`) stay denied, and `gh api` stays
+  fully blocked (it can mutate behind an innocuous-looking call). Rain can now read
+  PR/issue/CI state for review without gaining any write path.
+- **fix(ui): boot-time sweep withdraws stale tray rows on dead sessions.** The
+  notification bell counted pending tray rows from sessions that had since closed or
+  orphaned, so the badge showed phantom items that never cleared. Added a startup
+  sweep that withdraws pending tray rows whose session is closed/missing — the count
+  now self-heals stale cruft on launch instead of accumulating it.
+- **chore: remove Emma from the core entirely (migration 0017).** The solo helper
+  agent Emma is gone — prompt, auto-spawn, overlay, signaling, and her seeded data
+  are purged (migration 0017 drops the `emma` row; the legacy CHECK constraints stay
+  permissive). The duo (Brian = HANDS, Rain = EYES) is the whole agent model now.
+  Emma is slated to return as the first bot-hq plugin — TBD. Canonical docs
+  (ARCHITECTURE.md, CLAUDE.md) updated to match.
+
+---
+
 ## 2026-06-04 — audit remediation (continuous pass)
 
 Working through the full-codebase audit (findings in the session's investigate doc),

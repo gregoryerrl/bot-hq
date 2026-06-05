@@ -26,10 +26,7 @@ impl SignalingBridge {
         }
         let storage = self.storage.lock().await.clone();
         match storage {
-            Some(storage) => storage
-                .cl_path_for_project(&data_dir, project)
-                .await
-                .ok(),
+            Some(storage) => storage.cl_path_for_project(&data_dir, project).await.ok(),
             None => Some(data_dir.join("projects").join(project)),
         }
     }
@@ -63,7 +60,7 @@ impl SignalingBridge {
     }
 
     /// Write-side for agents: upsert a folder description. The jsonrpc layer
-    /// gates this to HANDS (brian) + Emma; Rain is denied.
+    /// gates this to HANDS (brian); Rain is denied.
     pub async fn cl_register_folder_description(
         &self,
         project: &str,
@@ -149,9 +146,7 @@ impl SignalingBridge {
         for (rel, (mtime, snippet)) in &on_disk {
             match by_path.get(rel.as_str()) {
                 None => {
-                    storage
-                        .upsert_cl_index(project, rel, snippet, None)
-                        .await?;
+                    storage.upsert_cl_index(project, rel, snippet, None).await?;
                     report.added.push(rel.clone());
                 }
                 Some(row) if row.updated_at.as_str() < mtime.as_str() => {

@@ -13,7 +13,9 @@
 use crate::policy::ViolationKind;
 use crate::signaling::bridge::{ApprovalContext, SignalingBridge};
 use crate::signaling::jsonrpc::{dispatch, CallerIdentity};
-use crate::signaling::response::{decode_jsonrpc_body, dispatch_outcome_to_response, text_response};
+use crate::signaling::response::{
+    decode_jsonrpc_body, dispatch_outcome_to_response, text_response,
+};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -172,10 +174,7 @@ async fn handle_request(
 /// `PendingChoice` → `resolve_choice` → `PushGate` violation path as the
 /// agent-facing `request_approval` MCP tool, but without the HANDS-only gate
 /// (the hook isn't an agent).
-async fn handle_pre_push(
-    body: Incoming,
-    bridge: Arc<SignalingBridge>,
-) -> Response<Full<Bytes>> {
+async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Response<Full<Bytes>> {
     let bytes = match body.collect().await {
         Ok(c) => c.to_bytes(),
         Err(e) => return text_response(StatusCode::BAD_REQUEST, &format!("body read failed: {e}")),
@@ -187,7 +186,7 @@ async fn handle_pre_push(
     let Some(session_id) = v.get("session_id").and_then(|s| s.as_str()) else {
         return text_response(StatusCode::BAD_REQUEST, "missing session_id");
     };
-    // Only HANDS (brian) / the solo helper (emma) push; default to brian if the
+    // Only HANDS (brian) pushes; default to brian if the
     // hook couldn't read BOT_HQ_AGENT (graceful — affects only the tray label).
     let agent = v
         .get("agent")
@@ -230,10 +229,7 @@ async fn handle_pre_push(
         }
     };
 
-    text_response(
-        StatusCode::OK,
-        &json!({ "approved": approved }).to_string(),
-    )
+    text_response(StatusCode::OK, &json!({ "approved": approved }).to_string())
 }
 
 fn parse_path(path: &str) -> Option<CallerIdentity> {
@@ -267,7 +263,10 @@ pub fn mcp_config_json(
     agent: &str,
     extra_servers: &serde_json::Map<String, serde_json::Value>,
 ) -> String {
-    let url = format!("http://{}/sessions/{}/{}/mcp", server_addr, session_id, agent);
+    let url = format!(
+        "http://{}/sessions/{}/{}/mcp",
+        server_addr, session_id, agent
+    );
     let mut servers = serde_json::Map::new();
     for (name, val) in extra_servers {
         servers.insert(name.clone(), val.clone());
@@ -276,8 +275,7 @@ pub fn mcp_config_json(
         "bot-hq-signaling".to_string(),
         json!({ "type": "http", "url": url }),
     );
-    serde_json::to_string_pretty(&json!({ "mcpServers": servers }))
-        .unwrap_or_else(|_| "{}".into())
+    serde_json::to_string_pretty(&json!({ "mcpServers": servers })).unwrap_or_else(|_| "{}".into())
 }
 
 /// Read the user's claude-code MCP server config (across both locations
@@ -341,7 +339,10 @@ pub fn default_user_settings_paths() -> Vec<std::path::PathBuf> {
         return Vec::new();
     };
     let home = std::path::PathBuf::from(home);
-    vec![home.join(".claude/settings.json"), home.join(".claude.json")]
+    vec![
+        home.join(".claude/settings.json"),
+        home.join(".claude.json"),
+    ]
 }
 
 #[cfg(test)]
@@ -381,7 +382,8 @@ mod tests {
         let url_a = url.clone();
         let client_a = client.clone();
         let call = tokio::spawn(async move {
-            let body = json!({ "session_id": "s1", "agent": "brian", "branch": "main" }).to_string();
+            let body =
+                json!({ "session_id": "s1", "agent": "brian", "branch": "main" }).to_string();
             let resp = client_a
                 .post(&url_a)
                 .header("content-type", "application/json")
@@ -466,7 +468,10 @@ mod tests {
         );
         let s = mcp_config_json(addr, "sess1", "brian", &extras);
         let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
-        let servers = parsed.get("mcpServers").and_then(|v| v.as_object()).unwrap();
+        let servers = parsed
+            .get("mcpServers")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert!(servers.contains_key("bot-hq-signaling"));
         assert!(servers.contains_key("chrome-devtools"));
     }
@@ -487,7 +492,10 @@ mod tests {
         )
         .unwrap();
         let map = load_user_mcp_servers(&[path]);
-        assert!(!map.contains_key("bot-hq"), "bot-hq must be filtered to avoid recursion");
+        assert!(
+            !map.contains_key("bot-hq"),
+            "bot-hq must be filtered to avoid recursion"
+        );
         assert!(
             !map.contains_key("claude-in-chrome"),
             "claude-in-chrome is reserved by claude-code in --mcp-config files"
@@ -497,9 +505,8 @@ mod tests {
 
     #[test]
     fn load_user_mcp_servers_missing_file_returns_empty() {
-        let map = load_user_mcp_servers(&[std::path::PathBuf::from(
-            "/nonexistent/path/settings.json",
-        )]);
+        let map =
+            load_user_mcp_servers(&[std::path::PathBuf::from("/nonexistent/path/settings.json")]);
         assert!(map.is_empty());
     }
 
@@ -536,6 +543,9 @@ mod tests {
         .unwrap();
         let map = load_user_mcp_servers(&[stale, live]);
         let args = map["brave-devtools"]["args"][0].as_str().unwrap();
-        assert!(args.contains("9225"), "expected live config to win, got: {args}");
+        assert!(
+            args.contains("9225"),
+            "expected live config to win, got: {args}"
+        );
     }
 }

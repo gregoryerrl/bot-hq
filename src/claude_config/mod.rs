@@ -1,7 +1,7 @@
 //! Surface + control the user's **Claude Code** configuration that bot-hq's
 //! agents inherit.
 //!
-//! bot-hq's agents (Brian/Rain/Emma) are `claude-code` headless subprocesses
+//! bot-hq's agents (Brian/Rain) are `claude-code` headless subprocesses
 //! (`src/agents/spawn.rs`), so whatever the user's `~/.claude` install has —
 //! skills, plugins, hooks, CLAUDE.md/memory, MCP servers, effort — flows into
 //! the agents (see the inheritance table in
@@ -31,15 +31,15 @@ pub use writer::{set_bool, set_plugin_enabled, set_string};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// The three trio agents, in display order. `_all` in the override store is a
+/// The two duo agents, in display order. `_all` in the override store is a
 /// fan-out default applied to each unless a per-agent entry overrides it.
-pub const AGENTS: [&str; 3] = ["brian", "rain", "emma"];
+pub const AGENTS: [&str; 2] = ["brian", "rain"];
 
 /// Which agents pick up a given config surface from `~/.claude` at spawn, and
 /// which don't. Drives the per-surface inheritance badges in the UI. This is
 /// the canonical mapping derived from `spawn.rs::build_command` behavior:
-/// Brian/Emma run full claude-code (inherit), Rain runs `--bare` (skips
-/// skills/plugins/hooks/CLAUDE.md), MCP is forwarded to Brian/Emma only, and
+/// Brian runs full claude-code (inherit), Rain runs `--bare` (skips
+/// skills/plugins/hooks/CLAUDE.md), MCP is forwarded to Brian only, and
 /// model/permissions are overridden per-agent by bot-hq.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct Inheritance {
@@ -75,56 +75,56 @@ fn agents(names: &[&str]) -> Vec<String> {
 pub fn inheritance(surface: Surface) -> Inheritance {
     match surface {
         Surface::Skills => Inheritance {
-            inherited_by: agents(&["brian", "emma"]),
+            inherited_by: agents(&["brian"]),
             skipped_by: agents(&["rain"]),
-            note: "Brian/Emma load your skills (a skill can self-invoke). Rain runs --bare and skips them.".into(),
+            note: "Brian loads your skills (a skill can self-invoke). Rain runs --bare and skips them.".into(),
             overridable: true,
         },
         Surface::Plugins => Inheritance {
-            inherited_by: agents(&["brian", "emma"]),
+            inherited_by: agents(&["brian"]),
             skipped_by: agents(&["rain"]),
-            note: "Brian/Emma load enabled plugins (and their skills/hooks/MCP). Rain --bare skips plugin sync.".into(),
+            note: "Brian loads enabled plugins (and their skills/hooks/MCP). Rain --bare skips plugin sync.".into(),
             overridable: true,
         },
         Surface::Hooks => Inheritance {
-            inherited_by: agents(&["brian", "emma"]),
+            inherited_by: agents(&["brian"]),
             skipped_by: agents(&["rain"]),
-            note: "Brian/Emma run your hooks alongside bot-hq's PreToolUse hook. Rain --bare skips hooks. Granular per-hook suppression is limited.".into(),
+            note: "Brian runs your hooks alongside bot-hq's PreToolUse hook. Rain --bare skips hooks. Granular per-hook suppression is limited.".into(),
             overridable: false,
         },
         Surface::Memory => Inheritance {
-            inherited_by: agents(&["brian", "emma"]),
+            inherited_by: agents(&["brian"]),
             skipped_by: agents(&["rain"]),
-            note: "Brian/Emma autodiscover CLAUDE.md + auto-memory. Rain --bare skips it. bot-hq adds its own system prompt regardless.".into(),
+            note: "Brian autodiscovers CLAUDE.md + auto-memory. Rain --bare skips it. bot-hq adds its own system prompt regardless.".into(),
             overridable: true,
         },
         Surface::Mcp => Inheritance {
-            inherited_by: agents(&["brian", "emma"]),
+            inherited_by: agents(&["brian"]),
             skipped_by: agents(&["rain"]),
-            note: "Forwarded into Brian/Emma (bot-hq + claude-in-chrome filtered out). Rain gets none.".into(),
+            note: "Forwarded into Brian (bot-hq + claude-in-chrome filtered out). Rain gets none.".into(),
             overridable: true,
         },
         Surface::CoreKnobs => Inheritance {
-            inherited_by: agents(&["brian", "emma", "rain"]),
+            inherited_by: agents(&["brian", "rain"]),
             skipped_by: agents(&[]),
             note: "Read from settings.json by all agents (effort, thinking, output tokens, …).".into(),
             overridable: true,
         },
         Surface::Model => Inheritance {
             inherited_by: agents(&[]),
-            skipped_by: agents(&["brian", "emma", "rain"]),
+            skipped_by: agents(&["brian", "rain"]),
             note: "Overridden per-agent by bot-hq via ANTHROPIC_MODEL (the Agents tab).".into(),
             overridable: true,
         },
         Surface::Permissions => Inheritance {
             inherited_by: agents(&[]),
-            skipped_by: agents(&["brian", "emma", "rain"]),
-            note: "bot-hq sets each agent's permission posture (Brian/Emma bypass; Rain dontAsk + allow/deny).".into(),
+            skipped_by: agents(&["brian", "rain"]),
+            note: "bot-hq sets each agent's permission posture (Brian bypass; Rain dontAsk + allow/deny).".into(),
             overridable: false,
         },
         Surface::Keybindings => Inheritance {
             inherited_by: agents(&[]),
-            skipped_by: agents(&["brian", "emma", "rain"]),
+            skipped_by: agents(&["brian", "rain"]),
             note: "Interactive-only; headless agents don't use keybindings.".into(),
             overridable: false,
         },
@@ -191,7 +191,7 @@ pub struct McpServerItem {
     pub effective: bool,
     /// Masked one-line detail (url or command), secrets redacted.
     pub detail: String,
-    /// Agents bot-hq forwards it into (Brian/Emma; reserved keys excluded).
+    /// Agents bot-hq forwards it into (Brian; reserved keys excluded).
     pub forwarded_to_agents: Vec<String>,
     /// True if bot-hq filters this server from agents (bot-hq / claude-in-chrome).
     pub reserved_filtered: bool,
@@ -246,10 +246,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skills_inherited_by_brian_emma_not_rain() {
+    fn skills_inherited_by_brian_not_rain() {
         let inh = inheritance(Surface::Skills);
         assert!(inh.inherited_by.contains(&"brian".to_string()));
-        assert!(inh.inherited_by.contains(&"emma".to_string()));
         assert!(inh.skipped_by.contains(&"rain".to_string()));
         assert!(inh.overridable);
     }
@@ -257,7 +256,7 @@ mod tests {
     #[test]
     fn core_knobs_inherited_by_all() {
         let inh = inheritance(Surface::CoreKnobs);
-        assert_eq!(inh.inherited_by.len(), 3);
+        assert_eq!(inh.inherited_by.len(), 2);
         assert!(inh.skipped_by.is_empty());
     }
 
@@ -265,7 +264,7 @@ mod tests {
     fn model_overridden_for_all() {
         let inh = inheritance(Surface::Model);
         assert!(inh.inherited_by.is_empty());
-        assert_eq!(inh.skipped_by.len(), 3);
+        assert_eq!(inh.skipped_by.len(), 2);
     }
 
     #[test]

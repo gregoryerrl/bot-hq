@@ -25,7 +25,7 @@ const CONFIG = {
       label: "Effort level",
       value: "xhigh",
       source: "~/.claude/settings.json",
-      inheritance: inh(["brian", "emma", "rain"], []),
+      inheritance: inh(["brian", "rain"], []),
     },
   ],
   skills: [
@@ -35,10 +35,10 @@ const CONFIG = {
       disable_model_invocation: true,
       description: "take notes",
       path: "/p/note/SKILL.md",
-      inheritance: inh(["brian", "emma"], ["rain"]),
+      inheritance: inh(["brian"], ["rain"]),
     },
   ],
-  plugins: [{ key: "warp@mkt", enabled: true, inheritance: inh(["brian", "emma"], ["rain"]) }],
+  plugins: [{ key: "warp@mkt", enabled: true, inheritance: inh(["brian"], ["rain"]) }],
   mcp_servers: [
     {
       name: "discord",
@@ -46,7 +46,7 @@ const CONFIG = {
       loaded_from: "~/.claude.json",
       effective: true,
       detail: "npx tsx",
-      forwarded_to_agents: ["brian", "emma"],
+      forwarded_to_agents: ["brian"],
       reserved_filtered: false,
     },
   ],
@@ -54,7 +54,7 @@ const CONFIG = {
     user_claude_md: { present: true, path: "/c/CLAUDE.md", bytes: 10 },
     home_claude_md: { present: false, path: "/h/CLAUDE.md", bytes: 0 },
     projects_with_memory: 2,
-    inheritance: inh(["brian", "emma"], ["rain"]),
+    inheritance: inh(["brian"], ["rain"]),
   },
   permissions: {
     default_mode: "default",
@@ -62,7 +62,7 @@ const CONFIG = {
     ask: 0,
     deny: 1,
     additional_directories: 0,
-    inheritance: inh([], ["brian", "emma", "rain"]),
+    inheritance: inh([], ["brian", "rain"]),
   },
   warnings: ["a server lives only in settings.json"],
 };
