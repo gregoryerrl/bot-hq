@@ -154,6 +154,18 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "web_search",
+            description: "Search the web and get back structured results (title, url, snippet). Runs INSIDE bot-hq via a headless browser, so it works regardless of which model backs this agent — unlike the built-in WebSearch, which is inert on third-party model gateways (e.g. DeepSeek). Use it to look things up online (docs, issues, current info); optionally read a result URL afterward with WebFetch.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The search query." },
+                    "num_results": { "type": "integer", "minimum": 1, "description": "Optional cap on how many results to return." }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolDescriptor {
             name: "request_phase_advance",
             description: "OPT-IN gated phase advance — use ONLY when you want to pause for explicit user acknowledgment before crossing a boundary. Most phase transitions should use `advance_phase` (self-advance, no gate). Reserve this for irreversible / destructive Apply work (force-push, prod writes, large rewrites). Adds a chat message + halt row; the duo's peer-forward halts until the user advances the chip OR replies in chat (implicit decline).",
             input_schema: serde_json::json!({

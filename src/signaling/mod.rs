@@ -27,6 +27,7 @@ pub mod protocol;
 mod response;
 mod server;
 mod tool_args;
+pub mod web_search;
 mod webview_js;
 
 pub use bridge::{PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent};

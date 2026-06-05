@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "search-webview",
+  "description": "The hidden web_search webview loads a remote search engine page; this grants that external page IPC access so its injected script can call web_search_callback to return results.",
+  "webviews": ["search"],
+  "remote": {
+    "urls": ["https://www.bing.com", "https://*.bing.com"]
+  },
+  "permissions": ["core:default"]
+}

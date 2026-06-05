@@ -176,6 +176,23 @@ async fn call_tool(
             bridge.agent_advance_phase(caller.session_id.clone(), caller.agent.clone(), target);
             Ok(ToolCallResult::text("phase advanced"))
         }
+        "web_search" => {
+            let query = arg_required_str(&args, "query")?;
+            let num_results = args.get("num_results").and_then(Value::as_u64).map(|n| n as usize);
+            let app = bridge
+                .app_handle()
+                .ok_or_else(|| {
+                    JsonRpcError::new(
+                        JsonRpcError::INTERNAL_ERROR,
+                        "Tauri AppHandle not yet initialized".to_string(),
+                    )
+                })?
+                .clone();
+            match crate::signaling::web_search::run_search(app, &query, num_results).await {
+                Ok(hits) => Ok(result_json(&hits, "[]")),
+                Err(e) => Ok(ToolCallResult::error(e)),
+            }
+        }
         "request_phase_advance" => {
             let target = arg_required_str(&args, "target")?;
             parse_phase_arg("target", &target)?;
