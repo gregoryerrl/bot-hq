@@ -527,15 +527,25 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // rejects it ("unknown variant `system`, expected user or assistant"
         // → API Error 400). The LOAD-BEARING fix is the local normalizing
         // proxy (`agents::llm_proxy`): Rain's ANTHROPIC_BASE_URL routes
-        // through it and any role:"system" message is hoisted into the
-        // top-level `system` field before it reaches DeepSeek. `--bare` is
-        // retained as defense-in-depth + to keep Rain lean (skips plugin sync
-        // + hooks + LSP + CLAUDE.md autodiscovery), but it does NOT eliminate
-        // the injection on claude-code >= 2.1.156 — a fresh --bare Rain still
-        // 400s on a fixed messages[11], which is why the proxy exists.
-        // `--bare` still honors --mcp-config (signaling) + ANTHROPIC_AUTH_TOKEN
-        // bearer auth. Brian hits the real first-party API, so it skips --bare.
-        cmd.arg("--bare");
+        // through it and EVERY role:"system" entry in `messages[]` is hoisted
+        // into the top-level `system` field before it reaches DeepSeek —
+        // source-agnostic, so it also catches the plugin-sync injection that
+        // running full (non-bare) mode brings back.
+        //
+        // We deliberately do NOT pass `--bare`. `--bare` (minimal mode,
+        // CLAUDE_CODE_SIMPLE=1) was once kept as belt-and-suspenders against
+        // that injection, but it ALSO disables claude-code's deferred-tool
+        // loader (`ToolSearch`) — which left Rain with Grep/Glob/WebFetch/
+        // ToolSearch/TodoWrite all inert ("exists but is not enabled in this
+        // context"), i.e. her whole read-investigation surface beyond Read/
+        // Bash. Since the proxy already neutralizes the role:"system"
+        // injection --bare was guarding against, dropping --bare restores the
+        // tool loader at no safety cost. Auth + routing are unaffected:
+        // ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL are set as env below
+        // regardless of mode. Read-only enforcement lives in `dontAsk` + the
+        // allow/deny lists, NOT in --bare. (Trade-off: without --bare Rain now
+        // syncs plugins + autodiscovers CLAUDE.md/auto-memory like Brian —
+        // heavier startup; suppress per-agent via the override env if needed.)
         cmd.args(["--permission-mode", "dontAsk"]);
         cmd.args([
             "--allowedTools",
@@ -586,10 +596,11 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // which surfaces Approve/Reject and runs the command on approval; an
         // `auto_allow`/unmatched command is allowed through. This replaces the
         // per-project `tool_blocklist` role after the 2026-05-29 fabricated-
-        // comment incident. Rain is exempt: she runs `--bare` (skips hooks) and
-        // is already mechanically read-only via the deny list above. Injected
-        // via `--settings` (a process arg) so NOTHING is written into the
-        // working repo's tree — disguise-safe for client repos.
+        // comment incident. Rain is exempt: this hook is injected only here in
+        // the HANDS branch, and she's already mechanically read-only via the
+        // deny list above (her mutation surface is blocked regardless of any
+        // hook). Injected via `--settings` (a process arg) so NOTHING is
+        // written into the working repo's tree — disguise-safe for client repos.
         match std::env::current_exe() {
             Ok(exe) => {
                 let mut hook_cmd = format!(
@@ -660,8 +671,9 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     }
 
     // Per-agent override env (effort / auto-memory / CLAUDE.md suppression).
-    // Applied to ALL agents, including Rain (--bare still reads env), though
-    // skill/plugin fragments above are moot for Rain (bare skips them).
+    // Applied to ALL agents. The skill/plugin `--settings` fragments above are
+    // Brian-only (Rain gets no --settings), but these ENV overrides are the
+    // lever to keep Rain lean now that she no longer runs --bare.
     for (k, v) in crate::claude_config::overrides::env_vars(&agent_override) {
         cmd.env(k, v);
     }
@@ -803,10 +815,9 @@ mod tests {
         c.data_dir = dir.path().to_path_buf();
 
         let args = debug_command(&c);
-        assert!(args.iter().any(|a| a == "--bare"), "rain runs --bare");
         assert!(
             !args.iter().any(|a| a == "--settings"),
-            "rain gets no --settings (skill/plugin fragments are moot under --bare)"
+            "rain gets no --settings (the tool-gate PreToolUse hook is Brian-only)"
         );
         // env-based overrides still apply to Rain.
         let cmd = build_command(&c);
@@ -1266,23 +1277,23 @@ mod tests {
     }
 
     #[test]
-    fn rain_gets_bare_minimal_mode() {
-        // Rain talks to a third-party Anthropic-compatible gateway (DeepSeek
-        // via ANTHROPIC_BASE_URL). claude-code >= 2.1.156 serializes a
-        // SessionStart hook's `additionalContext` (the superpowers plugin
-        // injects one) as a `role:"system"` entry in the `messages` array.
-        // The real Anthropic API tolerates it; stricter gateways reject it
-        // ("unknown variant `system`, expected user or assistant" → 400).
-        // `--bare` skips plugin sync so the injection never happens, while
-        // still honoring --mcp-config and ANTHROPIC_AUTH_TOKEN bearer auth.
+    fn rain_runs_without_bare_so_tool_loader_works() {
+        // Rain must NOT run `--bare`. `--bare` (CLAUDE_CODE_SIMPLE=1) disables
+        // claude-code's deferred-tool loader (`ToolSearch`), which left Rain's
+        // Grep/Glob/WebFetch/ToolSearch/TodoWrite inert ("exists but is not
+        // enabled in this context") — her whole read surface beyond Read/Bash.
+        // The role:"system" injection --bare once guarded against is
+        // neutralized by `llm_proxy` (it hoists every such entry out of
+        // `messages[]` into the top-level `system` field), so dropping --bare
+        // restores the tool surface at no safety cost.
         let mut c = cfg();
         c.agent_name = "rain".into();
         c.config.agent_name = "rain".into();
         let argv = debug_command(&c);
         assert!(
-            argv.iter().any(|a| a == "--bare"),
-            "Rain must run --bare so plugin SessionStart hooks can't inject a \
-             system-role message that non-Anthropic gateways reject: {argv:?}"
+            !argv.iter().any(|a| a == "--bare"),
+            "Rain must NOT run --bare (it disables the ToolSearch tool loader); \
+             the llm_proxy handles the role:system injection instead: {argv:?}"
         );
     }
 
@@ -1323,8 +1334,9 @@ mod tests {
 
     #[test]
     fn rain_does_not_get_tool_gate_hook() {
-        // Rain runs --bare (skips hooks) and is already mechanically read-only
-        // via the deny list, so injecting --settings would be inert noise.
+        // The tool-gate PreToolUse hook is injected via --settings in the HANDS
+        // (Brian) branch only; Rain is already mechanically read-only via the
+        // deny list, so she gets no --settings at all.
         let mut c = cfg();
         c.agent_name = "rain".into();
         c.config.agent_name = "rain".into();
