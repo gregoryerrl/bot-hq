@@ -235,7 +235,6 @@ fn main() -> Result<()> {
         .manage(Arc::clone(&bridge_arc))
         .manage(Arc::clone(&core))
         .manage(Arc::clone(&registry))
-        .manage(bot_hq::signaling::web_search::SearchRegistry::new())
         .invoke_handler(specta_builder.invoke_handler())
         .setup(move |app| {
             // Tauri's setup runs on the OS main thread outside any Tokio

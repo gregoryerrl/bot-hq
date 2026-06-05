@@ -20,7 +20,6 @@ pub fn typescript_config() -> specta_typescript::Typescript {
         .bigint(specta_typescript::BigIntExportBehavior::Number)
 }
 
-use crate::signaling::web_search;
 use crate::tauri_cmd::{
     agent_configs, claude_config, cl, docs, messages, models, plugins, policy, questions, sessions,
     tool_gate,
@@ -103,9 +102,6 @@ pub fn builder() -> Builder<tauri::Wry> {
         plugins::enable_plugin,
         plugins::disable_plugin,
         plugins::uninstall_plugin,
-        // Web search — invoked BY the hidden search webview's injected script
-        // to deliver results back to run_search (not called from the frontend).
-        web_search::web_search_callback,
     ])
 }
 
