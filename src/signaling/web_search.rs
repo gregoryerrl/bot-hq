@@ -185,12 +185,15 @@ fn startpage_extract() -> String {
         r#"(function() {{
   {CAPTCHA_JS}
   var hits = [];
-  var nodes = document.querySelectorAll('.w-gl__result, .result, div[class*="result"]');
+  var nodes = document.querySelectorAll('.result, .w-gl__result');
   for (var i = 0; i < nodes.length; i++) {{
     var li = nodes[i];
-    var a = li.querySelector('a.w-gl__result-title, a.result-title, .w-gl__result-title a, h3 a, a[class*="title"]');
-    var sn = li.querySelector('.w-gl__description, .description, p[class*="desc"], p');
-    var title = a ? (a.innerText || '').trim() : '';
+    // Title link carries the real URL; `.wgl-title` is the page title (NOT
+    // `.wgl-site-title`, the source label). `.description` is the snippet.
+    var a = li.querySelector('a.result-title, a.result-link');
+    var titleEl = li.querySelector('.wgl-title') || a;
+    var sn = li.querySelector('.description, .w-gl__description');
+    var title = titleEl ? (titleEl.innerText || '').trim() : '';
     var href = a ? (a.href || '') : '';
     if (href && title && href.indexOf('http') === 0) {{
       hits.push({{ title: title, url: href, snippet: sn ? (sn.innerText || '').trim() : '' }});
