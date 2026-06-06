@@ -13,7 +13,7 @@
 //! The implementation is split across submodules — each owns one cohesive slice
 //! of the bridge's surface and contributes its own `impl SignalingBridge` block:
 //!
-//! - [`questions`]    — user-blocking tools (ask/resolve/supersede/await/phase)
+//! - [`tray`]         — user-blocking tools (ask/resolve/supersede/await/phase)
 //! - [`cl_facade`]    — Context Library index/folder/rescan reads
 //! - [`session_docs`] — per-session scratch documents
 //! - [`util`]         — free helper functions
@@ -29,8 +29,8 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
 mod cl_facade;
-mod questions;
 mod session_docs;
+mod tray;
 mod util;
 
 /// Summary of a single `cl_rescan` pass.

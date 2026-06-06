@@ -64,7 +64,7 @@ impl SignalingBridge {
     /// Resolve the session's working repo, then run the command and format the
     /// combined output.
     ///
-    /// `pub(super)` so `resolve_choice` (sibling module `bridge::questions`) can
+    /// `pub(super)` so `resolve_choice` (sibling module `bridge::tray`) can
     /// run an approved gated command on the receiver-dropped path — when the
     /// agent's `action_gate` tool call timed out client-side, its request future
     /// (which would have called this in-band) was already cancelled.
