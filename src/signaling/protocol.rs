@@ -160,7 +160,8 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "The search query." },
-                    "num_results": { "type": "integer", "minimum": 1, "description": "Optional cap on how many results to return." }
+                    "num_results": { "type": "integer", "minimum": 1, "description": "Optional cap on how many results to return." },
+                    "engine": { "type": "string", "enum": ["google", "startpage", "bing", "auto"], "description": "Optional preferred engine to try FIRST (still falls back to the others). Default cascade order: Google → Startpage → Bing. Use 'auto' or omit for the default." }
                 },
                 "required": ["query"]
             }),

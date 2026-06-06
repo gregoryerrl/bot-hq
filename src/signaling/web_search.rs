@@ -12,10 +12,12 @@
 //! capability, no command, no initialization script. Reading the
 //! server-rendered DOM directly also dodges hidden-webview timer throttling.
 //!
-//! Engine FALLBACK CASCADE: engines are tried in priority order (Google →
-//! Bing); the first to return non-empty results wins. A CAPTCHA / empty page /
-//! timeout on one engine falls through to the next, so a single engine
-//! CAPTCHA-ing mid-task doesn't break search. Bing is the proven anchor.
+//! Engine FALLBACK CASCADE: engines (Google → Startpage → Bing) are tried in
+//! order; the first to return non-empty, titled results wins. A CAPTCHA / empty
+//! page (e.g. Google's intermittent consent interstitial) / timeout falls
+//! through to the next engine, so a single engine misbehaving mid-task doesn't
+//! break search. The caller may pass `engine` to try a preferred one first
+//! (still falling back to the rest). Bing is the proven anchor.
 //!
 //! Serialized one-at-a-time (a process-global permit) so the fixed webview
 //! label `search` never collides; each engine attempt ALWAYS destroys the
@@ -78,8 +80,9 @@ struct Engine {
     extract: fn() -> String,
 }
 
-/// Priority order. Google first (best results), Bing as the proven anchor.
-/// DuckDuckGo deliberately excluded. Reorder / add engines here.
+/// Default priority. Google first (best results when not bot-detected),
+/// Startpage (Google's index, fewer interstitials), Bing as the proven anchor.
+/// The caller can put any of these first via the `engine` arg.
 const ENGINES: &[Engine] = &[
     Engine {
         name: "google",
@@ -87,11 +90,19 @@ const ENGINES: &[Engine] = &[
         extract: google_extract,
     },
     Engine {
+        name: "startpage",
+        url: startpage_url,
+        extract: startpage_extract,
+    },
+    Engine {
         name: "bing",
         url: bing_url,
         extract: bing_extract,
     },
 ];
+
+/// Engine names the caller may select (kept in sync with [`ENGINES`]).
+pub const ENGINE_NAMES: &[&str] = &["google", "startpage", "bing"];
 
 /// Percent-encode a query per RFC 3986 unreserved set (ALPHA / DIGIT / -._~);
 /// everything else becomes %XX. Avoids pulling in a urlencoding crate.
@@ -112,13 +123,19 @@ fn google_url(q: &str) -> String {
     format!("https://www.google.com/search?q={}&hl=en", encode_query(q))
 }
 
+fn startpage_url(q: &str) -> String {
+    format!("https://www.startpage.com/sp/search?query={}", encode_query(q))
+}
+
 fn bing_url(q: &str) -> String {
     format!("https://www.bing.com/search?q={}", encode_query(q))
 }
 
 /// Google extraction (best-guess selectors — Google's DOM is obfuscated and
-/// shifts; tune from live results). Walks result `h3`s up to their anchor and
-/// decodes `/url?q=` redirects. Falls back to the Bing engine if empty.
+/// shifts; tune from live results). Walks result `h3`s up to their anchor,
+/// decodes `/url?q=` redirects, requires a non-empty title (rejects the
+/// empty-titled junk of Google's consent interstitial → falls through), and
+/// falls back to container text when the snippet selectors miss.
 fn google_extract() -> String {
     format!(
         r#"(function() {{
@@ -144,8 +161,39 @@ fn google_extract() -> String {
       if (!title || u.indexOf('http') !== 0 || seen[u]) continue;
       seen[u] = 1;
       var cont = h3.closest ? h3.closest('div.g, div[data-hveid], div[data-sokoban-container]') : null;
-      var sn = cont ? cont.querySelector('div[data-sncf], .VwiC3b, span.aCOpRe') : null;
-      hits.push({{ title: title, url: u, snippet: sn ? (sn.innerText || '').trim() : '' }});
+      var sn = cont ? cont.querySelector('div[data-sncf] span, .VwiC3b, span.aCOpRe, .lyLwlc, .yDYNvb') : null;
+      var snippet = sn ? (sn.innerText || '').trim() : '';
+      if (!snippet && cont) {{
+        var ct = (cont.innerText || '').replace(/\s+/g, ' ').trim();
+        var idx = ct.indexOf(title);
+        if (idx >= 0) ct = ct.slice(idx + title.length).trim();
+        snippet = ct.slice(0, 300);
+      }}
+      hits.push({{ title: title, url: u, snippet: snippet }});
+    }}
+  }}
+  return {{ results: hits }};
+}})()"#
+    )
+}
+
+/// Startpage extraction — Startpage proxies Google's index without Google's
+/// BotGuard, with cleaner server-rendered HTML. Selectors are best-guess
+/// (live-tunable); requires a non-empty title.
+fn startpage_extract() -> String {
+    format!(
+        r#"(function() {{
+  {CAPTCHA_JS}
+  var hits = [];
+  var nodes = document.querySelectorAll('.w-gl__result, .result, div[class*="result"]');
+  for (var i = 0; i < nodes.length; i++) {{
+    var li = nodes[i];
+    var a = li.querySelector('a.w-gl__result-title, a.result-title, .w-gl__result-title a, h3 a, a[class*="title"]');
+    var sn = li.querySelector('.w-gl__description, .description, p[class*="desc"], p');
+    var title = a ? (a.innerText || '').trim() : '';
+    var href = a ? (a.href || '') : '';
+    if (href && title && href.indexOf('http') === 0) {{
+      hits.push({{ title: title, url: href, snippet: sn ? (sn.innerText || '').trim() : '' }});
     }}
   }}
   return {{ results: hits }};
@@ -154,7 +202,7 @@ fn google_extract() -> String {
 }
 
 /// Bing extraction (proven). Decodes Bing's `bing.com/ck/a?...&u=a1<base64url>`
-/// click-redirects into real destination URLs (falls back to the raw href).
+/// click-redirects into real destination URLs; requires a non-empty title.
 fn bing_extract() -> String {
     format!(
         r#"(function() {{
@@ -291,13 +339,28 @@ async fn try_engine(app: &tauri::AppHandle, url: String, js: String) -> Result<V
     outcome
 }
 
-/// Run a web search across the engine fallback cascade. Returns the first
-/// engine's non-empty results; if all engines CAPTCHA / time out / return
+/// Build the engine try-order: a valid `preferred` engine goes first, then the
+/// rest of the default cascade as fallback. Unknown / `auto` / `None` → default.
+fn engine_order(preferred: Option<&str>) -> Vec<&'static Engine> {
+    match preferred {
+        Some(sel) if sel != "auto" && ENGINES.iter().any(|e| e.name == sel) => {
+            let mut v: Vec<&Engine> = ENGINES.iter().filter(|e| e.name == sel).collect();
+            v.extend(ENGINES.iter().filter(|e| e.name != sel));
+            v
+        }
+        _ => ENGINES.iter().collect(),
+    }
+}
+
+/// Run a web search across the engine cascade. `engine` optionally names a
+/// preferred engine to try first (still falling back to the rest). Returns the
+/// first engine's non-empty results; if all CAPTCHA / time out / return
 /// nothing, returns the last failure.
 pub async fn run_search(
     app: tauri::AppHandle,
     query: &str,
     num_results: Option<usize>,
+    engine: Option<String>,
 ) -> Result<Vec<Hit>, String> {
     // Serialize: one search (one "search" webview) at a time.
     let _permit = SEARCH_PERMIT
@@ -306,7 +369,7 @@ pub async fn run_search(
         .map_err(|_| "search permit closed".to_string())?;
 
     let mut last = "no engine returned results".to_string();
-    for engine in ENGINES {
+    for engine in engine_order(engine.as_deref()) {
         match try_engine(&app, (engine.url)(query), (engine.extract)()).await {
             Ok(hits) if !hits.is_empty() => {
                 tracing::info!(engine = engine.name, count = hits.len(), "web_search: results");
@@ -343,26 +406,40 @@ mod tests {
     #[test]
     fn engine_urls_encode_query() {
         assert!(google_url("hello world").starts_with("https://www.google.com/search?q=hello%20world"));
+        assert!(startpage_url("hello world").starts_with("https://www.startpage.com/sp/search?query=hello%20world"));
         assert!(bing_url("hello world").starts_with("https://www.bing.com/search?q=hello%20world"));
     }
 
     #[test]
-    fn cascade_order_is_google_then_bing() {
+    fn default_cascade_order_is_google_startpage_bing() {
         let names: Vec<&str> = ENGINES.iter().map(|e| e.name).collect();
-        assert_eq!(names, vec!["google", "bing"]);
+        assert_eq!(names, vec!["google", "startpage", "bing"]);
+        assert_eq!(ENGINE_NAMES, names.as_slice());
+    }
+
+    #[test]
+    fn engine_order_puts_preferred_first_then_fallback() {
+        let order: Vec<&str> = engine_order(Some("bing")).iter().map(|e| e.name).collect();
+        assert_eq!(order, vec!["bing", "google", "startpage"]);
+        // unknown / auto / none fall back to default order
+        let dflt: Vec<&str> = engine_order(Some("auto")).iter().map(|e| e.name).collect();
+        assert_eq!(dflt, vec!["google", "startpage", "bing"]);
+        assert_eq!(engine_order(Some("nope")).len(), 3);
+        assert_eq!(engine_order(None).len(), 3);
     }
 
     #[test]
     fn extraction_js_is_sync_no_ipc() {
-        for js in [google_extract(), bing_extract()] {
+        for js in [google_extract(), startpage_extract(), bing_extract()] {
             assert!(js.contains("captcha")); // shared CAPTCHA detection
             assert!(js.contains("results:")); // returns {results:[...]}
-            // No invoke / IPC — extraction reads the DOM, evaluated from Rust.
+            assert!(js.contains("title")); // title-filtered
             assert!(!js.contains("__TAURI_INTERNALS__"));
             assert!(!js.contains("invoke"));
         }
-        assert!(bing_extract().contains("li.b_algo")); // Bing selector
-        assert!(google_extract().contains("h3")); // Google selector
+        assert!(bing_extract().contains("li.b_algo"));
+        assert!(google_extract().contains("h3"));
+        assert!(startpage_extract().contains("w-gl__result"));
     }
 
     #[test]

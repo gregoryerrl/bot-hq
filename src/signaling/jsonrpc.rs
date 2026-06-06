@@ -179,6 +179,7 @@ async fn call_tool(
         "web_search" => {
             let query = arg_required_str(&args, "query")?;
             let num_results = args.get("num_results").and_then(Value::as_u64).map(|n| n as usize);
+            let engine = args.get("engine").and_then(Value::as_str).map(str::to_string);
             let app = bridge
                 .app_handle()
                 .ok_or_else(|| {
@@ -188,7 +189,7 @@ async fn call_tool(
                     )
                 })?
                 .clone();
-            match crate::signaling::web_search::run_search(app, &query, num_results).await {
+            match crate::signaling::web_search::run_search(app, &query, num_results, engine).await {
                 Ok(hits) => Ok(result_json(&hits, "[]")),
                 Err(e) => Ok(ToolCallResult::error(e)),
             }
