@@ -250,14 +250,14 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**24 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**25 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the full list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `advance_phase`, `request_phase_advance`,
 `request_approval`, `action_gate`, `check_commit_message`,
 `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_search`,
 `session_doc_read`, `cl_index_search`, `cl_register_read`, `cl_rescan`,
-`cl_folder_search`, `cl_register_folder_description`,
+`cl_folder_search`, `cl_register_folder_description`, `web_search`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
 
@@ -293,7 +293,7 @@ session, a test driver). Lives in `src/signaling/external_jsonrpc.rs`
   marks "unavailable" — bot-hq stays usable.
 
 Tools: see [README.md](README.md#available-external-tools) for the full
-list (21 driver tools including `list_sessions`, `create_session`,
+list (19 driver tools including `list_sessions`, `create_session`,
 `send_message`, `wait_for_change`, `get_session_snapshot`, etc.).
 
 ---
@@ -535,6 +535,18 @@ Deferred to separate plans (not in current scope):
 - **Clive plugin** — port of legacy bot-hq's Clive bot.
 
 Plugin contract TBD per plugin.
+
+---
+
+## Eval harness
+
+`bench/swebench/` is a SWE-bench rollout harness for evaluating the duo
+on real GitHub issues — a Python client (`run_rollout.py`,
+`bothq_client.py`, `verify.py`, …) that drives sessions through the
+external MCP server and scores patches. It is a developer tool, **not
+part of the runtime core**: it ships in-repo but is not compiled into
+the `bot-hq` binary and does not run at app startup. See
+[`bench/swebench/README.md`](bench/swebench/README.md).
 
 ---
 

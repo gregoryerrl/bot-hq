@@ -103,7 +103,7 @@ bot-hq/
   state.
 - **Two MCP servers:**
   - **Internal** at `127.0.0.1:<ephemeral>` — UI-signaling tools served
-    to child agents (24 tools — see "Internal MCP tools" below).
+    to child agents (25 tools — see "Internal MCP tools" below).
   - **External** at `127.0.0.1:7892` — driver tools served to any
     bearer-token-authenticated MCP client (see "Driving bot-hq from
     another MCP client" below).
@@ -155,6 +155,7 @@ Bot-hq exposes these to each spawned agent via the per-agent
 | `webview_type(selector, text)` | Type into a webview element. |
 | `webview_scroll(selector?, y)` | Scroll an element or the page in the webview. |
 | `webview_press_key(key)` | Dispatch a keypress in the webview. |
+| `web_search(query, engine?)` | Search the web via a headless webview (Google→Startpage→Bing cascade), so non-first-party models without a server-side search tool can fetch live results. Available to both agents. |
 
 Role boundary: Rain (EYES) is blocked from `ask_user_choice`,
 `mark_awaiting_user`, `request_approval`, `action_gate`,

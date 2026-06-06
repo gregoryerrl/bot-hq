@@ -11,13 +11,48 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-410 tests passing (359 lib + 32 external MCP + 7 signaling + 12 storage)
-plus 53 frontend Vitest. Release build clean. **Tauri v2 migration landed
+425 tests passing (377 lib + 31 external MCP + 7 signaling + 10 storage)
+plus 56 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-06-06 — web_search, prompt fixes, UI outline pass + health-audit sweep
+
+Backfills the 2026-06-06 feature work (shipped but previously unlogged) plus a
+CL + codebase health sweep.
+
+- **feat(web_search): model-agnostic web search via a headless webview.** A new
+  `web_search(query, engine?)` internal MCP tool navigates a hidden webview and
+  reads the rendered DOM from Rust (`eval_with_callback`), cascading
+  Google→Startpage→Bing with a title-filter + nav-junk drop. Lets agents on
+  gateways without a server-side search tool fetch live results. Rain's `--bare`
+  was dropped (`fa57a92`) so her client-side tool loader works again (the
+  llm_proxy already handles the system-message hoist `--bare` was guarding).
+- **fix(prompts): interpolate the project name + sharpen investigate guidance**
+  (`1bf3faa`). The `<your project>` placeholder in the CL anchor + role prompts
+  was never substituted; now resolved to the session's project (or `_globals`
+  when repo-less). Added a "tight turns while coordinating" nudge.
+- **feat(ui): outline icons + confirm dialog** (`2fa33f1`). Replaced text/glyph
+  icons with a hand-rolled outline SVG set (`components/icons.tsx`); a reusable
+  `ConfirmDialog` replaced all `window.confirm` sites; the session-view close
+  button is now a force-close danger dialog. Dropped the redundant role chip.
+- **fix: bell self-heal on out-of-band resolve** (`e43e5f3`) — the OOB resolve
+  paths now emit `ChoiceResolved` so the notifier badge clears.
+
+Health-audit sweep (CL + codebase):
+- **refactor: rename `bridge/questions.rs` → `tray.rs`** (`8035b38`) to match the
+  `session_tray` table (renamed in migration 0010).
+- **refactor(ui): share the phase→bucket mapping** (`9c48390`) between PhasePill
+  and SessionPhaseChip via `lib/phase.ts` (`phaseBucket`); +3 frontend tests.
+- **docs: correct drifted counts** — internal MCP tools 24→25 (web_search),
+  external driver tools 21→19, test counts 410→425 (377 lib + 31 ext + 7 sig +
+  10 storage + 56 frontend). Documented the `bench/swebench/` eval harness in
+  ARCHITECTURE.md.
 
 ---
 
