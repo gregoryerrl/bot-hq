@@ -579,15 +579,27 @@ pub fn read_system_prompt(
     // filenames and miss the rest of the CL. The full tool signatures for
     // cl_index_search / cl_register_read / cl_rescan live in GENERAL_RULES
     // (layer 3 below) — here we just establish the orientation.
+    let (project_arg, project_line) = match project {
+        Some(p) => (
+            format!("\"{p}\""),
+            format!(
+                "**This session's project is `{p}`** — pass it as the \
+                 `project` argument below.\n\n"
+            ),
+        ),
+        None => ("\"_globals\"".to_string(), String::new()),
+    };
     out.push_str(&format!(
         "## Context Library\n\n\
+         {project_line}\
          Your Context Library lives at `{cl}`. Single source of truth — \
          other `~/.bot-hq*` paths are archives from prior installs, ignore \
          them.\n\n\
          **Index-first.** The CL is indexed in SQLite; each file has a \
          description so you can decide what's worth opening without burning \
-         context on irrelevant files. Call `cl_index_search(project=<your \
-         project>)` BEFORE reaching for `Read` on any CL path. Pass \
+         context on irrelevant files. Call \
+         `cl_index_search(project=<your project>)` BEFORE reaching for \
+         `Read` on any CL path. Pass \
          `\"_globals\"` for system-level / cross-project notes, your \
          session's project name for project-scoped notes, or omit `project` \
          to search everything. Folders carry their own descriptions in \
@@ -646,6 +658,13 @@ pub fn read_system_prompt(
     if !block.is_empty() {
         push_section(&mut out, &block);
     }
+
+    // Interpolate the generic `<your project>` placeholder — used in the role
+    // prompt, GENERAL_RULES, and the CL anchor above — with the resolved
+    // project name, so every `cl_index_search(project=…)` example names the
+    // real project instead of leaving the agent to guess (a wrong guess
+    // silently returns nothing). Repo-less sessions default to `"_globals"`.
+    out = out.replace("<your project>", &project_arg);
     Ok(out)
 }
 
@@ -797,6 +816,35 @@ mod tests {
         // ask_user_choice or broad Glob sweeps.
         assert!(prompt.contains("Bare-filename heuristic"));
         assert!(prompt.contains("_globals"));
+    }
+
+    #[test]
+    fn cl_anchor_interpolates_resolved_project_name() {
+        // Issue: the CL anchor used to print the literal placeholder
+        // `cl_index_search(project=<your project>)`, so an agent had to GUESS
+        // its project key — and a wrong guess silently returns nothing. The
+        // resolved project name is now interpolated into the anchor and stated
+        // explicitly, removing the silent wrong-scope failure mode.
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        let prompt = read_system_prompt(&paths, "brian", Some("bot-hq"), None).unwrap();
+        assert!(
+            prompt.contains("cl_index_search(project=\"bot-hq\")"),
+            "CL anchor must interpolate the resolved project name"
+        );
+        assert!(
+            prompt.contains("This session's project is `bot-hq`"),
+            "CL anchor must state the session's project explicitly"
+        );
+        assert!(
+            !prompt.contains("project=<your project>"),
+            "no literal placeholder should survive interpolation"
+        );
+        // Repo-less session (project None) falls back to the _globals example
+        // rather than leaving a dangling placeholder.
+        let prompt_none = read_system_prompt(&paths, "brian", None, None).unwrap();
+        assert!(prompt_none.contains("cl_index_search(project=\"_globals\")"));
     }
 
     #[test]

@@ -82,7 +82,7 @@ You review and investigate. Your job is to read, think, and surface findings to 
 Tools you may use:
 
 - **Read-only file tools**: `Read`, `Grep`, `Glob`.
-- **Web / reference**: `WebFetch`, `ToolSearch`, and **`mcp__bot-hq-signaling__web_search`** — bot-hq's own web search (runs in-process via a headless browser, so it returns real results on any model gateway, unlike the built-in `WebSearch` which is inert through the DeepSeek gateway). Prefer `web_search` for live lookups; `WebFetch` to then read a result URL.
+- **Web / reference**: `WebFetch`, `ToolSearch`, and **`mcp__bot-hq-signaling__web_search`** — bot-hq's own web search (runs in-process via a headless browser, so it returns real results on any model gateway, unlike the built-in `WebSearch` which is inert through the DeepSeek gateway). Reach for `web_search` when the question reaches OUTSIDE the repo — an upstream dependency or library version, a known/upstream issue, current docs, or an unfamiliar error string. Skip it for codebase-internal questions: the answer is in `src/`, not on the web, and each search costs a real round-trip. `WebFetch` then reads a chosen result URL.
 - **Task tracking**: `TodoWrite` (for your own notes).
 - **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git rev-list`, `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`, and **read-only `gh`**: `gh issue view`/`gh issue list`, `gh pr view`/`gh pr diff`/`gh pr list`/`gh pr status`/`gh pr checks`, `gh repo view`, `gh release view`/`gh release list`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, reading an issue/PR). NOTE: every MUTATING `gh` form (`gh pr create`/`merge`/`comment`/`checkout`, `gh issue create`/`edit`/`close`/`comment`, `gh repo create`/`clone`, `gh release create`, …), `gh api` (the POST/PATCH/DELETE escape hatch), and `git branch` are mechanically blocked for you via `--disallowedTools`. Read an issue/PR with `gh ... view`; ask Brian to create/comment/merge.
 
@@ -259,6 +259,26 @@ mod tests {
         // ask-with-prior-context move for bare resume words.
         assert!(BRIAN_ROLE.contains("Ambiguous resume words"));
         assert!(BRIAN_ROLE.contains("ambiguity → ask, single thread → resume"));
+    }
+
+    #[test]
+    fn rain_web_search_guidance_is_conditional_not_blanket() {
+        // June-6 #5: the old "Prefer web_search for live lookups" was vague
+        // and read as "always search." Sharpened to when-to-search: only when
+        // the question reaches outside the repo. Lock the conditional framing
+        // and guard against drifting back to the blanket "prefer" wording.
+        assert!(
+            RAIN_ROLE.contains("Reach for `web_search` when the question reaches OUTSIDE the repo"),
+            "Rain web_search guidance must be scoped to external questions"
+        );
+        assert!(
+            RAIN_ROLE.contains("Skip it for codebase-internal questions"),
+            "Rain must be told to skip web_search for codebase-internal questions"
+        );
+        assert!(
+            !RAIN_ROLE.contains("Prefer `web_search` for live lookups"),
+            "the vague blanket 'prefer' wording must not return"
+        );
     }
 
     #[test]

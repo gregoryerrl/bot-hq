@@ -118,7 +118,9 @@ Each substantive task walks through four phases. The current phase appears as `[
 
 **One author, one chain.** HANDS authors the phase docs; EYES surfaces findings in chat for HANDS to fold in — so the single per-phase doc has one writer, not two clobbering each other. And each phase builds on the last: `plan` leans on `investigate`, `apply` on `plan`, `verify` on `apply`. Read the prior phase's doc with `session_doc_search(phase=<prev>)` and build on it instead of re-deriving.
 
-1. **Investigate** — gather facts. **Open `cl_index_search` first** so you know the project conventions before reading code. Then read code, grep, run read-only Bash. **No** Edit, Write, or mutating Bash. Output: your understanding stated in chat + a `phase=\"investigate\"` doc capturing pipeline traces, constraint discoveries, references consulted — anything reusable in later phases.
+**Tight turns while coordinating (Investigate/Plan).** Your peer's forwarded findings reach you only at a turn boundary — claude-code reads stdin between turns, never mid-turn. So a long, many-tool turn (a big parallel fan-out, say) delays picking up what your peer just surfaced by however long that turn runs. While the two of you are actively investigating or planning together, prefer several smaller turns over one monolithic turn so findings land and get folded in promptly. (Apply/Verify forward on turn-completion anyway, so this matters most in I/P.)
+
+1. **Investigate** — gather facts. **Open `cl_index_search` first** so you know the project conventions before reading code. Then read code, grep, run read-only Bash — reaching for `web_search` only when a question reaches OUTSIDE the repo (a dependency version, an upstream issue, current docs, an unfamiliar error string); skip it for codebase-internal questions. **No** Edit, Write, or mutating Bash. Output: your understanding stated in chat + a `phase=\"investigate\"` doc capturing pipeline traces, constraint discoveries, references consulted — anything reusable in later phases.
 2. **Plan** — **first read the `investigate` doc (`session_doc_search(phase=\"investigate\")`) and build the plan ON it, not from scratch.** Propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet. Output: the plan in chat + a `phase=\"plan\"` doc with the full plan (especially when >3 batches, multi-file, or anything Brian / Rain will reference during Apply / Verify).
 3. **Apply** — mutate, implementing against the `plan` doc (read it first). HANDS (Brian) executes Edit/Write/Bash; EYES (Rain) does not write. Output: code AND a `phase=\"apply\"` doc summarizing what changed, why, what was deferred — so Rain in Verify can pull it via `session_doc_search(phase=\"apply\")` without re-deriving from the diff. The session view's A tab auto-renders your working repo's `git diff` color-coded (GitHub-style: green adds, red removes, blue hunks, yellow file headers); point the user there for visual review instead of pasting diffs into chat. Apply-phase docs render below the diff in the same tab.
 4. **Verify** — confirm the outcome against the `apply` doc (read it first). Run tests, type-check, re-read the file, or describe the manual check. Cite the output. Output: chat summary + a `phase=\"verify\"` doc capturing commands run, output observed, manual checks, and any flakes / known limits.
@@ -229,6 +231,38 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("study notes, not a textbook"),
             "CL section must frame CL as high-signal study notes"
+        );
+    }
+
+    #[test]
+    fn ipav_nudges_tight_turns_for_peer_pickup() {
+        // June-6 observation: Brian was slow to pick up Rain's findings in
+        // Investigate/Plan. Root cause is turn-boundary latency (claude-code
+        // reads stdin only between turns), not the duo buffer. The IPAV
+        // section must teach tight turns while coordinating so a long fan-out
+        // turn doesn't strand a peer's findings.
+        assert!(
+            GENERAL_RULES.contains("Tight turns while coordinating"),
+            "IPAV section must carry the turn-boundary coordination nudge"
+        );
+        assert!(
+            GENERAL_RULES.contains("only at a turn boundary"),
+            "nudge must name the turn-boundary constraint, not just say 'be quick'"
+        );
+    }
+
+    #[test]
+    fn investigate_bullet_scopes_web_search_to_external() {
+        // June-6 #5: web_search should be reached for only when a question
+        // reaches outside the repo — not mandated on every Investigate, and
+        // not used for codebase-internal questions where it's pure overhead.
+        assert!(
+            GENERAL_RULES.contains("reaching for `web_search` only when"),
+            "Investigate bullet must scope web_search to external questions"
+        );
+        assert!(
+            GENERAL_RULES.contains("skip it for codebase-internal questions"),
+            "Investigate bullet must tell agents to skip web_search for local questions"
         );
     }
 
