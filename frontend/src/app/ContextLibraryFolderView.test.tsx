@@ -73,8 +73,6 @@ describe("FolderView", () => {
 
   it("shows the project registration section on a project root and unregisters", async () => {
     mockInvoke.mockResolvedValue(undefined);
-    // Unregister is now confirm-gated; accept it so the command fires.
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     const onProjectChanged = vi.fn();
     render(
       <FolderView
@@ -98,14 +96,14 @@ describe("FolderView", () => {
     ).toBeInTheDocument();
     expect(screen.getByDisplayValue("/Users/me/Projects/bot-hq")).toBeInTheDocument();
 
+    // Unregister is confirm-gated by a dialog: open it, then confirm.
     fireEvent.click(screen.getByRole("button", { name: /unregister project/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Unregister" }));
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("cl_unregister_project", {
         name: "bot-hq",
       }),
     );
-    expect(confirmSpy).toHaveBeenCalled();
     expect(onProjectChanged).toHaveBeenCalled();
-    confirmSpy.mockRestore();
   });
 });

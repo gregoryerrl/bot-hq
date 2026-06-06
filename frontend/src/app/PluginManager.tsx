@@ -3,6 +3,7 @@ import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { Button } from "../components/ui/Button";
 import { Card, CardDescription, CardTitle } from "../components/ui/Card";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { cn } from "../lib/cn";
 import type {
   AppError,
@@ -18,6 +19,8 @@ import type {
 export function PluginManager() {
   const [installSource, setInstallSource] = useState("");
   const [installError, setInstallError] = useState<AppError | null>(null);
+  const [confirmUninstall, setConfirmUninstall] =
+    useState<InstalledPluginView | null>(null);
 
   const list = useTauriQuery<InstalledPluginView[]>(
     "list_installed_plugins",
@@ -141,11 +144,7 @@ export function PluginManager() {
                 const action = p.enabled ? disable : enable;
                 action.mutate({ pluginId: p.id });
               }}
-              onUninstall={() => {
-                if (window.confirm(`Uninstall plugin "${p.name}"?`)) {
-                  uninstall.mutate({ pluginId: p.id });
-                }
-              }}
+              onUninstall={() => setConfirmUninstall(p)}
               busy={
                 (p.enabled && disable.isPending) ||
                 (!p.enabled && enable.isPending) ||
@@ -155,6 +154,27 @@ export function PluginManager() {
           ))}
         </div>
       )}
+      <ConfirmDialog
+        open={confirmUninstall !== null}
+        title="Uninstall plugin?"
+        message={
+          <>
+            Uninstall{" "}
+            <strong className="text-on-surface">{confirmUninstall?.name}</strong>?
+            Its files under{" "}
+            <code className="text-on-surface">~/.bot-hq/plugins/</code> are
+            removed.
+          </>
+        }
+        confirmLabel="Uninstall"
+        confirmVariant="danger"
+        onConfirm={() => {
+          if (confirmUninstall)
+            uninstall.mutate({ pluginId: confirmUninstall.id });
+          setConfirmUninstall(null);
+        }}
+        onCancel={() => setConfirmUninstall(null)}
+      />
     </div>
   );
 }

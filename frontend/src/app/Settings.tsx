@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import { Link, useBlocker } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { SaveIcon } from "./contextLibraryShared";
+import { WrenchIcon, EyeIcon, GearIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { ModelsPanel } from "./ModelsPanel";
 import { PolicyForm } from "../components/PolicyForm";
@@ -383,7 +384,7 @@ function AgentCard({
       {/* Header: icon + name + status badges + role chip */}
       <div className="mb-4 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="text-lg leading-none" aria-hidden>
+          <span className="flex items-center leading-none" aria-hidden>
             {agentIcon(cfg.agent_name)}
           </span>
           <h2 className="truncate font-headline-md text-headline-md capitalize text-on-surface">
@@ -400,7 +401,6 @@ function AgentCard({
             </span>
           )}
         </div>
-        <RoleChip agentName={cfg.agent_name} />
       </div>
 
       {/* Form fields */}
@@ -701,53 +701,6 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-function RoleChip({ agentName }: { agentName: string }) {
-  const { label, bg, text, border } = roleStyle(agentName);
-  return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center rounded border px-2 py-0.5 font-label-caps text-label-caps",
-        bg,
-        text,
-        border,
-      )}
-    >
-      {label}
-    </span>
-  );
-}
-
-function roleStyle(name: string): {
-  label: string;
-  bg: string;
-  text: string;
-  border: string;
-} {
-  switch (name) {
-    case "brian":
-      return {
-        label: "ACTIVE",
-        bg: "bg-primary/15",
-        text: "text-primary",
-        border: "border-primary/30",
-      };
-    case "rain":
-      return {
-        label: "STANDBY",
-        bg: "bg-outline-variant/15",
-        text: "text-on-surface-variant",
-        border: "border-outline-variant/30",
-      };
-    default:
-      return {
-        label: name.toUpperCase(),
-        bg: "bg-outline-variant/15",
-        text: "text-on-surface-variant",
-        border: "border-outline-variant/30",
-      };
-  }
-}
-
 function roleBorder(name: string): string {
   switch (name) {
     case "brian":
@@ -759,14 +712,14 @@ function roleBorder(name: string): string {
   }
 }
 
-function agentIcon(name: string): string {
+function agentIcon(name: string): ReactElement {
   switch (name) {
     case "brian":
-      return "👷";
+      return <WrenchIcon size={18} className="text-primary" />;
     case "rain":
-      return "💧";
+      return <EyeIcon size={18} className="text-on-surface-variant" />;
     default:
-      return "⚙️";
+      return <GearIcon size={18} className="text-on-surface-variant" />;
   }
 }
 

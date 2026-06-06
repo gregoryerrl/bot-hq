@@ -17,6 +17,7 @@ import {
   terminalInputClass,
   type TreeNode,
 } from "./contextLibraryShared";
+import { RescanIcon, WarnIcon } from "../components/icons";
 
 const SIDEBAR_WIDTH = 240;
 const INDENT_PX = 12;
@@ -147,9 +148,13 @@ export function WorkspaceSidebar({
             <span className="text-emerald-400">
               +{rescanReport.added.length}
             </span>
-            <span className="text-blue-400">↻{rescanReport.touched.length}</span>
-            <span className="text-amber-400">
-              ⚠{rescanReport.orphaned.length}
+            <span className="inline-flex items-center gap-0.5 text-blue-400">
+              <RescanIcon size={12} />
+              {rescanReport.touched.length}
+            </span>
+            <span className="inline-flex items-center gap-0.5 text-amber-400">
+              <WarnIcon size={12} />
+              {rescanReport.orphaned.length}
             </span>
           </div>
         )}

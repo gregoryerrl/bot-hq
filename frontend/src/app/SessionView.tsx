@@ -16,6 +16,8 @@ import type {
   SessionInfo,
 } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { GearIcon } from "../components/icons";
 import { invoke } from "@tauri-apps/api/core";
 
 interface PhaseChangedPayload {
@@ -71,15 +73,12 @@ export function SessionView() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
 
+  // The actual force-close, fired only after the user confirms in the dialog.
+  // The backend kill is unconditional — it does not wait for an in-flight turn.
   const onCloseSession = async () => {
-    if (
-      !window.confirm(
-        "Close this session? Brian + Rain stop (their subprocesses are killed) " +
-          "and it moves to Settings → Archive. Reopening later resumes them via --resume.",
-      )
-    )
-      return;
+    setShowCloseConfirm(false);
     setClosing(true);
     setCloseError(null);
     try {
@@ -225,20 +224,39 @@ export function SessionView() {
               aria-label="Session settings"
               onClick={() => setSettingsOpen(true)}
             >
-              ⚙️
+              <GearIcon />
             </Button>
             <Button
               variant="ghost"
               size="sm"
-              title="Close session — ends Brian + Rain and archives it"
+              title="Force-close session — ends Brian + Rain and archives it"
               aria-label="Close session"
               disabled={closing}
-              onClick={onCloseSession}
+              onClick={() => setShowCloseConfirm(true)}
             >
               {closing ? "…" : "✕"}
             </Button>
           </div>
         </header>
+
+        <ConfirmDialog
+          open={showCloseConfirm}
+          title="Force-close session?"
+          message={
+            <>
+              This <strong className="text-on-surface">force-closes</strong> the
+              session and stops Brian + Rain immediately — their subprocesses are
+              killed regardless of any in-flight work. The session moves to
+              Settings → Archive; reopening later resumes them via{" "}
+              <code className="text-on-surface">--resume</code>.
+            </>
+          }
+          confirmLabel="Force-close"
+          cancelLabel="Keep open"
+          confirmVariant="danger"
+          onConfirm={onCloseSession}
+          onCancel={() => setShowCloseConfirm(false)}
+        />
 
         {respawnError && (
           <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">

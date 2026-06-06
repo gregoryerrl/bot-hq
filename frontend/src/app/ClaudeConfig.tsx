@@ -1,8 +1,18 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { SaveIcon } from "./contextLibraryShared";
+import {
+  GearIcon,
+  OverviewIcon,
+  SkillsIcon,
+  PluginsIcon,
+  McpIcon,
+  MemoryIcon,
+  PermissionsIcon,
+  type IconProps,
+} from "../components/icons";
 import type {
   AgentOverride,
   ClaudeConfigView,
@@ -36,14 +46,18 @@ type SurfaceId =
   | "memory"
   | "permissions";
 
-const SURFACES: { id: SurfaceId; label: string; icon: string }[] = [
-  { id: "overview", label: "Overview", icon: "◉" },
-  { id: "core", label: "Core knobs", icon: "⚙" },
-  { id: "skills", label: "Skills", icon: "✦" },
-  { id: "plugins", label: "Plugins", icon: "⧉" },
-  { id: "mcp", label: "MCP servers", icon: "⇄" },
-  { id: "memory", label: "Memory & instructions", icon: "❏" },
-  { id: "permissions", label: "Permissions", icon: "⚿" },
+const SURFACES: {
+  id: SurfaceId;
+  label: string;
+  Icon: (props: IconProps) => ReactElement;
+}[] = [
+  { id: "overview", label: "Overview", Icon: OverviewIcon },
+  { id: "core", label: "Core knobs", Icon: GearIcon },
+  { id: "skills", label: "Skills", Icon: SkillsIcon },
+  { id: "plugins", label: "Plugins", Icon: PluginsIcon },
+  { id: "mcp", label: "MCP servers", Icon: McpIcon },
+  { id: "memory", label: "Memory & instructions", Icon: MemoryIcon },
+  { id: "permissions", label: "Permissions", Icon: PermissionsIcon },
 ];
 
 /** Empty override → the "no overrides" baseline (everything inherited). */
@@ -283,7 +297,7 @@ export function ClaudeConfigPanel() {
                     )}
                   >
                     <span className="flex items-center gap-2">
-                      <span aria-hidden>{s.icon}</span>
+                      <s.Icon size={14} />
                       {s.label}
                     </span>
                     {count !== null && (

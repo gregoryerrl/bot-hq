@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { terminalInputClass, SaveIcon } from "./contextLibraryShared";
@@ -100,6 +101,7 @@ function ModelCard({
 }) {
   const [draft, setDraft] = useState(model);
   const [tokenVisible, setTokenVisible] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const upsert = useTauriMutation<void, { model: ModelView }>("upsert_model");
   const del = useTauriMutation<void, { id: string }>("delete_model");
 
@@ -215,16 +217,7 @@ function ModelCard({
             variant="danger"
             size="sm"
             disabled={del.isPending}
-            onClick={async () => {
-              if (
-                !window.confirm(
-                  `Delete saved model "${model.display_name}"? This also removes its stored auth token and can't be undone.`,
-                )
-              )
-                return;
-              await del.mutateAsync({ id: model.id });
-              onDeleted();
-            }}
+            onClick={() => setConfirmDelete(true)}
           >
             Delete
           </Button>
@@ -242,6 +235,25 @@ function ModelCard({
           </button>
         </div>
       </div>
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Delete saved model?"
+        message={
+          <>
+            Delete{" "}
+            <strong className="text-on-surface">{model.display_name}</strong>?
+            This also removes its stored auth token and can&apos;t be undone.
+          </>
+        }
+        confirmLabel="Delete"
+        confirmVariant="danger"
+        onConfirm={async () => {
+          setConfirmDelete(false);
+          await del.mutateAsync({ id: model.id });
+          onDeleted();
+        }}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </section>
   );
 }

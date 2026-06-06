@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
 import type { ClFolderView, ProjectView } from "../lib/bindings";
 import { FolderIcon, type OpenTab, terminalInputClass } from "./contextLibraryShared";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 
 // ============================================================================
 // FolderView — editor-pane content for a folder tab. Edits the folder's CL
@@ -169,6 +170,7 @@ function ProjectSection({
 }) {
   const [wr, setWr] = useState(project.working_repo_path ?? "");
   const [busy, setBusy] = useState(false);
+  const [showUnregisterConfirm, setShowUnregisterConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Re-seed when switching to a different project root.
@@ -203,12 +205,7 @@ function ProjectSection({
 
   const unregister = async () => {
     if (busy) return;
-    if (
-      !window.confirm(
-        `Unregister project "${project.name}"? Files and descriptions are kept; this clears its working-repo + custom CL path.`,
-      )
-    )
-      return;
+    setShowUnregisterConfirm(false);
     setBusy(true);
     setError(null);
     try {
@@ -251,7 +248,7 @@ function ProjectSection({
         <button
           type="button"
           disabled={busy}
-          onClick={unregister}
+          onClick={() => setShowUnregisterConfirm(true)}
           title="Clears the working-repo + custom CL path. Keeps files & descriptions."
           className="rounded border border-error/50 bg-transparent px-3 py-1 font-code-sm text-code-sm text-error transition-colors hover:bg-error/10 disabled:opacity-50"
         >
@@ -266,6 +263,22 @@ function ProjectSection({
           Save working repo
         </button>
       </div>
+      <ConfirmDialog
+        open={showUnregisterConfirm}
+        title="Unregister project?"
+        message={
+          <>
+            Unregister{" "}
+            <strong className="text-on-surface">{project.name}</strong>? Files and
+            descriptions are kept — this only clears its working-repo + custom CL
+            path.
+          </>
+        }
+        confirmLabel="Unregister"
+        confirmVariant="danger"
+        onConfirm={unregister}
+        onCancel={() => setShowUnregisterConfirm(false)}
+      />
     </div>
   );
 }
