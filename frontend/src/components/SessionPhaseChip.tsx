@@ -1,4 +1,5 @@
 import { cn } from "../lib/cn";
+import { phaseBucket } from "../lib/phase";
 
 export interface SessionPhaseChipProps {
   /** Raw phase string from `get_session_phase` (lowercased). Null = unknown / not live. */
@@ -35,19 +36,10 @@ const TINT: Record<Bucket, { bg: string; text: string; border: string }> = {
 function bucketFor(phase: string | null, closed: boolean): Bucket | null {
   if (closed) return "muted";
   if (!phase) return null;
-  switch (phase.toLowerCase()) {
-    case "investigate":
-    case "plan":
-      return "primary";
-    case "apply":
-      return "secondary";
-    case "verify":
-      return "tertiary";
-    case "done":
-      return "muted";
-    default:
-      return null;
-  }
+  // "done" / closed -> muted is chip-only state; the IPAV phase->color mapping
+  // is shared with PhasePill via `phaseBucket`.
+  if (phase.toLowerCase() === "done") return "muted";
+  return phaseBucket(phase);
 }
 
 function labelFor(phase: string | null, closed: boolean): string | null {

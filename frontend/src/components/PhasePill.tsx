@@ -1,15 +1,15 @@
 import { cn } from "../lib/cn";
+import { phaseBucket, type PhaseBucket } from "../lib/phase";
 
 export type Phase = "investigate" | "plan" | "apply" | "verify";
 const PHASES: Phase[] = ["investigate", "plan", "apply", "verify"];
 
-// Phase->color buckets match SessionPhaseChip (investigate/plan=primary,
-// apply=secondary, verify=tertiary) so the two IPAV widgets agree.
-const tintByPhase: Record<Phase, string> = {
-  investigate: "border-primary/70 text-primary",
-  plan: "border-primary/70 text-primary",
-  apply: "border-secondary/70 text-secondary",
-  verify: "border-tertiary/70 text-tertiary",
+// Bucket -> pill accent classes. The phase->bucket mapping itself lives in
+// `lib/phase.ts`, shared with SessionPhaseChip so the two widgets can't drift.
+const pillTint: Record<PhaseBucket, string> = {
+  primary: "border-primary/70 text-primary",
+  secondary: "border-secondary/70 text-secondary",
+  tertiary: "border-tertiary/70 text-tertiary",
 };
 
 const label: Record<Phase, string> = {
@@ -32,7 +32,8 @@ export function PhasePill({ phase, selected, onSelect }: PhasePillProps) {
       className={cn(
         "inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold uppercase",
         "border-t-2",
-        tintByPhase[phase],
+        // `phase` is always one of the 4 IPAV phases, so the bucket is non-null.
+        pillTint[phaseBucket(phase)!],
         selected
           ? "bg-surface-container-high/80"
           : "bg-transparent border-transparent text-on-surface-variant hover:text-on-surface",
