@@ -355,6 +355,33 @@ fn engine_order(preferred: Option<&str>) -> Vec<&'static Engine> {
     }
 }
 
+/// True for navigational junk that isn't a real search result — a bare engine
+/// name as the title (e.g. "Google"), or a URL that is the engine's own
+/// homepage root. These slip past the title-filter (they have a title) on
+/// sparse/nonsense queries. Precise on purpose: only the bare engine root is
+/// dropped, never a real page on the same host (developers.google.com, etc.).
+fn is_junk(hit: &Hit) -> bool {
+    let title = hit.title.trim().to_lowercase();
+    if matches!(
+        title.as_str(),
+        "google" | "bing" | "startpage" | "duckduckgo" | "yahoo" | "yahoo!"
+    ) {
+        return true;
+    }
+    let url = hit.url.trim().trim_end_matches('/').to_lowercase();
+    matches!(
+        url.as_str(),
+        "https://www.google.com"
+            | "https://google.com"
+            | "https://www.bing.com"
+            | "https://bing.com"
+            | "https://www.startpage.com"
+            | "https://startpage.com"
+            | "https://duckduckgo.com"
+            | "https://www.duckduckgo.com"
+    )
+}
+
 /// Run a web search across the engine cascade. `engine` optionally names a
 /// preferred engine to try first (still falling back to the rest). Returns the
 /// first engine's non-empty results; if all CAPTCHA / time out / return
@@ -371,28 +398,31 @@ pub async fn run_search(
         .await
         .map_err(|_| "search permit closed".to_string())?;
 
-    let mut last = "no engine returned results".to_string();
+    let mut failures: Vec<String> = Vec::new();
     for engine in engine_order(engine.as_deref()) {
         match try_engine(&app, (engine.url)(query), (engine.extract)()).await {
-            Ok(hits) if !hits.is_empty() => {
-                tracing::info!(engine = engine.name, count = hits.len(), "web_search: results");
-                let mut hits = hits;
-                if let Some(n) = num_results {
-                    hits.truncate(n);
+            Ok(hits) => {
+                // Drop navigational junk (engine homepages etc.) before deciding
+                // whether this engine actually produced results.
+                let hits: Vec<Hit> = hits.into_iter().filter(|h| !is_junk(h)).collect();
+                if !hits.is_empty() {
+                    tracing::info!(engine = engine.name, count = hits.len(), "web_search: results");
+                    let mut hits = hits;
+                    if let Some(n) = num_results {
+                        hits.truncate(n);
+                    }
+                    return Ok(hits);
                 }
-                return Ok(hits);
-            }
-            Ok(_) => {
-                last = format!("{}: no results", engine.name);
+                failures.push(format!("{}: empty", engine.name));
                 tracing::info!(engine = engine.name, "web_search: empty, trying next engine");
             }
             Err(e) => {
-                last = format!("{}: {e}", engine.name);
+                failures.push(format!("{}: {e}", engine.name));
                 tracing::info!(engine = engine.name, error = %e, "web_search: failed, trying next engine");
             }
         }
     }
-    Err(last)
+    Err(format!("no results (tried {})", failures.join(" → ")))
 }
 
 #[cfg(test)]
@@ -452,5 +482,20 @@ mod tests {
         assert_eq!(r.results.unwrap().len(), 1);
         let e: ExtractResult = serde_json::from_str(r#"{"error":"captcha"}"#).unwrap();
         assert_eq!(e.error.unwrap(), "captcha");
+    }
+
+    fn hit(title: &str, url: &str) -> Hit {
+        Hit { title: title.into(), url: url.into(), snippet: String::new() }
+    }
+
+    #[test]
+    fn is_junk_drops_engine_nav_links_keeps_real_results() {
+        assert!(is_junk(&hit("Google", "https://www.google.com/")));
+        assert!(is_junk(&hit("Bing", "https://www.bing.com")));
+        assert!(is_junk(&hit("Some Page", "https://startpage.com/"))); // bare engine root URL
+        // real results — including real pages on an engine's own host — are kept
+        assert!(!is_junk(&hit("Tokio - An asynchronous Rust runtime", "https://tokio.rs/")));
+        assert!(!is_junk(&hit("Google Maps Platform", "https://developers.google.com/maps")));
+        assert!(!is_junk(&hit("Comprehensive Rust", "https://google.github.io/comprehensive-rust/")));
     }
 }
