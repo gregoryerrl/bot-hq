@@ -167,12 +167,20 @@ impl Policy {
     }
 
     /// Returns the first forbidden word found in `text`, if any.
+    ///
     /// Case-sensitive — disguise words are typically branded names (bot-hq,
-    /// Claude, Anthropic, …) where casing matters.
+    /// Claude, Anthropic, …) where casing matters. Matches on WORD BOUNDARIES
+    /// (regex `\b` semantics, word char = `[A-Za-z0-9_]`), so a forbidden word
+    /// only trips when it stands alone: `Claude` matches "Claude" / "Claude:"
+    /// but NOT "ClaudeConfig"; a forbidden `rain` no longer matches inside
+    /// "constraint". Non-word chars *inside* a forbidden word are fine — a
+    /// hyphenated marker (e.g. `Foo-Bar-Baz`, like the AI-attribution footer
+    /// bot-hq forbids) is matched literally; boundaries are only checked at the
+    /// match edges, so it still trips when written as a standalone footer line.
     pub fn first_forbidden_word(&self, text: &str) -> Option<&str> {
         self.forbidden_in_commits
             .iter()
-            .find(|w| text.contains(w.as_str()))
+            .find(|w| contains_word(text, w.as_str()))
             .map(String::as_str)
     }
 
@@ -372,6 +380,30 @@ pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<()> {
     let body = serde_yaml::to_string(policy).with_context(|| "serializing policy")?;
     std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// True iff `needle` occurs in `haystack` bounded by non-word chars on both
+/// edges — regex `\b{needle}\b` semantics, where a word char is `[A-Za-z0-9_]`
+/// (so `_` IS a word char: `rain` does not match "rain_check"). Case-sensitive.
+/// An empty needle never matches.
+///
+/// `match_indices` yields the byte offset where `needle` starts; that offset and
+/// `idx + needle.len()` are both on char boundaries (the start and end of a
+/// matched substring), so the slices below are always valid even when the
+/// surrounding chars are multi-byte.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    haystack.match_indices(needle).any(|(idx, _)| {
+        let before_ok = haystack[..idx].chars().next_back().is_none_or(|c| !is_word(c));
+        let after_ok = haystack[idx + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_word(c));
+        before_ok && after_ok
+    })
 }
 
 /// Overlay `overlay` onto `base`. Lists are replaced not merged when the
@@ -580,6 +612,52 @@ mod tests {
         p.forbidden_in_commits = vec!["bot-hq".into(), "Claude".into()];
         assert_eq!(p.first_forbidden_word("Co-authored by Claude"), Some("Claude"));
         assert_eq!(p.first_forbidden_word("clean commit"), None);
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn first_forbidden_word_matches_on_word_boundaries() {
+        let mut p = Policy::default();
+        // "Hyphen-Joined-Tag" stands in for the real hyphenated footer marker
+        // bot-hq forbids — written synthetically so this test file doesn't itself
+        // trip the (now word-boundary) pre-commit scan it's testing.
+        p.forbidden_in_commits =
+            vec!["rain".into(), "Claude".into(), "Hyphen-Joined-Tag".into(), "GPT".into()];
+
+        // The reported false positives no longer trip (substring, not whole word).
+        for ok in [
+            "add a constraint to the schema",
+            "drain the queue",
+            "brain dump",
+            "it was raining earlier",
+            "wire up ClaudeConfig.tsx",
+            "the ClaudeOverrides store",
+            "rain_check is a word char boundary", // `_` is a word char
+        ] {
+            assert_eq!(p.first_forbidden_word(ok), None, "should NOT trip: {ok:?}");
+        }
+
+        // Genuine whole-word brand/footer mentions still caught.
+        assert_eq!(p.first_forbidden_word("let it rain"), Some("rain"));
+        assert_eq!(p.first_forbidden_word("(rain)"), Some("rain"));
+        assert_eq!(p.first_forbidden_word("ship Claude Opus"), Some("Claude"));
+        assert_eq!(p.first_forbidden_word("the Claude: model"), Some("Claude"));
+        assert_eq!(
+            p.first_forbidden_word("Add Hyphen-Joined-Tag footer"),
+            Some("Hyphen-Joined-Tag")
+        );
+        assert_eq!(p.first_forbidden_word("uses GPT-4 here"), Some("GPT"));
+    }
+
+    #[test]
+    fn contains_word_boundary_semantics() {
+        assert!(contains_word("let it rain", "rain"));
+        assert!(contains_word("rain.", "rain"));
+        assert!(!contains_word("constraint", "rain"));
+        assert!(!contains_word("ClaudeConfig", "Claude"));
+        assert!(!contains_word("rain_check", "rain")); // `_` is a word char
+        assert!(contains_word("bot-hq is here", "bot-hq")); // hyphen edges are boundaries
+        assert!(!contains_word("anything", "")); // empty needle never matches
     }
 
     #[test]
