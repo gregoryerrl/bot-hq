@@ -52,7 +52,7 @@ async listSessions() : Promise<Result<SessionInfo[], AppError>> {
 },
 /**
  * All closed sessions (just-closed + archived), most-recently-closed first.
- * Backs the Settings → Archive tab. Excludes the emma singleton.
+ * Backs the Settings → Archive tab.
  */
 async listClosedSessions() : Promise<Result<SessionInfo[], AppError>> {
     try {
@@ -132,8 +132,7 @@ async getSessionMessages(sessionId: string, sinceId: number | null) : Promise<Re
 },
 /**
  * Send a user message to a session. For the duo session this fans out to
- * both Brian and Rain (with phase envelope); for Emma's solo session it
- * goes to her singleton agent. Persists the raw text + notifies the bridge.
+ * both Brian and Rain (with phase envelope). Persists the raw text + notifies the bridge.
  */
 async broadcastMessage(sessionId: string, text: string) : Promise<Result<null, AppError>> {
     try {
@@ -584,7 +583,7 @@ async listSessionTray(sessionId: string) : Promise<Result<SessionTrayView[], App
  * All pending tray rows for OPEN sessions across the whole app — powers the
  * header notifier's per-session "needs your input [N]" counts. Durable, so it
  * survives a restart (unlike the in-memory `list_pending_choices`). Closed
- * sessions + the emma singleton are excluded so dead-session pending isn't
+ * sessions are excluded so dead-session pending isn't
  * surfaced as noise.
  */
 async listPendingTray() : Promise<Result<SessionTrayView[], AppError>> {
@@ -801,7 +800,7 @@ warnings: string[] }
 /**
  * The full override store: a fan-out `_all` default plus per-agent entries.
  */
-export type ClaudeOverrides = { _all?: AgentOverride; brian?: AgentOverride; rain?: AgentOverride; emma?: AgentOverride }
+export type ClaudeOverrides = { _all?: AgentOverride; brian?: AgentOverride; rain?: AgentOverride }
 /**
  * Result of `compute_apply_diff`: the classified diff lines plus an
  * optional human-readable note (e.g., the session-start anchor was lost
@@ -858,8 +857,8 @@ keyword: string; mode: GateMode }
  * Which agents pick up a given config surface from `~/.claude` at spawn, and
  * which don't. Drives the per-surface inheritance badges in the UI. This is
  * the canonical mapping derived from `spawn.rs::build_command` behavior:
- * Brian/Emma run full claude-code (inherit), Rain runs `--bare` (skips
- * skills/plugins/hooks/CLAUDE.md), MCP is forwarded to Brian/Emma only, and
+ * Brian runs full claude-code (inherit), Rain runs `--bare` (skips
+ * skills/plugins/hooks/CLAUDE.md), MCP is forwarded to Brian only, and
  * model/permissions are overridden per-agent by bot-hq.
  */
 export type Inheritance = { 
@@ -905,7 +904,7 @@ effective: boolean;
  */
 detail: string; 
 /**
- * Agents bot-hq forwards it into (Brian/Emma; reserved keys excluded).
+ * Agents bot-hq forwards it into (Brian; reserved keys excluded).
  */
 forwarded_to_agents: string[]; 
 /**
