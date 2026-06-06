@@ -140,11 +140,12 @@ fn google_extract() -> String {
     if (!a) {{ var p = h3.parentElement; while (p && p.tagName !== 'A') p = p.parentElement; a = p; }}
     if (a && a.href) {{
       var u = gUrl(a.href);
-      if (u.indexOf('http') !== 0 || seen[u]) continue;
+      var title = (h3.innerText || '').trim();
+      if (!title || u.indexOf('http') !== 0 || seen[u]) continue;
       seen[u] = 1;
       var cont = h3.closest ? h3.closest('div.g, div[data-hveid], div[data-sokoban-container]') : null;
       var sn = cont ? cont.querySelector('div[data-sncf], .VwiC3b, span.aCOpRe') : null;
-      hits.push({{ title: (h3.innerText || '').trim(), url: u, snippet: sn ? (sn.innerText || '').trim() : '' }});
+      hits.push({{ title: title, url: u, snippet: sn ? (sn.innerText || '').trim() : '' }});
     }}
   }}
   return {{ results: hits }};
@@ -177,8 +178,9 @@ fn bing_extract() -> String {
     var li = nodes[i];
     var a = li.querySelector('h2 a');
     var sn = li.querySelector('.b_caption p') || li.querySelector('.b_algoSlug') || li.querySelector('p');
-    if (a && a.href) {{
-      hits.push({{ title: (a.innerText || '').trim(), url: realUrl(a.href), snippet: sn ? (sn.innerText || '').trim() : '' }});
+    var title = a ? (a.innerText || '').trim() : '';
+    if (a && a.href && title) {{
+      hits.push({{ title: title, url: realUrl(a.href), snippet: sn ? (sn.innerText || '').trim() : '' }});
     }}
   }}
   return {{ results: hits }};
