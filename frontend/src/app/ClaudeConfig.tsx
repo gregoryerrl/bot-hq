@@ -550,8 +550,16 @@ function Row({
 }
 
 /** Effort levels offered to agents + the global env-routed knob. `max` is
- *  session-only in claude-code and only persists via CLAUDE_CODE_EFFORT_LEVEL. */
-const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
+ *  session-only in claude-code and only persists via CLAUDE_CODE_EFFORT_LEVEL.
+ *  Exported so the create-session dialog can reuse the same control. */
+export const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
+
+/** Minimal shape `AgentEffortOverride` reads/writes — lets callers drive it from
+ *  either the override store (`AgentOverride`) or plain local state (the dialog). */
+export type EffortOverrideValue = {
+  effort?: string | null;
+  ultracode?: boolean | null;
+};
 
 /** Lightweight schema registry: how to edit each global core knob. */
 const KNOB_EDITORS: Record<
@@ -670,7 +678,7 @@ function CorePane({
 /** One agent's effort + ultracode override. Narrow write-coupling keeps `max`
  *  and ultracode mutually exclusive while preserving the valid `xhigh`+ultracode
  *  pair (ultracode IS xhigh + dynamic workflows). */
-function AgentEffortOverride({
+export function AgentEffortOverride({
   title,
   roleLabel,
   ov,
@@ -680,8 +688,8 @@ function AgentEffortOverride({
 }: {
   title: string;
   roleLabel: string;
-  ov: AgentOverride;
-  patch: (p: Partial<AgentOverride>) => void;
+  ov: EffortOverrideValue;
+  patch: (p: EffortOverrideValue) => void;
   inheritedEffort?: string | null;
   isEyes: boolean;
 }) {

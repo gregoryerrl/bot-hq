@@ -363,6 +363,12 @@ async fn spawn_session_handle(
     // the next reopen of this session can resume.
     let brian_resume = session.brian_claude_session_id.clone();
     let rain_resume = session.rain_claude_session_id.clone();
+    // Per-session effort/ultracode picks (create dialog); overlaid over the
+    // persistent per-agent override in build_command (session wins).
+    let brian_effort = session.brian_effort.clone();
+    let brian_ultracode = session.brian_ultracode;
+    let rain_effort = session.rain_effort.clone();
+    let rain_ultracode = session.rain_ultracode;
 
     let brian = spawn_agent_for(
         &session.id,
@@ -376,6 +382,8 @@ async fn spawn_session_handle(
         mcp_temp.path(),
         working_repo_path.clone(),
         brian_resume,
+        brian_effort,
+        brian_ultracode,
     )
     .await?;
     let rain = if let Some(rc) = rain_cfg {
@@ -392,6 +400,8 @@ async fn spawn_session_handle(
                 mcp_temp.path(),
                 working_repo_path.clone(),
                 rain_resume,
+                rain_effort,
+                rain_ultracode,
             )
             .await?,
         )
@@ -495,6 +505,8 @@ async fn spawn_agent_for(
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
     resume_session_id: Option<String>,
+    session_effort: Option<String>,
+    session_ultracode: Option<bool>,
 ) -> Result<AgentHandle> {
     let system_prompt =
         read_system_prompt(paths, agent_name, project.as_deref(), project_root, cl_index)?;
@@ -524,6 +536,8 @@ async fn spawn_agent_for(
         resume_session_id,
         project: project.clone(),
         data_dir: paths.data_dir.clone(),
+        session_effort,
+        session_ultracode,
     };
     // Supervised: a transient upstream API error (e.g. 529 Overloaded) auto-
     // resumes the agent with capped backoff instead of stranding the session.

@@ -130,6 +130,13 @@ pub struct SpawnConfig {
     /// bot-hq data dir — the injected PreToolUse hook needs it to resolve the
     /// project's policy at tool-call time.
     pub data_dir: PathBuf,
+    /// Per-session effort override (from the create dialog). When Some, it wins
+    /// over the persistent per-agent override resolved from claude-overrides.json.
+    pub session_effort: Option<String>,
+    /// Per-session ultracode override (from the create dialog). When Some, it
+    /// wins over the persistent per-agent override. Brian-only at runtime (EYES
+    /// gets no --settings).
+    pub session_ultracode: Option<bool>,
 }
 
 /// Driver handle for one running agent subprocess.
@@ -480,10 +487,17 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // from `<data_dir>/claude-overrides.json`; merged into the `--settings`
     // JSON + env below so a user can disable an inherited skill/plugin/MCP/
     // effort for THIS agent without touching their own ~/.claude. Fail-open.
-    let agent_override = crate::claude_config::resolve_agent_overrides(
+    let mut agent_override = crate::claude_config::resolve_agent_overrides(
         &crate::claude_config::load_overrides(&cfg.data_dir),
         &cfg.agent_name,
     );
+    // Per-SESSION overrides (create dialog) win over the persistent defaults.
+    if cfg.session_effort.is_some() {
+        agent_override.effort = cfg.session_effort.clone();
+    }
+    if cfg.session_ultracode.is_some() {
+        agent_override.ultracode = cfg.session_ultracode;
+    }
 
     if let Some(mcp) = &cfg.mcp_config_path {
         cmd.args(["--mcp-config", &mcp.display().to_string()])
@@ -723,6 +737,8 @@ mod tests {
             resume_session_id: None,
             project: Some("bcc-ad-manager-ad-exporter".into()),
             data_dir: Path::new("/tmp/data").to_path_buf(),
+            session_effort: None,
+            session_ultracode: None,
         }
     }
 
@@ -799,6 +815,37 @@ mod tests {
                 && v == Some(std::ffi::OsStr::new("high"))
         });
         assert!(has_effort, "effort env should be set from override");
+    }
+
+    #[test]
+    fn session_overrides_win_over_persistent() {
+        use crate::claude_config::{save_overrides, ClaudeOverrides};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ClaudeOverrides::default();
+        store.brian.effort = Some("high".into()); // persistent default
+        save_overrides(dir.path(), &store).unwrap();
+
+        let mut c = cfg(); // brian (gets --settings)
+        c.data_dir = dir.path().to_path_buf();
+        c.session_effort = Some("max".into()); // per-session pick wins
+        c.session_ultracode = Some(true);
+
+        // Session effort beats the persistent "high".
+        let cmd = build_command(&c);
+        let has_max = cmd.as_std().get_envs().any(|(k, v)| {
+            k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL")
+                && v == Some(std::ffi::OsStr::new("max"))
+        });
+        assert!(has_max, "session effort should win over persistent override");
+
+        // Session ultracode lands in --settings.
+        let args = debug_command(&c);
+        let settings_arg = args
+            .iter()
+            .skip_while(|a| *a != "--settings")
+            .nth(1)
+            .expect("--settings present");
+        assert!(settings_arg.contains("ultracode"), "got {settings_arg}");
     }
 
     #[test]

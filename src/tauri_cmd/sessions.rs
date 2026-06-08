@@ -38,6 +38,18 @@ impl From<Session> for SessionInfo {
     }
 }
 
+/// Per-session effort/ultracode picks from the create dialog. Bundled into one
+/// struct because `create_session` is at tauri-specta's 10-arg command limit;
+/// each field is `None` = inherit the Settings → Claude Config defaults.
+#[derive(Debug, Clone, Default, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEffortChoices {
+    pub brian_effort: Option<String>,
+    pub rain_effort: Option<String>,
+    pub brian_ultracode: Option<bool>,
+    pub rain_ultracode: Option<bool>,
+}
+
 #[tauri::command]
 #[specta::specta]
 // Param count is inflated by Tauri-injected `State` handles, not real fan-out.
@@ -54,6 +66,8 @@ pub async fn create_session(
     rain_enabled: Option<bool>,
     brian_model_id: Option<String>,
     rain_model_id: Option<String>,
+    // Per-session effort/ultracode overrides (bundled — see SessionEffortChoices).
+    effort: SessionEffortChoices,
 ) -> Result<SessionInfo, AppError> {
     storage
         .create_session(&id, &title, repo_path.as_deref())
@@ -67,6 +81,18 @@ pub async fn create_session(
             rain_enabled.unwrap_or(true),
             brian_model_id.as_deref(),
             rain_model_id.as_deref(),
+        )
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    // Per-session effort/ultracode overrides (separate setter to avoid an
+    // 8-param method; also persisted pre-spawn).
+    storage
+        .set_session_effort_config(
+            &id,
+            effort.brian_effort.as_deref(),
+            effort.rain_effort.as_deref(),
+            effort.brian_ultracode,
+            effort.rain_ultracode,
         )
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;

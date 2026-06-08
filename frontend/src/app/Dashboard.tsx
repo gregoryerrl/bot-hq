@@ -12,6 +12,7 @@ import type {
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { AgentEffortOverride } from "./ClaudeConfig";
 
 const RAIN_DISABLED_DEFAULT_KEY = "rain_disabled_default";
 
@@ -92,6 +93,13 @@ export function Dashboard() {
       rainEnabled: boolean;
       brianModelId: string | null;
       rainModelId: string | null;
+      // Per-session effort/ultracode picks (bundled — at the tauri 10-arg limit).
+      effort: {
+        brianEffort: string | null;
+        rainEffort: string | null;
+        brianUltracode: boolean | null;
+        rainUltracode: boolean | null;
+      };
     }
   >("create_session");
 
@@ -116,6 +124,11 @@ export function Dashboard() {
   const [brianModelId, setBrianModelId] = useState("");
   const [rainModelId, setRainModelId] = useState("");
   const [disableRain, setDisableRain] = useState(false);
+  // Per-session effort/ultracode picks (null = inherit the Settings defaults).
+  const [brianEffort, setBrianEffort] = useState<string | null>(null);
+  const [rainEffort, setRainEffort] = useState<string | null>(null);
+  const [brianUltracode, setBrianUltracode] = useState<boolean | null>(null);
+  const [rainUltracode, setRainUltracode] = useState<boolean | null>(null);
 
   // Case-insensitive substring filter on session title. In-memory so no
   // debounce needed — the list isn't a paginated query.
@@ -139,6 +152,11 @@ export function Dashboard() {
     setBrianModelId(modelIdFor(brianConfig));
     setRainModelId(modelIdFor(rainConfig));
     setDisableRain(rainDisabledDefault === "1");
+    // Effort/ultracode default to inherit (the Settings defaults) each open.
+    setBrianEffort(null);
+    setRainEffort(null);
+    setBrianUltracode(null);
+    setRainUltracode(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [creating]);
 
@@ -154,6 +172,12 @@ export function Dashboard() {
       rainEnabled: !disableRain,
       brianModelId: brianModelId || null,
       rainModelId: disableRain ? null : rainModelId || null,
+      effort: {
+        brianEffort,
+        rainEffort: disableRain ? null : rainEffort,
+        brianUltracode,
+        rainUltracode: disableRain ? null : rainUltracode,
+      },
     });
     setTitle("");
     setSelectedProject("");
@@ -316,6 +340,39 @@ export function Dashboard() {
                   </select>
                 </label>
               )}
+              <div>
+                <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                  Effort & ultracode (this session)
+                </span>
+                <div className="flex flex-col gap-2">
+                  <AgentEffortOverride
+                    title="Brian"
+                    roleLabel="HANDS"
+                    ov={{ effort: brianEffort, ultracode: brianUltracode }}
+                    patch={(p) => {
+                      if ("effort" in p) setBrianEffort(p.effort ?? null);
+                      if ("ultracode" in p) setBrianUltracode(p.ultracode ?? null);
+                    }}
+                    isEyes={false}
+                  />
+                  {!disableRain && (
+                    <AgentEffortOverride
+                      title="Rain"
+                      roleLabel="EYES"
+                      ov={{ effort: rainEffort, ultracode: rainUltracode }}
+                      patch={(p) => {
+                        if ("effort" in p) setRainEffort(p.effort ?? null);
+                        if ("ultracode" in p) setRainUltracode(p.ultracode ?? null);
+                      }}
+                      isEyes={true}
+                    />
+                  )}
+                </div>
+                <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+                  Overrides the Settings defaults for this session only. Leave on
+                  Inherit to use your configured defaults.
+                </span>
+              </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setCreating(false)}>

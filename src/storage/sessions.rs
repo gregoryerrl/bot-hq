@@ -30,7 +30,8 @@ impl Storage {
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
                     brian_model_at_spawn, rain_model_at_spawn, \
                     brian_claude_session_id, rain_claude_session_id, \
-                    rain_enabled, brian_model_id, rain_model_id \
+                    rain_enabled, brian_model_id, rain_model_id, \
+                    brian_effort, rain_effort, brian_ultracode, rain_ultracode \
              FROM sessions WHERE id = ?",
         )
         .bind(id)
@@ -63,7 +64,8 @@ impl Storage {
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
                     brian_model_at_spawn, rain_model_at_spawn, \
                     brian_claude_session_id, rain_claude_session_id, \
-                    rain_enabled, brian_model_id, rain_model_id \
+                    rain_enabled, brian_model_id, rain_model_id, \
+                    brian_effort, rain_effort, brian_ultracode, rain_ultracode \
              FROM sessions \
              WHERE archived = 0 AND closed_at IS NULL \
              ORDER BY created_at DESC, id ASC",
@@ -81,7 +83,8 @@ impl Storage {
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
                     brian_model_at_spawn, rain_model_at_spawn, \
                     brian_claude_session_id, rain_claude_session_id, \
-                    rain_enabled, brian_model_id, rain_model_id \
+                    rain_enabled, brian_model_id, rain_model_id, \
+                    brian_effort, rain_effort, brian_ultracode, rain_ultracode \
              FROM sessions \
              WHERE closed_at IS NOT NULL \
              ORDER BY closed_at DESC, id ASC",
@@ -136,6 +139,34 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording spawn config on session {session_id}"))?;
+        Ok(())
+    }
+
+    /// Record a session's per-agent effort/ultracode overrides, chosen in the
+    /// create dialog. Separate from `set_session_spawn_config` to avoid an
+    /// 8-positional-param method; `create_session` calls both back-to-back
+    /// before spawn. `None` = inherit the Settings defaults (column left NULL).
+    pub async fn set_session_effort_config(
+        &self,
+        session_id: &str,
+        brian_effort: Option<&str>,
+        rain_effort: Option<&str>,
+        brian_ultracode: Option<bool>,
+        rain_ultracode: Option<bool>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions \
+             SET brian_effort = ?, rain_effort = ?, brian_ultracode = ?, rain_ultracode = ? \
+             WHERE id = ?",
+        )
+        .bind(brian_effort)
+        .bind(rain_effort)
+        .bind(brian_ultracode)
+        .bind(rain_ultracode)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("recording effort config on session {session_id}"))?;
         Ok(())
     }
 

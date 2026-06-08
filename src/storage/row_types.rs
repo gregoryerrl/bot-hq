@@ -83,6 +83,13 @@ pub struct Session {
     /// Saved-model ids chosen at create time (NULL = fall back to agent config).
     pub brian_model_id: Option<String>,
     pub rain_model_id: Option<String>,
+    /// Per-session effort/ultracode overrides chosen at create time (NULL =
+    /// inherit the Settings → Claude Config defaults). ultracode applies to
+    /// Brian only (EYES gets no --settings).
+    pub brian_effort: Option<String>,
+    pub rain_effort: Option<String>,
+    pub brian_ultracode: Option<bool>,
+    pub rain_ultracode: Option<bool>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

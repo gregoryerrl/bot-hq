@@ -216,3 +216,32 @@ async fn set_session_spawn_models_round_trip() {
     let solo = s.get_session("sess-x").await.unwrap().unwrap();
     assert!(solo.rain_model_at_spawn.is_none());
 }
+
+#[tokio::test]
+async fn set_session_effort_config_round_trip() {
+    // Per-session effort/ultracode picks from the create dialog persist on the
+    // row; NULL = inherit the Settings defaults.
+    let s = Storage::memory().await.unwrap();
+    s.create_session("sess-e", "test", None).await.unwrap();
+    let before = s.get_session("sess-e").await.unwrap().unwrap();
+    assert!(before.brian_effort.is_none());
+    assert!(before.brian_ultracode.is_none());
+    assert!(before.rain_effort.is_none());
+
+    s.set_session_effort_config("sess-e", Some("max"), Some("low"), Some(true), Some(false))
+        .await
+        .unwrap();
+    let after = s.get_session("sess-e").await.unwrap().unwrap();
+    assert_eq!(after.brian_effort.as_deref(), Some("max"));
+    assert_eq!(after.rain_effort.as_deref(), Some("low"));
+    assert_eq!(after.brian_ultracode, Some(true));
+    assert_eq!(after.rain_ultracode, Some(false));
+
+    // None clears back to inherit (SQL NULL).
+    s.set_session_effort_config("sess-e", None, None, None, None)
+        .await
+        .unwrap();
+    let cleared = s.get_session("sess-e").await.unwrap().unwrap();
+    assert!(cleared.brian_effort.is_none());
+    assert!(cleared.brian_ultracode.is_none());
+}
