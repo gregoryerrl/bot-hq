@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
@@ -71,6 +71,38 @@ export function SessionView() {
   );
   const [respawnError, setRespawnError] = useState<AppError | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Resizable chat/document split. `leftPct` is the chat pane's width as a % of
+  // the container; the rest goes to the DocumentPane. Seeded from localStorage
+  // and clamped to [25,75] so neither pane can be dragged away entirely.
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const [leftPct, setLeftPct] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("bothq:split:leftPct"));
+    return Number.isFinite(saved) && saved >= 25 && saved <= 75 ? saved : 60;
+  });
+  const onSplitHandleDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = splitContainerRef.current;
+    if (!container) return;
+    let latest = leftPct;
+    const onMove = (ev: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      latest = Math.min(75, Math.max(25, pct));
+      setLeftPct(latest);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      localStorage.setItem("bothq:split:leftPct", String(Math.round(latest)));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
@@ -191,8 +223,11 @@ export function SessionView() {
   }
 
   return (
-    <div className="grid h-full grid-cols-[3fr_2fr] grid-rows-1">
-      <section className="flex h-full min-h-0 min-w-0 flex-col border-r border-outline-variant">
+    <div ref={splitContainerRef} className="flex h-full">
+      <section
+        style={{ flexBasis: `${leftPct}%` }}
+        className="flex h-full min-h-0 min-w-0 shrink-0 grow-0 flex-col border-r border-outline-variant"
+      >
         <header className="flex items-center justify-between border-b border-outline-variant px-4 py-3">
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold tracking-tight">
@@ -344,7 +379,17 @@ export function SessionView() {
         </div>
       </section>
 
-      <DocumentPane sessionId={sessionId} sessionPhase={phase} />
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize chat and document panes"
+        onMouseDown={onSplitHandleDown}
+        className="w-1.5 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-primary/40"
+      />
+
+      <div className="min-h-0 min-w-0 flex-1">
+        <DocumentPane sessionId={sessionId} sessionPhase={phase} />
+      </div>
 
       <SessionPolicyPanel
         sessionId={sessionId}
