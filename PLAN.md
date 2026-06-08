@@ -138,6 +138,22 @@ loading for the icon font.
 - **Tray garbage collection.** The `session_tray` table grows
   unbounded — resolved rows stay forever. A periodic purge of resolved
   rows older than N days would keep it bounded.
+- **Tighten CL ↔ agent stitching further** (deferred from the 2026-06-08
+  pass — context window = cache, session-docs = RAM, CL = disk). F-A
+  (gate phase-tagged `session_doc_write` to HANDS) + F-B (spawn-time CL
+  index primer) shipped; what remains is the "memory-controller" layer
+  the analogy wants:
+  - *Model-agnostic adherence:* a push/interrupt layer (MemGPT-style
+    memory-pressure reminders at decision points) so a weaker
+    non-Anthropic model doesn't rely purely on prompt instruction-
+    following to page CL / session-docs in and out.
+  - *Write-then-prune close-loop safety net:* nothing catches a HANDS
+    agent that forgets the bounded learnings delta before
+    `close_session`.
+  - *Rain CL write path:* EYES has no CL write at all (by design today);
+    revisit only if review-time annotations prove valuable.
+  - *`cl_register_read` feedback view:* the read-audit rows are written
+    but the "what context did this agent have?" view was never built.
 
 ---
 
