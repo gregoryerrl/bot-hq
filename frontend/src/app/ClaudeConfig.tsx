@@ -152,11 +152,18 @@ export function ClaudeConfigPanel() {
   const overridesDirty = JSON.stringify(draft) !== serverJson;
   const dirty = overridesDirty || pendingCount > 0;
   const all: AgentOverride = draft._all ?? emptyAll();
+  const brian: AgentOverride = draft.brian ?? emptyAll();
+  const rain: AgentOverride = draft.rain ?? emptyAll();
 
   // ---- override mutators (all write the `_all` fan-out: applies to every
   // agent; Rain ignores skill/plugin entries under --bare). ----
   const patchAll = (patch: Partial<AgentOverride>) =>
     setDraft((d) => ({ ...d, _all: { ...(d._all ?? {}), ...patch } }));
+  // Per-agent effort/ultracode overrides (layered over `_all` at resolve time).
+  const patchBrian = (patch: Partial<AgentOverride>) =>
+    setDraft((d) => ({ ...d, brian: { ...(d.brian ?? {}), ...patch } }));
+  const patchRain = (patch: Partial<AgentOverride>) =>
+    setDraft((d) => ({ ...d, rain: { ...(d.rain ?? {}), ...patch } }));
 
   const setSkill = (name: string, vis: SkillVisibility | null) =>
     setDraft((d) => {
@@ -319,7 +326,10 @@ export function ClaudeConfigPanel() {
             <CorePane
               config={config}
               all={all}
-              patchAll={patchAll}
+              brian={brian}
+              rain={rain}
+              patchBrian={patchBrian}
+              patchRain={patchRain}
               pendingStrings={pendingStrings}
               pendingBools={pendingBools}
               stageString={stageString}
@@ -539,12 +549,18 @@ function Row({
   );
 }
 
+/** Effort levels offered to agents + the global env-routed knob. `max` is
+ *  session-only in claude-code and only persists via CLAUDE_CODE_EFFORT_LEVEL. */
+const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
+
 /** Lightweight schema registry: how to edit each global core knob. */
 const KNOB_EDITORS: Record<
   string,
   { type: "enum" | "bool" | "text"; options?: string[] }
 > = {
-  effortLevel: { type: "enum", options: ["low", "medium", "high", "xhigh"] },
+  // Effort routes through the env var (the only persistent lever that accepts
+  // `max`); the writer drops the legacy `effortLevel` field on change.
+  "env.CLAUDE_CODE_EFFORT_LEVEL": { type: "enum", options: EFFORT_OPTS },
   model: { type: "text" },
   editorMode: { type: "enum", options: ["normal", "vim"] },
   alwaysThinkingEnabled: { type: "bool" },
@@ -552,10 +568,19 @@ const KNOB_EDITORS: Record<
   "env.CLAUDE_CODE_MAX_OUTPUT_TOKENS": { type: "text" },
 };
 
+/** Per-knob explanatory note rendered under the row (optional). */
+const KNOB_NOTES: Record<string, string> = {
+  "env.CLAUDE_CODE_EFFORT_LEVEL":
+    "max is session-only in claude-code; bot-hq persists it via the CLAUDE_CODE_EFFORT_LEVEL env var (which overrides effortLevel).",
+};
+
 function CorePane({
   config,
   all,
-  patchAll,
+  brian,
+  rain,
+  patchBrian,
+  patchRain,
   pendingStrings,
   pendingBools,
   stageString,
@@ -563,7 +588,10 @@ function CorePane({
 }: {
   config: ClaudeConfigView;
   all: AgentOverride;
-  patchAll: (p: Partial<AgentOverride>) => void;
+  brian: AgentOverride;
+  rain: AgentOverride;
+  patchBrian: (p: Partial<AgentOverride>) => void;
+  patchRain: (p: Partial<AgentOverride>) => void;
   pendingStrings: Record<string, string | null>;
   pendingBools: Record<string, boolean>;
   stageString: (key: string, value: string | null) => void;
@@ -599,6 +627,11 @@ function CorePane({
                 />
               </div>
               <InheritanceBadges inheritance={k.inheritance} />
+              {KNOB_NOTES[k.key] && (
+                <p className="font-label-caps text-label-caps text-on-surface-variant">
+                  {KNOB_NOTES[k.key]}
+                </p>
+              )}
             </Row>
           );
         })}
@@ -607,30 +640,121 @@ function CorePane({
       <h3 className="mb-2 mt-6 font-headline-sm text-headline-sm text-on-surface">
         Agent runtime overrides
       </h3>
-      <div className="flex flex-col gap-2 rounded-lg border border-outline-variant bg-surface-container p-3">
-        <label className="flex items-center justify-between gap-3">
-          <span className="font-code-sm text-code-sm text-on-surface">
-            Effort level (agents)
-          </span>
-          <select
-            className={selectClass}
-            value={all.effort ?? ""}
-            onChange={(e) => patchAll({ effort: e.target.value || undefined })}
-          >
-            <option value="">Inherit</option>
-            {["low", "medium", "high", "xhigh", "max"].map((v) => (
-              <option key={v} value={v}>
-                {v}
-              </option>
-            ))}
-          </select>
-        </label>
-        <ToggleRow
-          label="Ultracode (agents)"
-          checked={all.ultracode === true}
-          onChange={(v) => patchAll({ ultracode: v ? true : undefined })}
+      <p className="mb-2 max-w-prose font-body-md text-body-md text-on-surface-variant">
+        Per-agent effort & ultracode, applied on the next agent spawn. Set each
+        agent independently so a deep-reasoning effort isn&apos;t pushed blindly
+        onto a non-Anthropic model.
+      </p>
+      <div className="flex flex-col gap-2">
+        <AgentEffortOverride
+          title="Brian"
+          roleLabel="HANDS"
+          ov={brian}
+          patch={patchBrian}
+          inheritedEffort={all.effort}
+          isEyes={false}
+        />
+        <AgentEffortOverride
+          title="Rain"
+          roleLabel="EYES"
+          ov={rain}
+          patch={patchRain}
+          inheritedEffort={all.effort}
+          isEyes={true}
         />
       </div>
+    </div>
+  );
+}
+
+/** One agent's effort + ultracode override. Narrow write-coupling keeps `max`
+ *  and ultracode mutually exclusive while preserving the valid `xhigh`+ultracode
+ *  pair (ultracode IS xhigh + dynamic workflows). */
+function AgentEffortOverride({
+  title,
+  roleLabel,
+  ov,
+  patch,
+  inheritedEffort,
+  isEyes,
+}: {
+  title: string;
+  roleLabel: string;
+  ov: AgentOverride;
+  patch: (p: Partial<AgentOverride>) => void;
+  inheritedEffort?: string | null;
+  isEyes: boolean;
+}) {
+  const ultracodeOn = ov.ultracode === true;
+  const effortMax = ov.effort === "max";
+  // Conflict-aware disabling: never disable BOTH at once, so a pre-existing
+  // (e.g. legacy) override that set max + ultracode together stays escapable.
+  const effortDisabled = ultracodeOn && !effortMax;
+  const ultracodeDisabled = isEyes || (effortMax && !ultracodeOn);
+  const onEffort = (val: string | undefined) => {
+    // Selecting `max` clears ultracode (they conflict); other values are kept
+    // as-is — `xhigh` + ultracode is the intended pair.
+    if (val === "max") patch({ effort: "max", ultracode: undefined });
+    else patch({ effort: val });
+  };
+  const onUltracode = (on: boolean) => {
+    // Turning ultracode on only drops a conflicting `max` effort; `xhigh`/etc.
+    // survive so toggling ultracode off restores the prior value.
+    if (on) patch({ ultracode: true, ...(effortMax ? { effort: undefined } : {}) });
+    else patch({ ultracode: undefined });
+  };
+  // While ultracode is on, effort is pinned to xhigh at runtime — show that and
+  // disable the select (the stored value is untouched, so it returns on toggle-off).
+  const effortValue = effortDisabled ? "xhigh" : ov.effort ?? "";
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-outline-variant bg-surface-container p-3">
+      <div className="flex items-center justify-between">
+        <span className="font-code-sm text-code-sm text-on-surface">{title}</span>
+        <span className="rounded border border-outline-variant/50 px-1.5 py-0.5 font-label-caps text-label-caps text-on-surface-variant">
+          {roleLabel}
+        </span>
+      </div>
+      <label className="flex items-center justify-between gap-3">
+        <span className="font-code-sm text-code-sm text-on-surface">
+          Effort level
+        </span>
+        <select
+          className={selectClass}
+          value={effortValue}
+          disabled={effortDisabled}
+          onChange={(e) => onEffort(e.target.value || undefined)}
+        >
+          <option value="">
+            Inherit{inheritedEffort ? ` (${inheritedEffort})` : " (default)"}
+          </option>
+          {EFFORT_OPTS.map((v) => (
+            <option key={v} value={v}>
+              {v}
+            </option>
+          ))}
+        </select>
+      </label>
+      {ultracodeOn && (
+        <p className="font-label-caps text-label-caps text-on-surface-variant">
+          ultracode pins effort to xhigh.
+        </p>
+      )}
+      <ToggleRow
+        label="Ultracode"
+        checked={ultracodeOn}
+        onChange={onUltracode}
+        disabled={ultracodeDisabled}
+      />
+      {effortMax && !isEyes && (
+        <p className="font-label-caps text-label-caps text-on-surface-variant">
+          max can&apos;t combine with ultracode.
+        </p>
+      )}
+      <p className="font-label-caps text-label-caps text-on-surface-variant">
+        {isEyes
+          ? "EYES runs without --settings, so ultracode can't be injected. Effort may have limited effect on non-Anthropic models (e.g. DeepSeek)."
+          : "ultracode = xhigh + dynamic workflows (Opus 4.8/4.7); higher token use."}
+      </p>
     </div>
   );
 }
@@ -664,11 +788,18 @@ function KnobEditor({
   // string / enum — effective value = staged value if present, else current.
   const cur = knob.key in pendingStrings ? pendingStrings[knob.key] : knob.value;
   if (editor.type === "enum") {
+    const isEffort = knob.key === "env.CLAUDE_CODE_EFFORT_LEVEL";
     return (
       <select
         className={selectClass}
         value={cur ?? ""}
-        onChange={(e) => stageString(knob.key, e.target.value || null)}
+        onChange={(e) => {
+          const val = e.target.value || null;
+          stageString(knob.key, val);
+          // Effort is env-routed; clear the legacy top-level field so it can't
+          // shadow the env var (settings.json rejects `max` there anyway).
+          if (isEffort) stageString("effortLevel", null);
+        }}
       >
         <option value="">unset</option>
         {editor.options!.map((o) => (
@@ -1028,18 +1159,22 @@ function PermissionsPane({ config }: { config: ClaudeConfigView }) {
 function Switch({
   checked,
   onChange,
+  disabled,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
-      onClick={() => onChange(!checked)}
+      disabled={disabled}
+      onClick={() => !disabled && onChange(!checked)}
       className={cn(
-        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border transition-colors",
+        "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
+        disabled ? "cursor-not-allowed opacity-40" : "cursor-pointer",
         checked
           ? "border-primary bg-primary"
           : "border-outline bg-surface-container-highest",
@@ -1063,15 +1198,17 @@ function ToggleRow({
   label,
   checked,
   onChange,
+  disabled,
 }: {
   label: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <label className="flex items-center justify-between gap-3">
       <span className="font-code-sm text-code-sm text-on-surface">{label}</span>
-      <Switch checked={checked} onChange={onChange} />
+      <Switch checked={checked} onChange={onChange} disabled={disabled} />
     </label>
   );
 }

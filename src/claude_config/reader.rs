@@ -96,8 +96,34 @@ fn read_at(config_dir: &Path, home: &Path, source: &str, managed: bool) -> Claud
 // --- core knobs -------------------------------------------------------------
 
 fn core_knobs(settings: &Map<String, Value>) -> Vec<SettingItem> {
+    // Effort level: bot-hq routes this through the CLAUDE_CODE_EFFORT_LEVEL env
+    // var rather than the top-level `effortLevel` field, because the env var is
+    // the only persistent lever that accepts `max` (the field rejects
+    // `max`/`ultracode` — they are session-only in claude-code). Read env first,
+    // fall back to the legacy `effortLevel` field so an existing setting still
+    // shows; the writer clears the legacy field on the next change.
+    let effort_env = settings
+        .get("env")
+        .and_then(|v| v.as_object())
+        .and_then(|e| e.get("CLAUDE_CODE_EFFORT_LEVEL"))
+        .and_then(scalar_str);
+    let effort_legacy = settings.get("effortLevel").and_then(scalar_str);
+    let (effort_value, effort_source) = match (&effort_env, &effort_legacy) {
+        (Some(_), _) => (effort_env.clone(), "~/.claude/settings.json (env)"),
+        (None, Some(_)) => (
+            effort_legacy.clone(),
+            "~/.claude/settings.json (effortLevel, legacy)",
+        ),
+        (None, None) => (None, "unset (default)"),
+    };
     let mut items = vec![
-        knob(settings, "effortLevel", "Effort level", Surface::CoreKnobs),
+        SettingItem {
+            key: "env.CLAUDE_CODE_EFFORT_LEVEL".into(),
+            label: "Effort level".into(),
+            value: effort_value,
+            source: effort_source.into(),
+            inheritance: inheritance(Surface::CoreKnobs),
+        },
         knob(settings, "model", "Model (default)", Surface::Model),
         knob(settings, "editorMode", "Editor mode", Surface::CoreKnobs),
         knob(
@@ -488,12 +514,15 @@ mod tests {
     #[test]
     fn core_knobs_resolve_values_and_unset() {
         let v = view();
+        // Effort is surfaced under the env key; with only the legacy
+        // `effortLevel` field set, it resolves via the fallback path.
         let effort = v
             .core_knobs
             .iter()
-            .find(|k| k.key == "effortLevel")
+            .find(|k| k.key == "env.CLAUDE_CODE_EFFORT_LEVEL")
             .unwrap();
         assert_eq!(effort.value.as_deref(), Some("xhigh"));
+        assert_eq!(effort.source, "~/.claude/settings.json (effortLevel, legacy)");
         let model = v.core_knobs.iter().find(|k| k.key == "model").unwrap();
         assert_eq!(model.value, None);
         assert_eq!(model.source, "unset (default)");
@@ -503,6 +532,28 @@ mod tests {
             .find(|k| k.key == "env.CLAUDE_CODE_MAX_OUTPUT_TOKENS")
             .unwrap();
         assert_eq!(tokens.value.as_deref(), Some("32000"));
+    }
+
+    #[test]
+    fn effort_env_wins_over_legacy_field() {
+        let config = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        write(
+            &config.path().join("settings.json"),
+            r#"{ "effortLevel": "xhigh",
+                 "env": { "CLAUDE_CODE_EFFORT_LEVEL": "max" } }"#,
+        );
+        write(&home.path().join(".claude.json"), r#"{ "mcpServers": {} }"#);
+        let v = read_at(config.path(), home.path(), "default (~/.claude)", false);
+        let effort = v
+            .core_knobs
+            .iter()
+            .find(|k| k.key == "env.CLAUDE_CODE_EFFORT_LEVEL")
+            .unwrap();
+        // The env var takes precedence over the legacy `effortLevel` field, and
+        // `max` is only expressible via the env path.
+        assert_eq!(effort.value.as_deref(), Some("max"));
+        assert_eq!(effort.source, "~/.claude/settings.json (env)");
     }
 
     #[test]

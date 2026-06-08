@@ -21,10 +21,10 @@ const CONFIG = {
   managed_settings_present: false,
   core_knobs: [
     {
-      key: "effortLevel",
+      key: "env.CLAUDE_CODE_EFFORT_LEVEL",
       label: "Effort level",
       value: "xhigh",
-      source: "~/.claude/settings.json",
+      source: "~/.claude/settings.json (effortLevel, legacy)",
       inheritance: inh(["brian", "rain"], []),
     },
   ],
@@ -159,11 +159,47 @@ describe("Claude Config panel", () => {
     );
     fireEvent.click(await screen.findByRole("button", { name: /save changes/i }));
 
+    // Effort routes through the env var, and the legacy field is cleared so it
+    // can't shadow it.
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("claude_config_set_string", {
-        key: "effortLevel",
+        key: "env.CLAUDE_CODE_EFFORT_LEVEL",
         value: "high",
       }),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith("claude_config_set_string", {
+      key: "effortLevel",
+      value: null,
+    });
+  });
+
+  it("writes a per-agent effort override (Brian) without touching Rain", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "claude_config_read") return CONFIG;
+      if (cmd === "get_claude_overrides") return {};
+      if (cmd === "list_sessions") return [];
+      return undefined;
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /core knobs/i }));
+
+    // Per-agent effort selects live in the override block. DOM order:
+    // [0] = global env effort knob, [1] = Brian effort, [2] = Rain effort.
+    const selects = await screen.findAllByRole("combobox");
+    expect(selects).toHaveLength(3);
+    fireEvent.change(selects[1], { target: { value: "max" } });
+
+    fireEvent.click(await screen.findByRole("button", { name: /save changes/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "set_claude_overrides",
+        expect.objectContaining({
+          overrides: expect.objectContaining({
+            brian: expect.objectContaining({ effort: "max" }),
+          }),
+        }),
+      ),
     );
   });
 });
