@@ -138,6 +138,23 @@ async fn call_tool(
             "tool '{name}' is reserved for HANDS (brian); rain is EYES — read folder descriptions via cl_folder_search instead",
         )));
     }
+    // Rain may write UNTAGGED scratch docs, but a phase-tagged write overwrites
+    // the single per-phase doc (keyed by phase via effective_slug) — those are
+    // HANDS-authored. Block only the tagged form so EYES can't clobber Brian's
+    // investigate/plan/apply/verify doc. (RAIN_ROLE permits untagged scratch.)
+    if name == "session_doc_write"
+        && caller.agent == "rain"
+        && args
+            .get("phase")
+            .and_then(Value::as_str)
+            .is_some_and(|p| !p.is_empty())
+    {
+        return Ok(ToolCallResult::error(
+            "phase-tagged session_doc_write is reserved for HANDS (brian); \
+             rain is EYES — write an untagged scratch doc (no `phase`) instead"
+                .to_string(),
+        ));
+    }
     match name {
         "ask_user_choice" => {
             let question = arg_required_str(&args, "question")?;
@@ -1155,6 +1172,84 @@ mod tests {
             "msg: {}",
             err.message
         );
+    }
+
+    #[tokio::test]
+    async fn rain_phase_tagged_doc_write_rejected() {
+        // Single-author phase docs: Rain (EYES) must not write a phase-tagged
+        // doc — it overwrites the single per-phase doc Brian authors (keyed by
+        // phase via effective_slug, so it's a destructive clobber, not a dup).
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_write",
+                    "arguments": {"slug": "plan", "body": "rain's plan", "phase": "plan"}
+                }),
+                1,
+            ),
+            &rain_caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(true));
+        let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("phase-tagged session_doc_write is reserved for HANDS"),
+            "rain phase-doc write should be rejected, got: {text}"
+        );
+        // And nothing was written.
+        let docs = bridge
+            .session_doc_search("s1", None, Some("plan"))
+            .await
+            .unwrap();
+        assert!(docs.is_empty(), "rain's phase doc must not have persisted");
+    }
+
+    #[tokio::test]
+    async fn rain_untagged_doc_write_allowed() {
+        // The gate is narrow: Rain may still keep her own UNTAGGED scratch doc
+        // (RAIN_ROLE explicitly permits this). Only the phase-tagged form is
+        // HANDS-only.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_write",
+                    "arguments": {"slug": "rain-scratch", "body": "my notes"}
+                }),
+                1,
+            ),
+            &rain_caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_ne!(
+            v["result"]["isError"],
+            json!(true),
+            "rain's untagged scratch doc must be allowed"
+        );
+        let read = bridge
+            .session_doc_read("s1", "rain-scratch")
+            .await
+            .unwrap();
+        assert!(read.is_some(), "untagged scratch doc should persist");
     }
 
     #[tokio::test]
