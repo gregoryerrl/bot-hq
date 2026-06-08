@@ -6,6 +6,7 @@ import { PhasePillRow, type Phase } from "./PhasePill";
 import { ChoicePrompt } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { cn } from "../lib/cn";
+import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
 import type {
   SessionDocumentView,
   SessionTrayView,
@@ -23,11 +24,6 @@ interface DocumentPaneProps {
    * to peek; the view re-follows on the next phase change.
    */
   sessionPhase?: Phase | null;
-}
-
-interface DiffLine {
-  kind: string;
-  text: string;
 }
 
 interface ComputeApplyDiffResult {
@@ -171,8 +167,33 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
       <header className="border-b border-outline-variant px-3 py-1.5 text-[0.65rem] uppercase tracking-wide text-on-surface-variant">
         git diff{diff.note ? ` — ${diff.note}` : ""}
       </header>
-      <pre className="overflow-x-auto px-3 py-2 text-[0.7rem] leading-relaxed font-mono">
-        {diff.lines.map((line, i) => (
+      <div className="divide-y divide-outline-variant">
+        {groupDiffByFile(diff.lines).map((g, gi) => (
+          <details key={gi} open className="group">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-1.5 text-[0.7rem] hover:bg-surface-container-low">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span
+                  aria-hidden
+                  className="text-on-surface-variant transition-transform group-open:rotate-90"
+                >
+                  ▶
+                </span>
+                <span className="truncate font-mono text-amber-300">
+                  {g.file}
+                </span>
+              </span>
+              <span className="shrink-0 font-mono text-[0.65rem]">
+                {g.adds > 0 && (
+                  <span className="text-emerald-300">+{g.adds}</span>
+                )}
+                {g.adds > 0 && g.removes > 0 && " "}
+                {g.removes > 0 && (
+                  <span className="text-red-300">−{g.removes}</span>
+                )}
+              </span>
+            </summary>
+            <pre className="overflow-x-auto px-3 py-2 text-[0.7rem] leading-relaxed font-mono">
+              {g.lines.map((line, i) => (
           <div
             key={i}
             className={cn(
@@ -182,8 +203,11 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
           >
             {line.text || " "}
           </div>
+              ))}
+            </pre>
+          </details>
         ))}
-      </pre>
+      </div>
     </section>
   );
 }
