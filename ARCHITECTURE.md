@@ -112,14 +112,23 @@ System-prompt layering at session spawn (`src/core/session.rs::read_system_promp
 
 1. Hardcoded role prompt (Brian/Rain)
 2. CL location anchor (`<data_dir>` path)
+2b. Project CL index primer (when the session has a project) — the
+   `cl_index_search` rows for the project (`file_path — description`,
+   most-recently-updated first, capped). The table of contents only.
 3. `<data_dir>/general-rules.md`
 4. `<data_dir>/agents/<name>/custom-instruction.md`
 5. Resolved policy directive block (forbidden words list, push-gate
    mode, etc.)
 
-Project conventions/notes are deliberately NOT injected — agents use
-the `cl_index_search` MCP tool + `Read` to fetch project context
-on-demand.
+Project conventions/notes **bodies** are deliberately NOT injected —
+agents pull those via the `cl_index_search` MCP tool + `Read` on-demand.
+What *is* injected (layer 2b) is the lightweight CL **index** for the
+project: filenames + descriptions, so an agent that skips
+`cl_index_search` on a cold start still knows what context exists to
+pull. The index is fetched once in `spawn_session_handle`
+(`storage.cl_index_search`) and threaded into `read_system_prompt`;
+`policy.yaml` is omitted from the primer (it's already rendered as the
+policy block in layer 5).
 
 ---
 

@@ -11,7 +11,7 @@ use crate::paths::Paths;
 use crate::signaling::{
     default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge,
 };
-use crate::storage::{AgentConfig, Author, Session, Storage};
+use crate::storage::{AgentConfig, Author, ClIndexEntry, Session, Storage};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -197,6 +197,17 @@ async fn spawn_session_handle(
         None => None,
     };
 
+    // Fetch the project's CL index rows (filenames + descriptions, most-
+    // recently-updated first) so each agent's system prompt can carry a compact
+    // "table of contents" primer (see `read_system_prompt`). This pre-warms the
+    // cold start: an agent that skips `cl_index_search` on its first turn still
+    // knows what project context EXISTS to pull. Bodies stay pull-only. Best-
+    // effort; None for `_globals` / repo-less sessions.
+    let cl_index: Option<Vec<ClIndexEntry>> = match project.as_deref() {
+        Some(p) => storage.cl_index_search(Some(p), None).await.ok(),
+        None => None,
+    };
+
     // Audit policy.yaml files for mutations BEFORE we load them into the
     // system prompt. If the agent (or some other process) modified a policy
     // file between sessions, we want it logged. v1 is audit-only.
@@ -360,6 +371,7 @@ async fn spawn_session_handle(
         paths,
         &project,
         project_root.as_deref(),
+        cl_index.as_deref(),
         signaling_addr,
         mcp_temp.path(),
         working_repo_path.clone(),
@@ -375,6 +387,7 @@ async fn spawn_session_handle(
                 paths,
                 &project,
                 project_root.as_deref(),
+                cl_index.as_deref(),
                 signaling_addr,
                 mcp_temp.path(),
                 working_repo_path.clone(),
@@ -477,12 +490,14 @@ async fn spawn_agent_for(
     paths: &Paths,
     project: &Option<String>,
     project_root: Option<&Path>,
+    cl_index: Option<&[ClIndexEntry]>,
     signaling_addr: SocketAddr,
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
     resume_session_id: Option<String>,
 ) -> Result<AgentHandle> {
-    let system_prompt = read_system_prompt(paths, agent_name, project.as_deref(), project_root)?;
+    let system_prompt =
+        read_system_prompt(paths, agent_name, project.as_deref(), project_root, cl_index)?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
     let mut user_servers = user_mcp_servers_for_agent(agent_name);
     // Apply per-agent MCP overrides (Settings → Claude Config): a server the
@@ -553,10 +568,13 @@ pub fn user_mcp_servers_for_agent(agent_name: &str) -> serde_json::Map<String, s
 ///      overrides (optional).
 ///   6. **Policy directive block** — rendered from policy.yaml, project-aware.
 ///
-/// Project context (conventions / notes / decisions) is NOT injected here —
-/// agents read those via the `Read` tool when assigned a project task. This
-/// keeps spawn-time prompts compact and lets sessions hop projects without a
-/// fresh spawn.
+/// Project context BODIES (conventions / notes / decisions content) are NOT
+/// injected here — agents pull those via `cl_index_search` + `Read` when
+/// assigned a project task. What IS injected (when `cl_index` is provided) is a
+/// compact CL *index primer*: the same `file_path — description` rows
+/// `cl_index_search` returns, so an agent that skips the tool on a cold start
+/// still knows what context exists to pull. This keeps spawn-time prompts
+/// compact (table-of-contents, not the books) while pre-warming the map.
 ///
 /// Missing optional files are logged at debug and skipped. Policy parse
 /// errors propagate — broken YAML should surface loudly.
@@ -565,6 +583,7 @@ pub fn read_system_prompt(
     agent: &str,
     project: Option<&str>,
     project_root: Option<&Path>,
+    cl_index: Option<&[ClIndexEntry]>,
 ) -> Result<String> {
     let mut out = String::new();
 
@@ -627,6 +646,19 @@ pub fn read_system_prompt(
         cl = paths.data_dir.display()
     ));
 
+    // 2b. Project CL index primer — the concrete table of contents for THIS
+    // project (filenames + descriptions, most-recently-updated first). Only the
+    // index rows `cl_index_search` already returns; bodies stay pull-only. This
+    // pre-warms a cold start so an agent that skips `cl_index_search` on its
+    // first turn still knows what project context exists to pull. Empty for
+    // `_globals` / repo-less sessions.
+    if let Some(entries) = cl_index {
+        let primer = render_cl_primer(entries);
+        if !primer.is_empty() {
+            push_section(&mut out, &primer);
+        }
+    }
+
     // 3. Hardcoded universal rules — always present.
     push_section(&mut out, crate::agents::GENERAL_RULES);
 
@@ -666,6 +698,57 @@ pub fn read_system_prompt(
     // silently returns nothing). Repo-less sessions default to `"_globals"`.
     out = out.replace("<your project>", &project_arg);
     Ok(out)
+}
+
+/// Number of CL index rows the spawn-time primer lists. The CL is deliberately
+/// kept light (one-liner descriptions), so this cap is a guardrail against a
+/// pathological project, not an expected truncation.
+const CL_PRIMER_MAX_ROWS: usize = 12;
+/// Per-row description cap so a body-snippet description (files with no H1) can't
+/// bloat the prompt — the primer is a table of contents, not content.
+const CL_PRIMER_DESC_MAX: usize = 100;
+
+/// Render the project CL index as a compact "table of contents" primer:
+/// `` - `file_path` — description `` lines in the order `cl_index_search`
+/// returns them (most-recently-updated first). Only the index rows — never file
+/// bodies. `policy.yaml` is skipped (already rendered as the policy block).
+/// Returns "" when there's nothing useful to list.
+fn render_cl_primer(entries: &[ClIndexEntry]) -> String {
+    let mut lines = Vec::new();
+    for e in entries.iter().filter(|e| e.file_path != "policy.yaml") {
+        let desc = e.description.trim();
+        if desc.is_empty() {
+            lines.push(format!("- `{}`", e.file_path));
+        } else {
+            let desc = truncate_chars(desc, CL_PRIMER_DESC_MAX);
+            lines.push(format!("- `{}` — {}", e.file_path, desc));
+        }
+        if lines.len() >= CL_PRIMER_MAX_ROWS {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "## Project CL — files available (this project's index)\n\n\
+         These are the CL index rows for this project (most-recently-updated \
+         first) so you know what context EXISTS without a cold-start \
+         `cl_index_search`. Bodies are NOT inlined — pull the ones you need \
+         with `Read` (or re-run `cl_index_search` for the full, live list):\n\n\
+         {}\n",
+        lines.join("\n")
+    )
+}
+
+/// Truncate to at most `max` chars (char-boundary safe), appending `…` when cut.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut t: String = s.chars().take(max).collect();
+    t.push('…');
+    t
 }
 
 /// Append `s` to `out`, then ensure the section ends with one blank line so
@@ -755,7 +838,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         // Hardcoded role from agents::prompts — identity + duo + ask-close.
         assert!(prompt.contains("HANDS"));
         assert!(prompt.contains("BRAIN"));
@@ -774,7 +857,7 @@ mod tests {
             "BRIAN_CUSTOM_PREFS_X9Q",
         )
         .unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         assert!(prompt.contains("BRIAN_CUSTOM_PREFS_X9Q"));
     }
 
@@ -792,10 +875,86 @@ mod tests {
         std::fs::write(pdir.join("notes.md"), "FOO_NOTES_M1").unwrap();
         std::fs::write(pdir.join("decisions.md"), "FOO_DECISIONS_M1").unwrap();
 
-        let prompt = read_system_prompt(&paths, "brian", Some("foo"), None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", Some("foo"), None, None).unwrap();
         assert!(!prompt.contains("FOO_CONVENTIONS_M1"));
         assert!(!prompt.contains("FOO_NOTES_M1"));
         assert!(!prompt.contains("FOO_DECISIONS_M1"));
+    }
+
+    fn cl_entry(file_path: &str, description: &str) -> ClIndexEntry {
+        ClIndexEntry {
+            id: 0,
+            project_id: "foo".into(),
+            file_path: file_path.into(),
+            description: description.into(),
+            tags: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn cl_primer_injects_index_rows_but_not_bodies() {
+        // F-B: the CL index primer surfaces the table of contents (filenames +
+        // descriptions) so an agent cold-starts knowing what to pull — but
+        // NEVER file bodies (those stay pull-only via cl_index_search + Read).
+        // policy.yaml is omitted (it's already rendered as the policy block).
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        let entries = vec![
+            cl_entry("conventions.md", "repo, stack, commands"),
+            cl_entry("notes.md", "durable gotchas"),
+            cl_entry("policy.yaml", "machine gates"),
+        ];
+        let prompt =
+            read_system_prompt(&paths, "brian", Some("foo"), None, Some(&entries)).unwrap();
+        assert!(prompt.contains("Project CL — files available"));
+        assert!(prompt.contains("`conventions.md` — repo, stack, commands"));
+        assert!(prompt.contains("`notes.md` — durable gotchas"));
+        // policy.yaml filtered (already the policy block).
+        assert!(!prompt.contains("`policy.yaml` — machine gates"));
+    }
+
+    #[test]
+    fn cl_primer_absent_when_no_index_provided() {
+        // No primer rows (repo-less / _globals) → no primer section. Keeps the
+        // existing prompt shape for sessions without a project.
+        let tmp = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+        paths.init().unwrap();
+        let prompt = read_system_prompt(&paths, "brian", Some("foo"), None, None).unwrap();
+        assert!(!prompt.contains("Project CL — files available"));
+    }
+
+    #[test]
+    fn render_cl_primer_skips_policy_and_caps_rows() {
+        let mut entries = vec![cl_entry("policy.yaml", "gates")];
+        for i in 0..20 {
+            entries.push(cl_entry(&format!("f{i}.md"), "d"));
+        }
+        let out = render_cl_primer(&entries);
+        assert!(!out.contains("policy.yaml"), "policy.yaml must be filtered");
+        let rows = out.lines().filter(|l| l.starts_with("- `")).count();
+        assert_eq!(rows, CL_PRIMER_MAX_ROWS, "row count must be capped");
+    }
+
+    #[test]
+    fn render_cl_primer_empty_when_no_usable_rows() {
+        assert_eq!(render_cl_primer(&[]), "");
+        // Only policy.yaml present → filtered → nothing to render.
+        assert_eq!(render_cl_primer(&[cl_entry("policy.yaml", "x")]), "");
+    }
+
+    #[test]
+    fn render_cl_primer_truncates_long_description() {
+        let long = "x".repeat(250);
+        let out = render_cl_primer(&[cl_entry("notes.md", &long)]);
+        assert!(out.contains('…'), "over-long description should be truncated");
+        assert!(
+            !out.contains(&"x".repeat(CL_PRIMER_DESC_MAX + 1)),
+            "full over-long description must not appear in the primer"
+        );
     }
 
     #[test]
@@ -808,7 +967,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         assert!(prompt.contains("cl_index_search"));
         assert!(prompt.contains("Index-first"));
         // Regression: when the user mentions a bare filename (tasks.md,
@@ -828,7 +987,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let prompt = read_system_prompt(&paths, "brian", Some("bot-hq"), None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", Some("bot-hq"), None, None).unwrap();
         assert!(
             prompt.contains("cl_index_search(project=\"bot-hq\")"),
             "CL anchor must interpolate the resolved project name"
@@ -843,7 +1002,7 @@ mod tests {
         );
         // Repo-less session (project None) falls back to the _globals example
         // rather than leaving a dangling placeholder.
-        let prompt_none = read_system_prompt(&paths, "brian", None, None).unwrap();
+        let prompt_none = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         assert!(prompt_none.contains("cl_index_search(project=\"_globals\")"));
     }
 
@@ -856,7 +1015,7 @@ mod tests {
         // should still produce a prompt with at minimum the hardcoded role
         // and the hardcoded universal rules.
         std::fs::remove_file(tmp.path().join("custom-general-rules.md")).ok();
-        let prompt = read_system_prompt(&paths, "rain", Some("nonexistent"), None).unwrap();
+        let prompt = read_system_prompt(&paths, "rain", Some("nonexistent"), None, None).unwrap();
         assert!(prompt.contains("EYES"));
         assert!(prompt.contains("Commit hygiene"));
     }
@@ -870,7 +1029,7 @@ mod tests {
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
         std::fs::remove_file(tmp.path().join("custom-general-rules.md")).ok();
-        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         assert!(
             prompt.contains("Commit hygiene"),
             "missing commit-hygiene section"
@@ -896,7 +1055,7 @@ mod tests {
             "MY_ORG_RULE_X7P: always prefer ripgrep over grep.\n",
         )
         .unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None, None).unwrap();
+        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         // Both layers present.
         assert!(prompt.contains("Commit hygiene"));
         assert!(prompt.contains("MY_ORG_RULE_X7P"));
