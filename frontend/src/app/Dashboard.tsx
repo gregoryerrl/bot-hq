@@ -5,6 +5,8 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import type {
   AgentConfigView,
+  ClaudeConfigView,
+  ClaudeOverrides,
   ModelView,
   PendingChoiceView,
   ProjectView,
@@ -82,6 +84,25 @@ export function Dashboard() {
     "get_app_setting",
     { key: RAIN_DISABLED_DEFAULT_KEY },
   );
+
+  // Persistent effort defaults, so the dialog's "Inherit" option can show what
+  // it resolves to (e.g. "Inherit (max)") rather than a bare "(default)".
+  // Mirrors the spawn fall-through: per-agent override > _all > settings.json
+  // env. Called exactly as ClaudeConfig does (no args) so the React Query cache
+  // is shared — a cache-hit if the Settings → Claude Config tab was opened.
+  const { data: claudeOverrides } =
+    useTauriQuery<ClaudeOverrides>("get_claude_overrides");
+  const { data: claudeConfig } =
+    useTauriQuery<ClaudeConfigView>("claude_config_read");
+  const inheritedEffort = useMemo(() => {
+    const knob =
+      claudeConfig?.core_knobs.find(
+        (k) => k.key === "env.CLAUDE_CODE_EFFORT_LEVEL",
+      )?.value ?? null;
+    const at = (a: "brian" | "rain") =>
+      claudeOverrides?.[a]?.effort ?? claudeOverrides?._all?.effort ?? knob ?? null;
+    return { brian: at("brian"), rain: at("rain") };
+  }, [claudeOverrides, claudeConfig]);
 
   const createSession = useTauriMutation<
     SessionInfo,
@@ -353,6 +374,7 @@ export function Dashboard() {
                       if ("effort" in p) setBrianEffort(p.effort ?? null);
                       if ("ultracode" in p) setBrianUltracode(p.ultracode ?? null);
                     }}
+                    inheritedEffort={inheritedEffort.brian}
                     isEyes={false}
                   />
                   {!disableRain && (
@@ -364,6 +386,7 @@ export function Dashboard() {
                         if ("effort" in p) setRainEffort(p.effort ?? null);
                         if ("ultracode" in p) setRainUltracode(p.ultracode ?? null);
                       }}
+                      inheritedEffort={inheritedEffort.rain}
                       isEyes={true}
                     />
                   )}
