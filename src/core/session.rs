@@ -784,7 +784,7 @@ fn default_agent_config(name: &str) -> AgentConfig {
 /// missing/empty id or a deleted model falls back to the per-agent config, then
 /// the hardcoded default. Keeps the legacy path intact for sessions created
 /// before per-agent model selection existed (`*_model_id` is NULL there).
-async fn resolve_spawn_config(
+pub(crate) async fn resolve_spawn_config(
     storage: &Storage,
     agent_name: &str,
     model_id: Option<&str>,

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import { PhasePillRow, type Phase } from "./PhasePill";
 import { ChoicePrompt } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
@@ -76,6 +77,27 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
     (e) => e.status === "pending",
   ).length;
 
+  // One-shot "TL;DR" summary of a doc, rendered in a dispose-on-close dialog.
+  // The backend `summarize_session_doc` runs a headless model in the
+  // background; we just hold the latest request's status here.
+  const [summary, setSummary] = useState<{
+    slug: string;
+    status: "loading" | "done" | "error";
+    text: string;
+  } | null>(null);
+  const runSummary = async (slug: string) => {
+    setSummary({ slug, status: "loading", text: "" });
+    try {
+      const text = await invoke<string>("summarize_session_doc", {
+        sessionId,
+        slug,
+      });
+      setSummary({ slug, status: "done", text });
+    } catch (e) {
+      setSummary({ slug, status: "error", text: errorMessage(e) });
+    }
+  };
+
   return (
     <div className="flex h-full min-w-0 flex-col border-l border-outline-variant bg-surface-container-lowest/50">
       <div className="flex items-center gap-1 border-b border-outline-variant px-3 py-2">
@@ -119,13 +141,30 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
             ) : (
               activeDocs.map((doc) => (
                 <article key={doc.id} className="mb-6">
-                  <header className="mb-2 flex items-center justify-between">
-                    <h4 className="text-sm font-semibold text-on-surface">
+                  <header className="mb-2 flex items-center justify-between gap-2">
+                    <h4 className="min-w-0 truncate text-sm font-semibold text-on-surface">
                       {doc.slug}
                     </h4>
-                    <span className="text-[0.65rem] text-on-surface-variant">
-                      {doc.updated_at}
-                    </span>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => runSummary(doc.slug)}
+                        disabled={
+                          summary?.slug === doc.slug &&
+                          summary.status === "loading"
+                        }
+                        title="Summarize this document (TL;DR) with a background model"
+                        className="rounded border border-outline-variant bg-transparent px-2 py-0.5 text-[0.6rem] font-semibold uppercase tracking-wide text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
+                      >
+                        {summary?.slug === doc.slug &&
+                        summary.status === "loading"
+                          ? "…"
+                          : "TL;DR"}
+                      </button>
+                      <span className="text-[0.65rem] text-on-surface-variant">
+                        {doc.updated_at}
+                      </span>
+                    </div>
                   </header>
                   <Markdown>{doc.body}</Markdown>
                 </article>
@@ -134,7 +173,96 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
           </>
         )}
       </div>
+      <SummaryDialog
+        open={summary !== null}
+        slug={summary?.slug ?? ""}
+        status={summary?.status ?? "loading"}
+        text={summary?.text ?? ""}
+        onClose={() => setSummary(null)}
+      />
     </div>
+  );
+}
+
+// One-shot TL;DR modal: a scrim + focus-trapped panel mirroring ConfirmDialog,
+// but display-only (single Close). Backdrop click and Escape both dismiss; the
+// caller clears its state on close, disposing the summary.
+function SummaryDialog({
+  open,
+  slug,
+  status,
+  text,
+  onClose,
+}: {
+  open: boolean;
+  slug: string;
+  status: "loading" | "done" | "error";
+  text: string;
+  onClose: () => void;
+}) {
+  const trapRef = useFocusTrap<HTMLDivElement>(open);
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-40 bg-black/60"
+        onClick={onClose}
+        aria-hidden
+      />
+      <div
+        ref={trapRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Summary of ${slug}`}
+        className={cn(
+          "fixed left-1/2 top-1/2 z-50 max-h-[80vh] w-[min(560px,90vw)] -translate-x-1/2 -translate-y-1/2 overflow-auto",
+          "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
+        )}
+      >
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <h2 className="min-w-0 truncate text-base font-semibold text-on-surface">
+            TL;DR — {slug}
+          </h2>
+          <span className="shrink-0 text-[0.6rem] uppercase tracking-wide text-on-surface-variant">
+            summary
+          </span>
+        </div>
+        <div className="mb-5 min-h-[3rem] text-sm text-on-surface-variant">
+          {status === "loading" ? (
+            <p className="animate-pulse">Summarizing…</p>
+          ) : status === "error" ? (
+            <p className="text-on-error-container">
+              Couldn't summarize: {text}
+            </p>
+          ) : (
+            <Markdown>{text}</Markdown>
+          )}
+        </div>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-outline-variant bg-surface-container-high px-3 py-1.5 text-sm text-on-surface transition-colors hover:bg-surface-container-highest"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 

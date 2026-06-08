@@ -2,11 +2,12 @@
 
 use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingBridge;
-use crate::storage::SessionDocument;
+use crate::storage::{AgentConfig, SessionDocument, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct SessionDocumentView {
@@ -169,6 +170,104 @@ pub async fn compute_apply_diff(
         lines: parse_diff_lines(&diff),
         note,
     })
+}
+
+/// Summarize a session document via a one-shot, headless `claude -p` call —
+/// a TL;DR for users who don't want to read the full I/P/A/V doc. The model is
+/// resolved from `default_model_id` (app settings), falling back to the
+/// session's Brian model, then Brian's agent config (same chain the live agents
+/// use, via [`resolve_spawn_config`]). Bounded by a 60s timeout; the child is
+/// killed on drop. Runs `--max-turns 1 --strict-mcp-config` so it cannot loop,
+/// use tools, or touch MCP — a pure text response.
+#[tauri::command]
+#[specta::specta]
+pub async fn summarize_session_doc(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+    slug: String,
+) -> Result<String, AppError> {
+    let Some(doc) = bridge.session_doc_read(&session_id, &slug).await? else {
+        return Err(AppError::Internal(format!(
+            "no document '{slug}' in this session"
+        )));
+    };
+
+    // App-wide default model wins; else the session's chosen Brian model; else
+    // resolve_spawn_config falls through to Brian's agent config / hardcoded.
+    let default_model_id = storage
+        .get_setting("default_model_id")
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.is_empty());
+    let session_brian_model = storage
+        .get_session(&session_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| s.brian_model_id);
+    let model_id = default_model_id.or(session_brian_model);
+    let cfg =
+        crate::core::session::resolve_spawn_config(&storage, "brian", model_id.as_deref()).await;
+
+    let prompt = format!(
+        "Summarize the document below in 3-5 concise, plain-English bullet points \
+         (a TL;DR). Output only the bullet points, nothing else.\n\n---\n{}\n---",
+        doc.body
+    );
+
+    tokio::time::timeout(Duration::from_secs(60), run_summarizer(cfg, prompt))
+        .await
+        .map_err(|_| AppError::Internal("summary timed out after 60s".into()))?
+}
+
+/// Spawn the one-shot summarizer subprocess with the resolved model's env and
+/// return its trimmed stdout. Separated so the timeout wrapper above stays terse.
+async fn run_summarizer(cfg: AgentConfig, prompt: String) -> Result<String, AppError> {
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.arg("-p")
+        .arg(&prompt)
+        .args(["--output-format", "text"])
+        .args(["--max-turns", "1"])
+        .arg("--strict-mcp-config")
+        .env("ANTHROPIC_MODEL", &cfg.model_name)
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    if let Some(token) = cfg.auth_token.as_deref().filter(|t| !t.is_empty()) {
+        cmd.env("ANTHROPIC_AUTH_TOKEN", token);
+    }
+    // Route a custom gateway (e.g. DeepSeek) through the local normalizing proxy,
+    // exactly as live-agent spawn does (see agents::spawn::build_command).
+    if let Some(base) = crate::agents::llm_proxy::resolve_anthropic_base_url(
+        cfg.base_url.as_deref(),
+        crate::agents::llm_proxy::proxy_addr(),
+    ) {
+        cmd.env("ANTHROPIC_BASE_URL", base);
+    }
+
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| AppError::Internal(format!("failed to spawn claude: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(AppError::Internal(format!(
+            "summarizer exited with {}: {}",
+            out.status,
+            stderr.trim()
+        )));
+    }
+    let summary = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if summary.is_empty() {
+        return Err(AppError::Internal(
+            "summarizer returned no output".into(),
+        ));
+    }
+    Ok(summary)
 }
 
 #[cfg(test)]
