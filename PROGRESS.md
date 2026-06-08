@@ -11,13 +11,38 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-425 tests passing (377 lib + 31 external MCP + 7 signaling + 10 storage)
-plus 56 frontend Vitest. Release build clean. **Tauri v2 migration landed
+434 tests passing (386 lib + 31 external MCP + 7 signaling + 10 storage)
+plus 62 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-06-08 — June 8 QoL batch: metadata toggle, resizable split, collapsible diff, doc TL;DR
+
+Four independent frontend QoL features from `ideas.md` (June 8 list), built
+easiest→hardest, one commit each. All five gates green per commit.
+
+- **feat: CL metadata editor behind a toggle** (`5d24f4c`). The CL file editor's
+  description/tags panel is collapsed by default behind an "Edit metadata" header
+  button (amber dot when collapsed with unsaved metadata); it stays mounted
+  (CSS-hidden) so an in-progress edit survives a toggle.
+- **feat: resizable chat/document split** (`1853c81`). SessionView's fixed
+  `grid-cols-[3fr_2fr]` became a flex layout with a drag handle; the ratio clamps
+  to [25,75]% and persists to `localStorage["bothq:split:leftPct"]`.
+- **feat: collapse the Apply-tab git diff per file** (`9cab075`). A new pure
+  `lib/diffGroups.ts` (`groupDiffByFile`, unit-tested) splits the classified diff
+  on `diff --git` headers; each file renders as a native `<details open>` with a
+  `+adds −removes` summary. No backend change — reuses `compute_apply_diff`.
+- **feat: TL;DR summarize button on session docs** (`aa54329`, bindings `827f254`).
+  New `summarize_session_doc` command resolves a model (`default_model_id` → session
+  Brian model → agent config via the now-`pub(crate)` `resolve_spawn_config`) and runs
+  a one-shot headless `claude -p … --max-turns 1 --strict-mcp-config` (60s timeout,
+  kill-on-drop), rendered in a dispose-on-close dialog. The live model path is
+  static-verified only (compiles, wired, binding present) — not runtime-exercised.
 
 ---
 
