@@ -5,9 +5,9 @@
 
 
 export const commands = {
-async createSession(id: string, title: string, repoPath: string | null, project: string | null, rainEnabled: boolean | null, brianModelId: string | null, rainModelId: string | null) : Promise<Result<SessionInfo, AppError>> {
+async createSession(id: string, title: string, repoPath: string | null, project: string | null, rainEnabled: boolean | null, brianModelId: string | null, rainModelId: string | null, effort: SessionEffortChoices) : Promise<Result<SessionInfo, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, rainEnabled, brianModelId, rainModelId }) };
+    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, rainEnabled, brianModelId, rainModelId, effort }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1052,6 +1052,12 @@ export type PushGateMode =
  */
 "ask"
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
+/**
+ * Per-session effort/ultracode picks from the create dialog. Bundled into one
+ * struct because `create_session` is at tauri-specta's 10-arg command limit;
+ * each field is `None` = inherit the Settings → Claude Config defaults.
+ */
+export type SessionEffortChoices = { brianEffort: string | null; rainEffort: string | null; brianUltracode: boolean | null; rainUltracode: boolean | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null; 
 /**
  * False = solo-Brian session (Rain disabled at create).
