@@ -84,6 +84,7 @@ function GlobalEventSync() {
   useTauriEvent("session:pending_choice", onTray, [onTray]);
   useTauriEvent("session:choice_resolved", onTray, [onTray]);
   useTauriEvent("session:awaiting_user", onTray, [onTray]);
+  useTauriEvent("session:halt_cleared", onTray, [onTray]);
   useTauriEvent("session:phase_changed", onPhase, [onPhase]);
   useTauriEvent("session:doc_changed", onDoc, [onDoc]);
   useTauriEvent("session:closed", onClose, [onClose]);

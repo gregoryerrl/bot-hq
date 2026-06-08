@@ -224,9 +224,16 @@ impl AppState {
         self.clear_awaiting(handle, session_id).await;
         // Flip every pending `mark_awaiting_user` row to 'answered' — the
         // user's reply IS the answer to a halt. `choice` rows stay pending
-        // until the user actually picks an option.
-        if let Err(e) = self.storage.clear_pending_halts(session_id).await {
-            tracing::warn!(?e, session_id, "clear_pending_halts failed");
+        // until the user actually picks an option. Emit HaltsCleared only when
+        // rows actually flipped, so the UI refetches the tray + clears the
+        // "needs input" bell (a DB-only clear leaves list_pending_tray stale).
+        // The guard matters: broadcast() runs on every user message.
+        match self.storage.clear_pending_halts(session_id).await {
+            Ok(cleared) if cleared > 0 => {
+                self.bridge.notify_halts_cleared(session_id.to_string());
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(?e, session_id, "clear_pending_halts failed"),
         }
         let phase = handle.ipav.lock().await.current_phase;
         let id = broadcast_user_message(
@@ -254,8 +261,14 @@ impl AppState {
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
 
         self.clear_awaiting(handle, session_id).await;
-        if let Err(e) = self.storage.clear_pending_halts(session_id).await {
-            tracing::warn!(?e, session_id, "clear_pending_halts (advance_phase) failed");
+        match self.storage.clear_pending_halts(session_id).await {
+            Ok(cleared) if cleared > 0 => {
+                self.bridge.notify_halts_cleared(session_id.to_string());
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(?e, session_id, "clear_pending_halts (advance_phase) failed");
+            }
         }
 
         let ts = chrono::Utc::now().to_rfc3339();

@@ -113,6 +113,14 @@ pub enum SignalingEvent {
     SessionClosed {
         session_id: String,
     },
+    /// Pending `mark_awaiting_user` halt rows were flipped to answered (by a
+    /// user broadcast or a phase advance). The UI invalidates its tray queries
+    /// so the "needs input" bell clears — a DB-only clear (clear_pending_halts)
+    /// otherwise leaves the `list_pending_tray` cache stale. Scoped to the tray
+    /// (not a full resync) per the per-event invalidation policy.
+    HaltsCleared {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -388,6 +396,16 @@ impl SignalingBridge {
             session_id,
             message_id,
         });
+    }
+
+    /// Fire a `HaltsCleared` event after pending awaiting-halt rows were flipped
+    /// to answered, so the UI refetches `list_pending_tray` and the bell badge
+    /// clears. Callers guard on `cleared > 0` so this only fires when a halt was
+    /// actually pending. Fire-and-forget.
+    pub fn notify_halts_cleared(&self, session_id: String) {
+        let _ = self
+            .event_tx
+            .send(SignalingEvent::HaltsCleared { session_id });
     }
 
     /// Fire a `SessionClosed` event after a session finished closing, so the UI

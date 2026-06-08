@@ -125,6 +125,12 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }
+        SignalingEvent::HaltsCleared { session_id: _ } => {
+            // Pending awaiting-halts were answered; invalidate the tray so the
+            // "needs input" bell clears. Null payload — the frontend just
+            // refetches list_pending_tray (it isn't per-session data).
+            emit_event("session:halt_cleared", Value::Null);
+        }
     }
 }
 
@@ -249,5 +255,22 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, SessionClosedEvent::EVENT_NAME);
         assert_eq!(captured[0].1["session_id"], "s1");
+    }
+
+    #[tokio::test]
+    async fn route_halts_cleared_emits_tray_event() {
+        // A cleared awaiting-halt must reach the frontend as `session:halt_cleared`
+        // so GlobalEventSync invalidates TRAY_KEYS and the bell badge clears.
+        let storage = test_storage().await;
+        let captured_events: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let ev_cap = captured_events.clone();
+        let emitter = BatchEmitter::new(|_| {}, storage);
+        let ev = SignalingEvent::HaltsCleared { session_id: "s1".into() };
+        route(ev, &emitter, &move |name: &str, payload: Value| {
+            ev_cap.lock().unwrap().push((name.to_string(), payload));
+        });
+        let captured = captured_events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, "session:halt_cleared");
     }
 }
