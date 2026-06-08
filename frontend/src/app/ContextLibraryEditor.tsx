@@ -325,6 +325,12 @@ function EditorPane({
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  // Metadata (CL index entry) editor is collapsed by default — it's secondary
+  // to the file content. The toggle lives in the header; `metadataDirty` lets
+  // us badge the toggle when there are unsaved metadata edits while collapsed.
+  const [showMetadata, setShowMetadata] = useState(false);
+  const [metadataDirty, setMetadataDirty] = useState(false);
+
   const handleSave = async () => {
     if (!dirty || saving || draft == null) return;
     setSaving(true);
@@ -401,6 +407,24 @@ function EditorPane({
           )}
           <button
             type="button"
+            onClick={() => setShowMetadata((v) => !v)}
+            title={
+              showMetadata
+                ? "Hide CL index metadata"
+                : "Edit CL index metadata (description + tags)"
+            }
+            className="inline-flex items-center gap-1.5 rounded border border-outline-variant bg-transparent px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+          >
+            {showMetadata ? "Hide metadata" : "Edit metadata"}
+            {!showMetadata && metadataDirty && (
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-amber-400"
+                aria-label="unsaved metadata edits"
+              />
+            )}
+          </button>
+          <button
+            type="button"
             disabled={!dirty || saving}
             onClick={handleSave}
             title={
@@ -444,13 +468,18 @@ function EditorPane({
         ) : null}
       </div>
 
-      <DescriptionEditor
-        project={tab.project}
-        filePath={tab.filePath}
-        initial={entry?.description ?? ""}
-        tags={entry?.tags ?? null}
-        onSaved={onRefetchIndex}
-      />
+      {/* Kept mounted but visually hidden when collapsed, so an in-progress
+          metadata edit isn't lost when the user toggles it shut. */}
+      <div className={cn(!showMetadata && "hidden")}>
+        <DescriptionEditor
+          project={tab.project}
+          filePath={tab.filePath}
+          initial={entry?.description ?? ""}
+          tags={entry?.tags ?? null}
+          onSaved={onRefetchIndex}
+          onDirtyChange={setMetadataDirty}
+        />
+      </div>
     </div>
   );
 }
@@ -539,12 +568,14 @@ function DescriptionEditor({
   initial,
   tags,
   onSaved,
+  onDirtyChange,
 }: {
   project: string;
   filePath: string;
   initial: string;
   tags: string | null;
   onSaved: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const seedKey = `${project}/${filePath}`;
   const [seed, setSeed] = useState(seedKey);
@@ -561,6 +592,9 @@ function DescriptionEditor({
 
   const initialTagsStr = tags ?? "";
   const dirty = desc !== initial || tagsStr !== initialTagsStr;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const handleSave = async () => {
     if (!dirty || saving) return;
