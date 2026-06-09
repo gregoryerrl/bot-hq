@@ -1,7 +1,8 @@
 name: release
 
-# Builds bot-hq for macOS (universal .dmg), Linux (.AppImage + .deb), and
-# Windows (NSIS .exe), then attaches the artifacts to a GitHub Release.
+# Builds bot-hq for macOS (universal .dmg) and Linux (.AppImage + .deb), then
+# attaches the artifacts to a GitHub Release. Windows (NSIS .exe) is DEFERRED
+# until the unix-only reaper/signal-handler are cfg-gated (see the matrix).
 #
 # Triggers:
 #   - push a tag like `v0.1.0` -> builds + uploads to a DRAFT release for that tag
@@ -40,10 +41,13 @@ jobs:
           - platform: ubuntu-22.04
             args: ''
             rust-targets: ''
-          # Windows: NSIS .exe installer.
-          - platform: windows-latest
-            args: ''
-            rust-targets: ''
+          # Windows: NSIS .exe installer. DEFERRED — bot-hq does not yet
+          # compile on Windows: un-cfg-gated libc::kill/SIGKILL in
+          # src/agents/spawn.rs and tokio::signal::unix in src/main.rs. Restore
+          # this entry once both are cfg-gated with Windows equivalents.
+          # - platform: windows-latest
+          #   args: ''
+          #   rust-targets: ''
 
     runs-on: ${{ matrix.platform }}
     defaults:
