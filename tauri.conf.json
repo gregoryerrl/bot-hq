@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "./frontend/dist",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "cd frontend && npm run build",
-    "beforeDevCommand": "cd frontend && npm run dev"
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev"
   },
   "app": {
     "windows": [
@@ -19,6 +19,35 @@
     ],
     "security": {
       "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "deb", "appimage", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Desktop GUI for AI-assisted coding sessions",
+    "longDescription": "bot-hq drives AI-assisted coding sessions through a bilateral-duo agent model (Brian = HANDS, Rain = EYES) with policy enforcement. Each agent runs as a claude-code subprocess.",
+    "copyright": "Copyright © 2026 Gregory Errl Babela",
+    "publisher": "Gregory Errl Babela",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }

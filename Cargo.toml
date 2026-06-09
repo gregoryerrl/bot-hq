@@ -41,7 +41,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 semver = "1"
 
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

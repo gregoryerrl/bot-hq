@@ -1,0 +1,10 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!-- bot-hq temporary mark — Industrial Terminal prompt ">_" in the duo colors.
+       Replace with the real bot-hq mark and re-run: tauri icon icons/src/<real>.png -->
+  <rect width="1024" height="1024" rx="224" ry="224" fill="#0b1326"/>
+  <!-- terminal chevron — Brian / HANDS / execution (primary-container orange) -->
+  <polyline points="330,360 498,512 330,664" fill="none" stroke="#ff7a00"
+            stroke-width="84" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- cursor block — Rain / EYES / review (author.rain purple) -->
+  <rect x="540" y="600" width="208" height="64" rx="24" ry="24" fill="#a855f7"/>
+</svg>
