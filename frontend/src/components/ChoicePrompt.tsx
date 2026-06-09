@@ -1,9 +1,19 @@
 import { useState } from "react";
 import { Button } from "./ui/Button";
-import type { PendingChoiceView } from "../lib/bindings";
+
+/** Shape ChoicePrompt renders — a pending choice/approval row. Hand-defined
+ *  (not a generated binding) because it's built frontend-side from a durable
+ *  SessionTrayView, not returned by any Tauri command. */
+export interface ChoicePromptChoice {
+  choice_id: string;
+  session_id: string;
+  agent: string;
+  question: string;
+  options: string[];
+}
 
 interface ChoicePromptProps {
-  choice: PendingChoiceView;
+  choice: ChoicePromptChoice;
   /** The option string currently mid-resolve for this choice, or undefined. */
   pendingOption: string | undefined;
   onResolve: (choiceId: string, picked: string) => void;

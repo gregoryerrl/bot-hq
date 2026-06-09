@@ -4,14 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { PhasePillRow, type Phase } from "./PhasePill";
-import { ChoicePrompt } from "./ChoicePrompt";
+import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { cn } from "../lib/cn";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
 import type {
   SessionDocumentView,
   SessionTrayView,
-  PendingChoiceView,
 } from "../lib/bindings";
 
 interface DocumentPaneProps {
@@ -469,7 +468,7 @@ function TrayChoice({
   pendingOption: string | undefined;
   onResolve: (choiceId: string, picked: string) => void;
 }) {
-  const choice: PendingChoiceView = {
+  const choice: ChoicePromptChoice = {
     choice_id: entry.choice_id,
     session_id: sessionId,
     agent: entry.agent,
