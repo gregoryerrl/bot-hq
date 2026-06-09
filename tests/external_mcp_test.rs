@@ -134,6 +134,52 @@ async fn auth_rejects_wrong_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auth_rejects_same_length_wrong_token() {
+    // auth_rejects_wrong_token uses a shorter token, so subtle::ct_eq short-
+    // circuits on the length mismatch. Build a token the SAME length as the real
+    // one but all-different bytes, so the reject exercises the constant-time
+    // CONTENT comparison itself, not just the length guard.
+    let env = setup().await;
+    let wrong = "x".repeat(env.token.len());
+    assert_eq!(wrong.len(), env.token.len());
+    assert_ne!(wrong, env.token);
+    let h = auth_header(&wrong);
+    let (status, _body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+    )
+    .await;
+    assert!(status.contains("401"), "got: {status}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_server_soft_fails_on_port_in_use() {
+    // A second server on an already-bound port must return Err — so main.rs can
+    // log + continue without external MCP — rather than panic. The first server
+    // (held in scope) keeps the port bound across the second attempt.
+    let tmp = TempDir::new().unwrap();
+    let paths = Paths::for_data_dir(tmp.path().to_path_buf());
+    paths.init().unwrap();
+    let storage = Storage::open(&paths.db_path).await.unwrap();
+    let bridge = SignalingBridge::new();
+    let internal = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+    let core = Arc::new(CoreAppState::new(paths, storage, internal).await);
+
+    let first = start_external_server(Arc::clone(&core), 0, "tok".into())
+        .await
+        .expect("first bind succeeds on an ephemeral port");
+    let taken = first.local_addr.port();
+
+    let second = start_external_server(Arc::clone(&core), taken, "tok".into()).await;
+    assert!(
+        second.is_err(),
+        "second bind on a taken port must Err, not panic"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auth_rejects_get() {
     let env = setup().await;
     let req = format!(
