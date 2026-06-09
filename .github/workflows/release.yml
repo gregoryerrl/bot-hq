@@ -1,0 +1,122 @@
+name: release
+
+# Builds bot-hq for macOS (universal .dmg), Linux (.AppImage + .deb), and
+# Windows (NSIS .exe), then attaches the artifacts to a GitHub Release.
+#
+# Triggers:
+#   - push a tag like `v0.1.0` -> builds + uploads to a DRAFT release for that tag
+#   - manual (workflow_dispatch) -> validation build; artifacts uploaded to the
+#     run (NOT a release) so the pipeline can be exercised before the first tag
+#
+# Builds are UNSIGNED for now. macOS users right-click -> Open (or run
+# `xattr -dr com.apple.quarantine /Applications/bot-hq.app`); Windows users
+# click "More info -> Run anyway" past SmartScreen. See docs/SIGNING.md to
+# turn on real signing + notarization (just add the secrets + uncomment below).
+#
+# Flat layout note: tauri.conf.json + Cargo.toml live at the repo ROOT; the
+# React frontend lives in frontend/. The Tauri CLI is a frontend devDependency
+# and is invoked from the repo root, where it discovers the config.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS: one universal (arm64 + x86_64) .dmg for the Homebrew cask.
+          - platform: macos-latest
+            args: '--target universal-apple-darwin'
+            rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
+          # Linux: AppImage (primary, universal) + .deb. ubuntu-22.04 for the
+          # older glibc -> widest AppImage compatibility.
+          - platform: ubuntu-22.04
+            args: ''
+            rust-targets: ''
+          # Windows: NSIS .exe installer.
+          - platform: windows-latest
+            args: ''
+            rust-targets: ''
+
+    runs-on: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash # so ./frontend/node_modules/.bin/tauri runs on Windows too
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux bundling dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            file \
+            build-essential
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: cd frontend && npm ci
+
+      - name: Build bundles
+        # `tauri build` runs the frontend build (beforeBuildCommand), then
+        # cargo build --release, then bundles. Run from repo root so the CLI
+        # discovers tauri.conf.json.
+        run: ./frontend/node_modules/.bin/tauri build ${{ matrix.args }}
+        # To enable macOS signing + notarization, add these repo secrets and
+        # uncomment (see docs/SIGNING.md):
+        # env:
+        #   APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        #   APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        #   APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        #   APPLE_ID: ${{ secrets.APPLE_ID }}
+        #   APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        #   APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Attach artifacts to the draft release (tag pushes)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: bot-hq ${{ github.ref_name }}
+          fail_on_unmatched_files: false
+          files: |
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/nsis/*.exe
+
+      - name: Upload validation artifacts (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-hq-${{ matrix.platform }}
+          if-no-files-found: warn
+          path: |
+            target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/nsis/*.exe
