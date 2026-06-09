@@ -11,13 +11,49 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-451 tests passing (400 lib + 33 external MCP + 7 signaling + 11 storage)
+452 tests passing (401 lib + 33 external MCP + 7 signaling + 11 storage)
 plus 63 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-06-09 — v1.1 config/ split: host machine config moved under config/
+
+Followed the `library/` carve-out (`cf72e72`) with the deferred v1.1 step from
+the shipping roadmap: the three host-side machine-config files —
+`general-policy.yaml`, `tool-gate.json`, `claude-overrides.json` — moved from the
+data-dir root into `<data_dir>/config/`. The root now holds only `version.txt`
+plus the four subtrees (`library/`, `config/`, `plugins/`, `.local/`).
+
+- **`config_dir` is part of `Paths`.** New `config_dir` field + a free
+  `paths::config_dir_path(data_dir)` helper (mirrors `read_signaling_addr` — the
+  policy / claude-config path builders receive a bare `data_dir`, not a `Paths`,
+  e.g. the CLI hook subprocess). `policy::general_policy_path`,
+  `tool_gate::config_path`, and `overrides::config_path` route through it; the
+  policy audit reuses `general_policy_path` so the resolver and the
+  mutation-audit can't desync on the new location.
+- **Schema bumped 1 → 2 with a REQUIRED migration.** Not a pure rename: an
+  existing v1 install carries these files at the root, so changing the paths
+  without moving them would make the loaders read an empty `config/` and
+  silently fall back to defaults — dropping the user's configured policy /
+  tool-gate / overrides. `migrate_legacy_layout` is now gated on
+  `schema_version() < SCHEMA_VERSION` (was `version.txt` absence) and stages
+  cumulatively: v0→v1 (root CL → `library/`, host state → `.local/`) then v1→v2
+  (root config → `config/`), each exists-guarded + idempotent; `init` stamps the
+  marker afterward.
+- **Docs re-pointed:** `paths.rs` header layout, ARCHITECTURE.md storage map +
+  policy hierarchy (also fixed a stale `projects/` → `library/projects/` left
+  over from the carve-out), README policy/tool-gate paths + de-hardcoded a stale
+  "288 tests" line, and the in-code doc comments across `policy/hooks`,
+  `agents/spawn`, `tauri_cmd/*`, and the signaling bridge.
+- New test `migrates_v1_config_files_into_config_dir`; the existing migration
+  suite still passes under the schema-version gate. The deferred README
+  install-docs item rode along in the same batch (prerequisites were already
+  present from `cf72e72`).
 
 ---
 

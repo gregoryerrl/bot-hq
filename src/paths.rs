@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! <data_dir>/
-//!   version.txt                    (whole-home schema marker, "1" for v1)
+//!   version.txt                    (whole-home schema marker, "2" for v1.1)
 //!   library/                       (Context Library — its own folder)
 //!     custom-general-rules.md      (optional user additions; hardcoded core
 //!                                   lives in agents::general_rules)
@@ -16,10 +16,11 @@
 //!     projects/<p>/conventions.md
 //!     projects/<p>/notes.md
 //!     projects/<p>/policy.yaml     (CL-coupled: policy resolver reads here)
+//!   config/                        (host-side machine config — bot-hq-owned)
+//!     general-policy.yaml          (machine policy — overlay base)
+//!     tool-gate.json               (global Tool Gate keyword list)
+//!     claude-overrides.json        (per-agent claude-code overrides, 0600)
 //!   plugins/                       (installed plugins)
-//!   general-policy.yaml            (machine policy — stays at root in v1)
-//!   tool-gate.json
-//!   claude-overrides.json
 //!   .local/                        (host-only; never synced)
 //!     bot-hq.db
 //!     lock                         (single-instance PID lock)
@@ -30,14 +31,23 @@
 //!     session-permissions/<sid>.json  (per-session grant mirrors)
 //! ```
 //!
-//! Pre-`library/` installs (root-level CL, no `version.txt`) are migrated once
-//! into this shape by [`Paths::init`] via [`Paths::migrate_legacy_layout`].
+//! Older installs are migrated once into this shape by [`Paths::init`] via
+//! [`Paths::migrate_legacy_layout`]: a pre-`library/` root-level CL (v0) is
+//! carved into `library/` + `.local/`, and v1's root-level machine config is
+//! moved into `config/`.
 
 use anyhow::{Context, Result};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
+
+/// Current whole-home on-disk schema version, written to `version.txt`. Bumped
+/// when the layout changes in a way that needs a one-time migration:
+/// - **1** — Context Library carved into `library/`, host state into `.local/`.
+/// - **2** — host machine config (`general-policy.yaml`, `tool-gate.json`,
+///   `claude-overrides.json`) moved from the data-dir root into `config/`.
+const SCHEMA_VERSION: u32 = 2;
 
 /// Outcome of [`Paths::init`]. Used by the UI layer to surface one-time toasts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +71,11 @@ pub struct Paths {
     /// decisions, and `policy.yaml`). Its own folder so it can be backed up /
     /// cloud-synced independently of host-local state.
     pub cl_dir: PathBuf,
+    /// Host-side machine config: `<data_dir>/config/`. Holds `general-policy.yaml`,
+    /// `tool-gate.json`, and `claude-overrides.json` — bot-hq-owned enforcement /
+    /// spawn config, kept separate from the user-content CL (`library/`) and from
+    /// host-only runtime state (`.local/`).
+    pub config_dir: PathBuf,
     /// Installed-plugin root: `<data_dir>/plugins/`.
     pub plugins_dir: PathBuf,
     /// Host-only runtime state, secrets, and logs: `<data_dir>/.local/`.
@@ -103,6 +118,7 @@ impl Paths {
 
     pub fn for_data_dir(data_dir: PathBuf) -> Self {
         let cl_dir = data_dir.join("library");
+        let config_dir = config_dir_path(&data_dir);
         let plugins_dir = data_dir.join("plugins");
         let local_dir = data_dir.join(".local");
         let db_path = local_dir.join("bot-hq.db");
@@ -116,6 +132,7 @@ impl Paths {
         Self {
             data_dir,
             cl_dir,
+            config_dir,
             plugins_dir,
             local_dir,
             db_path,
@@ -172,16 +189,26 @@ impl Paths {
         Ok(())
     }
 
+    /// The on-disk whole-home schema version from `version.txt`. Absent or
+    /// unparseable → `0` (a pre-`library/` install, or a brand-new data dir).
+    fn schema_version(&self) -> u32 {
+        fs::read_to_string(&self.version_path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
     /// Idempotent. Creates the data dir + CL skeleton on first run, repairs
-    /// missing required CL slots on subsequent runs, migrates a pre-`library/`
-    /// install once, and leaves user content untouched otherwise. Returns the
-    /// outcome for UI toasts.
+    /// missing required CL slots on subsequent runs, migrates an older layout
+    /// once (see [`Paths::migrate_legacy_layout`]), and leaves user content
+    /// untouched otherwise. Returns the outcome for UI toasts.
     ///
-    /// First-run signal: `version.txt` doesn't exist AND there's no legacy
-    /// root-level CL. A brand-new install (or a wiped data dir) gets `FirstRun`
-    /// and a silent init. A pre-`library/` install (no `version.txt` but
-    /// root-level CL present) is migrated into the new layout and reported as
-    /// `Repaired`. A user who deleted just one slot also gets `Repaired`.
+    /// First-run signal: the schema marker reads `0` (no `version.txt`) AND
+    /// there's no legacy root-level CL. A brand-new install (or a wiped data
+    /// dir) gets `FirstRun` and a silent init. An older install (pre-`library/`,
+    /// or v1 with root-level machine config) is migrated into the current layout
+    /// and reported as `Repaired`. A user who deleted just one slot also gets
+    /// `Repaired`.
     pub fn init(&self) -> Result<InitOutcome> {
         // Detect a pre-`library/` install BEFORE creating anything: the old
         // marker `cl-version.txt` or any root-level CL means we migrate rather
@@ -190,7 +217,7 @@ impl Paths {
             || self.data_dir.join("projects").is_dir()
             || self.data_dir.join("agents").is_dir()
             || self.data_dir.join("custom-general-rules.md").exists();
-        let first_run = !self.version_path.exists() && !has_legacy;
+        let first_run = self.schema_version() == 0 && !has_legacy;
 
         fs::create_dir_all(&self.data_dir)
             .with_context(|| format!("creating data dir at {}", self.data_dir.display()))?;
@@ -200,6 +227,8 @@ impl Paths {
 
         fs::create_dir_all(&self.cl_dir)
             .with_context(|| format!("creating library dir at {}", self.cl_dir.display()))?;
+        fs::create_dir_all(&self.config_dir)
+            .with_context(|| format!("creating config dir at {}", self.config_dir.display()))?;
         fs::create_dir_all(&self.plugins_dir)
             .with_context(|| format!("creating plugins dir at {}", self.plugins_dir.display()))?;
         fs::create_dir_all(&self.local_dir)
@@ -207,8 +236,8 @@ impl Paths {
 
         let mut repaired_slots = Vec::new();
 
-        if !self.version_path.exists() {
-            fs::write(&self.version_path, "1\n")
+        if self.schema_version() < SCHEMA_VERSION {
+            fs::write(&self.version_path, format!("{SCHEMA_VERSION}\n"))
                 .with_context(|| format!("writing {}", self.version_path.display()))?;
         }
 
@@ -253,7 +282,7 @@ impl Paths {
         }
 
         if migrated {
-            repaired_slots.push("(migrated to library/ layout)".to_string());
+            repaired_slots.push("(migrated to library/ + config/ layout)".to_string());
         }
 
         if first_run {
@@ -267,25 +296,33 @@ impl Paths {
         }
     }
 
-    /// Move a pre-`library/` install into the new layout exactly once. Returns
-    /// `true` if anything was moved. Gated on `version.txt` being absent (the
-    /// post-migration marker), so it's a no-op on every later run and on a
-    /// genuinely fresh data dir. Idempotent per-entry: only moves a source that
-    /// exists when the destination doesn't. Projects whose CL lives at an
-    /// explicit absolute `cl_path` (stored in the db) are untouched — only the
-    /// convention layout under the data dir moves.
+    /// Move an older on-disk layout into the current one, exactly once. Returns
+    /// `true` if anything was moved. Gated on the recorded schema version being
+    /// behind [`SCHEMA_VERSION`] (the marker is stamped by [`Paths::init`] after
+    /// this runs), so it's a no-op on every later run and on a genuinely fresh
+    /// data dir. Idempotent per-entry: only moves a source that exists when the
+    /// destination doesn't, so a crash mid-migration self-heals on the next
+    /// launch. Projects whose CL lives at an explicit absolute `cl_path` (stored
+    /// in the db) are untouched — only the convention layout under the data dir
+    /// moves.
+    ///
+    /// Stages (cumulative, each exists-guarded):
+    /// - **v0 → v1:** root-level CL → `library/`, host-only state → `.local/`.
+    /// - **v1 → v2:** root-level machine config → `config/`.
     fn migrate_legacy_layout(&self) -> Result<bool> {
-        if self.version_path.exists() {
+        if self.schema_version() >= SCHEMA_VERSION {
             return Ok(false);
         }
         fs::create_dir_all(&self.cl_dir)
             .with_context(|| format!("creating library dir at {}", self.cl_dir.display()))?;
+        fs::create_dir_all(&self.config_dir)
+            .with_context(|| format!("creating config dir at {}", self.config_dir.display()))?;
         fs::create_dir_all(&self.local_dir)
             .with_context(|| format!("creating local dir at {}", self.local_dir.display()))?;
 
         let mut moved = false;
 
-        // CL content → library/
+        // v0 → v1: CL content → library/
         for name in [
             "projects",
             "agents",
@@ -301,7 +338,7 @@ impl Paths {
             }
         }
 
-        // host-only state → .local/
+        // v0 → v1: host-only state → .local/
         for name in [
             "mcp-token",
             "violations.jsonl",
@@ -316,17 +353,29 @@ impl Paths {
             }
         }
 
-        // Old schema marker → new whole-home marker.
+        // v1 → v2: host machine config → config/
+        for name in ["general-policy.yaml", "tool-gate.json", "claude-overrides.json"] {
+            let from = self.data_dir.join(name);
+            let to = self.config_dir.join(name);
+            if from.exists() && !to.exists() {
+                move_path(&from, &to)?;
+                moved = true;
+            }
+        }
+
+        // Obsolete pre-`library/` marker — superseded by `version.txt`, which
+        // init stamps to the current schema version after this returns.
         let old_marker = self.data_dir.join("cl-version.txt");
-        if old_marker.exists() && !self.version_path.exists() {
-            move_path(&old_marker, &self.version_path)?;
+        if old_marker.exists() {
+            fs::remove_file(&old_marker)
+                .with_context(|| format!("removing obsolete {}", old_marker.display()))?;
             moved = true;
         }
 
         if moved {
             warn!(
                 data_dir = %self.data_dir.display(),
-                "migrated legacy root-level CL into library/ + .local/"
+                "migrated legacy layout into library/ + config/ + .local/"
             );
         }
         Ok(moved)
@@ -346,6 +395,14 @@ fn home_dir() -> Result<PathBuf> {
 /// Default data dir = `~/.bot-hq/`.
 fn default_data_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".bot-hq"))
+}
+
+/// The host-side machine-config dir: `<data_dir>/config/`. A free fn (not only a
+/// [`Paths`] field) so the policy + claude-config path builders — which receive a
+/// bare `data_dir` (the CLI hook subprocess has no [`Paths`]) — resolve the same
+/// location. Single source of the `config/` segment so callers can't desync.
+pub fn config_dir_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("config")
 }
 
 /// Move a file or directory, preferring an atomic `fs::rename` and falling back
@@ -632,6 +689,51 @@ mod tests {
         let outcome = paths.init().unwrap();
         assert_eq!(outcome, InitOutcome::Existing);
         assert!(paths.cl_dir.join("custom-general-rules.md").exists());
+    }
+
+    #[test]
+    fn migrates_v1_config_files_into_config_dir() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Simulate a v1 (library/) install: marker reads "1", CL already lives
+        // under library/, but the three host config files are still at the root.
+        fs::create_dir_all(root.join("library")).unwrap();
+        fs::write(root.join("version.txt"), "1\n").unwrap();
+        fs::write(
+            root.join("general-policy.yaml"),
+            "forbidden_in_commits:\n  - Claude\n",
+        )
+        .unwrap();
+        fs::write(root.join("tool-gate.json"), "[]\n").unwrap();
+        fs::write(root.join("claude-overrides.json"), "{}\n").unwrap();
+
+        let paths = Paths::for_data_dir(root.to_path_buf());
+        let outcome = paths.init().unwrap();
+
+        // An upgrade migration, not a first run.
+        match outcome {
+            InitOutcome::Repaired { repaired_slots } => {
+                assert!(repaired_slots.iter().any(|s| s.contains("migrated")));
+            }
+            other => panic!("expected Repaired (config migration), got {other:?}"),
+        }
+
+        // The three config files moved under config/ …
+        assert!(paths.config_dir.join("general-policy.yaml").exists());
+        assert!(paths.config_dir.join("tool-gate.json").exists());
+        assert!(paths.config_dir.join("claude-overrides.json").exists());
+        // … and are gone from the data-dir root.
+        assert!(!root.join("general-policy.yaml").exists());
+        assert!(!root.join("tool-gate.json").exists());
+        assert!(!root.join("claude-overrides.json").exists());
+        // Schema marker bumped to the current version.
+        assert_eq!(
+            fs::read_to_string(&paths.version_path).unwrap().trim(),
+            SCHEMA_VERSION.to_string()
+        );
+
+        // Idempotent: a second init moves nothing and reports Existing.
+        assert_eq!(paths.init().unwrap(), InitOutcome::Existing);
     }
 
     #[test]

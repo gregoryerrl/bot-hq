@@ -5,7 +5,7 @@
 //! Layout under `<data_dir>/`:
 //!
 //! ```text
-//! general-policy.yaml                       (defaults — overlay base)
+//! config/general-policy.yaml                (defaults — overlay base)
 //! library/projects/<project>/policy.yaml    (per-project overrides)
 //! .local/session-policies/<sid>.yaml        (per-session canonical snapshot)
 //! ```
@@ -97,7 +97,7 @@ pub enum ForcePushMode {
 
 impl Policy {
     /// Load + resolve policy for `project` against `data_dir`.
-    /// - Reads `<data_dir>/general-policy.yaml` as the base.
+    /// - Reads `<data_dir>/config/general-policy.yaml` as the base.
     /// - If `project` is `Some(p)`, overlays `<data_dir>/library/projects/<p>/policy.yaml`.
     /// - Either missing → contribute nothing (no error).
     /// - Parse errors return Err (loud — the user needs to know their YAML is broken).
@@ -141,7 +141,7 @@ impl Policy {
             }
         }
 
-        let general_path = data_dir.join("general-policy.yaml");
+        let general_path = general_policy_path(data_dir);
         let base = load_one(&general_path)?.unwrap_or_default();
 
         let overlay = match project {
@@ -357,9 +357,9 @@ fn load_one(path: &Path) -> Result<Option<Policy>> {
     Ok(Some(parsed))
 }
 
-/// Path to the global blueprint policy file (`<data_dir>/general-policy.yaml`).
+/// Path to the global blueprint policy file (`<data_dir>/config/general-policy.yaml`).
 pub fn general_policy_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("general-policy.yaml")
+    crate::paths::config_dir_path(data_dir).join("general-policy.yaml")
 }
 
 /// Read a single blueprint policy file (global or project) as a [`Policy`].
@@ -505,7 +505,7 @@ mod tests {
     fn project_overlays_general() {
         let dir = tempdir().unwrap();
         write(
-            &dir.path().join("general-policy.yaml"),
+            &general_policy_path(dir.path()),
             "forbidden_in_commits:\n  - Claude\n  - GPT\n",
         );
         write(
@@ -535,7 +535,7 @@ mod tests {
         // the general+project blueprints (which DIFFER here) are ignored.
         let dir = tempdir().unwrap();
         write(
-            &dir.path().join("general-policy.yaml"),
+            &general_policy_path(dir.path()),
             "forbidden_in_commits:\n  - Claude\n",
         );
         write(
@@ -563,7 +563,7 @@ mod tests {
         // a session_id is threaded through.
         let dir = tempdir().unwrap();
         write(
-            &dir.path().join("general-policy.yaml"),
+            &general_policy_path(dir.path()),
             "forbidden_in_commits:\n  - Claude\n",
         );
         write(
@@ -578,7 +578,7 @@ mod tests {
     fn general_only_when_no_project_overlay() {
         let dir = tempdir().unwrap();
         write(
-            &dir.path().join("general-policy.yaml"),
+            &general_policy_path(dir.path()),
             "forbidden_in_commits:\n  - Claude\n",
         );
         let p = Policy::resolve(dir.path(), Some("nope"), None).unwrap();
@@ -589,7 +589,7 @@ mod tests {
     fn parse_error_is_loud() {
         let dir = tempdir().unwrap();
         write(
-            &dir.path().join("general-policy.yaml"),
+            &general_policy_path(dir.path()),
             "this: is\n  :: not valid yaml\n  - mixed\n",
         );
         let err = Policy::resolve(dir.path(), None, None).unwrap_err();

@@ -484,7 +484,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         .args(["--append-system-prompt", &cfg.system_prompt]);
 
     // Per-agent Claude-config overrides (Settings → Claude Config). Resolved
-    // from `<data_dir>/claude-overrides.json`; merged into the `--settings`
+    // from `<data_dir>/config/claude-overrides.json`; merged into the `--settings`
     // JSON + env below so a user can disable an inherited skill/plugin/MCP/
     // effort for THIS agent without touching their own ~/.claude. Fail-open.
     let mut agent_override = crate::claude_config::resolve_agent_overrides(

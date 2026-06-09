@@ -234,7 +234,7 @@ surfaces the user's `~/.claude` config that leaks into the headless
 agent subprocesses — skills, plugins, hooks, CLAUDE.md/memory, MCP
 servers, reasoning effort. The user controls it two ways: globally
 (write-back to the real `~/.claude` via `claude_config/writer.rs`) and
-per-agent via an override layer (`<data_dir>/claude-overrides.json`,
+per-agent via an override layer (`<data_dir>/config/claude-overrides.json`,
 `claude_config/overrides.rs`) merged into the spawn-time `--settings`
 JSON + env injection — so an inherited skill/plugin/MCP/effort can be
 disabled for one agent without touching the user's own `~/.claude`.
@@ -329,8 +329,8 @@ forgets to call the MCP tool.
    instead of clobbering).
 
 **Policy file hierarchy:**
-- `<data_dir>/general-policy.yaml` — defaults.
-- `<data_dir>/projects/<project>/policy.yaml` — per-project overlay
+- `<data_dir>/config/general-policy.yaml` — defaults.
+- `<data_dir>/library/projects/<project>/policy.yaml` — per-project overlay
   (lists are replaced, not merged).
 
 Fields: `forbidden_in_commits`, `push_gate` (scalar `auto`|`ask`),
@@ -372,7 +372,7 @@ replacing the per-project `tool_blocklist` role (post-2026-05-29
 fabricated-comment incident) with a single list that can also EXECUTE the
 command on approval.
 
-- **Config:** one global list at `<data_dir>/tool-gate.json` —
+- **Config:** one global list at `<data_dir>/config/tool-gate.json` —
   `[{keyword, mode}]`, `mode` ∈ `gate | auto_allow`, edited in Settings
   ("Gated Bash Keywords"). NOT per-project, NOT in `policy.yaml` —
   bot-hq-side, so nothing is written into a working repo (disguise-safe).
@@ -521,8 +521,8 @@ Defaults (env-overridable via `BOT_HQ_DATA_DIR`):
 - **Data-home schema marker:** `<data_dir>/version.txt`
 - **Context Library (cloud-syncable):** `<data_dir>/library/`
 - **Installed plugins:** `<data_dir>/plugins/`
-- **Machine policy/config (root in v1):** `<data_dir>/general-policy.yaml`,
-  `<data_dir>/tool-gate.json`, `<data_dir>/claude-overrides.json`
+- **Machine policy/config (`config/` since v1.1):** `<data_dir>/config/general-policy.yaml`,
+  `<data_dir>/config/tool-gate.json`, `<data_dir>/config/claude-overrides.json`
 - **DB file:** `<data_dir>/.local/bot-hq.db`
 - **Single-instance lock:** `<data_dir>/.local/lock`
 - **External MCP token:** `<data_dir>/.local/mcp-token`

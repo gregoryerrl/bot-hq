@@ -3,7 +3,7 @@
 //! - [`claude_config_read`] resolves the user's real `~/.claude` config into a
 //!   masked, inheritance-annotated view (no state needed — reads env + fs).
 //! - [`get_claude_overrides`] / [`set_claude_overrides`] load/save the per-agent
-//!   override store at `<data_dir>/claude-overrides.json`, which the spawn path
+//!   override store at `<data_dir>/config/claude-overrides.json`, which the spawn path
 //!   merges into the `--settings`/env/mcp-config it injects.
 
 use crate::claude_config::{

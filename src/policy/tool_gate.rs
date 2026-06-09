@@ -8,7 +8,7 @@
 //! command run with no prompt (the frictionless path for `git commit` /
 //! `git push`).
 //!
-//! Stored as `<data_dir>/tool-gate.json` — bot-hq-side, NEVER written into a
+//! Stored as `<data_dir>/config/tool-gate.json` — bot-hq-side, NEVER written into a
 //! working repo, so it's disguise-safe for client projects. The same `load`
 //! is read by THREE callers: the Tauri Settings commands (in-process), the
 //! `action_gate` bridge method (in-process), and the PreToolUse hook
@@ -62,9 +62,9 @@ pub struct CommandOutput {
     pub code: i32,
 }
 
-/// `<data_dir>/tool-gate.json`.
+/// `<data_dir>/config/tool-gate.json`.
 pub fn config_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("tool-gate.json")
+    crate::paths::config_dir_path(data_dir).join("tool-gate.json")
 }
 
 /// Load the global keyword list. **FAIL-OPEN**: a missing file, an unreadable
@@ -210,6 +210,7 @@ mod tests {
         // A malformed config must NOT error — the hook fails open so a bad
         // file can't brick every Bash call.
         let dir = tempdir().unwrap();
+        std::fs::create_dir_all(config_path(dir.path()).parent().unwrap()).unwrap();
         std::fs::write(config_path(dir.path()), "{ not valid json ]").unwrap();
         assert!(load(dir.path()).is_empty());
     }

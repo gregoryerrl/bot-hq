@@ -513,7 +513,7 @@ async fn log_push_block(
 /// PreToolUse hook handler — the **Tool Gate** tripwire, injected into
 /// HANDS at spawn via `--settings`. Reads the claude-code PreToolUse JSON
 /// payload on stdin and matches the Bash command against the GLOBAL keyword
-/// config (`<data_dir>/tool-gate.json`, NOT per-project `policy.yaml`). A
+/// config (`<data_dir>/config/tool-gate.json`, NOT per-project `policy.yaml`). A
 /// `gate` keyword BLOCKS the direct call (exit 2) and routes the agent to the
 /// `action_gate` MCP tool (which surfaces Approve/Reject and executes on
 /// approve); an `auto_allow`/unmatched command runs normally (exit 0). The

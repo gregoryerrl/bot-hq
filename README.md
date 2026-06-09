@@ -168,7 +168,7 @@ set.
 
 Each project (matched by `working_repo_path` basename) can carry a
 `policy.yaml` under `<data_dir>/library/projects/<project>/`. The file is layered
-over `<data_dir>/general-policy.yaml`. Policy fields:
+over `<data_dir>/config/general-policy.yaml`. Policy fields:
 
 - `forbidden_in_commits: [string]` — words/phrases that must not appear
   in commit messages or staged diffs.
@@ -189,7 +189,7 @@ over `<data_dir>/general-policy.yaml`. Policy fields:
   prompt.
 
 **Tool Gate.** Beyond `policy.yaml`, a global keyword list (Settings →
-"Gated Bash Keywords", stored at `<data_dir>/tool-gate.json`) gates agent
+"Gated Bash Keywords", stored at `<data_dir>/config/tool-gate.json`) gates agent
 Bash commands. A `gate` keyword blocks the command and routes it to the
 `action_gate` MCP tool (Approve/Reject → bot-hq executes on approve); an
 `auto_allow` keyword lets it run with no prompt. Case-insensitive substring
@@ -304,10 +304,11 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 ## Testing
 
 ```bash
-cargo test                          # 288 tests
+cargo test                          # Rust unit + integration suites
 RUN_LIVE_TESTS=1 cargo test         # includes claude-code subprocess smoke
 cargo build --release               # production binary
 ```
 
 Breakdown: lib unit tests plus signaling, storage, and external-MCP
-integration suites — 288 Rust total, plus 14 frontend Vitest.
+integration suites, plus the frontend Vitest suite. Live pass counts are
+tracked in PROGRESS.md (they drift each commit).

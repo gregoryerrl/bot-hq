@@ -1,7 +1,7 @@
 //! Tauri commands for the global **Tool Gate** keyword config (Settings page).
 //!
 //! Thin wrappers over [`crate::policy::tool_gate`] load/save against the
-//! bridge's data dir. The same `<data_dir>/tool-gate.json` is also read by the
+//! bridge's data dir. The same `<data_dir>/config/tool-gate.json` is also read by the
 //! PreToolUse hook subprocess and the `action_gate` MCP tool, so the Settings
 //! UI edits one global list every session honors.
 

@@ -88,7 +88,7 @@ pub enum MutationOutcome {
 /// the previous audit.
 ///
 /// We audit:
-/// - `<data_dir>/general-policy.yaml`
+/// - `<data_dir>/config/general-policy.yaml`
 /// - `<data_dir>/library/projects/<project>/policy.yaml` (if `project` is set)
 ///
 /// Returns the per-file outcomes (mainly for tests + UI surfacing).
@@ -120,7 +120,7 @@ pub fn audit_policy_files_at_root(
     caller_session: &str,
     caller_agent: &str,
 ) -> Result<Vec<(PathBuf, MutationOutcome)>> {
-    let mut targets: Vec<PathBuf> = vec![data_dir.join("general-policy.yaml")];
+    let mut targets: Vec<PathBuf> = vec![crate::policy::general_policy_path(data_dir)];
     if let Some(p) = project {
         let proj_dir = match project_root {
             Some(root) => root.to_path_buf(),
@@ -240,7 +240,8 @@ mod tests {
     #[test]
     fn first_read_records_baseline_no_mutation() {
         let data = tempdir().unwrap();
-        std::fs::write(data.path().join("general-policy.yaml"), "forbidden_in_commits:\n  - Claude\n").unwrap();
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        std::fs::write(crate::policy::general_policy_path(data.path()), "forbidden_in_commits:\n  - Claude\n").unwrap();
         let log = ViolationsLog::new(data.path());
         let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
         assert_eq!(outcomes.len(), 1);
@@ -253,7 +254,8 @@ mod tests {
     #[test]
     fn second_read_unchanged_no_mutation() {
         let data = tempdir().unwrap();
-        std::fs::write(data.path().join("general-policy.yaml"), "forbidden_in_commits:\n  - Claude\n").unwrap();
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        std::fs::write(crate::policy::general_policy_path(data.path()), "forbidden_in_commits:\n  - Claude\n").unwrap();
         let log = ViolationsLog::new(data.path());
         audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
         let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
@@ -264,7 +266,8 @@ mod tests {
     #[test]
     fn mutation_detected_and_logged() {
         let data = tempdir().unwrap();
-        let pol = data.path().join("general-policy.yaml");
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        let pol = crate::policy::general_policy_path(data.path());
         std::fs::write(&pol, "forbidden_in_commits:\n  - Claude\n  - bot-hq\n").unwrap();
         let log = ViolationsLog::new(data.path());
         // Baseline
@@ -290,7 +293,8 @@ mod tests {
         // within a runtime", which wedged session start after policy files
         // changed (stale hash cache → Changed → log).
         let data = tempdir().unwrap();
-        let policy = data.path().join("general-policy.yaml");
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        let policy = crate::policy::general_policy_path(data.path());
         std::fs::write(&policy, "forbidden_in_commits:\n  - Claude\n").unwrap();
         let log = ViolationsLog::new(data.path());
         // Baseline read records the first hash.
@@ -307,6 +311,7 @@ mod tests {
     #[test]
     fn missing_file_is_not_a_mutation() {
         let data = tempdir().unwrap();
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
         let log = ViolationsLog::new(data.path());
         let outcomes = audit_policy_files(data.path(), Some("nope"), Some(&log), "s1", "test").unwrap();
         // Both files absent → both FileAbsent.
@@ -319,6 +324,7 @@ mod tests {
     #[test]
     fn project_policy_audited_when_set() {
         let data = tempdir().unwrap();
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
         std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
             data.path().join("library/projects/foo/policy.yaml"),
@@ -342,6 +348,7 @@ mod tests {
         // (<data_dir>/library/projects/<p>/policy.yaml). A file placed there is
         // both picked up by resolve (overlay applied) and seen by audit.
         let data = tempdir().unwrap();
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
         std::fs::create_dir_all(data.path().join("library/projects/bar")).unwrap();
         std::fs::write(
             data.path().join("library/projects/bar/policy.yaml"),
@@ -363,7 +370,8 @@ mod tests {
     #[test]
     fn hash_cache_persists_across_calls() {
         let data = tempdir().unwrap();
-        std::fs::write(data.path().join("general-policy.yaml"), "a: 1\n").unwrap();
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        std::fs::write(crate::policy::general_policy_path(data.path()), "a: 1\n").unwrap();
         let log = ViolationsLog::new(data.path());
         audit_policy_files(data.path(), None, Some(&log), "s", "t").unwrap();
         // Cache file should exist (now under .local/).
@@ -380,7 +388,8 @@ mod tests {
         // file, then record_policy_write. The next audit must read Unchanged —
         // NOT Changed — so no spurious PolicyMutation violation is logged.
         let data = tempdir().unwrap();
-        let pol = data.path().join("general-policy.yaml");
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        let pol = crate::policy::general_policy_path(data.path());
         std::fs::write(&pol, "forbidden_in_commits:\n  - Claude\n").unwrap();
         let log = ViolationsLog::new(data.path());
         // Baseline read records the first hash.
@@ -400,7 +409,8 @@ mod tests {
     #[test]
     fn record_policy_write_on_absent_file_clears_entry() {
         let data = tempdir().unwrap();
-        let pol = data.path().join("general-policy.yaml");
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        let pol = crate::policy::general_policy_path(data.path());
         std::fs::write(&pol, "a: 1\n").unwrap();
         audit_policy_files(data.path(), None, None, "s", "t").unwrap();
         // Delete the file, then record — entry should be dropped so a later
@@ -415,11 +425,12 @@ mod tests {
     #[test]
     fn audit_without_log_handle_still_updates_cache() {
         let data = tempdir().unwrap();
-        std::fs::write(data.path().join("general-policy.yaml"), "a: 1\n").unwrap();
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        std::fs::write(crate::policy::general_policy_path(data.path()), "a: 1\n").unwrap();
         // No log handle → mutations not logged but cache still tracks.
         let outcomes = audit_policy_files(data.path(), None, None, "s", "t").unwrap();
         assert_eq!(outcomes[0].1, MutationOutcome::FirstSeen);
-        std::fs::write(data.path().join("general-policy.yaml"), "a: 2\n").unwrap();
+        std::fs::write(crate::policy::general_policy_path(data.path()), "a: 2\n").unwrap();
         let outcomes = audit_policy_files(data.path(), None, None, "s", "t").unwrap();
         assert!(matches!(outcomes[0].1, MutationOutcome::Changed { .. }));
     }

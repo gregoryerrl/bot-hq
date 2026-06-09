@@ -339,7 +339,7 @@ impl SignalingBridge {
         self.violations.as_ref()
     }
 
-    /// Audit `<data_dir>/general-policy.yaml` + the project's policy.yaml for
+    /// Audit `<data_dir>/config/general-policy.yaml` + the project's policy.yaml for
     /// mutations, honoring a non-default `projects.cl_path` when set. Wraps
     /// [`crate::policy::audit_policy_files_at_root`] for callers that only
     /// have a `(session_id, agent)` pair and don't want to thread storage

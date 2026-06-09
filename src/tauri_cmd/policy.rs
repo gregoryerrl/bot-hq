@@ -5,7 +5,7 @@
 //! boundary keeps the `#[serde(flatten)]` [`SessionPolicy`] off the wire (and
 //! out of the specta bindings).
 //!
-//! - **Global** → `<data_dir>/general-policy.yaml`.
+//! - **Global** → `<data_dir>/config/general-policy.yaml`.
 //! - **Project** → `<cl_path>/policy.yaml` (resolved via the projects row so a
 //!   non-default `cl_path` is honored, matching the resolver + auditor).
 //! - **Session** → `.local/session-policies/<sid>.yaml`, the canonical snapshot.

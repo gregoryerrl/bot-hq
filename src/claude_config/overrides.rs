@@ -1,5 +1,5 @@
 //! Per-agent **overrides** bot-hq applies to inherited Claude Code config at
-//! spawn time, stored at `<data_dir>/claude-overrides.json` (0600).
+//! spawn time, stored at `<data_dir>/config/claude-overrides.json` (0600).
 //!
 //! The spawn path (`agents::spawn::build_command` + `core::session`) merges the
 //! resolved override for each agent into the `--settings` JSON / env / mcp-config
@@ -81,9 +81,9 @@ pub struct ClaudeOverrides {
     pub rain: AgentOverride,
 }
 
-/// `<data_dir>/claude-overrides.json`.
+/// `<data_dir>/config/claude-overrides.json`.
 pub fn config_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("claude-overrides.json")
+    crate::paths::config_dir_path(data_dir).join("claude-overrides.json")
 }
 
 /// Load the override store. **FAIL-OPEN**: missing/unreadable/malformed → an
@@ -237,6 +237,7 @@ mod tests {
     #[test]
     fn corrupt_store_fails_open() {
         let dir = tempdir().unwrap();
+        std::fs::create_dir_all(config_path(dir.path()).parent().unwrap()).unwrap();
         std::fs::write(config_path(dir.path()), "{ not json ]").unwrap();
         assert_eq!(load_overrides(dir.path()), ClaudeOverrides::default());
     }
