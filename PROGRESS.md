@@ -21,6 +21,55 @@ constraint.
 
 ---
 
+## 2026-06-09 — macOS + Linux distribution: bundle config, release CI, v0.1.0 draft, Homebrew cask (shipping)
+
+Set up end-to-end distribution for macOS + Linux (Windows deferred) and cut the
+first release. The app had no `bundle` config, no real icons, and no CI; now a
+tagged `v*` push builds + drafts a GitHub release with platform artifacts.
+
+- **Bundle config + icons** (`69ff1d1`). Added the `bundle` section to
+  `tauri.conf.json`: `targets [app,dmg,deb,appimage,nsis]` (per-OS subset
+  auto-selected — mac app+dmg, linux deb+appimage, win nsis), `DeveloperTool`
+  category, per-OS metadata, macOS min 10.15. Generated the full icon set
+  (icns/ico/PNGs) from a temporary brand-matched `>_` terminal mark (orange
+  chevron = HANDS, purple cursor = EYES) kept in `icons/src/` for regeneration.
+  Fixed a latent bug: `beforeBuildCommand`/`beforeDevCommand` were `cd frontend
+  && …`, but Tauri v2 runs them from the frontend dir (inferred from
+  `frontendDist`), so the `cd` double-cd'd — `tauri build` never worked before
+  (the app was always built via separate `npm run build` + `cargo build`). Now
+  `npm run build` / `npm run dev`. Verified: `bot-hq.app` bundles with the icon +
+  correct Info.plist (category developer-tools, id, version).
+- **Release CI** (`525ba2b`). `.github/workflows/release.yml`: a `tauri build`
+  matrix (macOS universal `.dmg`, ubuntu-22.04 AppImage + `.deb`, Windows NSIS)
+  on a `v*` tag (draft-release upload) or manual dispatch (validation artifacts).
+  Manual-build approach, not tauri-action (whose layout auto-detection fights the
+  flat layout): invokes the frontend's tauri CLI from the repo root. Unsigned;
+  APPLE_* signing env stubbed. A `workflow_dispatch` dry-run validated all three
+  platforms — macOS + Linux green (the runner builds the `.dmg`; the local `.dmg`
+  failure was just headless GUI, `bundle_dmg.sh` needing Finder), Windows caught a
+  real blocker (below).
+- **Windows deferred** (`d1e94e0`). bot-hq doesn't compile on Windows: the
+  Ghost-Brian reaper (`spawn.rs` `libc::kill`/`SIGKILL`) and the shutdown signal
+  handler (`main.rs` `tokio::signal::unix`) aren't `#[cfg(unix)]`-gated. Commented
+  the windows-latest matrix entry (restore TODO) so `v*` tags yield clean mac +
+  Linux releases instead of a failed run. Follow-up: cfg-gate both + add Windows
+  equivalents (windows-sys TerminateProcess, tokio ctrl_c).
+- **v0.1.0 draft release.** Tagged + pushed `v0.1.0`; CI produced a draft release
+  with `bot-hq_0.1.0_universal.dmg` (15.8 MB), `bot-hq_0.1.0_amd64.AppImage`
+  (86 MB), `bot-hq_0.1.0_amd64.deb` (9 MB). First real exercise of the
+  draft-upload path — one clean release, no matrix race.
+- **Homebrew cask + docs** (`4c00c23`, `58b9bd5`). `packaging/homebrew/bot-hq.rb`
+  (real sha256, livecheck, claude-code + Gatekeeper caveats, deliberately no zap
+  of `~/.bot-hq`), `INSTALL.md` (per-platform), `docs/SIGNING.md` (notarization
+  upgrade path + Windows / auto-update follow-ons). Ships via an own tap
+  (`gregoryerrl/homebrew-bot-hq`).
+
+Remaining (manual/user): publish the draft `v0.1.0`; create the tap repo + add the
+cask. Deferred: the Windows compile fix, the real app icon (swap `icons/src/` +
+re-run `tauri icon`), and macOS notarization when an Apple cert exists.
+
+---
+
 ## 2026-06-09 — check-for-updates: GitHub-release update banner (shipping)
 
 Added the first user-facing "you can update" path (shipping/market-prep track).
