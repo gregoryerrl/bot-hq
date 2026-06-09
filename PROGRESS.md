@@ -11,13 +11,48 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-434 tests passing (386 lib + 31 external MCP + 7 signaling + 10 storage)
-plus 62 frontend Vitest. Release build clean. **Tauri v2 migration landed
+448 tests passing (397 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 63 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-06-09 — under-the-hood health sweep: dashboard halt bug, spawn invariant, enforcement tests, cleanup
+
+A full-codebase audit (5 read-only sub-agents + Rain's adversarial sweep) on an
+otherwise-healthy codebase surfaced one real silent bug, one latent invariant
+gap, under-tested enforcement seams, and a staleness tail. Remediated as 8
+self-contained commits, all 5 gates green per commit.
+
+- **fix: dashboard tiles flag halt waits via the durable tray** (`ce4d49b`). Tiles
+  counted pending input from the in-memory `list_pending_choices`, which
+  `mark_awaiting_user` / `request_phase_advance` never populate — so a halted
+  session showed no badge and counts reset on restart, while the header bell (on
+  the durable source) disagreed. Point the tile at `list_pending_tray`;
+  `SessionTile` is indicate-only so its prop is now a plain `pendingCount`.
+- **fix: exclude max-effort and ultracode at the spawn merge** (`e155897`). A
+  persistent `effort=max` + a session `ultracode=1` (or the reverse) emitted both,
+  which claude-code treats as mutually exclusive. Reconcile at the overlay
+  honoring session-wins; tests for both collision directions.
+- **test: push-gate approve/reject classification** (`315e05a`). Extract a pure
+  `classify_push_response` seam from `decide_push` and lock the fail-closed
+  property (reject / missing / malformed / non-2xx never resolve to Approved).
+- **test: external MCP soft-fail + same-length token reject** (`63724f9`). Auth was
+  already integration-tested; filled the two genuine gaps — port-in-use soft-fail,
+  and a same-length wrong token (exercises ct_eq's content path, not just length).
+- **refactor: rename `tauri_cmd/questions.rs` → `tray.rs`** (`faec167`), decouple
+  ChoicePrompt from the dropped `PendingChoiceView` (`37a0036`), regen bindings
+  (`a88b58b`). Drops the orphaned `list_pending_choices` Tauri command; the bridge
+  method stays for the external driver.
+- **chore: prune stale Emma/PluginSlot refs, the dead author.emma tailwind token,
+  and a broken rustdoc link** (`d128185`).
+
+Tests now 448 (397 lib + 33 external MCP + 7 signaling + 11 storage) + 63 frontend
+Vitest. Landed on branch `brian/health-sweep-2026-06-09`.
 
 ---
 
