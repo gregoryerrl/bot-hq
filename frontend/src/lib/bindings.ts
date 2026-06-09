@@ -550,14 +550,6 @@ async claudeConfigSetPluginEnabled(key: string, enabled: boolean | null) : Promi
     else return { status: "error", error: e  as any };
 }
 },
-async listPendingChoices() : Promise<Result<PendingChoiceView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_pending_choices") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async resolveChoice(choiceId: string, picked: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("resolve_choice", { choiceId, picked }) };
@@ -949,7 +941,6 @@ projects_with_memory: number; inheritance: Inheritance }
  * UI is local + trusted, like the AgentCard token field).
  */
 export type ModelView = { id: string; display_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; created_at: string; updated_at: string }
-export type PendingChoiceView = { choice_id: string; session_id: string; agent: string; question: string; options: string[] }
 /**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
  */
