@@ -30,9 +30,9 @@ pub mod messages;
 pub mod models;
 pub mod plugins;
 pub mod policy;
-pub mod questions;
 pub mod screenshot;
 pub mod sessions;
 pub mod tool_gate;
+pub mod tray;
 
 pub use error::AppError;

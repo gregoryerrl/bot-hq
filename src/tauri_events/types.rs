@@ -81,7 +81,8 @@ impl ChoiceResolvedEvent {
 }
 
 /// Emitted when an agent parks a choice/question for the user (a direct-emit
-/// nudge; the tray polls `list_pending_choices` as the source of truth).
+/// nudge; the durable `session_tray` is the source of truth, surfaced via
+/// `list_pending_tray`).
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct PendingChoiceEvent {
     pub choice_id: String,
