@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { SessionTile } from "./SessionTile";
-import type { PendingChoiceView, SessionInfo } from "../lib/bindings";
+import type { SessionInfo } from "../lib/bindings";
 
 const session: SessionInfo = {
   id: "s-abcd1234",
@@ -14,14 +14,6 @@ const session: SessionInfo = {
   brian_model_at_spawn: null,
   rain_model_at_spawn: null,
   rain_enabled: true,
-};
-
-const binaryChoice: PendingChoiceView = {
-  choice_id: "c1",
-  session_id: session.id,
-  agent: "brian",
-  question: "Approve the planned override?",
-  options: ["Approve", "Reject"],
 };
 
 function renderTile(props: Partial<React.ComponentProps<typeof SessionTile>> = {}) {
@@ -46,31 +38,26 @@ describe("SessionTile", () => {
     expect(screen.getByText("S-ABCD")).toBeInTheDocument();
   });
 
-  it("renders the [Need User Input] pill when pendingChoices is non-empty", () => {
-    renderTile({ pendingChoices: [binaryChoice] });
+  it("renders the [Need User Input] pill when pendingCount > 0", () => {
+    renderTile({ pendingCount: 1 });
     expect(screen.getByText(/need user input/i)).toBeInTheDocument();
   });
 
-  it("hides the [Need User Input] pill when no pending choices", () => {
+  it("hides the [Need User Input] pill when pendingCount is 0", () => {
     renderTile();
     expect(screen.queryByText(/need user input/i)).not.toBeInTheDocument();
   });
 
   it("indicates pending input without an inline answer surface", () => {
-    // The tile only INDICATES; the question + options live on the Tray tab.
-    renderTile({ pendingChoices: [binaryChoice] });
-    expect(
-      screen.queryByText(/approve the planned override/i),
-    ).not.toBeInTheDocument();
+    // The tile only INDICATES a count; the question + options live on the Tray tab.
+    renderTile({ pendingCount: 1 });
     expect(
       screen.queryByRole("button", { name: /^approve$/i }),
     ).not.toBeInTheDocument();
   });
 
   it("shows the pending count in the indicator", () => {
-    renderTile({
-      pendingChoices: [binaryChoice, { ...binaryChoice, choice_id: "c2" }],
-    });
+    renderTile({ pendingCount: 2 });
     expect(screen.getByText(/need user input · 2/i)).toBeInTheDocument();
   });
 });

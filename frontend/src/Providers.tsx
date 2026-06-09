@@ -35,11 +35,7 @@ export function Providers({ children }: { children: ReactNode }) {
 // a single choice-resolve during a live duo meant 10-20+ Tauri round-trips
 // (incl. `compute_apply_diff` spawning a `git` subprocess). Scope each event to
 // only what it can actually change.
-const TRAY_KEYS = [
-  "list_pending_tray",
-  "list_pending_choices",
-  "list_session_tray",
-] as const;
+const TRAY_KEYS = ["list_pending_tray", "list_session_tray"] as const;
 const PHASE_KEYS = [
   "get_session_phase",
   "session_doc_search",

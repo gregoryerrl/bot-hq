@@ -557,9 +557,11 @@ impl SignalingBridge {
     /// is async (was previously sync) because we need to set the halt flag
     /// before the agent's next chunk can volley.
     ///
-    /// Also writes a `kind=halt` row to `session_tray` so the per-session
-    /// tray surfaces the wait alongside any actual choice/open-ask questions
-    /// and the dashboard `[Need User Input] · N` counter reflects it.
+    /// Also writes a `kind=halt` row to `session_tray` so the per-session tray
+    /// surfaces the wait alongside any actual choice/open-ask questions. The
+    /// dashboard tile counter and the header bell both read this DURABLE row via
+    /// `list_pending_tray` (NOT the in-memory pending map, which halts don't
+    /// populate) — so the wait is reflected and survives a restart.
     pub async fn mark_awaiting_user(&self, session_id: String, agent: String, reason: String) {
         self.set_session_awaiting(&session_id).await;
         let choice_id = Uuid::new_v4().to_string();
@@ -583,8 +585,9 @@ impl SignalingBridge {
 
     /// Agent-initiated IPAV phase advance request. Persists a chat message
     /// authored by the requesting agent (so the scroll shows the ask inline)
-    /// and a halt question (so the tray + dashboard counter reflect it), then
-    /// sets the awaiting flag so the duo's peer-forward halts until the user acts.
+    /// and a halt question (so the tray + dashboard counter reflect it via the
+    /// durable `list_pending_tray`, not the in-memory map), then sets the
+    /// awaiting flag so the duo's peer-forward halts until the user acts.
     ///
     /// The user has two response paths, both clear the halt:
     ///   1. Click the phase chip → `AppState::advance_phase` (which also

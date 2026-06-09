@@ -1,25 +1,26 @@
 import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
-import type { PendingChoiceView, SessionInfo } from "../lib/bindings";
+import type { SessionInfo } from "../lib/bindings";
 import { SessionPhaseChip, phaseTintClasses } from "./SessionPhaseChip";
 
 export interface SessionTileProps {
   session: SessionInfo;
-  /** Pending choices pre-filtered to this session. First entry renders inline. */
-  pendingChoices?: PendingChoiceView[];
+  /** Count of items awaiting the user for this session (durable tray). The tile
+   *  only INDICATES — the user answers on the session's Tray tab. */
+  pendingCount?: number;
   /** Current IPAV phase (lowercase) from `get_session_phase`. Null when unknown. */
   phase?: string | null;
 }
 
 export function SessionTile({
   session,
-  pendingChoices = [],
+  pendingCount = 0,
   phase = null,
 }: SessionTileProps) {
   const navigate = useNavigate();
   const closed = session.closed_at !== null;
-  const needsInput = pendingChoices.length > 0;
+  const needsInput = pendingCount > 0;
   const tint = phaseTintClasses(phase, closed);
 
   const open = () => navigate(`/sessions/${session.id}`);
@@ -100,7 +101,7 @@ export function SessionTile({
             title="Open the session's Tray tab to respond"
           >
             <AlertIcon />
-            [Need User Input · {pendingChoices.length}]
+            [Need User Input · {pendingCount}]
           </div>
         )}
       </div>

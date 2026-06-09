@@ -8,9 +8,9 @@ import type {
   ClaudeConfigView,
   ClaudeOverrides,
   ModelView,
-  PendingChoiceView,
   ProjectView,
   SessionInfo,
+  SessionTrayView,
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -26,21 +26,17 @@ const RAIN_DISABLED_DEFAULT_KEY = "rain_disabled_default";
  */
 function SessionTileLoader({
   session,
-  pendingChoices,
+  pendingCount,
 }: {
   session: SessionInfo;
-  pendingChoices: PendingChoiceView[];
+  pendingCount: number;
 }) {
   const { data: phase = null } = useTauriQuery<string | null>(
     "get_session_phase",
     { sessionId: session.id },
   );
   return (
-    <SessionTile
-      session={session}
-      pendingChoices={pendingChoices}
-      phase={phase}
-    />
+    <SessionTile session={session} pendingCount={pendingCount} phase={phase} />
   );
 }
 
@@ -52,8 +48,11 @@ export function Dashboard() {
     error,
   } = useTauriQuery<SessionInfo[]>("list_sessions");
 
-  const { data: pending = [] } = useTauriQuery<PendingChoiceView[]>(
-    "list_pending_choices",
+  // Durable pending-tray rows for all open sessions — the same source the
+  // header bell uses. Survives restart and includes halt waits
+  // (mark_awaiting_user / phase-advance), unlike the in-memory pending map.
+  const { data: pending = [] } = useTauriQuery<SessionTrayView[]>(
+    "list_pending_tray",
     {},
   );
 
@@ -125,9 +124,9 @@ export function Dashboard() {
   >("create_session");
 
   const pendingBySession = useMemo(() => {
-    const acc: Record<string, PendingChoiceView[]> = {};
+    const acc: Record<string, number> = {};
     for (const p of pending) {
-      (acc[p.session_id] = acc[p.session_id] ?? []).push(p);
+      acc[p.session_id] = (acc[p.session_id] ?? 0) + 1;
     }
     return acc;
   }, [pending]);
@@ -476,7 +475,7 @@ export function Dashboard() {
             <SessionTileLoader
               key={s.id}
               session={s}
-              pendingChoices={pendingBySession[s.id] ?? []}
+              pendingCount={pendingBySession[s.id] ?? 0}
             />
           ))}
         </div>
