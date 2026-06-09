@@ -11,6 +11,7 @@ pub mod duo;
 pub mod ipav;
 pub mod session;
 pub mod state;
+pub mod updates;
 
 pub use broadcast::peer_forward_message;
 pub use ipav::{IpavPhase, IpavState};

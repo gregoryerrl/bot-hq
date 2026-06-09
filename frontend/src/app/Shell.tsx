@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { PendingTray } from "../components/PendingTray";
+import { UpdateBanner } from "../components/UpdateBanner";
 
 export function Shell() {
   return (
@@ -29,6 +30,7 @@ export function Shell() {
           <PendingTray />
         </div>
       </header>
+      <UpdateBanner />
       <main className="flex-1 overflow-hidden">
         <Outlet />
       </main>

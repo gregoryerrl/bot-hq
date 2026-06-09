@@ -675,6 +675,14 @@ async uninstallPlugin(pluginId: string) : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async checkForUpdate() : Promise<Result<UpdateInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("check_for_update") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1117,6 +1125,11 @@ export type SkillVisibility =
  * Fully disabled (no auto-invoke, not in the `/` menu).
  */
 "off"
+/**
+ * Update status reported to the frontend. snake_case fields (mirrors the
+ * `SessionInfo` return-type convention) — the React side reads these names.
+ */
+export type UpdateInfo = { current_version: string; latest_version: string; update_available: boolean; release_url: string; release_notes: string | null; published_at: string | null }
 
 /** tauri-specta globals **/
 

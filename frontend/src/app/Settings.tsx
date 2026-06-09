@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import { Link, useBlocker } from "react-router-dom";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
@@ -16,6 +17,7 @@ import type {
   ModelView,
   Policy,
   SessionInfo,
+  UpdateInfo,
 } from "../lib/bindings";
 
 type SettingsSubTab =
@@ -24,7 +26,8 @@ type SettingsSubTab =
   | "claude"
   | "toolgate"
   | "policy"
-  | "archive";
+  | "archive"
+  | "updates";
 
 /**
  * Settings is a tabbed container. The existing per-agent model/auth cards
@@ -74,6 +77,12 @@ export function Settings() {
         >
           Archive
         </SubTabButton>
+        <SubTabButton
+          active={tab === "updates"}
+          onClick={() => select("updates")}
+        >
+          Updates
+        </SubTabButton>
       </div>
       <div className="min-h-0 flex-1">
         <div className={cn("h-full", tab !== "agents" && "hidden")}>
@@ -93,6 +102,9 @@ export function Settings() {
         </div>
         <div className={cn("h-full", tab !== "archive" && "hidden")}>
           {visited.has("archive") && <ArchivePanel />}
+        </div>
+        <div className={cn("h-full", tab !== "updates" && "hidden")}>
+          {visited.has("updates") && <UpdatesPanel />}
         </div>
       </div>
     </div>
@@ -580,6 +592,91 @@ function ArchivePanel() {
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Updates — check GitHub Releases for a newer bot-hq (check-and-notify)
+// ============================================================================
+
+function UpdatesPanel() {
+  const { data, isFetching, isError, error, refetch } = useTauriQuery<UpdateInfo>(
+    "check_for_update",
+    {},
+    { retry: false, refetchOnWindowFocus: false, staleTime: 1000 * 60 * 60 },
+  );
+
+  return (
+    <div className="mx-auto h-full max-w-4xl overflow-auto px-6 py-6">
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="font-headline-lg text-headline-lg text-on-surface">
+            Updates
+          </h1>
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+            bot-hq checks GitHub Releases for a newer version on launch. The
+            install is manual — <span className="text-primary">Download</span>{" "}
+            opens the release page in your browser.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          className="inline-flex shrink-0 items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+        >
+          {isFetching ? "Checking…" : "Check now"}
+        </button>
+      </div>
+
+      <div className="rounded-lg border border-outline-variant bg-surface-container p-5">
+        <dl className="flex flex-col gap-2 font-code-sm text-code-sm">
+          <div className="flex justify-between gap-4">
+            <dt className="text-on-surface-variant">Installed version</dt>
+            <dd className="text-on-surface">{data?.current_version ?? "—"}</dd>
+          </div>
+          <div className="flex justify-between gap-4">
+            <dt className="text-on-surface-variant">Latest release</dt>
+            <dd className="text-on-surface">
+              {isFetching ? "checking…" : data?.latest_version ?? "—"}
+            </dd>
+          </div>
+        </dl>
+
+        <div className="mt-4 border-t border-outline-variant/30 pt-4">
+          {isError ? (
+            <p className="font-code-sm text-code-sm text-on-surface-variant">
+              Couldn&rsquo;t check for updates
+              {error?.message ? `: ${error.message}` : ""}. You may be offline,
+              or no release has been published yet.
+            </p>
+          ) : data?.update_available ? (
+            <div className="flex items-center justify-between gap-4">
+              <p className="font-code-sm text-code-sm text-on-surface">
+                A newer version (
+                <span className="text-primary">{data.latest_version}</span>) is
+                available.
+              </p>
+              <button
+                type="button"
+                onClick={() => void openUrl(data.release_url)}
+                className="inline-flex shrink-0 items-center rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed"
+              >
+                Download
+              </button>
+            </div>
+          ) : data ? (
+            <p className="font-code-sm text-code-sm text-on-surface-variant">
+              You&rsquo;re on the latest version.
+            </p>
+          ) : (
+            <p className="font-code-sm text-code-sm text-on-surface-variant">
+              Checking for updates…
+            </p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

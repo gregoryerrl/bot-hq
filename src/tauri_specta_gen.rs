@@ -22,7 +22,7 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 
 use crate::tauri_cmd::{
     agent_configs, claude_config, cl, docs, messages, models, plugins, policy, sessions, tool_gate,
-    tray,
+    tray, updates,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -102,6 +102,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         plugins::enable_plugin,
         plugins::disable_plugin,
         plugins::uninstall_plugin,
+        // Updates (check GitHub Releases for a newer bot-hq)
+        updates::check_for_update,
     ])
 }
 

@@ -231,6 +231,9 @@ fn main() -> Result<()> {
     let registry_for_setup = Arc::clone(&registry);
 
     tauri::Builder::default()
+        // Opener plugin — the update banner's "Download" button opens the
+        // GitHub release page in the system browser via `openUrl`.
+        .plugin(tauri_plugin_opener::init())
         .manage(Arc::clone(&storage_arc))
         .manage(Arc::clone(&bridge_arc))
         .manage(Arc::clone(&core))

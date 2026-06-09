@@ -15,6 +15,7 @@
 //! - [`policy`] — session/global/project policy get + set
 //! - [`tool_gate`] — global + per-session Tool Gate keyword lists
 //! - [`plugins`] — plugin install/enable/disable
+//! - [`updates`] — GitHub-release update check (check-and-notify)
 //! - [`screenshot`] — webview capture for agent-driven UI testing
 //! - [`error`] — the shared [`error::AppError`] type
 //!
@@ -34,5 +35,6 @@ pub mod screenshot;
 pub mod sessions;
 pub mod tool_gate;
 pub mod tray;
+pub mod updates;
 
 pub use error::AppError;
