@@ -452,7 +452,7 @@ async fn cl_startup_init(
     bridge: &Arc<SignalingBridge>,
     data_dir: &std::path::Path,
 ) -> Result<()> {
-    let projects_dir = data_dir.join("projects");
+    let projects_dir = Paths::for_data_dir(data_dir.to_path_buf()).cl_projects_dir();
     if projects_dir.is_dir() {
         for entry in std::fs::read_dir(&projects_dir)?.flatten() {
             let path = entry.path();

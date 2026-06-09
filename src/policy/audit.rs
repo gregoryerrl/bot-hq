@@ -22,8 +22,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const HASH_CACHE_FILE: &str = ".policy-hashes.json";
-
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct HashCache {
     /// Map: absolute policy file path → hex hash of last-seen content.
@@ -33,7 +31,7 @@ struct HashCache {
 
 impl HashCache {
     fn load(data_dir: &Path) -> Result<Self> {
-        let p = data_dir.join(HASH_CACHE_FILE);
+        let p = crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).policy_hashes_path;
         match std::fs::read_to_string(&p) {
             Ok(s) => match serde_json::from_str(&s) {
                 Ok(cache) => Ok(cache),
@@ -58,7 +56,11 @@ impl HashCache {
     }
 
     fn save(&self, data_dir: &Path) -> Result<()> {
-        let p = data_dir.join(HASH_CACHE_FILE);
+        let p = crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).policy_hashes_path;
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent for {}", p.display()))?;
+        }
         let body = serde_json::to_string_pretty(self).context("serializing hash cache")?;
         let tmp = p.with_extension("json.tmp");
         std::fs::write(&tmp, body)
@@ -85,9 +87,9 @@ pub enum MutationOutcome {
 /// `project`. Logs `PolicyMutation` for any file whose content changed since
 /// the previous audit.
 ///
-/// `data_dir` is the CL root. We audit:
+/// We audit:
 /// - `<data_dir>/general-policy.yaml`
-/// - `<data_dir>/projects/<project>/policy.yaml` (if `project` is set)
+/// - `<data_dir>/library/projects/<project>/policy.yaml` (if `project` is set)
 ///
 /// Returns the per-file outcomes (mainly for tests + UI surfacing).
 pub fn audit_policy_files(
@@ -122,7 +124,7 @@ pub fn audit_policy_files_at_root(
     if let Some(p) = project {
         let proj_dir = match project_root {
             Some(root) => root.to_path_buf(),
-            None => data_dir.join("projects").join(p),
+            None => crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).project_dir(p),
         };
         targets.push(proj_dir.join("policy.yaml"));
     }
@@ -317,9 +319,9 @@ mod tests {
     #[test]
     fn project_policy_audited_when_set() {
         let data = tempdir().unwrap();
-        std::fs::create_dir_all(data.path().join("projects/foo")).unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
-            data.path().join("projects/foo/policy.yaml"),
+            data.path().join("library/projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - bot-hq\n",
         )
         .unwrap();
@@ -334,13 +336,39 @@ mod tests {
     }
 
     #[test]
+    fn resolve_and_audit_agree_on_library_convention_path() {
+        // Parity: the policy resolver and the policy-mutation audit must look for
+        // a project's policy.yaml at the SAME convention path
+        // (<data_dir>/library/projects/<p>/policy.yaml). A file placed there is
+        // both picked up by resolve (overlay applied) and seen by audit.
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/bar")).unwrap();
+        std::fs::write(
+            data.path().join("library/projects/bar/policy.yaml"),
+            "forbidden_in_commits:\n  - bar-only\n",
+        )
+        .unwrap();
+
+        // resolve picks up the overlay → it looked under library/projects/bar/.
+        let resolved = crate::policy::Policy::resolve(data.path(), Some("bar"), None).unwrap();
+        assert_eq!(resolved.forbidden_in_commits, vec!["bar-only"]);
+
+        // audit targets the same file → parity, no drift.
+        let outcomes = audit_policy_files(data.path(), Some("bar"), None, "s", "t").unwrap();
+        assert!(outcomes
+            .iter()
+            .any(|(p, _)| p.ends_with("library/projects/bar/policy.yaml")));
+    }
+
+    #[test]
     fn hash_cache_persists_across_calls() {
         let data = tempdir().unwrap();
         std::fs::write(data.path().join("general-policy.yaml"), "a: 1\n").unwrap();
         let log = ViolationsLog::new(data.path());
         audit_policy_files(data.path(), None, Some(&log), "s", "t").unwrap();
-        // Cache file should exist
-        let cache_file = data.path().join(HASH_CACHE_FILE);
+        // Cache file should exist (now under .local/).
+        let cache_file =
+            crate::paths::Paths::for_data_dir(data.path().to_path_buf()).policy_hashes_path;
         assert!(cache_file.exists());
         let body = std::fs::read_to_string(&cache_file).unwrap();
         assert!(body.contains("general-policy.yaml"));

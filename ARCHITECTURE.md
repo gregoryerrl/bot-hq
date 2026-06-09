@@ -474,20 +474,29 @@ app; restart = fresh sessions.
 
 ## Context Library
 
-Filesystem space at `<data_dir>/` holding agent custom instructions,
-general rules, per-project conventions/notes. Indexed in `cl_index`
+Filesystem space at `<data_dir>/library/` — its own folder so it can be
+backed up / cloud-synced independently of host-local state — holding agent
+custom instructions, per-project conventions/notes. Indexed in `cl_index`
 table for fast description-aware search via `cl_index_search`.
 
 **Per-agent files** (always loaded at spawn):
-- `agents/<name>/custom-instruction.md`
-- `general-rules.md`
+- `library/agents/<name>/custom-instruction.md`
+- `library/custom-general-rules.md` (optional user additions; the
+  universal rules are hardcoded in `agents::general_rules`)
 
 **Per-project files** (loaded on-demand via `cl_index_search`):
-- `projects/<project>/conventions.md`
-- `projects/<project>/notes.md`
-- `projects/<project>/decisions.md`
-- `projects/<project>/policy.yaml`
-- Free-form: anything else under `projects/<project>/`
+- `library/projects/<project>/conventions.md`
+- `library/projects/<project>/notes.md`
+- `library/projects/<project>/decisions.md`
+- `library/projects/<project>/policy.yaml` (CL-coupled — the policy
+  resolver + audit read it here)
+- Free-form: anything else under `library/projects/<project>/`
+
+`_globals` maps to `<data_dir>/library/` itself; named projects honor a
+`projects.cl_path` override (absolute path) when set, else the convention
+`<data_dir>/library/projects/<name>/` resolved via `Paths::project_dir`
+— the single source of truth shared by the storage resolver, policy
+resolver, and policy audit (so the `library/` location can't desync them).
 
 **CL writes are user-explicit OR a bounded append-only agent delta at
 session close.** Mid-session, CL changes come from user action via the
@@ -497,9 +506,11 @@ right before `close_session`, and the user curates/prunes them later in
 the Context Library tab. No silent mid-session accumulation.
 
 **First-run init:** `templates/cl/` is baked into the binary. On first
-start (no `cl-version.txt` in data dir), bot-hq writes the templates to
-`<data_dir>/`. Missing individual files trigger an "initialize default"
-button in the UI for that slot.
+start (no `version.txt` in the data dir), bot-hq seeds the templates
+under `<data_dir>/library/`. A pre-`library/` install (root-level CL, no
+`version.txt`) is migrated once into the new layout by `Paths::init`.
+Missing individual files trigger an "initialize default" button in the UI
+for that slot.
 
 ---
 
@@ -507,13 +518,26 @@ button in the UI for that slot.
 
 Defaults (env-overridable via `BOT_HQ_DATA_DIR`):
 
-- **CL root + policy:** `<data_dir>/`
+- **Data-home schema marker:** `<data_dir>/version.txt`
+- **Context Library (cloud-syncable):** `<data_dir>/library/`
+- **Installed plugins:** `<data_dir>/plugins/`
+- **Machine policy/config (root in v1):** `<data_dir>/general-policy.yaml`,
+  `<data_dir>/tool-gate.json`, `<data_dir>/claude-overrides.json`
 - **DB file:** `<data_dir>/.local/bot-hq.db`
 - **Single-instance lock:** `<data_dir>/.local/lock`
-- **Violations log:** `<data_dir>/violations.jsonl`
-- **External MCP token:** `<data_dir>/mcp-token`
+- **External MCP token:** `<data_dir>/.local/mcp-token`
+- **Violations log:** `<data_dir>/.local/violations.jsonl`
+- **Policy-hash cache:** `<data_dir>/.local/.policy-hashes.json`
+- **Screenshots:** `<data_dir>/.local/screenshots/`
 - **Session policy snapshot:** `<data_dir>/.local/session-policies/<sid>.yaml`
-- **Tool Gate config:** `<data_dir>/tool-gate.json`
+
+Top-level dirs are **sync boundaries**: `library/` = user content
+(cloud-syncable), root config = portable machine policy, `.local/` =
+host-only runtime + secrets + logs (never synced). The binary itself ships
+in a platform bundle (`/Applications/bot-hq.app` on macOS; `/usr/bin` or
+AppImage on Linux; `Program Files` on Windows), NOT under `<data_dir>`.
+Pre-`library/` installs are migrated once on launch. A `config/` split for
+the root policy files is a planned v1.1 follow-up.
 
 **Dev:** `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` keeps dev data separate from a
 production install.

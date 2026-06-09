@@ -216,7 +216,12 @@ mod tests {
     #[test]
     fn project_policy_round_trip_at_convention_path() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("projects").join("foo").join("policy.yaml");
+        let path = dir
+            .path()
+            .join("library")
+            .join("projects")
+            .join("foo")
+            .join("policy.yaml");
         write_policy_file(&path, &sample_policy()).unwrap();
         assert_eq!(read_policy_file(&path).unwrap(), sample_policy());
     }

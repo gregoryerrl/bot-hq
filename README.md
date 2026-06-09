@@ -167,7 +167,7 @@ set.
 ## Policy enforcement
 
 Each project (matched by `working_repo_path` basename) can carry a
-`policy.yaml` under `<data_dir>/projects/<project>/`. The file is layered
+`policy.yaml` under `<data_dir>/library/projects/<project>/`. The file is layered
 over `<data_dir>/general-policy.yaml`. Policy fields:
 
 - `forbidden_in_commits: [string]` — words/phrases that must not appear
@@ -215,7 +215,7 @@ Settings gear tab); there are no agent-side grants.
    exit code. Hooks are idempotent and respect foreign hooks (write
    `.bot-hq` sidecar instead of clobbering).
 
-`violations.jsonl` lives at `<data_dir>/violations.jsonl`. UI exposes a
+`violations.jsonl` lives at `<data_dir>/.local/violations.jsonl`. UI exposes a
 viewer (Settings → Violations).
 
 ## Driving bot-hq from another MCP client
@@ -226,7 +226,7 @@ without the GUI.
 
 **Endpoint:** `http://127.0.0.1:7892/mcp` (POST, JSON-RPC body)
 **Auth:** `Authorization: Bearer <token>` where token lives at
-`<data_dir>/mcp-token` (UUIDv4, `0600` perms, auto-generated on first
+`<data_dir>/.local/mcp-token` (UUIDv4, `0600` perms, auto-generated on first
 run)
 
 ### Setup in another claude-code session
@@ -241,7 +241,7 @@ Add to your MCP config (typically `~/.claude.json` or per-project
       "type": "http",
       "url": "http://127.0.0.1:7892/mcp",
       "headers": {
-        "Authorization": "Bearer <paste contents of ~/.bot-hq/mcp-token>"
+        "Authorization": "Bearer <paste contents of ~/.bot-hq/.local/mcp-token>"
       }
     }
   }
@@ -287,7 +287,7 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 - **Port conflict:** soft-fails — internal MCP keeps working, Settings →
   External MCP shows "unavailable". Quickest fix: kill the conflicting
   process or set `BOT_HQ_EXTERNAL_MCP_PORT`.
-- **Rotation:** edit `<data_dir>/mcp-token` and restart bot-hq. The
+- **Rotation:** edit `<data_dir>/.local/mcp-token` and restart bot-hq. The
   token is read once at startup.
 
 ## Security caveats (v1)

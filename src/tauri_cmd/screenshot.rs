@@ -42,7 +42,7 @@ pub(crate) fn capture_main_window(
     let logical_w = (size.width as f64 / scale).round() as u64;
     let logical_h = (size.height as f64 / scale).round() as u64;
 
-    let dir = data_dir.join("screenshots");
+    let dir = crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).screenshots_dir;
     std::fs::create_dir_all(&dir).context("mkdir screenshots dir")?;
 
     let ts = Utc::now().format("%Y%m%dT%H%M%S%3f").to_string();

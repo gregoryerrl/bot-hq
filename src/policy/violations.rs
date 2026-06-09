@@ -1,6 +1,6 @@
 //! Append-only JSONL log of every enforcement event.
 //!
-//! Located at `<data_dir>/violations.jsonl`. Replaces the old CL's
+//! Located at `<data_dir>/.local/violations.jsonl`. Replaces the old CL's
 //! `discipline-log.md` + `voice-mirror-log.md` with a single structured file.
 //!
 //! Every approval round writes ONE record, regardless of outcome (approved
@@ -71,7 +71,7 @@ pub struct ViolationsLog {
 impl ViolationsLog {
     pub fn new(data_dir: &Path) -> Self {
         Self {
-            path: data_dir.join("violations.jsonl"),
+            path: crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).violations_path,
             write_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -105,6 +105,10 @@ impl ViolationsLog {
             .write_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent for {}", self.path.display()))?;
+        }
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -249,7 +253,8 @@ mod tests {
     async fn malformed_line_is_skipped() {
         let dir = tempdir().unwrap();
         let log = ViolationsLog::new(dir.path());
-        // Pre-populate with a mix of valid + junk.
+        // Pre-populate with a mix of valid + junk (log now lives under .local/).
+        std::fs::create_dir_all(log.path().parent().unwrap()).unwrap();
         std::fs::write(
             log.path(),
             "not json\n{\"ts\":\"2026-01-01T00:00:00Z\",\"session_id\":\"s\",\"agent\":\"a\",\"kind\":\"push_gate\",\"action\":\"x\",\"outcome\":\"approved\"}\n",

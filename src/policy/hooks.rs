@@ -904,9 +904,9 @@ mod tests {
     #[test]
     fn commit_msg_blocks_forbidden_word() {
         let data = tempdir().unwrap();
-        std::fs::create_dir_all(data.path().join("projects/foo")).unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
-            data.path().join("projects/foo/policy.yaml"),
+            data.path().join("library/projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - Claude\n  - Co-Authored-By\n",
         )
         .unwrap();
@@ -920,9 +920,9 @@ mod tests {
     #[test]
     fn commit_msg_passes_clean_message() {
         let data = tempdir().unwrap();
-        std::fs::create_dir_all(data.path().join("projects/foo")).unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
-            data.path().join("projects/foo/policy.yaml"),
+            data.path().join("library/projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - Claude\n",
         )
         .unwrap();
@@ -937,9 +937,9 @@ mod tests {
         // Git includes commented-out instruction lines in the message file
         // that don't end up in the actual commit — don't flag them.
         let data = tempdir().unwrap();
-        std::fs::create_dir_all(data.path().join("projects/foo")).unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
-            data.path().join("projects/foo/policy.yaml"),
+            data.path().join("library/projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - Claude\n",
         )
         .unwrap();
@@ -1000,9 +1000,9 @@ mod tests {
     #[test]
     fn run_pre_push_blocks_ask_without_session() {
         let data = tempdir().unwrap();
-        std::fs::create_dir_all(data.path().join("projects/foo")).unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
-            data.path().join("projects/foo/policy.yaml"),
+            data.path().join("library/projects/foo/policy.yaml"),
             "push_gate: ask\n",
         )
         .unwrap();

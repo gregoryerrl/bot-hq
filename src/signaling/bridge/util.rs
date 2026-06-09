@@ -9,8 +9,8 @@ use crate::storage::Project;
 /// Walk `dir` recursively; for each text-ish file (.md, .yaml, .txt) populate
 /// `out` with (relative_path, mtime_iso8601, description_snippet). Skips
 /// hidden files/dirs (anything starting with '.') and a few well-known noise
-/// directories (`projects` at the data_dir level is handled by per-project
-/// rescans, not here).
+/// directories (`projects` at the CL-dir (`library/`) level is handled by
+/// per-project rescans, not here).
 pub(super) fn walk_cl_dir(
     dir: &Path,
     root: &Path,
@@ -30,10 +30,10 @@ pub(super) fn walk_cl_dir(
         if name.starts_with('.') {
             continue;
         }
-        // At the _globals root, the per-project subdirectories show up under
-        // `projects/` — skip them; they'll be rescanned with their own
-        // project name. Same for `.local` (sqlite + per-project lock state).
-        if project == Project::GLOBALS && dir == root && (name == "projects" || name == ".local") {
+        // At the _globals root (the CL dir, `<data_dir>/library/`), the
+        // per-project subdirectories show up under `projects/` — skip them;
+        // they'll be rescanned with their own project name.
+        if project == Project::GLOBALS && dir == root && name == "projects" {
             continue;
         }
         if path.is_dir() {

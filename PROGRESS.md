@@ -11,13 +11,48 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-448 tests passing (397 lib + 33 external MCP + 7 signaling + 11 storage)
+451 tests passing (400 lib + 33 external MCP + 7 signaling + 11 storage)
 plus 63 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-06-09 — Context Library carved into its own `library/` folder (market-prep layout)
+
+Reshaped the `~/.bot-hq/` data home so the Context Library lives in its own
+`library/` subtree — separable for backup / a future cloud-sync-CL plugin, and
+so host-only state stops intermixing with user content at the data-dir root.
+Decided the full install topology first (the binary stays platform-bundled —
+`/Applications/bot-hq.app` etc., NOT under `~/.bot-hq/`); shipped the v1
+`library/` carve-out and deferred a `config/` split to a cheap v1.1. Target
+platforms now macOS + Linux + Windows; the layout is base-agnostic so no
+platform branches were needed.
+
+- **`Paths` is the single source of truth.** New `cl_dir` (`<dd>/library`),
+  `plugins_dir`, `version_path` (`version.txt`, renamed from `cl-version.txt`),
+  and `.local/`-rooted `mcp_token_path` / `violations_path` /
+  `policy_hashes_path` / `screenshots_dir`. A `project_dir(name)` helper is the
+  one per-project convention path, shared by the storage resolver, policy
+  resolver, and policy audit so the `library/` location can't desync them.
+- **One-time migration** (`Paths::migrate_legacy_layout`, gated on `version.txt`
+  absence): moves root CL → `library/`, host-only state → `.local/`, renames the
+  marker. Idempotent; explicit-`cl_path` projects untouched. Uses a
+  rename-with-copy-fallback (`move_path`) robust to cross-filesystem EXDEV /
+  locked files.
+- **Resolvers + policy re-pointed** through `cl_dir` / `project_dir`:
+  `cl_path_for_project`, `cl_project_root`, `walk_cl_dir`, `cl_startup_init`,
+  `read_system_prompt` (also fixed a pre-existing missing-slash bug in the CL
+  anchor), `resolve_at_root`, `audit_policy_files`. Host-only files
+  (violations.jsonl, .policy-hashes.json, screenshots/, mcp-token) moved under
+  `.local/`.
+- **Cleanup + docs:** removed the dead Emma template; refreshed ARCHITECTURE.md,
+  README.md, .env.example. Added migration tests (×2) + a resolver/audit parity
+  test. All 5 gates green; `config/` split + a `bin/` symlink are deferred
+  follow-ups.
 
 ---
 

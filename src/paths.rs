@@ -1,23 +1,37 @@
 //! Data-dir resolution + first-run init.
 //!
 //! Layout under `<data_dir>` (default `~/.bot-hq/`, overridable via
-//! `BOT_HQ_DATA_DIR`):
+//! `BOT_HQ_DATA_DIR`). The Context Library lives in its own `library/` subtree
+//! so it can be backed up / cloud-synced independently of host-local state;
+//! secrets, logs, and runtime state live under `.local/` (never synced):
 //!
 //! ```text
 //! <data_dir>/
-//!   cl-version.txt                 ("1" for v1)
-//!   custom-general-rules.md        (optional user additions; hardcoded core
+//!   version.txt                    (whole-home schema marker, "1" for v1)
+//!   library/                       (Context Library — its own folder)
+//!     custom-general-rules.md      (optional user additions; hardcoded core
 //!                                   lives in agents::general_rules)
-//!   agents/<name>/custom-instruction.md  (brian, rain — user tweaks)
-//!   projects/<p>/conventions.md
-//!   projects/<p>/notes.md
-//!   mcp-token                      (external MCP bearer token, 0600)
-//!   violations.jsonl               (policy audit trail)
-//!   .local/
+//!     eod.md, tasks.md             (cross-project _globals files)
+//!     agents/<name>/custom-instruction.md  (brian, rain — user tweaks)
+//!     projects/<p>/conventions.md
+//!     projects/<p>/notes.md
+//!     projects/<p>/policy.yaml     (CL-coupled: policy resolver reads here)
+//!   plugins/                       (installed plugins)
+//!   general-policy.yaml            (machine policy — stays at root in v1)
+//!   tool-gate.json
+//!   claude-overrides.json
+//!   .local/                        (host-only; never synced)
 //!     bot-hq.db
 //!     lock                         (single-instance PID lock)
+//!     mcp-token                    (external MCP bearer token, 0600 unix)
+//!     violations.jsonl             (policy audit trail)
+//!     .policy-hashes.json          (policy-file hash cache)
+//!     screenshots/<ts>.png
 //!     session-permissions/<sid>.json  (per-session grant mirrors)
 //! ```
+//!
+//! Pre-`library/` installs (root-level CL, no `version.txt`) are migrated once
+//! into this shape by [`Paths::init`] via [`Paths::migrate_legacy_layout`].
 
 use anyhow::{Context, Result};
 use std::fs::{self, OpenOptions};
@@ -41,14 +55,33 @@ pub enum InitOutcome {
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub data_dir: PathBuf,
+    /// Context Library root: `<data_dir>/library/`. Holds agent custom
+    /// instructions, `custom-general-rules.md`, cross-project `_globals` files
+    /// (`eod.md`, `tasks.md`), and `projects/<p>/` (conventions, notes,
+    /// decisions, and `policy.yaml`). Its own folder so it can be backed up /
+    /// cloud-synced independently of host-local state.
+    pub cl_dir: PathBuf,
+    /// Installed-plugin root: `<data_dir>/plugins/`.
+    pub plugins_dir: PathBuf,
+    /// Host-only runtime state, secrets, and logs: `<data_dir>/.local/`.
+    /// Never synced.
     pub local_dir: PathBuf,
     pub db_path: PathBuf,
     pub lock_path: PathBuf,
-    pub cl_version_path: PathBuf,
+    /// Whole-data-home schema marker: `<data_dir>/version.txt`. Its absence is
+    /// the first-run signal; an old install missing it but carrying root-level
+    /// CL triggers the one-time `library/` migration in [`Paths::init`].
+    pub version_path: PathBuf,
     /// Bearer token for the external MCP server. Generated on first run as a
-    /// UUIDv4 with 0o600 perms. Persists across restarts; user can rotate by
-    /// editing the file and restarting bot-hq.
+    /// UUIDv4 with 0o600 perms (unix). Lives under `.local/` (host-only secret,
+    /// never synced). User can rotate by editing the file and restarting.
     pub mcp_token_path: PathBuf,
+    /// Policy audit trail: `<data_dir>/.local/violations.jsonl`.
+    pub violations_path: PathBuf,
+    /// Policy-file hash cache: `<data_dir>/.local/.policy-hashes.json`.
+    pub policy_hashes_path: PathBuf,
+    /// Webview screenshot output dir: `<data_dir>/.local/screenshots/`.
+    pub screenshots_dir: PathBuf,
     /// The internal signaling server's bound address (e.g. `127.0.0.1:54321`),
     /// written at startup so the git pre-push hook — a separate subprocess that
     /// can't reach the running app's bridge directly — can POST `/hooks/pre-push`
@@ -69,21 +102,44 @@ impl Paths {
     }
 
     pub fn for_data_dir(data_dir: PathBuf) -> Self {
+        let cl_dir = data_dir.join("library");
+        let plugins_dir = data_dir.join("plugins");
         let local_dir = data_dir.join(".local");
         let db_path = local_dir.join("bot-hq.db");
         let lock_path = local_dir.join("lock");
-        let cl_version_path = data_dir.join("cl-version.txt");
-        let mcp_token_path = data_dir.join("mcp-token");
+        let version_path = data_dir.join("version.txt");
+        let mcp_token_path = local_dir.join("mcp-token");
+        let violations_path = local_dir.join("violations.jsonl");
+        let policy_hashes_path = local_dir.join(".policy-hashes.json");
+        let screenshots_dir = local_dir.join("screenshots");
         let signaling_addr_path = local_dir.join("signaling-addr");
         Self {
             data_dir,
+            cl_dir,
+            plugins_dir,
             local_dir,
             db_path,
             lock_path,
-            cl_version_path,
+            version_path,
             mcp_token_path,
+            violations_path,
+            policy_hashes_path,
+            screenshots_dir,
             signaling_addr_path,
         }
+    }
+
+    /// Single source of truth for the per-project CL convention path:
+    /// `<cl_dir>/projects/<name>/`. All convention callers (storage
+    /// `cl_path_for_project`, policy resolver, policy audit) route through this
+    /// so a layout change can't desync them.
+    pub fn project_dir(&self, name: &str) -> PathBuf {
+        self.cl_dir.join("projects").join(name)
+    }
+
+    /// The `projects/` root under the CL dir, walked by the startup backfill.
+    pub fn cl_projects_dir(&self) -> PathBuf {
+        self.cl_dir.join("projects")
     }
 
     /// Read the persisted external-MCP bearer token. Trims trailing whitespace
@@ -117,29 +173,46 @@ impl Paths {
     }
 
     /// Idempotent. Creates the data dir + CL skeleton on first run, repairs
-    /// missing required CL slots on subsequent runs, leaves user content
-    /// untouched otherwise. Returns the outcome for UI toasts.
+    /// missing required CL slots on subsequent runs, migrates a pre-`library/`
+    /// install once, and leaves user content untouched otherwise. Returns the
+    /// outcome for UI toasts.
     ///
-    /// First-run signal: `cl-version.txt` doesn't exist yet. A brand-new
-    /// installation, or one where the user wiped the data dir clean, gets
-    /// `FirstRun` and a silent init. A user who deleted just one slot gets
-    /// `Repaired { slots }` so the UI can name it.
+    /// First-run signal: `version.txt` doesn't exist AND there's no legacy
+    /// root-level CL. A brand-new install (or a wiped data dir) gets `FirstRun`
+    /// and a silent init. A pre-`library/` install (no `version.txt` but
+    /// root-level CL present) is migrated into the new layout and reported as
+    /// `Repaired`. A user who deleted just one slot also gets `Repaired`.
     pub fn init(&self) -> Result<InitOutcome> {
-        let first_run = !self.cl_version_path.exists();
+        // Detect a pre-`library/` install BEFORE creating anything: the old
+        // marker `cl-version.txt` or any root-level CL means we migrate rather
+        // than treat this as a fresh first run.
+        let has_legacy = self.data_dir.join("cl-version.txt").exists()
+            || self.data_dir.join("projects").is_dir()
+            || self.data_dir.join("agents").is_dir()
+            || self.data_dir.join("custom-general-rules.md").exists();
+        let first_run = !self.version_path.exists() && !has_legacy;
 
         fs::create_dir_all(&self.data_dir)
             .with_context(|| format!("creating data dir at {}", self.data_dir.display()))?;
+
+        // One-time migration of a legacy root-level CL into library/ + .local/.
+        let migrated = self.migrate_legacy_layout()?;
+
+        fs::create_dir_all(&self.cl_dir)
+            .with_context(|| format!("creating library dir at {}", self.cl_dir.display()))?;
+        fs::create_dir_all(&self.plugins_dir)
+            .with_context(|| format!("creating plugins dir at {}", self.plugins_dir.display()))?;
         fs::create_dir_all(&self.local_dir)
             .with_context(|| format!("creating local dir at {}", self.local_dir.display()))?;
 
         let mut repaired_slots = Vec::new();
 
-        if !self.cl_version_path.exists() {
-            fs::write(&self.cl_version_path, "1\n")
-                .with_context(|| format!("writing {}", self.cl_version_path.display()))?;
+        if !self.version_path.exists() {
+            fs::write(&self.version_path, "1\n")
+                .with_context(|| format!("writing {}", self.version_path.display()))?;
         }
 
-        for (path, body) in default_cl_files(&self.data_dir) {
+        for (path, body) in default_cl_files(&self.cl_dir) {
             if !path.exists() {
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)
@@ -159,6 +232,10 @@ impl Paths {
         // Unix so other users on the machine can't read it. Idempotent — if the
         // file exists, leave it alone (user might have rotated).
         if !self.mcp_token_path.exists() {
+            if let Some(parent) = self.mcp_token_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
             let token = uuid::Uuid::new_v4().to_string();
             fs::write(&self.mcp_token_path, format!("{token}\n")).with_context(|| {
                 format!("writing mcp-token at {}", self.mcp_token_path.display())
@@ -175,15 +252,84 @@ impl Paths {
             }
         }
 
+        if migrated {
+            repaired_slots.push("(migrated to library/ layout)".to_string());
+        }
+
         if first_run {
             info!(data_dir = %self.data_dir.display(), "first-run init complete");
             Ok(InitOutcome::FirstRun)
         } else if repaired_slots.is_empty() {
             Ok(InitOutcome::Existing)
         } else {
-            warn!(slots = ?repaired_slots, "repaired missing CL slots");
+            warn!(slots = ?repaired_slots, "repaired/migrated CL slots");
             Ok(InitOutcome::Repaired { repaired_slots })
         }
+    }
+
+    /// Move a pre-`library/` install into the new layout exactly once. Returns
+    /// `true` if anything was moved. Gated on `version.txt` being absent (the
+    /// post-migration marker), so it's a no-op on every later run and on a
+    /// genuinely fresh data dir. Idempotent per-entry: only moves a source that
+    /// exists when the destination doesn't. Projects whose CL lives at an
+    /// explicit absolute `cl_path` (stored in the db) are untouched — only the
+    /// convention layout under the data dir moves.
+    fn migrate_legacy_layout(&self) -> Result<bool> {
+        if self.version_path.exists() {
+            return Ok(false);
+        }
+        fs::create_dir_all(&self.cl_dir)
+            .with_context(|| format!("creating library dir at {}", self.cl_dir.display()))?;
+        fs::create_dir_all(&self.local_dir)
+            .with_context(|| format!("creating local dir at {}", self.local_dir.display()))?;
+
+        let mut moved = false;
+
+        // CL content → library/
+        for name in [
+            "projects",
+            "agents",
+            "custom-general-rules.md",
+            "eod.md",
+            "tasks.md",
+        ] {
+            let from = self.data_dir.join(name);
+            let to = self.cl_dir.join(name);
+            if from.exists() && !to.exists() {
+                move_path(&from, &to)?;
+                moved = true;
+            }
+        }
+
+        // host-only state → .local/
+        for name in [
+            "mcp-token",
+            "violations.jsonl",
+            ".policy-hashes.json",
+            "screenshots",
+        ] {
+            let from = self.data_dir.join(name);
+            let to = self.local_dir.join(name);
+            if from.exists() && !to.exists() {
+                move_path(&from, &to)?;
+                moved = true;
+            }
+        }
+
+        // Old schema marker → new whole-home marker.
+        let old_marker = self.data_dir.join("cl-version.txt");
+        if old_marker.exists() && !self.version_path.exists() {
+            move_path(&old_marker, &self.version_path)?;
+            moved = true;
+        }
+
+        if moved {
+            warn!(
+                data_dir = %self.data_dir.display(),
+                "migrated legacy root-level CL into library/ + .local/"
+            );
+        }
+        Ok(moved)
     }
 }
 
@@ -200,6 +346,48 @@ fn home_dir() -> Result<PathBuf> {
 /// Default data dir = `~/.bot-hq/`.
 fn default_data_dir() -> Result<PathBuf> {
     Ok(home_dir()?.join(".bot-hq"))
+}
+
+/// Move a file or directory, preferring an atomic `fs::rename` and falling back
+/// to recursive copy + remove when rename fails — e.g. a cross-filesystem
+/// `EXDEV` on unix, or a locked/open file on Windows. Used by the one-time
+/// legacy-layout migration.
+fn move_path(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent for {}", to.display()))?;
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_recursive(from, to)
+        .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
+    if from.is_dir() {
+        fs::remove_dir_all(from)
+    } else {
+        fs::remove_file(from)
+    }
+    .with_context(|| format!("removing source {} after copy", from.display()))?;
+    Ok(())
+}
+
+/// Recursively copy a file or directory tree.
+fn copy_recursive(from: &Path, to: &Path) -> Result<()> {
+    if from.is_dir() {
+        fs::create_dir_all(to).with_context(|| format!("creating dir {}", to.display()))?;
+        for entry in fs::read_dir(from).with_context(|| format!("reading dir {}", from.display()))? {
+            let entry = entry?;
+            copy_recursive(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent for {}", to.display()))?;
+        }
+        fs::copy(from, to)
+            .with_context(|| format!("copying file {} -> {}", from.display(), to.display()))?;
+    }
+    Ok(())
 }
 
 /// Read the persisted signaling-server address (`<data_dir>/.local/signaling-addr`)
@@ -341,20 +529,24 @@ mod tests {
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         let outcome = paths.init().unwrap();
         assert_eq!(outcome, InitOutcome::FirstRun);
-        assert!(paths.cl_version_path.exists());
+        assert!(paths.version_path.exists());
+        assert!(paths.cl_dir.exists());
+        assert!(paths.plugins_dir.exists());
         assert!(paths.local_dir.exists());
         assert!(
-            tmp.path().join("custom-general-rules.md").exists(),
-            "first run should seed custom-general-rules.md stub"
+            paths.cl_dir.join("custom-general-rules.md").exists(),
+            "first run should seed custom-general-rules.md stub under library/"
         );
         assert!(
-            !tmp.path().join("general-rules.md").exists(),
+            !paths.cl_dir.join("general-rules.md").exists(),
             "general-rules.md is hardcoded now — should not be seeded"
         );
-        assert!(tmp
-            .path()
+        assert!(paths
+            .cl_dir
             .join("agents/brian/custom-instruction.md")
             .exists());
+        // CL must NOT be seeded at the data-dir root anymore.
+        assert!(!tmp.path().join("custom-general-rules.md").exists());
     }
 
     #[test]
@@ -371,7 +563,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        fs::remove_file(tmp.path().join("agents/rain/custom-instruction.md")).unwrap();
+        fs::remove_file(paths.cl_dir.join("agents/rain/custom-instruction.md")).unwrap();
         let outcome = paths.init().unwrap();
         match outcome {
             InitOutcome::Repaired { repaired_slots } => {
@@ -379,6 +571,67 @@ mod tests {
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn migrates_legacy_root_layout_into_library() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Simulate a pre-`library/` install: CL at the data-dir root + the old
+        // marker + host-only state.
+        fs::create_dir_all(root.join("projects/foo")).unwrap();
+        fs::write(root.join("projects/foo/conventions.md"), "# foo\n").unwrap();
+        fs::create_dir_all(root.join("agents/brian")).unwrap();
+        fs::write(root.join("agents/brian/custom-instruction.md"), "hi\n").unwrap();
+        fs::write(root.join("custom-general-rules.md"), "rules\n").unwrap();
+        fs::write(root.join("eod.md"), "eod\n").unwrap();
+        fs::write(root.join("cl-version.txt"), "1\n").unwrap();
+        fs::write(root.join("mcp-token"), "tok\n").unwrap();
+        fs::write(root.join("violations.jsonl"), "{}\n").unwrap();
+
+        let paths = Paths::for_data_dir(root.to_path_buf());
+        let outcome = paths.init().unwrap();
+
+        // Not a first run — it's a migration, surfaced as Repaired.
+        match outcome {
+            InitOutcome::Repaired { repaired_slots } => {
+                assert!(repaired_slots.iter().any(|s| s.contains("migrated")));
+            }
+            other => panic!("expected Repaired (migration), got {other:?}"),
+        }
+
+        // CL content moved under library/.
+        assert!(paths.cl_dir.join("projects/foo/conventions.md").exists());
+        assert!(paths.cl_dir.join("custom-general-rules.md").exists());
+        assert!(paths.cl_dir.join("eod.md").exists());
+        assert!(paths
+            .cl_dir
+            .join("agents/brian/custom-instruction.md")
+            .exists());
+        // host-only state moved under .local/.
+        assert!(paths.mcp_token_path.exists());
+        assert!(paths.violations_path.exists());
+        // marker renamed; old root locations gone.
+        assert!(paths.version_path.exists());
+        assert!(!root.join("cl-version.txt").exists());
+        assert!(!root.join("projects").exists());
+        assert!(!root.join("custom-general-rules.md").exists());
+        assert!(!root.join("mcp-token").exists());
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("custom-general-rules.md"), "rules\n").unwrap();
+        fs::write(root.join("cl-version.txt"), "1\n").unwrap();
+
+        let paths = Paths::for_data_dir(root.to_path_buf());
+        paths.init().unwrap();
+        // Second init: version.txt now exists, nothing left to migrate → no-op.
+        let outcome = paths.init().unwrap();
+        assert_eq!(outcome, InitOutcome::Existing);
+        assert!(paths.cl_dir.join("custom-general-rules.md").exists());
     }
 
     #[test]

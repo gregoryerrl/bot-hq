@@ -1308,9 +1308,9 @@ mod tests {
     async fn check_commit_message_finds_forbidden_word() {
         let tmp = tempfile::tempdir().unwrap();
         // Write a project policy and register the session.
-        std::fs::create_dir_all(tmp.path().join("projects/foo")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("library/projects/foo")).unwrap();
         std::fs::write(
-            tmp.path().join("projects/foo/policy.yaml"),
+            tmp.path().join("library/projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - bot-hq\n  - Claude\n",
         )
         .unwrap();

@@ -648,7 +648,7 @@ pub fn read_system_prompt(
          query=<name>)` next — common cross-project files like `tasks.md` \
          and `eod.md` live at the CL root and surface as `_globals` rows. \
          Only fall back to `ask_user_choice` if `_globals` also misses.\n\n\
-         Per-project conventional files at `{cl}projects/<project>/` \
+         Per-project conventional files at `{cl}/projects/<project>/` \
          (the index covers everything under this path, not just these):\n\
          - `conventions.md` — repo, stack, commands, gates, disguise rules\n\
          - `notes.md` — current state, recurring trouble, gotchas\n\
@@ -657,7 +657,7 @@ pub fn read_system_prompt(
          this prompt if the project has one)\n\n\
          Trust the index over a hardcoded filename list. Don't ask the user \
          for facts that live in the CL.\n\n",
-        cl = paths.data_dir.display()
+        cl = paths.cl_dir.display()
     ));
 
     // 2b. Project CL index primer — the concrete table of contents for THIS
@@ -679,9 +679,9 @@ pub fn read_system_prompt(
     // 4 + 5. Optional user-editable slots: custom-general-rules.md applies to
     // all agents; agents/<name>/custom-instruction.md is per-agent.
     let slots = [
-        paths.data_dir.join("custom-general-rules.md"),
+        paths.cl_dir.join("custom-general-rules.md"),
         paths
-            .data_dir
+            .cl_dir
             .join(format!("agents/{agent}/custom-instruction.md")),
     ];
     for slot in slots {
@@ -864,7 +864,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let agent_dir = tmp.path().join("agents/brian");
+        let agent_dir = paths.cl_dir.join("agents/brian");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
             agent_dir.join("custom-instruction.md"),
@@ -1028,7 +1028,7 @@ mod tests {
         // No custom-general-rules.md content, nothing in agents/<name>/ —
         // should still produce a prompt with at minimum the hardcoded role
         // and the hardcoded universal rules.
-        std::fs::remove_file(tmp.path().join("custom-general-rules.md")).ok();
+        std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
         let prompt = read_system_prompt(&paths, "rain", Some("nonexistent"), None, None).unwrap();
         assert!(prompt.contains("EYES"));
         assert!(prompt.contains("Commit hygiene"));
@@ -1042,7 +1042,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        std::fs::remove_file(tmp.path().join("custom-general-rules.md")).ok();
+        std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
         let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         assert!(
             prompt.contains("Commit hygiene"),
@@ -1065,7 +1065,7 @@ mod tests {
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
         std::fs::write(
-            tmp.path().join("custom-general-rules.md"),
+            paths.cl_dir.join("custom-general-rules.md"),
             "MY_ORG_RULE_X7P: always prefer ripgrep over grep.\n",
         )
         .unwrap();

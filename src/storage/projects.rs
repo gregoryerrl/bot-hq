@@ -69,20 +69,21 @@ impl Storage {
         Ok(())
     }
 
-    /// Resolve a project's CL root. `_globals` always maps to `data_dir`.
-    /// Otherwise: uses `cl_path` from the projects row if set, else falls
-    /// back to the default convention `<data_dir>/projects/<name>/`. Missing
-    /// rows also fall back to the convention so callers can use the helper
-    /// uniformly without pre-checking existence.
+    /// Resolve a project's CL root. `_globals` maps to the CL dir
+    /// (`<data_dir>/library/`). Otherwise: uses `cl_path` from the projects row
+    /// if set, else falls back to the default convention
+    /// `<data_dir>/library/projects/<name>/` (via [`crate::paths::Paths::project_dir`]).
+    /// Missing rows also fall back to the convention so callers can use the
+    /// helper uniformly without pre-checking existence.
     pub async fn cl_path_for_project(&self, data_dir: &Path, project: &str) -> Result<PathBuf> {
+        let paths = crate::paths::Paths::for_data_dir(data_dir.to_path_buf());
         if project == Project::GLOBALS {
-            return Ok(data_dir.to_path_buf());
+            return Ok(paths.cl_dir);
         }
         let row = self.get_project(project).await?;
-        let convention = || data_dir.join("projects").join(project);
         match row.and_then(|r| r.cl_path) {
             Some(p) if !p.is_empty() => Ok(PathBuf::from(p)),
-            _ => Ok(convention()),
+            _ => Ok(paths.project_dir(project)),
         }
     }
 

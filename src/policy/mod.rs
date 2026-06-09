@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! general-policy.yaml                       (defaults — overlay base)
-//! projects/<project>/policy.yaml            (per-project overrides)
+//! library/projects/<project>/policy.yaml    (per-project overrides)
 //! .local/session-policies/<sid>.yaml        (per-session canonical snapshot)
 //! ```
 //!
@@ -98,7 +98,7 @@ pub enum ForcePushMode {
 impl Policy {
     /// Load + resolve policy for `project` against `data_dir`.
     /// - Reads `<data_dir>/general-policy.yaml` as the base.
-    /// - If `project` is `Some(p)`, overlays `<data_dir>/projects/<p>/policy.yaml`.
+    /// - If `project` is `Some(p)`, overlays `<data_dir>/library/projects/<p>/policy.yaml`.
     /// - Either missing → contribute nothing (no error).
     /// - Parse errors return Err (loud — the user needs to know their YAML is broken).
     pub fn resolve(
@@ -148,7 +148,9 @@ impl Policy {
             Some(p) => {
                 let proj_path = match project_root {
                     Some(root) => root.join("policy.yaml"),
-                    None => data_dir.join("projects").join(p).join("policy.yaml"),
+                    None => crate::paths::Paths::for_data_dir(data_dir.to_path_buf())
+                        .project_dir(p)
+                        .join("policy.yaml"),
                 };
                 load_one(&proj_path)?
             }
@@ -507,7 +509,7 @@ mod tests {
             "forbidden_in_commits:\n  - Claude\n  - GPT\n",
         );
         write(
-            &dir.path().join("projects/foo/policy.yaml"),
+            &dir.path().join("library/projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - bot-hq\n  - brian\n",
         );
         let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
@@ -520,7 +522,7 @@ mod tests {
         let dir = tempdir().unwrap();
         // general omits push_gate (defaults auto); project tightens to ask.
         write(
-            &dir.path().join("projects/foo/policy.yaml"),
+            &dir.path().join("library/projects/foo/policy.yaml"),
             "push_gate: ask\n",
         );
         let p = Policy::resolve(dir.path(), Some("foo"), None).unwrap();
@@ -537,7 +539,7 @@ mod tests {
             "forbidden_in_commits:\n  - Claude\n",
         );
         write(
-            &dir.path().join("projects/foo/policy.yaml"),
+            &dir.path().join("library/projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - bot-hq\n",
         );
         let snapshot = session_policy::SessionPolicy {
@@ -565,7 +567,7 @@ mod tests {
             "forbidden_in_commits:\n  - Claude\n",
         );
         write(
-            &dir.path().join("projects/foo/policy.yaml"),
+            &dir.path().join("library/projects/foo/policy.yaml"),
             "forbidden_in_commits:\n  - bot-hq\n",
         );
         let p = Policy::resolve(dir.path(), Some("foo"), Some("no-snapshot")).unwrap();

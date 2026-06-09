@@ -11,23 +11,24 @@ impl SignalingBridge {
     // ---- Context Library (CL) index ------------------------------------
 
     /// Resolve the on-disk root for a project's CL files. `_globals` maps to
-    /// the bot-hq data dir itself; named projects honor `projects.cl_path`
-    /// when set, otherwise fall back to `<data_dir>/projects/<name>`.
-    /// Returns None only when the bridge has no `data_dir` configured (test
-    /// bridges built via `new()`).
+    /// the CL dir (`<data_dir>/library/`); named projects honor
+    /// `projects.cl_path` when set, otherwise fall back to
+    /// `<data_dir>/library/projects/<name>`. Returns None only when the bridge
+    /// has no `data_dir` configured (test bridges built via `new()`).
     ///
     /// Clones the Storage handle out of the mutex before awaiting so callers
     /// holding the bridge mutex (e.g. `cl_rescan`) don't deadlock when this
     /// method tries to re-lock for its own lookup.
     pub(crate) async fn cl_project_root(&self, project: &str) -> Option<PathBuf> {
         let data_dir = self.data_dir.as_ref()?.clone();
+        let paths = crate::paths::Paths::for_data_dir(data_dir.clone());
         if project == Project::GLOBALS {
-            return Some(data_dir);
+            return Some(paths.cl_dir);
         }
         let storage = self.storage.lock().await.clone();
         match storage {
             Some(storage) => storage.cl_path_for_project(&data_dir, project).await.ok(),
-            None => Some(data_dir.join("projects").join(project)),
+            None => Some(paths.project_dir(project)),
         }
     }
 
