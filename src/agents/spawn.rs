@@ -499,6 +499,23 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         agent_override.ultracode = cfg.session_ultracode;
     }
 
+    // claude-code treats max-effort and ultracode as mutually exclusive
+    // (ultracode implies xhigh + workflow orchestration; `max` is a distinct
+    // effort posture, and emitting BOTH — env CLAUDE_CODE_EFFORT_LEVEL=max plus
+    // "ultracode":true in --settings — is undefined). The per-surface UI already
+    // prevents picking both, but a CROSS-LAYER overlay (persistent effort=max +
+    // session ultracode, or the reverse) can still resolve to both. Reconcile
+    // here honoring the same session-wins precedence as the overlay above:
+    // whichever knob the session EXPLICITLY chose wins; otherwise ultracode wins.
+    if agent_override.ultracode == Some(true) && agent_override.effort.as_deref() == Some("max") {
+        let session_chose_max = cfg.session_effort.is_some() && cfg.session_ultracode.is_none();
+        if session_chose_max {
+            agent_override.ultracode = None;
+        } else {
+            agent_override.effort = None;
+        }
+    }
+
     if let Some(mcp) = &cfg.mcp_config_path {
         cmd.args(["--mcp-config", &mcp.display().to_string()])
             .arg("--strict-mcp-config");
@@ -828,7 +845,6 @@ mod tests {
         let mut c = cfg(); // brian (gets --settings)
         c.data_dir = dir.path().to_path_buf();
         c.session_effort = Some("max".into()); // per-session pick wins
-        c.session_ultracode = Some(true);
 
         // Session effort beats the persistent "high".
         let cmd = build_command(&c);
@@ -837,8 +853,33 @@ mod tests {
                 && v == Some(std::ffi::OsStr::new("max"))
         });
         assert!(has_max, "session effort should win over persistent override");
+    }
 
-        // Session ultracode lands in --settings.
+    #[test]
+    fn session_ultracode_clears_inherited_max_effort() {
+        // Cross-layer collision: persistent effort=max + a per-session ultracode
+        // pick (session effort left on Inherit). Session ultracode wins; the
+        // inherited max must NOT also reach env (the documented exclusion).
+        use crate::claude_config::{save_overrides, ClaudeOverrides};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ClaudeOverrides::default();
+        store.brian.effort = Some("max".into()); // persistent
+        save_overrides(dir.path(), &store).unwrap();
+
+        let mut c = cfg();
+        c.data_dir = dir.path().to_path_buf();
+        c.session_ultracode = Some(true); // session pick; session_effort stays None
+
+        let cmd = build_command(&c);
+        let has_effort_env = cmd
+            .as_std()
+            .get_envs()
+            .any(|(k, _)| k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL"));
+        assert!(
+            !has_effort_env,
+            "inherited max effort must be cleared when the session enables ultracode"
+        );
+
         let args = debug_command(&c);
         let settings_arg = args
             .iter()
@@ -846,6 +887,42 @@ mod tests {
             .nth(1)
             .expect("--settings present");
         assert!(settings_arg.contains("ultracode"), "got {settings_arg}");
+    }
+
+    #[test]
+    fn session_max_clears_inherited_ultracode() {
+        // Reverse collision: persistent ultracode + a per-session effort=max pick
+        // (session ultracode left on Inherit). The session's explicit max wins;
+        // ultracode must NOT also reach --settings.
+        use crate::claude_config::{save_overrides, ClaudeOverrides};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ClaudeOverrides::default();
+        store.brian.ultracode = Some(true); // persistent
+        save_overrides(dir.path(), &store).unwrap();
+
+        let mut c = cfg();
+        c.data_dir = dir.path().to_path_buf();
+        c.session_effort = Some("max".into()); // session pick; session_ultracode stays None
+
+        let cmd = build_command(&c);
+        let has_max = cmd.as_std().get_envs().any(|(k, v)| {
+            k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL")
+                && v == Some(std::ffi::OsStr::new("max"))
+        });
+        assert!(has_max, "session effort=max should reach env");
+
+        // brian always gets a --settings (the PreToolUse hook); assert the
+        // fragment no longer carries ultracode (the persistent one was cleared).
+        let args = debug_command(&c);
+        let settings_arg = args
+            .iter()
+            .skip_while(|a| *a != "--settings")
+            .nth(1)
+            .expect("--settings present");
+        assert!(
+            !settings_arg.contains("ultracode"),
+            "ultracode must be cleared by the explicit max pick; got {settings_arg}"
+        );
     }
 
     #[test]
