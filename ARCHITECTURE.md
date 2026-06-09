@@ -208,7 +208,8 @@ uninstall, and a heartbeat-driven crash indicator (subscribes to the
 `src/plugins/` ships the manifest parser, loader, capability JSON
 generator, and heartbeat watcher. What's NOT wired yet: live plugin
 *execution* — the per-plugin iframes at `https://plugin-<id>.localhost`
-and their ping/pong channel (`PluginSlot` was removed as dead code).
+and their ping/pong channel (the frontend `PluginSlot.tsx` component was
+removed as dead code; the Rust `PluginSlot` manifest type stays).
 
 **Settings tab:** subtabs for the saved-model registry (Models), the
 default-model + disable-Rain-by-default app settings, the global Tool

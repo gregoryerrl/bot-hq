@@ -35,7 +35,8 @@ shipped. Remaining follow-ups:
   management UI (install / enable / disable / uninstall) and the
   heartbeat-driven crash indicator already shipped in `PluginManager.tsx`;
   what remains is rendering + driving the plugin iframes themselves
-  (`PluginSlot` was removed as dead code and needs rebuilding for this).
+  (the frontend `PluginSlot.tsx` component was removed as dead code and
+  needs rebuilding for this; the Rust `PluginSlot` manifest type stays).
 - Replace the placeholder `icons/icon.png` with the real bot-hq mark.
 
 The Context Library editor write-back + folder-view + right-click disk ops
@@ -49,8 +50,8 @@ re-derives the description, hard delete (no OS trash).
 
 ### UX polish (deferred from rebuild Phase 9.2)
 
-- Keyboard shortcuts: Cmd-N (new session), Cmd-, (settings), Cmd-K
-  (Emma toggle), Cmd-Enter (submit prompt).
+- Keyboard shortcuts: Cmd-N (new session), Cmd-, (settings),
+  Cmd-Enter (submit prompt).
 - Scroll-to-bottom on new messages (sticky if user is at bottom; idle
   if user has scrolled up).
 - Tile sort order (active sessions first, then by last activity).

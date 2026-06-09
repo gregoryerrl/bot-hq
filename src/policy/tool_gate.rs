@@ -18,8 +18,8 @@
 //! Matching (per the locked design): **case-insensitive substring** of the
 //! keyword against the tool name (`bash` → gates the whole Bash tool) OR the
 //! command string (`gh`/`git`/`push` → those commands). This is deliberately
-//! NOT [`crate::policy::Policy::is_blocked_command`], which is case-sensitive
-//! prefix matching for the legacy per-project `tool_blocklist`.
+//! NOT the case-sensitive prefix matching the legacy per-project
+//! `tool_blocklist` used (that matcher has since been removed).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

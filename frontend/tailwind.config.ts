@@ -3,8 +3,8 @@ import type { Config } from "tailwindcss";
 /**
  * Design tokens. 4-tier background hierarchy (canvas →
  * surface → elevated → overlay) so layered components read visually distinct
- * without ad-hoc neutral-XXX choices. Author color tokens (brian/rain/emma/
- * user) keep chat author dots + accent rings consistent.
+ * without ad-hoc neutral-XXX choices. Author color tokens (brian/rain/user)
+ * keep chat author dots + accent rings consistent.
  *
  * 2026-05 Industrial Terminal migration — additive only. New tokens added
  * alongside the legacy palette; screen batches migrate one surface at a time
@@ -79,7 +79,6 @@ export default {
         author: {
           brian: "#f97316",
           rain: "#a855f7",
-          emma: "#22c55e",
           user: "#3b82f6",
         },
         accent: {
