@@ -401,6 +401,7 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
 }
 
 /// Outcome of asking the running app to approve a push.
+#[derive(Debug, PartialEq)]
 enum PushDecision {
     Approved,
     Rejected,
@@ -459,15 +460,23 @@ async fn decide_push(
     };
 
     let status = resp.status();
-    if !status.is_success() {
-        return PushDecision::Blocked(format!("bot-hq returned HTTP {}", status.as_u16()));
-    }
-
     let txt = match resp.text().await {
         Ok(t) => t,
         Err(e) => return PushDecision::Blocked(format!("could not read bot-hq response: {e}")),
     };
-    let v: serde_json::Value = match serde_json::from_str(&txt) {
+    classify_push_response(status, &txt)
+}
+
+/// Map a `(status, body)` from the app's `/hooks/pre-push` route to a decision.
+/// Pure + fail-CLOSED: a non-success status, an unparseable body, or a missing
+/// `approved` field all Block — only an explicit `{"approved": true|false}` on a
+/// 2xx yields Approved/Rejected. Extracted from `decide_push` so the safety
+/// mapping is unit-testable without a live HTTP round-trip.
+fn classify_push_response(status: reqwest::StatusCode, body: &str) -> PushDecision {
+    if !status.is_success() {
+        return PushDecision::Blocked(format!("bot-hq returned HTTP {}", status.as_u16()));
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(e) => return PushDecision::Blocked(format!("malformed bot-hq response: {e}")),
     };
@@ -1013,6 +1022,72 @@ mod tests {
                 assert!(reason.contains("not running"), "reason: {reason}");
             }
             _ => panic!("expected Blocked when no signaling addr is present"),
+        }
+    }
+
+    #[test]
+    fn push_response_approved_true_approves() {
+        assert_eq!(
+            classify_push_response(reqwest::StatusCode::OK, r#"{"approved": true}"#),
+            PushDecision::Approved
+        );
+    }
+
+    #[test]
+    fn push_response_approved_false_rejects() {
+        assert_eq!(
+            classify_push_response(reqwest::StatusCode::OK, r#"{"approved": false}"#),
+            PushDecision::Rejected
+        );
+    }
+
+    #[test]
+    fn push_response_missing_field_blocks() {
+        assert!(matches!(
+            classify_push_response(reqwest::StatusCode::OK, r#"{"other": 1}"#),
+            PushDecision::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn push_response_non_2xx_blocks_even_if_body_approves() {
+        // Status is authoritative: a non-2xx blocks regardless of body content.
+        assert!(matches!(
+            classify_push_response(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                r#"{"approved": true}"#
+            ),
+            PushDecision::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn push_response_malformed_json_blocks() {
+        assert!(matches!(
+            classify_push_response(reqwest::StatusCode::OK, "not json {"),
+            PushDecision::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn reject_never_resolves_to_approved() {
+        // The fail-closed safety property: only an explicit {"approved": true} on a
+        // 2xx may Approve. Reject / missing / malformed / non-2xx never approve.
+        let non_approving = [
+            (reqwest::StatusCode::OK, r#"{"approved": false}"#),
+            (reqwest::StatusCode::OK, r#"{}"#),
+            (reqwest::StatusCode::OK, "garbage"),
+            (reqwest::StatusCode::FORBIDDEN, r#"{"approved": true}"#),
+            (reqwest::StatusCode::BAD_GATEWAY, r#"{"approved": true}"#),
+        ];
+        for (status, body) in non_approving {
+            assert!(
+                !matches!(
+                    classify_push_response(status, body),
+                    PushDecision::Approved
+                ),
+                "status={status} body={body} must not approve"
+            );
         }
     }
 
