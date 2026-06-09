@@ -11,13 +11,46 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-452 tests passing (401 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 63 frontend Vitest. Release build clean. **Tauri v2 migration landed
+465 tests passing (414 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 71 frontend Vitest. Release build clean. **Tauri v2 migration landed
 2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
 → Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
 `frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
 `src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
 constraint.
+
+---
+
+## 2026-06-09 — check-for-updates: GitHub-release update banner (shipping)
+
+Added the first user-facing "you can update" path (shipping/market-prep track).
+On launch bot-hq polls the GitHub releases API, semver-compares the latest tag to
+the running version, and shows a dismissible download banner when a newer build
+exists — plus a Settings → Updates subtab (installed-vs-latest + manual "Check
+now"). This is the **check-and-notify** scope (A): no code-signing / updater
+plugin, so the install is manual; the command + banner shell graduate cleanly to
+full auto-install later. Decided scope with the user up front — real auto-install
+is blocked on code-signing (a separate roadmap item), check-and-notify is not.
+
+- **`core::updates`** — the testable core, split from the network glue:
+  `is_newer` (semver compare, strips leading `v`, false on garbage),
+  `release_from_response` (**404 → no release, NOT an error** — the current
+  zero-releases state), `build_update_info` (`None` → not-available). Thin async
+  `fetch_latest_release` / `check_for_update` set the GitHub-required
+  `User-Agent`. 13 unit tests, all network-free.
+- **`check_for_update` command** (`tauri_cmd/updates.rs`) — returns `UpdateInfo`,
+  compares against `app.package_info().version` (the shipped version, not a
+  constant). Registered in `collect_commands!`; bindings regenerated.
+- **`tauri-plugin-opener`** (+ `opener:default` capability) opens the release page
+  in the system browser — `window.open` isn't reliable cross-platform per the
+  Tauri v2 docs.
+- **Frontend** — app-wide `UpdateBanner` (Shell) with per-version localStorage
+  dismissal; Settings Updates subtab. Both share one `check_for_update` query.
+- Fails quiet: offline / rate-limit / no-release never nags. The banner shows
+  nothing live until a release > installed is cut (`gh release list` is empty
+  today); Settings "Check now" proves the round-trip now. Live endpoint verified
+  returning 404 for the zero-releases state, handled gracefully.
+- All 5 gates green; commit `4c054f8`.
 
 ---
 
