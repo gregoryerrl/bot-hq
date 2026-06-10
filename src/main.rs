@@ -180,6 +180,7 @@ fn main() -> Result<()> {
     // launchd, SIGINT from terminal, SIGHUP on session disconnect), Tauri's
     // main-thread event loop never returns, so the panic-hook + signal-task
     // PID reapers are the only ways the claude-code children get killed.
+    #[cfg(unix)]
     rt.spawn(async {
         use tokio::signal::unix::{signal, SignalKind};
         let mut sigterm = signal(SignalKind::terminate()).ok();
@@ -189,6 +190,30 @@ fn main() -> Result<()> {
             _ = async { if let Some(s) = sigterm.as_mut() { s.recv().await; } }, if sigterm.is_some() => {}
             _ = async { if let Some(s) = sigint.as_mut() { s.recv().await; } }, if sigint.is_some() => {}
             _ = async { if let Some(s) = sighup.as_mut() { s.recv().await; } }, if sighup.is_some() => {}
+            else => {
+                tracing::warn!("no signal handlers installed; shutdown won't trigger child reap via signal");
+                std::future::pending::<()>().await;
+            }
+        }
+        tracing::warn!("shutdown signal received; reaping children");
+        bot_hq::agents::spawn::reap_all_children();
+        std::process::exit(0);
+    });
+
+    // Windows twin: ctrl_c ≈ SIGINT, ctrl_close ≈ SIGHUP (console window
+    // closed), ctrl_shutdown ≈ SIGTERM (logoff/OS shutdown). Windows has no
+    // kill-children-on-parent-exit semantics, so the reap walk matters just
+    // as much here as on unix.
+    #[cfg(windows)]
+    rt.spawn(async {
+        use tokio::signal::windows;
+        let mut ctrl_c = windows::ctrl_c().ok();
+        let mut ctrl_close = windows::ctrl_close().ok();
+        let mut ctrl_shutdown = windows::ctrl_shutdown().ok();
+        tokio::select! {
+            _ = async { if let Some(s) = ctrl_c.as_mut() { s.recv().await; } }, if ctrl_c.is_some() => {}
+            _ = async { if let Some(s) = ctrl_close.as_mut() { s.recv().await; } }, if ctrl_close.is_some() => {}
+            _ = async { if let Some(s) = ctrl_shutdown.as_mut() { s.recv().await; } }, if ctrl_shutdown.is_some() => {}
             else => {
                 tracing::warn!("no signal handlers installed; shutdown won't trigger child reap via signal");
                 std::future::pending::<()>().await;

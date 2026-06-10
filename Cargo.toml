@@ -31,7 +31,6 @@ http-body-util = "0.1"
 bytes = "1"
 tempfile = "3"
 subtle = "2"
-libc = "0.2"
 tauri = { version = "2", features = ["devtools", "custom-protocol"] }
 tauri-plugin-opener = "2"
 specta = "=2.0.0-rc.22"
@@ -39,6 +38,14 @@ specta-typescript = "=0.0.9"
 tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 semver = "1"
+
+# Platform-split deps for the child reaper (spawn.rs::kill_child): unix
+# SIGKILLs via libc; Windows opens a PROCESS_TERMINATE handle via windows-sys.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
