@@ -1,7 +1,7 @@
 //! Hardcoded universal rules every agent (Brian, Rain) follows.
 //!
-//! Baked into the binary so the load-bearing parts (commit hygiene, push
-//! gates, CL workflow, IPAV discipline, session-doc usage, prod-data safety)
+//! Baked into the binary so the load-bearing parts (push gates, CL
+//! workflow, IPAV discipline, session-doc usage, prod-data safety)
 //! can't drift if a user edits or deletes a CL file. User-specific additions
 //! go in `<data_dir>/custom-general-rules.md`, which `read_system_prompt`
 //! appends after this constant.
@@ -19,11 +19,9 @@ pub const GENERAL_RULES: &str = "\
 
 Universal conventions every agent (Brian, Rain) follows. Baked into the binary — add your own rules in `custom-general-rules.md`.
 
-## Commit hygiene
+## Commit conventions
 
-- Never include `Co-Authored-By:` or any AI/Anthropic attribution in commit messages.
-- Imperative-mood subjects, <=72 chars (`fix: foo`, `add: bar`).
-- One logical change per commit.
+No house commit style ships by default — commit style and forbidden-word rules are user-configured. `general-policy.yaml` / project `policy.yaml` render into your prompt's Enforcement policy block when set; personal conventions go in `custom-general-rules.md`.
 
 ## Working directory
 

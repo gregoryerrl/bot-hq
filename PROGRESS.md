@@ -21,6 +21,27 @@ constraint.
 
 ---
 
+## 2026-06-10 — separate personal rules from shipped standard rules (shipping)
+
+User classified the rule inventory: commit hygiene + the forbidden-in-commits
+brand list are PERSONAL conventions; everything else is standard product.
+
+- `src/agents/general_rules.rs` — `## Commit hygiene` removed from
+  `GENERAL_RULES`; replaced with a neutral `## Commit conventions` pointer
+  (style + forbidden words come from policy files / custom-general-rules.md).
+  Fresh installs ship NO house commit style. `Policy::default()` already has
+  an empty forbidden list, so an all-default policy renders no Enforcement
+  block (`is_effectively_empty` short-circuit, verified).
+- `src/core/session.rs` — prompt-assembly doc comment + 4 test anchors moved
+  from the deleted section to "Working directory".
+- `templates/cl/custom-general-rules.md` — example line no longer references
+  "baked-in hygiene".
+- User-side migration (not in repo): personal hygiene block appended to
+  `~/.bot-hq/library/custom-general-rules.md`; redundant outward-actions copy
+  trimmed (that rule is hardcoded in the binary). Leftover `agents/emma/` CL
+  dir flagged for manual deletion — blocked by a dogfooding find: `action_gate`
+  errors "session has no working_repo_path" on a session that has one.
+
 ## 2026-06-09 — macOS + Linux distribution: bundle config, release CI, v0.1.0 draft, Homebrew cask (shipping)
 
 Set up end-to-end distribution for macOS + Linux (Windows deferred) and cut the

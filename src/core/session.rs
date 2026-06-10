@@ -574,8 +574,8 @@ pub fn user_mcp_servers_for_agent(agent_name: &str) -> serde_json::Map<String, s
 ///   2. **CL location anchor** — index-first orientation.
 ///   3. **Hardcoded `GENERAL_RULES`** (from `agents::general_rules`) — shared
 ///      conventions every agent follows. Baked into the binary so the load-
-///      bearing parts (commit hygiene, push gates, CL workflow, IPAV, prod
-///      safety) can't drift if a user edits a CL file.
+///      bearing parts (push gates, CL workflow, IPAV, prod safety) can't
+///      drift if a user edits a CL file.
 ///   4. **`<data_dir>/custom-general-rules.md`** — user-editable additions
 ///      to the universal rules (optional).
 ///   5. **`<data_dir>/agents/<name>/custom-instruction.md`** — per-agent
@@ -1031,22 +1031,22 @@ mod tests {
         std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
         let prompt = read_system_prompt(&paths, "rain", Some("nonexistent"), None, None).unwrap();
         assert!(prompt.contains("EYES"));
-        assert!(prompt.contains("Commit hygiene"));
+        assert!(prompt.contains("Working directory"));
     }
 
     #[test]
     fn prompt_always_contains_hardcoded_general_rules() {
         // Load-bearing test: even on a freshly-init'd data dir with the
         // user's custom file deleted, the universal rules must be present
-        // (commit hygiene, push gate, IPAV, prod safety).
+        // (working directory, push gate, IPAV, prod safety).
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
         std::fs::remove_file(paths.cl_dir.join("custom-general-rules.md")).ok();
         let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         assert!(
-            prompt.contains("Commit hygiene"),
-            "missing commit-hygiene section"
+            prompt.contains("Working directory"),
+            "missing working-directory section"
         );
         assert!(
             prompt.contains("`git push` is governed by the session's push gate"),
@@ -1071,10 +1071,10 @@ mod tests {
         .unwrap();
         let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         // Both layers present.
-        assert!(prompt.contains("Commit hygiene"));
+        assert!(prompt.contains("Working directory"));
         assert!(prompt.contains("MY_ORG_RULE_X7P"));
         // Custom additions come AFTER the hardcoded core.
-        let core_pos = prompt.find("Commit hygiene").unwrap();
+        let core_pos = prompt.find("Working directory").unwrap();
         let custom_pos = prompt.find("MY_ORG_RULE_X7P").unwrap();
         assert!(
             custom_pos > core_pos,
