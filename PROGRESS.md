@@ -21,6 +21,19 @@ constraint.
 
 ---
 
+## 2026-06-10 — fix the release-build CWD litter found by the smoke (shipping)
+
+Same-day fix for the smoke's incidental find (`957d6a9`). The startup
+tauri-specta export is now guarded on `frontend/src/lib` existing in the
+CWD — the export creates intermediate dirs, so unguarded it littered a
+`frontend/` tree into any writable launch directory. Repo-root launches
+keep the documented auto-regen (verified: mtime advances, content
+byte-identical at HEAD, tree stays git-clean); foreign-CWD launches skip
+with a debug log (verified: temp CWD stays empty). `specta_builder`
+construction stays unguarded — it also feeds `invoke_handler` (first
+attempt scoped it into the guard; only the compiler caught the second
+use). All five gates green (465 Rust + 71 Vitest).
+
 ## 2026-06-10 — first-run + migration smoke: PASS (shipping); MIT license
 
 Closed the shipping.md "first-run + migration smoke" item — the GUI-startup
