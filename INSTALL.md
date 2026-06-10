@@ -29,13 +29,18 @@ This taps `gregoryerrl/homebrew-bot-hq` and installs the latest release.
 Download `bot-hq_<version>_universal.dmg` from the Releases page, open it, and
 drag **bot-hq** to Applications.
 
-> **Unsigned build:** this release is not yet notarized, so Gatekeeper may say
-> bot-hq "cannot be opened" or "is damaged". Right-click the app → **Open**
-> (once), or clear the quarantine flag:
+> **Unsigned build:** this release is not yet notarized, so Gatekeeper will say
+> bot-hq "cannot be opened" or "is damaged". On macOS 15 (Sequoia) and later,
+> launch it once (it gets blocked), then open **System Settings → Privacy &
+> Security** and click **Open Anyway**. Alternatively, clear the quarantine
+> flag:
 >
 > ```sh
 > xattr -dr com.apple.quarantine "/Applications/bot-hq.app"
 > ```
+>
+> (On macOS 14 and earlier, right-click the app → **Open** once also works;
+> Sequoia removed that bypass for unsigned apps.)
 
 ## Linux
 
