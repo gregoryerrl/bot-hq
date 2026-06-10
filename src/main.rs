@@ -226,16 +226,25 @@ fn main() -> Result<()> {
 
     // Export TypeScript bindings for the frontend at startup. Writes
     // `frontend/src/lib/bindings.ts` so the React side sees current
-    // command signatures. Best-effort: missing dir doesn't block startup.
+    // command signatures. Guarded on the target dir already existing:
+    // the export CREATES missing intermediate dirs, so an unguarded call
+    // litters `frontend/` into whatever CWD the app was launched from
+    // (e.g. `~/frontend/` for a release app started from a terminal).
+    // Repo-root launches keep the documented auto-regen; everywhere else
+    // skips. Headless regen: `bot-hq export-bindings` (CLI branch above).
     let specta_builder = bot_hq::tauri_specta_gen::builder();
-    if let Err(e) = specta_builder.export(
-        bot_hq::tauri_specta_gen::typescript_config(),
-        "frontend/src/lib/bindings.ts",
-    ) {
-        tracing::warn!(
-            ?e,
-            "tauri-specta bindings export failed (frontend may have stale types)"
-        );
+    if std::path::Path::new("frontend/src/lib").is_dir() {
+        if let Err(e) = specta_builder.export(
+            bot_hq::tauri_specta_gen::typescript_config(),
+            "frontend/src/lib/bindings.ts",
+        ) {
+            tracing::warn!(
+                ?e,
+                "tauri-specta bindings export failed (frontend may have stale types)"
+            );
+        }
+    } else {
+        tracing::debug!("skipping bindings export (frontend/src/lib not present in cwd)");
     }
 
     // Plugin registry — scans `<data_dir>/plugins/` and owns the heartbeat
