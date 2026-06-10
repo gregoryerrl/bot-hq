@@ -21,6 +21,39 @@ constraint.
 
 ---
 
+## 2026-06-10 — Windows compile fix: cfg-gate reaper + shutdown handler, restore CI lane (shipping)
+
+Un-deferred Windows from the release matrix by fixing the compile blocker
+found in the 2026-06-09 CI dry-run.
+
+- **Per-platform child kill** (`d039ffa`). `spawn.rs::reap_all_children` kept
+  its `try_lock` + iterate shape; the kill itself moved into a per-platform
+  `kill_child` — unix keeps the verbatim `libc::kill`/SIGKILL body, Windows
+  does `OpenProcess(PROCESS_TERMINATE)` → `TerminateProcess` → `CloseHandle`
+  via `windows-sys` 0.59 (version already in the lock transitively; new
+  `[target.'cfg(windows)'.dependencies]` entry, `libc` moved to the unix
+  twin). Windows has NO kill-children-on-parent-exit semantics (no process
+  tree; would need Job Objects), so an empty stub would have reintroduced
+  Ghost-Brian there — the reap walk is equally load-bearing on both
+  platforms. Job-Object hardening (covers hard parent kills, parity with
+  un-catchable SIGKILL) noted as a follow-up candidate, not blocking.
+- **Windows shutdown task** (`d039ffa`). The unix signal task is unchanged
+  under stmt-level `#[cfg(unix)]`; a `#[cfg(windows)]` twin selects over
+  `tokio::signal::windows::{ctrl_c, ctrl_close, ctrl_shutdown}` (≈ SIGINT /
+  SIGHUP / SIGTERM) with the same reap + exit tail. Panic hook untouched.
+- **CI lane restored** (`bcca313`). `release.yml` windows-latest matrix entry
+  back, exactly the previously-validated shape (`args: ''` — an explicit
+  `--target` would move bundle output out from under the upload globs, which
+  already cover `target/release/bundle/nsis/*.exe`).
+- **Verification.** All five gates green post-change (465 Rust + 71 Vitest,
+  tsc clean, release + frontend builds clean; gates 4–5 run by Rain pre-halt,
+  tree unchanged since). Local `cargo check --target x86_64-pc-windows-msvc`
+  dies environmentally in `ring`'s C build script (no Windows SDK headers on
+  macOS) before reaching our crate — the definitive Windows check is the CI
+  windows-latest lane (workflow_dispatch validation run on push).
+- **Still staged for later** (shipping.md): Windows runtime gaps once it
+  ships — PID lock, bash hooks, `mcp-token` ACL.
+
 ## 2026-06-10 — separate personal rules from shipped standard rules (shipping)
 
 User classified the rule inventory: commit hygiene + the forbidden-in-commits
