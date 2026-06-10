@@ -21,6 +21,37 @@ constraint.
 
 ---
 
+## 2026-06-10 — first-run + migration smoke: PASS (shipping); MIT license
+
+Closed the shipping.md "first-run + migration smoke" item — the GUI-startup
+wiring over a legacy data dir, which the `paths.rs` unit tests don't reach.
+Also shipped the MIT `LICENSE` (root + `frontend/package.json` field,
+`02bba46`) and corrected INSTALL.md's Gatekeeper steps for macOS Sequoia
+(right-click → Open no longer bypasses for unsigned apps; `9a2d2a0`).
+
+- **Method.** Release binary launched 3× over TEMP `BOT_HQ_DATA_DIR` dirs
+  (never the live `~/.bot-hq/`), neutral CWD, stderr captured, SIGTERM after
+  ~12s. Fixtures carried per-file sentinel content with md5 manifests.
+- **v0 → v2 full migration: PASS.** 13-entry root-layout fixture (all three
+  stages). One "migrated legacy layout" warn; outcome `Repaired`; all 12
+  content entries relocated to `library/`/`.local/`/`config/` byte-identical;
+  `cl-version.txt` removed; `version.txt` stamped "2".
+- **Idempotency: PASS.** Relaunch over the migrated dir: zero migration
+  lines, outcome `Existing`, marker + content untouched.
+- **Crash-window self-heal: PASS.** Simulated interrupted migration
+  (dest-exists + conflicting root copy + unmoved entry): existing dest not
+  clobbered, conflicting root copy left as residue, unmoved entry migrated.
+- **Second-instance safety confirmed.** Ran beside the live prod bot-hq:
+  internal signaling binds an ephemeral port; the external MCP's fixed port
+  collision warned + skipped exactly as coded — app fully functional.
+- **Incidental find (follow-up candidate).** The startup tauri-specta
+  bindings export writes `<cwd>/frontend/src/lib/bindings.ts` from ANY
+  writable CWD in release builds (it creates intermediate dirs) — launching
+  the app from a terminal in `~` litters `~/frontend/`. Polish: gate the
+  export to dev builds or an existing path.
+- Also live-verified the new unix shutdown handler (`d039ffa`) 3× — SIGTERM
+  → child reap → clean exit 0.
+
 ## 2026-06-10 — Windows compile fix: cfg-gate reaper + shutdown handler, restore CI lane (shipping)
 
 Un-deferred Windows from the release matrix by fixing the compile blocker
