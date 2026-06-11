@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import type {
@@ -50,6 +50,11 @@ type CtxAction =
   | { mode: "rename"; target: CtxTarget }
   | { mode: "delete"; target: CtxTarget };
 
+// Drag-resize bounds for the workspace sidebar (VS-Code-style explorer).
+const SIDEBAR_MIN_PX = 180;
+const SIDEBAR_MAX_PX = 480;
+const SIDEBAR_DEFAULT_PX = 240;
+
 export function ContextLibrary() {
   const [project, setProject] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -60,6 +65,44 @@ export function ContextLibrary() {
     const id = setTimeout(() => setDebouncedQuery(query), 300);
     return () => clearTimeout(id);
   }, [query]);
+
+  // Resizable sidebar, same listener pattern as SessionView's chat/document
+  // split but in absolute px (explorer-style). Seeded from localStorage and
+  // clamped so the tree can't collapse away or swallow the editor.
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem("bot-hq.cl.sidebarWidth"));
+    return Number.isFinite(saved) &&
+      saved >= SIDEBAR_MIN_PX &&
+      saved <= SIDEBAR_MAX_PX
+      ? saved
+      : SIDEBAR_DEFAULT_PX;
+  });
+  const onSidebarHandleDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = containerRef.current;
+    if (!container) return;
+    let latest = sidebarWidth;
+    const onMove = (ev: MouseEvent) => {
+      const rect = container.getBoundingClientRect();
+      latest = Math.min(
+        SIDEBAR_MAX_PX,
+        Math.max(SIDEBAR_MIN_PX, ev.clientX - rect.left),
+      );
+      setSidebarWidth(latest);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      localStorage.setItem("bot-hq.cl.sidebarWidth", String(Math.round(latest)));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  };
 
   const [rescanning, setRescanning] = useState(false);
   const [rescanReport, setRescanReport] = useState<ClRescanReportView | null>(
@@ -365,8 +408,9 @@ export function ContextLibrary() {
   };
 
   return (
-    <div className="flex h-full bg-background">
+    <div ref={containerRef} className="flex h-full bg-background">
       <WorkspaceSidebar
+        width={sidebarWidth}
         project={project}
         setProject={setProject}
         query={query}
@@ -386,6 +430,11 @@ export function ContextLibrary() {
         onRequestRegister={() => setRegisterOpen(true)}
         onRequestMaintain={() => setMaintainOpen(true)}
         onContextMenu={(target, x, y) => setMenu({ target, x, y })}
+      />
+      <div
+        onMouseDown={onSidebarHandleDown}
+        aria-label="Resize library tree"
+        className="w-1.5 shrink-0 cursor-col-resize bg-transparent transition-colors hover:bg-primary/40"
       />
       <EditorArea
         tabs={tabs}

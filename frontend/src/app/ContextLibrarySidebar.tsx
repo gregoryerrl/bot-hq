@@ -19,7 +19,6 @@ import {
 } from "./contextLibraryShared";
 import { RescanIcon, WarnIcon, WrenchIcon } from "../components/icons";
 
-const SIDEBAR_WIDTH = 240;
 const INDENT_PX = 12;
 
 // Icon-only header action. Color is applied per-button (cn is plain clsx —
@@ -35,6 +34,8 @@ const headerIconButtonClass = cn(
 // ============================================================================
 
 interface WorkspaceSidebarProps {
+  /** Pixel width, owned by ContextLibrary's drag-resize state. */
+  width: number;
   project: string | null;
   setProject: (v: string | null) => void;
   query: string;
@@ -57,6 +58,7 @@ interface WorkspaceSidebarProps {
 }
 
 export function WorkspaceSidebar({
+  width,
   project,
   setProject,
   query,
@@ -83,7 +85,7 @@ export function WorkspaceSidebar({
   return (
     <aside
       className="flex h-full flex-shrink-0 flex-col border-r border-outline-variant bg-surface-container"
-      style={{ width: SIDEBAR_WIDTH }}
+      style={{ width }}
     >
       <header className="flex items-center justify-between border-b border-outline-variant px-3 py-2">
         <span className="font-label-caps text-label-caps text-on-surface-variant">
