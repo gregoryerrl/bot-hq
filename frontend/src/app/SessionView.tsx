@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useStickyScroll } from "../hooks/useStickyScroll";
@@ -106,6 +107,24 @@ export function SessionView() {
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+
+  // Inline title rename. `editingTitle === null` = display mode; a string =
+  // the in-progress edit. Commit on Enter/blur, cancel on Escape.
+  const queryClient = useQueryClient();
+  const [editingTitle, setEditingTitle] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const commitRename = async () => {
+    const next = (editingTitle ?? "").trim();
+    setEditingTitle(null);
+    if (!next || !session || next === session.title) return;
+    try {
+      await invoke("rename_session", { sessionId, title: next });
+      queryClient.invalidateQueries({ queryKey: ["get_session"] });
+      queryClient.invalidateQueries({ queryKey: ["list_sessions"] });
+    } catch (e) {
+      setRenameError(errorMessage(e));
+    }
+  };
 
   // The actual force-close, fired only after the user confirms in the dialog.
   // The backend kill is unconditional — it does not wait for an in-flight turn.
@@ -230,9 +249,41 @@ export function SessionView() {
       >
         <header className="flex items-center justify-between border-b border-outline-variant px-4 py-3">
           <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold tracking-tight">
-              {session.title}
-            </h1>
+            {editingTitle === null ? (
+              <h1 className="group flex items-center gap-1 truncate text-base font-semibold tracking-tight">
+                <span className="truncate">{session.title}</span>
+                <button
+                  type="button"
+                  aria-label="Rename session"
+                  title="Rename session"
+                  onClick={() => {
+                    setRenameError(null);
+                    setEditingTitle(session.title);
+                  }}
+                  className="shrink-0 px-1 text-xs text-on-surface-variant opacity-0 transition-opacity hover:text-on-surface focus:opacity-100 group-hover:opacity-100"
+                >
+                  ✎
+                </button>
+              </h1>
+            ) : (
+              <input
+                autoFocus
+                value={editingTitle}
+                onChange={(e) => setEditingTitle(e.target.value)}
+                onBlur={commitRename}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitRename();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setEditingTitle(null);
+                  }
+                }}
+                aria-label="Session title"
+                className="w-full max-w-sm rounded border border-outline-variant bg-surface px-2 py-0.5 text-base font-semibold tracking-tight text-on-surface focus:border-primary focus:outline-none"
+              />
+            )}
             <p className="text-xs text-on-surface-variant">
               <Link to="/" className="hover:text-on-surface">
                 ← Dashboard
@@ -329,6 +380,18 @@ export function SessionView() {
             <button
               className="ml-2 underline hover:text-error"
               onClick={() => setCloseError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
+
+        {renameError && (
+          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">
+            <span className="font-semibold">Rename failed:</span> {renameError}
+            <button
+              className="ml-2 underline hover:text-error"
+              onClick={() => setRenameError(null)}
             >
               dismiss
             </button>

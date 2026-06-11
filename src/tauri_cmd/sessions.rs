@@ -299,6 +299,25 @@ pub async fn restart_session(
     Ok(())
 }
 
+/// Rename a session (inline edit in the SessionView header). Blank titles are
+/// rejected — an empty header is indistinguishable from a render bug.
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_session(
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+    title: String,
+) -> Result<(), AppError> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(AppError::Validation("title cannot be empty".into()));
+    }
+    storage
+        .rename_session(&session_id, title)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))
+}
+
 /// Read the current IPAV phase for a session. Returns one of "investigate" /
 /// "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
 /// state is in-memory only — restart loses it). Frontend SessionView header

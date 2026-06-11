@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { SessionTile } from "../components/SessionTile";
 import { Button } from "../components/ui/Button";
@@ -140,6 +141,16 @@ export function Dashboard() {
 
   const [creating, setCreating] = useState(false);
   const dialogRef = useFocusTrap<HTMLDivElement>(creating);
+
+  // ⌘/Ctrl-N lands here as `/?new=1` (see Shell) — open the dialog and eat
+  // the param so refresh/back doesn't re-open it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    if (searchParams.get("new") === "1") {
+      setCreating(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
   const [title, setTitle] = useState("");
   // Selected project name (matches ProjectView.name). Empty string = no
   // project (no working repo). When set, we look up the project's
@@ -482,11 +493,22 @@ export function Dashboard() {
         </div>
       ) : sessions.length === 0 ? (
         <div className="rounded-lg border border-dashed border-outline-variant p-10 text-center">
-          <p className="text-sm text-on-surface">
-            No active sessions yet.
+          <p className="font-headline-md text-headline-md text-on-surface">
+            Welcome to bot-hq
           </p>
-          <p className="mt-1 text-xs text-on-surface-variant">
-            Click <b>+ New session</b> to spawn a Brian + Rain duo on a scope.
+          <p className="mx-auto mt-2 max-w-md text-sm text-on-surface-variant">
+            A session is a scoped piece of work — Brian (HANDS) executes, Rain
+            (EYES) reviews, and you stay the conductor.
+          </p>
+          <p className="mx-auto mt-3 max-w-md text-xs text-on-surface-variant">
+            Register a project in the <b>Context Library</b> tab so sessions
+            know your repo and conventions, then hit{" "}
+            <b>+ New session</b> (or{" "}
+            <kbd className="rounded border border-outline-variant bg-surface-container-lowest px-1 py-0.5 font-mono text-[0.65rem]">
+              ⌘N
+            </kbd>
+            ) to put the agents to work. Repo-backed sessions run in isolated
+            worktrees, so several can work the same project at once.
           </p>
         </div>
       ) : filteredSessions.length === 0 ? (

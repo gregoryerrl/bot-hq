@@ -1,9 +1,31 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { useEffect } from "react";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { PendingTray } from "../components/PendingTray";
 import { UpdateBanner } from "../components/UpdateBanner";
 
 export function Shell() {
+  const navigate = useNavigate();
+
+  // App-wide shortcuts: ⌘/Ctrl-N opens the New-session dialog (the `?new=1`
+  // param is consumed by Dashboard), ⌘/Ctrl-, opens Settings (the macOS
+  // preferences convention). preventDefault keeps the webview from acting on
+  // the browser meaning of the chord.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key === "n") {
+        e.preventDefault();
+        navigate("/?new=1");
+      } else if (e.key === ",") {
+        e.preventDefault();
+        navigate("/settings");
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navigate]);
+
   return (
     <div className="flex h-screen flex-col bg-background font-body-md text-on-background">
       <header className="flex h-12 flex-shrink-0 items-center justify-between border-b border-outline-variant bg-surface px-grid-margin">

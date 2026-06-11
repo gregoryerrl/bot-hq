@@ -46,6 +46,18 @@ impl Storage {
         Ok(row)
     }
 
+    /// Rename a session. The live `SessionHandle.title` snapshot is NOT
+    /// touched (it only feeds spawn-time logs); the UI re-reads the row.
+    pub async fn rename_session(&self, id: &str, title: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET title = ? WHERE id = ?")
+            .bind(title)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("renaming session {id}"))?;
+        Ok(())
+    }
+
     pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
         sqlx::query(
             "UPDATE sessions SET closed_at = ?, archived = ? \
@@ -60,11 +72,12 @@ impl Storage {
         Ok(())
     }
 
-    /// Active sessions: not archived, not closed. Ordered most-recent first.
-    /// `id ASC` is the tiebreaker — `datetime('now')` has 1-second granularity,
-    /// so sessions created in the same second tied on `created_at` alone and
-    /// SQLite returned them in non-deterministic order, causing dashboard tiles
-    /// to swap places on every refresh.
+    /// Active sessions: not archived, not closed. Ordered by LAST ACTIVITY —
+    /// the newest message timestamp, falling back to `created_at` for
+    /// message-less (just-created) sessions — so the dashboard surfaces the
+    /// session you (or an agent) touched most recently first. `id ASC` is the
+    /// tiebreaker so equal timestamps can't make tiles swap places between
+    /// refreshes.
     pub async fn list_active_sessions(&self) -> Result<Vec<Session>> {
         let rows = sqlx::query_as::<_, Session>(
             "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
@@ -75,7 +88,10 @@ impl Storage {
                     base_repo_path \
              FROM sessions \
              WHERE archived = 0 AND closed_at IS NULL \
-             ORDER BY created_at DESC, id ASC",
+             ORDER BY COALESCE(\
+                 (SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = sessions.id), \
+                 created_at) DESC, \
+                 id ASC",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -274,6 +290,39 @@ mod tests {
         // Archived flag preserved so the UI can badge it.
         assert_eq!(closed.iter().find(|x| x.id == "s-c").unwrap().archived, 1);
         assert_eq!(closed.iter().find(|x| x.id == "s-b").unwrap().archived, 0);
+    }
+
+    #[tokio::test]
+    async fn active_sessions_order_by_last_activity() {
+        use crate::storage::{Author, MessageKind};
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-old", "Older", None).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        s.create_session("s-new", "Newer", None).await.unwrap();
+
+        // No messages anywhere → creation order, newest first.
+        let ids: Vec<String> = s
+            .list_active_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(ids, vec!["s-new", "s-old"]);
+
+        // Activity on the older session bumps it to the top.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        s.insert_message("s-old", Author::User, MessageKind::Text, "hi")
+            .await
+            .unwrap();
+        let ids: Vec<String> = s
+            .list_active_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(ids, vec!["s-old", "s-new"]);
     }
 
     #[tokio::test]
