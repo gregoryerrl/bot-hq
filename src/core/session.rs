@@ -188,6 +188,43 @@ async fn spawn_session_handle(
         .register_session(session.id.clone(), project.clone())
         .await;
 
+    // Worktree-isolated session: materialize the worktree before anything
+    // touches the path (hook install, HEAD capture, agent cwd). Idempotent —
+    // respawn/restart re-enter here. On failure the session falls back to the
+    // BASE repo and the row is converted to direct mode so row-readers
+    // (action_gate) and the live handle can't disagree about where it runs.
+    let working_repo_path = match (session.base_repo_path.as_ref(), working_repo_path) {
+        (Some(base), Some(wt)) => {
+            let base_pb = PathBuf::from(base);
+            let wt_clone = wt.clone();
+            let branch = crate::core::worktree::branch_for_session(&session.id);
+            let ensured = tokio::task::spawn_blocking(move || {
+                crate::core::worktree::ensure_worktree(&base_pb, &wt_clone, &branch)
+            })
+            .await
+            .context("worktree ensure task panicked")?;
+            match ensured {
+                Ok(()) => {
+                    info!(session_id = %session.id, worktree = %wt.display(), "session worktree ready");
+                    Some(wt)
+                }
+                Err(err) => {
+                    warn!(
+                        %err,
+                        session_id = %session.id,
+                        base = %base,
+                        "worktree ensure failed — falling back to the base repo (direct mode)"
+                    );
+                    if let Err(e) = storage.convert_session_to_direct(&session.id, base).await {
+                        warn!(?e, session_id = %session.id, "convert_session_to_direct failed");
+                    }
+                    Some(PathBuf::from(base))
+                }
+            }
+        }
+        (_, wrp) => wrp,
+    };
+
     // Resolve the project's on-disk CL root once. Honors `projects.cl_path`
     // (folder-view registration with non-default location) and falls back to
     // the convention `<data_dir>/projects/<name>/`. Used for both the policy

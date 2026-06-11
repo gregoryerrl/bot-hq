@@ -249,6 +249,17 @@ export function SessionView() {
                   </span>
                 </>
               )}
+              {session.base_repo_path && (
+                <>
+                  <span className="mx-2 text-outline-variant">·</span>
+                  <span
+                    className="font-mono text-[0.65rem] text-on-surface-variant"
+                    title={`Isolated worktree of ${session.base_repo_path} — work lands on branch bothq/${sessionId}`}
+                  >
+                    ⎇ bothq/{sessionId}
+                  </span>
+                </>
+              )}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">

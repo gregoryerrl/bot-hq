@@ -11,6 +11,12 @@ const MODEL_COLUMNS: &str =
 /// [`Storage::default_rain_enabled`].
 pub const RAIN_DISABLED_DEFAULT_KEY: &str = "rain_disabled_default";
 
+/// Key in `app_settings`: "0" = repo-backed sessions run directly in the repo
+/// by default instead of an isolated git worktree. Resolved via
+/// [`Storage::default_worktree_enabled`]; the create dialog seeds its
+/// checkbox from it.
+pub const WORKTREE_DEFAULT_KEY: &str = "worktree_default";
+
 impl Storage {
     // ---- models ----------------------------------------------------------
 
@@ -107,6 +113,17 @@ impl Storage {
             Ok(Some(v)) if v == "1"
         )
     }
+
+    /// Whether a repo-backed session created WITHOUT an explicit worktree
+    /// choice runs in an isolated git worktree. Opt-OUT: unset or any value
+    /// but "0" → worktree on (parallel sessions per project are the default);
+    /// `worktree_default == "0"` → direct mode.
+    pub async fn default_worktree_enabled(&self) -> bool {
+        !matches!(
+            self.get_setting(WORKTREE_DEFAULT_KEY).await,
+            Ok(Some(v)) if v == "0"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +192,17 @@ mod tests {
         // Any other value → duo.
         s.set_setting(RAIN_DISABLED_DEFAULT_KEY, "0").await.unwrap();
         assert!(s.default_rain_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn default_worktree_enabled_is_opt_out() {
+        let s = Storage::memory().await.unwrap();
+        // Unset → worktree isolation on by default.
+        assert!(s.default_worktree_enabled().await);
+        s.set_setting(WORKTREE_DEFAULT_KEY, "0").await.unwrap();
+        assert!(!s.default_worktree_enabled().await);
+        s.set_setting(WORKTREE_DEFAULT_KEY, "1").await.unwrap();
+        assert!(s.default_worktree_enabled().await);
     }
 
     #[tokio::test]

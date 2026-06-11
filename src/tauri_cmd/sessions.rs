@@ -13,6 +13,10 @@ pub struct SessionInfo {
     pub id: String,
     pub title: String,
     pub working_repo_path: Option<String>,
+    /// Set when the session runs in an isolated git worktree —
+    /// `working_repo_path` is then the worktree and this is the repo it was
+    /// carved from. None = direct mode.
+    pub base_repo_path: Option<String>,
     pub archived: bool,
     pub created_at: String,
     pub closed_at: Option<String>,
@@ -28,6 +32,7 @@ impl From<Session> for SessionInfo {
             id: s.id,
             title: s.title,
             working_repo_path: s.working_repo_path,
+            base_repo_path: s.base_repo_path,
             archived: s.archived != 0,
             created_at: s.created_at,
             closed_at: s.closed_at,
@@ -38,16 +43,59 @@ impl From<Session> for SessionInfo {
     }
 }
 
-/// Per-session effort/ultracode picks from the create dialog. Bundled into one
-/// struct because `create_session` is at tauri-specta's 10-arg command limit;
-/// each field is `None` = inherit the Settings → Claude Config defaults.
+/// Per-session create-dialog picks beyond the positional args. Bundled into
+/// one struct because `create_session` sits at tauri-specta's 10-arg command
+/// limit; every field is `None` = inherit the configured default.
+/// (Renamed from `SessionEffortChoices` when `use_worktree` joined.)
 #[derive(Debug, Clone, Default, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionEffortChoices {
+pub struct SessionCreateOptions {
     pub brian_effort: Option<String>,
     pub rain_effort: Option<String>,
     pub brian_ultracode: Option<bool>,
     pub rain_ultracode: Option<bool>,
+    /// Run the session in an isolated git worktree (None → the
+    /// `worktree_default` app setting, which defaults ON for repo-backed
+    /// sessions).
+    pub use_worktree: Option<bool>,
+}
+
+/// Where a new session runs: `(working_repo_path, base_repo_path)`.
+///
+/// Worktree mode (the default for repo-backed sessions) places the session at
+/// `<data_dir>/.local/worktrees/<sid>/<repo-basename>` and remembers the base
+/// repo; the worktree itself is materialized lazily at spawn
+/// (`spawn_session_handle`), so this only decides paths. Direct mode — and
+/// every repo-less or non-git path — runs in the repo itself. Blank paths
+/// normalize to None (matching `Storage::create_session`).
+async fn resolve_session_placement(
+    storage: &Storage,
+    data_dir: &std::path::Path,
+    session_id: &str,
+    repo_path: Option<String>,
+    use_worktree: Option<bool>,
+) -> (Option<String>, Option<String>) {
+    let repo = match repo_path.filter(|p| !p.trim().is_empty()) {
+        Some(r) => r,
+        None => return (None, None),
+    };
+    let enabled = match use_worktree {
+        Some(b) => b,
+        None => storage.default_worktree_enabled().await,
+    };
+    // A path with no `.git` can't host a worktree (hooks skip it too) —
+    // direct mode rather than a guaranteed spawn-time fallback.
+    if !enabled || !std::path::Path::new(&repo).join(".git").exists() {
+        return (Some(repo), None);
+    }
+    match crate::core::worktree::session_worktree_path(
+        data_dir,
+        session_id,
+        std::path::Path::new(&repo),
+    ) {
+        Some(wt) => (Some(wt.to_string_lossy().into_owned()), Some(repo)),
+        None => (Some(repo), None),
+    }
 }
 
 #[tauri::command]
@@ -55,8 +103,7 @@ pub struct SessionEffortChoices {
 // Param count is inflated by Tauri-injected `State` handles, not real fan-out.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_session(
-    storage: tauri::State<'_, Arc<Storage>>,
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
     id: String,
     title: String,
     repo_path: Option<String>,
@@ -66,13 +113,28 @@ pub async fn create_session(
     rain_enabled: Option<bool>,
     brian_model_id: Option<String>,
     rain_model_id: Option<String>,
-    // Per-session effort/ultracode overrides (bundled — see SessionEffortChoices).
-    effort: SessionEffortChoices,
+    // Effort/ultracode/worktree picks (bundled — see SessionCreateOptions).
+    options: SessionCreateOptions,
 ) -> Result<SessionInfo, AppError> {
+    let storage = &core.storage;
+    let (working, base) = resolve_session_placement(
+        storage,
+        &core.paths.data_dir,
+        &id,
+        repo_path,
+        options.use_worktree,
+    )
+    .await;
     storage
-        .create_session(&id, &title, repo_path.as_deref())
+        .create_session(&id, &title, working.as_deref())
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
+    if base.is_some() {
+        storage
+            .set_session_base_repo(&id, base.as_deref())
+            .await
+            .map_err(|e| AppError::DbError(e.to_string()))?;
+    }
     // Persist the Rain toggle + per-agent model picks on the row BEFORE the
     // session is spawned (respawn_session reads them off the row).
     storage
@@ -89,14 +151,14 @@ pub async fn create_session(
     storage
         .set_session_effort_config(
             &id,
-            effort.brian_effort.as_deref(),
-            effort.rain_effort.as_deref(),
-            effort.brian_ultracode,
-            effort.rain_ultracode,
+            options.brian_effort.as_deref(),
+            options.rain_effort.as_deref(),
+            options.brian_ultracode,
+            options.rain_ultracode,
         )
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
-    bridge.register_session(id.clone(), project).await;
+    core.bridge.register_session(id.clone(), project).await;
     // Re-fetch so the returned SessionInfo reflects the persisted config.
     let session = storage
         .get_session(&id)
@@ -130,14 +192,31 @@ pub async fn dispatch_session(
     repo_path: Option<String>,
     prompt: String,
 ) -> Result<SessionInfo, AppError> {
+    // No create dialog on this path → both placement and solo/duo come from
+    // the configured defaults (worktree_default / rain_disabled_default).
+    let (working, base) = resolve_session_placement(
+        &storage,
+        &core.paths.data_dir,
+        &id,
+        repo_path,
+        None,
+    )
+    .await;
     let mut session = storage
-        .create_session(&id, &title, repo_path.as_deref())
+        .create_session(&id, &title, working.as_deref())
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
-    // Honor the user's solo/duo default. There is no create dialog on this
-    // path, so without this the DB default (`rain_enabled=1`) always spawned
-    // the duo regardless of `rain_disabled_default`. Models stay NULL =
-    // per-agent defaults, same as the dialog's "(agent default)" pick.
+    if base.is_some() {
+        storage
+            .set_session_base_repo(&id, base.as_deref())
+            .await
+            .map_err(|e| AppError::DbError(e.to_string()))?;
+        session.base_repo_path = base;
+    }
+    // Honor the user's solo/duo default. Without this the DB default
+    // (`rain_enabled=1`) always spawned the duo regardless of
+    // `rain_disabled_default`. Models stay NULL = per-agent defaults, same as
+    // the dialog's "(agent default)" pick.
     let rain_enabled = storage.default_rain_enabled().await;
     storage
         .set_session_spawn_config(&id, rain_enabled, None, None)
@@ -262,6 +341,74 @@ mod tests {
         let s = Arc::new(Storage::memory().await.unwrap());
         let b = SignalingBridge::new();
         (s, b)
+    }
+
+    #[tokio::test]
+    async fn placement_repo_less_and_blank_are_direct_none() {
+        let (storage, _b) = setup().await;
+        let dd = std::path::Path::new("/dd");
+        assert_eq!(
+            resolve_session_placement(&storage, dd, "s-1", None, None).await,
+            (None, None)
+        );
+        assert_eq!(
+            resolve_session_placement(&storage, dd, "s-1", Some("  ".into()), None).await,
+            (None, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn placement_non_git_dir_is_direct() {
+        let (storage, _b) = setup().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("plain");
+        std::fs::create_dir(&repo).unwrap();
+        let got = resolve_session_placement(
+            &storage,
+            std::path::Path::new("/dd"),
+            "s-1",
+            Some(repo.to_string_lossy().into_owned()),
+            None,
+        )
+        .await;
+        assert_eq!(got.0.as_deref(), repo.to_str());
+        assert_eq!(got.1, None);
+    }
+
+    #[tokio::test]
+    async fn placement_git_repo_defaults_to_worktree_and_honors_optout() {
+        let (storage, _b) = setup().await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = tmp.path().join("myproj");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        let dd = std::path::Path::new("/dd");
+
+        // Default (setting unset) → worktree placement, basename preserved.
+        let (working, base) =
+            resolve_session_placement(&storage, dd, "s-wt", Some(repo_s.clone()), None).await;
+        assert_eq!(base.as_deref(), Some(repo_s.as_str()));
+        let w = working.unwrap();
+        assert!(w.contains(".local/worktrees/s-wt"), "got {w}");
+        assert!(w.ends_with("myproj"), "got {w}");
+
+        // Explicit per-session opt-out wins.
+        let got =
+            resolve_session_placement(&storage, dd, "s-d", Some(repo_s.clone()), Some(false))
+                .await;
+        assert_eq!(got, (Some(repo_s.clone()), None));
+
+        // worktree_default = "0" flips the unset default to direct.
+        storage
+            .set_setting(crate::storage::WORKTREE_DEFAULT_KEY, "0")
+            .await
+            .unwrap();
+        let got = resolve_session_placement(&storage, dd, "s-e", Some(repo_s.clone()), None).await;
+        assert_eq!(got, (Some(repo_s.clone()), None));
+        // …and an explicit opt-IN overrides the "0" setting.
+        let (_, base) =
+            resolve_session_placement(&storage, dd, "s-f", Some(repo_s.clone()), Some(true)).await;
+        assert_eq!(base.as_deref(), Some(repo_s.as_str()));
     }
 
     #[tokio::test]

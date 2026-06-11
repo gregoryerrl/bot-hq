@@ -27,7 +27,7 @@ mod session_docs;
 mod sessions;
 mod time;
 
-pub use models::RAIN_DISABLED_DEFAULT_KEY;
+pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Model, Plugin,
     Project, QuestionKind, QuestionStatus, Session, SessionDocument, SessionTrayEntry,

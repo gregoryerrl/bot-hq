@@ -178,6 +178,36 @@ impl AppState {
         // Drop the bridge's in-memory per-session state (project map + awaiting
         // flag) so closed sessions don't leak map entries for the process life.
         self.bridge.unregister_session(id).await;
+        // Worktree-isolated session: remove its worktree if (and only if) it
+        // is clean. Never forced — a dirty worktree outlives the session so
+        // uncommitted work is recoverable; the session branch always survives.
+        if let Ok(Some(row)) = self.storage.get_session(id).await {
+            if let (Some(base), Some(wt)) = (row.base_repo_path, row.working_repo_path) {
+                let sid = id.to_string();
+                let outcome = tokio::task::spawn_blocking(move || {
+                    crate::core::worktree::remove_worktree_if_clean(
+                        std::path::Path::new(&base),
+                        std::path::Path::new(&wt),
+                    )
+                })
+                .await;
+                use crate::core::worktree::RemoveOutcome;
+                match outcome {
+                    Ok(RemoveOutcome::Removed) => {
+                        tracing::info!(session_id = %sid, "session worktree removed (clean)");
+                    }
+                    Ok(RemoveOutcome::Kept(reason)) => {
+                        tracing::warn!(session_id = %sid, %reason, "session worktree KEPT (dirty) — recover or remove it manually");
+                    }
+                    Ok(RemoveOutcome::Gone) => {
+                        tracing::debug!(session_id = %sid, "session worktree already gone");
+                    }
+                    Err(e) => {
+                        tracing::warn!(?e, session_id = %sid, "worktree removal task failed");
+                    }
+                }
+            }
+        }
         // Tell the UI the session is closed so it can navigate away from the
         // (now-closed) session view + refresh its session lists.
         self.bridge.notify_session_closed(id.to_string());

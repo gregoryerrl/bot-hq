@@ -8,6 +8,7 @@ const session: SessionInfo = {
   id: "s-abcd1234",
   title: "Refactor auth flow",
   working_repo_path: null,
+  base_repo_path: null,
   archived: false,
   created_at: "2026-05-26T18:00:00Z",
   closed_at: null,

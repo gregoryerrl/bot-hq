@@ -36,7 +36,8 @@ impl Storage {
                     brian_model_at_spawn, rain_model_at_spawn, \
                     brian_claude_session_id, rain_claude_session_id, \
                     rain_enabled, brian_model_id, rain_model_id, \
-                    brian_effort, rain_effort, brian_ultracode, rain_ultracode \
+                    brian_effort, rain_effort, brian_ultracode, rain_ultracode, \
+                    base_repo_path \
              FROM sessions WHERE id = ?",
         )
         .bind(id)
@@ -70,7 +71,8 @@ impl Storage {
                     brian_model_at_spawn, rain_model_at_spawn, \
                     brian_claude_session_id, rain_claude_session_id, \
                     rain_enabled, brian_model_id, rain_model_id, \
-                    brian_effort, rain_effort, brian_ultracode, rain_ultracode \
+                    brian_effort, rain_effort, brian_ultracode, rain_ultracode, \
+                    base_repo_path \
              FROM sessions \
              WHERE archived = 0 AND closed_at IS NULL \
              ORDER BY created_at DESC, id ASC",
@@ -89,7 +91,8 @@ impl Storage {
                     brian_model_at_spawn, rain_model_at_spawn, \
                     brian_claude_session_id, rain_claude_session_id, \
                     rain_enabled, brian_model_id, rain_model_id, \
-                    brian_effort, rain_effort, brian_ultracode, rain_ultracode \
+                    brian_effort, rain_effort, brian_ultracode, rain_ultracode, \
+                    base_repo_path \
              FROM sessions \
              WHERE closed_at IS NOT NULL \
              ORDER BY closed_at DESC, id ASC",
@@ -172,6 +175,41 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording effort config on session {session_id}"))?;
+        Ok(())
+    }
+
+    /// Record the user's main repo for a worktree-isolated session. Called at
+    /// create time (before spawn) together with the worktree placement —
+    /// `working_repo_path` then carries the worktree path and this column the
+    /// repo the worktree was carved from. `None` clears (direct mode).
+    pub async fn set_session_base_repo(
+        &self,
+        session_id: &str,
+        base_repo_path: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query("UPDATE sessions SET base_repo_path = ? WHERE id = ?")
+            .bind(base_repo_path)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("recording base repo on session {session_id}"))?;
+        Ok(())
+    }
+
+    /// Convert a worktree-isolated session to direct mode: point
+    /// `working_repo_path` back at the base repo and clear `base_repo_path`.
+    /// Used when the worktree can't be materialized at spawn — the row must
+    /// follow the fallback or row-readers (action_gate) and the live session
+    /// would disagree about where the session runs.
+    pub async fn convert_session_to_direct(&self, session_id: &str, repo: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET working_repo_path = ?, base_repo_path = NULL WHERE id = ?",
+        )
+        .bind(repo)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("converting session {session_id} to direct mode"))?;
         Ok(())
     }
 

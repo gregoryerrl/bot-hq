@@ -314,7 +314,50 @@ function AgentsPanel() {
           ))}
         </div>
       )}
+      <SessionDefaults />
     </div>
+  );
+}
+
+/** App-wide defaults applied at session create (not per-agent config). */
+function SessionDefaults() {
+  const { data: worktreeDefault, refetch } = useTauriQuery<string | null>(
+    "get_app_setting",
+    { key: "worktree_default" },
+  );
+  const setAppSetting = useTauriMutation<void, { key: string; value: string }>(
+    "set_app_setting",
+  );
+  return (
+    <section className="mt-gutter rounded-lg border border-outline-variant bg-surface-container p-4">
+      <h2 className="font-headline-md text-headline-md text-on-surface">
+        Session defaults
+      </h2>
+      <label className="mt-3 flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={worktreeDefault !== "0"}
+          onChange={async (e) => {
+            await setAppSetting.mutateAsync({
+              key: "worktree_default",
+              value: e.target.checked ? "1" : "0",
+            });
+            refetch();
+          }}
+          className="size-4 accent-primary"
+        />
+        <span className="font-body-md text-body-md text-on-surface">
+          Run repo-backed sessions in isolated git worktrees
+        </span>
+      </label>
+      <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+        Each session gets its own checkout on branch{" "}
+        <code className="text-on-surface">bothq/&lt;session-id&gt;</code>, so
+        several sessions can work the same project in parallel. Clean worktrees
+        are removed at close; anything uncommitted is kept. The New-session
+        dialog can override this per session.
+      </p>
+    </section>
   );
 }
 

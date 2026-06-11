@@ -83,6 +83,12 @@ export function Dashboard() {
     "get_app_setting",
     { key: RAIN_DISABLED_DEFAULT_KEY },
   );
+  // Worktree isolation default (Settings → Agents → Session defaults).
+  // Anything but "0" means on.
+  const { data: worktreeDefault } = useTauriQuery<string | null>(
+    "get_app_setting",
+    { key: "worktree_default" },
+  );
 
   // Persistent effort defaults, so the dialog's "Inherit" option can show what
   // it resolves to (e.g. "Inherit (max)") rather than a bare "(default)".
@@ -113,12 +119,13 @@ export function Dashboard() {
       rainEnabled: boolean;
       brianModelId: string | null;
       rainModelId: string | null;
-      // Per-session effort/ultracode picks (bundled — at the tauri 10-arg limit).
-      effort: {
+      // Effort/ultracode/worktree picks (bundled — at the tauri 10-arg limit).
+      options: {
         brianEffort: string | null;
         rainEffort: string | null;
         brianUltracode: boolean | null;
         rainUltracode: boolean | null;
+        useWorktree: boolean | null;
       };
     }
   >("create_session");
@@ -144,6 +151,8 @@ export function Dashboard() {
   const [brianModelId, setBrianModelId] = useState("");
   const [rainModelId, setRainModelId] = useState("");
   const [disableRain, setDisableRain] = useState(false);
+  // Worktree isolation for this session (seeded from the app default).
+  const [useWorktree, setUseWorktree] = useState(true);
   // Per-session effort/ultracode picks (null = inherit the Settings defaults).
   const [brianEffort, setBrianEffort] = useState<string | null>(null);
   const [rainEffort, setRainEffort] = useState<string | null>(null);
@@ -172,6 +181,7 @@ export function Dashboard() {
     setBrianModelId(modelIdFor(brianConfig));
     setRainModelId(modelIdFor(rainConfig));
     setDisableRain(rainDisabledDefault === "1");
+    setUseWorktree(worktreeDefault !== "0");
     // Effort/ultracode default to inherit (the Settings defaults) each open.
     setBrianEffort(null);
     setRainEffort(null);
@@ -192,11 +202,12 @@ export function Dashboard() {
       rainEnabled: !disableRain,
       brianModelId: brianModelId || null,
       rainModelId: disableRain ? null : rainModelId || null,
-      effort: {
+      options: {
         brianEffort,
         rainEffort: disableRain ? null : rainEffort,
         brianUltracode,
         rainUltracode: disableRain ? null : rainUltracode,
+        useWorktree,
       },
     });
     setTitle("");
@@ -327,6 +338,21 @@ export function Dashboard() {
                   ))}
                 </select>
               </label>
+              {projects.find((p) => p.name === selectedProject)
+                ?.working_repo_path && (
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={useWorktree}
+                    onChange={(e) => setUseWorktree(e.target.checked)}
+                    className="size-4 accent-primary"
+                  />
+                  <span className="font-body-md text-body-md text-on-surface">
+                    Isolated git worktree (parallel-safe, branch{" "}
+                    <code className="font-code-sm text-code-sm">bothq/…</code>)
+                  </span>
+                </label>
+              )}
               <label className="flex items-center gap-2">
                 <input
                   type="checkbox"

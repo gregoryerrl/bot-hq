@@ -90,6 +90,10 @@ pub struct Session {
     pub rain_effort: Option<String>,
     pub brian_ultracode: Option<bool>,
     pub rain_ultracode: Option<bool>,
+    /// The user's main repo when this session runs in an isolated git
+    /// worktree (then `working_repo_path` is the worktree). NULL = session
+    /// runs directly in `working_repo_path`.
+    pub base_repo_path: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

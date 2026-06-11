@@ -613,11 +613,22 @@ pub fn install_hooks(
     data_dir: &Path,
     project: Option<&str>,
 ) -> Result<HookInstallReport> {
-    let git_dir = working_repo.join(".git");
-    if !git_dir.is_dir() {
+    let git_marker = working_repo.join(".git");
+    let hooks_dir = if git_marker.is_dir() {
+        git_marker.join("hooks")
+    } else if git_marker.is_file() {
+        // Linked worktree: `.git` is a FILE pointing at the common git dir,
+        // and git reads hooks from the SHARED common hooks dir (or
+        // core.hooksPath). Resolve through git so the write lands where git
+        // will actually look — a `.git/hooks` join here would silently
+        // install nothing enforcement-wise.
+        match resolve_hooks_dir(working_repo) {
+            Some(d) => d,
+            None => return Ok(HookInstallReport::not_a_git_repo()),
+        }
+    } else {
         return Ok(HookInstallReport::not_a_git_repo());
-    }
-    let hooks_dir = git_dir.join("hooks");
+    };
     std::fs::create_dir_all(&hooks_dir)
         .with_context(|| format!("creating hooks dir at {}", hooks_dir.display()))?;
 
@@ -643,6 +654,33 @@ pub fn install_hooks(
         }
     }
     Ok(report)
+}
+
+/// Where git actually reads hooks for this checkout — `git rev-parse
+/// --git-path hooks` honors linked worktrees (shared common dir) AND
+/// `core.hooksPath`. Relative output is anchored at the repo. None when git
+/// is missing or the dir isn't a repo.
+fn resolve_hooks_dir(working_repo: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(working_repo)
+        .args(["rev-parse", "--git-path", "hooks"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(out.stdout).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(raw);
+    Some(if p.is_absolute() {
+        p
+    } else {
+        working_repo.join(p)
+    })
 }
 
 #[derive(Debug, Default, Clone)]
@@ -870,6 +908,48 @@ mod tests {
         let rep = install_hooks(repo.path(), data.path(), Some("foo")).unwrap();
         assert_eq!(rep.unchanged.len(), 4, "second run should change nothing");
         assert!(rep.installed.is_empty());
+    }
+
+    #[test]
+    fn install_hooks_from_linked_worktree_lands_in_common_hooks_dir() {
+        // A linked worktree's `.git` is a FILE; hooks live in the base repo's
+        // shared `.git/hooks`. Installing "into the worktree" must write
+        // there — the old `.git/hooks` join skipped install entirely
+        // (not_a_git_repo), silently dropping the enforcement backstop.
+        let base = tempdir().unwrap();
+        let data = tempdir().unwrap();
+        init_repo(base.path());
+        // init_repo leaves an empty repo — the worktree needs a commit.
+        std::fs::write(base.path().join("f"), "x").unwrap();
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(base.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(base.path())
+            .status()
+            .unwrap();
+        let wt_holder = tempdir().unwrap();
+        let wt = wt_holder.path().join("wt");
+        let ok = Command::new("git")
+            .args(["worktree", "add", wt.to_str().unwrap(), "-b", "wt-branch"])
+            .current_dir(base.path())
+            .status()
+            .unwrap();
+        assert!(ok.success());
+
+        let rep = install_hooks(&wt, data.path(), Some("foo")).unwrap();
+        assert!(!rep.not_a_git_repo, "worktree must not read as non-repo");
+        assert_eq!(rep.installed.len(), 4);
+        for name in ["commit-msg", "pre-commit", "post-commit", "pre-push"] {
+            let p = base.path().join(".git/hooks").join(name);
+            assert!(p.exists(), "{name} must land in the COMMON hooks dir");
+        }
+        // Idempotent from the base repo too — same target dir.
+        let rep2 = install_hooks(base.path(), data.path(), Some("foo")).unwrap();
+        assert_eq!(rep2.unchanged.len(), 4);
     }
 
     #[test]

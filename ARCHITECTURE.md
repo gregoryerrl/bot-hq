@@ -219,14 +219,18 @@ warning preserved.
 
 **Per-agent model selection:** the user maintains a registry of saved
 models (`models` table — label + provider + base_url + auth_token) in
-Settings → Models. A `default_model_id` app setting picks the fleet
-default; the New-session dialog exposes a Brian + Rain model dropdown
-(defaulting to it) plus a "disable Rain" checkbox (solo Brian), with a
-`rain_disabled_default` app setting. The picks persist on the `sessions`
-row (`brian_model_id` / `rain_model_id` / `rain_enabled`) and
+Settings → Models. The New-session dialog exposes a Brian + Rain model
+dropdown (each seeded from that agent's `agent_configs` entry when it
+matches a saved model) plus a "disable Rain" checkbox (solo Brian) seeded
+from the `rain_disabled_default` app setting. The picks persist on the
+`sessions` row (`brian_model_id` / `rain_model_id` / `rain_enabled`) and
 `resolve_spawn_config` resolves them at spawn (registry → `agent_configs`
 → built-in default). `agent_configs` is now effectively the picker
-fallback.
+fallback. (A `default_model_id` app setting exists but is only consumed
+by `summarize_session_doc`'s model resolution, not the spawn path.)
+Dialog-less create paths — the Maintain-CL dispatcher and the external
+driver's `create_session` — honor `rain_disabled_default` via
+`Storage::default_rain_enabled` (models stay NULL = agent defaults).
 
 **Claude Config surface** (`src/claude_config/`,
 `tauri_cmd/claude_config.rs`, `frontend/src/app/ClaudeConfig.tsx`):
@@ -424,6 +428,45 @@ sessions.
 
 ---
 
+## Session worktrees
+
+Repo-backed sessions default to an **isolated git worktree** so two or
+more sessions can work the same project in parallel (per-session index,
+checkout, and branch — no file races). Opt-out per session in the
+New-session dialog, or globally via the `worktree_default` app setting
+(Settings → Agents → Session defaults). Dialog-less paths (Maintain CL)
+follow the setting.
+
+- **Placement:** `<data_dir>/.local/worktrees/<session-id>/<repo-basename>/`.
+  The repo basename stays the final path segment because
+  `spawn_session_handle` derives the session's project from
+  `working_repo_path.file_name()` — the worktree must map to the same
+  project for policy + CL.
+- **Row model:** `sessions.working_repo_path` = the WORKTREE (the path
+  agents run in — action_gate, hook install, A-tab diff, and project
+  derivation all read it unchanged); `sessions.base_repo_path` = the repo
+  it was carved from (NULL = direct mode). Placement is decided at create
+  (`tauri_cmd/sessions.rs::resolve_session_placement`); the worktree is
+  materialized lazily at spawn (`core/worktree.rs::ensure_worktree`,
+  idempotent across respawns, re-adds after a manual delete via
+  `worktree prune`). If ensure fails, the session falls back to the base
+  repo and the row is converted to direct mode so row-readers and the
+  live handle agree.
+- **Branch:** `bothq/<session-id>` from the base repo's HEAD at first
+  ensure. Two worktrees can't share one branch, so per-session branches
+  are inherent; merging back is the user's flow (push gate unchanged).
+- **Hooks:** a linked worktree's `.git` is a FILE and git reads hooks
+  from the shared common dir — `install_hooks` resolves the real hooks
+  dir via `git rev-parse --git-path hooks` (also honors
+  `core.hooksPath`), so the policy backstop covers every worktree of the
+  repo. Hook identity stays per-session via `BOT_HQ_SESSION_ID` env at
+  fire time.
+- **Close:** `close_session` removes the worktree only when clean (plain
+  `git worktree remove`, never `--force`); a dirty worktree is kept and
+  logged for manual recovery. The session branch always survives.
+
+---
+
 ## Storage (sqlite)
 
 Schema at `migrations/0001_init.sql` + subsequent migration files.
@@ -431,10 +474,11 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
 **Tables:**
 - `messages` (id PK, session_id, author, kind, content, created_at) —
   full chat history. Index on `(session_id, created_at)`.
-- `sessions` (id PK, title, working_repo_path, project, phase,
-  created_at, closed_at, archived, rain_enabled, brian_model_id,
-  rain_model_id) — the last three drive per-session model selection +
-  the solo-Brian (disable-Rain) toggle.
+- `sessions` (id PK, title, working_repo_path, base_repo_path, project,
+  phase, created_at, closed_at, archived, rain_enabled, brian_model_id,
+  rain_model_id) — rain_enabled + the model ids drive per-session model
+  selection + the solo-Brian (disable-Rain) toggle; `base_repo_path` is
+  set for worktree-isolated sessions (see "Session worktrees").
 - `agent_configs` (agent_name PK, provider, model_name, base_url,
   auth_token). CHECK constraint still lists `agent_name ∈
   {'emma','brian','rain'}` (migration 0001 created it permissive;
