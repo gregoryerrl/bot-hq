@@ -11,13 +11,50 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-482 tests passing (431 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 77 frontend Vitest. Release build clean. Version **1.0.0** (bumped
+483 tests passing (432 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 81 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
 zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-12 — Context Library tree overhaul + Models list redesign
+
+Four UI improvements from user spec (categories scheme picked by user:
+Projects / Global / System).
+
+- **add: CL sidebar header icon actions** (`8de5538`). Rescan / Register
+  project / Maintain CL moved from full-width block buttons into icon-only
+  header buttons (RefreshIcon w/ spin-while-rescanning, PlusIcon, WrenchIcon
+  in primary). No count on rescan-all per user. Search + project filter +
+  rescan report stay below.
+- **add: resizable context library sidebar** (`5d8c9e2`). VS-Code-style
+  drag-resize, ported from SessionView's split-handle pattern in absolute px:
+  clamp [180, 480], default 240, persisted to
+  `localStorage["bot-hq.cl.sidebarWidth"]`.
+- **add: categorized CL tree (system guard, register-from-global)**
+  (`1d2f546`). Tree now groups under three collapsible category headers
+  (sentinel collapse keys `@cat:*` in the existing persisted set; left-click
+  only toggles — never opens a tab): **Projects** (registered, `text-primary`),
+  **Global** (loose `_globals` files, header right-click → New file/folder),
+  **System** (`agents/**` + `custom-general-rules.md`, `text-amber-400`,
+  read+update only — no context menu, and `cl_rename`/`cl_delete_path` now
+  reject protected `_globals` paths server-side via
+  `assert_not_protected_globals_path`, canonicalized-path compare). Top-level
+  Global folders gain right-click **Register as project**: physically moves
+  the folder under `projects/` (in-place registration would double-index),
+  upserts the project row, re-points folder-description rows, rescans both
+  sides. `splitGlobals`/`isInternalGlobalsPath` helpers + 4 Vitest cases +
+  1 cargo guard test.
+- **redesign: models settings as list with edit dialog** (`dc3e70c`).
+  Settings → Models card grid replaced by a 5-column list (name / provider /
+  model id / updated / actions). Create + edit go through a ModelDialog
+  (RegisterProjectModal scaffold); the model id is generated at save time so
+  cancelling Add leaves no ghost "New model" row (the old grid pre-created
+  one). Delete keeps the ConfirmDialog flow.
 
 ---
 
