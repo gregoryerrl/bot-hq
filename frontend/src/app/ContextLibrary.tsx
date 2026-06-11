@@ -11,6 +11,7 @@ import {
   baseName,
   collapseKey,
   type CtxTarget,
+  isInternalGlobalsPath,
   tabKey,
   type OpenTab,
 } from "./contextLibraryShared";
@@ -48,7 +49,8 @@ type CtxAction =
   | { mode: "newFile"; target: CtxTarget }
   | { mode: "newFolder"; target: CtxTarget }
   | { mode: "rename"; target: CtxTarget }
-  | { mode: "delete"; target: CtxTarget };
+  | { mode: "delete"; target: CtxTarget }
+  | { mode: "registerProject"; target: CtxTarget };
 
 // Drag-resize bounds for the workspace sidebar (VS-Code-style explorer).
 const SIDEBAR_MIN_PX = 180;
@@ -190,24 +192,37 @@ export function ContextLibrary() {
   const [actionError, setActionError] = useState<string | null>(null);
 
   const menuItems = (target: CtxTarget): ContextMenuItem[] => {
+    // SYSTEM subtree (agent custom-instructions, custom-general-rules.md) is
+    // read+update only — no create/rename/delete. The backend guard in
+    // cl_rename/cl_delete_path enforces the same; this hides the menu.
+    if (target.project === "_globals" && isInternalGlobalsPath(target.path)) {
+      return [];
+    }
     if (target.kind === "folder") {
-      const items: ContextMenuItem[] = [];
-      // `_globals` is a virtual bucket for cross-project system files (general
-      // rules, agent instructions), not a real project dir — don't offer
-      // file/folder creation under it.
-      if (target.project !== "_globals") {
-        items.push(
-          {
-            label: "New file",
-            onSelect: () => setAction({ mode: "newFile", target }),
-          },
-          {
-            label: "New folder",
-            onSelect: () => setAction({ mode: "newFolder", target }),
-          },
-        );
+      const items: ContextMenuItem[] = [
+        {
+          label: "New file",
+          onSelect: () => setAction({ mode: "newFile", target }),
+        },
+        {
+          label: "New folder",
+          onSelect: () => setAction({ mode: "newFolder", target }),
+        },
+      ];
+      // Top-level folder in GLOBAL → promote to a registered project (moves
+      // the folder under projects/).
+      if (
+        target.project === "_globals" &&
+        target.path !== "" &&
+        !target.path.includes("/")
+      ) {
+        items.push({
+          label: "Register as project",
+          onSelect: () => setAction({ mode: "registerProject", target }),
+        });
       }
-      // The project-root folder can't be renamed/deleted from here.
+      // The project-root folder (and the Global category header, which
+      // targets the `_globals` root) can't be renamed/deleted from here.
       if (target.path !== "") {
         items.push({
           label: "Rename",
@@ -263,6 +278,14 @@ export function ContextLibrary() {
           confirmLabel: "Delete",
           danger: true,
         };
+      case "registerProject":
+        return {
+          title: "Register as project",
+          message: `Moves "${t.path}" into projects/ and registers it as a Context Library project.`,
+          inputLabel: "Project name",
+          initialValue: baseName(t.path),
+          confirmLabel: "Register",
+        };
     }
   };
 
@@ -272,7 +295,70 @@ export function ContextLibrary() {
     setActionBusy(true);
     setActionError(null);
     try {
-      if (mode === "newFile") {
+      if (mode === "registerProject") {
+        const name = value;
+        if (name === "_globals" || name === "projects" || name.includes("/")) {
+          setActionError(`"${name}" is a reserved or invalid project name.`);
+          return;
+        }
+        if (projects.some((p) => p.name === name)) {
+          setActionError(`A project named "${name}" already exists.`);
+          return;
+        }
+        // Physically move the folder under projects/ — registering it in
+        // place would double-index it (the `_globals` walk only skips the
+        // projects/ dir itself, not arbitrary registered roots).
+        await invoke("cl_rename", {
+          project: "_globals",
+          fromPath: target.path,
+          toPath: `projects/${name}`,
+        });
+        try {
+          await invoke("cl_register_project", {
+            name,
+            displayName: name,
+            workingRepoPath: null,
+            clPath: null,
+            description: null,
+          });
+        } catch (e) {
+          // Roll the move back so the folder doesn't vanish from the tree
+          // (the `_globals` walk skips everything under projects/).
+          await invoke("cl_rename", {
+            project: "_globals",
+            fromPath: `projects/${name}`,
+            toPath: target.path,
+          }).catch(() => undefined);
+          throw e;
+        }
+        // File rows re-home on rescan (orphans auto-purge), but
+        // folder-description rows don't — re-point them at the new project.
+        const prefix = `${target.path}/`;
+        for (const f of folders) {
+          if (f.project_id !== "_globals") continue;
+          if (f.folder_path !== target.path && !f.folder_path.startsWith(prefix))
+            continue;
+          const newPath =
+            f.folder_path === target.path
+              ? ""
+              : f.folder_path.slice(prefix.length);
+          try {
+            await invoke("cl_set_folder_description", {
+              project: name,
+              folderPath: newPath,
+              description: f.description,
+              tags: f.tags,
+            });
+            await invoke("cl_delete_folder_description", {
+              project: "_globals",
+              folderPath: f.folder_path,
+            });
+          } catch {
+            // non-fatal — the description can be re-added in the folder view
+          }
+        }
+        await invoke("cl_rescan", { project: name });
+      } else if (mode === "newFile") {
         const fp = target.path ? `${target.path}/${value}` : value;
         await invoke("cl_create_file", { project: target.project, filePath: fp });
       } else if (mode === "newFolder") {
@@ -429,7 +515,11 @@ export function ContextLibrary() {
         onOpenFolder={openFolder}
         onRequestRegister={() => setRegisterOpen(true)}
         onRequestMaintain={() => setMaintainOpen(true)}
-        onContextMenu={(target, x, y) => setMenu({ target, x, y })}
+        onContextMenu={(target, x, y) => {
+          // SYSTEM nodes have no actions at all — show nothing.
+          if (menuItems(target).length === 0) return;
+          setMenu({ target, x, y });
+        }}
       />
       <div
         onMouseDown={onSidebarHandleDown}

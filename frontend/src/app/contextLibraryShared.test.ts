@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { buildTree } from "./contextLibraryShared";
+import {
+  buildTree,
+  isInternalGlobalsPath,
+  splitGlobals,
+} from "./contextLibraryShared";
 import type { ClIndexEntryView } from "../lib/bindings";
 
 const entry = (id: number, file_path: string): ClIndexEntryView => ({
@@ -51,5 +55,54 @@ describe("buildTree", () => {
   it("sorts files alphabetically within a folder", () => {
     const root = buildTree([entry(2, "b.md"), entry(1, "a.md")]);
     expect(root.files.map((f) => f.file_path)).toEqual(["a.md", "b.md"]);
+  });
+});
+
+describe("isInternalGlobalsPath", () => {
+  it("classifies bot-hq-owned paths as internal", () => {
+    expect(isInternalGlobalsPath("custom-general-rules.md")).toBe(true);
+    expect(isInternalGlobalsPath("agents")).toBe(true);
+    expect(isInternalGlobalsPath("agents/brian/custom-instruction.md")).toBe(
+      true,
+    );
+  });
+
+  it("leaves loose cross-project paths external", () => {
+    expect(isInternalGlobalsPath("eod.md")).toBe(false);
+    expect(isInternalGlobalsPath("tasks.md")).toBe(false);
+    expect(isInternalGlobalsPath("notes/agents.md")).toBe(false);
+    // prefix must be a path segment, not a substring
+    expect(isInternalGlobalsPath("agents-archive/old.md")).toBe(false);
+    expect(isInternalGlobalsPath("")).toBe(false);
+  });
+});
+
+describe("splitGlobals", () => {
+  it("routes internal entries+folders to system, the rest to global", () => {
+    const entries = [
+      entry(1, "custom-general-rules.md"),
+      entry(2, "agents/brian/custom-instruction.md"),
+      entry(3, "eod.md"),
+      entry(4, "notes/scratch.md"),
+    ];
+    const folders = ["agents", "agents/brian", "notes"];
+    const split = splitGlobals(entries, folders);
+
+    expect(split.system.entries.map((e) => e.file_path)).toEqual([
+      "custom-general-rules.md",
+      "agents/brian/custom-instruction.md",
+    ]);
+    expect(split.system.folderPaths).toEqual(["agents", "agents/brian"]);
+    expect(split.global.entries.map((e) => e.file_path)).toEqual([
+      "eod.md",
+      "notes/scratch.md",
+    ]);
+    expect(split.global.folderPaths).toEqual(["notes"]);
+  });
+
+  it("handles an empty bucket", () => {
+    const split = splitGlobals([], []);
+    expect(split.system.entries).toEqual([]);
+    expect(split.global.entries).toEqual([]);
   });
 });

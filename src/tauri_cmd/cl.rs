@@ -461,6 +461,33 @@ async fn canonical_cl_root(
         .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))
 }
 
+/// `_globals` paths that bot-hq itself owns: the agents/ subtree (custom
+/// instructions) and custom-general-rules.md. Session spawn resolves these
+/// exact paths, so rename/delete would silently break agent startup — they
+/// are read+update only. Mirrors `isInternalGlobalsPath` in
+/// frontend contextLibraryShared.tsx (keep in sync); the UI hides the menu
+/// items and this is the enforcement behind them. Compares CANONICALIZED
+/// paths so case-insensitive filesystems can't sidestep the check.
+fn assert_not_protected_globals_path(
+    project: &str,
+    root_real: &std::path::Path,
+    candidate_real: &std::path::Path,
+) -> Result<(), AppError> {
+    if project != crate::storage::Project::GLOBALS {
+        return Ok(());
+    }
+    let agents = root_real.join("agents");
+    let rules = root_real.join("custom-general-rules.md");
+    if candidate_real == rules || candidate_real == agents || candidate_real.starts_with(&agents) {
+        return Err(AppError::Validation(
+            "protected bot-hq path — agent custom-instructions and \
+             custom-general-rules.md can be edited but not renamed, moved, or deleted"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Create a new empty file. Parent dir must exist; the file must not. The
 /// frontend follows with `cl_rescan` to index it.
 #[tauri::command]
@@ -502,7 +529,11 @@ pub async fn cl_rename(
 ) -> Result<(), AppError> {
     let root = canonical_cl_root(&bridge, &project).await?;
     let from_real = resolve_within_root(&root, &from_path)?;
+    assert_not_protected_globals_path(&project, &root, &from_real)?;
     let to_target = resolve_new_cl_path(&root, &to_path)?;
+    // Also guard the destination — renaming INTO agents/ would shadow a
+    // bot-hq-owned path.
+    assert_not_protected_globals_path(&project, &root, &to_target)?;
     std::fs::rename(&from_real, &to_target)
         .map_err(|e| AppError::Internal(format!("rename: {e}")))?;
     Ok(())
@@ -520,6 +551,7 @@ pub async fn cl_delete_path(
 ) -> Result<(), AppError> {
     let root = canonical_cl_root(&bridge, &project).await?;
     let target = resolve_within_root(&root, &path)?;
+    assert_not_protected_globals_path(&project, &root, &target)?;
     if target.is_dir() {
         std::fs::remove_dir_all(&target)
             .map_err(|e| AppError::Internal(format!("delete folder: {e}")))?;
@@ -539,6 +571,46 @@ mod tests {
         let bridge = SignalingBridge::new();
         let res = bridge.cl_index_search(None, None).await.unwrap();
         assert!(res.is_empty());
+    }
+
+    #[test]
+    fn protected_globals_paths_block_rename_and_delete() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("bot-hq-clprot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("agents/brian")).unwrap();
+        fs::write(base.join("agents/brian/custom-instruction.md"), b"x").unwrap();
+        fs::write(base.join("custom-general-rules.md"), b"x").unwrap();
+        fs::write(base.join("eod.md"), b"x").unwrap();
+        fs::create_dir_all(base.join("projects")).unwrap();
+        fs::create_dir_all(base.join("notes")).unwrap();
+        let root = base.canonicalize().unwrap();
+
+        let check = |rel: &str| {
+            let real = resolve_within_root(&root, rel).unwrap();
+            assert_not_protected_globals_path("_globals", &root, &real)
+        };
+        // bot-hq-owned paths are blocked…
+        assert!(check("agents").is_err());
+        assert!(check("agents/brian").is_err());
+        assert!(check("agents/brian/custom-instruction.md").is_err());
+        assert!(check("custom-general-rules.md").is_err());
+        // …loose cross-project content is not.
+        assert!(check("eod.md").is_ok());
+        assert!(check("notes").is_ok());
+
+        // The register-from-Global move target (projects/<name>) is allowed…
+        let to = resolve_new_cl_path(&root, "projects/notes").unwrap();
+        assert!(assert_not_protected_globals_path("_globals", &root, &to).is_ok());
+        // …but renaming INTO agents/ is blocked.
+        let into = resolve_new_cl_path(&root, "agents/sneaky.md").unwrap();
+        assert!(assert_not_protected_globals_path("_globals", &root, &into).is_err());
+
+        // Non-_globals projects never match, even with identical layouts.
+        let real = resolve_within_root(&root, "agents").unwrap();
+        assert!(assert_not_protected_globals_path("some-project", &root, &real).is_ok());
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

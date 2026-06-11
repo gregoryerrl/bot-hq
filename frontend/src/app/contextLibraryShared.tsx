@@ -51,6 +51,48 @@ export function baseName(filePath: string): string {
 }
 
 // ============================================================================
+// `_globals` categorization — SYSTEM vs GLOBAL
+// ============================================================================
+
+// Paths in the `_globals` bucket that bot-hq itself owns: agent custom
+// instructions + custom-general-rules.md. Session spawn resolves these exact
+// paths, so they are read+update only — no rename/delete/create around them.
+// Deliberately a prefix predicate (not an exact-path set) so the `agents`
+// folder itself, its folder-description rows, and any future agent files all
+// classify as internal. Mirrored by `assert_not_protected_globals_path` in
+// src/tauri_cmd/cl.rs — keep the two in sync.
+export function isInternalGlobalsPath(path: string): boolean {
+  return (
+    path === "custom-general-rules.md" ||
+    path === "agents" ||
+    path.startsWith("agents/")
+  );
+}
+
+export interface GlobalsSplit {
+  system: { entries: ClIndexEntryView[]; folderPaths: string[] };
+  global: { entries: ClIndexEntryView[]; folderPaths: string[] };
+}
+
+// Split the `_globals` bucket into the bot-hq-owned SYSTEM subtree and the
+// loose cross-project GLOBAL subtree (eod.md, tasks.md, user folders).
+export function splitGlobals(
+  entries: ClIndexEntryView[],
+  folderPaths: string[],
+): GlobalsSplit {
+  return {
+    system: {
+      entries: entries.filter((e) => isInternalGlobalsPath(e.file_path)),
+      folderPaths: folderPaths.filter(isInternalGlobalsPath),
+    },
+    global: {
+      entries: entries.filter((e) => !isInternalGlobalsPath(e.file_path)),
+      folderPaths: folderPaths.filter((p) => !isInternalGlobalsPath(p)),
+    },
+  };
+}
+
+// ============================================================================
 // Folder tree
 // ============================================================================
 

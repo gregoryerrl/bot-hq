@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { cn } from "../lib/cn";
 import type {
   ClIndexEntryView,
@@ -14,6 +15,7 @@ import {
   type OpenTab,
   PlusIcon,
   RefreshIcon,
+  splitGlobals,
   terminalInputClass,
   type TreeNode,
 } from "./contextLibraryShared";
@@ -81,6 +83,64 @@ export function WorkspaceSidebar({
 }: WorkspaceSidebarProps) {
   const projectIds = Object.keys(byProject).sort();
   const projectCount = projectIds.length;
+
+  // Category split: PROJECTS = registered projects; the `_globals` bucket is
+  // divided into SYSTEM (bot-hq-owned, read+update only) and GLOBAL (loose
+  // cross-project files). Buckets that are neither registered nor `_globals`
+  // shouldn't occur (rescan upserts a project row) — they land in GLOBAL as a
+  // defensive catch-all.
+  const registered = new Set(projects.map((p) => p.name));
+  const globalsSplit = splitGlobals(
+    byProject["_globals"] ?? [],
+    byProjectFolders["_globals"] ?? [],
+  );
+  const globalTree = buildTree(
+    globalsSplit.global.entries,
+    globalsSplit.global.folderPaths,
+  );
+  const systemTree = buildTree(
+    globalsSplit.system.entries,
+    globalsSplit.system.folderPaths,
+  );
+  const projectCategoryIds = projectIds.filter(
+    (id) => id !== "_globals" && registered.has(id),
+  );
+  const orphanIds = projectIds.filter(
+    (id) => id !== "_globals" && !registered.has(id),
+  );
+
+  // With a search/filter active, hide categories that have nothing to show;
+  // otherwise all three headers always render (GLOBAL must stay right-click
+  // reachable even when empty).
+  const filterActive = query.trim() !== "" || project !== null;
+  const hasProjects = projectCategoryIds.length > 0;
+  const hasGlobal =
+    globalsSplit.global.entries.length > 0 ||
+    globalsSplit.global.folderPaths.length > 0 ||
+    orphanIds.length > 0;
+  const hasSystem =
+    globalsSplit.system.entries.length > 0 ||
+    globalsSplit.system.folderPaths.length > 0;
+  const showProjects = !filterActive || hasProjects;
+  const showGlobal = !filterActive || hasGlobal;
+  const showSystem = !filterActive || hasSystem;
+
+  const projectsFileCount = projectCategoryIds.reduce(
+    (s, id) => s + (byProject[id]?.length ?? 0),
+    0,
+  );
+  const globalFileCount =
+    globalsSplit.global.entries.length +
+    orphanIds.reduce((s, id) => s + (byProject[id]?.length ?? 0), 0);
+
+  const nodeProps = {
+    collapsed,
+    onToggle,
+    activeTab,
+    onOpenFile,
+    onOpenFolder,
+    onContextMenu,
+  };
 
   return (
     <aside
@@ -186,28 +246,188 @@ export function WorkspaceSidebar({
               : "Empty. Use Rescan to populate."}
           </p>
         ) : (
-          projectIds.map((projectId) => (
-            <section key={projectId} className="mb-1">
-              <FolderNode
-                project={projectId}
-                node={buildTree(
-                  byProject[projectId],
-                  byProjectFolders[projectId] ?? [],
-                )}
-                depth={0}
-                isProjectRoot
+          <>
+            {showProjects && (
+              <CategorySection
+                id="@cat:projects"
+                label="Projects"
+                colorClass="text-primary"
+                count={projectsFileCount}
                 collapsed={collapsed}
                 onToggle={onToggle}
-                activeTab={activeTab}
-                onOpenFile={onOpenFile}
-                onOpenFolder={onOpenFolder}
-                onContextMenu={onContextMenu}
-              />
-            </section>
-          ))
+              >
+                {projectCategoryIds.map((projectId) => (
+                  <FolderNode
+                    key={projectId}
+                    project={projectId}
+                    node={buildTree(
+                      byProject[projectId] ?? [],
+                      byProjectFolders[projectId] ?? [],
+                    )}
+                    depth={1}
+                    isProjectRoot
+                    {...nodeProps}
+                  />
+                ))}
+              </CategorySection>
+            )}
+            {showGlobal && (
+              <CategorySection
+                id="@cat:global"
+                label="Global"
+                colorClass="text-on-surface-variant"
+                count={globalFileCount}
+                collapsed={collapsed}
+                onToggle={onToggle}
+                onContextMenu={(x, y) =>
+                  onContextMenu(
+                    { project: "_globals", path: "", kind: "folder" },
+                    x,
+                    y,
+                  )
+                }
+              >
+                {globalTree.folders.map((child) => (
+                  <FolderNode
+                    key={child.path}
+                    project="_globals"
+                    node={child}
+                    depth={1}
+                    {...nodeProps}
+                  />
+                ))}
+                {globalTree.files.map((f) => (
+                  <FileRow
+                    key={f.id}
+                    file={f}
+                    depth={1}
+                    isActive={
+                      activeTab?.kind === "file" &&
+                      activeTab.project === f.project_id &&
+                      activeTab.filePath === f.file_path
+                    }
+                    onOpen={() => onOpenFile(f.project_id, f.file_path)}
+                    onContextMenu={onContextMenu}
+                  />
+                ))}
+                {orphanIds.map((projectId) => (
+                  <FolderNode
+                    key={projectId}
+                    project={projectId}
+                    node={buildTree(
+                      byProject[projectId] ?? [],
+                      byProjectFolders[projectId] ?? [],
+                    )}
+                    depth={1}
+                    isProjectRoot
+                    {...nodeProps}
+                  />
+                ))}
+              </CategorySection>
+            )}
+            {showSystem && (
+              <CategorySection
+                id="@cat:system"
+                label="System"
+                colorClass="text-amber-400"
+                count={globalsSplit.system.entries.length}
+                collapsed={collapsed}
+                onToggle={onToggle}
+              >
+                {systemTree.folders.map((child) => (
+                  <FolderNode
+                    key={child.path}
+                    project="_globals"
+                    node={child}
+                    depth={1}
+                    {...nodeProps}
+                  />
+                ))}
+                {systemTree.files.map((f) => (
+                  <FileRow
+                    key={f.id}
+                    file={f}
+                    depth={1}
+                    isActive={
+                      activeTab?.kind === "file" &&
+                      activeTab.project === f.project_id &&
+                      activeTab.filePath === f.file_path
+                    }
+                    onOpen={() => onOpenFile(f.project_id, f.file_path)}
+                    onContextMenu={onContextMenu}
+                  />
+                ))}
+              </CategorySection>
+            )}
+          </>
         )}
       </div>
     </aside>
+  );
+}
+
+// ============================================================================
+// CategorySection — a collapsible top-level grouping (Projects / Global /
+// System). Left-click ONLY toggles collapse — categories never open a tab.
+// Collapse state reuses the persisted `collapsed` set via sentinel project
+// ids ("@cat:…"), which can't collide with real registered project names.
+// ============================================================================
+
+function CategorySection({
+  id,
+  label,
+  colorClass,
+  count,
+  collapsed,
+  onToggle,
+  onContextMenu,
+  children,
+}: {
+  id: string;
+  label: string;
+  colorClass: string;
+  count: number;
+  collapsed: Set<string>;
+  onToggle: (project: string, folderPath: string) => void;
+  onContextMenu?: (x: number, y: number) => void;
+  children: ReactNode;
+}) {
+  const isCollapsed = collapsed.has(collapseKey(id, ""));
+  return (
+    <section className="mb-1">
+      <button
+        type="button"
+        onClick={() => onToggle(id, "")}
+        onContextMenu={
+          onContextMenu
+            ? (e) => {
+                e.preventDefault();
+                onContextMenu(e.clientX, e.clientY);
+              }
+            : undefined
+        }
+        aria-expanded={!isCollapsed}
+        className={cn(
+          "flex w-full items-center gap-1 rounded py-1 pl-2 pr-2 text-left font-label-caps text-label-caps transition-colors hover:bg-surface-container-high",
+          colorClass,
+        )}
+      >
+        <span
+          aria-hidden
+          className={cn(
+            "inline-block w-3 shrink-0 transition-transform",
+            isCollapsed ? "" : "rotate-90",
+          )}
+        >
+          ▸
+        </span>
+        <span className="truncate">{label}</span>
+        <span className="ml-auto pl-1 font-code-sm text-code-sm text-on-surface-variant/60">
+          {count}
+        </span>
+      </button>
+      {!isCollapsed && <div>{children}</div>}
+    </section>
   );
 }
 
