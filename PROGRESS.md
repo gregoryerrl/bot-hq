@@ -11,13 +11,53 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-465 tests passing (414 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 71 frontend Vitest. Release build clean. **Tauri v2 migration landed
-2026-05-26** on branch `tauri-v2-migration` (7 batches across foundation
-→ Slint removal). Slint UI deleted (-7,560 LOC); React frontend in
-`frontend/` (~3,000 LOC); zero LOC delta in `src/agents/`, `src/core/`,
-`src/policy/`, `src/storage/`, `src/signaling/` per the design-doc
-constraint.
+482 tests passing (431 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 77 frontend Vitest. Release build clean. Version **1.0.0** (bumped
+2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
+branch `tauri-v2-migration` (7 batches across foundation → Slint
+removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
+zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
+`src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-11 — v1.0.0 stabilization: worktrees, dispatch defaults, prompt drafts, UX polish (shipping)
+
+The four-area stabilization pass for the first stable release.
+
+- **fix: dispatched sessions honor the solo/duo default** (`c215392`). The
+  Maintain-CL button (`dispatch_session`) and the external driver
+  (`open_session`) never called `set_session_spawn_config`, so the DB default
+  (`rain_enabled=1`) always spawned the duo — `rain_disabled_default` was
+  ignored. Both now resolve `Storage::default_rain_enabled` before spawn;
+  models stay NULL (= agent defaults). Modal copy de-hardcodes "Brian + Rain".
+- **feat: per-session prompt drafts** (`d48a02b`). ChatInput gained a
+  `draftKey` prop — drafts persist to `localStorage["bothq:draft:<sid>"]`
+  through navigation/restart, clear on successful send, survive failed sends.
+  SessionView keys the input per session. 6 new Vitest cases.
+- **fix: blank repo paths store as NULL** (`41b13d7`). A session created with
+  `''` read as repo-backed everywhere `working_repo_path` is consumed
+  (action_gate hard-error before its approve prompt). `create_session`
+  normalizes; migration 0019 repairs pre-guard rows.
+- **add: per-session git worktrees** (`b5d1d7d`). Repo-backed sessions default
+  to an isolated worktree at `<data_dir>/.local/worktrees/<sid>/<repo-basename>`
+  on branch `bothq/<sid>` — parallel sessions per project. `working_repo_path`
+  stores the worktree (all consumers unchanged); new `base_repo_path` column
+  (migration 0020) remembers the source repo. Idempotent ensure at spawn with
+  direct-mode fallback (row converted so row-readers agree); clean-only removal
+  at close (never `--force`); `install_hooks` resolves the hooks dir via
+  `git rev-parse --git-path hooks` — a linked worktree's `.git` is a FILE and
+  hooks live in the shared common dir (previously worktree repos silently
+  skipped hook install). Opt-out per session or via `worktree_default`
+  (Settings → Agents → Session defaults). ARCHITECTURE.md "Session worktrees"
+  section added.
+- **ux: 1.0 polish** (`59d39b7`). Activity-ordered dashboard tiles (newest
+  message, created_at fallback), ⌘/Ctrl-N → New-session dialog + ⌘/Ctrl-, →
+  Settings, welcoming empty-state copy, inline session rename
+  (`rename_session` command).
+- **release: version 1.0.0** across Cargo.toml / tauri.conf.json /
+  frontend/package.json. Violations-log viewer deliberately deferred to v1.1
+  (user scope pick).
 
 ---
 

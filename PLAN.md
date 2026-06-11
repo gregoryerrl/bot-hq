@@ -16,8 +16,10 @@ bot-hq is built and used. The rebuild milestone (v0.1.0) shipped and the
 (7 batches; see PROGRESS.md). React frontend in `frontend/`, Slint
 deleted, Rust core untouched. Since then: the 3-tier session-policy
 toggles, the global Tool Gate, the saved-model registry + per-session
-model pickers + solo-Brian toggle, and the Claude Config surface all
-shipped (see PROGRESS.md).
+model pickers + solo-Brian toggle, the claude-code config surface, and
+the **v1.0.0 stabilization pass** (per-session git worktrees, dispatch
+defaults, prompt drafts, UX polish — 2026-06-11) all shipped (see
+PROGRESS.md).
 
 Test + build status (live counts) lives in PROGRESS.md, not here — it
 drifts every commit.
@@ -50,16 +52,16 @@ re-derives the description, hard delete (no OS trash).
 
 ### UX polish (deferred from rebuild Phase 9.2)
 
-- Keyboard shortcuts: Cmd-N (new session), Cmd-, (settings),
-  Cmd-Enter (submit prompt).
-- Scroll-to-bottom on new messages (sticky if user is at bottom; idle
-  if user has scrolled up).
-- Tile sort order (active sessions first, then by last activity).
-- Empty-state copy on the Dashboard (currently shows a card; needs the
-  prose to be welcoming).
+Shipped 2026-06-11 in the v1.0.0 stabilization pass: keyboard shortcuts
+(Cmd-N / Cmd-,), tile sort by last activity, welcoming Dashboard
+empty-state, inline session rename, persistent prompt drafts.
+(Scroll-to-bottom had already shipped.) Remaining:
+
 - Responsive Brian/Rain vertical stack at content widths < 1200px (the
   single-chronological-chat redesign mooted this, but keep the option
   on the table if the two-pane view is requested back).
+- Surface a "worktree kept (dirty)" indicator in the UI when a closed
+  session's worktree survives cleanup (today it's a tracing warn only).
 
 ### Auth-token v2 — OS keychain
 
@@ -79,10 +81,11 @@ failure (headless CI, Linux without Secret Service daemon).
 
 Original Phase 0 research: [`docs/rebuild-archive/decisions.md`](docs/rebuild-archive/decisions.md#auth-storage).
 
-### Violations log — UI viewer
+### Violations log — UI viewer (v1.1 target)
 
 The `violations.jsonl` file exists and is written, but the Settings →
-Violations viewer is a stub. Build it out:
+Violations viewer is a stub (deliberately deferred from the v1.0.0
+scope, 2026-06-11 user pick). Build it out:
 - Tail the file (mtime poll, ~2s cadence).
 - Filter by kind (`CommitGrep`, `PushDenied`, `PolicyMutation`, …),
   by session, by date.
