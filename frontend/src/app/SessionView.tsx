@@ -370,7 +370,12 @@ export function SessionView() {
         </div>
 
         <div className="border-t border-outline-variant">
+          {/* key remounts the input per session so the draft seed (a lazy
+              initializer) re-runs — without it, switching sessions would
+              carry session A's text into session B. */}
           <ChatInput
+            key={sessionId}
+            draftKey={`bothq:draft:${sessionId}`}
             placeholder="Broadcast to Brian + Rain…"
             onSend={async (text) => {
               await invoke("broadcast_message", { sessionId, text });

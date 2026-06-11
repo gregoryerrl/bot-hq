@@ -7,13 +7,32 @@ interface ChatInputProps {
   placeholder?: string;
   onSend: (text: string) => Promise<void> | void;
   disabled?: boolean;
+  /**
+   * localStorage key for draft persistence. When set, the in-progress text
+   * survives unmounts (navigating to another session / app restart): seeded
+   * on mount, written through on change, cleared on successful send. The
+   * parent must remount this component when the key changes (`key={...}`) —
+   * the seed is a lazy initializer, not an effect.
+   */
+  draftKey?: string;
 }
 
-export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
-  const [value, setValue] = useState("");
+export function ChatInput({ placeholder, onSend, disabled, draftKey }: ChatInputProps) {
+  const [value, setValue] = useState(() =>
+    draftKey ? (localStorage.getItem(draftKey) ?? "") : "",
+  );
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const updateValue = (next: string) => {
+    setValue(next);
+    if (!draftKey) return;
+    // Drop the key entirely when the box is emptied so abandoned sessions
+    // don't accumulate "" entries in localStorage.
+    if (next) localStorage.setItem(draftKey, next);
+    else localStorage.removeItem(draftKey);
+  };
 
   // Auto-grow: reset to `auto` so scrollHeight reflects actual content height,
   // then clamp to 200px (~8 rows). Beyond that the textarea scrolls
@@ -33,7 +52,7 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
     setError(null);
     try {
       await onSend(text);
-      setValue("");
+      updateValue("");
     } catch (err) {
       // Keep `value` so the user can retry without retyping, and surface the
       // failure — a silent reject made the user think the message was sent.
@@ -69,7 +88,7 @@ export function ChatInput({ placeholder, onSend, disabled }: ChatInputProps) {
           rows={2}
           placeholder={placeholder ?? "Message…"}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => updateValue(e.target.value)}
           onKeyDown={(e) => {
             // Enter sends; Shift+Enter inserts a newline (so multi-line messages
             // aren't lost). ⌘/Ctrl+Enter also sends. Skip while an IME is
