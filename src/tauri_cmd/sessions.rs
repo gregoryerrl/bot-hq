@@ -130,10 +130,20 @@ pub async fn dispatch_session(
     repo_path: Option<String>,
     prompt: String,
 ) -> Result<SessionInfo, AppError> {
-    let session = storage
+    let mut session = storage
         .create_session(&id, &title, repo_path.as_deref())
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?;
+    // Honor the user's solo/duo default. There is no create dialog on this
+    // path, so without this the DB default (`rain_enabled=1`) always spawned
+    // the duo regardless of `rain_disabled_default`. Models stay NULL =
+    // per-agent defaults, same as the dialog's "(agent default)" pick.
+    let rain_enabled = storage.default_rain_enabled().await;
+    storage
+        .set_session_spawn_config(&id, rain_enabled, None, None)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    session.rain_enabled = if rain_enabled { 1 } else { 0 };
     // Register the project mapping BEFORE spawn so the agents' system prompt
     // picks up project-scoped CL conventions.
     bridge.register_session(id.clone(), project).await;

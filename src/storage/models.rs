@@ -5,6 +5,12 @@ use super::*;
 const MODEL_COLUMNS: &str =
     "id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at";
 
+/// Key in `app_settings`: "1" = new sessions default to solo-Brian. The create
+/// dialog reads it to pre-check "Disable Rain"; backend dispatch paths with no
+/// dialog (Maintain CL, external driver) resolve it via
+/// [`Storage::default_rain_enabled`].
+pub const RAIN_DISABLED_DEFAULT_KEY: &str = "rain_disabled_default";
+
 impl Storage {
     // ---- models ----------------------------------------------------------
 
@@ -91,6 +97,16 @@ impl Storage {
         .with_context(|| format!("setting app_setting {key}"))?;
         Ok(())
     }
+
+    /// Whether a session created WITHOUT an explicit Rain choice spawns the
+    /// duo. `rain_disabled_default == "1"` → solo-Brian (false); unset, any
+    /// other value, or a read error → duo (true, the historical default).
+    pub async fn default_rain_enabled(&self) -> bool {
+        !matches!(
+            self.get_setting(RAIN_DISABLED_DEFAULT_KEY).await,
+            Ok(Some(v)) if v == "1"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +162,19 @@ mod tests {
         let after = s.get_model("m1").await.unwrap().unwrap();
         assert_eq!(after.display_name, "Opus Renamed");
         assert_eq!(after.created_at, first.created_at, "created_at must persist");
+    }
+
+    #[tokio::test]
+    async fn default_rain_enabled_tracks_setting() {
+        let s = Storage::memory().await.unwrap();
+        // Unset → duo (historical default).
+        assert!(s.default_rain_enabled().await);
+        // "1" → solo-Brian default.
+        s.set_setting(RAIN_DISABLED_DEFAULT_KEY, "1").await.unwrap();
+        assert!(!s.default_rain_enabled().await);
+        // Any other value → duo.
+        s.set_setting(RAIN_DISABLED_DEFAULT_KEY, "0").await.unwrap();
+        assert!(s.default_rain_enabled().await);
     }
 
     #[tokio::test]

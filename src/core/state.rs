@@ -63,10 +63,12 @@ impl AppState {
         title: impl Into<String>,
         working_repo_path: Option<std::path::PathBuf>,
     ) -> Result<String> {
-        // External-driver entry: duo defaults (Rain on, models from agent
-        // config). The UI create path persists per-agent model + Rain toggle on
+        // External-driver entry: models from agent config, solo/duo from the
+        // user's `rain_disabled_default` setting (no create dialog on this
+        // path). The UI create path persists per-agent model + Rain toggle on
         // the row, then spawns via spawn_existing_session.
-        let req = OpenSessionRequest::duo(title, working_repo_path);
+        let mut req = OpenSessionRequest::duo(title, working_repo_path);
+        req.rain_enabled = self.storage.default_rain_enabled().await;
         let handle = open_session(
             req,
             &self.paths,

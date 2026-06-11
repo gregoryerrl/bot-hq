@@ -89,9 +89,6 @@ pub async fn delete_model(
         .map_err(|e| AppError::DbError(e.to_string()))
 }
 
-/// Key in `app_settings`: "1" pre-checks "Disable Rain" in the create dialog.
-pub const RAIN_DISABLED_DEFAULT_KEY: &str = "rain_disabled_default";
-
 #[tauri::command]
 #[specta::specta]
 pub async fn get_app_setting(

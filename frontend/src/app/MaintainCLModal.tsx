@@ -14,9 +14,10 @@ interface MaintainCLModalProps {
 }
 
 /**
- * "Maintain CL" dispatcher. Pick a project; this creates a session, spawns the
- * Brian + Rain duo, and seeds it with the hardcoded CL-maintenance prompt (all
- * via the `dispatch_session` command), then navigates into it. The duo starts
+ * "Maintain CL" dispatcher. Pick a project; this creates a session, spawns
+ * your default agent setup (duo, or solo Brian when "disable Rain by default"
+ * is set), and seeds it with the hardcoded CL-maintenance prompt (all via the
+ * `dispatch_session` command), then navigates into it. The agents start
  * maintaining that project's Context Library immediately — no follow-up needed.
  */
 export function MaintainCLModal({ open, onClose }: MaintainCLModalProps) {
@@ -104,9 +105,9 @@ export function MaintainCLModal({ open, onClose }: MaintainCLModalProps) {
           </button>
         </div>
         <p className="mb-3 font-code-sm text-code-sm text-on-surface-variant">
-          Dispatches a Brian + Rain session that maintains the chosen project's
-          CL — auditing the where-things-live map, sharpening descriptions, and
-          pruning stale notes.
+          Dispatches a session (your default agent setup) that maintains the
+          chosen project's CL — auditing the where-things-live map, sharpening
+          descriptions, and pruning stale notes.
         </p>
         <label className="block">
           <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
