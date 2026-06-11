@@ -92,6 +92,18 @@ async restartSession(sessionId: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * Rename a session (inline edit in the SessionView header). Blank titles are
+ * rejected — an empty header is indistinguishable from a render bug.
+ */
+async renameSession(sessionId: string, title: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_session", { sessionId, title }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read the current IPAV phase for a session. Returns one of "investigate" /
  * "plan" / "apply" / "verify", or `None` if the session isn't live (IPAV
  * state is in-memory only — restart loses it). Frontend SessionView header
