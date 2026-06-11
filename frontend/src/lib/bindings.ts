@@ -5,9 +5,9 @@
 
 
 export const commands = {
-async createSession(id: string, title: string, repoPath: string | null, project: string | null, rainEnabled: boolean | null, brianModelId: string | null, rainModelId: string | null, effort: SessionEffortChoices) : Promise<Result<SessionInfo, AppError>> {
+async createSession(id: string, title: string, repoPath: string | null, project: string | null, rainEnabled: boolean | null, brianModelId: string | null, rainModelId: string | null, options: SessionCreateOptions) : Promise<Result<SessionInfo, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, rainEnabled, brianModelId, rainModelId, effort }) };
+    return { status: "ok", data: await TAURI_INVOKE("create_session", { id, title, repoPath, project, rainEnabled, brianModelId, rainModelId, options }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1050,14 +1050,27 @@ export type PushGateMode =
  * unreachable). The user may also flip the session toggle to `auto`.
  */
 "ask"
-export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 /**
- * Per-session effort/ultracode picks from the create dialog. Bundled into one
- * struct because `create_session` is at tauri-specta's 10-arg command limit;
- * each field is `None` = inherit the Settings → Claude Config defaults.
+ * Per-session create-dialog picks beyond the positional args. Bundled into
+ * one struct because `create_session` sits at tauri-specta's 10-arg command
+ * limit; every field is `None` = inherit the configured default.
+ * (Renamed from `SessionEffortChoices` when `use_worktree` joined.)
  */
-export type SessionEffortChoices = { brianEffort: string | null; rainEffort: string | null; brianUltracode: boolean | null; rainUltracode: boolean | null }
-export type SessionInfo = { id: string; title: string; working_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null; 
+export type SessionCreateOptions = { brianEffort: string | null; rainEffort: string | null; brianUltracode: boolean | null; rainUltracode: boolean | null; 
+/**
+ * Run the session in an isolated git worktree (None → the
+ * `worktree_default` app setting, which defaults ON for repo-backed
+ * sessions).
+ */
+useWorktree: boolean | null }
+export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
+export type SessionInfo = { id: string; title: string; working_repo_path: string | null; 
+/**
+ * Set when the session runs in an isolated git worktree —
+ * `working_repo_path` is then the worktree and this is the repo it was
+ * carved from. None = direct mode.
+ */
+base_repo_path: string | null; archived: boolean; created_at: string; closed_at: string | null; brian_model_at_spawn: string | null; rain_model_at_spawn: string | null; 
 /**
  * False = solo-Brian session (Rain disabled at create).
  */
