@@ -17,10 +17,18 @@ import {
   terminalInputClass,
   type TreeNode,
 } from "./contextLibraryShared";
-import { RescanIcon, WarnIcon } from "../components/icons";
+import { RescanIcon, WarnIcon, WrenchIcon } from "../components/icons";
 
 const SIDEBAR_WIDTH = 240;
 const INDENT_PX = 12;
+
+// Icon-only header action. Color is applied per-button (cn is plain clsx —
+// conflicting text-* classes would both stick).
+const headerIconButtonClass = cn(
+  "inline-flex items-center justify-center rounded p-1 transition-colors",
+  "hover:bg-surface-container-high disabled:opacity-50",
+  "disabled:hover:bg-transparent",
+);
 
 // ============================================================================
 // WorkspaceSidebar (left ~240px) — "Library Tree"
@@ -81,8 +89,44 @@ export function WorkspaceSidebar({
         <span className="font-label-caps text-label-caps text-on-surface-variant">
           Library Tree
         </span>
-        {/* New file/folder is created via right-click on a project/folder node
-            (it needs the target folder + a name) — no header button. */}
+        {/* New file/folder is created via right-click on a folder node (it
+            needs the target folder + a name) — no header button for those. */}
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onRescan}
+            disabled={rescanning || (!project && projectCount === 0)}
+            aria-label={project ? `Rescan ${project}` : "Rescan all projects"}
+            title={project ? `Rescan ${project}` : "Rescan all projects"}
+            className={cn(
+              headerIconButtonClass,
+              "text-on-surface-variant hover:text-on-surface",
+            )}
+          >
+            <RefreshIcon className={rescanning ? "animate-spin" : undefined} />
+          </button>
+          <button
+            type="button"
+            onClick={onRequestRegister}
+            aria-label="Register project"
+            title="Register an on-disk folder as a Context Library project"
+            className={cn(
+              headerIconButtonClass,
+              "text-on-surface-variant hover:text-on-surface",
+            )}
+          >
+            <PlusIcon className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={onRequestMaintain}
+            aria-label="Maintain CL"
+            title="Dispatch a Brian + Rain session to maintain a project's Context Library"
+            className={cn(headerIconButtonClass, "text-primary")}
+          >
+            <WrenchIcon size={14} />
+          </button>
+        </div>
       </header>
 
       <div className="flex flex-col gap-2 border-b border-outline-variant px-3 py-2">
@@ -106,43 +150,6 @@ export function WorkspaceSidebar({
             </option>
           ))}
         </select>
-        <button
-          type="button"
-          onClick={onRescan}
-          disabled={rescanning || (!project && projectCount === 0)}
-          title={
-            project
-              ? `cl_rescan(${project})`
-              : `cl_rescan all (${projectCount} project${
-                  projectCount === 1 ? "" : "s"
-                })`
-          }
-          className="inline-flex items-center justify-center gap-1.5 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-on-surface transition-colors hover:bg-surface-container-high disabled:opacity-50"
-        >
-          <RefreshIcon />
-          {rescanning
-            ? "Rescanning…"
-            : project
-              ? "Rescan project"
-              : `Rescan all (${projectCount})`}
-        </button>
-        <button
-          type="button"
-          onClick={onRequestRegister}
-          title="Register an on-disk folder as a Context Library project"
-          className="inline-flex items-center justify-center gap-1.5 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-on-surface transition-colors hover:bg-surface-container-high"
-        >
-          <PlusIcon />
-          Register project
-        </button>
-        <button
-          type="button"
-          onClick={onRequestMaintain}
-          title="Dispatch a Brian + Rain session to maintain a project's Context Library"
-          className="inline-flex items-center justify-center gap-1.5 rounded border border-primary/50 bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-primary transition-colors hover:bg-surface-container-high"
-        >
-          Maintain CL
-        </button>
         {rescanReport && (
           <div className="flex flex-wrap gap-2 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm">
             <span className="text-emerald-400">
