@@ -10,6 +10,11 @@ impl Storage {
         title: &str,
         working_repo_path: Option<&str>,
     ) -> Result<Session> {
+        // Blank-but-present paths ('' from a repo-less project row) must store
+        // as NULL: every consumer treats Some as "has a repo", and a phantom
+        // path hard-errors action_gate / hook install. Migration 0019 repaired
+        // pre-guard rows.
+        let working_repo_path = working_repo_path.filter(|p| !p.trim().is_empty());
         sqlx::query(
             "INSERT INTO sessions (id, title, working_repo_path, created_at) VALUES (?, ?, ?, ?)",
         )
@@ -231,6 +236,21 @@ mod tests {
         // Archived flag preserved so the UI can badge it.
         assert_eq!(closed.iter().find(|x| x.id == "s-c").unwrap().archived, 1);
         assert_eq!(closed.iter().find(|x| x.id == "s-b").unwrap().archived, 0);
+    }
+
+    #[tokio::test]
+    async fn create_session_normalizes_blank_repo_path_to_null() {
+        let s = Storage::memory().await.unwrap();
+        let created = s.create_session("s-blank", "T", Some("")).await.unwrap();
+        assert!(created.working_repo_path.is_none());
+        let ws = s.create_session("s-ws", "T", Some("  ")).await.unwrap();
+        assert!(ws.working_repo_path.is_none());
+        // A real path still round-trips.
+        let real = s
+            .create_session("s-real", "T", Some("/tmp/repo"))
+            .await
+            .unwrap();
+        assert_eq!(real.working_repo_path.as_deref(), Some("/tmp/repo"));
     }
 
     #[tokio::test]
