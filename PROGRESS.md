@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-483 tests passing (432 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 81 frontend Vitest. Release build clean. Version **1.0.0** (bumped
+492 tests passing (441 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 87 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
@@ -20,6 +20,46 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
 
 ---
+
+## 2026-06-12 — Full sweep: 9 fix/cleanup commits from a duo audit
+
+Brian + Rain swept CL + codebase + docs post-1.0.0 (4 parallel review
+agents, findings adversarially re-verified — 3 agent claims dismissed as
+false positives). Landed `7fef038..9916514`:
+
+- **Register-Project "doesn't work" root-caused and fixed** (`9916514`,
+  closes the issues.md 2026-06-11 item). DB forensics showed the 06-11
+  registration SUCCEEDED — the new project was just invisible: tree roots
+  required indexed entries matching the active filter/search. Roots are
+  now indexed ∪ registered (`treeProjectIds`, 5 tests), and a successful
+  register clears the search + pins the tree to the new project.
+- **Session project now resolves via registered-repo lookup** (`9210194`).
+  Was pure basename(working_repo_path); a registered project whose repo
+  dir is named differently silently got general policy + no CL context.
+  Canonicalized exactly-one-match lookup (base repo first for worktree
+  sessions), basename fallback, 9 tests. Also explains the 06-11
+  "full forbidden list" surprise: that session ran on an UNregistered
+  repo (`~/Projects/test`) — designed inheritance, now at least
+  inferrable from logs. Provenance badge in the gear tab = follow-up.
+- **register-from-global migration correctness** (`054d29c`): folder
+  descriptions re-home from a fresh `_globals` fetch (was: view-filtered
+  state — active search silently skipped descendants); partial failures
+  surface in the action error.
+- **Rescan failures visible** (`2380006`): single-project rescan failure
+  was entirely uncaught; all-projects failures hid in console.warn. Both
+  now feed a "✗N failed" chip beside the report.
+- **Dialog parity** (`e4a906e`): Escape for ActionModal / ModelDialog /
+  RegisterProjectModal, focus trap for SessionPolicyPanel (+1 vitest).
+- **Enforcement-path observability** (`f9641c4`): check_commit_message's
+  policy-audit + violation-log failures now `warn!` instead of `let _ =`.
+- Docs/comments (`7fef038`): config/-split note un-staled, tool count
+  25→26, cl_write_file comment. Tokens (`ca5eaf8`): blue-400→tertiary,
+  neutral-600→outline-variant, red-400→error (no success/warn tokens
+  exist yet — follow-up). Hygiene (`1b5437f`): root `/node_modules/`
+  ignored + stray vite cache removed.
+
+Deferred by decision: module splits (May-21 precedent), provenance
+badge, semantic success/warn tokens, CL-content edits (user-gated).
 
 ## 2026-06-12 — Context Library tree overhaul + Models list redesign
 
