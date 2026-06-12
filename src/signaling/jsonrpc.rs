@@ -289,9 +289,12 @@ async fn call_tool(
             // quietly modified policy.yaml to remove forbidden words,
             // PolicyMutation gets logged and the user sees it post-hoc.
             // v1 is audit-only; the check below still uses the new content.
-            let _ = bridge
+            if let Err(err) = bridge
                 .audit_policy_files_for_session(&caller.session_id, &caller.agent)
-                .await;
+                .await
+            {
+                tracing::warn!(%err, session_id = %caller.session_id, "policy-file audit failed");
+            }
             let policy = bridge
                 .resolve_policy_for(&caller.session_id)
                 .await
@@ -304,7 +307,7 @@ async fn call_tool(
                     // hopefully rewrite). Record as Denied so the audit
                     // trail captures the catch.
                     if let Some(log) = bridge.violations_log() {
-                        let _ = log
+                        if let Err(err) = log
                             .record(
                                 caller.session_id.clone(),
                                 caller.agent.clone(),
@@ -313,7 +316,13 @@ async fn call_tool(
                                 ViolationOutcome::Denied,
                                 Some(format!("forbidden word '{word}' in proposed message")),
                             )
-                            .await;
+                            .await
+                        {
+                            // The block still lands (the agent sees the error
+                            // either way) — but a hole in the audit trail must
+                            // not be invisible.
+                            tracing::warn!(%err, session_id = %caller.session_id, "violation-log write failed");
+                        }
                     }
                     Ok(ToolCallResult::text(format!("forbidden_word: {word}")))
                 }
