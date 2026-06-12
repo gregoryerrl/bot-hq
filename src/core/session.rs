@@ -168,6 +168,44 @@ pub async fn spawn_existing_session(
 
 /// Shared spawn logic for both fresh and existing sessions: spawn Brian + Rain,
 /// kick the duo pumps, return the handle.
+/// Resolve a session's project from its repo paths. A registered project
+/// whose `working_repo_path` matches wins (matched against the BASE repo
+/// first — a worktree session's path ends in the repo basename, not
+/// necessarily the project name); the path basename stays as the fallback
+/// for unregistered repos. Repo-less sessions resolve to `None` (general
+/// policy applies by inheritance).
+pub(crate) async fn resolve_session_project(
+    storage: &Storage,
+    base_repo_path: Option<&str>,
+    working_repo_path: Option<&Path>,
+) -> Option<String> {
+    let repo: &Path = match base_repo_path.map(Path::new).or(working_repo_path) {
+        Some(p) => p,
+        None => return None,
+    };
+    let basename = repo
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
+    match storage.project_by_repo_path(repo).await {
+        Ok(Some(name)) => {
+            if basename.as_deref() != Some(name.as_str()) {
+                info!(
+                    project = %name,
+                    repo = %repo.display(),
+                    "project resolved from registered working repo (basename differs)"
+                );
+            }
+            Some(name)
+        }
+        Ok(None) => basename,
+        Err(err) => {
+            warn!(%err, repo = %repo.display(), "project lookup failed — using path basename");
+            basename
+        }
+    }
+}
+
 async fn spawn_session_handle(
     session: Session,
     working_repo_path: Option<PathBuf>,
@@ -176,11 +214,12 @@ async fn spawn_session_handle(
     bridge: Arc<SignalingBridge>,
     signaling_addr: SocketAddr,
 ) -> Result<SessionHandle> {
-    let project = working_repo_path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .map(str::to_string);
+    let project = resolve_session_project(
+        &storage,
+        session.base_repo_path.as_deref(),
+        working_repo_path.as_deref(),
+    )
+    .await;
 
     // Register session→project with the bridge so policy-aware MCP tools can
     // resolve `<data_dir>/projects/<project>/policy.yaml` per-call.
@@ -869,6 +908,48 @@ pub(crate) async fn resolve_spawn_config(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn resolve_project_prefers_registered_lookup_over_basename() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("acme", "acme", Some("/repos/acme-web"), None, None)
+            .await
+            .unwrap();
+        // Registered repo with a non-matching basename → project name wins.
+        let p = resolve_session_project(&s, None, Some(Path::new("/repos/acme-web"))).await;
+        assert_eq!(p.as_deref(), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn resolve_project_falls_back_to_basename() {
+        let s = Storage::memory().await.unwrap();
+        let p = resolve_session_project(&s, None, Some(Path::new("/repos/loose-repo"))).await;
+        assert_eq!(p.as_deref(), Some("loose-repo"));
+    }
+
+    #[tokio::test]
+    async fn resolve_project_matches_base_repo_for_worktree_sessions() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("acme", "acme", Some("/repos/acme-web"), None, None)
+            .await
+            .unwrap();
+        // Worktree session: working path is the worktree; base must drive
+        // the lookup.
+        let p = resolve_session_project(
+            &s,
+            Some("/repos/acme-web"),
+            Some(Path::new("/data/.local/worktrees/s-1/acme-web")),
+        )
+        .await;
+        assert_eq!(p.as_deref(), Some("acme"));
+    }
+
+    #[tokio::test]
+    async fn resolve_project_none_without_repo() {
+        let s = Storage::memory().await.unwrap();
+        let p = resolve_session_project(&s, None, None).await;
+        assert_eq!(p, None);
+    }
 
     #[test]
     fn rain_gets_no_user_mcps_brian_gets_inherited() {

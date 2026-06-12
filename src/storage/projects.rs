@@ -108,6 +108,45 @@ impl Storage {
         Ok(())
     }
 
+    /// Resolve the registered project whose `working_repo_path` points at
+    /// `path`. Paths are canonicalized before comparing (falling back to the
+    /// raw path when canonicalization fails, e.g. the dir is gone) so
+    /// symlinks and `./`-style variants can't defeat the match. Returns
+    /// `None` unless EXACTLY ONE project matches — two projects sharing a
+    /// repo is ambiguous, logged, and treated as no-match so the caller's
+    /// fallback applies.
+    pub async fn project_by_repo_path(&self, path: &Path) -> Result<Option<String>> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, working_repo_path FROM projects \
+             WHERE working_repo_path IS NOT NULL AND working_repo_path != ''",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("listing projects with a working repo")?;
+        let canon =
+            |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let target = canon(path);
+        let mut matches = rows.into_iter().filter_map(|(name, wrp)| {
+            if name == Project::GLOBALS {
+                return None;
+            }
+            (canon(Path::new(&wrp)) == target).then_some(name)
+        });
+        match (matches.next(), matches.next()) {
+            (Some(only), None) => Ok(Some(only)),
+            (Some(a), Some(b)) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    first = %a,
+                    second = %b,
+                    "multiple projects share this working repo — not inferring one"
+                );
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub async fn list_projects(&self) -> Result<Vec<Project>> {
         let rows = sqlx::query_as::<_, Project>(
             "SELECT name, display_name, working_repo_path, description, created_at, cl_path \
@@ -127,5 +166,83 @@ impl Storage {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn seeded() -> Storage {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("alpha", "alpha", Some("/repos/alpha-web"), None, None)
+            .await
+            .unwrap();
+        s.upsert_project("beta", "beta", Some("/repos/beta"), None, None)
+            .await
+            .unwrap();
+        s
+    }
+
+    #[tokio::test]
+    async fn project_by_repo_path_matches_exact() {
+        let s = seeded().await;
+        let hit = s
+            .project_by_repo_path(Path::new("/repos/alpha-web"))
+            .await
+            .unwrap();
+        assert_eq!(hit.as_deref(), Some("alpha"));
+    }
+
+    #[tokio::test]
+    async fn project_by_repo_path_none_when_unregistered() {
+        let s = seeded().await;
+        let hit = s
+            .project_by_repo_path(Path::new("/repos/unknown"))
+            .await
+            .unwrap();
+        assert_eq!(hit, None);
+    }
+
+    #[tokio::test]
+    async fn project_by_repo_path_trailing_slash_matches() {
+        let s = seeded().await;
+        // The dirs don't exist, so canonicalize falls back to the raw path;
+        // Path equality is component-based, which normalizes the trailing `/`.
+        let hit = s
+            .project_by_repo_path(Path::new("/repos/beta/"))
+            .await
+            .unwrap();
+        assert_eq!(hit.as_deref(), Some("beta"));
+    }
+
+    #[tokio::test]
+    async fn project_by_repo_path_ambiguous_is_none() {
+        let s = seeded().await;
+        s.upsert_project("alpha-fork", "alpha-fork", Some("/repos/alpha-web"), None, None)
+            .await
+            .unwrap();
+        let hit = s
+            .project_by_repo_path(Path::new("/repos/alpha-web"))
+            .await
+            .unwrap();
+        assert_eq!(hit, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn project_by_repo_path_resolves_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-repo");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link-repo");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("gamma", "gamma", Some(real.to_str().unwrap()), None, None)
+            .await
+            .unwrap();
+        let hit = s.project_by_repo_path(&link).await.unwrap();
+        assert_eq!(hit.as_deref(), Some("gamma"));
     }
 }
