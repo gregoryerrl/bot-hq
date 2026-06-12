@@ -5,6 +5,7 @@ import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import { CloseIcon, SaveIcon } from "./contextLibraryShared";
 import { cn } from "../lib/cn";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 /**
  * Right-side drawer for editing a session's canonical policy snapshot
@@ -53,6 +54,9 @@ export function SessionPolicyPanel({
     return () => clearTimeout(id);
   }, [saved]);
 
+  // Trap focus in the drawer while open (Tab can't escape to the page behind).
+  const trapRef = useFocusTrap<HTMLElement>(open);
+
   // Escape-to-close, scoped to open so it doesn't fight other handlers.
   useEffect(() => {
     if (!open) return;
@@ -76,6 +80,8 @@ export function SessionPolicyPanel({
 
   return (
     <aside
+      ref={trapRef}
+      tabIndex={-1}
       role="dialog"
       aria-label="Session settings"
       className={cn(

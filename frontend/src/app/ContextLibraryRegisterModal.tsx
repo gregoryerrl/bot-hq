@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
 import { baseName, terminalInputClass } from "./contextLibraryShared";
@@ -26,7 +26,21 @@ export function RegisterProjectModal({
   const [workingRepo, setWorkingRepo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const trapRef = useFocusTrap<HTMLDivElement>();
+  const trapRef = useFocusTrap<HTMLDivElement>(open);
+
+  // Escape closes, mirroring ConfirmDialog. Guarded on `open` because this
+  // modal stays mounted while hidden.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
 
   if (!open) return null;
 

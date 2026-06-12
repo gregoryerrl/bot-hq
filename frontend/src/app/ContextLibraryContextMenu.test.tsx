@@ -53,6 +53,21 @@ describe("ActionModal", () => {
     expect(onConfirm).toHaveBeenCalledWith("notes.md");
   });
 
+  it("closes on Escape", () => {
+    const onClose = vi.fn();
+    render(
+      <ActionModal
+        title="New file"
+        inputLabel="File name"
+        confirmLabel="Create"
+        onConfirm={() => {}}
+        onClose={onClose}
+      />,
+    );
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it("confirm-only (delete) calls onConfirm with an empty string", () => {
     const onConfirm = vi.fn();
     render(
