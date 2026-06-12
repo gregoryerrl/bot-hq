@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-492 tests passing (441 lib + 33 external MCP + 7 signaling + 11 storage)
+494 tests passing (443 lib + 33 external MCP + 7 signaling + 11 storage)
 plus 87 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
@@ -20,6 +20,17 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
 
 ---
+
+## 2026-06-12 — Spawn cwd pinned: repo-less sessions no longer inherit app cwd
+
+Sessions with no `working_repo_path` spawned claude-code with the app
+process's inherited cwd — in dev that's the bot-hq repo itself, so the
+agents adopted its `CLAUDE.md` + user-scope auto-memory as session
+context (s-79f8aafe's duo quoted stale trio-era memory exactly this
+way). `build_command` (`src/agents/spawn.rs`) now always pins the child
+cwd: the session repo when set, else the bot-hq data dir — neutral (no
+CLAUDE.md, no .git, empty auto-memory namespace) and guaranteed to exist
+by `paths.rs` boot init. Two tests cover both branches.
 
 ## 2026-06-12 — Full sweep: 9 fix/cleanup commits from a duo audit
 
