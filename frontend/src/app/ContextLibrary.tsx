@@ -41,8 +41,8 @@ import {
 //   │    file ←  │     │                                    │
 //   └────────────┴──────────────────────────────────────────┘
 //
-// File-content saves are disabled in v1 — `cl_write_file` doesn't exist.
-// Description saves work via the existing `cl_set_description` command.
+// File-content saves go through `cl_write_file` (wired in ContextLibraryEditor);
+// description saves via the existing `cl_set_description` command.
 // ============================================================================
 
 type CtxAction =

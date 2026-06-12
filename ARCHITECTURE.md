@@ -264,7 +264,7 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**25 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**26 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the full list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `advance_phase`, `request_phase_advance`,
 `request_approval`, `action_gate`, `check_commit_message`,
@@ -576,12 +576,12 @@ Defaults (env-overridable via `BOT_HQ_DATA_DIR`):
 - **Session policy snapshot:** `<data_dir>/.local/session-policies/<sid>.yaml`
 
 Top-level dirs are **sync boundaries**: `library/` = user content
-(cloud-syncable), root config = portable machine policy, `.local/` =
+(cloud-syncable), `config/` = portable machine policy, `.local/` =
 host-only runtime + secrets + logs (never synced). The binary itself ships
 in a platform bundle (`/Applications/bot-hq.app` on macOS; `/usr/bin` or
 AppImage on Linux; `Program Files` on Windows), NOT under `<data_dir>`.
-Pre-`library/` installs are migrated once on launch. A `config/` split for
-the root policy files is a planned v1.1 follow-up.
+Pre-`library/` and pre-`config/` installs are migrated once on launch (the
+`config/` split landed in v1.1, 2026-06-09).
 
 **Dev:** `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` keeps dev data separate from a
 production install.
