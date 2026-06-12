@@ -333,9 +333,16 @@ export function ContextLibrary() {
         }
         // File rows re-home on rescan (orphans auto-purge), but
         // folder-description rows don't — re-point them at the new project.
+        // Fetch the FULL `_globals` folder set fresh: the view's `folders`
+        // query is filtered by the sidebar's project/search state, so
+        // iterating it here could silently skip descendants.
+        const allGlobals = await invoke<ClFolderView[]>("cl_folder_search", {
+          project: "_globals",
+          query: null,
+        });
         const prefix = `${target.path}/`;
-        for (const f of folders) {
-          if (f.project_id !== "_globals") continue;
+        const failedDescriptions: string[] = [];
+        for (const f of allGlobals) {
           if (f.folder_path !== target.path && !f.folder_path.startsWith(prefix))
             continue;
           const newPath =
@@ -354,10 +361,21 @@ export function ContextLibrary() {
               folderPath: f.folder_path,
             });
           } catch {
-            // non-fatal — the description can be re-added in the folder view
+            failedDescriptions.push(f.folder_path || name);
           }
         }
         await invoke("cl_rescan", { project: name });
+        if (failedDescriptions.length > 0) {
+          // Registration itself succeeded — surface the partial description
+          // migration instead of closing as if it were clean. The rows can be
+          // re-added in the folder view.
+          await invoke("cl_rescan", { project: target.project });
+          onProjectChanged();
+          setActionError(
+            `Registered, but ${failedDescriptions.length} folder description(s) did not migrate: ${failedDescriptions.join(", ")}`,
+          );
+          return;
+        }
       } else if (mode === "newFile") {
         const fp = target.path ? `${target.path}/${value}` : value;
         await invoke("cl_create_file", { project: target.project, filePath: fp });
