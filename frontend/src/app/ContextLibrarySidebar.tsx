@@ -48,6 +48,7 @@ interface WorkspaceSidebarProps {
   isLoading: boolean;
   rescanning: boolean;
   rescanReport: ClRescanReportView | null;
+  rescanFailures: string[];
   onRescan: () => void;
   collapsed: Set<string>;
   onToggle: (project: string, folderPath: string) => void;
@@ -71,6 +72,7 @@ export function WorkspaceSidebar({
   isLoading,
   rescanning,
   rescanReport,
+  rescanFailures,
   onRescan,
   collapsed,
   onToggle,
@@ -212,19 +214,31 @@ export function WorkspaceSidebar({
             </option>
           ))}
         </select>
-        {rescanReport && (
+        {(rescanReport || rescanFailures.length > 0) && (
           <div className="flex flex-wrap gap-2 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm">
-            <span className="text-emerald-400">
-              +{rescanReport.added.length}
-            </span>
-            <span className="inline-flex items-center gap-0.5 text-blue-400">
-              <RescanIcon size={12} />
-              {rescanReport.touched.length}
-            </span>
-            <span className="inline-flex items-center gap-0.5 text-amber-400">
-              <WarnIcon size={12} />
-              {rescanReport.orphaned.length}
-            </span>
+            {rescanReport && (
+              <>
+                <span className="text-emerald-400">
+                  +{rescanReport.added.length}
+                </span>
+                <span className="inline-flex items-center gap-0.5 text-blue-400">
+                  <RescanIcon size={12} />
+                  {rescanReport.touched.length}
+                </span>
+                <span className="inline-flex items-center gap-0.5 text-amber-400">
+                  <WarnIcon size={12} />
+                  {rescanReport.orphaned.length}
+                </span>
+              </>
+            )}
+            {rescanFailures.length > 0 && (
+              <span
+                className="text-error"
+                title={`Rescan failed for: ${rescanFailures.join(", ")}`}
+              >
+                ✗{rescanFailures.length} failed
+              </span>
+            )}
           </div>
         )}
       </div>

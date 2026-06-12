@@ -110,6 +110,9 @@ export function ContextLibrary() {
   const [rescanReport, setRescanReport] = useState<ClRescanReportView | null>(
     null,
   );
+  // Projects whose rescan FAILED — rendered beside the report chip so a bad
+  // project can't hide inside a clean-looking aggregate.
+  const [rescanFailures, setRescanFailures] = useState<string[]>([]);
   const [registerOpen, setRegisterOpen] = useState(false);
   const [maintainOpen, setMaintainOpen] = useState(false);
 
@@ -463,28 +466,39 @@ export function ContextLibrary() {
     if (rescanning) return;
     setRescanning(true);
     setRescanReport(null);
+    setRescanFailures([]);
     try {
       if (project) {
-        const report = await invoke<ClRescanReportView>("cl_rescan", {
-          project,
-        });
-        setRescanReport(report);
+        try {
+          const report = await invoke<ClRescanReportView>("cl_rescan", {
+            project,
+          });
+          setRescanReport(report);
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn(`cl_rescan(${project}) failed`, e);
+          setRescanFailures([project]);
+        }
       } else {
         // All-projects rescan: each project's rescan is independent, so run
         // them in parallel (was a serial for…await). Per-project failures are
-        // contained so one bad project doesn't abort the rest.
+        // contained so one bad project doesn't abort the rest — but they're
+        // collected and surfaced, not swallowed into a clean aggregate.
         const projectIds = Object.keys(byProject);
+        const failures: string[] = [];
         const reports = await Promise.all(
           projectIds.map((p) =>
             invoke<ClRescanReportView>("cl_rescan", { project: p }).catch(
               (e) => {
                 // eslint-disable-next-line no-console
                 console.warn(`cl_rescan(${p}) failed`, e);
+                failures.push(p);
                 return null;
               },
             ),
           ),
         );
+        setRescanFailures(failures);
         const agg: ClRescanReportView = { added: [], touched: [], orphaned: [] };
         for (const r of reports) {
           if (!r) continue;
@@ -525,6 +539,7 @@ export function ContextLibrary() {
         isLoading={isLoading}
         rescanning={rescanning}
         rescanReport={rescanReport}
+        rescanFailures={rescanFailures}
         onRescan={handleRescan}
         collapsed={collapsed}
         onToggle={toggle}
