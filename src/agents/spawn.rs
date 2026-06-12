@@ -742,9 +742,14 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         cmd.env(k, v);
     }
 
-    if let Some(wd) = &cfg.working_dir {
-        cmd.current_dir(wd);
-    }
+    // Always pin the subprocess cwd. A repo-less session must not inherit
+    // the app's own cwd — in dev that's the bot-hq repo itself, and the
+    // claude-code child would adopt that repo's CLAUDE.md + user-scope
+    // auto-memory as session context (observed bleed: s-79f8aafe quoted
+    // stale memory). data_dir always exists by spawn time (paths.rs boot
+    // init creates it).
+    let wd = cfg.working_dir.as_deref().unwrap_or(&cfg.data_dir);
+    cmd.current_dir(wd);
 
     cmd
 }
@@ -821,6 +826,20 @@ mod tests {
         assert_eq!(p.backoff(4), Duration::from_secs(16));
         assert_eq!(p.backoff(5), Duration::from_secs(30)); // 32 → capped
         assert_eq!(p.backoff(99), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn repo_less_spawn_falls_back_to_data_dir_cwd() {
+        let mut c = cfg();
+        c.working_dir = None;
+        let cmd = build_command(&c);
+        assert_eq!(cmd.as_std().get_current_dir(), Some(Path::new("/tmp/data")));
+    }
+
+    #[test]
+    fn pinned_working_dir_wins_over_data_dir_fallback() {
+        let cmd = build_command(&cfg());
+        assert_eq!(cmd.as_std().get_current_dir(), Some(Path::new("/tmp/repo")));
     }
 
     #[test]
