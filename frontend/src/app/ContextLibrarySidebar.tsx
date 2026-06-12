@@ -221,7 +221,7 @@ export function WorkspaceSidebar({
                 <span className="text-emerald-400">
                   +{rescanReport.added.length}
                 </span>
-                <span className="inline-flex items-center gap-0.5 text-blue-400">
+                <span className="inline-flex items-center gap-0.5 text-tertiary">
                   <RescanIcon size={12} />
                   {rescanReport.touched.length}
                 </span>

@@ -273,14 +273,14 @@ function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
 }
 
 function statusDotClass(status: PluginStatus, enabled: boolean): string {
-  if (!enabled) return "bg-neutral-600";
+  if (!enabled) return "bg-outline-variant";
   switch (status.kind) {
     case "Healthy":
       return "bg-emerald-400";
     case "Slow":
       return "animate-pulse bg-amber-400";
     case "Crashed":
-      return "bg-red-400";
+      return "bg-error";
   }
 }
 
