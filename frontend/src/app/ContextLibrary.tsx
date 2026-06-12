@@ -575,7 +575,14 @@ export function ContextLibrary() {
       <RegisterProjectModal
         open={registerOpen}
         onClose={() => setRegisterOpen(false)}
-        onRegistered={onProjectChanged}
+        onRegistered={(name) => {
+          // Make the result unmissable: clear any search and pin the tree to
+          // the new project (a fresh project was previously invisible under
+          // an active filter — the "Register does nothing" report).
+          onProjectChanged();
+          setQuery("");
+          setProject(name);
+        }}
       />
       <MaintainCLModal
         open={maintainOpen}

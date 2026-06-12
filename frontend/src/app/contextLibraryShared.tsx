@@ -149,6 +149,28 @@ export function buildTree(
   return root;
 }
 
+// Tree-root project ids for the sidebar. Indexed projects (byProject keys)
+// UNION registered projects — a freshly-registered project with no indexed
+// files must still render, or Register appears to do nothing. During a text
+// search only indexed (matching) projects show; a project FILTER pins the
+// tree to that project even when it's empty. `_globals` renders via the
+// SYSTEM/GLOBAL split, never as a Projects-category root, so it's excluded
+// from the registered side (an indexed `_globals` key still passes through
+// for the split's consumers).
+export function treeProjectIds(
+  indexed: string[],
+  registered: string[],
+  searchActive: boolean,
+  projectFilter: string | null,
+): string[] {
+  const union = searchActive
+    ? [...indexed]
+    : [...new Set([...indexed, ...registered.filter((r) => r !== "_globals")])];
+  return union
+    .filter((id) => (projectFilter ? id === projectFilter : true))
+    .sort();
+}
+
 // ============================================================================
 // Inline SVG icons
 // ============================================================================

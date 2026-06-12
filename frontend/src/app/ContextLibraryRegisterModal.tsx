@@ -19,7 +19,8 @@ export function RegisterProjectModal({
 }: {
   open: boolean;
   onClose: () => void;
-  onRegistered: () => void;
+  /** Fires with the registered project's name so the parent can focus it. */
+  onRegistered: (name: string) => void;
 }) {
   const [path, setPath] = useState("");
   const [name, setName] = useState("");
@@ -73,7 +74,7 @@ export function RegisterProjectModal({
       });
       // Index the new project's files so it appears in the tree immediately.
       await invoke("cl_rescan", { project: effectiveName });
-      onRegistered();
+      onRegistered(effectiveName);
       reset();
       onClose();
     } catch (e) {

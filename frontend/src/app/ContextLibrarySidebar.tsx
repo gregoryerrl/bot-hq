@@ -17,6 +17,7 @@ import {
   RefreshIcon,
   splitGlobals,
   terminalInputClass,
+  treeProjectIds,
   type TreeNode,
 } from "./contextLibraryShared";
 import { RescanIcon, WarnIcon, WrenchIcon } from "../components/icons";
@@ -83,7 +84,12 @@ export function WorkspaceSidebar({
   onRequestMaintain,
   onContextMenu,
 }: WorkspaceSidebarProps) {
-  const projectIds = Object.keys(byProject).sort();
+  const projectIds = treeProjectIds(
+    Object.keys(byProject),
+    projects.map((p) => p.name),
+    query.trim() !== "",
+    project,
+  );
   const projectCount = projectIds.length;
 
   // Category split: PROJECTS = registered projects; the `_globals` bucket is

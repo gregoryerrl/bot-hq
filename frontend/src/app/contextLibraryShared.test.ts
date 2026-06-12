@@ -3,6 +3,7 @@ import {
   buildTree,
   isInternalGlobalsPath,
   splitGlobals,
+  treeProjectIds,
 } from "./contextLibraryShared";
 import type { ClIndexEntryView } from "../lib/bindings";
 
@@ -104,5 +105,35 @@ describe("splitGlobals", () => {
     const split = splitGlobals([], []);
     expect(split.system.entries).toEqual([]);
     expect(split.global.entries).toEqual([]);
+  });
+});
+
+describe("treeProjectIds", () => {
+  it("unions registered projects so an unindexed one still renders", () => {
+    const ids = treeProjectIds(["bot-hq"], ["bot-hq", "fresh"], false, null);
+    expect(ids).toEqual(["bot-hq", "fresh"]);
+  });
+
+  it("excludes _globals from the registered side but keeps it when indexed", () => {
+    expect(treeProjectIds([], ["_globals", "a"], false, null)).toEqual(["a"]);
+    expect(treeProjectIds(["_globals"], ["a"], false, null)).toEqual([
+      "_globals",
+      "a",
+    ]);
+  });
+
+  it("shows only indexed matches during a text search", () => {
+    const ids = treeProjectIds(["hit"], ["hit", "miss"], true, null);
+    expect(ids).toEqual(["hit"]);
+  });
+
+  it("pins to the project filter even when it has no indexed files", () => {
+    const ids = treeProjectIds(["other"], ["other", "empty"], false, "empty");
+    expect(ids).toEqual(["empty"]);
+  });
+
+  it("sorts and dedups", () => {
+    const ids = treeProjectIds(["b", "a"], ["a", "c"], false, null);
+    expect(ids).toEqual(["a", "b", "c"]);
   });
 });
