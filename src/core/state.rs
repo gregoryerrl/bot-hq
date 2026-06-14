@@ -291,6 +291,8 @@ impl AppState {
         let handle = sessions
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
+        // A2 (adherence): remember the phase we're leaving, to detect Plan→Apply.
+        let prev_phase = handle.ipav.lock().await.current_phase;
 
         self.clear_awaiting(handle, session_id).await;
         match self.storage.clear_pending_halts(session_id).await {
@@ -316,7 +318,34 @@ impl AppState {
             .notify_message_persisted(session_id.to_string(), id);
         // And fed to both agents' stdin so they pick it up as a natural prompt.
         handle.send_to_both(OutgoingUserMessage::text(notice)).await;
+
+        // A2 (adherence): the peer-ack the prompts don't mechanically enforce.
+        // On the Plan→Apply boundary in a duo session, remind Brian (HANDS) to
+        // confirm Rain's plan review before mutating. Brian-only; no-op solo;
+        // gated by the adherence_nudges setting.
+        if Self::should_peer_ack_nudge(prev_phase, target, handle.rain.is_some())
+            && self.storage.adherence_nudges_enabled().await
+        {
+            let _ = handle
+                .brian
+                .input_tx
+                .send(OutgoingUserMessage::text(
+                    "🔔 Entering Apply. Before you mutate: confirm Rain reviewed the plan — \
+                     pull session_doc_search(phase=\"plan\") and check her pushback landed. If \
+                     she hasn't reviewed yet, wait for it (mark_awaiting_user) rather than \
+                     applying unreviewed."
+                        .to_string(),
+                ))
+                .await;
+        }
         Ok(())
+    }
+
+    /// A2 (adherence): whether the Plan→Apply boundary in a duo session warrants
+    /// the peer-ack nudge to Brian. Pure for testing; the caller additionally
+    /// AND-gates the `adherence_nudges` setting.
+    fn should_peer_ack_nudge(prev: IpavPhase, target: IpavPhase, has_rain: bool) -> bool {
+        has_rain && prev == IpavPhase::Plan && target == IpavPhase::Apply
     }
 
     pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<()> {
@@ -385,11 +414,41 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // Live session tests require RUN_LIVE_TESTS=1 (subprocesses spawn).
     // We unit-test the static pieces here.
 
     #[test]
     fn smoke() {
         // Module compiles.
+    }
+
+    #[test]
+    fn peer_ack_nudge_only_on_plan_to_apply_duo() {
+        // A2: fires only when crossing Plan→Apply in a duo session.
+        assert!(AppState::should_peer_ack_nudge(
+            IpavPhase::Plan,
+            IpavPhase::Apply,
+            true
+        ));
+        // Solo (no Rain) → no peer to ack.
+        assert!(!AppState::should_peer_ack_nudge(
+            IpavPhase::Plan,
+            IpavPhase::Apply,
+            false
+        ));
+        // Other transitions don't nudge.
+        assert!(!AppState::should_peer_ack_nudge(
+            IpavPhase::Investigate,
+            IpavPhase::Plan,
+            true
+        ));
+        // Re-entering Apply from Verify isn't the plan-review boundary.
+        assert!(!AppState::should_peer_ack_nudge(
+            IpavPhase::Verify,
+            IpavPhase::Apply,
+            true
+        ));
     }
 }
