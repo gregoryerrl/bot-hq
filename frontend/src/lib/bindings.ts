@@ -50,6 +50,21 @@ async checkSessionDirty(sessionId: string) : Promise<Result<SessionDirty, AppErr
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * C1: the kept-worktree path for a closed worktree-session, if its isolated
+ * worktree still exists on disk. `close_session` keeps (never force-removes) a
+ * dirty worktree, so its presence after close ⇒ uncommitted work was left
+ * there. `None` for a direct-mode session or a clean worktree that was removed.
+ * Lets the Archive surface "work was kept here" for recovery.
+ */
+async sessionWorktreeKept(sessionId: string) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("session_worktree_kept", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listSessions() : Promise<Result<SessionInfo[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_sessions") };
