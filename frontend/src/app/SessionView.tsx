@@ -107,6 +107,9 @@ export function SessionView() {
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  // B4: # of uncommitted entries in the session's working tree, probed when the
+  // user opens the close-confirm so the dialog can warn the work will be kept.
+  const [dirtyCount, setDirtyCount] = useState(0);
 
   // Inline title rename. `editingTitle === null` = display mode; a string =
   // the in-progress edit. Commit on Enter/blur, cancel on Escape.
@@ -140,6 +143,22 @@ export function SessionView() {
       setCloseError(errorMessage(e));
       setClosing(false);
     }
+  };
+
+  // B4: probe for uncommitted work before opening the close-confirm, so the
+  // dialog can warn the user it'll be kept (not committed). Best-effort — the
+  // dialog opens regardless if the probe fails.
+  const onCloseClick = async () => {
+    setDirtyCount(0);
+    try {
+      const d = await invoke<{ dirty_count: number }>("check_session_dirty", {
+        sessionId,
+      });
+      setDirtyCount(d.dirty_count);
+    } catch {
+      // ignore — show the dialog without the warning
+    }
+    setShowCloseConfirm(true);
   };
 
   useEffect(() => {
@@ -352,7 +371,7 @@ export function SessionView() {
               title="Force-close session — ends Brian + Rain and archives it"
               aria-label="Close session"
               disabled={closing}
-              onClick={() => setShowCloseConfirm(true)}
+              onClick={onCloseClick}
             >
               {closing ? "…" : "✕"}
             </Button>
@@ -369,6 +388,12 @@ export function SessionView() {
               killed regardless of any in-flight work. The session moves to
               Settings → Archive; reopening later resumes them via{" "}
               <code className="text-on-surface">--resume</code>.
+              {dirtyCount > 0 && (
+                <span className="mt-2 block text-amber-400">
+                  ⚠️ {dirtyCount} uncommitted change{dirtyCount === 1 ? "" : "s"}{" "}
+                  in this session's working tree will be kept, not committed.
+                </span>
+              )}
             </>
           }
           confirmLabel="Force-close"

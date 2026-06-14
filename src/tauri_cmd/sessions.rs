@@ -244,6 +244,46 @@ pub async fn get_session(
         .map_err(|e| AppError::DbError(e.to_string()))
 }
 
+/// Uncommitted-work probe for the close-confirm dialog: how many entries
+/// `git status --porcelain` reports in the session's working tree. `has_repo`
+/// is false for a repo-less session (nothing to warn about). Best-effort —
+/// never an error path that could block closing. Return struct uses snake_case
+/// (mirrors `SessionInfo`); the React side reads `has_repo` / `dirty_count`.
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct SessionDirty {
+    pub has_repo: bool,
+    pub dirty_count: u32,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn check_session_dirty(
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+) -> Result<SessionDirty, AppError> {
+    let repo = storage
+        .get_session(&session_id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?
+        .and_then(|s| s.working_repo_path)
+        .filter(|p| !p.is_empty());
+    Ok(match repo {
+        Some(path) => SessionDirty {
+            has_repo: true,
+            // Sync git call off the async executor (worktree.rs convention).
+            dirty_count: tokio::task::spawn_blocking(move || {
+                crate::core::worktree::working_tree_dirty_count(std::path::Path::new(&path))
+            })
+            .await
+            .unwrap_or(0),
+        },
+        None => SessionDirty {
+            has_repo: false,
+            dirty_count: 0,
+        },
+    })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn list_sessions(

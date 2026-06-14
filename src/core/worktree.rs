@@ -165,6 +165,29 @@ pub fn remove_worktree_if_clean(base_repo: &Path, worktree: &Path) -> RemoveOutc
     }
 }
 
+/// Count uncommitted entries (`git status --porcelain` lines) in `repo`'s
+/// working tree. Best-effort: returns 0 if `repo` isn't a git work tree or git
+/// fails — it backs the close-confirm "uncommitted work will be kept" warning,
+/// never a hard gate. Sync (shells out to git); call from `spawn_blocking` on
+/// async paths, like the rest of this module.
+pub fn working_tree_dirty_count(repo: &Path) -> u32 {
+    let Ok(out) = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain"])
+        .output()
+    else {
+        return 0;
+    };
+    if !out.status.success() {
+        return 0;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count() as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +318,21 @@ mod tests {
             Ok(()) => assert!(wt.join(".git").exists(), "Ok must mean a valid worktree"),
             Err(_) => assert!(!wt.join(".git").exists(), "Err must not leave debris"),
         }
+    }
+
+    #[test]
+    fn dirty_count_reflects_uncommitted_changes() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        init_repo(repo); // init + one commit → clean tree
+        assert_eq!(working_tree_dirty_count(repo), 0);
+        std::fs::write(repo.join("new.txt"), "x").unwrap(); // untracked → ?? line
+        assert_eq!(working_tree_dirty_count(repo), 1);
+        std::fs::write(repo.join("README"), "changed\n").unwrap(); // modified tracked
+        assert_eq!(working_tree_dirty_count(repo), 2);
+        // A non-git path is best-effort 0, never an error.
+        let empty = TempDir::new().unwrap();
+        assert_eq!(working_tree_dirty_count(empty.path()), 0);
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::create_session,
         sessions::dispatch_session,
         sessions::get_session,
+        sessions::check_session_dirty,
         sessions::list_sessions,
         sessions::list_closed_sessions,
         sessions::respawn_session,
