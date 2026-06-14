@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-500 tests passing (449 lib + 33 external MCP + 7 signaling + 11 storage)
+503 tests passing (452 lib + 33 external MCP + 7 signaling + 11 storage)
 plus 92 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
@@ -20,6 +20,29 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
 
 ---
+
+## 2026-06-14 — Adherence + worktree optional follow-ons
+
+The three explicitly-deferred optionals from the reliability arc, on branch
+`brian/optional-polish` (off the merged arc). Each its own commit, all gates
+green; 452 lib tests (+3).
+
+- **Worktree-kept indicator** (`ebf6b27`). `close_session` keeps (never
+  force-removes) a dirty worktree; the Settings → Archive list now shows a
+  "⚠ Worktree kept" badge + path for a closed worktree-session whose worktree
+  dir still exists on disk. New `session_worktree_kept` command — no migration,
+  the kept dir is deterministic via `worktree::session_worktree_path`.
+- **A3a — Edit-before-Apply nudge** (`9514724`). The duo pump self-nudges Brian
+  once per session when he uses Edit/Write/NotebookEdit during Investigate/Plan,
+  pointing him at Apply. `DuoConfig` gained `self_input_tx` (the agent's own
+  stdin, distinct from the peer's); gated by `adherence_nudges`.
+- **A3b — close-delta soft-gate** (`9f72beb`). The agent's first `close_session`
+  with no `cl_rescan` this session is rejected with a write-then-prune reminder
+  (two-call gate: append learnings + cl_rescan, then close on the retry); a
+  per-session `CloseGateState` in the bridge tracks it. The UI force-close path
+  is separate + ungated. Gated by `adherence_nudges`.
+
+Bindings regen for the worktree command in its own chore commit (`f6103e1`).
 
 ## 2026-06-14 — Model-agnostic reliability + UX hardening (pre-market-ship)
 
