@@ -121,6 +121,15 @@ pub enum SignalingEvent {
     HaltsCleared {
         session_id: String,
     },
+    /// An agent's retry-supervisor liveness changed (B2: running / retrying /
+    /// dead). The UI updates the per-agent health dot. `health` is the state
+    /// string from `AgentHealth::as_str` — carried as a String so the signaling
+    /// layer stays decoupled from the agents enum.
+    AgentHealth {
+        session_id: String,
+        agent: String,
+        health: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -439,6 +448,17 @@ impl SignalingBridge {
             session_id,
             agent,
             target,
+        });
+    }
+
+    /// Publish an agent's retry-supervisor liveness change (B2). Fire-and-forget;
+    /// the UI subscriber maps it to a `session:agent_health` event. `health` is
+    /// the `AgentHealth::as_str` string ("running" / "retrying" / "dead").
+    pub fn notify_agent_health(&self, session_id: String, agent: &str, health: &str) {
+        let _ = self.event_tx.send(SignalingEvent::AgentHealth {
+            session_id,
+            agent: agent.to_string(),
+            health: health.to_string(),
         });
     }
 }

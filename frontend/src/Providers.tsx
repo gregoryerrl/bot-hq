@@ -5,6 +5,7 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useState, type ReactNode } from "react";
 import { useTauriEvent } from "./hooks/useTauriEvent";
+import { useHealthStore, type AgentHealth } from "./stores/health";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -67,7 +68,21 @@ function GlobalEventSync() {
   const onTray = useCallback(() => invalidate(TRAY_KEYS), [invalidate]);
   const onPhase = useCallback(() => invalidate(PHASE_KEYS), [invalidate]);
   const onDoc = useCallback(() => invalidate(DOC_KEYS), [invalidate]);
-  const onClose = useCallback(() => invalidate(CLOSE_KEYS), [invalidate]);
+  const setHealth = useHealthStore((s) => s.setHealth);
+  const clearHealth = useHealthStore((s) => s.clearSession);
+  const onClose = useCallback(
+    (p: { session_id: string }) => {
+      invalidate(CLOSE_KEYS);
+      clearHealth(p.session_id);
+    },
+    [invalidate, clearHealth],
+  );
+  const onHealth = useCallback(
+    (p: { session_id: string; agent: string; health: string }) => {
+      setHealth(p.session_id, p.agent, p.health as AgentHealth);
+    },
+    [setHealth],
+  );
   // Recovery: the backend emits `session:resync` when its broadcast receiver
   // lagged and dropped events — refetch every event-backed query so the UI
   // can't be left stale. This is what lets us drop the fixed-interval safety
@@ -84,6 +99,7 @@ function GlobalEventSync() {
   useTauriEvent("session:phase_changed", onPhase, [onPhase]);
   useTauriEvent("session:doc_changed", onDoc, [onDoc]);
   useTauriEvent("session:closed", onClose, [onClose]);
+  useTauriEvent("session:agent_health", onHealth, [onHealth]);
   useTauriEvent("session:resync", onResync, [onResync]);
 
   return null;

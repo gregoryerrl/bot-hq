@@ -3,6 +3,8 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
+import { useHealthStore } from "../stores/health";
+import { HealthDot } from "../components/HealthDot";
 import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
@@ -110,6 +112,8 @@ export function SessionView() {
   // B4: # of uncommitted entries in the session's working tree, probed when the
   // user opens the close-confirm so the dialog can warn the work will be kept.
   const [dirtyCount, setDirtyCount] = useState(0);
+  // B2: live agent health for this session (drives the header dots).
+  const health = useHealthStore((s) => s.bySession[sessionId]);
 
   // Inline title rename. `editingTitle === null` = display mode; a string =
   // the in-progress edit. Commit on Enter/blur, cancel on Escape.
@@ -337,13 +341,16 @@ export function SessionView() {
                     className="text-on-surface-variant"
                     title="Models driving this session (captured at spawn)"
                   >
-                    Brian:{" "}
+                    <HealthDot health={health?.brian} name="Brian" /> Brian:{" "}
                     <span className="text-on-surface">
                       {session.brian_model_at_spawn}
                     </span>
                   </span>
                   <span className="mx-2 text-outline-variant">·</span>
                   <span className="text-on-surface-variant">
+                    {session.rain_enabled && (
+                      <HealthDot health={health?.rain} name="Rain" />
+                    )}{" "}
                     Rain:{" "}
                     <span className="text-on-surface">
                       {session.rain_enabled

@@ -80,6 +80,30 @@ fn kill_child(pid: u32) {
     }
 }
 
+/// Liveness of an agent's retry supervisor, surfaced to the UI as a health dot
+/// (B2). Plain enum — the serializable Tauri payload is built at the
+/// `tauri_events` boundary via [`AgentHealth::as_str`], so the agents layer
+/// stays free of `specta`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentHealth {
+    /// Running normally.
+    Running,
+    /// Hit a transient API error; backing off + auto-resuming.
+    Retrying,
+    /// Supervisor gave up — permanent error / exhausted retries / exited.
+    Dead,
+}
+
+impl AgentHealth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentHealth::Running => "running",
+            AgentHealth::Retrying => "retrying",
+            AgentHealth::Dead => "dead",
+        }
+    }
+}
+
 /// High-level events a session-orchestrator consumes from an agent.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -122,6 +146,10 @@ pub enum AgentEvent {
     Exited(String),
     /// Catch-all for fatal errors the supervisor wants to surface.
     Error(String),
+    /// Retry-supervisor liveness transition (B2), relayed by the duo pump to
+    /// the UI as a health dot. Not produced by the stream-json translator —
+    /// emitted directly by `supervise` at running/retrying/dead transitions.
+    Health(AgentHealth),
 }
 
 /// Classify an upstream API HTTP status as transient (worth an automatic
@@ -431,7 +459,13 @@ async fn supervise<S, Fut>(
                                     if *is_error {
                                         last_error_status = *api_error_status;
                                     } else {
-                                        // A healthy turn clears the retry budget.
+                                        // A healthy turn clears the retry budget;
+                                        // if we'd been retrying, signal recovery.
+                                        if consecutive_transient > 0 {
+                                            let _ = out_event_tx
+                                                .send(AgentEvent::Health(AgentHealth::Running))
+                                                .await;
+                                        }
                                         consecutive_transient = 0;
                                         last_error_status = None;
                                     }
@@ -459,6 +493,9 @@ async fn supervise<S, Fut>(
                 delay_ms = delay.as_millis() as u64,
                 "agent hit transient API error; auto-resuming after backoff"
             );
+            let _ = out_event_tx
+                .send(AgentEvent::Health(AgentHealth::Retrying))
+                .await;
             tokio::select! {
                 _ = &mut kill_rx => return,
                 _ = tokio::time::sleep(delay) => {}
@@ -795,6 +832,15 @@ mod tests {
             session_effort: None,
             session_ultracode: None,
         }
+    }
+
+    #[test]
+    fn agent_health_wire_strings() {
+        // B2: the as_str values are the wire contract with the frontend
+        // (session:agent_health payload + HealthDot styling) — lock them.
+        assert_eq!(AgentHealth::Running.as_str(), "running");
+        assert_eq!(AgentHealth::Retrying.as_str(), "retrying");
+        assert_eq!(AgentHealth::Dead.as_str(), "dead");
     }
 
     #[test]

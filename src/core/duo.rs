@@ -1,7 +1,7 @@
 //! Per-agent event pump. Persists agent events to storage, fans text chunks
 //! out to the peer with the IPAV buffer rule.
 
-use crate::agents::{AgentEvent, OutgoingUserMessage};
+use crate::agents::{AgentEvent, AgentHealth, OutgoingUserMessage};
 use crate::core::broadcast::peer_forward_message;
 use crate::core::ipav::IpavState;
 use crate::signaling::SignalingBridge;
@@ -209,7 +209,30 @@ pub async fn pump_agent(
             AgentEvent::Error(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent error");
             }
+            AgentEvent::Health(state) => {
+                // B2: relay the retry-supervisor's liveness transition to the
+                // UI as a health dot. Not persisted — purely a status signal.
+                if let Some(bridge) = &cfg.bridge {
+                    bridge.notify_agent_health(
+                        cfg.session_id.clone(),
+                        cfg.author.as_str(),
+                        state.as_str(),
+                    );
+                }
+            }
         }
+    }
+
+    // B2: the event loop ended → the agent's supervisor returned (exhausted
+    // retries / permanent error / process exit / intentional close). Flag it
+    // dead so the UI dot goes red. On an intentional close the session is being
+    // removed anyway, so a late "dead" is harmless.
+    if let Some(bridge) = &cfg.bridge {
+        bridge.notify_agent_health(
+            cfg.session_id.clone(),
+            cfg.author.as_str(),
+            AgentHealth::Dead.as_str(),
+        );
     }
 }
 

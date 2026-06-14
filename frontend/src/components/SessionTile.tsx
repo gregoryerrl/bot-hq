@@ -3,6 +3,8 @@ import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
 import type { SessionInfo } from "../lib/bindings";
 import { SessionPhaseChip, phaseTintClasses } from "./SessionPhaseChip";
+import { useHealthStore, worstHealth } from "../stores/health";
+import { HealthDot } from "./HealthDot";
 
 export interface SessionTileProps {
   session: SessionInfo;
@@ -22,6 +24,8 @@ export function SessionTile({
   const closed = session.closed_at !== null;
   const needsInput = pendingCount > 0;
   const tint = phaseTintClasses(phase, closed);
+  // B2: session-level health dot (problem-only on the tile). Worst-of Brian+Rain.
+  const health = useHealthStore((s) => s.bySession[session.id]);
 
   const open = () => navigate(`/sessions/${session.id}`);
   const onTileKey = (e: React.KeyboardEvent) => {
@@ -67,6 +71,13 @@ export function SessionTile({
               {formatSessionId(session.id)}
             </code>
             <SessionPhaseChip phase={phase} closed={closed} />
+            {!closed && (
+              <HealthDot
+                health={worstHealth(health)}
+                name="An agent"
+                hideWhenHealthy
+              />
+            )}
             {!session.rain_enabled && (
               <span
                 className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"

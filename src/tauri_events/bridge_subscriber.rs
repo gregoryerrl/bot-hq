@@ -20,8 +20,8 @@ use crate::signaling::{SignalingBridge, SignalingEvent};
 use crate::storage::Storage;
 use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
-    AwaitingUser, ChoiceResolvedEvent, DocChangedEvent, PendingChoiceEvent, PhaseChangedEvent,
-    SessionClosedEvent,
+    AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent, PendingChoiceEvent,
+    PhaseChangedEvent, SessionClosedEvent,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -130,6 +130,21 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             // "needs input" bell clears. Null payload — the frontend just
             // refetches list_pending_tray (it isn't per-session data).
             emit_event("session:halt_cleared", Value::Null);
+        }
+        SignalingEvent::AgentHealth {
+            session_id,
+            agent,
+            health,
+        } => {
+            let payload = AgentHealthEvent {
+                session_id,
+                agent,
+                health,
+            };
+            emit_event(
+                AgentHealthEvent::EVENT_NAME,
+                serde_json::to_value(&payload).unwrap_or(Value::Null),
+            );
         }
     }
 }
@@ -255,6 +270,29 @@ mod tests {
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, SessionClosedEvent::EVENT_NAME);
         assert_eq!(captured[0].1["session_id"], "s1");
+    }
+
+    #[tokio::test]
+    async fn route_agent_health_emits_typed_event() {
+        // B2: a supervisor liveness change must reach the frontend as
+        // `session:agent_health` with the agent + health string intact.
+        let storage = test_storage().await;
+        let captured_events: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let ev_cap = captured_events.clone();
+        let emitter = BatchEmitter::new(|_| {}, storage);
+        let ev = SignalingEvent::AgentHealth {
+            session_id: "s1".into(),
+            agent: "brian".into(),
+            health: "retrying".into(),
+        };
+        route(ev, &emitter, &move |name: &str, payload: Value| {
+            ev_cap.lock().unwrap().push((name.to_string(), payload));
+        });
+        let captured = captured_events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].0, AgentHealthEvent::EVENT_NAME);
+        assert_eq!(captured[0].1["agent"], "brian");
+        assert_eq!(captured[0].1["health"], "retrying");
     }
 
     #[tokio::test]

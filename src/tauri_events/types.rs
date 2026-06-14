@@ -118,6 +118,20 @@ impl SessionClosedEvent {
     pub const EVENT_NAME: &'static str = "session:closed";
 }
 
+/// Emitted when an agent's retry-supervisor liveness changes (B2: running /
+/// retrying / dead), so the UI updates the per-agent health dot. `health` is
+/// the `AgentHealth::as_str` string.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct AgentHealthEvent {
+    pub session_id: String,
+    pub agent: String,
+    pub health: String,
+}
+
+impl AgentHealthEvent {
+    pub const EVENT_NAME: &'static str = "session:agent_health";
+}
+
 /// Plugin lifecycle event names emitted to the frontend PluginManager, which
 /// listens for the same strings. Centralized so an emit site and the listener
 /// can't drift independently.
