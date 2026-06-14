@@ -42,6 +42,14 @@ async getSession(sessionId: string) : Promise<Result<SessionInfo | null, AppErro
     else return { status: "error", error: e  as any };
 }
 },
+async checkSessionDirty(sessionId: string) : Promise<Result<SessionDirty, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("check_session_dirty", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listSessions() : Promise<Result<SessionInfo[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_sessions") };
@@ -1075,6 +1083,14 @@ export type SessionCreateOptions = { brianEffort: string | null; rainEffort: str
  * sessions).
  */
 useWorktree: boolean | null }
+/**
+ * Uncommitted-work probe for the close-confirm dialog: how many entries
+ * `git status --porcelain` reports in the session's working tree. `has_repo`
+ * is false for a repo-less session (nothing to warn about). Best-effort —
+ * never an error path that could block closing. Return struct uses snake_case
+ * (mirrors `SessionInfo`); the React side reads `has_repo` / `dirty_count`.
+ */
+export type SessionDirty = { has_repo: boolean; dirty_count: number }
 export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
 export type SessionInfo = { id: string; title: string; working_repo_path: string | null; 
 /**
