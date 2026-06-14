@@ -311,6 +311,29 @@ export function SessionView() {
                   </span>
                 </>
               )}
+              {session.brian_model_at_spawn && (
+                <>
+                  <span className="mx-2 text-outline-variant">·</span>
+                  <span
+                    className="text-on-surface-variant"
+                    title="Models driving this session (captured at spawn)"
+                  >
+                    Brian:{" "}
+                    <span className="text-on-surface">
+                      {session.brian_model_at_spawn}
+                    </span>
+                  </span>
+                  <span className="mx-2 text-outline-variant">·</span>
+                  <span className="text-on-surface-variant">
+                    Rain:{" "}
+                    <span className="text-on-surface">
+                      {session.rain_enabled
+                        ? (session.rain_model_at_spawn ?? "—")
+                        : "off"}
+                    </span>
+                  </span>
+                </>
+              )}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
