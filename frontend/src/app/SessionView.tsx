@@ -339,24 +339,15 @@ export function SessionView() {
                   <span className="mx-2 text-outline-variant">·</span>
                   <span
                     className="text-on-surface-variant"
-                    title="Models driving this session (captured at spawn)"
+                    title="Live agent health (models are in Session Settings)"
                   >
-                    <HealthDot health={health?.brian} name="Brian" /> Brian:{" "}
-                    <span className="text-on-surface">
-                      {session.brian_model_at_spawn}
-                    </span>
-                  </span>
-                  <span className="mx-2 text-outline-variant">·</span>
-                  <span className="text-on-surface-variant">
+                    Brian <HealthDot health={health?.brian} name="Brian" />
                     {session.rain_enabled && (
-                      <HealthDot health={health?.rain} name="Rain" />
-                    )}{" "}
-                    Rain:{" "}
-                    <span className="text-on-surface">
-                      {session.rain_enabled
-                        ? (session.rain_model_at_spawn ?? "—")
-                        : "off"}
-                    </span>
+                      <>
+                        <span className="mx-1.5 text-outline-variant">·</span>
+                        Rain <HealthDot health={health?.rain} name="Rain" />
+                      </>
+                    )}
                   </span>
                 </>
               )}
@@ -526,6 +517,7 @@ export function SessionView() {
       </div>
 
       <SessionPolicyPanel
+        session={session}
         sessionId={sessionId}
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}

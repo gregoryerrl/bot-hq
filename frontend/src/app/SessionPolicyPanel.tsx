@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
-import type { GatedKeyword, Policy } from "../lib/bindings";
+import type { GatedKeyword, Policy, SessionInfo } from "../lib/bindings";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import { CloseIcon, SaveIcon } from "./contextLibraryShared";
@@ -17,10 +17,12 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
  * tool_gate keywords (those are managed globally in Settings → Tool Gate).
  */
 export function SessionPolicyPanel({
+  session,
   sessionId,
   open,
   onClose,
 }: {
+  session: SessionInfo | null;
   sessionId: string;
   open: boolean;
   onClose: () => void;
@@ -135,6 +137,26 @@ export function SessionPolicyPanel({
           want them to <em>see</em> the new rules (enforcement applies either
           way).
         </p>
+        {session?.brian_model_at_spawn && (
+          <div className="mb-4 rounded border border-outline-variant/40 bg-surface-container/60 px-3 py-2">
+            <p className="mb-1 font-label-caps text-label-caps text-on-surface-variant">
+              Models (captured at spawn)
+            </p>
+            <p className="font-code-sm text-code-sm text-on-surface-variant">
+              Brian:{" "}
+              <span className="text-on-surface">
+                {session.brian_model_at_spawn}
+              </span>
+              <span className="mx-2 text-outline-variant">·</span>
+              Rain:{" "}
+              <span className="text-on-surface">
+                {session.rain_enabled
+                  ? (session.rain_model_at_spawn ?? "—")
+                  : "off"}
+              </span>
+            </p>
+          </div>
+        )}
         {isLoading ? (
           <div className="h-40 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
         ) : (
