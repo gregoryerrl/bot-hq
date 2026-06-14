@@ -98,6 +98,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         docs::session_doc_read,
         docs::compute_apply_diff,
         docs::summarize_session_doc,
+        docs::validate_model,
         // Plugins
         plugins::install_plugin,
         plugins::list_installed_plugins,

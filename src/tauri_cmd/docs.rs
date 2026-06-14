@@ -222,12 +222,14 @@ pub async fn summarize_session_doc(
         .map_err(|_| AppError::Internal("summary timed out after 60s".into()))?
 }
 
-/// Spawn the one-shot summarizer subprocess with the resolved model's env and
-/// return its trimmed stdout. Separated so the timeout wrapper above stays terse.
-async fn run_summarizer(cfg: AgentConfig, prompt: String) -> Result<String, AppError> {
+/// Build a one-shot, tool-free headless `claude -p` command carrying the
+/// resolved model's env (model id + token + gateway via the normalizing proxy,
+/// exactly as live-agent spawn does — see `agents::spawn::build_command`).
+/// Shared by the doc summarizer and the model pre-flight probe (B5).
+fn headless_claude_cmd(cfg: &AgentConfig, prompt: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("claude");
     cmd.arg("-p")
-        .arg(&prompt)
+        .arg(prompt)
         .args(["--output-format", "text"])
         .args(["--max-turns", "1"])
         .arg("--strict-mcp-config")
@@ -236,20 +238,22 @@ async fn run_summarizer(cfg: AgentConfig, prompt: String) -> Result<String, AppE
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-
     if let Some(token) = cfg.auth_token.as_deref().filter(|t| !t.is_empty()) {
         cmd.env("ANTHROPIC_AUTH_TOKEN", token);
     }
-    // Route a custom gateway (e.g. DeepSeek) through the local normalizing proxy,
-    // exactly as live-agent spawn does (see agents::spawn::build_command).
     if let Some(base) = crate::agents::llm_proxy::resolve_anthropic_base_url(
         cfg.base_url.as_deref(),
         crate::agents::llm_proxy::proxy_addr(),
     ) {
         cmd.env("ANTHROPIC_BASE_URL", base);
     }
+    cmd
+}
 
-    let out = cmd
+/// Spawn the one-shot summarizer subprocess with the resolved model's env and
+/// return its trimmed stdout. Separated so the timeout wrapper above stays terse.
+async fn run_summarizer(cfg: AgentConfig, prompt: String) -> Result<String, AppError> {
+    let out = headless_claude_cmd(&cfg, &prompt)
         .output()
         .await
         .map_err(|e| AppError::Internal(format!("failed to spawn claude: {e}")))?;
@@ -268,6 +272,74 @@ async fn run_summarizer(cfg: AgentConfig, prompt: String) -> Result<String, AppE
         ));
     }
     Ok(summary)
+}
+
+/// Outcome of a pre-flight model probe (B5).
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct ValidateResult {
+    pub ok: bool,
+    pub message: String,
+}
+
+/// Pre-flight check a saved model before a session uses it (B5): a one-shot,
+/// headless `claude -p` ping through the model's resolved env (token + gateway,
+/// via the same normalizing proxy live agents use). Surfaces a bad token, wrong
+/// model id, or unreachable gateway at configure-time instead of as a silent
+/// mid-session API error. Bounded by a 30s timeout; the child is killed on drop.
+#[tauri::command]
+#[specta::specta]
+pub async fn validate_model(
+    storage: tauri::State<'_, Arc<Storage>>,
+    model_id: String,
+) -> Result<ValidateResult, AppError> {
+    let cfg = crate::core::session::resolve_spawn_config(&storage, "brian", Some(&model_id)).await;
+    Ok(
+        match tokio::time::timeout(Duration::from_secs(30), probe_model(cfg)).await {
+            Ok(result) => result,
+            Err(_) => ValidateResult {
+                ok: false,
+                message: "Timed out after 30s — the gateway is unreachable or too slow.".into(),
+            },
+        },
+    )
+}
+
+/// One-shot model ping. Non-empty output on a clean exit ⇒ reachable; a non-zero
+/// exit or empty output ⇒ failure with the captured detail (the API error
+/// usually lands on stderr — e.g. a 401 for a bad token).
+async fn probe_model(cfg: AgentConfig) -> ValidateResult {
+    let out = match headless_claude_cmd(&cfg, "Reply with exactly the word: ok")
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return ValidateResult {
+                ok: false,
+                message: format!("Couldn't launch claude: {e}"),
+            }
+        }
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if out.status.success() && !stdout.trim().is_empty() {
+        return ValidateResult {
+            ok: true,
+            message: "Connected — the model responded.".into(),
+        };
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let detail = if !stderr.trim().is_empty() {
+        stderr.trim()
+    } else if !stdout.trim().is_empty() {
+        stdout.trim()
+    } else {
+        "no output"
+    };
+    let detail: String = detail.chars().take(300).collect();
+    ValidateResult {
+        ok: false,
+        message: format!("Check failed: {detail}"),
+    }
 }
 
 #[cfg(test)]

@@ -7,6 +7,11 @@ import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { terminalInputClass, SaveIcon } from "./contextLibraryShared";
 import type { ModelView } from "../lib/bindings";
+import { invoke } from "@tauri-apps/api/core";
+
+// Inline shape of the backend `ValidateResult` (kept local so this feature
+// doesn't depend on the generated bindings — those land in their own regen).
+type ProbeResult = { ok: boolean; message: string };
 
 const selectClass =
   "w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary";
@@ -15,7 +20,7 @@ const PROVIDERS = ["anthropic", "openai", "deepseek", "local"] as const;
 
 // Shared 5-column grid for the header row + each model row.
 const rowGridClass =
-  "grid grid-cols-[minmax(10rem,1.4fr)_8rem_minmax(8rem,1fr)_9rem_8.5rem] items-center gap-3 px-4";
+  "grid grid-cols-[minmax(10rem,1.4fr)_8rem_minmax(8rem,1fr)_9rem_12rem] items-center gap-3 px-4";
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -44,6 +49,31 @@ export function ModelsPanel() {
     { mode: "create" } | { mode: "edit"; model: ModelView } | null
   >(null);
   const [deleteTarget, setDeleteTarget] = useState<ModelView | null>(null);
+  // B5: per-model pre-flight "Test connection" state + last result.
+  const [testing, setTesting] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<Record<string, ProbeResult>>({});
+
+  const onTest = async (id: string) => {
+    setTesting(id);
+    setTestResult((r) => {
+      const next = { ...r };
+      delete next[id];
+      return next;
+    });
+    try {
+      const res = await invoke<ProbeResult>("validate_model", {
+        modelId: id,
+      });
+      setTestResult((r) => ({ ...r, [id]: res }));
+    } catch (e) {
+      setTestResult((r) => ({
+        ...r,
+        [id]: { ok: false, message: errorMessage(e) },
+      }));
+    } finally {
+      setTesting(null);
+    }
+  };
 
   return (
     <div className="mx-auto h-full max-w-7xl overflow-auto px-6 py-6">
@@ -99,38 +129,59 @@ export function ModelsPanel() {
           </div>
           <div className="divide-y divide-outline-variant/40">
             {models.map((m) => (
-              <div key={m.id} className={cn(rowGridClass, "py-2.5")}>
-                <span className="truncate font-body-md text-body-md text-on-surface">
-                  {m.display_name || "Untitled model"}
-                </span>
-                <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
-                  {m.provider || "—"}
-                </span>
-                <span
-                  className="truncate font-code-sm text-code-sm text-on-surface-variant"
-                  title={m.model_name}
-                >
-                  {m.model_name || "—"}
-                </span>
-                <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
-                  {m.updated_at ? formatTimestamp(m.updated_at) : "—"}
-                </span>
-                <div className="flex justify-end gap-2">
-                  <Button
-                    size="sm"
-                    onClick={() => setDialog({ mode: "edit", model: m })}
+              <div key={m.id}>
+                <div className={cn(rowGridClass, "py-2.5")}>
+                  <span className="truncate font-body-md text-body-md text-on-surface">
+                    {m.display_name || "Untitled model"}
+                  </span>
+                  <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
+                    {m.provider || "—"}
+                  </span>
+                  <span
+                    className="truncate font-code-sm text-code-sm text-on-surface-variant"
+                    title={m.model_name}
                   >
-                    Edit
-                  </Button>
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    disabled={del.isPending}
-                    onClick={() => setDeleteTarget(m)}
-                  >
-                    Delete
-                  </Button>
+                    {m.model_name || "—"}
+                  </span>
+                  <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
+                    {m.updated_at ? formatTimestamp(m.updated_at) : "—"}
+                  </span>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      size="sm"
+                      disabled={testing === m.id}
+                      title="Pre-flight check this model's token + gateway"
+                      onClick={() => onTest(m.id)}
+                    >
+                      {testing === m.id ? "…" : "Test"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={() => setDialog({ mode: "edit", model: m })}
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      variant="danger"
+                      size="sm"
+                      disabled={del.isPending}
+                      onClick={() => setDeleteTarget(m)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
                 </div>
+                {testResult[m.id] && (
+                  <div
+                    className={cn(
+                      "px-4 pb-2 font-code-sm text-code-sm",
+                      testResult[m.id].ok ? "text-emerald-400" : "text-error",
+                    )}
+                  >
+                    {testResult[m.id].ok ? "✓ " : "✗ "}
+                    {testResult[m.id].message}
+                  </div>
+                )}
               </div>
             ))}
           </div>
