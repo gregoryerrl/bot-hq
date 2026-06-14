@@ -42,3 +42,21 @@ export function worstHealth(h: SessionHealth | undefined): AgentHealth | undefin
   if (h.brian === "running" || h.rain === "running") return "running";
   return undefined;
 }
+
+/** App-wide footer summary: the worst state across all sessions + how many
+ *  sessions sit in it. `ok` when nothing is retrying or dead. */
+export function appHealthSummary(bySession: Record<string, SessionHealth>): {
+  state: "ok" | "retrying" | "dead";
+  count: number;
+} {
+  let dead = 0;
+  let retrying = 0;
+  for (const h of Object.values(bySession)) {
+    const w = worstHealth(h);
+    if (w === "dead") dead += 1;
+    else if (w === "retrying") retrying += 1;
+  }
+  if (dead > 0) return { state: "dead", count: dead };
+  if (retrying > 0) return { state: "retrying", count: retrying };
+  return { state: "ok", count: 0 };
+}

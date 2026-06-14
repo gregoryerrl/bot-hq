@@ -3,6 +3,33 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { PendingTray } from "../components/PendingTray";
 import { UpdateBanner } from "../components/UpdateBanner";
+import { useHealthStore, appHealthSummary } from "../stores/health";
+
+// B3: app-wide agent-health status in the footer (replaces the hardcoded green
+// "Online"). Worst-of all sessions from the B2 health store — green when all OK,
+// amber while any agent is recovering, red when any has stopped.
+function FooterStatus() {
+  const bySession = useHealthStore((s) => s.bySession);
+  const { state, count } = appHealthSummary(bySession);
+  const cfg = {
+    ok: { dot: "bg-emerald-500", label: "Agents: OK" },
+    retrying: { dot: "bg-amber-400 animate-pulse", label: `${count} recovering` },
+    dead: { dot: "bg-error", label: `${count} stopped` },
+  }[state];
+  return (
+    <span
+      className="flex cursor-default items-center gap-1 font-code-sm text-code-sm text-on-surface-variant"
+      title={
+        state === "ok"
+          ? "All agents running"
+          : `${count} session${count === 1 ? "" : "s"} with ${state === "dead" ? "a stopped" : "a recovering"} agent`
+      }
+    >
+      <span className={cn("size-2 rounded-full", cfg.dot)} />
+      {cfg.label}
+    </span>
+  );
+}
 
 export function Shell() {
   const navigate = useNavigate();
@@ -66,10 +93,7 @@ export function Shell() {
           &copy; {new Date().getFullYear()} BOT-HQ INDUSTRIAL ORCHESTRATION
         </span>
         <div className="flex items-center gap-4">
-          <span className="flex cursor-default items-center gap-1 font-code-sm text-code-sm text-on-surface-variant">
-            <span className="size-2 rounded-full bg-emerald-500" />
-            Status: Online
-          </span>
+          <FooterStatus />
         </div>
       </footer>
     </div>
