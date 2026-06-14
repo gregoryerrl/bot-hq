@@ -162,6 +162,15 @@ struct Parked {
     choice: PendingChoice,
 }
 
+/// A3b: per-session state for the close-delta soft-gate.
+#[derive(Default)]
+struct CloseGateState {
+    /// The agent ran `cl_rescan` this session (proxy for a CL learnings write).
+    cl_written: bool,
+    /// We've already nudged once on `close_session` — let the next close go.
+    close_nudged: bool,
+}
+
 /// Shared signaling state.
 pub struct SignalingBridge {
     event_tx: broadcast::Sender<SignalingEvent>,
@@ -194,6 +203,11 @@ pub struct SignalingBridge {
     /// dispatchers, which don't have CoreAppState. Set-once; `None` in tests
     /// and during the pre-setup window.
     app_handle: std::sync::OnceLock<tauri::AppHandle>,
+    /// A3b: per-session close-gate state — whether the agent touched the CL
+    /// (`cl_rescan`, a proxy for the write-then-prune learnings delta) and
+    /// whether we've already nudged it once on close. Drives the soft two-call
+    /// gate in the `close_session` MCP handler.
+    session_close_gate: Mutex<HashMap<String, CloseGateState>>,
 }
 
 impl SignalingBridge {
@@ -215,6 +229,7 @@ impl SignalingBridge {
             session_awaiting: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
+            session_close_gate: Mutex::new(HashMap::new()),
         })
     }
 
@@ -276,6 +291,40 @@ impl SignalingBridge {
     pub async fn unregister_session(&self, session_id: &str) {
         self.session_projects.lock().await.remove(session_id);
         self.session_awaiting.lock().await.remove(session_id);
+        self.session_close_gate.lock().await.remove(session_id);
+    }
+
+    /// A3b: record that the agent ran `cl_rescan` this session — a proxy for
+    /// "appended a learnings delta", which lifts the close-delta gate.
+    pub async fn mark_cl_rescan(&self, session_id: &str) {
+        self.session_close_gate
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .cl_written = true;
+    }
+
+    /// A3b: should the agent's `close_session` be soft-gated with a
+    /// write-then-prune reminder instead of closing? True only on the FIRST
+    /// close when adherence nudges are on and no CL write happened this session;
+    /// records the nudge so the agent's NEXT `close_session` proceeds. False
+    /// when nudges are off, the CL was touched, or we already nudged once.
+    pub async fn should_nudge_close(&self, session_id: &str) -> bool {
+        let storage = self.storage.lock().await.clone();
+        let Some(storage) = storage else {
+            return false; // no storage wired (test/pre-init) — never gate
+        };
+        if !storage.adherence_nudges_enabled().await {
+            return false;
+        }
+        let mut gate = self.session_close_gate.lock().await;
+        let state = gate.entry(session_id.to_string()).or_default();
+        if state.cl_written || state.close_nudged {
+            return false;
+        }
+        state.close_nudged = true;
+        true
     }
 
     // ---- Project helpers --------------------------------------------

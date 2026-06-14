@@ -278,10 +278,27 @@ async fn call_tool(
                 .get("archive")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            bridge.request_session_close(caller.session_id.clone(), caller.agent.clone(), archive);
-            Ok(ToolCallResult::text(
-                "session close requested — your subprocess will be terminated shortly",
-            ))
+            // A3b (adherence): soft-gate the FIRST close with no CL learnings
+            // delta this session — nudge to run write-then-prune, then close on
+            // the retry. The UI force-close path (tauri_cmd) is separate + ungated.
+            if bridge.should_nudge_close(&caller.session_id).await {
+                Ok(ToolCallResult::text(
+                    "Before closing: append this session's bounded learnings delta to the \
+                     project's notes.md (the write-then-prune loop) and call cl_rescan, so the \
+                     next session doesn't re-discover what this one learned. Then call \
+                     close_session again. (If there's genuinely nothing to persist, just call \
+                     close_session again and it will close.)",
+                ))
+            } else {
+                bridge.request_session_close(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    archive,
+                );
+                Ok(ToolCallResult::text(
+                    "session close requested — your subprocess will be terminated shortly",
+                ))
+            }
         }
         "check_commit_message" => {
             let message = arg_required_str(&args, "message")?;
@@ -518,6 +535,9 @@ async fn call_tool(
                 .cl_rescan(&project)
                 .await
                 .map_err(internal_err_no_prefix)?;
+            // A3b: a cl_rescan is the proxy for "the agent touched the CL" — it
+            // lifts the close-delta gate so a later close_session won't nudge.
+            bridge.mark_cl_rescan(&caller.session_id).await;
             Ok(result_json(&report, "{}"))
         }
         "webview_screenshot" => {
@@ -676,6 +696,65 @@ mod tests {
                 assert!(!archive);
             }
             other => panic!("expected SessionCloseRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn close_session_nudges_for_cl_delta_then_closes() {
+        // A3b: with storage wired (adherence on by default) and no cl_rescan this
+        // session, the FIRST close_session returns a write-then-prune nudge and
+        // does NOT request close; the SECOND closes.
+        let bridge = SignalingBridge::new();
+        bridge
+            .set_storage(crate::storage::Storage::memory().await.unwrap())
+            .await;
+        let mut sub = bridge.subscribe();
+
+        let first = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "close_session", "arguments": {}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&first).unwrap();
+        assert!(
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("learnings"),
+            "first close must nudge for the learnings delta"
+        );
+        assert!(
+            sub.try_recv().is_err(),
+            "nudged close must NOT request session close"
+        );
+
+        let second = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "close_session", "arguments": {}}),
+                2,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v2 = serde_json::to_value(&second).unwrap();
+        assert!(v2["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("close requested"));
+        match sub.recv().await.unwrap() {
+            SignalingEvent::SessionCloseRequest { .. } => {}
+            other => panic!("expected SessionCloseRequest on retry, got {other:?}"),
         }
     }
 
