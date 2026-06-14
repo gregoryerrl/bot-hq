@@ -656,6 +656,21 @@ async summarizeSessionDoc(sessionId: string, slug: string) : Promise<Result<stri
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Pre-flight check a saved model before a session uses it (B5): a one-shot,
+ * headless `claude -p` ping through the model's resolved env (token + gateway,
+ * via the same normalizing proxy live agents use). Surfaces a bad token, wrong
+ * model id, or unreachable gateway at configure-time instead of as a silent
+ * mid-session API error. Bounded by a 30s timeout; the child is killed on drop.
+ */
+async validateModel(modelId: string) : Promise<Result<ValidateResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("validate_model", { modelId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async installPlugin(source: string) : Promise<Result<InstalledPluginView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source }) };
@@ -1171,6 +1186,10 @@ export type SkillVisibility =
  * `SessionInfo` return-type convention) — the React side reads these names.
  */
 export type UpdateInfo = { current_version: string; latest_version: string; update_available: boolean; release_url: string; release_notes: string | null; published_at: string | null }
+/**
+ * Outcome of a pre-flight model probe (B5).
+ */
+export type ValidateResult = { ok: boolean; message: string }
 
 /** tauri-specta globals **/
 
