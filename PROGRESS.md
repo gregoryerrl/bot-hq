@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-494 tests passing (443 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 87 frontend Vitest. Release build clean. Version **1.0.0** (bumped
+500 tests passing (449 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 92 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
@@ -20,6 +20,60 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
 
 ---
+
+## 2026-06-14 — Model-agnostic reliability + UX hardening (pre-market-ship)
+
+An 8-slice arc on branch `brian/model-agnostic-reliability` to make the duo
+workflow behave consistently regardless of which model drives Brian/Rain, and to
+close the UX gaps that left agent/model failures invisible. Investigation found
+reliability splits in two: transport + enforcement are already model-agnostic
+(the normalizing LLM proxy, the forward-compatible stream-json parser, the retry
+supervisor, the git-hook policy backstop), but workflow *quality* — CL-first,
+IPAV, peer review — was 100% prompt-driven with no mechanical backstop, the gap
+weaker non-Anthropic models fell into. Each slice is its own commit; all five
+gates green per slice.
+
+**Model-adherence nudges (Track A — the consistency fix).** Extends the `duo.rs`
+silence-on-hold precedent (a prompt rule WITH a mechanical backstop) to the two
+highest-leverage decision points, behind a new `adherence_nudges` opt-out app
+setting (default on):
+- **Session-start CL-opener nudge** (`87ac003`). One-shot stdin nudge on a first
+  spawn (real project; not a `--resume` reopen) paging Brian + Rain at
+  `cl_index_search` before the first task — the most-skipped rule in every audit.
+  `core/session.rs` (`cl_opener_nudge`) + `storage/models.rs` (the setting).
+- **Pre-Apply peer-ack nudge** (`37b6019`). On a duo session's Plan→Apply
+  transition, a Brian-only reminder to confirm Rain reviewed the plan — the P→A
+  handoff the prompts never enforced. `core/state.rs::advance_phase`
+  (`should_peer_ack_nudge`).
+
+**Reliability-visibility (Track B — make failures visible).**
+- **Per-agent models in the session header** (`815dbda`, frontend — data was
+  already in `SessionInfo`).
+- **Agent-health dots** (`03f25bd`). The retry supervisor emits
+  running/retrying/dead transitions via a new `AgentEvent::Health` → the duo pump
+  (which also flags `Dead` on loop-end) → `SignalingEvent::AgentHealth` →
+  `session:agent_health` → a Zustand store → green/amber-pulse/red dots on the
+  dashboard tiles + session header.
+- **Dynamic footer status** (`f09c53c`). The hardcoded green "Online" now reflects
+  the worst-of-all-sessions health.
+- **Force-close uncommitted-work warning** (`94d0808`). The close confirm runs
+  `git status --porcelain` (`working_tree_dirty_count`) and warns the work will be
+  kept, not committed.
+- **Pre-flight model validation** (`4dd64b9`). A Models-settings "Test" button
+  runs a one-shot `claude -p` ping through the model's real token + gateway (the
+  same path live agents use), so a bad token / wrong model id / unreachable
+  gateway fails at setup instead of as a silent mid-session API error. Extracted a
+  shared `headless_claude_cmd` builder (DRY with the doc summarizer).
+
+**Onboarding (Track C).** Create-dialog "no saved models" hint + a state-aware
+welcome checklist — register project → add model → create session, with a ✓ on
+steps already done (`81528e7`).
+
+Tests: **449 lib (+6)** + 92 frontend Vitest (+5); release build clean. Bindings
+regens are their own `chore: regen bindings` commits (`4e39058`, `0bc285e`).
+Deferred (optional): secondary IPAV-hygiene/close-delta nudges; a
+worktree-dirty-state close indicator; a `is_stale()` load-seed so health/footer
+survive an app restart. Branch not yet merged.
 
 ## 2026-06-12 — Spawn cwd pinned: repo-less sessions no longer inherit app cwd
 
