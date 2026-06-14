@@ -3,7 +3,7 @@
 
 use crate::agents::{AgentEvent, AgentHealth, OutgoingUserMessage};
 use crate::core::broadcast::peer_forward_message;
-use crate::core::ipav::IpavState;
+use crate::core::ipav::{IpavPhase, IpavState};
 use crate::signaling::SignalingBridge;
 use crate::storage::{Author, MessageKind, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,6 +32,11 @@ pub struct DuoConfig {
     /// successful storage.insert_message. None in tests that don't need
     /// event-driven readers.
     pub bridge: Option<Arc<SignalingBridge>>,
+    /// The agent's OWN stdin sender (distinct from the peer's `peer_input_tx`),
+    /// for A3a self-nudges — e.g. nudging Brian when he mutates during
+    /// Investigate/Plan. `None` disables self-nudging (Rain; tests that don't
+    /// need it). Set only for Brian's pump at spawn.
+    pub self_input_tx: Option<mpsc::Sender<OutgoingUserMessage>>,
 }
 
 impl DuoConfig {
@@ -43,6 +48,7 @@ impl DuoConfig {
             buffer_window: None,
             awaiting: None,
             bridge: None,
+            self_input_tx: None,
         }
     }
 
@@ -83,6 +89,9 @@ pub async fn pump_agent(
     // resets it. Once it trips, further short forwards are suppressed so a
     // novel ack phrasing the keyword list doesn't catch can't volley forever.
     let mut consecutive_short: u32 = 0;
+    // A3a: one-shot guard so Brian gets at most one "you're mutating before
+    // Apply" nudge per session (delivered to his own stdin via self_input_tx).
+    let mut mutate_nudged = false;
 
     loop {
         let event = match flush_at {
@@ -129,6 +138,30 @@ pub async fn pump_agent(
                 // A tool call is substantive activity — reset the idle breaker
                 // so post-work ack chunks aren't pre-emptively suppressed.
                 consecutive_short = 0;
+                // A3a (adherence): catch Brian mutating before the Apply phase —
+                // a one-time self-nudge to advance first. Brian-only (Rain can't
+                // mutate), gated by adherence_nudges, fired at most once.
+                if !mutate_nudged
+                    && matches!(cfg.author, Author::Brian)
+                    && matches!(name.as_str(), "Edit" | "Write" | "NotebookEdit")
+                {
+                    if let Some(tx) = cfg.self_input_tx.as_ref() {
+                        let phase = ipav_state.lock().await.current_phase;
+                        if matches!(phase, IpavPhase::Investigate | IpavPhase::Plan)
+                            && storage.adherence_nudges_enabled().await
+                        {
+                            let _ = tx
+                                .send(OutgoingUserMessage::text(
+                                    "🔔 You're editing files before the Apply phase. Per IPAV, \
+                                     mutations belong in Apply — call advance_phase(\"Apply\") \
+                                     first, or note why this edit is intentional. (One-time \
+                                     reminder.)",
+                                ))
+                                .await;
+                            mutate_nudged = true;
+                        }
+                    }
+                }
                 let payload = serde_json::json!({
                     "tool_use_id": id,
                     "name": name,
@@ -375,6 +408,7 @@ mod tests {
             buffer_window: Some(Duration::from_millis(50)),
             awaiting: None,
             bridge: None,
+            self_input_tx: None,
         }
     }
 
@@ -747,5 +781,63 @@ mod tests {
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].kind, "tool_use");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn edit_during_investigate_self_nudges_brian() {
+        // A3a: Brian editing in Investigate gets a one-time self-nudge on his
+        // OWN stdin (cfg.self_input_tx), pointing him at Apply.
+        let (storage, state) = setup().await; // default phase = Investigate
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let (self_tx, mut self_rx) = mpsc::channel(8);
+        let cfg = DuoConfig {
+            self_input_tx: Some(self_tx),
+            ..fast_cfg(Author::Brian, Author::Rain)
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, None, storage, state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu1".into(),
+                name: "Edit".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        let nudge = self_rx.recv().await.expect("self-nudge delivered");
+        assert!(nudge.message.content.contains("Apply"));
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn edit_during_apply_does_not_nudge() {
+        // A3a: editing in Apply is correct — no nudge.
+        let (storage, state) = setup().await;
+        state.lock().await.current_phase = IpavPhase::Apply;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let (self_tx, mut self_rx) = mpsc::channel(8);
+        let cfg = DuoConfig {
+            self_input_tx: Some(self_tx),
+            ..fast_cfg(Author::Brian, Author::Rain)
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, None, storage, state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu1".into(),
+                name: "Write".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(self_rx.try_recv().is_err(), "no nudge in Apply");
+
+        drop(ev_tx);
+        task.await.unwrap();
     }
 }

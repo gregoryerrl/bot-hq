@@ -523,6 +523,9 @@ async fn spawn_session_handle(
     let brian_duo = DuoConfig {
         awaiting: Some(Arc::clone(&awaiting)),
         bridge: Some(Arc::clone(&bridge)),
+        // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
+        // before the Apply phase.
+        self_input_tx: Some(brian_handle.input_tx.clone()),
         ..DuoConfig::new(session_id_clone, Author::Brian, Author::Rain)
     };
     tokio::spawn(async move {
