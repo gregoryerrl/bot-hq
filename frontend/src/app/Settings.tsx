@@ -570,6 +570,25 @@ function AgentCard({
 // Archive — closed sessions (just-closed + archived), newest-closed first
 // ============================================================================
 
+function WorktreeKeptBadge({ sessionId }: { sessionId: string }) {
+  // C1: queries whether this closed session's isolated worktree still exists on
+  // disk (close keeps — never force-removes — a dirty worktree). Only mounted
+  // for worktree-backed sessions, so the query runs only where it can matter.
+  const { data: keptPath } = useTauriQuery<string | null>(
+    "session_worktree_kept",
+    { sessionId },
+  );
+  if (!keptPath) return null;
+  return (
+    <span
+      className="shrink-0 rounded border border-amber-400/40 bg-amber-400/15 px-2 py-0.5 font-label-caps text-label-caps text-amber-400"
+      title={`Worktree kept — may have uncommitted work: ${keptPath}`}
+    >
+      ⚠ Worktree kept
+    </span>
+  );
+}
+
 function ArchivePanel() {
   const { data: sessions = [], isLoading } = useTauriQuery<SessionInfo[]>(
     "list_closed_sessions",
@@ -620,16 +639,19 @@ function ArchivePanel() {
                     closed {formatTimestamp(s.closed_at ?? "") || "—"}
                   </p>
                 </div>
-                <span
-                  className={cn(
-                    "shrink-0 rounded border px-2 py-0.5 font-label-caps text-label-caps",
-                    s.archived
-                      ? "border-outline-variant/40 bg-outline-variant/15 text-on-surface-variant"
-                      : "border-tertiary/40 bg-tertiary/15 text-tertiary",
-                  )}
-                >
-                  {s.archived ? "Archived" : "Closed"}
-                </span>
+                <div className="flex shrink-0 items-center gap-2">
+                  {s.base_repo_path && <WorktreeKeptBadge sessionId={s.id} />}
+                  <span
+                    className={cn(
+                      "shrink-0 rounded border px-2 py-0.5 font-label-caps text-label-caps",
+                      s.archived
+                        ? "border-outline-variant/40 bg-outline-variant/15 text-on-surface-variant"
+                        : "border-tertiary/40 bg-tertiary/15 text-tertiary",
+                    )}
+                  >
+                    {s.archived ? "Archived" : "Closed"}
+                  </span>
+                </div>
               </Link>
             </li>
           ))}

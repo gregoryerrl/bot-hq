@@ -284,6 +284,38 @@ pub async fn check_session_dirty(
     })
 }
 
+/// C1: the kept-worktree path for a closed worktree-session, if its isolated
+/// worktree still exists on disk. `close_session` keeps (never force-removes) a
+/// dirty worktree, so its presence after close ⇒ uncommitted work was left
+/// there. `None` for a direct-mode session or a clean worktree that was removed.
+/// Lets the Archive surface "work was kept here" for recovery.
+#[tauri::command]
+#[specta::specta]
+pub async fn session_worktree_kept(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+) -> Result<Option<String>, AppError> {
+    let Some(session) = storage
+        .get_session(&session_id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let Some(base_repo) = session.base_repo_path else {
+        return Ok(None); // direct-mode session — no worktree
+    };
+    let kept = crate::core::worktree::session_worktree_path(
+        &core.paths.data_dir,
+        &session_id,
+        std::path::Path::new(&base_repo),
+    )
+    .filter(|p| p.exists())
+    .map(|p| p.to_string_lossy().into_owned());
+    Ok(kept)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn list_sessions(
