@@ -349,6 +349,13 @@ export function Dashboard() {
                   ))}
                 </select>
               </label>
+              {models.length === 0 && (
+                <p className="text-xs text-on-surface-variant">
+                  No saved models yet — both agents use their configured default.
+                  Add models in <b>Settings → Models</b> to pick per session (and
+                  to run a pre-flight connection test).
+                </p>
+              )}
               {projects.find((p) => p.name === selectedProject)
                 ?.working_repo_path && (
                 <label className="flex items-center gap-2">
@@ -500,16 +507,57 @@ export function Dashboard() {
             A session is a scoped piece of work — Brian (HANDS) executes, Rain
             (EYES) reviews, and you stay the conductor.
           </p>
-          <p className="mx-auto mt-3 max-w-md text-xs text-on-surface-variant">
-            Register a project in the <b>Context Library</b> tab so sessions
-            know your repo and conventions, then hit{" "}
-            <b>+ New session</b> (or{" "}
-            <kbd className="rounded border border-outline-variant bg-surface-container-lowest px-1 py-0.5 font-mono text-[0.65rem]">
-              ⌘N
-            </kbd>
-            ) to put the agents to work. Repo-backed sessions run in isolated
-            worktrees, so several can work the same project at once.
-          </p>
+          <ol className="mx-auto mt-5 max-w-sm space-y-2.5 text-left">
+            {[
+              {
+                done: projects.length > 0,
+                body: (
+                  <>
+                    Register a project in the <b>Context Library</b> tab — so
+                    sessions know your repo and conventions.
+                  </>
+                ),
+              },
+              {
+                done: models.length > 0,
+                body: (
+                  <>
+                    Add a model in <b>Settings → Models</b> (optional — agents
+                    use their built-in default otherwise).
+                  </>
+                ),
+              },
+              {
+                done: false,
+                body: (
+                  <>
+                    Create a session with <b>+ New session</b> (or{" "}
+                    <kbd className="rounded border border-outline-variant bg-surface-container-lowest px-1 py-0.5 font-mono text-[0.65rem]">
+                      ⌘N
+                    </kbd>
+                    ) to put Brian + Rain to work.
+                  </>
+                ),
+              },
+            ].map((step, i) => (
+              <li key={i} className="flex items-start gap-2.5">
+                <span
+                  className={cn(
+                    "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full text-[0.7rem]",
+                    step.done
+                      ? "bg-emerald-500/20 text-emerald-400"
+                      : "border border-outline-variant text-on-surface-variant",
+                  )}
+                  aria-hidden
+                >
+                  {step.done ? "✓" : i + 1}
+                </span>
+                <span className="text-xs text-on-surface-variant">
+                  {step.body}
+                </span>
+              </li>
+            ))}
+          </ol>
         </div>
       ) : filteredSessions.length === 0 ? (
         <div className="rounded-lg border border-dashed border-outline-variant p-10 text-center">
