@@ -4,9 +4,12 @@
 //! system prompt from CL, spawns Brian + Rain, kicks off the duo event pumps,
 //! and registers the session in `AppState`.
 
-use crate::agents::{spawn_supervised_agent, AgentHandle, RetryPolicy, SpawnConfig};
+use crate::agents::{
+    spawn_supervised_agent, AgentHandle, OutgoingUserMessage, RetryPolicy, SpawnConfig,
+};
+use crate::core::broadcast::with_phase_envelope;
 use crate::core::duo::{pump_agent, DuoConfig};
-use crate::core::ipav::IpavState;
+use crate::core::ipav::{IpavPhase, IpavState};
 use crate::paths::Paths;
 use crate::signaling::{
     default_user_settings_paths, load_user_mcp_servers, mcp_config_json, SignalingBridge,
@@ -439,6 +442,9 @@ async fn spawn_session_handle(
     // the next reopen of this session can resume.
     let brian_resume = session.brian_claude_session_id.clone();
     let rain_resume = session.rain_claude_session_id.clone();
+    // A1 (adherence): a FIRST spawn (no stored claude session id yet) gets the
+    // one-shot CL-opener nudge below; a `--resume` reopen does not (restored).
+    let is_first_spawn = session.brian_claude_session_id.is_none();
     // Per-session effort/ultracode picks (create dialog); overlaid over the
     // persistent per-agent override in build_command (session wins).
     let brian_effort = session.brian_effort.clone();
@@ -553,6 +559,26 @@ async fn spawn_session_handle(
         });
     }
 
+    // A1 (adherence): one-shot session-start CL-opener nudge. Mechanically pages
+    // the agent toward `cl_index_search` so a model that doesn't reliably follow
+    // the prompt-side opener still gets nudged. Fires only on a FIRST spawn (not
+    // a `--resume` reopen), only for a real project (skips `_globals`/repo-less),
+    // and only when nudges are enabled. Delivered before the user's first task —
+    // the agent opens the CL during the user's think-time, so the task lands
+    // with conventions already loaded.
+    if is_first_spawn && storage.adherence_nudges_enabled().await {
+        if let Some(nudge) = cl_opener_nudge(project.as_deref()) {
+            let wire = with_phase_envelope(IpavPhase::Investigate, &nudge);
+            let _ = brian_handle
+                .input_tx
+                .send(OutgoingUserMessage::text(wire.clone()))
+                .await;
+            if let Some(r) = rain_handle.as_ref() {
+                let _ = r.input_tx.send(OutgoingUserMessage::text(wire)).await;
+            }
+        }
+    }
+
     info!(session_id = %session.id, title = %session.title, "session opened");
 
     Ok(SessionHandle {
@@ -566,6 +592,22 @@ async fn spawn_session_handle(
         awaiting,
         _mcp_temp: mcp_temp,
     })
+}
+
+/// A1 (adherence): the one-shot session-start CL-opener nudge text for a
+/// session targeting `project`, or `None` for a repo-less / `_globals` session
+/// (no project conventions to page in). Distinct from the system-prompt CL
+/// INDEX primer (layer 2b, `render_cl_primer`) — this is a runtime stdin nudge
+/// delivered to each agent. Pure so it's unit-testable; the caller wraps it in
+/// the phase envelope before sending.
+fn cl_opener_nudge(project: Option<&str>) -> Option<String> {
+    let name = project.filter(|p| !p.is_empty() && *p != "_globals")?;
+    Some(format!(
+        "🔔 Session start — project `{name}`. Before the user's first task, call \
+         `cl_index_search(project=\"{name}\")` to load this project's conventions \
+         (formatter, test commands, gates) — they live in the Context Library, not \
+         the repo. Then wait for the user's task; take no other action yet."
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1057,6 +1099,18 @@ mod tests {
         paths.init().unwrap();
         let prompt = read_system_prompt(&paths, "brian", Some("foo"), None, None).unwrap();
         assert!(!prompt.contains("Project CL — files available"));
+    }
+
+    #[test]
+    fn cl_opener_nudge_fires_for_real_project_only() {
+        // A1: the session-start nudge pages the agent at cl_index_search for a
+        // real project, and is absent for repo-less / _globals / empty sessions
+        // (no project conventions to load).
+        let nudge = cl_opener_nudge(Some("bot-hq")).expect("real project gets a nudge");
+        assert!(nudge.contains("cl_index_search(project=\"bot-hq\")"));
+        assert_eq!(cl_opener_nudge(None), None, "repo-less session: no nudge");
+        assert_eq!(cl_opener_nudge(Some("_globals")), None, "_globals: no nudge");
+        assert_eq!(cl_opener_nudge(Some("")), None, "empty project: no nudge");
     }
 
     #[test]

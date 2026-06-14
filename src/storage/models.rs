@@ -17,6 +17,13 @@ pub const RAIN_DISABLED_DEFAULT_KEY: &str = "rain_disabled_default";
 /// checkbox from it.
 pub const WORKTREE_DEFAULT_KEY: &str = "worktree_default";
 
+/// Key in `app_settings`: "0" = disable the Track-A workflow-adherence nudges
+/// (e.g. the session-start CL-index primer) that mechanically page a model
+/// toward the workflow when it doesn't reliably follow the prompt. Opt-OUT:
+/// unset or any value but "0" → nudges ON (the default). Resolved via
+/// [`Storage::adherence_nudges_enabled`].
+pub const ADHERENCE_NUDGES_KEY: &str = "adherence_nudges";
+
 impl Storage {
     // ---- models ----------------------------------------------------------
 
@@ -124,6 +131,16 @@ impl Storage {
             Ok(Some(v)) if v == "0"
         )
     }
+
+    /// Whether the Track-A workflow-adherence nudges fire. Opt-OUT: unset, any
+    /// value but "0", or a read error → ON (the default); `adherence_nudges ==
+    /// "0"` → OFF (revert to pure prompt-driven behavior).
+    pub async fn adherence_nudges_enabled(&self) -> bool {
+        !matches!(
+            self.get_setting(ADHERENCE_NUDGES_KEY).await,
+            Ok(Some(v)) if v == "0"
+        )
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +220,19 @@ mod tests {
         assert!(!s.default_worktree_enabled().await);
         s.set_setting(WORKTREE_DEFAULT_KEY, "1").await.unwrap();
         assert!(s.default_worktree_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn adherence_nudges_enabled_is_opt_out() {
+        let s = Storage::memory().await.unwrap();
+        // Unset → nudges on by default.
+        assert!(s.adherence_nudges_enabled().await);
+        // "0" → disabled.
+        s.set_setting(ADHERENCE_NUDGES_KEY, "0").await.unwrap();
+        assert!(!s.adherence_nudges_enabled().await);
+        // Any other value → on.
+        s.set_setting(ADHERENCE_NUDGES_KEY, "1").await.unwrap();
+        assert!(s.adherence_nudges_enabled().await);
     }
 
     #[tokio::test]
