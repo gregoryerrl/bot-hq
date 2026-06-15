@@ -365,8 +365,16 @@ pub async fn cl_write_file(
             .canonicalize()
             .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))?;
         let candidate_real = resolve_existing_cl_file(&project_root_real, &file_path)?;
-        std::fs::write(&candidate_real, content.as_bytes())
-            .map_err(|e| AppError::Internal(format!("write: {e}")))?;
+        // Atomic write: a sibling temp in the SAME directory (intra-filesystem,
+        // no cross-mount EXDEV) then rename into place — so a crash mid-write
+        // can't leave the file truncated or half-written.
+        let mut tmp = candidate_real.clone().into_os_string();
+        tmp.push(".bot-hq-tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        std::fs::write(&tmp, content.as_bytes())
+            .map_err(|e| AppError::Internal(format!("write temp: {e}")))?;
+        std::fs::rename(&tmp, &candidate_real)
+            .map_err(|e| AppError::Internal(format!("rename temp into place: {e}")))?;
         Ok::<(), AppError>(())
     })
     .await
