@@ -10,7 +10,7 @@ const mockInvoke = vi.mocked(invoke);
 function renderEditor() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const tab = { kind: "file" as const, project: "p", filePath: "a.md" };
-  return render(
+  const utils = render(
     <QueryClientProvider client={qc}>
       <EditorArea
         tabs={[tab]}
@@ -27,6 +27,7 @@ function renderEditor() {
       />
     </QueryClientProvider>,
   );
+  return { qc, ...utils };
 }
 
 describe("Context Library editor", () => {
@@ -82,6 +83,51 @@ describe("Context Library editor", () => {
     await waitFor(() =>
       expect(screen.queryByText("UNSAVED CHANGES")).not.toBeInTheDocument(),
     );
+  });
+
+  it("live-refreshes an open file when clean, but preserves unsaved edits", async () => {
+    let stored = "v1";
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cl_read_file") {
+        return {
+          project: "p",
+          file_path: "a.md",
+          content: stored,
+          size_bytes: stored.length,
+          truncated: false,
+          binary: false,
+        };
+      }
+      return [];
+    });
+
+    const { qc } = renderEditor();
+    const textarea = await screen.findByLabelText("File content editor");
+    expect(textarea).toHaveValue("v1");
+
+    // External change while the editor is CLEAN → adopt the new content.
+    stored = "v2 external";
+    await qc.invalidateQueries({ queryKey: ["cl_read_file"] });
+    await waitFor(() => expect(textarea).toHaveValue("v2 external"));
+    expect(screen.queryByText("UNSAVED CHANGES")).not.toBeInTheDocument();
+
+    // Type unsaved edits, then an external change → keep the user's text.
+    fireEvent.change(textarea, { target: { value: "my local edits" } });
+    expect(await screen.findByText("UNSAVED CHANGES")).toBeInTheDocument();
+
+    const readsBefore = mockInvoke.mock.calls.filter(
+      (c) => c[0] === "cl_read_file",
+    ).length;
+    stored = "v3 external";
+    await qc.invalidateQueries({ queryKey: ["cl_read_file"] });
+    await waitFor(() =>
+      expect(
+        mockInvoke.mock.calls.filter((c) => c[0] === "cl_read_file").length,
+      ).toBeGreaterThan(readsBefore),
+    );
+    // The dirty editor must NOT be clobbered by the external change.
+    expect(textarea).toHaveValue("my local edits");
+    expect(screen.getByText("UNSAVED CHANGES")).toBeInTheDocument();
   });
 
   it("is read-only for binary files and blocks saving", async () => {

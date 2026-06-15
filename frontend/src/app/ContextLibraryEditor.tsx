@@ -306,10 +306,29 @@ function EditorPane({
   });
 
   // Editable working copy. EditorArea keys EditorPane by path, so this pane
-  // remounts per file — a one-shot seed when content first arrives is enough
-  // (there's no cross-file stale draft to clear).
+  // remounts per file; a one-shot seed handles the first load.
   const [draft, setDraft] = useState<string | null>(null);
   if (draft === null && fileContent) setDraft(fileContent.content);
+
+  // Live-refresh the open file when it changes on disk (external edit, agent
+  // write, cloud sync) — the `cl:changed` watcher event invalidates this query,
+  // and we adopt the new server content ONLY when the editor is clean. A dirty
+  // editor keeps the user's unsaved text (last-write-wins on save).
+  // `syncedContent` is the server content the draft was last synced to.
+  const syncedContent = useRef<string | null>(null);
+  useEffect(() => {
+    if (!fileContent) return;
+    const old = syncedContent.current;
+    const incoming = fileContent.content;
+    if (old === null) {
+      syncedContent.current = incoming; // record the baseline after the first load
+      return;
+    }
+    if (incoming === old) return; // no external change
+    syncedContent.current = incoming;
+    // Clean (draft still equals the last-synced content) → adopt; dirty → keep.
+    setDraft((prev) => (prev === old ? incoming : prev));
+  }, [fileContent]);
 
   // Refuse edits that would lose data on save: a truncated read (we only hold
   // the first 1 MB) or a binary / non-UTF-8 file (content is a lossy decode,

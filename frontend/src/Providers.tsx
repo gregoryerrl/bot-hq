@@ -52,12 +52,15 @@ const CLOSE_KEYS = [
 // the SQLite index for the changed scope, so refetching here reads fresh rows.
 // Invalidation is prefix-based (queryKey is `[command]`), so this refreshes every
 // project's CL nav regardless of the event's `project` payload — fine, CL writes
-// are infrequent. NOTE: `cl_read_file` is deliberately EXCLUDED — EditorPane seeds
-// its editable `draft` once on mount and never re-syncs from the query, so
-// invalidating an open file wouldn't update the textarea (sticky draft) and would
-// only flip a clean editor into a spurious "dirty" state. Live open-file refresh
-// needs an editor-side draft re-seed — a separate follow-up.
-const CL_KEYS = ["cl_index_search", "list_projects", "cl_folder_search"] as const;
+// are infrequent. `cl_read_file` IS included: EditorPane re-seeds its draft from
+// the refetched content only when the editor is clean (see ContextLibraryEditor.tsx),
+// so an open file live-refreshes on an external change without clobbering unsaved edits.
+const CL_KEYS = [
+  "cl_index_search",
+  "list_projects",
+  "cl_folder_search",
+  "cl_read_file",
+] as const;
 // Working-tree freshness: the fs watcher fires `session:worktree_changed` when a
 // file changes inside a live session's repo, so the Apply-tab diff re-runs live
 // (not just on a phase/doc write).
