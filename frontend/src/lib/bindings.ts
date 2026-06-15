@@ -42,6 +42,20 @@ async getSession(sessionId: string) : Promise<Result<SessionInfo | null, AppErro
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Resolve a session's project + how it was derived, so the gear tab can show
+ * WHY the session inherited its policy (registered repo vs path basename vs
+ * no project → general). Deterministic from the session's repo paths — no
+ * persisted column needed.
+ */
+async getSessionProjectInfo(sessionId: string) : Promise<Result<SessionProjectInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_session_project_info", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async checkSessionDirty(sessionId: string) : Promise<Result<SessionDirty, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_session_dirty", { sessionId }) };
@@ -1074,6 +1088,33 @@ branch_pattern?: string;
  */
 commit_style?: string }
 /**
+ * Shared spawn logic for both fresh and existing sessions: spawn Brian + Rain,
+ * kick the duo pumps, return the handle.
+ * Resolve a session's project from its repo paths. A registered project
+ * whose `working_repo_path` matches wins (matched against the BASE repo
+ * first — a worktree session's path ends in the repo basename, not
+ * necessarily the project name); the path basename stays as the fallback
+ * for unregistered repos. Repo-less sessions resolve to `None` (general
+ * policy applies by inheritance).
+ * How a session's project name was derived from its repo path — surfaced in
+ * the gear tab (policy-origin badge) so the user can see WHY a session
+ * inherited a given policy. The 2026-06-11 "why the full forbidden list?"
+ * surprise was an unregistered repo silently resolving to general policy.
+ */
+export type ProjectProvenance = 
+/**
+ * Matched a registered project's working-repo path (canonical compare).
+ */
+"registered" | 
+/**
+ * No registered match — fell back to the repo's path basename.
+ */
+"inferred" | 
+/**
+ * Repo-less session — no project; general policy applies by inheritance.
+ */
+"none"
+/**
  * Project as exposed to the frontend. Drives the project-filter dropdown
  * in ContextLibrary and (eventually) the New-Session repo picker.
  */
@@ -1133,6 +1174,15 @@ base_repo_path: string | null; archived: boolean; created_at: string; closed_at:
  * False = solo-Brian session (Rain disabled at create).
  */
 rain_enabled: boolean }
+export type SessionProjectInfo = { 
+/**
+ * Resolved project name, or None for a repo-less session.
+ */
+project: string | null; 
+/**
+ * How `project` was derived — drives the gear-tab policy-origin badge.
+ */
+provenance: ProjectProvenance }
 /**
  * One durable `session_tray` row, projected for the session-view Tray tab.
  * Unlike [`PendingChoiceView`] (live in-memory pending only), this surfaces
