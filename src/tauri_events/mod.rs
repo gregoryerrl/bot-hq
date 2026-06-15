@@ -14,8 +14,10 @@
 
 pub mod batch_emitter;
 pub mod bridge_subscriber;
+pub mod fs_watcher;
 pub mod types;
 
 pub use batch_emitter::BatchEmitter;
 pub use bridge_subscriber::spawn_subscriber;
+pub use fs_watcher::spawn_fs_watcher;
 pub use types::{AgentMessage, AwaitingUser, ChoiceResolvedEvent, PhaseChangedEvent};

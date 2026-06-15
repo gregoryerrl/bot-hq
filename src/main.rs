@@ -263,6 +263,8 @@ fn main() -> Result<()> {
     let rt_for_setup = rt.clone();
     let core_for_setup = Arc::clone(&core);
     let registry_for_setup = Arc::clone(&registry);
+    let bridge_for_fs = Arc::clone(&bridge_arc);
+    let paths_for_fs = paths.clone();
 
     tauri::Builder::default()
         // Opener plugin — the update banner's "Download" button opens the
@@ -307,6 +309,23 @@ fn main() -> Result<()> {
                     }
                 },
             );
+            // Filesystem watcher → CL/EOD freshness. Watches the Context Library
+            // dir; on a debounced change it re-syncs the index for the affected
+            // scope and emits `cl:changed` so the UI refetches the now-current
+            // index. Best-effort — a failure here just leaves CL views on their
+            // existing poll. (Inside the rt guard above, so its tokio::spawn works.)
+            let app_handle_for_fs = app.handle().clone();
+            if let Err(e) = tauri_events::spawn_fs_watcher(
+                paths_for_fs,
+                bridge_for_fs,
+                move |name: &str, payload: Value| {
+                    if let Err(e) = app_handle_for_fs.emit(name, &payload) {
+                        tracing::warn!(?e, event = name, "emit fs event failed");
+                    }
+                },
+            ) {
+                tracing::warn!(?e, "fs watcher failed to start; CL/EOD views fall back to polling");
+            }
             // SessionCloseRequest handler. The agent-facing `close_session`
             // MCP tool only broadcasts a SignalingEvent::SessionCloseRequest;
             // nothing consumed it before (bridge_subscriber deliberately skips

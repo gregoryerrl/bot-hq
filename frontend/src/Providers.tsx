@@ -48,6 +48,16 @@ const CLOSE_KEYS = [
   "list_closed_sessions",
   "list_pending_tray",
 ] as const;
+// Filesystem-watcher CL freshness. `cl:changed` fires AFTER the watcher re-syncs
+// the SQLite index for the changed scope, so refetching here reads fresh rows.
+// Invalidation is prefix-based (queryKey is `[command]`), so this refreshes every
+// project's CL nav regardless of the event's `project` payload — fine, CL writes
+// are infrequent. NOTE: `cl_read_file` is deliberately EXCLUDED — EditorPane seeds
+// its editable `draft` once on mount and never re-syncs from the query, so
+// invalidating an open file wouldn't update the textarea (sticky draft) and would
+// only flip a clean editor into a spurious "dirty" state. Live open-file refresh
+// needs an editor-side draft re-seed — a separate follow-up.
+const CL_KEYS = ["cl_index_search", "list_projects", "cl_folder_search"] as const;
 
 /**
  * Event-driven cache invalidation: each backend `session:*` event invalidates
@@ -68,6 +78,7 @@ function GlobalEventSync() {
   const onTray = useCallback(() => invalidate(TRAY_KEYS), [invalidate]);
   const onPhase = useCallback(() => invalidate(PHASE_KEYS), [invalidate]);
   const onDoc = useCallback(() => invalidate(DOC_KEYS), [invalidate]);
+  const onCl = useCallback(() => invalidate(CL_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
   const clearHealth = useHealthStore((s) => s.clearSession);
   const onClose = useCallback(
@@ -88,7 +99,14 @@ function GlobalEventSync() {
   // can't be left stale. This is what lets us drop the fixed-interval safety
   // polls (PendingTray/phase/pending-choices) that previously filled this gap.
   const onResync = useCallback(
-    () => invalidate([...TRAY_KEYS, ...PHASE_KEYS, ...DOC_KEYS, ...CLOSE_KEYS]),
+    () =>
+      invalidate([
+        ...TRAY_KEYS,
+        ...PHASE_KEYS,
+        ...DOC_KEYS,
+        ...CLOSE_KEYS,
+        ...CL_KEYS,
+      ]),
     [invalidate],
   );
 
@@ -98,6 +116,7 @@ function GlobalEventSync() {
   useTauriEvent("session:halt_cleared", onTray, [onTray]);
   useTauriEvent("session:phase_changed", onPhase, [onPhase]);
   useTauriEvent("session:doc_changed", onDoc, [onDoc]);
+  useTauriEvent("cl:changed", onCl, [onCl]);
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
   useTauriEvent("session:resync", onResync, [onResync]);

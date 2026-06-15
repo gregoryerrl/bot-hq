@@ -132,6 +132,22 @@ impl AgentHealthEvent {
     pub const EVENT_NAME: &'static str = "session:agent_health";
 }
 
+/// Emitted by the filesystem watcher when a Context Library file changed on disk
+/// (after the index was re-synced for the affected scope). `project` is the CL
+/// scope: a named project, or `None` for `_globals`/root files (`eod.md`,
+/// `tasks.md`, `agents/…`). The frontend invalidates its whole CL query family
+/// regardless of the scope (prefix-based invalidation), so this field is
+/// informational — it's here for future scoped consumers + parity with the other
+/// typed events.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ClChangedEvent {
+    pub project: Option<String>,
+}
+
+impl ClChangedEvent {
+    pub const EVENT_NAME: &'static str = "cl:changed";
+}
+
 /// Plugin lifecycle event names emitted to the frontend PluginManager, which
 /// listens for the same strings. Centralized so an emit site and the listener
 /// can't drift independently.
