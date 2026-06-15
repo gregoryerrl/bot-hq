@@ -42,6 +42,7 @@ bot-hq.db
 /frontend/node_modules/
 /frontend/dist/
 /frontend/.vite/
+/.vite/
 /frontend/tsconfig.tsbuildinfo
 /frontend/**/tsconfig.tsbuildinfo
 
