@@ -103,6 +103,42 @@ pub fn parse_diff_lines(diff: &str) -> Vec<DiffLine> {
         .collect()
 }
 
+/// Add-only diff for each untracked, non-ignored file in `repo`, so brand-new
+/// files — invisible to plain `git diff`, which is tracked-only — still render
+/// in the Apply tab. Side-effect free: compares each file against the null
+/// device via `git diff --no-index` rather than `git add -N`, so the agent's
+/// index is never mutated.
+fn untracked_diff(repo: &std::path::Path) -> String {
+    // NUL-separated list of untracked paths, honoring .gitignore via
+    // --exclude-standard (so target/, node_modules/, etc. stay out).
+    let listing = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "--others", "--exclude-standard", "-z"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return String::new(),
+    };
+    let mut acc = String::new();
+    for raw in listing.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        let path = String::from_utf8_lossy(raw);
+        // `git diff --no-index` exits 1 when the files differ — the normal case
+        // for a new file, NOT an error — so we read stdout regardless of status.
+        // TODO(win): swap `/dev/null` for the `NUL` device when Windows is a target.
+        if let Ok(out) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["diff", "--no-index", "--no-color", "--", "/dev/null"])
+            .arg(path.as_ref())
+            .output()
+        {
+            acc.push_str(&String::from_utf8_lossy(&out.stdout));
+        }
+    }
+    acc
+}
+
 /// Result of `compute_apply_diff`: the classified diff lines plus an
 /// optional human-readable note (e.g., the session-start anchor was lost
 /// and we fell back to `git diff HEAD`).
@@ -151,7 +187,11 @@ pub async fn compute_apply_diff(
             if !out.status.success() {
                 return Ok((String::new(), Some("git diff failed".to_string())));
             }
-            let diff = String::from_utf8_lossy(&out.stdout).into_owned();
+            let mut diff = String::from_utf8_lossy(&out.stdout).into_owned();
+            // Append add-only diffs for untracked/new files — the `git diff`
+            // above is tracked-only, so without this a brand-new file (`??` in
+            // `git status`) is invisible in the Apply tab.
+            diff.push_str(&untracked_diff(&repo));
             Ok((diff, note))
         },
     )
@@ -395,5 +435,41 @@ rename to new";
         let lines = parse_diff_lines(diff);
         assert_eq!(lines[0].kind, "file");
         assert_eq!(lines[1].kind, "remove");
+    }
+
+    #[test]
+    fn untracked_diff_includes_new_files_and_respects_gitignore() {
+        use std::fs;
+        use std::process::Command;
+        let dir = std::env::temp_dir()
+            .join(format!("bothq_untracked_diff_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git available")
+        };
+        assert!(git(&["init"]).status.success());
+        // `.gitignore` is read from the working tree — no commit needed.
+        fs::write(dir.join(".gitignore"), "secret.txt\n").unwrap();
+        fs::write(dir.join("new.txt"), "BRAND_NEW_LINE\n").unwrap();
+        fs::write(dir.join("secret.txt"), "SHOULD_NOT_APPEAR\n").unwrap();
+
+        let out = untracked_diff(&dir);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(out.contains("new.txt"), "new file path missing:\n{out}");
+        assert!(
+            out.contains("BRAND_NEW_LINE"),
+            "new file content missing:\n{out}"
+        );
+        assert!(
+            !out.contains("SHOULD_NOT_APPEAR"),
+            "gitignored file leaked into the diff:\n{out}"
+        );
     }
 }
