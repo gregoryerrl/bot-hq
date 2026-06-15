@@ -58,6 +58,10 @@ const CLOSE_KEYS = [
 // only flip a clean editor into a spurious "dirty" state. Live open-file refresh
 // needs an editor-side draft re-seed — a separate follow-up.
 const CL_KEYS = ["cl_index_search", "list_projects", "cl_folder_search"] as const;
+// Working-tree freshness: the fs watcher fires `session:worktree_changed` when a
+// file changes inside a live session's repo, so the Apply-tab diff re-runs live
+// (not just on a phase/doc write).
+const WORKTREE_KEYS = ["compute_apply_diff"] as const;
 
 /**
  * Event-driven cache invalidation: each backend `session:*` event invalidates
@@ -79,6 +83,7 @@ function GlobalEventSync() {
   const onPhase = useCallback(() => invalidate(PHASE_KEYS), [invalidate]);
   const onDoc = useCallback(() => invalidate(DOC_KEYS), [invalidate]);
   const onCl = useCallback(() => invalidate(CL_KEYS), [invalidate]);
+  const onWorktree = useCallback(() => invalidate(WORKTREE_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
   const clearHealth = useHealthStore((s) => s.clearSession);
   const onClose = useCallback(
@@ -106,6 +111,7 @@ function GlobalEventSync() {
         ...DOC_KEYS,
         ...CLOSE_KEYS,
         ...CL_KEYS,
+        ...WORKTREE_KEYS,
       ]),
     [invalidate],
   );
@@ -117,6 +123,7 @@ function GlobalEventSync() {
   useTauriEvent("session:phase_changed", onPhase, [onPhase]);
   useTauriEvent("session:doc_changed", onDoc, [onDoc]);
   useTauriEvent("cl:changed", onCl, [onCl]);
+  useTauriEvent("session:worktree_changed", onWorktree, [onWorktree]);
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
   useTauriEvent("session:resync", onResync, [onResync]);

@@ -39,6 +39,11 @@ pub struct AppState {
     /// has to wait for this to be filled. `OnceCell` because it's write-once
     /// at startup; no contention.
     pub app_handle: std::sync::OnceLock<tauri::AppHandle>,
+    /// Populated from Tauri's `setup()` once the filesystem watcher is up. The
+    /// session spawn/close paths register + unregister working repos here so each
+    /// session's Apply-tab diff updates live. `OnceLock` — write-once at startup,
+    /// like `app_handle`.
+    pub fs_watcher: std::sync::OnceLock<crate::tauri_events::WatcherHandle>,
 }
 
 impl AppState {
@@ -55,6 +60,7 @@ impl AppState {
             spawn_gate: Mutex::new(()),
             external_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
+            fs_watcher: std::sync::OnceLock::new(),
         }
     }
 
@@ -78,6 +84,7 @@ impl AppState {
         )
         .await?;
         let id = handle.id.clone();
+        self.watch_session_repo(&id, &handle);
         self.sessions.lock().await.insert(id.clone(), handle);
         Ok(id)
     }
@@ -125,6 +132,7 @@ impl AppState {
             self.signaling_addr,
         )
         .await?;
+        self.watch_session_repo(session_id, &handle);
         self.sessions
             .lock()
             .await
@@ -155,6 +163,17 @@ impl AppState {
         self.ensure_session_started(session_id).await
     }
 
+    /// Register a session's working repo with the filesystem watcher so its
+    /// Apply-tab diff updates live on file changes. No-op if the watcher isn't up
+    /// yet or the session has no working repo.
+    fn watch_session_repo(&self, id: &str, handle: &SessionHandle) {
+        if let (Some(watcher), Some(repo)) =
+            (self.fs_watcher.get(), handle.working_repo_path.as_ref())
+        {
+            watcher.add_repo(id, repo.clone());
+        }
+    }
+
     pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
         if let Some(mut handle) = sessions.remove(id) {
@@ -162,6 +181,10 @@ impl AppState {
             if let Some(rain) = handle.rain.as_mut() {
                 rain.kill();
             }
+        }
+        // Stop live-watching this session's working repo.
+        if let Some(watcher) = self.fs_watcher.get() {
+            watcher.remove_repo(id);
         }
         self.storage.close_session(id, archive).await?;
         // The session's pending tray items are moot now the agents are gone —

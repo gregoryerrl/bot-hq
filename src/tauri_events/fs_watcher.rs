@@ -1,55 +1,97 @@
-//! Filesystem watcher: keeps Context Library / EOD views fresh without polling.
+//! Filesystem watcher: live CL/EOD freshness AND live Apply-tab working-tree diffs.
 //!
-//! `notify` (via `notify-debouncer-mini`) reports changes under the CL dir. For
-//! each debounced batch we derive the affected CL *scope* (`projects/<name>/…` →
-//! that project; root files / `agents/…` → `_globals`), re-index that scope via
-//! the existing [`SignalingBridge::cl_rescan`] (which reconciles disk↔index:
-//! add / touch / orphan-delete), THEN emit `cl:changed` so the frontend refetches
-//! the now-current index.
+//! One `notify` debouncer watches the Context Library dir plus every live
+//! session's working repo (registered/unregistered via [`WatcherHandle`]). For
+//! each debounced batch of changed paths:
 //!
-//! Re-indexing BEFORE the emit is load-bearing: `cl_index_search` reads the
-//! SQLite index, not disk, so emitting without a rescan would just refresh stale
-//! rows (and never surface brand-new files).
+//! - paths under the CL dir → derive the CL *scope* (`projects/<name>/…` → that
+//!   project; root files / `agents/…` → `_globals`), re-index it via the existing
+//!   [`SignalingBridge::cl_rescan`] (disk↔index reconcile), THEN emit `cl:changed`
+//!   so the frontend refetches the now-current index. Re-indexing BEFORE the emit
+//!   is load-bearing: `cl_index_search` reads the SQLite index, not disk.
+//! - paths under a watched session repo → map back to the session and emit
+//!   `session:worktree_changed`, so the Apply-tab `git diff` re-runs live. Build /
+//!   VCS churn (`target/`, `node_modules/`, `.git/`, …) is filtered out so a
+//!   `cargo build` / `npm ci` doesn't spam recomputes.
 //!
-//! `notify`'s callback is synchronous and runs on its own thread, so it merely
-//! forwards changed paths over an mpsc channel to a tokio task that performs the
-//! async rescan + emit. The task owns the debouncer, so the watch stays alive for
-//! the process lifetime.
+//! `notify`'s callback is synchronous (its own thread); it just forwards changed
+//! paths over an mpsc channel to a tokio task. That task owns the debouncer (so
+//! the watch lives for the process lifetime) and also mutates its watch-set as
+//! sessions come and go, driven by a second `WatchCmd` channel.
 
 use crate::signaling::SignalingBridge;
 use crate::storage::Project;
-use crate::tauri_events::types::ClChangedEvent;
+use crate::tauri_events::types::{ClChangedEvent, WorktreeChangedEvent};
 use notify_debouncer_mini::notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc::UnboundedSender;
 
-/// Debounce window for CL filesystem changes. Long enough to coalesce an
-/// editor's save burst, short enough to feel immediate.
-const CL_DEBOUNCE: Duration = Duration::from_millis(400);
+/// Debounce window for filesystem changes. One debouncer covers both the CL dir
+/// and every watched session repo, so this is a single compromise window — long
+/// enough to coalesce an editor's / a git op's burst, short enough to feel live.
+const DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// Start watching the Context Library dir. Best-effort: returns the `notify`
-/// error if the watcher can't be created (the caller logs it and CL views fall
-/// back to their existing poll). `emit` is the same `app.emit`-backed closure
-/// the bridge subscriber uses.
+/// Build / VCS directories whose churn must never trigger an A-tab recompute.
+/// (Dot-prefixed names — `.git`, `.vite`, `.next`, … — are caught by the
+/// `.`-prefix rule in [`is_ignored_component`], so they're not repeated here.)
+const IGNORED_DIRS: &[&str] = &["target", "node_modules", "dist", "build", "__pycache__"];
+
+/// Command into the watcher task. Lets the session spawn/close paths register
+/// and unregister working repos for live A-tab diffs.
+enum WatchCmd {
+    AddRepo { session_id: String, path: PathBuf },
+    RemoveRepo { session_id: String },
+}
+
+/// Handle to the running filesystem watcher, stored on `AppState`. Sending a
+/// command is non-async and best-effort (a dead task just means no watch).
+pub struct WatcherHandle {
+    cmd_tx: UnboundedSender<WatchCmd>,
+}
+
+impl WatcherHandle {
+    /// Start live-watching a session's working repo for A-tab diffs.
+    pub fn add_repo(&self, session_id: &str, path: PathBuf) {
+        let _ = self.cmd_tx.send(WatchCmd::AddRepo {
+            session_id: session_id.to_string(),
+            path,
+        });
+    }
+
+    /// Stop watching a session's working repo (on session close).
+    pub fn remove_repo(&self, session_id: &str) {
+        let _ = self.cmd_tx.send(WatchCmd::RemoveRepo {
+            session_id: session_id.to_string(),
+        });
+    }
+}
+
+/// Start watching the Context Library dir. Returns a [`WatcherHandle`] for
+/// registering session repos later, or the `notify` error if the watcher can't
+/// be created (the caller logs it; views fall back to their existing poll).
+/// `emit` is the same `app.emit`-backed closure the bridge subscriber uses.
 pub fn spawn_fs_watcher<EB>(
     paths: crate::paths::Paths,
     bridge: Arc<SignalingBridge>,
     emit: EB,
-) -> Result<(), notify_debouncer_mini::notify::Error>
+) -> Result<WatcherHandle, notify_debouncer_mini::notify::Error>
 where
     EB: Fn(&str, Value) + Send + Sync + 'static,
 {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+    let (path_tx, mut path_rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WatchCmd>();
 
     // notify's callback is sync + on its own thread — just forward the paths.
-    let mut debouncer = new_debouncer(CL_DEBOUNCE, move |res: DebounceEventResult| {
+    let mut debouncer = new_debouncer(DEBOUNCE, move |res: DebounceEventResult| {
         if let Ok(events) = res {
             for ev in events {
-                let _ = tx.send(ev.path);
+                let _ = path_tx.send(ev.path);
             }
         }
     })?;
@@ -59,39 +101,73 @@ where
 
     let cl_dir = paths.cl_dir.clone();
     tokio::spawn(async move {
-        // Own the debouncer here so the watch lives as long as this task (the
-        // whole app); dropping it would stop the watch.
-        let _debouncer = debouncer;
-        while let Some(first) = rx.recv().await {
-            // Coalesce any paths already queued behind this one into one pass.
-            let mut batch = vec![first];
-            while let Ok(p) = rx.try_recv() {
-                batch.push(p);
-            }
-            let scopes: BTreeSet<String> = batch
-                .iter()
-                .filter_map(|p| scope_for_path(p, &cl_dir))
-                .collect();
-            for scope in scopes {
-                // Re-index disk→SQLite for this scope BEFORE telling the UI to
-                // refetch, or it would re-read a stale index.
-                if let Err(e) = bridge.cl_rescan(&scope).await {
-                    tracing::warn!(error = ?e, scope = %scope, "fs watcher: cl_rescan failed");
-                    continue;
-                }
-                let project = if scope == Project::GLOBALS {
-                    None
-                } else {
-                    Some(scope)
-                };
-                emit(
-                    ClChangedEvent::EVENT_NAME,
-                    serde_json::to_value(ClChangedEvent { project }).unwrap_or(Value::Null),
-                );
+        // Own the debouncer so the watch lives as long as this task (the whole
+        // app); we also mutate its watch-set as sessions register/unregister.
+        let mut debouncer = debouncer;
+        // Watched session repos: repo root → session_id.
+        let mut repos: HashMap<PathBuf, String> = HashMap::new();
+        loop {
+            tokio::select! {
+                Some(cmd) = cmd_rx.recv() => match cmd {
+                    WatchCmd::AddRepo { session_id, path } => {
+                        match debouncer.watcher().watch(&path, RecursiveMode::Recursive) {
+                            Ok(()) => {
+                                repos.insert(path, session_id);
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = ?e, ?path, "fs watcher: failed to watch session repo");
+                            }
+                        }
+                    }
+                    WatchCmd::RemoveRepo { session_id } => {
+                        let gone: Vec<PathBuf> = repos
+                            .iter()
+                            .filter(|(_, sid)| **sid == session_id)
+                            .map(|(p, _)| p.clone())
+                            .collect();
+                        for p in gone {
+                            let _ = debouncer.watcher().unwatch(&p);
+                            repos.remove(&p);
+                        }
+                    }
+                },
+                Some(first) = path_rx.recv() => {
+                    let mut batch = vec![first];
+                    while let Ok(p) = path_rx.try_recv() {
+                        batch.push(p);
+                    }
+                    // CL files → re-index the affected scope, then emit cl:changed.
+                    let cl_scopes: BTreeSet<String> =
+                        batch.iter().filter_map(|p| scope_for_path(p, &cl_dir)).collect();
+                    for scope in cl_scopes {
+                        // Re-index disk→SQLite BEFORE telling the UI to refetch,
+                        // or it would re-read a stale index.
+                        if let Err(e) = bridge.cl_rescan(&scope).await {
+                            tracing::warn!(error = ?e, scope = %scope, "fs watcher: cl_rescan failed");
+                            continue;
+                        }
+                        let project = if scope == Project::GLOBALS { None } else { Some(scope) };
+                        emit(
+                            ClChangedEvent::EVENT_NAME,
+                            serde_json::to_value(ClChangedEvent { project }).unwrap_or(Value::Null),
+                        );
+                    }
+                    // Working-repo files → the session's A-tab diff is now stale.
+                    let sessions: BTreeSet<String> =
+                        batch.iter().filter_map(|p| session_for_path(p, &repos)).collect();
+                    for session_id in sessions {
+                        emit(
+                            WorktreeChangedEvent::EVENT_NAME,
+                            serde_json::to_value(WorktreeChangedEvent { session_id })
+                                .unwrap_or(Value::Null),
+                        );
+                    }
+                },
+                else => break,
             }
         }
     });
-    Ok(())
+    Ok(WatcherHandle { cmd_tx })
 }
 
 /// Map a changed path to its CL scope, relative to the CL dir.
@@ -116,6 +192,33 @@ fn scope_for_path(path: &Path, cl_dir: &Path) -> Option<String> {
         Some((first, rest)) if *first == "projects" => rest.first().map(|name| name.to_string()),
         Some(_) => Some(Project::GLOBALS.to_string()),
         None => None,
+    }
+}
+
+/// Map a changed path under a watched session repo back to its session_id.
+/// `None` if the path is under no watched repo, or if it lives in a build / VCS
+/// dir whose churn shouldn't trigger an A-tab recompute.
+fn session_for_path(path: &Path, repos: &HashMap<PathBuf, String>) -> Option<String> {
+    for (root, session_id) in repos {
+        if let Ok(rel) = path.strip_prefix(root) {
+            if rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::Normal(n) if is_ignored_component(n)))
+            {
+                return None;
+            }
+            return Some(session_id.clone());
+        }
+    }
+    None
+}
+
+/// A path component to ignore: any hidden (`.`-prefixed) name — covers `.git`,
+/// `.vite`, `.next`, `.idea`, `.turbo`, editor temp dirs — or a known build dir.
+fn is_ignored_component(name: &OsStr) -> bool {
+    match name.to_str() {
+        Some(s) => s.starts_with('.') || IGNORED_DIRS.contains(&s),
+        None => false,
     }
 }
 
@@ -162,7 +265,6 @@ mod tests {
 
     #[test]
     fn scope_bare_projects_dir_is_none() {
-        // A change to `projects/` itself (no project subdir) has no scope.
         assert_eq!(scope_for_path(&cl().join("projects"), &cl()), None);
     }
 
@@ -172,5 +274,38 @@ mod tests {
             scope_for_path(Path::new("/somewhere/else/file.md"), &cl()),
             None
         );
+    }
+
+    fn repos_with(root: &str, sid: &str) -> HashMap<PathBuf, String> {
+        let mut m = HashMap::new();
+        m.insert(PathBuf::from(root), sid.to_string());
+        m
+    }
+
+    #[test]
+    fn session_for_source_file_maps_to_session() {
+        let repos = repos_with("/repo", "s1");
+        assert_eq!(
+            session_for_path(Path::new("/repo/src/main.rs"), &repos),
+            Some("s1".to_string())
+        );
+    }
+
+    #[test]
+    fn session_ignores_build_and_vcs_churn() {
+        let repos = repos_with("/repo", "s1");
+        assert_eq!(session_for_path(Path::new("/repo/target/debug/x"), &repos), None);
+        assert_eq!(session_for_path(Path::new("/repo/.git/index"), &repos), None);
+        assert_eq!(
+            session_for_path(Path::new("/repo/node_modules/a/b.js"), &repos),
+            None
+        );
+        assert_eq!(session_for_path(Path::new("/repo/.vite/dep.js"), &repos), None);
+    }
+
+    #[test]
+    fn session_for_path_outside_all_repos_is_none() {
+        let repos = repos_with("/repo", "s1");
+        assert_eq!(session_for_path(Path::new("/elsewhere/file"), &repos), None);
     }
 }

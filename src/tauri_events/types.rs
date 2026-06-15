@@ -148,6 +148,18 @@ impl ClChangedEvent {
     pub const EVENT_NAME: &'static str = "cl:changed";
 }
 
+/// Emitted by the filesystem watcher when a file changed inside a live session's
+/// working repo (build/VCS churn filtered out), so the Apply tab re-runs its
+/// `git diff` live instead of only on a phase/doc write.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct WorktreeChangedEvent {
+    pub session_id: String,
+}
+
+impl WorktreeChangedEvent {
+    pub const EVENT_NAME: &'static str = "session:worktree_changed";
+}
+
 /// Plugin lifecycle event names emitted to the frontend PluginManager, which
 /// listens for the same strings. Centralized so an emit site and the listener
 /// can't drift independently.

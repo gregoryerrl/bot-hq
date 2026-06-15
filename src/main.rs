@@ -315,7 +315,7 @@ fn main() -> Result<()> {
             // index. Best-effort — a failure here just leaves CL views on their
             // existing poll. (Inside the rt guard above, so its tokio::spawn works.)
             let app_handle_for_fs = app.handle().clone();
-            if let Err(e) = tauri_events::spawn_fs_watcher(
+            match tauri_events::spawn_fs_watcher(
                 paths_for_fs,
                 bridge_for_fs,
                 move |name: &str, payload: Value| {
@@ -324,7 +324,14 @@ fn main() -> Result<()> {
                     }
                 },
             ) {
-                tracing::warn!(?e, "fs watcher failed to start; CL/EOD views fall back to polling");
+                // Stash the handle so the session spawn/close paths can register
+                // working repos for live A-tab diffs (Phase 3).
+                Ok(handle) => {
+                    let _ = core_for_setup.fs_watcher.set(handle);
+                }
+                Err(e) => {
+                    tracing::warn!(?e, "fs watcher failed to start; CL/EOD + A-tab fall back to polling");
+                }
             }
             // SessionCloseRequest handler. The agent-facing `close_session`
             // MCP tool only broadcasts a SignalingEvent::SessionCloseRequest;
