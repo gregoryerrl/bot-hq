@@ -6,8 +6,8 @@
 use super::*;
 
 /// Full column projection for a `SessionTrayEntry` row — shared by
-/// `questions_for_session` and `get_question` so the two can't drift.
-const QUESTION_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
+/// `tray_entries_for_session` and `get_tray_entry` so the two can't drift.
+const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text";
 
 impl Storage {
@@ -16,7 +16,7 @@ impl Storage {
     /// otherwise. `supersedes_id` links to the question this one replaces
     /// (when an agent rephrases via `update_question`).
     #[allow(clippy::too_many_arguments)]
-    pub async fn insert_question(
+    pub async fn insert_tray_entry(
         &self,
         session_id: &str,
         choice_id: &str,
@@ -53,7 +53,7 @@ impl Storage {
     /// Mark a question as answered + record the picked option (for choices)
     /// or the typed reply (for open_ask). Idempotent on already-answered:
     /// returns Ok with 0 rows affected so callers don't have to guard.
-    pub async fn answer_question(&self, choice_id: &str, picked: &str) -> Result<u64> {
+    pub async fn answer_tray_entry(&self, choice_id: &str, picked: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE session_tray \
              SET status = 'answered', picked_option = ?, answered_at = ? \
@@ -89,7 +89,7 @@ impl Storage {
     }
 
     /// Mark a question as withdrawn (agent abandons it; never to be answered).
-    pub async fn withdraw_question(&self, choice_id: &str) -> Result<u64> {
+    pub async fn withdraw_tray_entry(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE session_tray \
              SET status = 'withdrawn' \
@@ -103,7 +103,7 @@ impl Storage {
     }
 
     /// Mark a question as superseded by another (agent rephrased).
-    pub async fn supersede_question(&self, choice_id: &str) -> Result<u64> {
+    pub async fn supersede_tray_entry(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE session_tray \
              SET status = 'superseded' \
@@ -119,9 +119,9 @@ impl Storage {
     /// Read all questions for a session, ordered oldest-first. Use for the
     /// in-chat tray (filter to status=pending in the UI) and the dashboard
     /// counter (count where status=pending).
-    pub async fn questions_for_session(&self, session_id: &str) -> Result<Vec<SessionTrayEntry>> {
+    pub async fn tray_entries_for_session(&self, session_id: &str) -> Result<Vec<SessionTrayEntry>> {
         let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
-            "SELECT {QUESTION_COLUMNS} FROM session_tray \
+            "SELECT {TRAY_COLUMNS} FROM session_tray \
              WHERE session_id = ? ORDER BY id ASC"
         ))
         .bind(session_id)
@@ -131,9 +131,9 @@ impl Storage {
     }
 
     /// Look up a question by its `choice_id`. Returns None if absent.
-    pub async fn get_question(&self, choice_id: &str) -> Result<Option<SessionTrayEntry>> {
+    pub async fn get_tray_entry(&self, choice_id: &str) -> Result<Option<SessionTrayEntry>> {
         let row = sqlx::query_as::<_, SessionTrayEntry>(&format!(
-            "SELECT {QUESTION_COLUMNS} FROM session_tray WHERE choice_id = ?"
+            "SELECT {TRAY_COLUMNS} FROM session_tray WHERE choice_id = ?"
         ))
         .bind(choice_id)
         .fetch_optional(&self.pool)
@@ -147,7 +147,7 @@ impl Storage {
     /// in-memory pending map.
     pub async fn pending_tray_open_sessions(&self) -> Result<Vec<SessionTrayEntry>> {
         let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
-            "SELECT {QUESTION_COLUMNS} FROM session_tray \
+            "SELECT {TRAY_COLUMNS} FROM session_tray \
              WHERE status = 'pending' \
                AND session_id IN \
                    (SELECT id FROM sessions WHERE closed_at IS NULL) \
@@ -203,7 +203,7 @@ mod tests {
     use super::*;
 
     async fn pending_count(s: &Storage, session_id: &str) -> usize {
-        s.questions_for_session(session_id)
+        s.tray_entries_for_session(session_id)
             .await
             .unwrap()
             .into_iter()
@@ -217,7 +217,7 @@ mod tests {
         s.create_session("open-1", "Open", None).await.unwrap();
         s.create_session("closed-1", "Closed", None).await.unwrap();
         let opts = vec!["A".to_string(), "B".to_string()];
-        s.insert_question(
+        s.insert_tray_entry(
             "open-1",
             "c-open",
             "brian",
@@ -229,7 +229,7 @@ mod tests {
         )
         .await
         .unwrap();
-        s.insert_question(
+        s.insert_tray_entry(
             "closed-1",
             "c-closed",
             "brian",

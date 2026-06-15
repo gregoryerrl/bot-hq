@@ -320,7 +320,7 @@ mod tests {
             .unwrap();
         let opts = vec!["Approve".to_string(), "Reject".to_string()];
         storage
-            .insert_question(
+            .insert_tray_entry(
                 "s1",
                 "cid-1",
                 "brian",
@@ -367,7 +367,7 @@ mod tests {
             .unwrap();
         let opts = vec!["Approve".to_string(), "Reject".to_string()];
         storage
-            .insert_question(
+            .insert_tray_entry(
                 "s1",
                 "cid-2",
                 "brian",

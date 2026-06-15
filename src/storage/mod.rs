@@ -2,7 +2,7 @@
 //! sqlx. The query methods are split across per-table submodules, each
 //! contributing its own `impl Storage` block:
 //!
-//! - [`sessions`], [`messages`], [`agent_config`], [`questions`],
+//! - [`sessions`], [`messages`], [`agent_config`], [`tray`],
 //!   [`projects`], [`cl_index`], [`session_docs`], [`plugins`]
 //!
 //! This module keeps the `Storage` struct, the `open`/`memory` constructors,
@@ -22,10 +22,10 @@ mod messages;
 mod models;
 mod plugins;
 mod projects;
-mod questions;
 mod session_docs;
 mod sessions;
 mod time;
+mod tray;
 
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{

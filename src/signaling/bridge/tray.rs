@@ -84,7 +84,7 @@ impl SignalingBridge {
             let storage_guard = self.storage.lock().await;
             match storage_guard.as_ref() {
                 Some(storage) => storage
-                    .get_question(&stale_choice_id)
+                    .get_tray_entry(&stale_choice_id)
                     .await
                     .ok()
                     .flatten()
@@ -96,7 +96,7 @@ impl SignalingBridge {
         {
             let storage_guard = self.storage.lock().await;
             if let Some(storage) = storage_guard.as_ref() {
-                let _ = storage.supersede_question(&stale_choice_id).await;
+                let _ = storage.supersede_tray_entry(&stale_choice_id).await;
             }
         }
         self.pending.lock().await.remove(&stale_choice_id);
@@ -136,7 +136,7 @@ impl SignalingBridge {
     ) -> Option<i64> {
         let storage_guard = self.storage.lock().await;
         let storage = storage_guard.as_ref()?;
-        let rows = storage.questions_for_session(session_id).await.ok()?;
+        let rows = storage.tray_entries_for_session(session_id).await.ok()?;
         let latest = rows
             .into_iter()
             .rev()
@@ -144,7 +144,7 @@ impl SignalingBridge {
         let stale_choice_id = latest.choice_id.clone();
         let stale_internal_id = latest.id;
         // Mark in storage first so the UI tray drops it on its next poll.
-        let _ = storage.supersede_question(&stale_choice_id).await;
+        let _ = storage.supersede_tray_entry(&stale_choice_id).await;
         drop(storage_guard);
         // Drop the parked oneshot so any (rare) still-listening client gets
         // the standard cancellation.
@@ -248,7 +248,7 @@ impl SignalingBridge {
             return;
         };
         if let Err(e) = storage
-            .insert_question(
+            .insert_tray_entry(
                 session_id,
                 choice_id,
                 agent,
@@ -276,7 +276,7 @@ impl SignalingBridge {
         drop(parked);
         let storage_guard = self.storage.lock().await;
         if let Some(storage) = storage_guard.as_ref() {
-            if let Err(e) = storage.withdraw_question(choice_id).await {
+            if let Err(e) = storage.withdraw_tray_entry(choice_id).await {
                 tracing::warn!(?e, choice_id, "withdraw_question storage update failed");
             }
         }
@@ -293,7 +293,7 @@ impl SignalingBridge {
         let Some(storage) = storage_guard.as_ref() else {
             return Ok(Vec::new());
         };
-        storage.questions_for_session(session_id).await
+        storage.tray_entries_for_session(session_id).await
     }
 
     /// All pending tray rows across OPEN sessions (closed sessions are
@@ -319,7 +319,7 @@ impl SignalingBridge {
         let flipped = {
             let storage_guard = self.storage.lock().await;
             match storage_guard.as_ref() {
-                Some(storage) => match storage.answer_question(choice_id, &picked).await {
+                Some(storage) => match storage.answer_tray_entry(choice_id, &picked).await {
                     Ok(rows) => rows == 1,
                     Err(e) => {
                         tracing::warn!(?e, choice_id, "answer_question storage update failed");
@@ -453,7 +453,7 @@ impl SignalingBridge {
                 let q = {
                     let storage_guard = self.storage.lock().await;
                     match storage_guard.as_ref() {
-                        Some(storage) => storage.get_question(choice_id).await?,
+                        Some(storage) => storage.get_tray_entry(choice_id).await?,
                         None => None,
                     }
                 };
@@ -713,7 +713,7 @@ mod tests {
         storage.create_session("s-reopen", "t", None).await.unwrap();
         let opts = vec!["Yes".to_string(), "No".to_string()];
         storage
-            .insert_question(
+            .insert_tray_entry(
                 "s-reopen",
                 "old-choice-id",
                 "brian",
@@ -749,7 +749,7 @@ mod tests {
             .any(|m| m.content.contains("(out-of-band)") && m.content.contains("Yes")));
         // Question row marked answered so the tray clears.
         let q = storage
-            .get_question("old-choice-id")
+            .get_tray_entry("old-choice-id")
             .await
             .unwrap()
             .unwrap();
@@ -770,7 +770,7 @@ mod tests {
         storage.create_session("s-oob", "t", None).await.unwrap();
         let opts = vec!["Yes".to_string(), "No".to_string()];
         storage
-            .insert_question(
+            .insert_tray_entry(
                 "s-oob",
                 "cid-oob",
                 "brian",
@@ -1121,7 +1121,7 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let rows = storage.questions_for_session("s1").await.unwrap();
+        let rows = storage.tray_entries_for_session("s1").await.unwrap();
         assert_eq!(rows.len(), 2, "two question rows expected");
         let first_row = &rows[0];
         let second_row = &rows[1];
@@ -1176,7 +1176,7 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let rows = storage.questions_for_session("s1").await.unwrap();
+        let rows = storage.tray_entries_for_session("s1").await.unwrap();
         let pending: Vec<_> = rows.iter().filter(|r| r.status == "pending").collect();
         assert_eq!(
             pending.len(),
@@ -1207,7 +1207,7 @@ mod tests {
         // supersede path so we have a clean "stale exists, nothing else
         // pending" state for the explicit tool to target).
         storage
-            .insert_question(
+            .insert_tray_entry(
                 "s1",
                 "stale-cid",
                 "brian",
@@ -1234,7 +1234,7 @@ mod tests {
         });
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        let rows = storage.questions_for_session("s1").await.unwrap();
+        let rows = storage.tray_entries_for_session("s1").await.unwrap();
         assert_eq!(rows.len(), 2);
         let stale = &rows[0];
         let fresh = &rows[1];
