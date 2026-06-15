@@ -164,7 +164,9 @@ impl SignalingBridge {
         // never returns a row the agent can't actually read.
         for path in &existing_paths {
             if !on_disk.contains_key(path) {
-                let _ = storage.delete_cl_index(project, path).await;
+                if let Err(e) = storage.delete_cl_index(project, path).await {
+                    tracing::warn!(?e, ?path, "failed to purge orphaned CL index row");
+                }
                 report.orphaned.push(path.clone());
             }
         }

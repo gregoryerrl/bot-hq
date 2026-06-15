@@ -96,7 +96,9 @@ impl SignalingBridge {
         {
             let storage_guard = self.storage.lock().await;
             if let Some(storage) = storage_guard.as_ref() {
-                let _ = storage.supersede_tray_entry(&stale_choice_id).await;
+                if let Err(e) = storage.supersede_tray_entry(&stale_choice_id).await {
+                    tracing::warn!(?e, %stale_choice_id, "supersede (explicit) storage update failed");
+                }
             }
         }
         self.pending.lock().await.remove(&stale_choice_id);
@@ -144,7 +146,9 @@ impl SignalingBridge {
         let stale_choice_id = latest.choice_id.clone();
         let stale_internal_id = latest.id;
         // Mark in storage first so the UI tray drops it on its next poll.
-        let _ = storage.supersede_tray_entry(&stale_choice_id).await;
+        if let Err(e) = storage.supersede_tray_entry(&stale_choice_id).await {
+            tracing::warn!(?e, %stale_choice_id, "supersede (auto) storage update failed");
+        }
         drop(storage_guard);
         // Drop the parked oneshot so any (rare) still-listening client gets
         // the standard cancellation.
