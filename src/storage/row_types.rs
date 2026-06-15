@@ -110,9 +110,6 @@ impl Message {
     pub fn author_typed(&self) -> Option<Author> {
         Author::parse(&self.author)
     }
-    pub fn kind_typed(&self) -> Option<MessageKind> {
-        MessageKind::parse(&self.kind)
-    }
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -230,14 +227,6 @@ pub struct SessionTrayEntry {
 }
 
 impl SessionTrayEntry {
-    pub fn kind_typed(&self) -> Option<QuestionKind> {
-        QuestionKind::parse(&self.kind)
-    }
-
-    pub fn status_typed(&self) -> Option<QuestionStatus> {
-        QuestionStatus::parse(&self.status)
-    }
-
     /// Decode `options_json` into a Vec<String>. Returns None for non-choice
     /// kinds or when the column is null/empty.
     pub fn options(&self) -> Option<Vec<String>> {
@@ -263,10 +252,6 @@ pub struct Project {
 
 impl Project {
     pub const GLOBALS: &'static str = "_globals";
-
-    pub fn is_globals(&self) -> bool {
-        self.name == Self::GLOBALS
-    }
 }
 
 /// A bot-hq plugin row. The plugin runtime is scaffolded in `src/plugin/`;
