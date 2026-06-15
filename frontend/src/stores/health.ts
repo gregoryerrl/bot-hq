@@ -44,9 +44,12 @@ export function worstHealth(h: SessionHealth | undefined): AgentHealth | undefin
 }
 
 /** App-wide footer summary: the worst state across all sessions + how many
- *  sessions sit in it. `ok` when nothing is retrying or dead. */
+ *  sessions sit in it. `ok` when nothing is retrying or dead; `idle` when no
+ *  agents are tracked at all (health is event-driven + in-memory, so it's empty
+ *  after a fresh launch until a reopened session's agent emits — don't claim
+ *  "OK" then). */
 export function appHealthSummary(bySession: Record<string, SessionHealth>): {
-  state: "ok" | "retrying" | "dead";
+  state: "ok" | "retrying" | "dead" | "idle";
   count: number;
 } {
   let dead = 0;
@@ -58,5 +61,6 @@ export function appHealthSummary(bySession: Record<string, SessionHealth>): {
   }
   if (dead > 0) return { state: "dead", count: dead };
   if (retrying > 0) return { state: "retrying", count: retrying };
+  if (Object.keys(bySession).length === 0) return { state: "idle", count: 0 };
   return { state: "ok", count: 0 };
 }

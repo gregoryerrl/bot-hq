@@ -7,7 +7,8 @@ import { useHealthStore, appHealthSummary } from "../stores/health";
 
 // B3: app-wide agent-health status in the footer (replaces the hardcoded green
 // "Online"). Worst-of all sessions from the B2 health store — green when all OK,
-// amber while any agent is recovering, red when any has stopped.
+// amber while any agent is recovering, red when any has stopped, grey when none
+// are tracked yet (e.g. a fresh launch before any session is reopened).
 function FooterStatus() {
   const bySession = useHealthStore((s) => s.bySession);
   const { state, count } = appHealthSummary(bySession);
@@ -15,6 +16,7 @@ function FooterStatus() {
     ok: { dot: "bg-success", label: "Agents: OK" },
     retrying: { dot: "bg-warning animate-pulse", label: `${count} recovering` },
     dead: { dot: "bg-error", label: `${count} stopped` },
+    idle: { dot: "bg-outline-variant", label: "Agents: idle" },
   }[state];
   return (
     <span
@@ -22,7 +24,9 @@ function FooterStatus() {
       title={
         state === "ok"
           ? "All agents running"
-          : `${count} session${count === 1 ? "" : "s"} with ${state === "dead" ? "a stopped" : "a recovering"} agent`
+          : state === "idle"
+            ? "No agents running yet"
+            : `${count} session${count === 1 ? "" : "s"} with ${state === "dead" ? "a stopped" : "a recovering"} agent`
       }
     >
       <span className={cn("size-2 rounded-full", cfg.dot)} />

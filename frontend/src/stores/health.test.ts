@@ -16,8 +16,11 @@ describe("worstHealth", () => {
 });
 
 describe("appHealthSummary", () => {
-  it("is ok when nothing is retrying or dead", () => {
-    expect(appHealthSummary({})).toEqual({ state: "ok", count: 0 });
+  it("is idle when no agents are tracked", () => {
+    expect(appHealthSummary({})).toEqual({ state: "idle", count: 0 });
+  });
+
+  it("is ok when something is running but nothing is retrying or dead", () => {
     expect(appHealthSummary({ a: { brian: "running" } })).toEqual({
       state: "ok",
       count: 0,
