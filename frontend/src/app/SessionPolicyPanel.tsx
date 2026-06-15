@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
-import type { GatedKeyword, Policy, SessionInfo } from "../lib/bindings";
+import type {
+  GatedKeyword,
+  Policy,
+  SessionInfo,
+  SessionProjectInfo,
+} from "../lib/bindings";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import { CloseIcon, SaveIcon } from "./contextLibraryShared";
@@ -137,6 +142,7 @@ export function SessionPolicyPanel({
           want them to <em>see</em> the new rules (enforcement applies either
           way).
         </p>
+        <PolicyOriginBadge sessionId={sessionId} open={open} />
         {session?.brian_model_at_spawn && (
           <div className="mb-4 rounded border border-outline-variant/40 bg-surface-container/60 px-3 py-2">
             <p className="mb-1 font-label-caps text-label-caps text-on-surface-variant">
@@ -171,6 +177,65 @@ export function SessionPolicyPanel({
         <SessionToolGateSection sessionId={sessionId} />
       </div>
     </aside>
+  );
+}
+
+/**
+ * Surfaces HOW this session's project (and therefore its policy) was resolved —
+ * registered repo vs path-basename inference vs no project. Closes the
+ * 2026-06-11 "why am I getting the full forbidden-word list?" gap: an
+ * unregistered repo silently inheriting general policy is now visible.
+ */
+function PolicyOriginBadge({
+  sessionId,
+  open,
+}: {
+  sessionId: string;
+  open: boolean;
+}) {
+  const { data: info } = useTauriQuery<SessionProjectInfo>(
+    "get_session_project_info",
+    { sessionId },
+    { enabled: open && !!sessionId },
+  );
+  if (!info) return null;
+  const { project, provenance } = info;
+  const badgeCls = {
+    registered: "border-success/40 bg-success/15 text-success",
+    inferred: "border-warning/40 bg-warning/15 text-warning",
+    none: "border-outline-variant bg-surface-container text-on-surface-variant",
+  }[provenance];
+  const badgeLabel =
+    provenance === "registered"
+      ? `${project} · registered`
+      : provenance === "inferred"
+        ? `${project} · inferred from path`
+        : "no project";
+  const explanation =
+    provenance === "registered"
+      ? `Resolved from the registered project "${project}" — its policy.yaml (if any) narrows the rules below.`
+      : provenance === "inferred"
+        ? `This repo isn't a registered project; "${project}" is just its folder name, so general policy applies until you register it.`
+        : "Repo-less session — general policy applies by inheritance.";
+  return (
+    <div className="mb-4 rounded border border-outline-variant/40 bg-surface-container/60 px-3 py-2">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="font-label-caps text-label-caps text-on-surface-variant">
+          Policy origin
+        </span>
+        <span
+          className={cn(
+            "rounded border px-1.5 py-0.5 font-label-caps text-label-caps",
+            badgeCls,
+          )}
+        >
+          {badgeLabel}
+        </span>
+      </div>
+      <p className="font-code-sm text-code-sm text-on-surface-variant">
+        {explanation}
+      </p>
+    </div>
   );
 }
 
