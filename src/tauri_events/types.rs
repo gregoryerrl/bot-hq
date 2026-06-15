@@ -171,6 +171,11 @@ pub const PROJECT_CHANGED: &str = "project:changed";
 /// `{ session_id }`; the frontend invalidates `list_sessions`.
 pub const SESSION_CREATED: &str = "session:created";
 
+/// Emitted (direct `app.emit`) when the saved-model registry changes (upsert or
+/// delete) — a DB-only change the filesystem watcher can't see. The frontend
+/// invalidates `list_models`. No payload.
+pub const MODEL_CHANGED: &str = "model:changed";
+
 /// Plugin lifecycle event names emitted to the frontend PluginManager, which
 /// listens for the same strings. Centralized so an emit site and the listener
 /// can't drift independently.

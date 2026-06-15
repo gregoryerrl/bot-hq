@@ -6,6 +6,7 @@ use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
+use tauri::Emitter;
 
 /// Frontend-facing shape of a saved model. `auth_token` is exposed (the desktop
 /// UI is local + trusted, like the AgentCard token field).
@@ -67,26 +68,31 @@ pub async fn list_models(
 #[specta::specta]
 pub async fn upsert_model(
     storage: tauri::State<'_, Arc<Storage>>,
+    app: tauri::AppHandle,
     model: ModelView,
 ) -> Result<(), AppError> {
     let m: Model = model.into();
     storage
         .upsert_model(&m)
         .await
-        .map_err(|e| AppError::DbError(e.to_string()))
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    let _ = app.emit(crate::tauri_events::types::MODEL_CHANGED, ());
+    Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_model(
     storage: tauri::State<'_, Arc<Storage>>,
+    app: tauri::AppHandle,
     id: String,
 ) -> Result<(), AppError> {
     storage
         .delete_model(&id)
         .await
-        .map(|_| ())
-        .map_err(|e| AppError::DbError(e.to_string()))
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    let _ = app.emit(crate::tauri_events::types::MODEL_CHANGED, ());
+    Ok(())
 }
 
 #[tauri::command]

@@ -64,11 +64,11 @@ export function Dashboard() {
     {},
   );
 
-  // Saved models for the per-agent pickers, plus the configured defaults.
+  // Saved models for the per-agent pickers. Refreshed live via the
+  // `model:changed` event (upsert/delete) — no poll needed.
   const { data: models = [] } = useTauriQuery<ModelView[]>(
     "list_models",
     {},
-    { refetchInterval: 60_000 },
   );
   // Each agent's configured model (Agents tab) is its default for new sessions.
   const { data: brianConfig } = useTauriQuery<AgentConfigView | null>(

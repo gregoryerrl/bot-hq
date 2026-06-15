@@ -69,6 +69,9 @@ const WORKTREE_KEYS = ["compute_apply_diff"] as const;
 // DB-only changes nothing else refetches, so explicit `app.emit` events drive them.
 const PROJECT_KEYS = ["list_projects"] as const;
 const SESSION_LIST_KEYS = ["list_sessions"] as const;
+// Saved-model registry (upsert/delete) — DB-only, watcher-invisible; the Dashboard
+// picker is a cross-view consumer so it needs an explicit event.
+const MODEL_KEYS = ["list_models"] as const;
 
 /**
  * Event-driven cache invalidation: each backend `session:*` event invalidates
@@ -96,6 +99,7 @@ function GlobalEventSync() {
     () => invalidate(SESSION_LIST_KEYS),
     [invalidate],
   );
+  const onModel = useCallback(() => invalidate(MODEL_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
   const clearHealth = useHealthStore((s) => s.clearSession);
   const onClose = useCallback(
@@ -125,6 +129,7 @@ function GlobalEventSync() {
         ...CL_KEYS,
         ...WORKTREE_KEYS,
         ...PROJECT_KEYS,
+        ...MODEL_KEYS,
       ]),
     [invalidate],
   );
@@ -139,6 +144,7 @@ function GlobalEventSync() {
   useTauriEvent("session:worktree_changed", onWorktree, [onWorktree]);
   useTauriEvent("project:changed", onProject, [onProject]);
   useTauriEvent("session:created", onSessionCreated, [onSessionCreated]);
+  useTauriEvent("model:changed", onModel, [onModel]);
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
   useTauriEvent("session:resync", onResync, [onResync]);
