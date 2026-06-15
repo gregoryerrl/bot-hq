@@ -12,8 +12,8 @@ function FooterStatus() {
   const bySession = useHealthStore((s) => s.bySession);
   const { state, count } = appHealthSummary(bySession);
   const cfg = {
-    ok: { dot: "bg-emerald-500", label: "Agents: OK" },
-    retrying: { dot: "bg-amber-400 animate-pulse", label: `${count} recovering` },
+    ok: { dot: "bg-success", label: "Agents: OK" },
+    retrying: { dot: "bg-warning animate-pulse", label: `${count} recovering` },
     dead: { dot: "bg-error", label: `${count} stopped` },
   }[state];
   return (

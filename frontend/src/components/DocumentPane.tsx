@@ -269,11 +269,11 @@ function SummaryDialog({
 // yellow file headers, muted context. Mirrors the Rust diff classifier
 // `parse_diff_lines` in `tauri_cmd/docs.rs`.
 const diffLineClass: Record<string, string> = {
-  add: "bg-emerald-500/10 text-emerald-300",
-  remove: "bg-red-500/10 text-red-300",
-  hunk: "bg-blue-500/10 text-blue-300",
-  file: "text-amber-300",
-  context: "text-neutral-400",
+  add: "bg-success/10 text-success",
+  remove: "bg-error/10 text-error",
+  hunk: "bg-tertiary/10 text-tertiary",
+  file: "text-warning",
+  context: "text-on-surface-variant",
 };
 
 function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
@@ -305,17 +305,17 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
                 >
                   ▶
                 </span>
-                <span className="truncate font-mono text-amber-300">
+                <span className="truncate font-mono text-warning">
                   {g.file}
                 </span>
               </span>
               <span className="shrink-0 font-mono text-[0.65rem]">
                 {g.adds > 0 && (
-                  <span className="text-emerald-300">+{g.adds}</span>
+                  <span className="text-success">+{g.adds}</span>
                 )}
                 {g.adds > 0 && g.removes > 0 && " "}
                 {g.removes > 0 && (
-                  <span className="text-red-300">−{g.removes}</span>
+                  <span className="text-error">−{g.removes}</span>
                 )}
               </span>
             </summary>
@@ -325,7 +325,7 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
             key={i}
             className={cn(
               "whitespace-pre-wrap",
-              diffLineClass[line.kind] ?? "text-neutral-300",
+              diffLineClass[line.kind] ?? "text-on-surface-variant",
             )}
           >
             {line.text || " "}

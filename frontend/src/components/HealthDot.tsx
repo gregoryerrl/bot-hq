@@ -1,11 +1,10 @@
 import { cn } from "../lib/cn";
 import type { AgentHealth } from "../stores/health";
 
-// No semantic success/warn tokens exist yet — emerald/amber raw are the
-// house stand-ins (see SessionPolicyPanel / PluginManager). `error` IS a token.
+// Semantic status tokens: `success` (green) / `warning` (amber) / `error` (red).
 const STYLES: Record<AgentHealth, { dot: string; label: string }> = {
-  running: { dot: "bg-emerald-400", label: "running" },
-  retrying: { dot: "bg-amber-400 animate-pulse", label: "retrying (transient API error)" },
+  running: { dot: "bg-success", label: "running" },
+  retrying: { dot: "bg-warning animate-pulse", label: "retrying (transient API error)" },
   dead: { dot: "bg-error", label: "stopped — gave up after errors" },
 };
 

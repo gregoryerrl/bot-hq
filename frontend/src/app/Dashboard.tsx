@@ -544,7 +544,7 @@ export function Dashboard() {
                   className={cn(
                     "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full text-[0.7rem]",
                     step.done
-                      ? "bg-emerald-500/20 text-emerald-400"
+                      ? "bg-success/20 text-success"
                       : "border border-outline-variant text-on-surface-variant",
                   )}
                   aria-hidden

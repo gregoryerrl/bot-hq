@@ -387,7 +387,7 @@ export function SessionView() {
               Settings → Archive; reopening later resumes them via{" "}
               <code className="text-on-surface">--resume</code>.
               {dirtyCount > 0 && (
-                <span className="mt-2 block text-amber-400">
+                <span className="mt-2 block text-warning">
                   ⚠️ {dirtyCount} uncommitted change{dirtyCount === 1 ? "" : "s"}{" "}
                   in this session's working tree will be kept, not committed.
                 </span>

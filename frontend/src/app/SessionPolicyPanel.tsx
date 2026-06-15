@@ -97,12 +97,12 @@ export function SessionPolicyPanel({
             Session Settings
           </h2>
           {dirty && (
-            <span className="rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-amber-300">
+            <span className="rounded border border-warning/40 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning">
               Unsaved
             </span>
           )}
           {saved && !dirty && (
-            <span className="rounded border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-emerald-300">
+            <span className="rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-label-caps text-label-caps text-success">
               Saved ✓
             </span>
           )}
@@ -229,13 +229,13 @@ function SessionToolGateSection({ sessionId }: { sessionId: string }) {
             session only.{" "}
             <span className="text-primary">Gate</span> blocks a matching Bash
             command and asks you to Approve/Reject;{" "}
-            <span className="text-emerald-300">Auto-allow</span> runs it with no
+            <span className="text-success">Auto-allow</span> runs it with no
             prompt. Case-insensitive substring match.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {saved && !dirty && (
-            <span className="rounded border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-emerald-300">
+            <span className="rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-label-caps text-label-caps text-success">
               Saved ✓
             </span>
           )}

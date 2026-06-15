@@ -446,12 +446,12 @@ function AgentCard({
             {cfg.agent_name}
           </h2>
           {dirty && (
-            <span className="shrink-0 rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-amber-300">
+            <span className="shrink-0 rounded border border-warning/40 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning">
               Unsaved
             </span>
           )}
           {saved && !dirty && (
-            <span className="shrink-0 rounded border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-emerald-300">
+            <span className="shrink-0 rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-label-caps text-label-caps text-success">
               Saved ✓
             </span>
           )}
@@ -581,7 +581,7 @@ function WorktreeKeptBadge({ sessionId }: { sessionId: string }) {
   if (!keptPath) return null;
   return (
     <span
-      className="shrink-0 rounded border border-amber-400/40 bg-amber-400/15 px-2 py-0.5 font-label-caps text-label-caps text-amber-400"
+      className="shrink-0 rounded border border-warning/40 bg-warning/15 px-2 py-0.5 font-label-caps text-label-caps text-warning"
       title={`Worktree kept — may have uncommitted work: ${keptPath}`}
     >
       ⚠ Worktree kept
@@ -792,7 +792,7 @@ function ToolGateSection() {
             One global list for every session. When an agent's Bash command
             contains a keyword, <span className="text-primary">Gate</span> blocks
             it and asks you to Approve/Reject (bot-hq runs it on approve);{" "}
-            <span className="text-emerald-300">Auto-allow</span> lets it run with
+            <span className="text-success">Auto-allow</span> lets it run with
             no prompt. Case-insensitive substring match against the command or
             tool name; commands with no matching keyword run normally.
           </p>
@@ -831,7 +831,7 @@ function ToolGateSection() {
                   + Add keyword
                 </Button>
                 {dirty && (
-                  <span className="font-label-caps text-label-caps text-amber-300">
+                  <span className="font-label-caps text-label-caps text-warning">
                     Unsaved changes
                   </span>
                 )}

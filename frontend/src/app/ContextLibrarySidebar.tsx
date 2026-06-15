@@ -224,14 +224,14 @@ export function WorkspaceSidebar({
           <div className="flex flex-wrap gap-2 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm">
             {rescanReport && (
               <>
-                <span className="text-emerald-400">
+                <span className="text-success">
                   +{rescanReport.added.length}
                 </span>
                 <span className="inline-flex items-center gap-0.5 text-tertiary">
                   <RescanIcon size={12} />
                   {rescanReport.touched.length}
                 </span>
-                <span className="inline-flex items-center gap-0.5 text-amber-400">
+                <span className="inline-flex items-center gap-0.5 text-warning">
                   <WarnIcon size={12} />
                   {rescanReport.orphaned.length}
                 </span>
@@ -349,7 +349,7 @@ export function WorkspaceSidebar({
               <CategorySection
                 id="@cat:system"
                 label="System"
-                colorClass="text-amber-400"
+                colorClass="text-warning"
                 count={globalsSplit.system.entries.length}
                 collapsed={collapsed}
                 onToggle={onToggle}

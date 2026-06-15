@@ -252,7 +252,7 @@ export function ClaudeConfigPanel() {
           </div>
         </div>
       ) : showRestart ? (
-        <div className="flex items-center justify-between gap-3 border-b border-emerald-500/30 bg-emerald-500/10 px-4 py-2">
+        <div className="flex items-center justify-between gap-3 border-b border-success/30 bg-success/10 px-4 py-2">
           <span className="font-code-sm text-code-sm text-on-surface">
             Saved ✓{" "}
             {activeSessions.length > 0
@@ -270,7 +270,7 @@ export function ClaudeConfigPanel() {
                 type="button"
                 onClick={onRestartAgents}
                 disabled={respawn.isPending}
-                className="inline-flex items-center gap-2 rounded border border-emerald-500/50 bg-emerald-500/15 px-3 py-1.5 font-code-sm text-code-sm text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded border border-success/50 bg-success/15 px-3 py-1.5 font-code-sm text-code-sm text-success hover:bg-success/25 disabled:opacity-50"
               >
                 {respawn.isPending
                   ? "Restarting…"
@@ -395,7 +395,7 @@ function ConfigDirHeader({ config }: { config: ClaudeConfigView }) {
         {config.config_dir_source}
       </div>
       {config.managed_settings_present && (
-        <div className="mt-1 rounded border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 font-label-caps text-label-caps text-amber-300">
+        <div className="mt-1 rounded border border-warning/40 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning">
           Managed policy active
         </div>
       )}
@@ -410,7 +410,7 @@ function InheritanceBadges({ inheritance }: { inheritance: Inheritance }) {
       {inheritance.inherited_by.map((a) => (
         <span
           key={`in-${a}`}
-          className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 font-label-caps text-label-caps capitalize text-emerald-300"
+          className="rounded border border-success/40 bg-success/10 px-1.5 py-0.5 font-label-caps text-label-caps capitalize text-success"
         >
           {a} inherits
         </span>
@@ -488,8 +488,8 @@ function OverviewPane({ config }: { config: ClaudeConfigView }) {
         />
       </dl>
       {config.warnings.length > 0 && (
-        <div className="mt-5 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
-          <div className="mb-1 font-label-caps text-label-caps text-amber-300">
+        <div className="mt-5 rounded-lg border border-warning/40 bg-warning/10 p-3">
+          <div className="mb-1 font-label-caps text-label-caps text-warning">
             Notices
           </div>
           <ul className="list-inside list-disc font-code-sm text-code-sm text-on-surface-variant">
@@ -1016,7 +1016,7 @@ function McpPane({
                         {m.transport}
                       </span>
                       {!m.effective && (
-                        <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1 font-label-caps text-label-caps text-amber-300">
+                        <span className="rounded border border-warning/40 bg-warning/10 px-1 font-label-caps text-label-caps text-warning">
                           ignored by claude-code
                         </span>
                       )}
@@ -1131,7 +1131,7 @@ function FileRow({
           className={cn(
             "shrink-0 rounded border px-1.5 py-0.5 font-label-caps text-label-caps",
             stat.present
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+              ? "border-success/40 bg-success/10 text-success"
               : "border-outline-variant/50 text-on-surface-variant",
           )}
         >

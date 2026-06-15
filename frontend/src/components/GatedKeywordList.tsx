@@ -62,7 +62,7 @@ export function GatedKeywordList({
                   const activeCls =
                     m === "gate"
                       ? "bg-primary/15 text-primary"
-                      : "bg-emerald-500/15 text-emerald-300";
+                      : "bg-success/15 text-success";
                   return (
                     <button
                       key={m}

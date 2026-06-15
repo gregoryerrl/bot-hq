@@ -152,7 +152,7 @@ function SegToggle<T extends string>({
         const active = value === o.value;
         const activeCls =
           o.tone === "good"
-            ? "bg-emerald-500/15 text-emerald-300"
+            ? "bg-success/15 text-success"
             : o.tone === "warn"
               ? "bg-primary/15 text-primary"
               : "bg-error/20 text-on-error-container";

@@ -276,9 +276,9 @@ function statusDotClass(status: PluginStatus, enabled: boolean): string {
   if (!enabled) return "bg-outline-variant";
   switch (status.kind) {
     case "Healthy":
-      return "bg-emerald-400";
+      return "bg-success";
     case "Slow":
-      return "animate-pulse bg-amber-400";
+      return "animate-pulse bg-warning";
     case "Crashed":
       return "bg-error";
   }

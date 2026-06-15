@@ -11,13 +11,13 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 
 // Migrated to Industrial Terminal tokens. `primary` is the role-Brian
 // orange (`bg-primary` → `#ffb68b`), `secondary` is the muted surface tier,
-// `ghost` is transparent on a hovered surface, `danger` keeps red for
-// destructive intent (no design-system red yet).
+// `ghost` is transparent on a hovered surface, `danger` uses the error
+// container token for destructive intent.
 const variantClasses: Record<Variant, string> = {
   primary: "bg-primary hover:bg-primary-fixed-dim text-on-primary",
   secondary: "bg-surface-container hover:bg-surface-container-high text-on-surface",
   ghost: "bg-transparent hover:bg-surface-container/60 text-on-surface",
-  danger: "bg-red-600 hover:bg-red-500 text-white",
+  danger: "bg-error-container hover:bg-error-container/80 text-on-error-container",
 };
 
 const sizeClasses: Record<Size, string> = {

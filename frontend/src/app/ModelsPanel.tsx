@@ -175,7 +175,7 @@ export function ModelsPanel() {
                   <div
                     className={cn(
                       "px-4 pb-2 font-code-sm text-code-sm",
-                      testResult[m.id].ok ? "text-emerald-400" : "text-error",
+                      testResult[m.id].ok ? "text-success" : "text-error",
                     )}
                   >
                     {testResult[m.id].ok ? "✓ " : "✗ "}

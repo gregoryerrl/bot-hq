@@ -392,7 +392,7 @@ function EditorPane({
                 {fileContent.truncated && (
                   <>
                     <span className="mx-2 text-on-surface-variant/60">·</span>
-                    <span className="text-amber-400">
+                    <span className="text-warning">
                       truncated to 1 MB
                     </span>
                   </>
@@ -400,7 +400,7 @@ function EditorPane({
                 {fileContent.binary && (
                   <>
                     <span className="mx-2 text-on-surface-variant/60">·</span>
-                    <span className="text-amber-400">binary / non-UTF-8</span>
+                    <span className="text-warning">binary / non-UTF-8</span>
                   </>
                 )}
               </>
@@ -418,7 +418,7 @@ function EditorPane({
           )}
           {dirty && (
             <span
-              className="rounded border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 font-label-caps text-label-caps text-amber-300"
+              className="rounded border border-warning/40 bg-warning/15 px-2 py-0.5 font-label-caps text-label-caps text-warning"
               title="Unsaved edits"
             >
               UNSAVED CHANGES
@@ -437,7 +437,7 @@ function EditorPane({
             {showMetadata ? "Hide metadata" : "Edit metadata"}
             {!showMetadata && metadataDirty && (
               <span
-                className="h-1.5 w-1.5 rounded-full bg-amber-400"
+                className="h-1.5 w-1.5 rounded-full bg-warning"
                 aria-label="unsaved metadata edits"
               />
             )}
