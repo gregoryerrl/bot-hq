@@ -1,11 +1,13 @@
 //! Session lifecycle commands.
 
+use crate::core::session::{resolve_session_project, ProjectProvenance};
 use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingBridge;
 use crate::storage::{Session, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -41,6 +43,38 @@ impl From<Session> for SessionInfo {
             rain_enabled: s.rain_enabled != 0,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct SessionProjectInfo {
+    /// Resolved project name, or None for a repo-less session.
+    pub project: Option<String>,
+    /// How `project` was derived — drives the gear-tab policy-origin badge.
+    pub provenance: ProjectProvenance,
+}
+
+/// Resolve a session's project + how it was derived, so the gear tab can show
+/// WHY the session inherited its policy (registered repo vs path basename vs
+/// no project → general). Deterministic from the session's repo paths — no
+/// persisted column needed.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_session_project_info(
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+) -> Result<SessionProjectInfo, AppError> {
+    let session = storage
+        .get_session(&session_id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("session {session_id}")))?;
+    let (project, provenance) = resolve_session_project(
+        &storage,
+        session.base_repo_path.as_deref(),
+        session.working_repo_path.as_deref().map(Path::new),
+    )
+    .await;
+    Ok(SessionProjectInfo { project, provenance })
 }
 
 /// Per-session create-dialog picks beyond the positional args. Bundled into

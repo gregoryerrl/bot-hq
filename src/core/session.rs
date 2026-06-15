@@ -177,14 +177,29 @@ pub async fn spawn_existing_session(
 /// necessarily the project name); the path basename stays as the fallback
 /// for unregistered repos. Repo-less sessions resolve to `None` (general
 /// policy applies by inheritance).
+/// How a session's project name was derived from its repo path — surfaced in
+/// the gear tab (policy-origin badge) so the user can see WHY a session
+/// inherited a given policy. The 2026-06-11 "why the full forbidden list?"
+/// surprise was an unregistered repo silently resolving to general policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectProvenance {
+    /// Matched a registered project's working-repo path (canonical compare).
+    Registered,
+    /// No registered match — fell back to the repo's path basename.
+    Inferred,
+    /// Repo-less session — no project; general policy applies by inheritance.
+    None,
+}
+
 pub(crate) async fn resolve_session_project(
     storage: &Storage,
     base_repo_path: Option<&str>,
     working_repo_path: Option<&Path>,
-) -> Option<String> {
+) -> (Option<String>, ProjectProvenance) {
     let repo: &Path = match base_repo_path.map(Path::new).or(working_repo_path) {
         Some(p) => p,
-        None => return None,
+        None => return (None, ProjectProvenance::None),
     };
     let basename = repo
         .file_name()
@@ -199,12 +214,12 @@ pub(crate) async fn resolve_session_project(
                     "project resolved from registered working repo (basename differs)"
                 );
             }
-            Some(name)
+            (Some(name), ProjectProvenance::Registered)
         }
-        Ok(None) => basename,
+        Ok(None) => (basename, ProjectProvenance::Inferred),
         Err(err) => {
             warn!(%err, repo = %repo.display(), "project lookup failed — using path basename");
-            basename
+            (basename, ProjectProvenance::Inferred)
         }
     }
 }
@@ -217,7 +232,7 @@ async fn spawn_session_handle(
     bridge: Arc<SignalingBridge>,
     signaling_addr: SocketAddr,
 ) -> Result<SessionHandle> {
-    let project = resolve_session_project(
+    let (project, _provenance) = resolve_session_project(
         &storage,
         session.base_repo_path.as_deref(),
         working_repo_path.as_deref(),
@@ -961,15 +976,19 @@ mod tests {
             .await
             .unwrap();
         // Registered repo with a non-matching basename → project name wins.
-        let p = resolve_session_project(&s, None, Some(Path::new("/repos/acme-web"))).await;
+        let (p, prov) =
+            resolve_session_project(&s, None, Some(Path::new("/repos/acme-web"))).await;
         assert_eq!(p.as_deref(), Some("acme"));
+        assert_eq!(prov, ProjectProvenance::Registered);
     }
 
     #[tokio::test]
     async fn resolve_project_falls_back_to_basename() {
         let s = Storage::memory().await.unwrap();
-        let p = resolve_session_project(&s, None, Some(Path::new("/repos/loose-repo"))).await;
+        let (p, prov) =
+            resolve_session_project(&s, None, Some(Path::new("/repos/loose-repo"))).await;
         assert_eq!(p.as_deref(), Some("loose-repo"));
+        assert_eq!(prov, ProjectProvenance::Inferred);
     }
 
     #[tokio::test]
@@ -980,20 +999,22 @@ mod tests {
             .unwrap();
         // Worktree session: working path is the worktree; base must drive
         // the lookup.
-        let p = resolve_session_project(
+        let (p, prov) = resolve_session_project(
             &s,
             Some("/repos/acme-web"),
             Some(Path::new("/data/.local/worktrees/s-1/acme-web")),
         )
         .await;
         assert_eq!(p.as_deref(), Some("acme"));
+        assert_eq!(prov, ProjectProvenance::Registered);
     }
 
     #[tokio::test]
     async fn resolve_project_none_without_repo() {
         let s = Storage::memory().await.unwrap();
-        let p = resolve_session_project(&s, None, None).await;
+        let (p, prov) = resolve_session_project(&s, None, None).await;
         assert_eq!(p, None);
+        assert_eq!(prov, ProjectProvenance::None);
     }
 
     #[test]
