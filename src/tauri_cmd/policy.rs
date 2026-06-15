@@ -33,6 +33,18 @@ fn data_dir(bridge: &SignalingBridge) -> Result<PathBuf, AppError> {
         .cloned()
 }
 
+/// Read the full enforcement audit trail (`<data_dir>/.local/violations.jsonl`)
+/// for the Settings → Violations viewer. Parse-tolerant (the reader skips
+/// malformed lines); empty when the log doesn't exist yet.
+#[tauri::command]
+#[specta::specta]
+pub async fn read_violations(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+) -> Result<Vec<policy::violations::ViolationRecord>, AppError> {
+    let dd = data_dir(&bridge)?;
+    Ok(policy::violations::ViolationsLog::new(&dd).read_all()?)
+}
+
 // --- Global tier -------------------------------------------------------------
 
 #[tauri::command]

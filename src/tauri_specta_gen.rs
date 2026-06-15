@@ -84,6 +84,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         policy::set_session_policy,
         policy::get_session_tool_gate,
         policy::set_session_tool_gate,
+        policy::read_violations,
         // Claude Config (surface + override the config agents inherit)
         claude_config::claude_config_read,
         claude_config::get_claude_overrides,
