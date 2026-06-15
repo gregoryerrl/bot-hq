@@ -289,36 +289,47 @@ pub async fn cl_read_file(
         .await
         .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
 
-    // Canonicalize the project root first. If it doesn't exist (typo or
-    // project removed), refuse rather than letting a relative file path
-    // escape the data_dir.
-    let project_root_real = project_root
-        .canonicalize()
-        .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))?;
-
-    let candidate_real = resolve_existing_cl_file(&project_root_real, &file_path)?;
-
-    let size_bytes = std::fs::metadata(&candidate_real)
-        .map_err(|e| AppError::Internal(format!("metadata: {e}")))?
-        .len();
-
-    let (content, truncated, binary) = if size_bytes > MAX_READ_BYTES {
-        use std::io::Read;
-        let mut buf = vec![0u8; MAX_READ_BYTES as usize];
-        let mut f = std::fs::File::open(&candidate_real)
-            .map_err(|e| AppError::Internal(format!("open: {e}")))?;
-        let n = f.read(&mut buf).map_err(|e| AppError::Internal(format!("read: {e}")))?;
-        buf.truncate(n);
-        let cow = String::from_utf8_lossy(&buf);
-        let binary = matches!(cow, std::borrow::Cow::Owned(_));
-        (cow.into_owned(), true, binary)
-    } else {
-        let bytes = std::fs::read(&candidate_real)
-            .map_err(|e| AppError::Internal(format!("read: {e}")))?;
-        let cow = String::from_utf8_lossy(&bytes);
-        let binary = matches!(cow, std::borrow::Cow::Owned(_));
-        (cow.into_owned(), false, binary)
-    };
+    // Path resolution (canonicalize + traversal guard) and the read are blocking
+    // syscalls — run them on a blocking thread so they don't stall an async
+    // worker. `project`/`file_path` are cloned for the closure since the result
+    // view needs them afterward.
+    let project_label = project.clone();
+    let fp = file_path.clone();
+    let (content, size_bytes, truncated, binary) =
+        tokio::task::spawn_blocking(move || -> Result<(String, u64, bool, bool), AppError> {
+            // Canonicalize the project root first. If it doesn't exist (typo or
+            // project removed), refuse rather than letting a relative file path
+            // escape the data_dir.
+            let project_root_real = project_root.canonicalize().map_err(|e| {
+                AppError::NotFound(format!("project '{project_label}' not found: {e}"))
+            })?;
+            let candidate_real = resolve_existing_cl_file(&project_root_real, &fp)?;
+            let size_bytes = std::fs::metadata(&candidate_real)
+                .map_err(|e| AppError::Internal(format!("metadata: {e}")))?
+                .len();
+            let (content, truncated, binary) = if size_bytes > MAX_READ_BYTES {
+                use std::io::Read;
+                let mut buf = vec![0u8; MAX_READ_BYTES as usize];
+                let mut f = std::fs::File::open(&candidate_real)
+                    .map_err(|e| AppError::Internal(format!("open: {e}")))?;
+                let n = f
+                    .read(&mut buf)
+                    .map_err(|e| AppError::Internal(format!("read: {e}")))?;
+                buf.truncate(n);
+                let cow = String::from_utf8_lossy(&buf);
+                let binary = matches!(cow, std::borrow::Cow::Owned(_));
+                (cow.into_owned(), true, binary)
+            } else {
+                let bytes = std::fs::read(&candidate_real)
+                    .map_err(|e| AppError::Internal(format!("read: {e}")))?;
+                let cow = String::from_utf8_lossy(&bytes);
+                let binary = matches!(cow, std::borrow::Cow::Owned(_));
+                (cow.into_owned(), false, binary)
+            };
+            Ok((content, size_bytes, truncated, binary))
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("cl_read_file task panicked: {e}")))??;
 
     Ok(ClFileContentView {
         project,
@@ -349,15 +360,17 @@ pub async fn cl_write_file(
         .await
         .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
 
-    let project_root_real = project_root
-        .canonicalize()
-        .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))?;
-
-    let candidate_real = resolve_existing_cl_file(&project_root_real, &file_path)?;
-
-    std::fs::write(&candidate_real, content.as_bytes())
-        .map_err(|e| AppError::Internal(format!("write: {e}")))?;
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let project_root_real = project_root
+            .canonicalize()
+            .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))?;
+        let candidate_real = resolve_existing_cl_file(&project_root_real, &file_path)?;
+        std::fs::write(&candidate_real, content.as_bytes())
+            .map_err(|e| AppError::Internal(format!("write: {e}")))?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("cl_write_file task panicked: {e}")))?
 }
 
 /// Upsert a folder's description + tags (`cl_folders`). Used by the Context
@@ -503,9 +516,13 @@ pub async fn cl_create_file(
     file_path: String,
 ) -> Result<(), AppError> {
     let root = canonical_cl_root(&bridge, &project).await?;
-    let target = resolve_new_cl_path(&root, &file_path)?;
-    std::fs::write(&target, b"").map_err(|e| AppError::Internal(format!("create file: {e}")))?;
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let target = resolve_new_cl_path(&root, &file_path)?;
+        std::fs::write(&target, b"").map_err(|e| AppError::Internal(format!("create file: {e}")))?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("cl_create_file task panicked: {e}")))?
 }
 
 /// Create a new directory. Parent dir must exist; the directory must not.
@@ -517,9 +534,13 @@ pub async fn cl_mkdir(
     folder_path: String,
 ) -> Result<(), AppError> {
     let root = canonical_cl_root(&bridge, &project).await?;
-    let target = resolve_new_cl_path(&root, &folder_path)?;
-    std::fs::create_dir(&target).map_err(|e| AppError::Internal(format!("mkdir: {e}")))?;
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let target = resolve_new_cl_path(&root, &folder_path)?;
+        std::fs::create_dir(&target).map_err(|e| AppError::Internal(format!("mkdir: {e}")))?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("cl_mkdir task panicked: {e}")))?
 }
 
 /// Rename / move a file or folder within the project's CL root. Source must
@@ -533,15 +554,19 @@ pub async fn cl_rename(
     to_path: String,
 ) -> Result<(), AppError> {
     let root = canonical_cl_root(&bridge, &project).await?;
-    let from_real = resolve_within_root(&root, &from_path)?;
-    assert_not_protected_globals_path(&project, &root, &from_real)?;
-    let to_target = resolve_new_cl_path(&root, &to_path)?;
-    // Also guard the destination — renaming INTO agents/ would shadow a
-    // bot-hq-owned path.
-    assert_not_protected_globals_path(&project, &root, &to_target)?;
-    std::fs::rename(&from_real, &to_target)
-        .map_err(|e| AppError::Internal(format!("rename: {e}")))?;
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let from_real = resolve_within_root(&root, &from_path)?;
+        assert_not_protected_globals_path(&project, &root, &from_real)?;
+        let to_target = resolve_new_cl_path(&root, &to_path)?;
+        // Also guard the destination — renaming INTO agents/ would shadow a
+        // bot-hq-owned path.
+        assert_not_protected_globals_path(&project, &root, &to_target)?;
+        std::fs::rename(&from_real, &to_target)
+            .map_err(|e| AppError::Internal(format!("rename: {e}")))?;
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("cl_rename task panicked: {e}")))?
 }
 
 /// Delete a file, or a folder and everything under it. Must exist + resolve
@@ -555,16 +580,20 @@ pub async fn cl_delete_path(
     path: String,
 ) -> Result<(), AppError> {
     let root = canonical_cl_root(&bridge, &project).await?;
-    let target = resolve_within_root(&root, &path)?;
-    assert_not_protected_globals_path(&project, &root, &target)?;
-    if target.is_dir() {
-        std::fs::remove_dir_all(&target)
-            .map_err(|e| AppError::Internal(format!("delete folder: {e}")))?;
-    } else {
-        std::fs::remove_file(&target)
-            .map_err(|e| AppError::Internal(format!("delete file: {e}")))?;
-    }
-    Ok(())
+    tokio::task::spawn_blocking(move || {
+        let target = resolve_within_root(&root, &path)?;
+        assert_not_protected_globals_path(&project, &root, &target)?;
+        if target.is_dir() {
+            std::fs::remove_dir_all(&target)
+                .map_err(|e| AppError::Internal(format!("delete folder: {e}")))?;
+        } else {
+            std::fs::remove_file(&target)
+                .map_err(|e| AppError::Internal(format!("delete file: {e}")))?;
+        }
+        Ok::<(), AppError>(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("cl_delete_path task panicked: {e}")))?
 }
 
 #[cfg(test)]
