@@ -142,6 +142,18 @@ export default {
         "error-container": "#93000a",
         "on-error-container": "#ffdad6",
 
+        // Success (positive — OK / running / auto-allow / saved / diff-add)
+        success: "#7fd99a",
+        "on-success": "#00391c",
+        "success-container": "#1f5236",
+        "on-success-container": "#9bf6b4",
+
+        // Warning (caution — retrying / unsaved / dirty / kept / gated)
+        warning: "#f3c150",
+        "on-warning": "#3d2e00",
+        "warning-container": "#574419",
+        "on-warning-container": "#ffdf9e",
+
         // Inverse
         "inverse-surface": "#dae2fd",
         "inverse-on-surface": "#283044",
