@@ -9,6 +9,7 @@ import { SaveIcon } from "./contextLibraryShared";
 import { WrenchIcon, EyeIcon, GearIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { ModelsPanel } from "./ModelsPanel";
+import { ViolationsPanel } from "./ViolationsPanel";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import type {
@@ -26,6 +27,7 @@ type SettingsSubTab =
   | "claude"
   | "toolgate"
   | "policy"
+  | "violations"
   | "archive"
   | "updates";
 
@@ -72,6 +74,12 @@ export function Settings() {
           Policy
         </SubTabButton>
         <SubTabButton
+          active={tab === "violations"}
+          onClick={() => select("violations")}
+        >
+          Violations
+        </SubTabButton>
+        <SubTabButton
           active={tab === "archive"}
           onClick={() => select("archive")}
         >
@@ -99,6 +107,9 @@ export function Settings() {
         </div>
         <div className={cn("h-full", tab !== "policy" && "hidden")}>
           {visited.has("policy") && <GlobalPolicyPanel />}
+        </div>
+        <div className={cn("h-full", tab !== "violations" && "hidden")}>
+          {visited.has("violations") && <ViolationsPanel />}
         </div>
         <div className={cn("h-full", tab !== "archive" && "hidden")}>
           {visited.has("archive") && <ArchivePanel />}
