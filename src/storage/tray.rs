@@ -196,6 +196,30 @@ impl Storage {
         .context("withdrawing pending tray for closed/orphaned sessions")?;
         Ok(res.rows_affected())
     }
+
+    /// GC: delete resolved tray rows (answered/withdrawn/superseded) older than
+    /// `retention_days`. Keeps `session_tray` bounded — resolved rows are never
+    /// read again (the in-chat tray + counters only surface `pending`), and
+    /// `pending` rows are always kept. Uses `COALESCE(answered_at, asked_at)`
+    /// because withdraw/supersede flip status WITHOUT setting `answered_at` (it
+    /// stays NULL) — falling back to `asked_at` (always set at insert) ensures no
+    /// resolved row escapes the cutoff. The cutoff is built in Rust in the same
+    /// RFC3339-Z format `now_utc()` writes, so the string `<` is a valid
+    /// chronological compare. Returns the number of rows deleted.
+    pub async fn purge_resolved_tray(&self, retention_days: i64) -> Result<u64> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let res = sqlx::query(
+            "DELETE FROM session_tray \
+             WHERE status != 'pending' \
+               AND COALESCE(answered_at, asked_at) < ?",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await
+        .context("purging resolved tray rows")?;
+        Ok(res.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +293,47 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn purge_resolved_tray_drops_resolved_keeps_pending() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let opts = vec!["A".to_string(), "B".to_string()];
+        for cid in ["c-pending", "c-answered", "c-withdrawn"] {
+            s.insert_tray_entry(
+                "s1",
+                cid,
+                "brian",
+                QuestionKind::Choice,
+                "q?",
+                Some(&opts),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        // answered sets answered_at; withdrawn flips status but leaves answered_at
+        // NULL → exercises the COALESCE(answered_at, asked_at) fallback.
+        s.answer_tray_entry("c-answered", "A").await.unwrap();
+        s.withdraw_tray_entry("c-withdrawn").await.unwrap();
+
+        // A real retention window keeps freshly-resolved rows.
+        assert_eq!(
+            s.purge_resolved_tray(90).await.unwrap(),
+            0,
+            "recent resolved rows are within the window"
+        );
+
+        // Future-dated cutoff (negative retention) purges every non-pending row,
+        // incl. the withdrawn one whose answered_at is NULL.
+        let purged = s.purge_resolved_tray(-1).await.unwrap();
+        assert_eq!(purged, 2, "answered + withdrawn purged; pending untouched");
+
+        let rows = s.tray_entries_for_session("s1").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].choice_id, "c-pending");
+        assert_eq!(rows[0].status, "pending");
     }
 }

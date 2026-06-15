@@ -96,6 +96,16 @@ fn main() -> Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(?e, "startup tray sweep failed"),
             }
+            // GC: drop resolved tray rows older than 90 days so session_tray
+            // stays bounded — resolved rows are never read again (the in-chat
+            // tray + counters only surface pending).
+            match storage.purge_resolved_tray(90).await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(purged = n, "purged old resolved tray rows at startup")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(?e, "startup tray GC failed"),
+            }
             let violations = ViolationsLog::new(&paths.data_dir);
             // Wipe any stale per-session policy snapshots — a leftover file would
             // leak a prior session's resolved policy into a fresh session that
