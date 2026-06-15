@@ -56,7 +56,7 @@ pub async fn peer_forward_message(
     text: &str,
     phase: IpavPhase,
     input_tx: &mpsc::Sender<OutgoingUserMessage>,
-) -> Result<()> {
+) {
     let prefix = match peer_author {
         Author::Brian => "[Brian]\n",
         Author::Rain => "[Rain]\n",
@@ -64,8 +64,13 @@ pub async fn peer_forward_message(
     };
     let inner = format!("{prefix}{text}");
     let wire = with_phase_envelope(phase, &inner);
-    let _ = input_tx.send(OutgoingUserMessage::text(wire)).await;
-    Ok(())
+    // A send error means this agent's input pump has exited (stdin gone) and it
+    // won't SEE the peer's message. Mirrors broadcast_user_message: log per agent
+    // so a one-sided peer-forward loss is diagnosable instead of silent (the same
+    // invisible-desync failure mode, on the peer path).
+    if let Err(e) = input_tx.send(OutgoingUserMessage::text(wire)).await {
+        warn!(agent = ?peer_author, error = %e, "peer forward not delivered (input pump closed)");
+    }
 }
 
 #[cfg(test)]
@@ -144,9 +149,7 @@ mod tests {
     #[tokio::test]
     async fn peer_forward_envelopes_then_author_tags() {
         let (tx, mut rx) = mpsc::channel(8);
-        peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, &tx)
-            .await
-            .unwrap();
+        peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, &tx).await;
         let m = rx.recv().await.unwrap();
         assert!(
             m.message.content.starts_with("[PHASE: Plan]\n[Rain]\n"),

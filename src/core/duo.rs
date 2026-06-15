@@ -332,9 +332,7 @@ async fn flush_buffer(
         return;
     }
     let phase = ipav_state.lock().await.current_phase;
-    if let Err(e) = peer_forward_message(cfg.author, body.trim_end(), phase, peer_input_tx).await {
-        warn!(?e, "peer forward failed");
-    }
+    peer_forward_message(cfg.author, body.trim_end(), phase, peer_input_tx).await;
     *flush_at = None;
 }
 
