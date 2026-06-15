@@ -144,9 +144,11 @@ export function ContextLibrary() {
     query: debouncedQuery.trim() || null,
   });
 
+  // Refreshed live via the `project:changed` event (register/unregister) plus
+  // `cl:changed` (file edits) — no poll needed.
   const { data: projects = [], refetch: refetchProjects } = useTauriQuery<
     ProjectView[]
-  >("list_projects", {}, { refetchInterval: 60_000 });
+  >("list_projects", {});
 
   // Folder descriptions feed both the tree (so a described-but-empty folder
   // still shows) and the folder-view editor (current description lookup).

@@ -22,10 +22,12 @@ interface MaintainCLModalProps {
  */
 export function MaintainCLModal({ open, onClose }: MaintainCLModalProps) {
   const navigate = useNavigate();
+  // Live via the `project:changed` event — no poll. `enabled: open` keeps the
+  // query idle until the modal opens.
   const { data: projects = [] } = useTauriQuery<ProjectView[]>(
     "list_projects",
     {},
-    { refetchInterval: 60_000, enabled: open },
+    { enabled: open },
   );
   const [selected, setSelected] = useState("");
   const [dispatching, setDispatching] = useState(false);

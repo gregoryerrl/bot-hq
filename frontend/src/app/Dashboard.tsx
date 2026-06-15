@@ -57,12 +57,11 @@ export function Dashboard() {
     {},
   );
 
-  // Project dropdown source for the New Session dialog. Refreshes on a
-  // 60s interval so newly-imported projects show without a manual reload.
+  // Project dropdown source for the New Session dialog. Refreshed live via the
+  // `project:changed` event (project register/unregister) — no poll needed.
   const { data: projects = [] } = useTauriQuery<ProjectView[]>(
     "list_projects",
     {},
-    { refetchInterval: 60_000 },
   );
 
   // Saved models for the per-agent pickers, plus the configured defaults.

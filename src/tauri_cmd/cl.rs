@@ -7,6 +7,7 @@ use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
+use tauri::Emitter;
 
 /// Set the description (and optionally tags) on a CL index entry. Used by
 /// the ContextLibrary UI's inline edit flow. Underlying call is the same
@@ -404,6 +405,7 @@ pub async fn cl_delete_folder_description(
 #[specta::specta]
 pub async fn cl_register_project(
     storage: tauri::State<'_, Arc<Storage>>,
+    app: tauri::AppHandle,
     name: String,
     display_name: Option<String>,
     working_repo_path: Option<String>,
@@ -432,6 +434,7 @@ pub async fn cl_register_project(
             cl_path.as_deref(),
         )
         .await?;
+    let _ = app.emit(crate::tauri_events::types::PROJECT_CHANGED, ());
     Ok(())
 }
 
@@ -442,9 +445,11 @@ pub async fn cl_register_project(
 #[specta::specta]
 pub async fn cl_unregister_project(
     storage: tauri::State<'_, Arc<Storage>>,
+    app: tauri::AppHandle,
     name: String,
 ) -> Result<(), AppError> {
     storage.unregister_project(&name).await?;
+    let _ = app.emit(crate::tauri_events::types::PROJECT_CHANGED, ());
     Ok(())
 }
 

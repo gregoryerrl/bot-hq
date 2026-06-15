@@ -160,6 +160,17 @@ impl WorktreeChangedEvent {
     pub const EVENT_NAME: &'static str = "session:worktree_changed";
 }
 
+/// Emitted (direct `app.emit`) when the project registry changes — a project was
+/// registered or unregistered. That's a DB-only change the filesystem watcher
+/// can't see, so the UI needs an explicit nudge; the frontend invalidates
+/// `list_projects`. No payload.
+pub const PROJECT_CHANGED: &str = "project:changed";
+
+/// Emitted (direct `app.emit`) when a session is created via a path the frontend
+/// doesn't already self-invalidate (the external driver). Carries
+/// `{ session_id }`; the frontend invalidates `list_sessions`.
+pub const SESSION_CREATED: &str = "session:created";
+
 /// Plugin lifecycle event names emitted to the frontend PluginManager, which
 /// listens for the same strings. Centralized so an emit site and the listener
 /// can't drift independently.

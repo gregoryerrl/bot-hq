@@ -12,6 +12,7 @@ use crate::storage::{Author, MessageKind, Session, Storage};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use tauri::Emitter;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
@@ -86,6 +87,15 @@ impl AppState {
         let id = handle.id.clone();
         self.watch_session_repo(&id, &handle);
         self.sessions.lock().await.insert(id.clone(), handle);
+        // Tell the frontend a session was created. This covers the external
+        // driver path (UI create paths already self-invalidate list_sessions);
+        // no-op until the AppHandle is set in setup.
+        if let Some(app) = self.app_handle.get() {
+            let _ = app.emit(
+                crate::tauri_events::types::SESSION_CREATED,
+                serde_json::json!({ "session_id": id }),
+            );
+        }
         Ok(id)
     }
 
