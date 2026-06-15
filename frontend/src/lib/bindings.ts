@@ -539,6 +539,19 @@ async setSessionToolGate(sessionId: string, keywords: GatedKeyword[]) : Promise<
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Read the full enforcement audit trail (`<data_dir>/.local/violations.jsonl`)
+ * for the Settings → Violations viewer. Parse-tolerant (the reader skips
+ * malformed lines); empty when the log doesn't exist yet.
+ */
+async readViolations() : Promise<Result<ViolationRecord[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_violations") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async claudeConfigRead() : Promise<Result<ClaudeConfigView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("claude_config_read") };
@@ -1255,6 +1268,50 @@ export type UpdateInfo = { current_version: string; latest_version: string; upda
  * Outcome of a pre-flight model probe (B5).
  */
 export type ValidateResult = { ok: boolean; message: string }
+export type ViolationKind = 
+/**
+ * `git push` intercepted by push_gate policy.
+ */
+"push_gate" | 
+/**
+ * `git commit` proposed message contained a forbidden word.
+ */
+"commit_grep" | 
+/**
+ * `git push --force` / `--force-with-lease`.
+ */
+"force_push" | 
+/**
+ * Tool Gate / `action_gate` approval (legacy wire name `tool_blocklist`,
+ * kept for back-compat; the per-project `tool_blocklist` it was named for
+ * is retired — see the Tool Gate).
+ */
+"tool_blocklist" | 
+/**
+ * Bash command matched `per_action_approval`.
+ */
+"per_action" | 
+/**
+ * Generic agent-initiated approval request (free-form).
+ */
+"generic_approval" | 
+/**
+ * A policy.yaml file was modified outside the Settings UI flow.
+ * Audit-only in v1 — we log but don't block (yet). Catches the
+ * "agent edits policy.yaml to remove forbidden words" attack.
+ */
+"policy_mutation"
+export type ViolationOutcome = "approved" | "denied" | 
+/**
+ * User dismissed/canceled before deciding (e.g., closed dialog).
+ */
+"abandoned" | 
+/**
+ * Audit-only — we observed an event but didn't ask for approval.
+ * Used for PolicyMutation entries (no user prompt; just logged).
+ */
+"detected"
+export type ViolationRecord = { ts: string; session_id: string; agent: string; kind: ViolationKind; action: string; outcome: ViolationOutcome; detail?: string | null }
 
 /** tauri-specta globals **/
 
