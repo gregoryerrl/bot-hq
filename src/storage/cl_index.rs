@@ -125,6 +125,22 @@ impl Storage {
         Ok(())
     }
 
+    /// Read back the CL-read audit trail for a session, most-recent first — the
+    /// reader half of [`Self::record_cl_read`]. Each row carries the
+    /// `cl_index_id` of the file read; callers join to `cl_index` for the path.
+    /// Powers the deferred "what context did this agent see?" view promised by
+    /// the `cl_register_read` tool descriptor.
+    pub async fn cl_reads_for_session(&self, session_id: &str) -> Result<Vec<ClRead>> {
+        let rows = sqlx::query_as::<_, ClRead>(
+            "SELECT id, cl_index_id, session_id, agent, read_at FROM cl_reads \
+             WHERE session_id = ? ORDER BY read_at DESC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     // ---- cl_folders ------------------------------------------------------
 
     /// Upsert a folder description. `folder_path = ""` is the project root
@@ -200,5 +216,27 @@ impl Storage {
     ) -> Result<Vec<ClFolder>> {
         self.cl_search_table("cl_folders", "folder_path", project, query)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cl_reads_for_session_returns_recorded_reads_scoped_by_session() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("p", "p", None, None, None).await.unwrap();
+        let cl_id = s.upsert_cl_index("p", "notes.md", "d", None).await.unwrap();
+        s.record_cl_read(cl_id, Some("s1"), "brian").await.unwrap();
+        s.record_cl_read(cl_id, Some("s2"), "rain").await.unwrap();
+
+        let reads = s.cl_reads_for_session("s1").await.unwrap();
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].agent, "brian");
+        assert_eq!(reads[0].cl_index_id, cl_id);
+        // Scoped by session: s2 has its own row, an unknown session has none.
+        assert_eq!(s.cl_reads_for_session("s2").await.unwrap().len(), 1);
+        assert!(s.cl_reads_for_session("nope").await.unwrap().is_empty());
     }
 }
