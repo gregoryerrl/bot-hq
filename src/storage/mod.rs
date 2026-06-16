@@ -92,6 +92,15 @@ impl Storage {
     where
         T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
     {
+        // `table` and `path_column` are interpolated into the SQL below (sqlx
+        // can't bind identifiers), so they MUST be compile-time constants, never
+        // user input. Both call sites pass literals; this guard trips a debug
+        // build if a future caller forgets. The search term IS bound — see
+        // `.bind(&q)` — so it carries no injection risk.
+        debug_assert!(
+            matches!(table, "cl_index" | "cl_folders"),
+            "cl_search_table: non-constant table name {table:?} — identifiers must not be dynamic"
+        );
         let like = query.map(|q| format!("%{}%", q.to_lowercase()));
         let select = format!(
             "SELECT id, project_id, {path_column}, description, tags, created_at, updated_at \

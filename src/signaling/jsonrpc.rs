@@ -99,6 +99,9 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
 /// Tools that mutate CL annotations (folder descriptions, etc.). Brian (HANDS)
 /// owns mutations; Rain (EYES) reviews via the read
 /// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
+/// `cl_register_read` is deliberately NOT gated: it writes an AUDIT row (who
+/// read what), not CL content, and Rain recording her own reads is correct —
+/// the gate is about content authorship, not any write to a CL table.
 const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
 
 /// Valid IPAV phase tags accepted by `session_doc_write` / `session_doc_search`.

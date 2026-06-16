@@ -807,7 +807,10 @@ pub async fn cl_rename(
 
 /// Delete a file, or a folder and everything under it. Must exist + resolve
 /// inside the project root. Destructive — the frontend gates this behind a
-/// confirmation dialog.
+/// confirmation dialog. Does NOT reconcile the index itself: the caller must
+/// follow with `cl_rescan` to drop the now-orphaned `cl_index`/`cl_folders`
+/// rows (the frontend does at ContextLibrary.tsx). A future agent/driver path
+/// that deletes without rescanning would leave orphan rows until the next one.
 #[tauri::command]
 #[specta::specta]
 pub async fn cl_delete_path(
