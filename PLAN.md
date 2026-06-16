@@ -60,8 +60,6 @@ empty-state, inline session rename, persistent prompt drafts.
 - Responsive Brian/Rain vertical stack at content widths < 1200px (the
   single-chronological-chat redesign mooted this, but keep the option
   on the table if the two-pane view is requested back).
-- Surface a "worktree kept (dirty)" indicator in the UI when a closed
-  session's worktree survives cleanup (today it's a tracing warn only).
 
 ### Auth-token v2 — OS keychain
 
@@ -80,16 +78,6 @@ Fall back to plaintext-sqlite mode with a startup warning on keychain
 failure (headless CI, Linux without Secret Service daemon).
 
 Original Phase 0 research: [`docs/rebuild-archive/decisions.md`](docs/rebuild-archive/decisions.md#auth-storage).
-
-### Violations log — UI viewer (v1.1 target)
-
-The `violations.jsonl` file exists and is written, but the Settings →
-Violations viewer is a stub (deliberately deferred from the v1.0.0
-scope, 2026-06-11 user pick). Build it out:
-- Tail the file (mtime poll, ~2s cadence).
-- Filter by kind (`CommitGrep`, `PushDenied`, `PolicyMutation`, …),
-  by session, by date.
-- Click-through to the source message in chat where possible.
 
 ### Sub-agent dispatcher integration
 
