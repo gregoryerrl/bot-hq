@@ -3,24 +3,9 @@
 //! [`extract_description`] which is only used by [`walk_cl_dir`] here.
 
 use super::*;
+use crate::paths::IGNORED_BUILD_DIRS;
 use crate::policy::ViolationOutcome;
 use crate::storage::Project;
-
-/// Build / dependency directories never worth indexing as CL content. Mirrors
-/// `tauri_events::fs_watcher::IGNORED_DIRS` (keep in sync) plus a couple of
-/// extras common in doc/code repos. Hidden dirs are already skipped by the
-/// `.`-prefix rule in [`walk_cl_dir`]. Without this, pointing a project's
-/// `cl_path` at a real repo indexed every `package.json`/`README.md` under
-/// `node_modules`, `target`, etc.
-const IGNORED_DIRS: &[&str] = &[
-    "target",
-    "node_modules",
-    "dist",
-    "build",
-    "__pycache__",
-    "vendor",
-    "coverage",
-];
 
 /// Walk `dir` recursively; for each text-ish file (.md, .yaml, .txt) populate
 /// `out` with (relative_path, mtime_iso8601, description_snippet). Skips
@@ -55,7 +40,7 @@ pub(super) fn walk_cl_dir(
         if path.is_dir() {
             // Skip build/dependency dirs — a repo-rooted cl_path otherwise pulls
             // every node_modules/target text file into the index.
-            if IGNORED_DIRS.contains(&name) {
+            if IGNORED_BUILD_DIRS.contains(&name) {
                 continue;
             }
             walk_cl_dir(&path, root, project, out);

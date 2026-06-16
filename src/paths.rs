@@ -49,6 +49,22 @@ use tracing::{info, warn};
 ///   `claude-overrides.json`) moved from the data-dir root into `config/`.
 const SCHEMA_VERSION: u32 = 2;
 
+/// Build / dependency directories never worth walking — skipped both when
+/// indexing a `cl_path` repo as CL content (`signaling::bridge::util::walk_cl_dir`)
+/// and when filtering working-tree change events (`tauri_events::fs_watcher`).
+/// One shared list so the two consumers can't drift (they did: the watcher copy
+/// was missing `vendor`/`coverage`). Hidden dirs (`.`-prefixed) are handled
+/// separately by each caller.
+pub const IGNORED_BUILD_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    "__pycache__",
+    "vendor",
+    "coverage",
+];
+
 /// Outcome of [`Paths::init`]. Used by the UI layer to surface one-time toasts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InitOutcome {

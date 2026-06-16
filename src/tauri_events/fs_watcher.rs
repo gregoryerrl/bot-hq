@@ -19,6 +19,7 @@
 //! the watch lives for the process lifetime) and also mutates its watch-set as
 //! sessions come and go, driven by a second `WatchCmd` channel.
 
+use crate::paths::IGNORED_BUILD_DIRS;
 use crate::signaling::SignalingBridge;
 use crate::storage::Project;
 use crate::tauri_events::types::{ClChangedEvent, WorktreeChangedEvent};
@@ -37,10 +38,10 @@ use tokio::sync::mpsc::UnboundedSender;
 /// enough to coalesce an editor's / a git op's burst, short enough to feel live.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
-/// Build / VCS directories whose churn must never trigger an A-tab recompute.
-/// (Dot-prefixed names — `.git`, `.vite`, `.next`, … — are caught by the
-/// `.`-prefix rule in [`is_ignored_component`], so they're not repeated here.)
-const IGNORED_DIRS: &[&str] = &["target", "node_modules", "dist", "build", "__pycache__"];
+// Build / VCS directories whose churn must never trigger an A-tab recompute are
+// shared with the CL walker via `crate::paths::IGNORED_BUILD_DIRS`. (Dot-prefixed
+// names — `.git`, `.vite`, `.next`, … — are caught by the `.`-prefix rule in
+// [`is_ignored_component`], so they're not in that list.)
 
 /// Command into the watcher task. Lets the session spawn/close paths register
 /// and unregister working repos for live A-tab diffs.
@@ -217,7 +218,7 @@ fn session_for_path(path: &Path, repos: &HashMap<PathBuf, String>) -> Option<Str
 /// `.vite`, `.next`, `.idea`, `.turbo`, editor temp dirs — or a known build dir.
 fn is_ignored_component(name: &OsStr) -> bool {
     match name.to_str() {
-        Some(s) => s.starts_with('.') || IGNORED_DIRS.contains(&s),
+        Some(s) => s.starts_with('.') || IGNORED_BUILD_DIRS.contains(&s),
         None => false,
     }
 }
@@ -301,6 +302,13 @@ mod tests {
             None
         );
         assert_eq!(session_for_path(Path::new("/repo/.vite/dep.js"), &repos), None);
+        // Shared IGNORED_BUILD_DIRS adds vendor/ + coverage/ (previously only the
+        // CL walker filtered these — the watcher copy had drifted).
+        assert_eq!(session_for_path(Path::new("/repo/vendor/x/y.php"), &repos), None);
+        assert_eq!(
+            session_for_path(Path::new("/repo/coverage/lcov.info"), &repos),
+            None
+        );
     }
 
     #[test]
