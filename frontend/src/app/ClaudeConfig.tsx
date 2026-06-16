@@ -116,6 +116,9 @@ export function ClaudeConfigPanel() {
   // session keeps its old config until respawned).
   const [showRestart, setShowRestart] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
+  // Inline save error — a rejected staged-edit/override flush must not be
+  // swallowed (otherwise the unsaved-changes bar just sits there silently).
+  const [saveError, setSaveError] = useState<string | null>(null);
   const { data: sessions } = useTauriQuery<SessionInfo[]>("list_sessions");
   const respawn = useTauriMutation<void, { sessionId: string }>("restart_session");
   const activeSessions = (sessions ?? []).filter(
@@ -196,23 +199,30 @@ export function ClaudeConfigPanel() {
     setPluginEnabled.isPending;
 
   const onSave = async () => {
-    // Flush staged global settings.json edits, then per-agent overrides.
-    for (const [key, value] of Object.entries(pendingStrings)) {
-      await setString.mutateAsync({ key, value });
+    setSaveError(null);
+    try {
+      // Flush staged global settings.json edits, then per-agent overrides.
+      for (const [key, value] of Object.entries(pendingStrings)) {
+        await setString.mutateAsync({ key, value });
+      }
+      for (const [key, value] of Object.entries(pendingBools)) {
+        await setBool.mutateAsync({ key, value });
+      }
+      for (const [key, enabled] of Object.entries(pendingPlugins)) {
+        await setPluginEnabled.mutateAsync({ key, enabled });
+      }
+      if (overridesDirty) {
+        await save.mutateAsync({ overrides: draft });
+      }
+      clearPending();
+      refetchConfig();
+      refetchOverrides();
+      setShowRestart(true);
+    } catch (e) {
+      // A failed write aborts the flush — surface it instead of leaving the
+      // unsaved-changes bar silently stuck (some edits may already be written).
+      setSaveError(errorMessage(e));
     }
-    for (const [key, value] of Object.entries(pendingBools)) {
-      await setBool.mutateAsync({ key, value });
-    }
-    for (const [key, enabled] of Object.entries(pendingPlugins)) {
-      await setPluginEnabled.mutateAsync({ key, enabled });
-    }
-    if (overridesDirty) {
-      await save.mutateAsync({ overrides: draft });
-    }
-    clearPending();
-    refetchConfig();
-    refetchOverrides();
-    setShowRestart(true);
   };
   const onReset = () => {
     clearPending();
@@ -235,6 +245,11 @@ export function ClaudeConfigPanel() {
           <span className="font-code-sm text-code-sm text-on-surface">
             Unsaved changes — global edits write your settings.json; agent
             overrides take effect after restarting agents.
+            {saveError && (
+              <span className="ml-2 text-on-error-container">
+                — save failed: {saveError}
+              </span>
+            )}
           </span>
           <div className="flex gap-2">
             <Button variant="ghost" size="sm" onClick={onReset}>

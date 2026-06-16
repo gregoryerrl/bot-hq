@@ -49,6 +49,9 @@ export function ModelsPanel() {
     { mode: "create" } | { mode: "edit"; model: ModelView } | null
   >(null);
   const [deleteTarget, setDeleteTarget] = useState<ModelView | null>(null);
+  // Inline delete error so a rejected delete_model surfaces in the confirm
+  // dialog instead of silently failing (the dialog stays open to show it).
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   // B5: per-model pre-flight "Test connection" state + last result.
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, ProbeResult>>({});
@@ -165,7 +168,10 @@ export function ModelsPanel() {
                       variant="danger"
                       size="sm"
                       disabled={del.isPending}
-                      onClick={() => setDeleteTarget(m)}
+                      onClick={() => {
+                        setDeleteError(null);
+                        setDeleteTarget(m);
+                      }}
                     >
                       Delete
                     </Button>
@@ -208,17 +214,31 @@ export function ModelsPanel() {
               {deleteTarget?.display_name || "this model"}
             </strong>
             ? This also removes its stored auth token and can&apos;t be undone.
+            {deleteError && (
+              <span className="mt-3 block rounded border border-error/40 bg-error-container/20 px-3 py-2 text-on-error-container">
+                Delete failed: {deleteError}
+              </span>
+            )}
           </>
         }
         confirmLabel="Delete"
         confirmVariant="danger"
         onConfirm={async () => {
           if (!deleteTarget) return;
-          await del.mutateAsync({ id: deleteTarget.id });
-          setDeleteTarget(null);
-          refetch();
+          setDeleteError(null);
+          try {
+            await del.mutateAsync({ id: deleteTarget.id });
+            setDeleteTarget(null);
+            refetch();
+          } catch (e) {
+            // Keep the dialog open so the inline error is visible.
+            setDeleteError(errorMessage(e));
+          }
         }}
-        onCancel={() => setDeleteTarget(null)}
+        onCancel={() => {
+          setDeleteError(null);
+          setDeleteTarget(null);
+        }}
       />
     </div>
   );

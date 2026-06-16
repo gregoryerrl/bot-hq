@@ -19,6 +19,10 @@ import type {
 export function PluginManager() {
   const [installSource, setInstallSource] = useState("");
   const [installError, setInstallError] = useState<AppError | null>(null);
+  // Enable/disable + uninstall both fire-and-forget mutate; capture their
+  // rejections so a failed toggle/uninstall isn't silently swallowed.
+  const [toggleError, setToggleError] = useState<AppError | null>(null);
+  const [uninstallError, setUninstallError] = useState<AppError | null>(null);
   const [confirmUninstall, setConfirmUninstall] =
     useState<InstalledPluginView | null>(null);
 
@@ -118,6 +122,31 @@ export function PluginManager() {
             </button>
           </div>
         )}
+        {toggleError && (
+          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 text-xs text-on-error-container">
+            <div>
+              <span className="font-semibold">{toggleError.kind}:</span>{" "}
+              Enable/disable failed: {toggleError.message}
+            </div>
+            <button className="underline" onClick={() => setToggleError(null)}>
+              dismiss
+            </button>
+          </div>
+        )}
+        {uninstallError && (
+          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 text-xs text-on-error-container">
+            <div>
+              <span className="font-semibold">{uninstallError.kind}:</span>{" "}
+              Uninstall failed: {uninstallError.message}
+            </div>
+            <button
+              className="underline"
+              onClick={() => setUninstallError(null)}
+            >
+              dismiss
+            </button>
+          </div>
+        )}
       </section>
 
       {list.isLoading ? (
@@ -142,7 +171,11 @@ export function PluginManager() {
               plugin={p}
               onToggle={() => {
                 const action = p.enabled ? disable : enable;
-                action.mutate({ pluginId: p.id });
+                setToggleError(null);
+                action.mutate(
+                  { pluginId: p.id },
+                  { onError: (err) => setToggleError(err) },
+                );
               }}
               onUninstall={() => setConfirmUninstall(p)}
               busy={
@@ -169,8 +202,13 @@ export function PluginManager() {
         confirmLabel="Uninstall"
         confirmVariant="danger"
         onConfirm={() => {
-          if (confirmUninstall)
-            uninstall.mutate({ pluginId: confirmUninstall.id });
+          if (confirmUninstall) {
+            setUninstallError(null);
+            uninstall.mutate(
+              { pluginId: confirmUninstall.id },
+              { onError: (err) => setUninstallError(err) },
+            );
+          }
           setConfirmUninstall(null);
         }}
         onCancel={() => setConfirmUninstall(null)}

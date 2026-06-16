@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { SessionTile } from "../components/SessionTile";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
@@ -139,6 +139,9 @@ export function Dashboard() {
   }, [pending]);
 
   const [creating, setCreating] = useState(false);
+  // Inline create-session error so a rejected mutation doesn't leave the dialog
+  // silently stuck on "Creating…" (the dialog stays open on failure to show it).
+  const [createError, setCreateError] = useState<string | null>(null);
   const dialogRef = useFocusTrap<HTMLDivElement>(creating);
 
   // ⌘/Ctrl-N lands here as `/?new=1` (see Shell) — open the dialog and eat
@@ -181,6 +184,7 @@ export function Dashboard() {
   // the dialog opens (not on every query change, so user edits aren't clobbered).
   useEffect(() => {
     if (!creating) return;
+    setCreateError(null);
     const modelIdFor = (cfg: AgentConfigView | null | undefined) =>
       models.find(
         (m) =>
@@ -204,26 +208,39 @@ export function Dashboard() {
     if (!title.trim()) return;
     const id = `s-${crypto.randomUUID().slice(0, 8)}`;
     const proj = projects.find((p) => p.name === selectedProject);
-    await createSession.mutateAsync({
-      id,
-      title: title.trim(),
-      repoPath: proj?.working_repo_path ?? null,
-      project: selectedProject || null,
-      rainEnabled: !disableRain,
-      brianModelId: brianModelId || null,
-      rainModelId: disableRain ? null : rainModelId || null,
-      options: {
-        brianEffort,
-        rainEffort: disableRain ? null : rainEffort,
-        brianUltracode,
-        rainUltracode: disableRain ? null : rainUltracode,
-        useWorktree,
-      },
-    });
-    setTitle("");
-    setSelectedProject("");
-    setCreating(false);
-    refetch();
+    setCreateError(null);
+    let ok = false;
+    try {
+      await createSession.mutateAsync({
+        id,
+        title: title.trim(),
+        repoPath: proj?.working_repo_path ?? null,
+        project: selectedProject || null,
+        rainEnabled: !disableRain,
+        brianModelId: brianModelId || null,
+        rainModelId: disableRain ? null : rainModelId || null,
+        options: {
+          brianEffort,
+          rainEffort: disableRain ? null : rainEffort,
+          brianUltracode,
+          rainUltracode: disableRain ? null : rainUltracode,
+          useWorktree,
+        },
+      });
+      ok = true;
+    } catch (e) {
+      // Keep the dialog open so the inline error is visible.
+      setCreateError(errorMessage(e));
+    } finally {
+      // Only tear the dialog down on success; on failure it stays up to show
+      // the error (this guarantees we never get wedged on "Creating…").
+      if (ok) {
+        setTitle("");
+        setSelectedProject("");
+        setCreating(false);
+        refetch();
+      }
+    }
   };
 
   // Escape-to-dismiss + first-input focus when the dialog opens.
@@ -439,6 +456,11 @@ export function Dashboard() {
                 </span>
               </div>
             </div>
+            {createError && (
+              <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+                Create failed: {createError}
+              </p>
+            )}
             <div className="mt-5 flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setCreating(false)}>
                 Cancel
