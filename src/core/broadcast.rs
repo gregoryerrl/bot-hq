@@ -58,8 +58,8 @@ pub async fn peer_forward_message(
     input_tx: &mpsc::Sender<OutgoingUserMessage>,
 ) {
     let prefix = match peer_author {
-        Author::Brian => "[Brian]\n",
-        Author::Rain => "[Rain]\n",
+        Author::Brian => "[PEER MESSAGE — from Brian (HANDS), not the user]\n",
+        Author::Rain => "[PEER MESSAGE — from Rain (EYES), not the user]\n",
         Author::User => "",
     };
     let inner = format!("{prefix}{text}");
@@ -152,8 +152,10 @@ mod tests {
         peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, &tx).await;
         let m = rx.recv().await.unwrap();
         assert!(
-            m.message.content.starts_with("[PHASE: Plan]\n[Rain]\n"),
-            "expected phase envelope wrapping author tag, got: {}",
+            m.message
+                .content
+                .starts_with("[PHASE: Plan]\n[PEER MESSAGE — from Rain (EYES), not the user]\n"),
+            "expected phase envelope wrapping peer provenance tag, got: {}",
             m.message.content
         );
         assert!(m.message.content.contains("concerns?"));
