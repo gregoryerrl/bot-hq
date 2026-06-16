@@ -2,7 +2,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { FolderView } from "./ContextLibraryFolderView";
 import { invoke } from "@tauri-apps/api/core";
-import type { ClFolderView } from "../lib/bindings";
+import type { ClFolderView, ProjectView } from "../lib/bindings";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const mockInvoke = vi.mocked(invoke);
@@ -19,6 +19,15 @@ const folder = (
   tags: null,
   created_at: "",
   updated_at: "",
+});
+
+const proj = (over: Partial<ProjectView>): ProjectView => ({
+  name: "p",
+  display_name: "p",
+  working_repo_path: null,
+  description: null,
+  cl_path: null,
+  ...over,
 });
 
 describe("FolderView", () => {
@@ -71,39 +80,98 @@ describe("FolderView", () => {
     expect(screen.getByText("project root")).toBeInTheDocument();
   });
 
-  it("shows the project registration section on a project root and unregisters", async () => {
+  it("shows the registration section on a project root and unbinds the repo", async () => {
     mockInvoke.mockResolvedValue(undefined);
     const onProjectChanged = vi.fn();
     render(
       <FolderView
         tab={{ kind: "folder", project: "bot-hq", folderPath: "" }}
         folders={[]}
-        project={{
+        project={proj({
           name: "bot-hq",
           display_name: "bot-hq",
           working_repo_path: "/Users/me/Projects/bot-hq",
-          description: null,
           cl_path: "/Users/me/.bot-hq/projects/bot-hq",
-        }}
+        })}
         onSaved={() => {}}
         onProjectChanged={onProjectChanged}
       />,
     );
 
-    // CL path + working repo surfaced
     expect(
       screen.getByText("/Users/me/.bot-hq/projects/bot-hq"),
     ).toBeInTheDocument();
-    expect(screen.getByDisplayValue("/Users/me/Projects/bot-hq")).toBeInTheDocument();
+    expect(
+      screen.getByDisplayValue("/Users/me/Projects/bot-hq"),
+    ).toBeInTheDocument();
 
-    // Unregister is confirm-gated by a dialog: open it, then confirm.
-    fireEvent.click(screen.getByRole("button", { name: /unregister project/i }));
-    fireEvent.click(screen.getByRole("button", { name: "Unregister" }));
+    // Unbind is confirm-gated: open the dialog, then confirm.
+    fireEvent.click(
+      screen.getByRole("button", { name: /unbind working repo/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^unbind$/i }));
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("cl_unregister_project", {
         name: "bot-hq",
       }),
     );
     expect(onProjectChanged).toHaveBeenCalled();
+  });
+
+  it("hard-deletes a managed project (incl. files) via cl_delete_project", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const onProjectGone = vi.fn();
+    render(
+      <FolderView
+        tab={{ kind: "folder", project: "widget", folderPath: "" }}
+        folders={[]}
+        project={proj({ name: "widget", display_name: "widget", cl_path: null })}
+        onSaved={() => {}}
+        onProjectChanged={() => {}}
+        onProjectGone={onProjectGone}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /delete project/i }));
+    // Managed project → the "also delete files" checkbox is offered.
+    fireEvent.click(screen.getByLabelText(/also delete the cl files/i));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("cl_delete_project", {
+        name: "widget",
+        deleteClDir: true,
+      }),
+    );
+    expect(onProjectGone).toHaveBeenCalledWith("widget");
+  });
+
+  it("renames a project via cl_rename_project", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const onProjectGone = vi.fn();
+    render(
+      <FolderView
+        tab={{ kind: "folder", project: "old", folderPath: "" }}
+        folders={[]}
+        project={proj({ name: "old", display_name: "old" })}
+        onSaved={() => {}}
+        onProjectChanged={() => {}}
+        onProjectGone={onProjectGone}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^rename$/i }));
+    fireEvent.change(screen.getByDisplayValue("old"), {
+      target: { value: "new" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("cl_rename_project", {
+        name: "old",
+        newName: "new",
+      }),
+    );
+    expect(onProjectGone).toHaveBeenCalledWith("old", "new");
   });
 });

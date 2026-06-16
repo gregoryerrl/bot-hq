@@ -16,6 +16,7 @@ import type {
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { AgentEffortOverride } from "./ClaudeConfig";
+import { pickFolder } from "./contextLibraryShared";
 
 const RAIN_DISABLED_DEFAULT_KEY = "rain_disabled_default";
 
@@ -158,6 +159,11 @@ export function Dashboard() {
   // project (no working repo). When set, we look up the project's
   // working_repo_path and pass it as repoPath to create_session.
   const [selectedProject, setSelectedProject] = useState("");
+  // Ad-hoc working repo picked directly (folder not registered as a project).
+  // When set it overrides the dropdown: repoPath = this path, project = null
+  // (the backend derives the project from the path basename and the session
+  // inherits the general policy tier, since the repo isn't a registered project).
+  const [adHocRepo, setAdHocRepo] = useState("");
   const [filter, setFilter] = useState("");
   // Per-agent model picks ("" = fall back to the agent's saved config) and the
   // Rain toggle. Seeded from the configured defaults when the dialog opens.
@@ -196,6 +202,8 @@ export function Dashboard() {
     setRainModelId(modelIdFor(rainConfig));
     setDisableRain(rainDisabledDefault === "1");
     setUseWorktree(worktreeDefault !== "0");
+    setSelectedProject("");
+    setAdHocRepo("");
     // Effort/ultracode default to inherit (the Settings defaults) each open.
     setBrianEffort(null);
     setRainEffort(null);
@@ -208,14 +216,18 @@ export function Dashboard() {
     if (!title.trim()) return;
     const id = `s-${crypto.randomUUID().slice(0, 8)}`;
     const proj = projects.find((p) => p.name === selectedProject);
+    // Ad-hoc repo wins over the dropdown; project stays null so the backend
+    // derives it from the path basename (general policy tier).
+    const repoPath = adHocRepo.trim() || proj?.working_repo_path || null;
+    const project = adHocRepo.trim() ? null : selectedProject || null;
     setCreateError(null);
     let ok = false;
     try {
       await createSession.mutateAsync({
         id,
         title: title.trim(),
-        repoPath: proj?.working_repo_path ?? null,
-        project: selectedProject || null,
+        repoPath,
+        project,
         rainEnabled: !disableRain,
         brianModelId: brianModelId || null,
         rainModelId: disableRain ? null : rainModelId || null,
@@ -326,7 +338,10 @@ export function Dashboard() {
                 </span>
                 <select
                   value={selectedProject}
-                  onChange={(e) => setSelectedProject(e.target.value)}
+                  onChange={(e) => {
+                    setSelectedProject(e.target.value);
+                    if (e.target.value) setAdHocRepo("");
+                  }}
                   className={cn(
                     "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
                     "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
@@ -345,6 +360,49 @@ export function Dashboard() {
                   policy. Leave blank for ad-hoc scopes.
                 </span>
               </label>
+              {/* Ad-hoc repo: pick a folder that isn't a registered project. */}
+              {adHocRepo ? (
+                <div className="flex items-center justify-between gap-2 rounded-md border border-outline-variant bg-surface px-3 py-1.5">
+                  <span
+                    className="truncate font-code-sm text-code-sm text-on-surface"
+                    title={adHocRepo}
+                  >
+                    {adHocRepo}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAdHocRepo("")}
+                    aria-label="Clear picked folder"
+                    className="shrink-0 text-on-surface-variant transition-colors hover:text-on-surface"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const picked = await pickFolder("Choose a working repo");
+                      if (picked) {
+                        setAdHocRepo(picked);
+                        setSelectedProject("");
+                      }
+                    } catch (e) {
+                      setCreateError(errorMessage(e));
+                    }
+                  }}
+                  className="font-code-sm text-code-sm text-primary transition-colors hover:underline"
+                >
+                  or pick a folder not listed…
+                </button>
+              )}
+              {adHocRepo && (
+                <p className="font-code-sm text-code-sm text-on-surface-variant">
+                  Ad-hoc repo — not a registered project, so this session uses
+                  the general policy tier.
+                </p>
+              )}
               <label className="block">
                 <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
                   Brian model
@@ -372,8 +430,9 @@ export function Dashboard() {
                   to run a pre-flight connection test).
                 </p>
               )}
-              {projects.find((p) => p.name === selectedProject)
-                ?.working_repo_path && (
+              {(projects.find((p) => p.name === selectedProject)
+                ?.working_repo_path ||
+                adHocRepo.trim()) && (
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
@@ -534,8 +593,9 @@ export function Dashboard() {
                 done: projects.length > 0,
                 body: (
                   <>
-                    Register a project in the <b>Context Library</b> tab — so
-                    sessions know your repo and conventions.
+                    Add a project in the <b>Context Library</b> tab (or pick a
+                    repo folder when you start a session) — so sessions know your
+                    repo and conventions.
                   </>
                 ),
               },

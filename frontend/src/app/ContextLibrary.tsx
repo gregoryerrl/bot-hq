@@ -222,7 +222,7 @@ export function ContextLibrary() {
         !target.path.includes("/")
       ) {
         items.push({
-          label: "Register as project",
+          label: "Promote to project",
           onSelect: () => setAction({ mode: "registerProject", target }),
         });
       }
@@ -285,11 +285,11 @@ export function ContextLibrary() {
         };
       case "registerProject":
         return {
-          title: "Register as project",
-          message: `Moves "${t.path}" into projects/ and registers it as a Context Library project.`,
+          title: "Promote to project",
+          message: `Moves the existing Global folder "${t.path}" into projects/ and registers it as a Context Library project. (To create a new project, use "+ New project".)`,
           inputLabel: "Project name",
           initialValue: baseName(t.path),
-          confirmLabel: "Register",
+          confirmLabel: "Promote",
         };
     }
   };
@@ -464,6 +464,24 @@ export function ContextLibrary() {
     });
   };
 
+  // A project was deleted (no replacement) or renamed (replacement = new name).
+  // Drop its open tabs, refresh the tree, and retarget the filter / reopen the
+  // renamed root so the user isn't left staring at a stale view.
+  const onProjectGone = (name: string, replacement?: string) => {
+    setTabs((prev) => {
+      const next = prev.filter((t) => t.project !== name);
+      setActiveTabIndex((cur) => Math.min(cur, Math.max(0, next.length - 1)));
+      return next;
+    });
+    if (project === name) setProject(replacement ?? null);
+    onProjectChanged();
+    if (replacement) {
+      setQuery("");
+      setProject(replacement);
+      openFolder(replacement, "");
+    }
+  };
+
   const handleRescan = async () => {
     if (rescanning) return;
     setRescanning(true);
@@ -573,6 +591,7 @@ export function ContextLibrary() {
         onRefetchIndex={refetch}
         onRefetchFolders={refetchFolders}
         onProjectChanged={onProjectChanged}
+        onProjectGone={onProjectGone}
       />
       <RegisterProjectModal
         open={registerOpen}

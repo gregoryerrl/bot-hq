@@ -43,6 +43,7 @@ interface EditorAreaProps {
   onRefetchIndex: () => void;
   onRefetchFolders: () => void;
   onProjectChanged: () => void;
+  onProjectGone: (name: string, replacement?: string) => void;
 }
 
 export function EditorArea({
@@ -57,6 +58,7 @@ export function EditorArea({
   onRefetchIndex,
   onRefetchFolders,
   onProjectChanged,
+  onProjectGone,
 }: EditorAreaProps) {
   return (
     <div className="flex min-w-0 flex-1 flex-col">
@@ -80,6 +82,7 @@ export function EditorArea({
           }
           onSaved={onRefetchFolders}
           onProjectChanged={onProjectChanged}
+          onProjectGone={onProjectGone}
         />
       ) : isPolicyFile(activeTab.filePath) ? (
         <ProjectPolicyEditor

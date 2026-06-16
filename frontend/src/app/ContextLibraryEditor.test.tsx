@@ -24,6 +24,7 @@ function renderEditor() {
         onRefetchIndex={() => {}}
         onRefetchFolders={() => {}}
         onProjectChanged={() => {}}
+        onProjectGone={() => {}}
       />
     </QueryClientProvider>,
   );

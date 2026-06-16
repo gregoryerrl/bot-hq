@@ -1,3 +1,4 @@
+import { open } from "@tauri-apps/plugin-dialog";
 import { cn } from "../lib/cn";
 import type { ClIndexEntryView } from "../lib/bindings";
 
@@ -48,6 +49,25 @@ export const terminalInputClass = cn(
 export function baseName(filePath: string): string {
   const parts = filePath.split("/");
   return parts[parts.length - 1] || filePath;
+}
+
+/**
+ * Native OS folder picker (Finder / Explorer / file manager) via the Tauri
+ * dialog plugin. Returns the chosen absolute path, or null if cancelled.
+ * `title` labels the dialog; `defaultPath` pre-seeds it with the field's current
+ * value. Single directory only.
+ */
+export async function pickFolder(
+  title: string,
+  defaultPath?: string,
+): Promise<string | null> {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title,
+    defaultPath: defaultPath?.trim() || undefined,
+  });
+  return typeof selected === "string" ? selected : null;
 }
 
 // ============================================================================
