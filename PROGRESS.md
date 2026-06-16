@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-503 tests passing (452 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 92 frontend Vitest. Release build clean. Version **1.0.0** (bumped
+514 tests passing (463 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 94 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
@@ -20,6 +20,46 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
 
 ---
+
+## 2026-06-15 — Live UI freshness, semantic tokens, violations viewer, provenance
+
+A frontend-freshness + market-prep arc: the UI now refreshes live from a filesystem
+watcher and event-emitting commands (the last `refetchInterval` polls dropped), the
+Apply-tab diff recomputes on working-tree changes, semantic status tokens replace raw
+color literals, and the deferred Violations viewer + session-project provenance shipped.
+All five gates green per commit.
+
+**Live freshness (event-driven, no polls).**
+- **Filesystem watcher** (`1fde789`) — a `notify-debouncer-mini` (500ms) over the CL dir
+  + per-session repos (`src/tauri_events/fs_watcher.rs`); re-indexes the affected scope
+  THEN emits `cl:changed` / working-tree events (the index is the search source, so emit
+  without rescan would serve stale rows). Working-repo churn is filtered by an ignore-list
+  (`target`/`node_modules`/`.git`/dotdirs) so `cargo build`/`npm ci` don't thrash the A-tab.
+- **Live Apply-tab diff** (`a4ea46b`, `91de8a2`) — recomputes on working-tree changes;
+  untracked files now appear (side-effect-free `git diff --no-index`, never `git add -N`).
+- **Live CL editor** (`23d15f4`) — an open CL file re-reads on external change, guarded so
+  a CLEAN editor refreshes but an in-progress (dirty) edit isn't clobbered.
+- **Event-driven lists** (`587a474`, `2c7dc77`) — project/session/model lists refresh via
+  `app.emit` from their mutating commands (`project:changed` / `model:changed`; adding
+  `app: AppHandle` to a command doesn't change generated bindings). The last 60s
+  `refetchInterval` polls dropped — only the PluginManager 10s heartbeat + the
+  broadcast-`Lagged` `session:resync` backstop remain by design.
+
+**Semantic tokens** (`2ca657a`, `aad3a44`) — added `success` / `warning` color tokens and
+migrated the raw `emerald` / `amber` / `red` literals to semantic tokens.
+
+**Violations viewer + provenance (deferred items, now shipped).**
+- **`read_violations` + `ViolationsPanel`** (`16a078d`, `db2d540`) — the Settings →
+  Violations viewer (was a stub): tails `violations.jsonl`, filters by kind / outcome /
+  session.
+- **Session-project provenance** (`2df8cce`, `0b3dcc6`) — a `ProjectProvenance` enum +
+  `get_session_project_info` command + a policy-origin badge in Session Settings (surfaces
+  whether the session's project resolved by registered-repo match vs basename inference).
+
+**UX polish** — idle footer state when no agents are tracked (`6251870`), neutral Archive
+resume copy (`e711aa9`), root `.vite` cache ignored (`ec27cdb`); agent models moved from
+the session header into Session Settings (`2c899d0`, 2026-06-14). Bindings regens are their
+own `chore: regen bindings` commits (`7ae1dde`, `1aad5c7`).
 
 ## 2026-06-14 — Adherence + worktree optional follow-ons
 
