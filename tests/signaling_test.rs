@@ -1,9 +1,8 @@
 //! End-to-end HTTP test of the MCP signaling server.
 
-use bot_hq::signaling::{start_signaling_server, SignalingBridge, SignalingEvent};
+use bot_hq::signaling::{start_signaling_server, SignalingBridge};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -63,29 +62,13 @@ async fn server_tools_list_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn server_ask_user_choice_resolves() {
+async fn server_ask_user_choice_parks_immediately() {
+    // ask_user_choice is non-blocking: the HTTP tool call returns a parked ack
+    // (`{status:"parked", choice_id}`) immediately, without waiting for any
+    // resolution. The pick is delivered later out-of-band.
     let bridge = SignalingBridge::new();
     let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
     let addr = server.local_addr;
-    let mut sub = bridge.subscribe();
-
-    let bridge_clone = Arc::clone(&bridge);
-    tokio::spawn(async move {
-        // Wait for the PendingChoice event, then resolve.
-        loop {
-            match tokio::time::timeout(Duration::from_secs(5), sub.recv()).await {
-                Ok(Ok(SignalingEvent::PendingChoice(p))) => {
-                    bridge_clone
-                        .resolve_choice(&p.choice_id, p.options[1].clone())
-                        .await
-                        .unwrap();
-                    return;
-                }
-                Ok(Ok(_)) => continue,
-                _ => return,
-            }
-        }
-    });
 
     let body = http_post_json(
         addr,
@@ -102,7 +85,8 @@ async fn server_ask_user_choice_resolves() {
         .to_string(),
     )
     .await;
-    assert!(body.contains("\"text\":\"b\""), "body: {body}");
+    assert!(body.contains("parked"), "body: {body}");
+    assert!(body.contains("choice_id"), "body: {body}");
     server.shutdown();
 }
 

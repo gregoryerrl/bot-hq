@@ -112,7 +112,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         vec![
         ToolDescriptor {
             name: "ask_user_choice",
-            description: "Ask the user to pick one option from a list. Blocks the agent's turn until the user picks. Use this whenever a decision belongs to the user.",
+            description: "Ask the user to pick one option from a list. Returns IMMEDIATELY with a parked acknowledgment (status=parked plus a choice_id) — it does NOT block; the user's pick is delivered later as an out-of-band user message and the session stays halted until then. After calling it, stop and wait — don't guess, poll, or re-ask. Use this whenever a decision belongs to the user.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -293,7 +293,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "supersede_question",
-            description: "Replace a stale question you parked for the user with a rephrased version. The old row gets status='superseded' (drops from the tray); the new row links to it via `supersedes_id` so the history is traceable. Same blocking semantics as `ask_user_choice` — returns the user's pick of an option from the NEW question.\n\nNote: `ask_user_choice` and `request_approval` already auto-supersede the MOST RECENT pending question from this agent in this session. Use `supersede_question` when you need to explicitly target a SPECIFIC stale row that isn't the most recent (e.g. multiple pending choices from different topics, and you want to rephrase a particular one without disturbing others).",
+            description: "Replace a stale question you parked for the user with a rephrased version. The old row gets status='superseded' (drops from the tray); the new row links to it via `supersedes_id` so the history is traceable. Same non-blocking semantics as `ask_user_choice` — parks the new question and returns a parked acknowledgment immediately; the user's pick on it arrives out-of-band.\n\nNote: `ask_user_choice` and `request_approval` already auto-supersede the MOST RECENT pending question from this agent in this session. Use `supersede_question` when you need to explicitly target a SPECIFIC stale row that isn't the most recent (e.g. multiple pending choices from different topics, and you want to rephrase a particular one without disturbing others).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

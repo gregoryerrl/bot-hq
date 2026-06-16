@@ -16,14 +16,17 @@ impl SignalingBridge {
         }
     }
 
-    /// Called by the MCP `tools/call` handler for `ask_user_choice`.
-    /// Awaits a response from the UI.
+    /// Called by the MCP `tools/call` handler for `ask_user_choice`. Parks the
+    /// question and returns IMMEDIATELY with `{"status":"parked","choice_id"}`
+    /// — it does NOT block waiting for the user. The pick is delivered later
+    /// out-of-band (resolve_choice → synthetic user message), so a slow human
+    /// no longer ties up the agent's MCP request until it client-side times out.
     ///
     /// Auto-supersedes the most recent pending question from this same
     /// `(session_id, agent)` — the new ask replaces the old one in the tray,
     /// the old gets `status='superseded'`, and the new row's `supersedes_id`
-    /// points at the old. This kills the client-side-timeout-retry-duplicate
-    /// cascade without relying on agent discipline.
+    /// points at the old. This kills the retry-duplicate cascade without
+    /// relying on agent discipline.
     pub async fn ask_user_choice(
         &self,
         session_id: String,
@@ -34,8 +37,10 @@ impl SignalingBridge {
         let supersedes_id = self
             .auto_supersede_prior_pending(&session_id, &agent, &question)
             .await;
-        self.ask_user_choice_inner(session_id, agent, question, options, None, supersedes_id)
-            .await
+        self.ask_user_choice_inner(
+            session_id, agent, question, options, None, supersedes_id, false,
+        )
+        .await
     }
 
     /// Policy-initiated approval request. Same machinery as `ask_user_choice`
@@ -60,16 +65,19 @@ impl SignalingBridge {
             options,
             Some(ctx),
             supersedes_id,
+            // Approvals BLOCK: the pre-push git hook awaits a synchronous bool.
+            true,
         )
         .await
     }
 
     /// Explicit supersede: agent passes the choice_id of a stale question
     /// they want to replace + the new question text/options. Same effect as
-    /// `ask_user_choice` from the user's perspective (blocking call returning
-    /// the eventual pick) but the linkage to a SPECIFIC stale row is
-    /// deterministic (vs the auto-supersede heuristic which only catches the
-    /// latest). Returns the picked option from the new question.
+    /// `ask_user_choice` from the user's perspective (parks and returns
+    /// immediately; the pick arrives out-of-band) but the linkage to a SPECIFIC
+    /// stale row is deterministic (vs the auto-supersede heuristic which only
+    /// catches the latest). Returns the parked acknowledgment for the new
+    /// question.
     pub async fn supersede_question_with_new(
         &self,
         session_id: String,
@@ -106,8 +114,9 @@ impl SignalingBridge {
             choice_id: stale_choice_id,
             picked: "(superseded)".to_string(),
         });
-        // Post the new question with the supersedes_id link in place, then
-        // block on its oneshot like a normal ask_user_choice would.
+        // Post the new question with the supersedes_id link in place. Like a
+        // normal ask_user_choice this is non-blocking — it parks and returns;
+        // the pick arrives out-of-band.
         self.ask_user_choice_inner(
             session_id,
             agent,
@@ -115,6 +124,7 @@ impl SignalingBridge {
             options,
             None,
             stale_internal_id,
+            false,
         )
         .await
     }
@@ -161,6 +171,7 @@ impl SignalingBridge {
         Some(stale_internal_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn ask_user_choice_inner(
         &self,
         session_id: String,
@@ -169,6 +180,11 @@ impl SignalingBridge {
         options: Vec<String>,
         approval: Option<ApprovalContext>,
         supersedes_id: Option<i64>,
+        // `true` = hold the request open until the UI resolves (request_approval
+        // / pre-push gate — a git hook awaits a synchronous bool). `false` =
+        // park and return immediately (ask_user_choice / supersede); the answer
+        // arrives out-of-band. See the branch at the end of this fn.
+        blocking: bool,
     ) -> Result<String> {
         let choice_id = Uuid::new_v4().to_string();
         // Persist the command for an action_gate (ToolBlocklist) approval so it
@@ -220,7 +236,25 @@ impl SignalingBridge {
         // until resolve_choice is called (mostly a concern for tests).
         let _ = self.event_tx.send(SignalingEvent::PendingChoice(choice));
 
-        // Caller is the agent; block until UI resolves.
+        if !blocking {
+            // Non-blocking primary path (ask_user_choice / supersede): park and
+            // return IMMEDIATELY. `rx` drops here — we never await it — but the
+            // Parked{tx} stays in `pending` so the UI snapshot and
+            // list_my_pending_questions still see the open question. When
+            // resolve_choice lands the pick, its `tx.send` fails (rx gone) and
+            // falls through to the existing OOB stdin-injection path, which
+            // delivers the answer as a synthetic user message. That is the SAME
+            // path that already handled client-side timeouts — here it's primary,
+            // so there's no ~30s dead-wait and no timeout-then-poll dance.
+            return Ok(serde_json::json!({
+                "status": "parked",
+                "choice_id": choice_id,
+            })
+            .to_string());
+        }
+        // Blocking path (request_approval / pre-push gate): the caller needs a
+        // synchronous decision (a git hook awaits a bool), so hold the request
+        // open until the UI resolves.
         let picked = rx.await.map_err(|_| {
             anyhow::anyhow!("ask_user_choice canceled before user picked an option")
         })?;
@@ -654,33 +688,67 @@ mod tests {
     use crate::policy::ViolationOutcome;
 
     #[tokio::test]
-    async fn ask_user_choice_round_trip() {
+    async fn ask_user_choice_parks_and_returns_immediately() {
+        // ask_user_choice is non-blocking: it parks the question, halts the duo,
+        // and returns a `{status:"parked", choice_id}` ack right away — it does
+        // NOT wait for the user. The pick is delivered later out-of-band, and
+        // resolving clears the awaiting halt.
+        use std::sync::atomic::{AtomicBool, Ordering};
         let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let flag = Arc::new(AtomicBool::new(false));
+        bridge
+            .register_session_awaiting("s1".into(), Arc::clone(&flag))
+            .await;
+
         let mut sub = bridge.subscribe();
-        let bridge_clone = Arc::clone(&bridge);
-        let ask = tokio::spawn(async move {
-            bridge_clone
-                .ask_user_choice(
-                    "s1".into(),
-                    "brian".into(),
-                    "pick".into(),
-                    vec!["a".into(), "b".into()],
-                )
-                .await
-                .unwrap()
-        });
-        // First event should be PendingChoice.
-        let ev = sub.recv().await.unwrap();
-        let choice_id = match ev {
-            SignalingEvent::PendingChoice(p) => p.choice_id,
-            other => panic!("expected PendingChoice, got {other:?}"),
+        // Inline (not spawned): returns immediately with the parked ack.
+        let ack = bridge
+            .ask_user_choice(
+                "s1".into(),
+                "brian".into(),
+                "pick".into(),
+                vec!["Yes".into(), "No".into()],
+            )
+            .await
+            .unwrap();
+        assert!(ack.contains("\"status\":\"parked\""), "ack: {ack}");
+        assert!(ack.contains("choice_id"), "ack: {ack}");
+        assert!(
+            flag.load(Ordering::Acquire),
+            "ask_user_choice must halt the duo while parked"
+        );
+
+        let choice_id = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
         };
-        bridge.resolve_choice(&choice_id, "b".into()).await.unwrap();
-        let picked = ask.await.unwrap();
-        assert_eq!(picked, "b");
-        // Next event should be ChoiceResolved.
-        let ev2 = sub.recv().await.unwrap();
-        assert!(matches!(ev2, SignalingEvent::ChoiceResolved { picked: p, .. } if p == "b"));
+
+        // The parked oneshot's rx dropped when ask returned, so resolve lands via
+        // the OOB path: a synthetic user message + awaiting cleared.
+        let outcome = bridge.resolve_choice(&choice_id, "Yes".into()).await.unwrap();
+        match outcome {
+            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } => {
+                assert_eq!(session_id, "s1");
+                assert!(
+                    body.contains("User picked:") && body.contains("Yes"),
+                    "body: {body}"
+                );
+            }
+            other => panic!("non-blocking ask should resolve via OOB, got {other:?}"),
+        }
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "resolve must clear the awaiting halt so the duo resumes"
+        );
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(msgs
+            .iter()
+            .any(|m| m.content.contains("(out-of-band)") && m.content.contains("Yes")));
     }
 
     #[tokio::test]
@@ -899,17 +967,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivered_outcome_when_agent_receives() {
+    async fn request_approval_blocks_and_returns_pick_in_band() {
+        // Contrast with ask_user_choice: request_approval (and the pre-push gate)
+        // BLOCKS — the caller's await returns the user's pick directly, in-band,
+        // and resolve_choice reports Delivered. This is the synchronous path a
+        // git hook depends on, and it must NOT regress to the parked-ack form.
         let bridge = SignalingBridge::new();
         let mut sub = bridge.subscribe();
         let bridge_clone = Arc::clone(&bridge);
         let ask = tokio::spawn(async move {
             bridge_clone
-                .ask_user_choice(
+                .request_approval(
                     "s1".into(),
                     "brian".into(),
-                    "pick".into(),
-                    vec!["a".into(), "b".into()],
+                    "Approve push?".into(),
+                    vec!["Approve".into(), "Deny".into()],
+                    ApprovalContext {
+                        kind: ViolationKind::PushGate,
+                        action: "git push".into(),
+                        detail: None,
+                    },
                 )
                 .await
                 .unwrap()
@@ -920,17 +997,23 @@ mod tests {
                 _ => continue,
             }
         };
-        let outcome = bridge.resolve_choice(&choice_id, "b".into()).await.unwrap();
-        let _ = ask.await.unwrap();
+        let outcome = bridge
+            .resolve_choice(&choice_id, "Approve".into())
+            .await
+            .unwrap();
+        let picked = ask.await.unwrap();
+        assert_eq!(picked, "Approve", "blocking call returns the pick in-band");
         assert!(matches!(outcome, ResolveOutcome::Delivered));
     }
 
     #[tokio::test]
     async fn resolve_choice_delivered_clears_awaiting() {
         // Regression for "the duo goes silent after the user answers": a Delivered
-        // resolve must clear the awaiting halt the ask set, or the duo pump keeps
+        // resolve must clear the awaiting halt the gate set, or the duo pump keeps
         // dropping every Brian<->Rain peer-forward (duo::flush_buffer is gated on
-        // this flag).
+        // this flag). Uses request_approval (the blocking path that yields
+        // Delivered); the non-blocking ask_user_choice clears awaiting on its OOB
+        // resolve too — see ask_user_choice_parks_and_returns_immediately.
         use std::sync::atomic::{AtomicBool, Ordering};
         let bridge = SignalingBridge::new();
         let flag = Arc::new(AtomicBool::new(false));
@@ -941,11 +1024,16 @@ mod tests {
         let bridge_clone = Arc::clone(&bridge);
         let ask = tokio::spawn(async move {
             bridge_clone
-                .ask_user_choice(
+                .request_approval(
                     "s1".into(),
                     "brian".into(),
-                    "pick".into(),
-                    vec!["a".into(), "b".into()],
+                    "Approve push?".into(),
+                    vec!["Approve".into(), "Deny".into()],
+                    ApprovalContext {
+                        kind: ViolationKind::PushGate,
+                        action: "git push".into(),
+                        detail: None,
+                    },
                 )
                 .await
                 .unwrap()
@@ -956,13 +1044,16 @@ mod tests {
                 _ => continue,
             }
         };
-        // ask_user_choice halts the duo; set_session_awaiting runs before the
+        // The gate halts the duo; set_session_awaiting runs before the
         // PendingChoice event emits, so this read is race-free.
         assert!(
             flag.load(Ordering::Acquire),
-            "ask_user_choice should set the awaiting halt"
+            "request_approval should set the awaiting halt"
         );
-        let outcome = bridge.resolve_choice(&choice_id, "b".into()).await.unwrap();
+        let outcome = bridge
+            .resolve_choice(&choice_id, "Approve".into())
+            .await
+            .unwrap();
         let _ = ask.await.unwrap();
         assert!(matches!(outcome, ResolveOutcome::Delivered));
         assert!(
@@ -1252,7 +1343,9 @@ mod tests {
             .resolve_choice(&fresh.choice_id, "x".into())
             .await
             .unwrap();
-        let picked = supersede.await.unwrap().unwrap();
-        assert_eq!(picked, "x");
+        // supersede_question_with_new is non-blocking like ask_user_choice: it
+        // returns a parked ack, not the pick (which arrives out-of-band).
+        let ack = supersede.await.unwrap().unwrap();
+        assert!(ack.contains("\"status\":\"parked\""), "ack: {ack}");
     }
 }

@@ -46,7 +46,7 @@ After the 2026-05-29 incident where an agent published a fabricated \"third part
 
 The bot-hq host exposes two tools your subprocess can call. Use them — don't ask the user inline as prose.
 
-- `ask_user_choice(question, options)` — blocks your turn until the user picks. Use when you need a decision between concrete options.
+- `ask_user_choice(question, options)` — parks a decision for the user and returns immediately; the pick arrives later as an out-of-band message and the session stays halted until then. Use when you need a decision between concrete options.
 - `mark_awaiting_user(reason)` — flags the session as awaiting user input (no blocking). Use for clarifying questions or \"let me know when ready\" signals.
 
 Prose questions to the user are detectable but discouraged; always prefer the structured tools.

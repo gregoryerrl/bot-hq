@@ -151,7 +151,10 @@ async fn call_tool(
                     "options must be a non-empty array of strings",
                 ));
             }
-            let picked = bridge
+            // ask_user_choice is non-blocking: this returns a parked ack
+            // (`{"status":"parked","choice_id"}`) immediately, NOT the pick. The
+            // user's choice arrives later as an out-of-band user message.
+            let parked = bridge
                 .ask_user_choice(
                     caller.session_id.clone(),
                     caller.agent.clone(),
@@ -160,7 +163,7 @@ async fn call_tool(
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
-            Ok(ToolCallResult::text(picked))
+            Ok(ToolCallResult::text(parked))
         }
         "mark_awaiting_user" => {
             let reason = args
@@ -373,7 +376,9 @@ async fn call_tool(
                     "options must have at least 1 entry",
                 ));
             }
-            let picked = bridge
+            // Non-blocking, like ask_user_choice: returns a parked ack, not the
+            // pick — the user's choice on the new question arrives out-of-band.
+            let parked = bridge
                 .supersede_question_with_new(
                     caller.session_id.clone(),
                     caller.agent.clone(),
@@ -383,7 +388,7 @@ async fn call_tool(
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
-            Ok(ToolCallResult::text(picked))
+            Ok(ToolCallResult::text(parked))
         }
         "session_doc_write" => {
             let slug = arg_required_str(&args, "slug")?;
@@ -1057,37 +1062,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_user_choice_dispatches_and_resolves() {
+    async fn ask_user_choice_dispatches_parked_ack() {
+        // ask_user_choice is non-blocking at the dispatch layer too: the tool
+        // call returns `{status:"parked", choice_id}` immediately, NOT the pick.
+        // (No spawn needed — it doesn't wait on the user.)
         let bridge = SignalingBridge::new();
-        let mut sub = bridge.subscribe();
-        let bridge_clone = Arc::clone(&bridge);
-        let call = tokio::spawn(async move {
-            dispatch(
-                req(
-                    "tools/call",
-                    json!({
-                        "name": "ask_user_choice",
-                        "arguments": {"question": "?", "options": ["a", "b"]}
-                    }),
-                    1,
-                ),
-                &caller(),
-                &bridge_clone,
-            )
-            .await
-        });
-        let ev = sub.recv().await.unwrap();
-        let pending = match ev {
-            SignalingEvent::PendingChoice(p) => p,
-            other => panic!("expected PendingChoice, got {other:?}"),
-        };
-        bridge
-            .resolve_choice(&pending.choice_id, "a".into())
-            .await
-            .unwrap();
-        let res = call.await.unwrap().unwrap().unwrap();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "ask_user_choice",
+                    "arguments": {"question": "?", "options": ["a", "b"]}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let v = serde_json::to_value(&res).unwrap();
-        assert_eq!(v["result"]["content"][0]["text"], "a");
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"status\":\"parked\""), "text: {text}");
+        assert!(text.contains("choice_id"), "text: {text}");
     }
 
     #[tokio::test]

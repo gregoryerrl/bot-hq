@@ -149,7 +149,7 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "resolve_choice",
-            description: "Answer a parked `ask_user_choice` / `request_approval` prompt. Look up choice_id via `get_pending_choices`. The agent's blocking tool-call returns with the picked option as its result.",
+            description: "Answer a parked `ask_user_choice` / `request_approval` prompt. Look up choice_id via `get_pending_choices`. For a `request_approval` gate the agent's blocking call returns the picked option; for `ask_user_choice` (non-blocking) the pick is delivered to the agent out-of-band as a synthetic user message.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
