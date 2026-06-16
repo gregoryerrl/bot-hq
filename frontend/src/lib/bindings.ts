@@ -397,6 +397,51 @@ async clUnregisterProject(name: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * Create a NEW Context Library project at the default managed location
+ * (`<data_dir>/library/projects/<name>/`). Unlike [`cl_register_project`] this
+ * NEVER sets `cl_path` and NEVER indexes an external folder — it makes the
+ * convention dir, seeds starter `conventions.md` + `notes.md` (if absent), and
+ * rescans just that dir. `working_repo_path` only binds the repo sessions run
+ * in; it is NOT scanned. This is the common "add a project" flow.
+ */
+async clCreateProject(name: string, workingRepoPath: string | null, description: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_create_project", { name, workingRepoPath, description }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Hard-delete a project: purges the `projects` row + all child CL rows
+ * (`cl_index`/`cl_folders`/`cl_reads` cascade). When `delete_cl_dir` is set AND
+ * the project uses the default managed location (no custom `cl_path`), its
+ * on-disk dir under `library/projects/` is removed too. A custom `cl_path`
+ * (an external folder / repo) is NEVER touched — the flag is ignored for it.
+ */
+async clDeleteProject(name: string, deleteClDir: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_delete_project", { name, deleteClDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Rename a project: repoint the row + all child CL rows from `name` to
+ * `new_name`, and (for a managed default-convention project) rename its on-disk
+ * dir `library/projects/<name>/` -> `<new_name>/`. A custom `cl_path` keeps
+ * pointing at the same external folder (only the project identifier changes).
+ */
+async clRenameProject(name: string, newName: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_rename_project", { name, newName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Create a new empty file. Parent dir must exist; the file must not. The
  * frontend follows with `cl_rescan` to index it.
  */
