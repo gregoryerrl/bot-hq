@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import { Link, useBlocker } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
@@ -361,6 +361,11 @@ function SessionDefaults() {
           Run repo-backed sessions in isolated git worktrees
         </span>
       </label>
+      {setAppSetting.error && (
+        <p className="mt-2 inline-block rounded border border-error/40 bg-error-container/20 px-2 py-1 font-code-sm text-code-sm text-on-error-container">
+          Couldn’t save: {setAppSetting.error.message}
+        </p>
+      )}
       <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
         Each session gets its own checkout on branch{" "}
         <code className="text-on-surface">bothq/&lt;session-id&gt;</code>, so
@@ -389,6 +394,9 @@ function AgentCard({
 }) {
   const [draft, setDraft] = useState(cfg);
   const [saved, setSaved] = useState(false);
+  // Inline per-card save error so a rejected upsert (button or Save-all) gives
+  // feedback instead of an unhandled rejection. Scoped to the card that failed.
+  const [saveError, setSaveError] = useState<string | null>(null);
   const dirty = JSON.stringify(draft) !== JSON.stringify(cfg);
 
   // Rain-only "disable by default" preference (app_settings). The hooks run for
@@ -419,7 +427,10 @@ function AgentCard({
     if (saveAllSignal === lastSeenSignal.current) return;
     lastSeenSignal.current = saveAllSignal;
     if (!dirty) return;
-    onSave(draft).then(() => setSaved(true));
+    setSaveError(null);
+    onSave(draft)
+      .then(() => setSaved(true))
+      .catch((e) => setSaveError(errorMessage(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveAllSignal]);
 
@@ -437,7 +448,10 @@ function AgentCard({
   if (prevDirty.current !== dirty) {
     prevDirty.current = dirty;
     onDirtyChange(dirty);
-    if (dirty) setSaved(false);
+    if (dirty) {
+      setSaved(false);
+      setSaveError(null);
+    }
   }
 
   return (
@@ -540,7 +554,18 @@ function AgentCard({
             </span>
           </label>
         )}
+        {cfg.agent_name === "rain" && setAppSetting.error && (
+          <p className="inline-block rounded border border-error/40 bg-error-container/20 px-2 py-1 font-code-sm text-code-sm text-on-error-container">
+            Couldn’t save: {setAppSetting.error.message}
+          </p>
+        )}
       </div>
+
+      {saveError && (
+        <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          Save failed: {saveError}
+        </p>
+      )}
 
       {/* Footer: updated-at + reset/save */}
       <div className="mt-4 flex items-center justify-between gap-2 border-t border-outline-variant/30 pt-3">
@@ -563,8 +588,13 @@ function AgentCard({
             type="button"
             disabled={!dirty || isSaving}
             onClick={async () => {
-              await onSave(draft);
-              setSaved(true);
+              setSaveError(null);
+              try {
+                await onSave(draft);
+                setSaved(true);
+              } catch (e) {
+                setSaveError(errorMessage(e));
+              }
             }}
             className="inline-flex items-center gap-1.5 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
           >
@@ -849,6 +879,11 @@ function ToolGateSection() {
             )}
           />
         </div>
+      )}
+      {save.error && (
+        <p className="mt-4 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          Save failed: {save.error.message}
+        </p>
       )}
     </section>
   );
