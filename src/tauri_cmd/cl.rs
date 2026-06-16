@@ -543,23 +543,36 @@ pub async fn cl_create_project(
         .cl_project_root(&name)
         .await
         .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
-    std::fs::create_dir_all(&root)
-        .map_err(|e| AppError::Internal(format!("create project dir: {e}")))?;
-    // Seed starters only if absent — never clobber existing content.
-    let conventions = root.join("conventions.md");
-    if !conventions.exists() {
-        let _ = std::fs::write(
-            &conventions,
-            format!("# {name} — conventions\n\n_(Repo, stack, build/test commands, gates, house rules. Edit me.)_\n"),
-        );
-    }
-    let notes = root.join("notes.md");
-    if !notes.exists() {
-        let _ = std::fs::write(
-            &notes,
-            format!("# {name} — notes\n\n_(Durable, non-obvious learnings — gotchas, where-things-live. Edit me.)_\n"),
-        );
-    }
+    // Create the managed dir + seed starters on a blocking thread — fs syscalls
+    // belong off the async runtime, like every other cl.rs file op. Seeds are
+    // best-effort: a failed write is logged, not fatal (the project row + dir
+    // already exist), so the user gets a signal instead of a silent empty project.
+    let seed_name = name.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), AppError> {
+        std::fs::create_dir_all(&root)
+            .map_err(|e| AppError::Internal(format!("create project dir: {e}")))?;
+        let conventions = root.join("conventions.md");
+        if !conventions.exists() {
+            if let Err(e) = std::fs::write(
+                &conventions,
+                format!("# {seed_name} — conventions\n\n_(Repo, stack, build/test commands, gates, house rules. Edit me.)_\n"),
+            ) {
+                tracing::warn!(?e, project = %seed_name, "failed to seed conventions.md");
+            }
+        }
+        let notes = root.join("notes.md");
+        if !notes.exists() {
+            if let Err(e) = std::fs::write(
+                &notes,
+                format!("# {seed_name} — notes\n\n_(Durable, non-obvious learnings — gotchas, where-things-live. Edit me.)_\n"),
+            ) {
+                tracing::warn!(?e, project = %seed_name, "failed to seed notes.md");
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("seed project task panicked: {e}")))??;
 
     bridge.cl_rescan(&name).await?;
     emit_project_and_cl_changed(&app, &name);
@@ -592,9 +605,16 @@ pub async fn cl_delete_project(
     let managed = proj.cl_path.as_deref().unwrap_or("").trim().is_empty();
     if delete_cl_dir && managed {
         if let Some(root) = bridge.cl_project_root(&name).await {
-            if root.is_dir() {
-                let _ = std::fs::remove_dir_all(&root);
-            }
+            // remove_dir_all on a populated managed dir is the heaviest fs op
+            // here — keep it off the async runtime. Best-effort (the DB purge is
+            // the source of truth).
+            tokio::task::spawn_blocking(move || {
+                if root.is_dir() {
+                    let _ = std::fs::remove_dir_all(&root);
+                }
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("delete project dir task panicked: {e}")))?;
         }
     }
 
@@ -642,9 +662,22 @@ pub async fn cl_rename_project(
         let old_root = bridge.cl_project_root(&name).await;
         let new_root = bridge.cl_project_root(&new_name).await;
         if let (Some(old_root), Some(new_root)) = (old_root, new_root) {
-            if old_root.is_dir() {
-                std::fs::rename(&old_root, &new_root)
-                    .map_err(|e| AppError::Internal(format!("rename project dir: {e}")))?;
+            // Move the managed dir on the blocking pool, BEFORE the DB repoint so
+            // a disk failure aborts without leaving the row pointing at a missing
+            // dir; on a later DB failure we roll the dir back (also off-runtime).
+            let (or, nr) = (old_root.clone(), new_root.clone());
+            let did_move = tokio::task::spawn_blocking(move || -> Result<bool, AppError> {
+                if or.is_dir() {
+                    std::fs::rename(&or, &nr)
+                        .map_err(|e| AppError::Internal(format!("rename project dir: {e}")))?;
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            })
+            .await
+            .map_err(|e| AppError::Internal(format!("rename project dir task panicked: {e}")))??;
+            if did_move {
                 moved = Some((old_root, new_root));
             }
         }
@@ -652,7 +685,10 @@ pub async fn cl_rename_project(
 
     if let Err(e) = storage.rename_project(&name, &new_name, &new_name).await {
         if let Some((old_root, new_root)) = moved {
-            let _ = std::fs::rename(&new_root, &old_root); // best-effort rollback
+            let _ = tokio::task::spawn_blocking(move || {
+                let _ = std::fs::rename(&new_root, &old_root); // best-effort rollback
+            })
+            .await;
         }
         return Err(e.into());
     }
