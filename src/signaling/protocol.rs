@@ -409,7 +409,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_rescan",
-            description: "Diff a project's filesystem against the index. Auto-registers new .md files (description = first H1 or first 80 chars), refreshes updated_at where mtime has moved, and removes orphan index rows for files that no longer exist. Use after creating CL files via Bash so the index stays in sync. Cheap to call.",
+            description: "Diff a project's filesystem against the index. Auto-registers new text files (.md/.yaml/.yml/.txt/.toml/.json; description = first H1 or first 80 chars), refreshes updated_at where mtime has moved, and removes orphan index rows for files that no longer exist. Use after creating CL files via Bash so the index stays in sync. Cheap to call.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

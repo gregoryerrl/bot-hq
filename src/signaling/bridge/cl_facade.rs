@@ -114,7 +114,8 @@ impl SignalingBridge {
     /// Diff a project's on-disk CL directory against the index. Three outcomes:
     ///   - added:    file on disk, no index row → insert with auto-extracted description
     ///   - touched:  index row exists, mtime newer than stored updated_at → bump
-    ///   - orphaned: index row exists, file gone → list (but DO NOT auto-delete; user decides)
+    ///   - orphaned: index row exists, file gone → auto-purge the dangling row
+    ///     (it points at a file the agent can no longer read) and report it
     pub async fn cl_rescan(&self, project: &str) -> Result<ClRescanReport> {
         let mut report = ClRescanReport::default();
         // Clone the Storage handle out of the bridge mutex BEFORE calling
