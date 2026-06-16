@@ -302,7 +302,15 @@ export function ContextLibrary() {
     try {
       if (mode === "registerProject") {
         const name = value;
-        if (name === "_globals" || name === "projects" || name.includes("/")) {
+        // Mirror the backend validate_project_name guard (cl.rs) exactly so the
+        // UI rejects the same reserved / malformed names up front.
+        if (
+          name === "_globals" ||
+          name === "projects" ||
+          name.includes("/") ||
+          name.includes("\\") ||
+          name.startsWith(".")
+        ) {
           setActionError(`"${name}" is a reserved or invalid project name.`);
           return;
         }

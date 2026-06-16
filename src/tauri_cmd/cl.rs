@@ -433,6 +433,11 @@ pub async fn cl_register_project(
     cl_path: Option<String>,
     description: Option<String>,
 ) -> Result<(), AppError> {
+    // Same name guard create/rename use — this is also a frontend entry point
+    // (Promote-to-project, Advanced index-a-folder), so the backend must reject
+    // reserved / malformed names rather than trusting the UI. Safe on the
+    // working-repo-edit path too: an already-registered name is already valid.
+    validate_project_name(&name)?;
     if let Some(p) = cl_path.as_deref() {
         if !p.is_empty() {
             let real = std::path::Path::new(p)
@@ -830,6 +835,23 @@ pub async fn cl_delete_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_project_name_rejects_reserved_and_malformed() {
+        // Valid names pass (and leading/trailing space is trimmed, not rejected).
+        assert!(validate_project_name("my-proj").is_ok());
+        assert!(validate_project_name("  spaced  ").is_ok());
+        // Empty / whitespace-only.
+        assert!(validate_project_name("").is_err());
+        assert!(validate_project_name("   ").is_err());
+        // Reserved (the CL root layout owns these).
+        assert!(validate_project_name("_globals").is_err());
+        assert!(validate_project_name("projects").is_err());
+        // Path separators + hidden-file prefix.
+        assert!(validate_project_name("a/b").is_err());
+        assert!(validate_project_name("a\\b").is_err());
+        assert!(validate_project_name(".hidden").is_err());
+    }
 
     #[tokio::test]
     async fn cl_index_search_empty_when_bridge_has_no_storage() {
