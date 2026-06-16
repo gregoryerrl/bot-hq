@@ -21,6 +21,44 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 
 ---
 
+## 2026-06-16 — Full-codebase audit + Tiers 0–3 remediation
+
+A comprehensive duo audit (5 read-only sweep agents + Rain's adversarial pass, every
+finding re-verified at the call site) found the codebase healthy — clippy-clean, no
+dead-code / TODO / marker debt — with the real debt in **doc staleness** from the fast
+06-15 arc plus a small set of genuine fixes. Remediated as 13 commits, all five gates
+green per commit; 514 tests (+1).
+
+- **rename storage questions module to tray** (`08518b3`) — the last "questions" naming
+  (table = `session_tray` since migration 0010; the bridge + tauri_cmd modules were
+  renamed earlier). Fns + const renamed; `QuestionKind`/`QuestionStatus` enums + bridge
+  methods + MCP tool-names kept.
+- **surface dropped peer-forward** (`27dc0ea`) — `broadcast.rs::peer_forward_message`
+  swallowed its send error with `let _` (the caller `warn!` at `duo.rs` was dead, could
+  never fire); now warns in-function like its `broadcast_user_message` twin — closes the
+  symmetric half of the #4 invisible-desync class.
+- **log swallowed tray/rescan errors** (`32121ef`); **purge resolved tray rows at
+  startup** (`5d8d9f2`) — `session_tray` grew unbounded; a 90-day boot GC
+  (`COALESCE(answered_at, asked_at)` since withdraw/supersede leave `answered_at` NULL),
+  +1 test.
+- **CL filesystem ops off the async runtime** (`3f4b83f`) — the 6 CL file-op commands
+  `spawn_blocking`-wrapped (path-traversal helpers byte-identical); **atomic CL writes**
+  (`a040c08`) via an adjacent temp + rename (no EXDEV). **remove dead storage accessors**
+  (`f60e530`, 4 of 5 — `author_typed` kept, a test uses it).
+- **surface mutation errors** (`f0c0bb8`, `516ac57`) — 9 silent save/mutation sites
+  (create-session, Claude-config, agent-config, tool-gate, model-delete, plugin
+  toggle/uninstall) now show inline errors instead of failing silently. **FE hygiene**
+  (`c63e8cc`) — dedup the terminal-input class, extract a shared message header, guard the
+  event-subscribe path.
+- **docs** (`8b6557d`, `6a5c0c5`, `9e196be`) — logged the 06-15 arc; corrected test
+  counts (514/94) + internal tool count (26→25 across ARCHITECTURE/README); documented the
+  fs-watcher; dropped the violations-viewer + worktree-kept-indicator backlog items (both
+  shipped).
+
+Deferred by decision (user scope pick): Tier-4 net-new test coverage (ViolationsPanel,
+cl-rescan↔index reconcile, tool_args, core/state.rs) — a separate session. Full audit
+findings in the session's investigate doc.
+
 ## 2026-06-15 — Live UI freshness, semantic tokens, violations viewer, provenance
 
 A frontend-freshness + market-prep arc: the UI now refreshes live from a filesystem
