@@ -11,13 +11,46 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-517 tests passing (466 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 98 frontend Vitest. Release build clean. Version **1.0.0** (bumped
+521 tests passing (470 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 99 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
 zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-16 — Duo-survey improvements (EYES verifier, peer provenance, EYES phase doc, non-blocking ask_user_choice)
+
+Acted on the converged findings from two independent BRAIN-duo retrospectives
+(sessions `s-66ef6ad2` + `s-115dfd`) of bcc-ad-manager work, raised by the user via the
+project CL `ideas.md`. Four batches on `brian/duo-survey-improvements`, all five gates
+green per commit.
+
+- **EYES → adversarial verifier** (`5ddd763`, `src/agents/prompts.rs`). The #2 converged
+  limiter was producer/producer waste — EYES re-deriving HANDS's findings in parallel.
+  Reframed RAIN_ROLE: verify what Brian PRODUCES, read his output first, and recast the
+  "bottom-up investigation" section as a review *lens* (not a parallel re-derivation).
+- **Peer-message provenance** (`6a3a30e`, `src/core/broadcast.rs`). The claude-code harness
+  wraps peer forwards with the same "IMPORTANT: you MUST address the user's message" line
+  as real user turns; bot-hq's only marker was `[Brian]`/`[Rain]`. Replaced with
+  `[PEER MESSAGE — from Brian (HANDS), not the user]`. (The harness wrapper itself is
+  outside bot-hq's control.)
+- **EYES co-located phase doc** (`dbbfdd7`, `src/signaling/{jsonrpc,bridge/session_docs}.rs`).
+  A phase-tagged `session_doc_write` from rain was hard-rejected. It now lands in a
+  co-located `<phase>-eyes` doc (same phase tag → same IPAV tab), clobber-proof in both
+  directions — chosen over appending into Brian's single doc, whose overwrite-on-upsert
+  would wipe the EYES section on his next rewrite. New `bridge.session_doc_write_eyes`.
+- **Non-blocking `ask_user_choice`** (`f55d2b5`, `src/signaling/*` + prompts). The #1
+  converged limiter: the agent's MCP client timed out (~30s) waiting on a human, forcing a
+  call → timeout → `list_my_pending_questions` → wait dance every decision. `ask_user_choice`
+  + `supersede_question` now return a parked ack (`{status:"parked", choice_id}`)
+  immediately; the pick arrives via the existing out-of-band stdin path (the same path that
+  handled timeouts — now primary). `request_approval` / pre-push stay BLOCKING (a git hook
+  awaits a synchronous bool). `ask_user_choice_inner` gained a `blocking: bool` param.
+- Deferred (see PLAN.md): EYES compound-`&&` read Bash — a claude-code `--disallowedTools`
+  denylist limitation, not a bot-hq gate.
 
 ---
 

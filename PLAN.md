@@ -146,6 +146,14 @@ loading for the icon font.
     revisit only if review-time annotations prove valuable.
   - *`cl_register_read` feedback view:* the read-audit rows are written
     but the "what context did this agent have?" view was never built.
+- **EYES compound-`&&` read Bash.** EYES's `--disallowedTools` denylist
+  (`src/agents/spawn.rs`) blocks compound `&&` reads regardless of content;
+  HANDS isn't affected (its Tool Gate is substring-matched and only HANDS
+  gets the PreToolUse hook). If EYES is meant to investigate, consider a
+  finer-grained allow for read-only compound reads — but loosening the
+  denylist risks letting a mutating compound slip through, so it needs care.
+  Surfaced by the 2026-06-16 duo survey; it's a claude-code denylist limit,
+  not a bot-hq gate bug.
 
 ---
 
