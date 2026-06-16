@@ -460,7 +460,7 @@ pub async fn cl_register_project(
             cl_path.as_deref(),
         )
         .await?;
-    let _ = app.emit(crate::tauri_events::types::PROJECT_CHANGED, ());
+    emit_project_and_cl_changed(&app, &name);
     Ok(())
 }
 
@@ -475,7 +475,7 @@ pub async fn cl_unregister_project(
     name: String,
 ) -> Result<(), AppError> {
     storage.unregister_project(&name).await?;
-    let _ = app.emit(crate::tauri_events::types::PROJECT_CHANGED, ());
+    emit_project_and_cl_changed(&app, &name);
     Ok(())
 }
 
