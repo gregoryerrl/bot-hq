@@ -6,6 +6,22 @@ use super::*;
 use crate::policy::ViolationOutcome;
 use crate::storage::Project;
 
+/// Build / dependency directories never worth indexing as CL content. Mirrors
+/// `tauri_events::fs_watcher::IGNORED_DIRS` (keep in sync) plus a couple of
+/// extras common in doc/code repos. Hidden dirs are already skipped by the
+/// `.`-prefix rule in [`walk_cl_dir`]. Without this, pointing a project's
+/// `cl_path` at a real repo indexed every `package.json`/`README.md` under
+/// `node_modules`, `target`, etc.
+const IGNORED_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    "__pycache__",
+    "vendor",
+    "coverage",
+];
+
 /// Walk `dir` recursively; for each text-ish file (.md, .yaml, .txt) populate
 /// `out` with (relative_path, mtime_iso8601, description_snippet). Skips
 /// hidden files/dirs (anything starting with '.') and a few well-known noise
@@ -37,6 +53,11 @@ pub(super) fn walk_cl_dir(
             continue;
         }
         if path.is_dir() {
+            // Skip build/dependency dirs — a repo-rooted cl_path otherwise pulls
+            // every node_modules/target text file into the index.
+            if IGNORED_DIRS.contains(&name) {
+                continue;
+            }
             walk_cl_dir(&path, root, project, out);
             continue;
         }
@@ -117,4 +138,39 @@ pub(super) fn oob_resolution_body(agent_label: &str, question: &str, picked: &st
          **User picked:** {picked}\n\n\
          Treat this as the user's reply. Continue from here."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::walk_cl_dir;
+    use std::collections::HashMap;
+    use std::fs;
+
+    #[test]
+    fn walk_cl_dir_skips_build_and_dependency_dirs() {
+        let base = std::env::temp_dir().join(format!("bot-hq-walk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("node_modules/pkg")).unwrap();
+        fs::create_dir_all(base.join("target")).unwrap();
+        fs::create_dir_all(base.join("docs")).unwrap();
+        fs::write(base.join("README.md"), "# readme").unwrap();
+        fs::write(base.join("docs/guide.md"), "# guide").unwrap();
+        fs::write(base.join("node_modules/pkg/package.json"), "{}").unwrap();
+        fs::write(base.join("target/out.json"), "{}").unwrap();
+        // macOS temp_dir is a /var -> /private/var symlink; canonicalize so the
+        // strip_prefix in walk_cl_dir matches.
+        let root = base.canonicalize().unwrap();
+
+        let mut out: HashMap<String, (String, String)> = HashMap::new();
+        walk_cl_dir(&root, &root, "p", &mut out);
+
+        let mut keys: Vec<_> = out.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["README.md".to_string(), "docs/guide.md".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }

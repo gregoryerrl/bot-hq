@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "default capability set for the main webview",
   "windows": ["main"],
-  "permissions": ["core:default", "opener:default"]
+  "permissions": ["core:default", "opener:default", "dialog:default"]
 }

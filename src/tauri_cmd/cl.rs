@@ -474,6 +474,193 @@ pub async fn cl_unregister_project(
     Ok(())
 }
 
+/// Emit both the project-registry nudge (`list_projects`) and the CL-tree nudge
+/// (`cl_index_search`/`cl_folder_search`). A DB-only project mutation fires no
+/// filesystem-watcher event, so create/delete/rename emit `cl:changed`
+/// themselves or the tree would stay stale until the next disk touch.
+fn emit_project_and_cl_changed(app: &tauri::AppHandle, project: &str) {
+    use crate::tauri_events::types::{ClChangedEvent, PROJECT_CHANGED};
+    let _ = app.emit(PROJECT_CHANGED, ());
+    let _ = app.emit(
+        ClChangedEvent::EVENT_NAME,
+        ClChangedEvent {
+            project: Some(project.to_string()),
+        },
+    );
+}
+
+/// Validate a user-supplied project name. Mirrors the guards in the frontend
+/// "Register as project" path (ContextLibrary.tsx) so both entry points reject
+/// the same reserved / malformed names. `_globals` + `projects` are reserved
+/// (the CL root layout owns them); names can't contain a path separator or
+/// start with `.` (would collide with hidden-file handling).
+fn validate_project_name(name: &str) -> Result<(), AppError> {
+    let n = name.trim();
+    if n.is_empty() {
+        return Err(AppError::Validation("project name is required".into()));
+    }
+    if n == Project::GLOBALS || n == "projects" {
+        return Err(AppError::Validation(format!("'{n}' is a reserved name")));
+    }
+    if n.contains('/') || n.contains('\\') || n.starts_with('.') {
+        return Err(AppError::Validation(format!("'{n}' is not a valid project name")));
+    }
+    Ok(())
+}
+
+/// Create a NEW Context Library project at the default managed location
+/// (`<data_dir>/library/projects/<name>/`). Unlike [`cl_register_project`] this
+/// NEVER sets `cl_path` and NEVER indexes an external folder — it makes the
+/// convention dir, seeds starter `conventions.md` + `notes.md` (if absent), and
+/// rescans just that dir. `working_repo_path` only binds the repo sessions run
+/// in; it is NOT scanned. This is the common "add a project" flow.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_create_project(
+    storage: tauri::State<'_, Arc<Storage>>,
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    app: tauri::AppHandle,
+    name: String,
+    working_repo_path: Option<String>,
+    description: Option<String>,
+) -> Result<(), AppError> {
+    let name = name.trim().to_string();
+    validate_project_name(&name)?;
+    if storage.get_project(&name).await?.is_some() {
+        return Err(AppError::Validation(format!(
+            "a project named '{name}' already exists"
+        )));
+    }
+
+    // Row first so the cl_index FK (project_id -> projects.name) holds when the
+    // rescan inserts the seeded files. cl_path stays NULL => convention root.
+    let working = working_repo_path.as_deref().filter(|s| !s.trim().is_empty());
+    storage
+        .upsert_project(&name, &name, working, description.as_deref(), None)
+        .await?;
+
+    let root = bridge
+        .cl_project_root(&name)
+        .await
+        .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
+    std::fs::create_dir_all(&root)
+        .map_err(|e| AppError::Internal(format!("create project dir: {e}")))?;
+    // Seed starters only if absent — never clobber existing content.
+    let conventions = root.join("conventions.md");
+    if !conventions.exists() {
+        let _ = std::fs::write(
+            &conventions,
+            format!("# {name} — conventions\n\n_(Repo, stack, build/test commands, gates, house rules. Edit me.)_\n"),
+        );
+    }
+    let notes = root.join("notes.md");
+    if !notes.exists() {
+        let _ = std::fs::write(
+            &notes,
+            format!("# {name} — notes\n\n_(Durable, non-obvious learnings — gotchas, where-things-live. Edit me.)_\n"),
+        );
+    }
+
+    bridge.cl_rescan(&name).await?;
+    emit_project_and_cl_changed(&app, &name);
+    Ok(())
+}
+
+/// Hard-delete a project: purges the `projects` row + all child CL rows
+/// (`cl_index`/`cl_folders`/`cl_reads` cascade). When `delete_cl_dir` is set AND
+/// the project uses the default managed location (no custom `cl_path`), its
+/// on-disk dir under `library/projects/` is removed too. A custom `cl_path`
+/// (an external folder / repo) is NEVER touched — the flag is ignored for it.
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_delete_project(
+    storage: tauri::State<'_, Arc<Storage>>,
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    app: tauri::AppHandle,
+    name: String,
+    delete_cl_dir: bool,
+) -> Result<(), AppError> {
+    if name == Project::GLOBALS || name == "projects" {
+        return Err(AppError::Validation(format!("'{name}' cannot be deleted")));
+    }
+    let Some(proj) = storage.get_project(&name).await? else {
+        return Ok(()); // already gone — idempotent
+    };
+
+    // Only remove disk for a managed (default-convention) project. A custom
+    // cl_path points at the user's own folder/repo; never rm that.
+    let managed = proj.cl_path.as_deref().unwrap_or("").trim().is_empty();
+    if delete_cl_dir && managed {
+        if let Some(root) = bridge.cl_project_root(&name).await {
+            if root.is_dir() {
+                let _ = std::fs::remove_dir_all(&root);
+            }
+        }
+    }
+
+    storage.delete_project(&name).await?;
+    emit_project_and_cl_changed(&app, &name);
+    Ok(())
+}
+
+/// Rename a project: repoint the row + all child CL rows from `name` to
+/// `new_name`, and (for a managed default-convention project) rename its on-disk
+/// dir `library/projects/<name>/` -> `<new_name>/`. A custom `cl_path` keeps
+/// pointing at the same external folder (only the project identifier changes).
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_rename_project(
+    storage: tauri::State<'_, Arc<Storage>>,
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    app: tauri::AppHandle,
+    name: String,
+    new_name: String,
+) -> Result<(), AppError> {
+    let new_name = new_name.trim().to_string();
+    if name == Project::GLOBALS || name == "projects" {
+        return Err(AppError::Validation(format!("'{name}' cannot be renamed")));
+    }
+    validate_project_name(&new_name)?;
+    if new_name == name {
+        return Ok(());
+    }
+    let Some(proj) = storage.get_project(&name).await? else {
+        return Err(AppError::NotFound(format!("project '{name}' not found")));
+    };
+    if storage.get_project(&new_name).await?.is_some() {
+        return Err(AppError::Validation(format!(
+            "a project named '{new_name}' already exists"
+        )));
+    }
+
+    // Managed dir move (default convention only). Done BEFORE the DB repoint so
+    // a disk failure aborts without leaving the row pointing at a missing dir;
+    // on a later DB failure we roll the dir back.
+    let managed = proj.cl_path.as_deref().unwrap_or("").trim().is_empty();
+    let mut moved: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    if managed {
+        let old_root = bridge.cl_project_root(&name).await;
+        let new_root = bridge.cl_project_root(&new_name).await;
+        if let (Some(old_root), Some(new_root)) = (old_root, new_root) {
+            if old_root.is_dir() {
+                std::fs::rename(&old_root, &new_root)
+                    .map_err(|e| AppError::Internal(format!("rename project dir: {e}")))?;
+                moved = Some((old_root, new_root));
+            }
+        }
+    }
+
+    if let Err(e) = storage.rename_project(&name, &new_name, &new_name).await {
+        if let Some((old_root, new_root)) = moved {
+            let _ = std::fs::rename(&new_root, &old_root); // best-effort rollback
+        }
+        return Err(e.into());
+    }
+
+    emit_project_and_cl_changed(&app, &new_name);
+    Ok(())
+}
+
 /// Resolve + canonicalize a project's CL root for the disk-op commands below.
 async fn canonical_cl_root(
     bridge: &SignalingBridge,

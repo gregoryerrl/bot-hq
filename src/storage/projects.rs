@@ -69,6 +69,52 @@ impl Storage {
         Ok(())
     }
 
+    /// Hard-delete a project: removes the `projects` row, which CASCADES (FK
+    /// `ON DELETE CASCADE`, `foreign_keys` pragma is on) to `cl_index` +
+    /// `cl_folders`, and `cl_reads` via its FK to `cl_index`. The on-disk CL
+    /// directory is NOT touched here — the command layer decides that, and only
+    /// for managed default-convention dirs (never a custom `cl_path` / repo).
+    pub async fn delete_project(&self, name: &str) -> Result<()> {
+        sqlx::query("DELETE FROM projects WHERE name = ?")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("deleting project {name}"))?;
+        Ok(())
+    }
+
+    /// Rename a project: repoint the `projects` row name + display_name and all
+    /// child CL rows (`cl_index`, `cl_folders`) from `old` to `new`. The FK is
+    /// `ON DELETE CASCADE` only (no `ON UPDATE CASCADE`), so children are
+    /// repointed explicitly; `PRAGMA defer_foreign_keys` holds the constraint
+    /// until commit so update order doesn't matter. `cl_reads` rides along
+    /// unchanged (it keys on `cl_index.id`, not the project name).
+    pub async fn rename_project(&self, old: &str, new: &str, new_display: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("PRAGMA defer_foreign_keys = ON")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE projects SET name = ?, display_name = ? WHERE name = ?")
+            .bind(new)
+            .bind(new_display)
+            .bind(old)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("renaming project {old} -> {new}"))?;
+        sqlx::query("UPDATE cl_index SET project_id = ? WHERE project_id = ?")
+            .bind(new)
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE cl_folders SET project_id = ? WHERE project_id = ?")
+            .bind(new)
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Resolve a project's CL root. `_globals` maps to the CL dir
     /// (`<data_dir>/library/`). Otherwise: uses `cl_path` from the projects row
     /// if set, else falls back to the default convention
@@ -244,5 +290,56 @@ mod tests {
             .unwrap();
         let hit = s.project_by_repo_path(&link).await.unwrap();
         assert_eq!(hit.as_deref(), Some("gamma"));
+    }
+
+    #[tokio::test]
+    async fn delete_project_cascades_children() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("p", "p", Some("/r"), None, None)
+            .await
+            .unwrap();
+        s.upsert_cl_index("p", "a.md", "desc", None).await.unwrap();
+        s.upsert_folder_description("p", "", "root", None)
+            .await
+            .unwrap();
+
+        s.delete_project("p").await.unwrap();
+
+        assert!(s.get_project("p").await.unwrap().is_none());
+        assert!(s.cl_index_search(Some("p"), None).await.unwrap().is_empty());
+        assert!(s
+            .cl_folder_search(Some("p"), None)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_project_repoints_children() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("old", "old", Some("/r"), None, None)
+            .await
+            .unwrap();
+        s.upsert_cl_index("old", "a.md", "desc", None)
+            .await
+            .unwrap();
+        s.upsert_folder_description("old", "sub", "d", None)
+            .await
+            .unwrap();
+
+        s.rename_project("old", "new", "new").await.unwrap();
+
+        assert!(s.get_project("old").await.unwrap().is_none());
+        assert!(s.get_project("new").await.unwrap().is_some());
+        assert_eq!(s.cl_index_search(Some("new"), None).await.unwrap().len(), 1);
+        assert!(s
+            .cl_index_search(Some("old"), None)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            s.cl_folder_search(Some("new"), None).await.unwrap().len(),
+            1
+        );
     }
 }
