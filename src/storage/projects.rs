@@ -298,10 +298,13 @@ mod tests {
         s.upsert_project("p", "p", Some("/r"), None, None)
             .await
             .unwrap();
-        s.upsert_cl_index("p", "a.md", "desc", None).await.unwrap();
+        let cl_id = s.upsert_cl_index("p", "a.md", "desc", None).await.unwrap();
         s.upsert_folder_description("p", "", "root", None)
             .await
             .unwrap();
+        // Audit row so the full cl_reads -> cl_index -> projects cascade is hit.
+        s.record_cl_read(cl_id, Some("s1"), "brian").await.unwrap();
+        assert_eq!(s.cl_reads_for_session("s1").await.unwrap().len(), 1);
 
         s.delete_project("p").await.unwrap();
 
@@ -312,6 +315,8 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        // cl_reads cascades off cl_index (cl_index_id FK ON DELETE CASCADE).
+        assert!(s.cl_reads_for_session("s1").await.unwrap().is_empty());
     }
 
     #[tokio::test]
