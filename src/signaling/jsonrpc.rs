@@ -141,23 +141,6 @@ async fn call_tool(
             "tool '{name}' is reserved for HANDS (brian); rain is EYES — read folder descriptions via cl_folder_search instead",
         )));
     }
-    // Rain may write UNTAGGED scratch docs, but a phase-tagged write overwrites
-    // the single per-phase doc (keyed by phase via effective_slug) — those are
-    // HANDS-authored. Block only the tagged form so EYES can't clobber Brian's
-    // investigate/plan/apply/verify doc. (RAIN_ROLE permits untagged scratch.)
-    if name == "session_doc_write"
-        && caller.agent == "rain"
-        && args
-            .get("phase")
-            .and_then(Value::as_str)
-            .is_some_and(|p| !p.is_empty())
-    {
-        return Ok(ToolCallResult::error(
-            "phase-tagged session_doc_write is reserved for HANDS (brian); \
-             rain is EYES — write an untagged scratch doc (no `phase`) instead"
-                .to_string(),
-        ));
-    }
     match name {
         "ask_user_choice" => {
             let question = arg_required_str(&args, "question")?;
@@ -406,13 +389,31 @@ async fn call_tool(
             let slug = arg_required_str(&args, "slug")?;
             let body = arg_required_str(&args, "body")?;
             let phase = parse_optional_phase(&args)?;
-            let id = bridge
-                .session_doc_write(&caller.session_id, &slug, &body, phase.as_deref())
-                .await
-                .map_err(internal_err_no_prefix)?;
-            Ok(ToolCallResult::text(
-                json!({"id": id, "slug": slug}).to_string(),
-            ))
+            // EYES (rain) contributing to a phase doc must not overwrite Brian's
+            // single per-phase doc. Route a phase-tagged rain write to a
+            // co-located, attributed `<phase>-eyes` doc (same phase tag → same
+            // IPAV tab). Untagged rain scratch writes fall through to the normal
+            // overwrite path.
+            match (caller.agent.as_str(), phase.as_deref()) {
+                ("rain", Some(p)) => {
+                    let (id, eyes_slug) = bridge
+                        .session_doc_write_eyes(&caller.session_id, p, &body)
+                        .await
+                        .map_err(internal_err_no_prefix)?;
+                    Ok(ToolCallResult::text(
+                        json!({"id": id, "slug": eyes_slug}).to_string(),
+                    ))
+                }
+                _ => {
+                    let id = bridge
+                        .session_doc_write(&caller.session_id, &slug, &body, phase.as_deref())
+                        .await
+                        .map_err(internal_err_no_prefix)?;
+                    Ok(ToolCallResult::text(
+                        json!({"id": id, "slug": slug}).to_string(),
+                    ))
+                }
+            }
         }
         "session_doc_search" => {
             let query = args.get("query").and_then(Value::as_str);
@@ -1266,21 +1267,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rain_phase_tagged_doc_write_rejected() {
-        // Single-author phase docs: Rain (EYES) must not write a phase-tagged
-        // doc — it overwrites the single per-phase doc Brian authors (keyed by
-        // phase via effective_slug, so it's a destructive clobber, not a dup).
+    async fn rain_phase_tagged_doc_write_creates_co_located_eyes_doc() {
+        // EYES contributes to a phase doc WITHOUT clobbering Brian's single
+        // per-phase doc. Brian authors `plan`; Rain's phase-tagged write lands
+        // in a co-located `plan-eyes` doc (same phase tag → same IPAV tab).
+        // Both persist; Brian's body is untouched; Rain's is attributed.
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "test", None).await.unwrap();
 
+        // Brian authors the plan doc.
+        dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "session_doc_write",
+                    "arguments": {"slug": "plan", "body": "brian's plan", "phase": "plan"}
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Rain contributes — must NOT error, and must land in `plan-eyes`.
         let res = dispatch(
             req(
                 "tools/call",
                 json!({
                     "name": "session_doc_write",
-                    "arguments": {"slug": "plan", "body": "rain's plan", "phase": "plan"}
+                    "arguments": {"slug": "plan", "body": "rain's review", "phase": "plan"}
                 }),
                 1,
             ),
@@ -1291,18 +1311,34 @@ mod tests {
         .unwrap()
         .unwrap();
         let v = serde_json::to_value(&res).unwrap();
-        assert_eq!(v["result"]["isError"], json!(true));
+        assert_ne!(
+            v["result"]["isError"],
+            json!(true),
+            "rain's phase-tagged write must be accepted now"
+        );
         let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
         assert!(
-            text.contains("phase-tagged session_doc_write is reserved for HANDS"),
-            "rain phase-doc write should be rejected, got: {text}"
+            text.contains("plan-eyes"),
+            "rain's write should report the co-located eyes slug, got: {text}"
         );
-        // And nothing was written.
+
+        // Both docs render under the Plan tab; Brian's body is not clobbered.
         let docs = bridge
             .session_doc_search("s1", None, Some("plan"))
             .await
             .unwrap();
-        assert!(docs.is_empty(), "rain's phase doc must not have persisted");
+        assert_eq!(docs.len(), 2, "Brian's plan + Rain's plan-eyes both persist");
+        let brian = docs
+            .iter()
+            .find(|d| d.slug == "plan")
+            .expect("brian's plan doc");
+        assert_eq!(brian.body, "brian's plan", "Brian's doc must be untouched");
+        let eyes = docs
+            .iter()
+            .find(|d| d.slug == "plan-eyes")
+            .expect("rain's eyes doc");
+        assert!(eyes.body.contains("### EYES findings (Rain)"));
+        assert!(eyes.body.contains("rain's review"));
     }
 
     #[tokio::test]

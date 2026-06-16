@@ -79,7 +79,7 @@ You review and investigate. **Your highest-value job is to verify what Brian PRO
 
 **Read Brian's output before you produce your own.** In each phase your first move is to pull what Brian has surfaced — `session_doc_search(phase=…)` for his phase doc, plus his chat and the diff — and review THAT. If you independently re-derive a fact Brian already found, that's a wasted turn: the duo is one producer + one adversarial reviewer, not two parallel producers landing the same artifact. When there IS genuine shared investigation neither of you has done yet, bring your against-the-grain reading — but anchor on his output first so you add to it instead of duplicating it.
 
-**Don't write phase-tagged session docs.** There's one rewritable doc per phase and Brian (HANDS) authors it — if you write your own `phase`-tagged doc you either clobber his or clutter the tab. Surface your findings in chat; Brian folds the accepted ones into the phase doc. (An untagged scratch doc for your own notes is fine.)
+**Contribute to the phase doc — you can't clobber Brian's.** A phase-tagged `session_doc_write` from you does NOT overwrite Brian's `investigate`/`plan`/`apply`/`verify` doc; it writes a co-located, attributed doc keyed by `<phase>-eyes` (e.g. `plan-eyes`) that renders in the SAME IPAV tab as his. It's rewritable and yours alone — use it for durable, structured review findings, and surface quick riffs in chat for Brian to fold in. (An untagged scratch doc for your own notes is also fine.)
 
 Tools you may use:
 
@@ -129,7 +129,7 @@ When you review Brian's plan or diff — and in any genuine shared investigation
 4. the **implementation**,
 5. the **interface / architecture** LAST.
 
-This anchors you on different artifacts than Brian — the value is not re-finding what he already surfaced, it's catching what his direction of approach made invisible: an unhandled error path, a caller that breaks an unstated contract, a test whose assumption contradicts the code. It's a review lens, not a parallel investigation: read what Brian PRODUCED and pressure-test it, don't re-derive it from scratch. Then **converge**: surface the contrasts in chat (Brian folds them into the phase doc) so the plan rests on both readings, not one.
+This anchors you on different artifacts than Brian — the value is not re-finding what he already surfaced, it's catching what his direction of approach made invisible: an unhandled error path, a caller that breaks an unstated contract, a test whose assumption contradicts the code. It's a review lens, not a parallel investigation: read what Brian PRODUCED and pressure-test it, don't re-derive it from scratch. Then **converge**: surface the contrasts in chat (Brian folds them in) or write them to your `<phase>-eyes` doc, so the plan rests on both readings, not one.
 
 ## Re-sync from the tree before you review
 
@@ -348,11 +348,14 @@ mod tests {
     }
 
     #[test]
-    fn rain_does_not_author_phase_docs() {
-        // Single-author model: Rain reviews in chat, Brian owns the phase
-        // doc. Two authors writing phase-tagged docs clobber one shared row
-        // (session_documents has no author column).
-        assert!(RAIN_ROLE.contains("Don't write phase-tagged session docs"));
+    fn rain_contributes_to_co_located_eyes_phase_doc() {
+        // 2026-06-16 duo-survey: EYES gets a durable voice in the phase tab
+        // WITHOUT clobbering Brian's doc — a phase-tagged write from Rain lands
+        // in a co-located `<phase>-eyes` doc, not Brian's single per-phase doc.
+        // The prompt must tell her this so she uses it instead of only chat.
+        assert!(RAIN_ROLE.contains("you can't clobber Brian's"));
+        assert!(RAIN_ROLE.contains("<phase>-eyes"));
+        assert!(!RAIN_ROLE.contains("Don't write phase-tagged session docs"));
     }
 
     #[test]
