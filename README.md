@@ -103,7 +103,7 @@ bot-hq/
   state.
 - **Two MCP servers:**
   - **Internal** at `127.0.0.1:<ephemeral>` — UI-signaling tools served
-    to child agents (26 tools — see "Internal MCP tools" below).
+    to child agents (25 tools — see "Internal MCP tools" below).
   - **External** at `127.0.0.1:7892` — driver tools served to any
     bearer-token-authenticated MCP client (see "Driving bot-hq from
     another MCP client" below).

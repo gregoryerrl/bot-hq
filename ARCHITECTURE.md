@@ -168,6 +168,18 @@ broadcast-subscriber bridge in `src/tauri_events/` translates
 `messages_for_session(session_id, since_id)`) goes through a
 `BatchEmitter` (N=20 / 50ms coalesce).
 
+**Live freshness (filesystem watcher + command emits):** beyond the bridge event
+stream, a filesystem watcher (`src/tauri_events/fs_watcher.rs` — one
+`notify-debouncer-mini` over the CL dir + per-session repos, re-indexing the affected
+scope before it emits) and direct `app.emit` calls from mutating Tauri commands
+(`project:changed` / `model:changed`) drive UI updates that bypass the bridge. All three
+channels converge on `Providers.tsx` GlobalEventSync key-set invalidation, so the CL
+tree/editor, the Apply-tab `git diff`, and the project/session/model lists refresh on
+external change without polling — the 60s `refetchInterval`s were dropped; only the
+plugin heartbeat (10s) + a broadcast-`Lagged` `session:resync` backstop remain. Working-
+repo churn is filtered by an ignore-list (`target`/`node_modules`/`.git`/dotdirs) so
+builds don't thrash the A-tab diff. (Shipped 2026-06-15; see PROGRESS.md.)
+
 **Topbar:** `Dashboard | Context Library | Plugins | Settings`.
 
 **Dashboard:** grid of session tiles. Each tile shows title, last
@@ -264,7 +276,7 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**26 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**25 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the full list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `advance_phase`, `request_phase_advance`,
 `request_approval`, `action_gate`, `check_commit_message`,
