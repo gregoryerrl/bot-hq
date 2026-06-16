@@ -174,4 +174,40 @@ describe("FolderView", () => {
     );
     expect(onProjectGone).toHaveBeenCalledWith("old", "new");
   });
+
+  it("clears the working repo when the field is emptied (sends '' not null)", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const onProjectChanged = vi.fn();
+    render(
+      <FolderView
+        tab={{ kind: "folder", project: "bot-hq", folderPath: "" }}
+        folders={[]}
+        project={proj({
+          name: "bot-hq",
+          display_name: "bot-hq",
+          working_repo_path: "/Users/me/Projects/bot-hq",
+        })}
+        onSaved={() => {}}
+        onProjectChanged={onProjectChanged}
+      />,
+    );
+
+    fireEvent.change(screen.getByDisplayValue("/Users/me/Projects/bot-hq"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save working repo/i }));
+
+    // "" (not null) reaches the backend so upsert_project actually clears the
+    // column — null would COALESCE back to the old value (silent no-op).
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("cl_register_project", {
+        name: "bot-hq",
+        displayName: "bot-hq",
+        workingRepoPath: "",
+        clPath: null,
+        description: null,
+      }),
+    );
+    expect(onProjectChanged).toHaveBeenCalled();
+  });
 });

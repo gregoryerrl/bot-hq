@@ -215,7 +215,10 @@ function ProjectSection({
       await invoke("cl_register_project", {
         name: project.name,
         displayName: project.display_name,
-        workingRepoPath: wr.trim() || null,
+        // Send "" (not null) so emptying the field actually clears the repo:
+        // upsert_project COALESCEs null → keeps the old value, but treats "" as
+        // an explicit clear. Without this, "save empty" is a silent no-op.
+        workingRepoPath: wr.trim(),
         clPath: null,
         description: null,
       });
