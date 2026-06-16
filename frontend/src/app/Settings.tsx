@@ -5,6 +5,7 @@ import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvok
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
+import { terminalInputClass } from "./contextLibraryShared";
 import { SaveIcon } from "./contextLibraryShared";
 import { WrenchIcon, EyeIcon, GearIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
@@ -892,13 +893,6 @@ function ToolGateSection() {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-const terminalInputClass = cn(
-  "w-full border-0 border-b border-outline-variant bg-transparent",
-  "rounded-none px-0 py-1.5 font-code-sm text-code-sm text-on-surface",
-  "placeholder:text-on-surface-variant caret-primary",
-  "focus:border-primary focus:outline-none",
-);
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
   return (

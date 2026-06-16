@@ -11,6 +11,32 @@ interface ChatMessageProps {
   groupedWithPrev?: boolean;
 }
 
+// Author + relative-timestamp header. Shared by the text and tool message rows
+// (the markup was byte-identical) so the two can't drift.
+function MessageHeader({
+  author,
+  createdAt,
+}: {
+  author: string;
+  createdAt: string;
+}) {
+  return (
+    <header className="mb-1 flex items-center gap-2">
+      <span
+        className={cn(
+          "text-[0.65rem] font-semibold uppercase tracking-wide",
+          authorColorClass(author),
+        )}
+      >
+        {author}
+      </span>
+      <span className="text-[0.65rem] text-on-surface-variant">
+        {formatRelative(createdAt)}
+      </span>
+    </header>
+  );
+}
+
 /**
  * One rendered chat message. Markdown via react-markdown + GFM (tables,
  * task lists, autolinks). Code blocks get a contained scroll. Phase-change
@@ -38,19 +64,7 @@ export const ChatMessage = memo(function ChatMessage({
   return (
     <article className={cn("mb-2", groupedWithPrev ? "mt-0" : "mt-3")}>
       {!groupedWithPrev && (
-        <header className="mb-1 flex items-center gap-2">
-          <span
-            className={cn(
-              "text-[0.65rem] font-semibold uppercase tracking-wide",
-              authorColorClass(message.author),
-            )}
-          >
-            {message.author}
-          </span>
-          <span className="text-[0.65rem] text-on-surface-variant">
-            {formatRelative(message.created_at)}
-          </span>
-        </header>
+        <MessageHeader author={message.author} createdAt={message.created_at} />
       )}
       <Markdown>{message.content}</Markdown>
     </article>
@@ -86,19 +100,7 @@ function ToolMessage({
   return (
     <article className={cn("mb-1", groupedWithPrev ? "mt-0" : "mt-2")}>
       {!groupedWithPrev && (
-        <header className="mb-1 flex items-center gap-2">
-          <span
-            className={cn(
-              "text-[0.65rem] font-semibold uppercase tracking-wide",
-              authorColorClass(message.author),
-            )}
-          >
-            {message.author}
-          </span>
-          <span className="text-[0.65rem] text-on-surface-variant">
-            {formatRelative(message.created_at)}
-          </span>
-        </header>
+        <MessageHeader author={message.author} createdAt={message.created_at} />
       )}
       <button
         type="button"

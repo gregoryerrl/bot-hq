@@ -17,13 +17,17 @@ export function useTauriEvent<T>(
 
     listen<T>(eventName, (event) => {
       if (!cancelled) handler(event.payload);
-    }).then((un) => {
-      if (cancelled) {
-        un();
-      } else {
-        unlisten = un;
-      }
-    });
+    })
+      .then((un) => {
+        if (cancelled) {
+          un();
+        } else {
+          unlisten = un;
+        }
+      })
+      .catch((e) => {
+        console.error(`useTauriEvent: failed to subscribe to "${eventName}"`, e);
+      });
 
     return () => {
       cancelled = true;
