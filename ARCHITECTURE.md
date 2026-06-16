@@ -206,12 +206,22 @@ tree renders nested collapsible folders (`cl_index_search` + `cl_folder_search`)
 Files open a read-write editor (`cl_read_file` / `cl_write_file`; binary +
 truncated files are read-only so a lossy save can't corrupt them). Folders open
 a folder-view that edits the folder description (`cl_set_folder_description`)
-and, at the project root, configures + registers / unregisters the project
-(`cl_register_project` / `cl_unregister_project`); a sidebar modal registers an
-arbitrary on-disk folder as a new project. Right-click gives VSCode-style new
+and, at the project root, manages the project: set the working repo, rename
+(`cl_rename_project`), unbind (`cl_unregister_project` — soft: clears repo +
+custom cl_path, keeps content), and hard-delete (`cl_delete_project` — purges
+all index/folder rows + the row; optionally removes the managed on-disk dir,
+never a custom `cl_path`). The sidebar `+` opens a **New-project** modal: the
+default path (`cl_create_project`) creates a managed project at
+`<data_dir>/library/projects/<name>/` (seeded `conventions.md`/`notes.md`) and
+binds an optional working repo WITHOUT indexing it; an Advanced section
+(`cl_register_project` + `cl_rescan`) is the power case that indexes an existing
+on-disk folder AS the CL content (`cl_path`). Right-click gives VSCode-style new
 file / new folder / rename / delete (`cl_create_file` / `cl_mkdir` / `cl_rename`
-/ `cl_delete_path`, each followed by `cl_rescan`). Substring search + project
-filter.
+/ `cl_delete_path`, each followed by `cl_rescan`), plus **Promote to project**
+on a top-level Global folder (moves it into `projects/` + registers). Path
+inputs (working-repo, cl_path) use a native folder picker via
+`tauri-plugin-dialog`. The New-session dialog can also pick an ad-hoc working
+repo directly (no pre-registration). Substring search + project filter.
 
 **Plugins tab:** Functional management UI (`PluginManager.tsx`) over
 `tauri_cmd/plugins.rs` — install from a local path, enable / disable /

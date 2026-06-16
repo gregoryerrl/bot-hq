@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-514 tests passing (463 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 94 frontend Vitest. Release build clean. Version **1.0.0** (bumped
+517 tests passing (466 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 98 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
@@ -21,7 +21,42 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 
 ---
 
-## 2026-06-16 — Full-codebase audit + Tiers 0–3 remediation
+## 2026-06-16 — Context Library registration UX redesign
+
+Fixed the project-registration trap (user registered `model-connector` by putting the
+repo path in the modal's required "Folder path" field → the whole repo got indexed as CL
+content, and "unregister" left 47 ghost `cl_index` rows that kept showing under Projects
+with no UI way to remove them). Root cause: the modal wired "Folder path" → `cl_path` (an
+index-this-folder power feature) as the prominent required field, the only entry point to
+add a repo; `unregister_project` was a soft no-op; `walk_cl_dir` skipped only dotfiles;
+no hard-delete existed. Full redesign (Tier 1+2), all five gates green.
+
+- **Name-first New-project modal** (`ContextLibraryRegisterModal.tsx`) — Name + optional
+  Working repo + Description; `cl_path` demoted to a collapsed Advanced section. Default
+  submit calls the new `cl_create_project` (managed dir at
+  `library/projects/<name>/`, seeds `conventions.md`/`notes.md`, binds repo but does NOT
+  index it); Advanced still does `cl_register_project` + `cl_rescan` for the index-a-folder
+  case.
+- **Real delete + rename** (`cl_delete_project`, `cl_rename_project`, `storage::projects`)
+  — Delete purges the row (FK `ON DELETE CASCADE` clears `cl_index`/`cl_folders`/`cl_reads`)
+  with an opt-in "delete files" for managed dirs only (never a custom `cl_path`/repo);
+  rename repoints rows under `PRAGMA defer_foreign_keys` + renames the managed dir.
+  FolderView gains Rename + Delete; "Unregister" → "Unbind working repo". `onProjectGone`
+  closes/retargets the stale tab.
+- **Build-dir ignore-list** (`walk_cl_dir`) — skips `node_modules`/`target`/`dist`/`build`/
+  `vendor`/`coverage`/`__pycache__` (mirrors `fs_watcher`), so even an Advanced cl_path on
+  a code repo no longer pulls dependency files.
+- **Native folder picker** (`tauri-plugin-dialog` + `dialog:default`) — `pickFolder()`
+  Browse buttons on every path field.
+- **Ad-hoc New-session repo** (`Dashboard.tsx`) — pick a folder not registered as a
+  project (project derived by basename, general policy tier); stale onboarding copy fixed.
+- **Path B clarified** — right-click "Register as project" → "Promote to project" (it moves
+  an existing Global folder; distinct from the modal's create — left intact, not folded in).
+- New commands wired in `tauri_specta_gen.rs` + bindings regenerated. Events: create/delete/
+  rename emit `project:changed` + `cl:changed` (DB-only mutations fire no fs-watcher event).
+- ARCHITECTURE.md CL-tab section refreshed (was stale — predated the 06-12 categorized tree).
+
+
 
 A comprehensive duo audit (5 read-only sweep agents + Rain's adversarial pass, every
 finding re-verified at the call site) found the codebase healthy — clippy-clean, no
