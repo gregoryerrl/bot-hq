@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { SessionTile } from "../components/SessionTile";
@@ -15,10 +15,15 @@ import type {
 } from "../lib/bindings";
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useTauriEvent } from "../hooks/useTauriEvent";
 import { AgentEffortOverride } from "./ClaudeConfig";
 import { pickFolder } from "./contextLibraryShared";
 
 const RAIN_DISABLED_DEFAULT_KEY = "rain_disabled_default";
+
+// Quickview liveness throttle: collapse bursts of agent:messages:batch into at
+// most one dashboard refetch per this window (see onMessageBatch in Dashboard).
+const QUICKVIEW_REFRESH_THROTTLE_MS = 2500;
 
 /**
  * Thin wrapper that drives the per-session phase query, so `SessionTile`
@@ -49,6 +54,41 @@ export function Dashboard() {
     isLoading,
     error,
   } = useTauriQuery<SessionInfo[]>("list_sessions");
+
+  // Quickview liveness: agent:messages:batch fires on every message batch.
+  // Throttle a list_sessions refetch so the dashboard's per-tile Quickview
+  // stays current while watched, without re-running the per-session preview
+  // query on every batch. Local to the dashboard — the listener (and its cost)
+  // unmounts with it; that's why Providers.tsx leaves this event out of the
+  // global invalidation map.
+  const lastQuickviewRefreshRef = useRef(0);
+  const quickviewRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const onMessageBatch = useCallback(() => {
+    const now = Date.now();
+    const sinceLast = now - lastQuickviewRefreshRef.current;
+    if (sinceLast >= QUICKVIEW_REFRESH_THROTTLE_MS) {
+      lastQuickviewRefreshRef.current = now;
+      refetch();
+    } else if (quickviewRefreshTimerRef.current == null) {
+      // Trailing edge: reflect the tail of a burst once the window elapses.
+      quickviewRefreshTimerRef.current = setTimeout(() => {
+        quickviewRefreshTimerRef.current = null;
+        lastQuickviewRefreshRef.current = Date.now();
+        refetch();
+      }, QUICKVIEW_REFRESH_THROTTLE_MS - sinceLast);
+    }
+  }, [refetch]);
+  useTauriEvent("agent:messages:batch", onMessageBatch, [onMessageBatch]);
+  useEffect(
+    () => () => {
+      if (quickviewRefreshTimerRef.current) {
+        clearTimeout(quickviewRefreshTimerRef.current);
+      }
+    },
+    [],
+  );
 
   // Durable pending-tray rows for all open sessions — the same source the
   // header bell uses. Survives restart and includes halt waits
@@ -300,7 +340,7 @@ export function Dashboard() {
             aria-modal="true"
             aria-label="New session"
             className={cn(
-              "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] -translate-x-1/2 -translate-y-1/2",
+              "fixed left-1/2 top-1/2 z-50 w-[min(480px,90vw)] max-h-[90vh] -translate-x-1/2 -translate-y-1/2 overflow-y-auto",
               "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
             )}
           >
@@ -317,7 +357,7 @@ export function Dashboard() {
                 ×
               </button>
             </div>
-            <div className="space-y-3">
+            <div className="space-y-4">
               <label className="block">
                 <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
                   Title
@@ -351,7 +391,6 @@ export function Dashboard() {
                   {projects.map((p) => (
                     <option key={p.name} value={p.name}>
                       {p.display_name || p.name}
-                      {p.working_repo_path ? ` — ${p.working_repo_path}` : ""}
                     </option>
                   ))}
                 </select>
@@ -403,26 +442,68 @@ export function Dashboard() {
                   the general policy tier.
                 </p>
               )}
-              <label className="block">
-                <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                  Brian model
+              {/* Disable Rain first — it determines whether the Rain picker
+                  renders, so the model row below can collapse to one column. */}
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={disableRain}
+                  onChange={(e) => setDisableRain(e.target.checked)}
+                  className="size-4 accent-primary"
+                />
+                <span className="font-body-md text-body-md text-on-surface">
+                  Disable Rain (solo Brian — saves credits)
                 </span>
-                <select
-                  value={brianModelId}
-                  onChange={(e) => setBrianModelId(e.target.value)}
-                  className={cn(
-                    "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
-                    "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-                  )}
-                >
-                  <option value="">(agent default)</option>
-                  {models.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.display_name}
-                    </option>
-                  ))}
-                </select>
               </label>
+              <div
+                className={cn(
+                  "grid gap-3",
+                  disableRain ? "grid-cols-1" : "grid-cols-2",
+                )}
+              >
+                <label className="block">
+                  <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                    Brian model
+                  </span>
+                  <select
+                    value={brianModelId}
+                    onChange={(e) => setBrianModelId(e.target.value)}
+                    className={cn(
+                      "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                      "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+                    )}
+                  >
+                    <option value="">(agent default)</option>
+                    {models.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {!disableRain && (
+                  <label className="block">
+                    <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                      Rain model
+                    </span>
+                    <select
+                      value={rainModelId}
+                      onChange={(e) => setRainModelId(e.target.value)}
+                      className={cn(
+                        "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
+                        "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
+                      )}
+                    >
+                      <option value="">(agent default)</option>
+                      {models.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
               {models.length === 0 && (
                 <p className="text-xs text-on-surface-variant">
                   No saved models yet — both agents use their configured default.
@@ -444,39 +525,6 @@ export function Dashboard() {
                     Isolated git worktree (parallel-safe, branch{" "}
                     <code className="font-code-sm text-code-sm">bothq/…</code>)
                   </span>
-                </label>
-              )}
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={disableRain}
-                  onChange={(e) => setDisableRain(e.target.checked)}
-                  className="size-4 accent-primary"
-                />
-                <span className="font-body-md text-body-md text-on-surface">
-                  Disable Rain (solo Brian — saves credits)
-                </span>
-              </label>
-              {!disableRain && (
-                <label className="block">
-                  <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                    Rain model
-                  </span>
-                  <select
-                    value={rainModelId}
-                    onChange={(e) => setRainModelId(e.target.value)}
-                    className={cn(
-                      "w-full rounded-md border border-outline-variant bg-surface px-3 py-1.5 font-body-md text-body-md text-on-surface",
-                      "focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary",
-                    )}
-                  >
-                    <option value="">(agent default)</option>
-                    {models.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.display_name}
-                      </option>
-                    ))}
-                  </select>
                 </label>
               )}
               <div>

@@ -5,6 +5,7 @@ import type { SessionInfo } from "../lib/bindings";
 import { SessionPhaseChip, phaseTintClasses } from "./SessionPhaseChip";
 import { useHealthStore, worstHealth } from "../stores/health";
 import { HealthDot } from "./HealthDot";
+import { authorColorClass } from "./authorColor";
 
 export interface SessionTileProps {
   session: SessionInfo;
@@ -26,6 +27,8 @@ export function SessionTile({
   const tint = phaseTintClasses(phase, closed);
   // B2: session-level health dot (problem-only on the tile). Worst-of Brian+Rain.
   const health = useHealthStore((s) => s.bySession[session.id]);
+  // Slot 8 Quickview: first line of the latest text message (null until one exists).
+  const quickview = firstLine(session.last_message);
 
   const open = () => navigate(`/sessions/${session.id}`);
   const onTileKey = (e: React.KeyboardEvent) => {
@@ -117,14 +120,30 @@ export function SessionTile({
         )}
       </div>
 
-      {/* Slot 8: Quickview footer */}
+      {/* Slot 8: Quickview footer — first line of the latest text message so a
+          session can be monitored from the dashboard without opening it. Falls
+          back to a generic phase hint until the session has a text message. */}
       <div className="border-t border-outline-variant/30 px-4 py-2">
         <div className="font-label-caps text-label-caps text-on-surface-variant">
           Quickview
         </div>
-        <div className="truncate font-code-sm text-code-sm italic text-on-surface">
-          {quickviewFor(phase, closed)}
-        </div>
+        {quickview ? (
+          <div className="truncate font-code-sm text-code-sm text-on-surface">
+            <span
+              className={cn(
+                "mr-1.5 font-semibold",
+                authorColorClass(session.last_author ?? ""),
+              )}
+            >
+              {authorLabel(session.last_author)}
+            </span>
+            {quickview}
+          </div>
+        ) : (
+          <div className="truncate font-code-sm text-code-sm italic text-on-surface-variant">
+            {quickviewFor(phase, closed)}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -137,12 +156,14 @@ function formatSessionId(id: string): string {
 }
 
 function describe(session: SessionInfo): string {
+  const created = `created ${formatRelative(session.created_at)}`;
   if (session.working_repo_path) {
     const basename =
       session.working_repo_path.split("/").filter(Boolean).pop() ?? "repo";
-    return `Working in ${basename}`;
+    const worktree = session.base_repo_path ? " · worktree" : "";
+    return `${basename}${worktree} · ${created}`;
   }
-  return `Created ${formatRelative(session.created_at)}`;
+  return `no repo · ${created}`;
 }
 
 function quickviewFor(phase: string | null, closed: boolean): string {
@@ -151,6 +172,27 @@ function quickviewFor(phase: string | null, closed: boolean): string {
     return `${phase.charAt(0).toUpperCase()}${phase.slice(1)} phase — open to view activity`;
   }
   return "Open session to view activity log";
+}
+
+/** First non-blank line of a message body, trimmed; null when empty/absent. */
+function firstLine(text: string | null): string | null {
+  if (!text) return null;
+  const line = text.split("\n").find((l) => l.trim().length > 0);
+  return line ? line.trim() : null;
+}
+
+/** Short, friendly author label for the Quickview tag. */
+function authorLabel(author: string | null): string {
+  switch (author) {
+    case "brian":
+      return "Brian";
+    case "rain":
+      return "Rain";
+    case "user":
+      return "You";
+    default:
+      return author ? author.charAt(0).toUpperCase() + author.slice(1) : "";
+  }
 }
 
 function AlertIcon({ className }: { className?: string }) {

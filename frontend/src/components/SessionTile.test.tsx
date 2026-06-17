@@ -15,6 +15,8 @@ const session: SessionInfo = {
   brian_model_at_spawn: null,
   rain_model_at_spawn: null,
   rain_enabled: true,
+  last_message: null,
+  last_author: null,
 };
 
 function renderTile(props: Partial<React.ComponentProps<typeof SessionTile>> = {}) {
@@ -60,5 +62,40 @@ describe("SessionTile", () => {
   it("shows the pending count in the indicator", () => {
     renderTile({ pendingCount: 2 });
     expect(screen.getByText(/need user input · 2/i)).toBeInTheDocument();
+  });
+
+  it("shows the first line of the latest message + author tag in Quickview", () => {
+    renderTile({
+      session: {
+        ...session,
+        last_message: "Looking at the storage layer now\nsecond line",
+        last_author: "brian",
+      },
+    });
+    expect(screen.getByText("Brian")).toBeInTheDocument();
+    expect(
+      screen.getByText(/looking at the storage layer now/i),
+    ).toBeInTheDocument();
+    // Only the first line surfaces; trailing lines are dropped.
+    expect(screen.queryByText(/second line/i)).not.toBeInTheDocument();
+  });
+
+  it("labels a user-authored latest message as You", () => {
+    renderTile({
+      session: {
+        ...session,
+        last_message: "Fix the login bug",
+        last_author: "user",
+      },
+    });
+    expect(screen.getByText("You")).toBeInTheDocument();
+    expect(screen.getByText(/fix the login bug/i)).toBeInTheDocument();
+  });
+
+  it("falls back to a generic Quickview hint when there is no message", () => {
+    renderTile({ phase: "investigate" });
+    expect(
+      screen.getByText(/open to view activity/i),
+    ).toBeInTheDocument();
   });
 });

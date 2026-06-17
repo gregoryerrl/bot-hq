@@ -76,8 +76,10 @@ const MODEL_KEYS = ["list_models"] as const;
 /**
  * Event-driven cache invalidation: each backend `session:*` event invalidates
  * only the query families it can affect (see the key maps above). Renders
- * nothing. `agent:messages:batch` is intentionally excluded — the chat consumes
- * it directly, and a chat message doesn't change other views.
+ * nothing. `agent:messages:batch` is intentionally excluded from this global
+ * map — the chat consumes it directly (SessionView), and the Dashboard consumes
+ * it locally for a throttled Quickview refetch (Dashboard.tsx). It changes no
+ * OTHER view, so it stays out of the key maps above.
  */
 function GlobalEventSync() {
   const queryClient = useQueryClient();
