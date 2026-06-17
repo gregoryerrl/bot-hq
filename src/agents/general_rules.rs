@@ -118,10 +118,12 @@ Each substantive task walks through four phases. The current phase appears as `[
 
 **Tight turns while coordinating (Investigate/Plan).** Your peer's forwarded findings reach you only at a turn boundary — claude-code reads stdin between turns, never mid-turn. So a long, many-tool turn (a big parallel fan-out, say) delays picking up what your peer just surfaced by however long that turn runs. While the two of you are actively investigating or planning together, prefer several smaller turns over one monolithic turn so findings land and get folded in promptly. (Apply/Verify forward on turn-completion anyway, so this matters most in I/P.)
 
+**Phases are task-shape-agnostic — \"Apply\" is whatever *doing the work* means here, not just editing code.** The deliverable a task produces lands in **Apply** regardless of shape: a code change is a diff; a deploy/smoke is the merge + smoke output; an investigation, review, or audit is the findings themselves. You do NOT *skip* phases for non-code work — you right-size them. A review still walks all four: Investigate (read the PRs/code), Plan (decide the review strategy), Apply (**produce the findings — that IS the deliverable**), Verify (adversarial proof-read). If you catch yourself thinking \"no Apply needed, nothing to edit,\" that's the trap — the findings are the Apply, and they belong in the `apply` doc, not stranded in `investigate` or chat.
+
 1. **Investigate** — gather facts. **Open `cl_index_search` first** so you know the project conventions before reading code. Then read code, grep, run read-only Bash — reaching for `web_search` only when a question reaches OUTSIDE the repo (a dependency version, an upstream issue, current docs, an unfamiliar error string); skip it for codebase-internal questions. **No** Edit, Write, or mutating Bash. Output: your understanding stated in chat + a `phase=\"investigate\"` doc capturing pipeline traces, constraint discoveries, references consulted — anything reusable in later phases.
 2. **Plan** — **first read the `investigate` doc (`session_doc_search(phase=\"investigate\")`) and build the plan ON it, not from scratch.** Propose the approach in chat. Name files, functions, expected diffs. Surface tradeoffs. **No** Edit/Write yet. Output: the plan in chat + a `phase=\"plan\"` doc with the full plan (especially when >3 batches, multi-file, or anything Brian / Rain will reference during Apply / Verify).
-3. **Apply** — mutate, implementing against the `plan` doc (read it first). HANDS (Brian) executes Edit/Write/Bash; EYES (Rain) does not write. Output: code AND a `phase=\"apply\"` doc summarizing what changed, why, what was deferred — so Rain in Verify can pull it via `session_doc_search(phase=\"apply\")` without re-deriving from the diff. The session view's A tab auto-renders your working repo's `git diff` color-coded (GitHub-style: green adds, red removes, blue hunks, yellow file headers); point the user there for visual review instead of pasting diffs into chat. Apply-phase docs render below the diff in the same tab.
-4. **Verify** — confirm the outcome against the `apply` doc (read it first). Run tests, type-check, re-read the file, or describe the manual check. Cite the output. Output: chat summary + a `phase=\"verify\"` doc capturing commands run, output observed, manual checks, and any flakes / known limits.
+3. **Apply** — produce the deliverable, implementing against the `plan` doc (read it first). **The `apply` doc IS the deliverable**, shaped to the task: for code, a tight changelog beside the diff; for a deploy, the merge + smoke output; for an investigation or review, the synthesized findings themselves. HANDS (Brian) executes any mutations (Edit/Write/Bash); EYES (Rain) does not write — so Rain in Verify can pull the deliverable via `session_doc_search(phase=\"apply\")` without re-deriving from the diff. The session view's A tab auto-renders your working repo's `git diff` color-coded (GitHub-style: green adds, red removes, blue hunks, yellow file headers); point the user there for visual review instead of pasting diffs into chat. Apply-phase docs render below the diff in the same tab.
+4. **Verify** — confirm the deliverable against the `apply` doc (read it first). Check the *thing you produced*: tests / type-check for code, the smoke output for a deploy, an adversarial proof-read for an investigation or review. Cite the output. Output: chat summary + a `phase=\"verify\"` doc capturing commands run, output observed, manual checks, and any flakes / known limits.
 
 **Self-advance via `advance_phase(target)`** when your work crosses a boundary — no user click needed. Phase is a self-discipline signal, not a permission gate. The dashboard chip moves and both agents receive a `[PHASE: X]` transition notice. Push, commit, and destructive ops have their own gates (`request_approval`, `check_commit_message`) — IPAV doesn't double-gate them.
 
@@ -129,7 +131,7 @@ Use `request_phase_advance(target, reason)` only when you specifically want to p
 
 Trivial single-step tasks (a one-line answer, a quick lookup) don't need a phase walk at all — just do them. The discipline applies to *substantive* work; you decide when it does.
 
-Brian executes Apply. Rain reviews and pushes back adversarially.
+Brian executes Apply (produces the deliverable, whatever its shape). Rain reviews and pushes back adversarially.
 ";
 
 #[cfg(test)]
@@ -275,6 +277,27 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("that is not staleness"),
             "UTC rule must call out same-instant-different-zone is not staleness"
+        );
+    }
+
+    #[test]
+    fn ipav_apply_is_task_shape_agnostic() {
+        // 2026-06-17 cross-model survey: the prompts coded "Apply = code
+        // mutation," so non-code tasks (review/deploy/investigation) read as
+        // "no Apply needed" and stalled in Investigate (DeepSeek-Brian: 0 phase
+        // advances; the deliverable stranded in the investigate doc/chat). The
+        // reframe teaches Apply = produce the deliverable, whatever its shape.
+        assert!(
+            GENERAL_RULES.contains("Phases are task-shape-agnostic"),
+            "IPAV section must teach phases generalize beyond code"
+        );
+        assert!(
+            GENERAL_RULES.contains("produce the deliverable"),
+            "Apply bullet must frame Apply as producing the deliverable"
+        );
+        assert!(
+            GENERAL_RULES.contains("the findings are the Apply"),
+            "reframe must name the non-code-Apply trap"
         );
     }
 }

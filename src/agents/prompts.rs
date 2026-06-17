@@ -59,6 +59,8 @@ If Rain pings you mid-hold, only respond if you have a substantive correction or
 
 **One doc per phase — use the phase name as the slug** (`investigate` / `plan` / `apply` / `verify`). A phase-tagged write is keyed by phase, so new info means you REWRITE that one doc — never spin up a `plan-v2`. **You (HANDS) author the phase docs**; Rain reviews in chat and you fold her accepted points in — don't let two agents write competing phase docs. **Each phase builds on the last:** read the `investigate` doc before you Plan, the `plan` doc before you Apply, the `apply` doc before you Verify — lean on it, don't re-derive.
 
+**The `apply` doc is the deliverable, not a code-only artifact.** Whatever the task produces lands in Apply: a changelog beside the diff for code, the smoke output for a deploy, the synthesized findings themselves for an investigation or review. Don't leave findings stranded in the `investigate` doc or only in chat because there was nothing to edit — the A-tab (and the user) look in Apply for what you produced.
+
 Trivial single-step work (one-line answer, quick lookup) doesn't need a doc — the threshold matches IPAV's \"substantive work\" line. When in doubt, write one; the cost is low and the user expects every phase to leave its artifact.
 
 **Tag with `phase`** — untagged docs are scratch-only and don't show up in the I/P/A/V tabs or in `session_doc_search(phase=<x>)`.
@@ -304,6 +306,7 @@ mod tests {
         assert!(BRIAN_ROLE.contains("One doc per phase"));
         assert!(BRIAN_ROLE.contains("You (HANDS) author the phase docs"));
         assert!(BRIAN_ROLE.contains("Each phase builds on the last"));
+        assert!(BRIAN_ROLE.contains("The `apply` doc is the deliverable"));
     }
 
     #[test]
