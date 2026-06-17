@@ -542,6 +542,112 @@ async fn supervise<S, Fut>(
     }
 }
 
+/// EYES (`rain`) runs read-only under `--permission-mode dontAsk`. Tools with a
+/// read form worth keeping (`git branch`, `gh`) are denied BY WRITE VERB rather
+/// than by blanket noun, so the read forms fall through to the allowed `Bash`
+/// (deny wins over allow, so a blanket `Bash(gh issue:*)` / `Bash(git branch:*)`
+/// would also kill the reads). These const lists are the single source of truth:
+/// both `build_rain_disallowed_tools` AND the `rain_denies_*` tests iterate them,
+/// so enforcement and its test can't drift. New write verbs go here.
+///
+/// Mutating `git branch` forms. Read forms (bare / `--show-current` / `-a` / `-r`
+/// / `--list` / `--contains`) fall through. 2026-06-17: replaced the blanket
+/// `Bash(git branch:*)` deny that was false-blocking EYES's read-only listing.
+const GIT_BRANCH_WRITE_VERBS: &[&str] = &[
+    "-d",
+    "-D",
+    "--delete",
+    "-m",
+    "-M",
+    "--move",
+    "-c",
+    "-C",
+    "--copy",
+    "-f",
+    "--force",
+    "-u",
+    "--set-upstream-to",
+    "--unset-upstream",
+    "--track",
+    "--no-track",
+    "--edit-description",
+];
+/// Mutating `gh pr` verbs (read forms — view/diff/list/status/checks — fall through).
+const GH_PR_WRITE_VERBS: &[&str] = &[
+    "create", "edit", "close", "reopen", "merge", "ready", "review", "comment", "lock", "unlock",
+    "delete", "checkout",
+];
+/// Mutating `gh issue` verbs (read forms — view/list — fall through).
+const GH_ISSUE_WRITE_VERBS: &[&str] = &[
+    "create", "edit", "close", "reopen", "comment", "delete", "transfer", "pin", "unpin", "lock",
+    "unlock", "develop",
+];
+/// Mutating `gh release` verbs (read forms — view/list — fall through).
+const GH_RELEASE_WRITE_VERBS: &[&str] = &["create", "edit", "delete", "upload", "download"];
+/// Mutating `gh repo` verbs (read forms — view — fall through).
+const GH_REPO_WRITE_VERBS: &[&str] = &[
+    "create", "edit", "delete", "fork", "sync", "rename", "archive", "clone",
+];
+
+/// Build space-joined `Bash(<tool> <verb>:*)` deny patterns for a
+/// deny-by-write-verb tool. Read forms (no listed verb) fall through to allowed `Bash`.
+fn deny_write_verbs(tool: &str, verbs: &[&str]) -> String {
+    verbs
+        .iter()
+        .map(|v| format!("Bash({tool} {v}:*)"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// EYES's `--disallowedTools` value: static denies (Edit/Write/Task + the
+/// full-noun git mutations that have no read form worth preserving) plus the
+/// deny-by-write-verb collections for `git branch` and `gh`. `gh api` is fully
+/// denied — the POST/PATCH/DELETE escape hatch. Covered by the `rain_denies_*`
+/// tests, which assert against the same `*_WRITE_VERBS` consts.
+fn build_rain_disallowed_tools() -> String {
+    let mut parts: Vec<String> = [
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "Task",
+        "Bash(git commit:*)",
+        "Bash(git push:*)",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    parts.push(deny_write_verbs("git branch", GIT_BRANCH_WRITE_VERBS));
+
+    // Full-noun git mutations — no read form worth preserving, so deny the noun.
+    parts.extend(
+        [
+            "Bash(git checkout:*)",
+            "Bash(git switch:*)",
+            "Bash(git reset:*)",
+            "Bash(git merge:*)",
+            "Bash(git rebase:*)",
+            "Bash(git add:*)",
+            "Bash(git stash:*)",
+            "Bash(git restore:*)",
+            "Bash(git rm:*)",
+            "Bash(git tag:*)",
+            "Bash(git cherry-pick:*)",
+            "Bash(git apply:*)",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+
+    parts.push(deny_write_verbs("gh pr", GH_PR_WRITE_VERBS));
+    parts.push(deny_write_verbs("gh issue", GH_ISSUE_WRITE_VERBS));
+    parts.push(deny_write_verbs("gh release", GH_RELEASE_WRITE_VERBS));
+    parts.push(deny_write_verbs("gh repo", GH_REPO_WRITE_VERBS));
+    parts.push("Bash(gh api:*)".to_string());
+
+    parts.join(" ")
+}
+
 fn build_command(cfg: &SpawnConfig) -> Command {
     let bin = cfg.claude_bin.as_deref().unwrap_or("claude");
     let mut cmd = Command::new(bin);
@@ -652,47 +758,14 @@ fn build_command(cfg: &SpawnConfig) -> Command {
             "--allowedTools",
             "Read Grep Glob WebFetch WebSearch ToolSearch TodoWrite BashOutput KillShell Bash mcp__bot-hq-signaling",
         ]);
-        // `gh` is denied by WRITE VERB, not blanket noun — so Rain keeps the
-        // read forms the issue asks for (`gh issue view/list`, `gh pr view/diff/
-        // list/status/checks`, `gh repo view`, `gh release view/list`) while every
-        // mutating subcommand is blocked. Deny wins over allow, so a blanket
-        // `Bash(gh issue:*)` would also kill `gh issue view`; enumerating write
-        // verbs is the only way to allow reads under `dontAsk`. `gh api` stays
-        // FULLY denied — it's the escape hatch that can POST/PATCH/DELETE
-        // anything. New gh write verbs must be appended here (covered by
-        // `rain_denies_gh_write_allows_gh_read`).
-        //
-        // `git branch` uses the SAME deny-by-write-verb shape (2026-06-17): the
-        // blanket `Bash(git branch:*)` also blocked read-only listing (10+ false
-        // denials on legit `git branch --show-current`/`-a` reads + compound
-        // `git branch … && echo …` across the cross-model survey sessions). Now
-        // only the mutating forms (-d/-D/-m/-c/-f/--set-upstream-to/--track/…)
-        // are denied; read forms fall through to the allowed `Bash`. Residual:
-        // bare `git branch <new>` creation — same accepted class as the gh
-        // side-channels (covered by `rain_denies_git_branch_write_allows_read`).
-        cmd.args([
-            "--disallowedTools",
-            "Edit Write NotebookEdit Task \
-             Bash(git commit:*) Bash(git push:*) Bash(git branch -d:*) Bash(git branch -D:*) Bash(git branch --delete:*) Bash(git branch -m:*) Bash(git branch -M:*) Bash(git branch --move:*) Bash(git branch -c:*) Bash(git branch -C:*) Bash(git branch --copy:*) Bash(git branch -f:*) Bash(git branch --force:*) Bash(git branch -u:*) Bash(git branch --set-upstream-to:*) Bash(git branch --unset-upstream:*) Bash(git branch --track:*) Bash(git branch --no-track:*) Bash(git branch --edit-description:*) \
-             Bash(git checkout:*) Bash(git switch:*) Bash(git reset:*) \
-             Bash(git merge:*) Bash(git rebase:*) Bash(git add:*) \
-             Bash(git stash:*) Bash(git restore:*) Bash(git rm:*) \
-             Bash(git tag:*) Bash(git cherry-pick:*) Bash(git apply:*) \
-             Bash(gh pr create:*) Bash(gh pr edit:*) Bash(gh pr close:*) \
-             Bash(gh pr reopen:*) Bash(gh pr merge:*) Bash(gh pr ready:*) \
-             Bash(gh pr review:*) Bash(gh pr comment:*) Bash(gh pr lock:*) \
-             Bash(gh pr unlock:*) Bash(gh pr delete:*) Bash(gh pr checkout:*) \
-             Bash(gh issue create:*) Bash(gh issue edit:*) Bash(gh issue close:*) \
-             Bash(gh issue reopen:*) Bash(gh issue comment:*) Bash(gh issue delete:*) \
-             Bash(gh issue transfer:*) Bash(gh issue pin:*) Bash(gh issue unpin:*) \
-             Bash(gh issue lock:*) Bash(gh issue unlock:*) Bash(gh issue develop:*) \
-             Bash(gh release create:*) Bash(gh release edit:*) Bash(gh release delete:*) \
-             Bash(gh release upload:*) Bash(gh release download:*) \
-             Bash(gh repo create:*) Bash(gh repo edit:*) Bash(gh repo delete:*) \
-             Bash(gh repo fork:*) Bash(gh repo sync:*) Bash(gh repo rename:*) \
-             Bash(gh repo archive:*) Bash(gh repo clone:*) \
-             Bash(gh api:*)",
-        ]);
+        // Read-only enforcement for EYES: deny BY WRITE VERB (not blanket noun)
+        // for tools whose read forms we keep (`git branch`, `gh`), so the reads
+        // fall through to the allowed `Bash` (deny wins over allow). Verb lists +
+        // rationale live on the `*_WRITE_VERBS` consts above; the value is
+        // assembled by `build_rain_disallowed_tools`, and the `rain_denies_*`
+        // tests assert against the SAME consts so enforcement + test can't drift.
+        let disallowed = build_rain_disallowed_tools();
+        cmd.args(["--disallowedTools", &disallowed]);
     } else {
         cmd.arg("--dangerously-skip-permissions");
 
@@ -1437,32 +1510,24 @@ mod tests {
             .map(|w| w[1].clone())
             .expect("--disallowedTools present");
 
-        // Every mutating gh verb is blocked.
-        for t in [
-            "Bash(gh pr create:*)",
-            "Bash(gh pr edit:*)",
-            "Bash(gh pr close:*)",
-            "Bash(gh pr merge:*)",
-            "Bash(gh pr comment:*)",
-            "Bash(gh pr checkout:*)",
-            "Bash(gh issue create:*)",
-            "Bash(gh issue edit:*)",
-            "Bash(gh issue close:*)",
-            "Bash(gh issue comment:*)",
-            "Bash(gh issue delete:*)",
-            "Bash(gh release create:*)",
-            "Bash(gh release delete:*)",
-            "Bash(gh repo create:*)",
-            "Bash(gh repo delete:*)",
-            "Bash(gh repo clone:*)",
-            // The escape hatch — gh api can POST/PATCH/DELETE anything.
-            "Bash(gh api:*)",
+        // Every mutating gh verb is blocked — asserted against the SAME consts
+        // the production deny-list is built from, so the two can't drift.
+        for (noun, verbs) in [
+            ("gh pr", GH_PR_WRITE_VERBS),
+            ("gh issue", GH_ISSUE_WRITE_VERBS),
+            ("gh release", GH_RELEASE_WRITE_VERBS),
+            ("gh repo", GH_REPO_WRITE_VERBS),
         ] {
-            assert!(
-                denied.contains(t),
-                "gh write verb not denied: {t}\n{denied}"
-            );
+            for v in verbs {
+                let pat = format!("Bash({noun} {v}:*)");
+                assert!(denied.contains(&pat), "gh write verb not denied: {pat}\n{denied}");
+            }
         }
+        // The escape hatch — gh api can POST/PATCH/DELETE anything.
+        assert!(
+            denied.contains("Bash(gh api:*)"),
+            "gh api must be denied:\n{denied}"
+        );
 
         // No blanket noun deny survives (it would block the read forms).
         for blanket in [
@@ -1510,21 +1575,13 @@ mod tests {
             .map(|w| w[1].clone())
             .expect("--disallowedTools present");
 
-        // Every mutating git-branch form is blocked.
-        for t in [
-            "Bash(git branch -d:*)",
-            "Bash(git branch -D:*)",
-            "Bash(git branch --delete:*)",
-            "Bash(git branch -m:*)",
-            "Bash(git branch -c:*)",
-            "Bash(git branch -f:*)",
-            "Bash(git branch --force:*)",
-            "Bash(git branch --set-upstream-to:*)",
-            "Bash(git branch --track:*)",
-        ] {
+        // Every mutating git-branch form is blocked — asserted against the SAME
+        // const the production deny-list is built from, so the two can't drift.
+        for v in GIT_BRANCH_WRITE_VERBS {
+            let pat = format!("Bash(git branch {v}:*)");
             assert!(
-                denied.contains(t),
-                "git branch write form not denied: {t}\n{denied}"
+                denied.contains(&pat),
+                "git branch write form not denied: {pat}\n{denied}"
             );
         }
 
