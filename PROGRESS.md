@@ -21,6 +21,31 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 
 ---
 
+## 2026-06-17 — EYES deny-list refactor + leftover-branch cleanup (review of `s-5e7007af`)
+
+Reviewed session `s-5e7007af`'s duo-quality work (the four survey-followup commits) and
+applied the cleanups it left behind. The work itself was sound; these are pure-win.
+
+- **Const-driven EYES deny-list** (`refactor(spawn)`, `9e97979`). Rain's `--disallowedTools`
+  value was a ~1KB hand-rolled string, and the `rain_denies_*` tests spot-checked only 9 of
+  17 git-branch forms (plus a subset of gh) while the comment claimed "every mutating form is
+  blocked". Extracted `*_WRITE_VERBS` consts + `deny_write_verbs()` /
+  `build_rain_disallowed_tools()`; production code AND the tests now iterate the same consts,
+  so enforcement and its test can't drift and a newly-added verb is covered automatically.
+  Generated deny-set is unchanged (existing tests stayed green across the refactor). Closed the
+  pre-existing gh test gap the same way.
+- **Prose accuracy** (`docs(prompts)`, `c2bf274`). RAIN_ROLE listed the blocked git-branch
+  forms as a closed set of seven; the code denies seventeen — added a trailing ellipsis so it
+  reads as illustrative, matching the gh list beside it.
+- **Removed leftover branch** `brian/duo-quality-followups` (local + remote). Fast-forward
+  merged to main (`git log main..branch` empty → tip == main tip), pure dead weight.
+
+524 tests green (473 lib + 33 ext + 7 sig + 11 storage), release build clean, frontend trio
+green (invariant — backend-only). Deferred deliberately: consolidating the 9 near-synonymous
+`HEARTBEAT_LEADS` (cosmetic, would risk changing match behavior for no real gain).
+
+---
+
 ## 2026-06-17 — Duo quality from the cross-model survey (IPAV reframe, EYES git branch, ack list)
 
 Acted on the June-17 cross-model survey — three bcc-ad-manager sessions, one per model combo
