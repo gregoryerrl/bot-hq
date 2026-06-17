@@ -370,6 +370,8 @@ fn is_heartbeat_ack(text: &str) -> bool {
     const HEARTBEAT_LEADS: &[&str] = &[
         "holding",
         "standing by",
+        "on standby",
+        "ready when you are",
         "silent",
         "awaiting",
         "idle",
@@ -422,6 +424,11 @@ mod tests {
         assert!(is_heartbeat_ack("[Awaiting END-SSO from the user driving Brave.]"));
         assert!(is_heartbeat_ack("Awaiting your direction."));
         assert!(is_heartbeat_ack("Holding silently."));
+        // 2026-06-17 cross-model survey: pure acks the prefix list previously
+        // missed (slipped through to the circuit breaker only on a runaway streak).
+        assert!(is_heartbeat_ack("Ready when you are."));
+        assert!(is_heartbeat_ack("On standby."));
+        assert!(is_heartbeat_ack("On standby for the next step."));
         // Phrases from the 2026-05-28 ad-exporter volley that the original
         // list missed (the bug): bare + parenthesized forms.
         assert!(is_heartbeat_ack("No response needed."));
