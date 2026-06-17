@@ -292,6 +292,37 @@ impl Paths {
                 fs::set_permissions(&self.mcp_token_path, perms)
                     .with_context(|| format!("0o600 perms on {}", self.mcp_token_path.display()))?;
             }
+            #[cfg(windows)]
+            {
+                // No chmod on Windows — restrict the token to the current user via
+                // `icacls`: drop inherited ACEs, then grant only this user. Mirrors
+                // the unix 0o600 intent (owner-only). Best-effort: the user profile
+                // dir is already user-restricted, so a failure here is a hardening
+                // miss, not a reason to abort init (unlike the unix `?` above).
+                match std::env::var_os("USERNAME") {
+                    Some(user) => {
+                        let grant = format!("{}:F", user.to_string_lossy());
+                        match std::process::Command::new("icacls")
+                            .arg(&self.mcp_token_path)
+                            .arg("/inheritance:r")
+                            .arg("/grant:r")
+                            .arg(&grant)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status()
+                        {
+                            Ok(s) if s.success() => {}
+                            Ok(s) => {
+                                warn!("icacls exited {s} restricting mcp-token ACL (non-fatal)")
+                            }
+                            Err(e) => {
+                                warn!("could not run icacls for mcp-token ACL: {e} (non-fatal)")
+                            }
+                        }
+                    }
+                    None => warn!("USERNAME unset; mcp-token left at inherited ACL defaults"),
+                }
+            }
             if !first_run {
                 repaired_slots.push("mcp-token".to_string());
             }
@@ -584,7 +615,33 @@ fn pid_alive(pid: i32) -> bool {
         }
         kill(pid, 0) == 0
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // STILL_ACTIVE (259 / STATUS_PENDING) is what GetExitCodeProcess reports
+        // for a running process. Literal avoids windows-sys module-path skew.
+        const STILL_ACTIVE: u32 = 259;
+        if pid <= 0 {
+            return false;
+        }
+        // SAFETY: handle is null-checked before use and closed exactly once.
+        // OpenProcess returns NULL when the pid no longer exists (or on access
+        // denial) — treated as not-alive, so a stale lock is taken over.
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            CloseHandle(handle);
+            ok != 0 && code == STILL_ACTIVE
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false
