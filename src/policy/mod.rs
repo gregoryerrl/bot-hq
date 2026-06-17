@@ -170,8 +170,12 @@ impl Policy {
 
     /// Returns the first forbidden word found in `text`, if any.
     ///
-    /// Case-sensitive — disguise words are typically branded names (bot-hq,
-    /// Claude, Anthropic, …) where casing matters. Matches on WORD BOUNDARIES
+    /// Case-INsensitive — a disguise check must not be evadable by re-casing
+    /// (the git co-author trailer's lowercase form is honored identically by
+    /// GitHub, so the canonical-cased entry must still catch it). A forbidden
+    /// brand word may therefore also match lowercase occurrences in diffs —
+    /// curate the list to avoid legitimate-substring false-positives. Matches
+    /// on WORD BOUNDARIES
     /// (regex `\b` semantics, word char = `[A-Za-z0-9_]`), so a forbidden word
     /// only trips when it stands alone: `Claude` matches "Claude" / "Claude:"
     /// but NOT "ClaudeConfig"; a forbidden `rain` no longer matches inside
@@ -386,7 +390,7 @@ pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<()> {
 
 /// True iff `needle` occurs in `haystack` bounded by non-word chars on both
 /// edges — regex `\b{needle}\b` semantics, where a word char is `[A-Za-z0-9_]`
-/// (so `_` IS a word char: `rain` does not match "rain_check"). Case-sensitive.
+/// (so `_` IS a word char: `rain` does not match "rain_check"). Case-INsensitive.
 /// An empty needle never matches.
 ///
 /// `match_indices` yields the byte offset where `needle` starts; that offset and
@@ -397,10 +401,16 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
+    // Lowercase both sides so a forbidden term is caught in any casing (a
+    // disguise check must not be evadable by re-casing). Match AND boundary-check
+    // against the SAME lowercased string so byte offsets stay aligned even when a
+    // case fold changes byte length.
+    let hay_lc = haystack.to_lowercase();
+    let needle_lc = needle.to_lowercase();
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    haystack.match_indices(needle).any(|(idx, _)| {
-        let before_ok = haystack[..idx].chars().next_back().is_none_or(|c| !is_word(c));
-        let after_ok = haystack[idx + needle.len()..]
+    hay_lc.match_indices(needle_lc.as_str()).any(|(idx, _)| {
+        let before_ok = hay_lc[..idx].chars().next_back().is_none_or(|c| !is_word(c));
+        let after_ok = hay_lc[idx + needle_lc.len()..]
             .chars()
             .next()
             .is_none_or(|c| !is_word(c));
@@ -660,6 +670,24 @@ mod tests {
         assert!(!contains_word("rain_check", "rain")); // `_` is a word char
         assert!(contains_word("bot-hq is here", "bot-hq")); // hyphen edges are boundaries
         assert!(!contains_word("anything", "")); // empty needle never matches
+    }
+
+    #[test]
+    fn contains_word_is_case_insensitive() {
+        // A disguise check must catch ALL casings, else re-casing evades it (the
+        // load-bearing real case is a git trailer whose lowercase form is honored
+        // identically). "Hyphen-Joined-Tag" stands in for the real hyphenated
+        // footer marker so this file doesn't itself trip the scan it tests.
+        assert!(contains_word("add hyphen-joined-tag footer", "Hyphen-Joined-Tag"));
+        assert!(contains_word("HYPHEN-JOINED-TAG", "Hyphen-Joined-Tag"));
+        assert!(contains_word("a Hyphen-Joined-By line", "hyphen-joined-by"));
+        assert!(contains_word("ship claude opus", "Claude"));
+        assert!(contains_word("uses gpt-4 here", "GPT"));
+        // Word boundaries STILL apply case-insensitively — an embedded
+        // identifier does not trip.
+        assert!(!contains_word("fooclaudeconfig", "Claude"));
+        assert!(!contains_word("claude_config", "Claude")); // `_` is a word char
+        assert!(!contains_word("constraint", "rain"));
     }
 
     #[test]
