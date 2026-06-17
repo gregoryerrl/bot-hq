@@ -125,11 +125,13 @@ fn untracked_diff(repo: &std::path::Path) -> String {
         let path = String::from_utf8_lossy(raw);
         // `git diff --no-index` exits 1 when the files differ — the normal case
         // for a new file, NOT an error — so we read stdout regardless of status.
-        // TODO(win): swap `/dev/null` for the `NUL` device when Windows is a target.
+        // Diff against the platform null device so the file renders as all-adds.
+        let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
         if let Ok(out) = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
-            .args(["diff", "--no-index", "--no-color", "--", "/dev/null"])
+            .args(["diff", "--no-index", "--no-color", "--"])
+            .arg(null_device)
             .arg(path.as_ref())
             .output()
         {
@@ -293,6 +295,8 @@ fn headless_claude_cmd(cfg: &AgentConfig, prompt: &str) -> tokio::process::Comma
 /// Spawn the one-shot summarizer subprocess with the resolved model's env and
 /// return its trimmed stdout. Separated so the timeout wrapper above stays terse.
 async fn run_summarizer(cfg: AgentConfig, prompt: String) -> Result<String, AppError> {
+    crate::agents::spawn::ensure_claude_runnable("claude")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     let out = headless_claude_cmd(&cfg, &prompt)
         .output()
         .await
@@ -348,6 +352,12 @@ pub async fn validate_model(
 /// exit or empty output ⇒ failure with the captured detail (the API error
 /// usually lands on stderr — e.g. a 401 for a bad token).
 async fn probe_model(cfg: AgentConfig) -> ValidateResult {
+    if let Err(e) = crate::agents::spawn::ensure_claude_runnable("claude") {
+        return ValidateResult {
+            ok: false,
+            message: e.to_string(),
+        };
+    }
     let out = match headless_claude_cmd(&cfg, "Reply with exactly the word: ok")
         .output()
         .await

@@ -224,6 +224,8 @@ impl Drop for AgentHandle {
 }
 
 pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
+    ensure_claude_runnable(cfg.claude_bin.as_deref().unwrap_or("claude"))?;
+
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
     let (input_tx, input_rx) = mpsc::channel::<OutgoingUserMessage>(64);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -646,6 +648,60 @@ fn build_rain_disallowed_tools() -> String {
     parts.push("Bash(gh api:*)".to_string());
 
     parts.join(" ")
+}
+
+/// Pre-flight: ensure the `claude` binary is launchable on this platform, with
+/// an actionable error when it isn't.
+///
+/// On Windows `std::process::Command` finds `claude.exe` but NOT npm's
+/// `claude.cmd` (it appends `.exe` and ignores `PATHEXT`), and bot-hq's multi-KB
+/// `--append-system-prompt` is unsafe to route through `cmd.exe`. So we require a
+/// native `.exe` on PATH and turn the otherwise-cryptic OS "program not found"
+/// into guidance pointing at the native installer. No-op on unix, where a bare
+/// `claude` on PATH is found and launched directly.
+#[cfg(windows)]
+pub(crate) fn ensure_claude_runnable(bin: &str) -> Result<()> {
+    // An explicit path (custom bin / test override) is trusted as-is.
+    if bin.contains('\\') || bin.contains('/') {
+        return Ok(());
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+    // A native `.exe` on PATH is exactly what `Command::new(bin)` will launch.
+    if dirs.iter().any(|d| d.join(format!("{bin}.exe")).is_file()) {
+        return Ok(());
+    }
+    // npm installs a cmd-shim — detect it for a precise message.
+    let has_shim = dirs
+        .iter()
+        .any(|d| d.join(format!("{bin}.cmd")).is_file() || d.join(format!("{bin}.bat")).is_file());
+    if has_shim {
+        anyhow::bail!(
+            "claude-code is installed as an npm shim ('{bin}.cmd'), which bot-hq can't \
+             launch reliably on Windows. Install the native build: run \
+             `irm https://claude.ai/install.ps1 | iex` in PowerShell, then restart bot-hq."
+        );
+    }
+    anyhow::bail!(
+        "claude-code ('{bin}') was not found on PATH. Install it: run \
+         `irm https://claude.ai/install.ps1 | iex` in PowerShell, then restart bot-hq."
+    );
+}
+
+/// No-op on non-Windows: a bare `claude` on PATH is found and launched directly.
+#[cfg(not(windows))]
+pub(crate) fn ensure_claude_runnable(_bin: &str) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(all(test, not(windows)))]
+mod ensure_claude_runnable_tests {
+    use super::ensure_claude_runnable;
+    #[test]
+    fn noop_off_windows() {
+        assert!(ensure_claude_runnable("claude").is_ok());
+        assert!(ensure_claude_runnable("does-not-exist-xyz").is_ok());
+    }
 }
 
 fn build_command(cfg: &SpawnConfig) -> Command {
