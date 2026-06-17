@@ -11,13 +11,60 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-524 tests passing (473 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 102 frontend Vitest. Release build clean. Version **1.0.0** (bumped
-2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
+527 tests passing (476 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 102 frontend Vitest. Release build clean. Version **1.0.0-rc1**
+(pre-release for Windows friend-testing; `1.0.0` reserved for the official
+market launch). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
 zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-17 — Windows runtime support: close usability gaps for friend testing (shipping)
+
+Windows already *compiled + bundled* (CI 3-platform green since 2026-06-10), but had
+never actually *run* there. Closed the runtime gaps so the user's Windows friends can
+install + drive sessions. Branch `brian/windows-shipping`; all five local gates green;
+CI `windows-latest` compiles **and** bundles the NSIS installer (validation run
+27693697614, 3-platform success). Version → **1.0.0-rc1** pre-release (`v1.0.0` stays
+reserved for the official market launch).
+
+- **claude spawn pre-flight** (`spawn.rs::ensure_claude_runnable` + the two `docs.rs`
+  headless callers). `Command::new("claude")` finds `claude.exe` (native installer) but
+  NOT npm's `claude.cmd` (Rust appends `.exe`, ignores `PATHEXT`). New `#[cfg(windows)]`
+  PATH probe: native `.exe` → OK; npm `.cmd`/`.bat` → actionable "install the native
+  build (`irm https://claude.ai/install.ps1 | iex`)" error; not-found → install error.
+  **No `cmd /c`** — the multi-KB `--append-system-prompt` is unsafe through cmd.exe
+  regardless of the post-BatBadBut escaping. Unix = no-op (+1 lib test). Called at the
+  top of `spawn_agent` (fails before the retry supervisor starts — no respawn-spam) and
+  in `run_summarizer`/`probe_model` (the model **Test** button surfaces it at setup).
+- **Single-instance lock** (`paths.rs::pid_alive`). The `cfg(not(unix))` stub returned
+  `false`, so the lock was always stolen on Windows (no single-instance guarantee — two
+  instances would share the DB + collide on the MCP port). `#[cfg(windows)]`:
+  `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` → `GetExitCodeProcess` == `STILL_ACTIVE`
+  (259) → `CloseHandle`, mirroring the existing `kill_child` windows-sys 0.59 usage.
+- **git hooks** (`hooks.rs::render_hook_body`). On Windows the hook's binary path is now
+  forward-slashed + double-quoted so Git-for-Windows' bundled MSYS2 `sh` execs it as a
+  native path (a single-quoted backslash path defeats MSYS handling); unix output
+  byte-identical; the `--data-dir` arg is untouched (passed literally to bot-hq.exe).
+- **mcp-token ACL** (`paths.rs` init). No chmod on Windows — `#[cfg(windows)]`
+  `icacls <token> /inheritance:r /grant:r <USERNAME>:F` restricts to the owner (mirrors
+  the unix `0o600`), best-effort (`warn!` on failure, never aborts init).
+- **`/dev/null` → `NUL`** (`docs.rs::untracked_diff`, the Apply-tab diff) — picks the
+  platform null device; cleared the `TODO(win)`.
+- **`docs/WINDOWS-TESTING.md`** — tester guide: native-installer prereq (the spawn
+  sidestep), Git-for-Windows, WebView2; the unsigned-installer SmartScreen step; a smoke
+  checklist mapping each gap to a tester action; feedback → GitHub issues.
+
+Verification reality: this dev box is macOS and can't run/compile the Windows code
+(`cargo check --target …-windows-msvc` dies in ring's C build). Local gates verify only
+the non-Windows build + no regression (527 tests / 102 Vitest, release + frontend clean);
+the `#[cfg(windows)]` paths are type-checked only on CI (windows-latest now green).
+Runtime behavior (hooks via MSYS2, icacls, lock, spawn) is for the friends' smoke
+checklist. Deferred: WebView2 install mode stays Tauri's default `downloadBootstrapper`;
+macOS signing/notarize unchanged.
 
 ---
 
