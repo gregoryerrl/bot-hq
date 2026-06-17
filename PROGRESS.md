@@ -21,6 +21,32 @@ zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 
 ---
 
+## 2026-06-17 — Forbidden-word check made case-insensitive (enforcement security review)
+
+Security-focused adversarial pass over the policy/enforcement layer (forbidden-word check, Tool
+Gate, git hooks). One real gap found and fixed; the rest of the surface verified clean.
+
+- **`contains_word` is now case-insensitive** (`policy/mod.rs`). It matched case-sensitively, so
+  casing variants of a forbidden word slipped through the disguise check — notably the AI
+  co-author attribution trailer, whose lowercase form GitHub honors identically to the canonical
+  casing. Lowercased both sides (match + word-boundary check on the same lowered string).
+  Word-boundary semantics unchanged (embedded identifiers like `fooConfig` still don't trip).
+  One change fixes all four enforcement paths (the `check_commit_message` MCP tool + the
+  commit-msg / pre-commit / post-commit git hooks share this matcher). The case-sensitivity had
+  been a documented deliberate choice (branded-names rationale); flipped with user sign-off since
+  for a disguise check the safer bias is to catch every casing. New test uses a synthetic
+  hyphenated stand-in so the test file doesn't trip the scan it exercises.
+- Verified clean (no action): pre-push fail-closed + session-less-push block, Tool Gate
+  (gate-wins-over-allow, case-insensitive, fail-open-on-corrupt), commit-msg comment stripping,
+  post-commit backstop, hook install (linked worktrees + foreign-hook sidecar), session-policy
+  snapshot fail-soft.
+- Also this session: a `duo.rs` deep review (verdict sound — doc/test gaps closed, `a4d6f7d`) and
+  the `s-5e7007af` deny-list refactor + leftover-branch cleanup (logged below).
+
+526 tests green (475 lib + 33 ext + 7 sig + 11 storage), release build clean, frontend trio green.
+
+---
+
 ## 2026-06-17 — EYES deny-list refactor + leftover-branch cleanup (review of `s-5e7007af`)
 
 Reviewed session `s-5e7007af`'s duo-quality work (the four survey-followup commits) and
