@@ -26,7 +26,7 @@ pub struct DuoConfig {
     /// Shared "user has been asked, halt the duo" flag. When set, flush_buffer
     /// drains the buffer to storage but does NOT forward to the peer — stops
     /// the Brian/Rain volley while we wait for the user. Cleared by
-    /// core.broadcast when the user replies.
+    /// `SessionState::broadcast` (core::state) on the user's next message.
     pub awaiting: Option<Arc<AtomicBool>>,
     /// Optional bridge for firing MessagePersisted events after every
     /// successful storage.insert_message. None in tests that don't need
@@ -351,6 +351,14 @@ const MAX_CONSECUTIVE_SHORT_FORWARDS: u32 = 4;
 /// substantive acks ("Confirmed. The data at line 1580 is correct.") read
 /// as long-enough or non-heartbeat-prefixed and slip through.
 ///
+/// KNOWN false-positive (accepted, not a bug): a SHORT (≤ HEARTBEAT_MAX_LEN)
+/// message that OPENS with a lead but carries real content ("Holding. Check
+/// line 42.") IS suppressed — the prefix match can't tell an idle continuation
+/// ("Awaiting your direction.") from a substantive one. Bounded: the chunk is
+/// still persisted (the UI shows it), the length cap keeps the blast radius
+/// small, and the idle-volley breaker is the backstop. Pinned by
+/// `heartbeat_ack_lead_plus_short_content_is_a_known_false_positive`.
+///
 /// Matching (case-insensitive, after trim, length ≤ HEARTBEAT_MAX_LEN):
 /// the chunk's leading bracket/paren/emphasis chars are stripped, then the
 /// remainder is matched against a list of idle lead phrases. This catches
@@ -455,6 +463,33 @@ mod tests {
         // Empty / whitespace.
         assert!(!is_heartbeat_ack(""));
         assert!(!is_heartbeat_ack("   \n  "));
+    }
+
+    #[test]
+    fn heartbeat_ack_lead_plus_short_content_is_a_known_false_positive() {
+        // KNOWN, ACCEPTED LIMITATION (not a bug): is_heartbeat_ack is a prefix
+        // match, so a SHORT (<= HEARTBEAT_MAX_LEN) message that opens with a lead
+        // but carries real content IS suppressed from peer-forward. The matcher
+        // deliberately allows idle continuations ("Awaiting your direction.",
+        // "Holding silently."), so there's no syntactic way to separate those
+        // from substantive tails. Harm is bounded: the chunk is still PERSISTED
+        // (the user sees it in the UI) and the idle-volley breaker backstops it.
+        // These assertions pin the boundary — a future matcher change (e.g. to
+        // whole-message matching) would flip them and force an explicit decision.
+        assert!(is_heartbeat_ack("Holding. Check the error in line 42."));
+        assert!(is_heartbeat_ack("Nothing further to add. The build failed."));
+        assert!(is_heartbeat_ack("Ready when you are. The logs show error #1452."));
+
+        // The HEARTBEAT_MAX_LEN cap is what bounds the blast radius: the SAME
+        // leads with enough trailing content cross the cap and forward normally.
+        assert!(!is_heartbeat_ack(
+            "Holding. Check the error in line 42 of spawn.rs — the deny-list builder \
+             dropped a verb, so the read forms are blocked again."
+        ));
+        assert!(!is_heartbeat_ack(
+            "Nothing further to add. The build failed on the release gate; see the cargo \
+             output above for the failing test name and the assertion message."
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
