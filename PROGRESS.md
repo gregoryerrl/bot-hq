@@ -11,13 +11,37 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-521 tests passing (470 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 99 frontend Vitest. Release build clean. Version **1.0.0** (bumped
+522 tests passing (471 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 102 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
 zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-17 — Dashboard refinements (live Quickview, richer cards, roomier create dialog)
+
+Dashboard UI/UX pass (user-requested). Two commits on `main`, all five gates green.
+
+- **Quickview live preview** (`203cb50` backend, `e25266d` frontend). The Quickview
+  footer was a dead stub showing generic phase text. Now it shows the first line of a
+  session's latest `kind='text'` message with a color-coded author tag (Brian/Rain/You),
+  falling back to the phase hint when a session has no messages. Backend adds a
+  `SessionWithPreview` DTO + `list_active_sessions_with_preview()` — two correlated
+  subqueries (latest text content capped at 200 chars + author) on the existing
+  `idx_messages_session_id`, so no extra per-tile round-trips; `SessionInfo` gains
+  `last_message`/`last_author`. The `Session` row type is untouched.
+- **Quickview liveness** (`e25266d`). The dashboard refetches `list_sessions` on
+  `agent:messages:batch`, throttled to 2.5s (leading + trailing edge) and scoped to the
+  dashboard (the listener unmounts with it), so it stays monitorable live without
+  re-running the preview query on every batch. `agent:messages:batch` stays out of the
+  global invalidation map (`Providers.tsx`) — handled locally instead.
+- **Richer card subtitle** (`e25266d`). `Working in <repo>` → `<repo> · worktree · created <rel>`.
+- **Roomier create dialog** (`e25266d`). De-cramped vertically: capped height with internal
+  scroll, more field spacing, 2-column model pickers (Disable-Rain moved above so the grid
+  collapses when Rain is off). Projects dropdown shows names only (dropped the repo path).
 
 ---
 
