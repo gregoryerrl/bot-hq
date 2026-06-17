@@ -11,13 +11,48 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-522 tests passing (471 lib + 33 external MCP + 7 signaling + 11 storage)
+524 tests passing (473 lib + 33 external MCP + 7 signaling + 11 storage)
 plus 102 frontend Vitest. Release build clean. Version **1.0.0** (bumped
 2026-06-11; first stable). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
 zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-17 — Duo quality from the cross-model survey (IPAV reframe, EYES git branch, ack list)
+
+Acted on the June-17 cross-model survey — three bcc-ad-manager sessions, one per model combo
+(DeepSeek-HANDS + GLM-EYES, Opus-HANDS + DeepSeek-EYES, GLM-HANDS + DeepSeek-EYES) — recorded in
+the project CL `ideas.md`. Live-DB investigation found the surveys' self-reported "clean IPAV"
+masked a real gradient: IPAV discipline tracks the HANDS model (Opus drove 3 phase advances, GLM 1,
+DeepSeek-Brian 0 on a review task). Root cause was a prompt defect, not capability. Branch
+`brian/duo-quality-followups`; all five gates green per commit; 473 lib tests (+2).
+
+- **IPAV task-shape reframe** (`61b2c4f`, `general_rules.rs` + BRIAN_ROLE). The prompts coded
+  "Apply = code mutation," so non-code tasks (review/deploy/investigation) read as "no Apply needed"
+  and stalled in Investigate, stranding the deliverable in the investigate doc/chat. Reframed Apply
+  as "produce the deliverable, whatever its shape" (code=diff, deploy=merge+smoke,
+  investigation=findings); right-size phases, don't skip them. Kept the code-specific Apply verbs
+  (add the generalization, don't replace). New test `ipav_apply_is_task_shape_agnostic`.
+- **EYES read-only git branch** (`e375828`, `spawn.rs` + RAIN_ROLE). The blanket `Bash(git branch:*)`
+  deny in Rain's `--disallowedTools` blocked read-only listing — DeepSeek-EYES hit 10+ false denials
+  on legit `git branch --show-current`/`-a` reads (incl. compound `git branch … && echo …`) across
+  the survey sessions; flagged in 5 consecutive surveys. Applied the gh deny-by-write-verb shape:
+  enumerate mutating forms, let read forms fall through. New test
+  `rain_denies_git_branch_write_allows_read`.
+- **Heartbeat-ack list extension** (`22b3dab`, `duo.rs`). The duo ALREADY suppresses peer acks two
+  ways (`is_heartbeat_ack` prefix filter + idle-volley circuit breaker, both since May, pre-survey).
+  A planned redundant filter in `broadcast.rs` was dropped during Apply once the existing mechanism
+  surfaced (a full-suite gate caught the conflict). Instead added the two survey-observed pure-ack
+  leads the keyword list missed — `"on standby"` + `"ready when you are"` — safe under the existing
+  `starts_with` match; ambiguous leads (ok/noted/confirmed) deliberately left to the circuit breaker.
+
+Confirmed already-shipped (no action): EYES co-located `<phase>-eyes` doc (`dbbfdd7`), peer-message
+provenance prefix (`6a3a30e`). Out of bot-hq scope / deferred (my YAGNI call): Laravel-Cloud console
+bridge, known-flaky-suite signal, batch approvals, WebFetch-on-JS-docs, clip TTL, survey-diff UI,
+`propose_write` for EYES.
 
 ---
 

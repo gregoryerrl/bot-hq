@@ -146,14 +146,15 @@ loading for the icon font.
     revisit only if review-time annotations prove valuable.
   - *`cl_register_read` feedback view:* the read-audit rows are written
     but the "what context did this agent have?" view was never built.
-- **EYES compound-`&&` read Bash.** EYES's `--disallowedTools` denylist
-  (`src/agents/spawn.rs`) blocks compound `&&` reads regardless of content;
-  HANDS isn't affected (its Tool Gate is substring-matched and only HANDS
-  gets the PreToolUse hook). If EYES is meant to investigate, consider a
-  finer-grained allow for read-only compound reads — but loosening the
-  denylist risks letting a mutating compound slip through, so it needs care.
-  Surfaced by the 2026-06-16 duo survey; it's a claude-code denylist limit,
-  not a bot-hq gate bug.
+- **EYES compound-`&&` read Bash — git-branch cause RESOLVED 2026-06-17 (`e375828`).**
+  The observed denials were content-based, not pure-`&&`: the blanket
+  `Bash(git branch:*)` deny matched the git-branch segment of compound reads like
+  `git branch --show-current && echo …`, taking the whole compound down. Replaced
+  it with deny-by-write-verb (read git-branch forms now fall through), so those
+  reads pass. If any pure-`&&` denial independent of a denied segment remains,
+  that's a separate claude-code matcher question — untested (needs a live
+  non-Anthropic EYES session to confirm); not a known bot-hq gate bug. HANDS is
+  unaffected (substring Tool Gate + PreToolUse hook).
 
 ---
 
