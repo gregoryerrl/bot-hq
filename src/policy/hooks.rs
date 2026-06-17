@@ -775,8 +775,19 @@ fn render_hook_body(
     data_dir: &Path,
     project: Option<&str>,
 ) -> String {
+    // The hook runs through `sh` — on Windows that's Git-for-Windows' bundled
+    // MSYS2 shell, which execs a native path written with forward slashes
+    // (backslashes are escapes); double-quote it for spaces. Unix is unchanged
+    // (byte-identical passthrough). The `--data-dir` arg stays single-quoted with
+    // its native separators — it's passed literally to bot-hq, which parses
+    // Windows paths fine.
+    let bin_for_sh = if cfg!(windows) {
+        format!("\"{}\"", bot_hq_bin.replace('\\', "/"))
+    } else {
+        bot_hq_bin.to_string()
+    };
     let mut cmd = format!(
-        "{bot_hq_bin} policy-check {sub} --data-dir {dd}",
+        "{bin_for_sh} policy-check {sub} --data-dir {dd}",
         sub = kind.filename(),
         dd = shell_quote(&data_dir.display().to_string())
     );
