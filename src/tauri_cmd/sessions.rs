@@ -3,7 +3,7 @@
 use crate::core::session::{resolve_session_project, ProjectProvenance};
 use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingBridge;
-use crate::storage::{Session, Storage};
+use crate::storage::{Session, SessionWithPreview, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -26,6 +26,12 @@ pub struct SessionInfo {
     pub rain_model_at_spawn: Option<String>,
     /// False = solo-Brian session (Rain disabled at create).
     pub rain_enabled: bool,
+    /// First line preview of the latest text message + its author, for the
+    /// dashboard Quickview. Both None on the closed-session and external
+    /// JSON-RPC paths — only the dashboard `list_sessions` command populates
+    /// them (via `list_active_sessions_with_preview`).
+    pub last_message: Option<String>,
+    pub last_author: Option<String>,
 }
 
 impl From<Session> for SessionInfo {
@@ -41,7 +47,18 @@ impl From<Session> for SessionInfo {
             brian_model_at_spawn: s.brian_model_at_spawn,
             rain_model_at_spawn: s.rain_model_at_spawn,
             rain_enabled: s.rain_enabled != 0,
+            last_message: None,
+            last_author: None,
         }
+    }
+}
+
+impl From<SessionWithPreview> for SessionInfo {
+    fn from(s: SessionWithPreview) -> Self {
+        let mut info = SessionInfo::from(s.session);
+        info.last_message = s.last_message;
+        info.last_author = s.last_author;
+        info
     }
 }
 
@@ -356,7 +373,7 @@ pub async fn list_sessions(
     storage: tauri::State<'_, Arc<Storage>>,
 ) -> Result<Vec<SessionInfo>, AppError> {
     storage
-        .list_active_sessions()
+        .list_active_sessions_with_preview()
         .await
         .map(|v| v.into_iter().map(Into::into).collect())
         .map_err(|e| AppError::DbError(e.to_string()))

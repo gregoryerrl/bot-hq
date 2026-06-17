@@ -98,6 +98,37 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Like `list_active_sessions` but each row also carries a cheap preview of
+    /// its latest `kind='text'` message (content capped at 200 chars + author),
+    /// for the dashboard Quickview. The two preview subqueries hit the same
+    /// `idx_messages_session_id` index the ORDER BY already uses, so there are
+    /// no extra per-tile round-trips. Dashboard-only consumer (`list_sessions`).
+    pub async fn list_active_sessions_with_preview(&self) -> Result<Vec<SessionWithPreview>> {
+        let rows = sqlx::query_as::<_, SessionWithPreview>(
+            "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
+                    brian_model_at_spawn, rain_model_at_spawn, \
+                    brian_claude_session_id, rain_claude_session_id, \
+                    rain_enabled, brian_model_id, rain_model_id, \
+                    brian_effort, rain_effort, brian_ultracode, rain_ultracode, \
+                    base_repo_path, \
+                    (SELECT substr(m.content, 1, 200) FROM messages m \
+                       WHERE m.session_id = sessions.id AND m.kind = 'text' \
+                       ORDER BY m.id DESC LIMIT 1) AS last_message, \
+                    (SELECT m.author FROM messages m \
+                       WHERE m.session_id = sessions.id AND m.kind = 'text' \
+                       ORDER BY m.id DESC LIMIT 1) AS last_author \
+             FROM sessions \
+             WHERE archived = 0 AND closed_at IS NULL \
+             ORDER BY COALESCE(\
+                 (SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = sessions.id), \
+                 created_at) DESC, \
+                 id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Closed sessions (both just-closed and archived), most-recently-closed
     /// first. Surfaces in the Settings → Archive tab. `id ASC` tiebreaks the
     /// 1-second `datetime('now')` granularity for stable ordering.
@@ -323,6 +354,39 @@ mod tests {
             .map(|x| x.id)
             .collect();
         assert_eq!(ids, vec!["s-old", "s-new"]);
+    }
+
+    #[tokio::test]
+    async fn preview_carries_latest_text_message() {
+        use crate::storage::{Author, MessageKind};
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-msg", "Has messages", None)
+            .await
+            .unwrap();
+        s.create_session("s-empty", "No messages", None)
+            .await
+            .unwrap();
+
+        // Newest TEXT message wins; a later tool_use must NOT shadow it.
+        s.insert_message("s-msg", Author::User, MessageKind::Text, "first prompt")
+            .await
+            .unwrap();
+        s.insert_message("s-msg", Author::Brian, MessageKind::Text, "brian reply")
+            .await
+            .unwrap();
+        s.insert_message("s-msg", Author::Brian, MessageKind::ToolUse, "{\"tool\":\"x\"}")
+            .await
+            .unwrap();
+
+        let rows = s.list_active_sessions_with_preview().await.unwrap();
+        let msg = rows.iter().find(|r| r.session.id == "s-msg").unwrap();
+        assert_eq!(msg.last_message.as_deref(), Some("brian reply"));
+        assert_eq!(msg.last_author.as_deref(), Some("brian"));
+
+        // A session with no text messages → None preview, not an error.
+        let empty = rows.iter().find(|r| r.session.id == "s-empty").unwrap();
+        assert!(empty.last_message.is_none());
+        assert!(empty.last_author.is_none());
     }
 
     #[tokio::test]

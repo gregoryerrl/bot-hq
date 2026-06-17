@@ -31,6 +31,7 @@ pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Model, Plugin,
     Project, QuestionKind, QuestionStatus, Session, SessionDocument, SessionTrayEntry,
+    SessionWithPreview,
 };
 pub(crate) use time::now_utc;
 

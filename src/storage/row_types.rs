@@ -96,6 +96,22 @@ pub struct Session {
     pub base_repo_path: Option<String>,
 }
 
+/// `Session` plus a cheap latest-text-message preview, for the dashboard
+/// session list (Quickview). Built only by
+/// `list_active_sessions_with_preview`; the plain `Session` row type stays
+/// unchanged so the other `query_as::<_, Session>` sites (`get_session`,
+/// `list_closed_sessions`) keep compiling without a preview column.
+#[derive(Debug, Clone, FromRow)]
+pub struct SessionWithPreview {
+    #[sqlx(flatten)]
+    pub session: Session,
+    /// First 200 chars of the most recent `kind='text'` message, or None when
+    /// the session has no text messages yet.
+    pub last_message: Option<String>,
+    /// Author of that latest text message ('user' | 'brian' | 'rain' | 'emma').
+    pub last_author: Option<String>,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Message {
     pub id: i64,

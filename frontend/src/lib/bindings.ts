@@ -479,7 +479,10 @@ async clRename(project: string, fromPath: string, toPath: string) : Promise<Resu
 /**
  * Delete a file, or a folder and everything under it. Must exist + resolve
  * inside the project root. Destructive — the frontend gates this behind a
- * confirmation dialog.
+ * confirmation dialog. Does NOT reconcile the index itself: the caller must
+ * follow with `cl_rescan` to drop the now-orphaned `cl_index`/`cl_folders`
+ * rows (the frontend does at ContextLibrary.tsx). A future agent/driver path
+ * that deletes without rescanning would leave orphan rows until the next one.
  */
 async clDeletePath(project: string, path: string) : Promise<Result<null, AppError>> {
     try {
@@ -1231,7 +1234,14 @@ base_repo_path: string | null; archived: boolean; created_at: string; closed_at:
 /**
  * False = solo-Brian session (Rain disabled at create).
  */
-rain_enabled: boolean }
+rain_enabled: boolean; 
+/**
+ * First line preview of the latest text message + its author, for the
+ * dashboard Quickview. Both None on the closed-session and external
+ * JSON-RPC paths — only the dashboard `list_sessions` command populates
+ * them (via `list_active_sessions_with_preview`).
+ */
+last_message: string | null; last_author: string | null }
 export type SessionProjectInfo = { 
 /**
  * Resolved project name, or None for a repo-less session.
