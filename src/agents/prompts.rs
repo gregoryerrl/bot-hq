@@ -88,7 +88,7 @@ Tools you may use:
 - **Read-only file tools**: `Read`, `Grep`, `Glob`.
 - **Web / reference**: `WebFetch`, `ToolSearch`, and **`mcp__bot-hq-signaling__web_search`** — bot-hq's own web search (runs in-process via a headless browser, so it returns real results on any model gateway, unlike the built-in `WebSearch` which is inert through the DeepSeek gateway). Reach for `web_search` when the question reaches OUTSIDE the repo — an upstream dependency or library version, a known/upstream issue, current docs, or an unfamiliar error string. Skip it for codebase-internal questions: the answer is in `src/`, not on the web, and each search costs a real round-trip. `WebFetch` then reads a chosen result URL.
 - **Task tracking**: `TodoWrite` (for your own notes).
-- **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git rev-list`, `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`, and **read-only `gh`**: `gh issue view`/`gh issue list`, `gh pr view`/`gh pr diff`/`gh pr list`/`gh pr status`/`gh pr checks`, `gh repo view`, `gh release view`/`gh release list`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, reading an issue/PR). NOTE: every MUTATING `gh` form (`gh pr create`/`merge`/`comment`/`checkout`, `gh issue create`/`edit`/`close`/`comment`, `gh repo create`/`clone`, `gh release create`, …), `gh api` (the POST/PATCH/DELETE escape hatch), and `git branch` are mechanically blocked for you via `--disallowedTools`. Read an issue/PR with `gh ... view`; ask Brian to create/comment/merge.
+- **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git rev-list`, `git branch` (read-only: list / `--show-current` / `-a` / `--contains`), `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`, and **read-only `gh`**: `gh issue view`/`gh issue list`, `gh pr view`/`gh pr diff`/`gh pr list`/`gh pr status`/`gh pr checks`, `gh repo view`, `gh release view`/`gh release list`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, reading an issue/PR). NOTE: every MUTATING `gh` form (`gh pr create`/`merge`/`comment`/`checkout`, `gh issue create`/`edit`/`close`/`comment`, `gh repo create`/`clone`, `gh release create`, …), `gh api` (the POST/PATCH/DELETE escape hatch), and the MUTATING `git branch` forms (`-d`/`-D`/`-m`/`-c`/`-f`/`--set-upstream-to`/`--track`) are mechanically blocked for you via `--disallowedTools` — but read-only `git branch` (listing, `--show-current`, `-a`, `--contains`) IS allowed now. Read an issue/PR with `gh ... view`; ask Brian to create/comment/merge — and to delete/rename branches.
 
 Tools that are Brian's, NOT yours — they MUTATE state:
 
@@ -202,16 +202,20 @@ mod tests {
         assert!(RAIN_ROLE.contains("read-only invocations only"));
         assert!(RAIN_ROLE.contains("`git log`"));
         assert!(RAIN_ROLE.contains("`git rev-list`"));
-        // Prose↔enforcement alignment (C1): enforcement (spawn.rs
-        // --disallowedTools) now denies gh by WRITE VERB, so read-only gh forms
-        // ARE allowed and the prose advertises them — while mutating gh, `gh
-        // api`, and `git branch` stay blocked. The prose must match: list the
-        // read forms, and still mark the write forms / `gh api` / `git branch`
-        // as blocked so Rain doesn't try a denied command.
+        // Prose↔enforcement alignment: enforcement (spawn.rs --disallowedTools)
+        // denies gh AND git branch by WRITE VERB, so read-only forms ARE allowed
+        // and the prose advertises them — while mutating gh, `gh api`, and the
+        // mutating `git branch` forms stay blocked. The prose must match: list
+        // the read forms, and still mark the write forms / `gh api` / mutating
+        // `git branch` as blocked so Rain doesn't try a denied command.
         assert!(RAIN_ROLE.contains("`gh issue view`"));
         assert!(RAIN_ROLE.contains("`gh pr view`"));
         assert!(RAIN_ROLE.contains("`gh api`"));
-        assert!(RAIN_ROLE.contains("`git branch` are mechanically blocked"));
+        // 2026-06-17: read-only git branch now allowed for EYES; only mutating
+        // forms blocked (blanket deny caused 10+ false denials on legit reads
+        // across the cross-model survey sessions).
+        assert!(RAIN_ROLE.contains("MUTATING `git branch` forms"));
+        assert!(RAIN_ROLE.contains("read-only `git branch`"));
     }
 
     #[test]

@@ -661,10 +661,19 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // FULLY denied — it's the escape hatch that can POST/PATCH/DELETE
         // anything. New gh write verbs must be appended here (covered by
         // `rain_denies_gh_write_allows_gh_read`).
+        //
+        // `git branch` uses the SAME deny-by-write-verb shape (2026-06-17): the
+        // blanket `Bash(git branch:*)` also blocked read-only listing (10+ false
+        // denials on legit `git branch --show-current`/`-a` reads + compound
+        // `git branch … && echo …` across the cross-model survey sessions). Now
+        // only the mutating forms (-d/-D/-m/-c/-f/--set-upstream-to/--track/…)
+        // are denied; read forms fall through to the allowed `Bash`. Residual:
+        // bare `git branch <new>` creation — same accepted class as the gh
+        // side-channels (covered by `rain_denies_git_branch_write_allows_read`).
         cmd.args([
             "--disallowedTools",
             "Edit Write NotebookEdit Task \
-             Bash(git commit:*) Bash(git push:*) Bash(git branch:*) \
+             Bash(git commit:*) Bash(git push:*) Bash(git branch -d:*) Bash(git branch -D:*) Bash(git branch --delete:*) Bash(git branch -m:*) Bash(git branch -M:*) Bash(git branch --move:*) Bash(git branch -c:*) Bash(git branch -C:*) Bash(git branch --copy:*) Bash(git branch -f:*) Bash(git branch --force:*) Bash(git branch -u:*) Bash(git branch --set-upstream-to:*) Bash(git branch --unset-upstream:*) Bash(git branch --track:*) Bash(git branch --no-track:*) Bash(git branch --edit-description:*) \
              Bash(git checkout:*) Bash(git switch:*) Bash(git reset:*) \
              Bash(git merge:*) Bash(git rebase:*) Bash(git add:*) \
              Bash(git stash:*) Bash(git restore:*) Bash(git rm:*) \
@@ -1477,6 +1486,56 @@ mod tests {
             "Bash(gh pr diff:*)",
             "Bash(gh repo view:*)",
         ] {
+            assert!(
+                !denied.contains(read),
+                "read form should not be explicitly denied: {read}"
+            );
+        }
+    }
+
+    #[test]
+    fn rain_denies_git_branch_write_allows_read() {
+        // 2026-06-17 cross-model survey: the blanket `Bash(git branch:*)` deny
+        // blocked read-only listing too — DeepSeek-EYES hit 10+ false denials on
+        // legit `git branch --show-current`/`-a` reads (incl. compound
+        // `git branch … && echo …`). Mirror the gh deny-by-write-verb shape: only
+        // mutating git-branch forms denied, read forms fall through to allowed Bash.
+        let mut c = cfg();
+        c.agent_name = "rain".into();
+        c.config.agent_name = "rain".into();
+        let argv = debug_command(&c);
+        let denied = argv
+            .windows(2)
+            .find(|w| w[0] == "--disallowedTools")
+            .map(|w| w[1].clone())
+            .expect("--disallowedTools present");
+
+        // Every mutating git-branch form is blocked.
+        for t in [
+            "Bash(git branch -d:*)",
+            "Bash(git branch -D:*)",
+            "Bash(git branch --delete:*)",
+            "Bash(git branch -m:*)",
+            "Bash(git branch -c:*)",
+            "Bash(git branch -f:*)",
+            "Bash(git branch --force:*)",
+            "Bash(git branch --set-upstream-to:*)",
+            "Bash(git branch --track:*)",
+        ] {
+            assert!(
+                denied.contains(t),
+                "git branch write form not denied: {t}\n{denied}"
+            );
+        }
+
+        // The blanket noun deny must NOT survive (it blocked read-only listing).
+        assert!(
+            !denied.contains("Bash(git branch:*)"),
+            "blanket git branch deny would block read forms: {denied}"
+        );
+
+        // Read forms have no dedicated deny entry — they fall through to allowed Bash.
+        for read in ["Bash(git branch --show-current:*)", "Bash(git branch -a:*)"] {
             assert!(
                 !denied.contains(read),
                 "read form should not be explicitly denied: {read}"
