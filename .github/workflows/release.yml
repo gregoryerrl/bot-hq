@@ -103,6 +103,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
+          # Any semver pre-release tag (v1.0.0-rc1, -beta.1, -alpha, …) carries a
+          # hyphen; a final vX.Y.Z does not. Auto-flag the former as a pre-release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           name: bot-hq ${{ github.ref_name }}
           fail_on_unmatched_files: false
           files: |
