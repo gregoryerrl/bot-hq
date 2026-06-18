@@ -1,6 +1,6 @@
 [package]
 name = "bot-hq"
-version = "1.0.0-rc1"
+version = "1.0.0-rc2"
 edition = "2021"
 description = "Desktop GUI for AI-assisted coding sessions (Tauri v2 + React + Rust)"
 license = "MIT"
