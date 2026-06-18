@@ -646,6 +646,13 @@ async fn spawn_agent_for(
 ) -> Result<AgentHandle> {
     let system_prompt =
         read_system_prompt(paths, agent_name, project.as_deref(), project_root, cl_index)?;
+    // The assembled prompt is multi-KB. Hand it to claude-code via a file
+    // (`--append-system-prompt-file`) rather than an inline arg so the command
+    // line stays under Windows' 32,767-char `CreateProcessW` limit. Co-located
+    // with the mcp-config in the same per-agent temp dir (same lifecycle).
+    let system_prompt_path = mcp_temp_dir.join(format!("{agent_name}-system-prompt.txt"));
+    std::fs::write(&system_prompt_path, &system_prompt)
+        .with_context(|| format!("writing system prompt to {}", system_prompt_path.display()))?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
     let mut user_servers = user_mcp_servers_for_agent(agent_name);
     // Apply per-agent MCP overrides (Settings → Claude Config): a server the
@@ -664,7 +671,7 @@ async fn spawn_agent_for(
     let spawn_cfg = SpawnConfig {
         agent_name: agent_name.to_string(),
         config,
-        system_prompt,
+        system_prompt_path,
         mcp_config_path: Some(mcp_config_path),
         working_dir,
         claude_bin: None,

@@ -170,7 +170,11 @@ pub fn is_transient_api_error(status: u16) -> bool {
 pub struct SpawnConfig {
     pub agent_name: String,
     pub config: AgentConfig,
-    pub system_prompt: String,
+    /// Path to a file holding the assembled system prompt, passed via
+    /// `--append-system-prompt-file`. Routing the multi-KB prompt through a file
+    /// (not an inline arg) keeps the command line under Windows' 32,767-char
+    /// `CreateProcessW` limit. Cross-platform safe.
+    pub system_prompt_path: PathBuf,
     pub mcp_config_path: Option<PathBuf>,
     pub working_dir: Option<PathBuf>,
     /// Override the claude binary (for tests). Defaults to `"claude"`.
@@ -654,11 +658,11 @@ fn build_rain_disallowed_tools() -> String {
 /// an actionable error when it isn't.
 ///
 /// On Windows `std::process::Command` finds `claude.exe` but NOT npm's
-/// `claude.cmd` (it appends `.exe` and ignores `PATHEXT`), and bot-hq's multi-KB
-/// `--append-system-prompt` is unsafe to route through `cmd.exe`. So we require a
-/// native `.exe` on PATH and turn the otherwise-cryptic OS "program not found"
-/// into guidance pointing at the native installer. No-op on unix, where a bare
-/// `claude` on PATH is found and launched directly.
+/// `claude.cmd` (it appends `.exe` and ignores `PATHEXT`), and routing our
+/// invocation through `cmd.exe` is unreliable. So we require a native `.exe` on
+/// PATH and turn the otherwise-cryptic OS "program not found" into guidance
+/// pointing at the native installer. No-op on unix, where a bare `claude` on
+/// PATH is found and launched directly.
 #[cfg(windows)]
 pub(crate) fn ensure_claude_runnable(bin: &str) -> Result<()> {
     // An explicit path (custom bin / test override) is trusted as-is.
@@ -713,7 +717,10 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // `--verbose` is REQUIRED when combining `-p` + stream-json IO.
         // See docs/stream-json-events.md.
         .arg("--verbose")
-        .args(["--append-system-prompt", &cfg.system_prompt]);
+        .args([
+            "--append-system-prompt-file",
+            &cfg.system_prompt_path.display().to_string(),
+        ]);
 
     // Per-agent Claude-config overrides (Settings → Claude Config). Resolved
     // from `<data_dir>/config/claude-overrides.json`; merged into the `--settings`
@@ -959,7 +966,7 @@ mod tests {
                 auth_token: Some("sk-test".into()),
                 updated_at: String::new(),
             },
-            system_prompt: "be terse".into(),
+            system_prompt_path: Path::new("/tmp/bot-hq-test-prompt.txt").to_path_buf(),
             mcp_config_path: Some(Path::new("/tmp/mcp.json").to_path_buf()),
             working_dir: Some(Path::new("/tmp/repo").to_path_buf()),
             claude_bin: Some("claude".into()),
@@ -1485,9 +1492,11 @@ mod tests {
             .any(|w| w[0] == "--mcp-config" && w[1] == "/tmp/mcp.json"));
         assert!(argv.iter().any(|a| a == "--strict-mcp-config"));
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
-        assert!(argv
-            .windows(2)
-            .any(|w| w[0] == "--append-system-prompt" && w[1] == "be terse"));
+        assert!(argv.windows(2).any(|w| w[0] == "--append-system-prompt-file"
+            && w[1].ends_with("bot-hq-test-prompt.txt")));
+        // The inline form must never be used — it would put the multi-KB prompt
+        // on the command line and trip Windows' 32,767-char limit.
+        assert!(!argv.iter().any(|a| a == "--append-system-prompt"));
         // No resume flag when SpawnConfig.resume_session_id is None.
         assert!(!argv.iter().any(|a| a == "--resume"));
     }
