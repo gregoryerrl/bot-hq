@@ -11,14 +11,43 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-527 tests passing (476 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 102 frontend Vitest. Release build clean. Version **1.0.0-rc1**
+528 tests passing (477 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 102 frontend Vitest. Release build clean. Version **1.0.0-rc2**
 (pre-release for Windows friend-testing; `1.0.0` reserved for the official
 market launch). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
 zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-18 — Windows agent-spawn fix: prompt via file + full error chain (rc2)
+
+rc1 launched + created sessions on Windows but agent spawn failed
+(`spawning claude-code for agent rain; bin=claude`) and the session went
+dead (`no live session`). Root cause: the full ~30KB assembled system
+prompt was passed inline as `--append-system-prompt`, blowing past
+Windows' 32,767-char command-line limit (`CreateProcessW`). Rain's prompt
+is larger than Brian's, so only her spawn tripped it; the atomic
+session-create then dropped the already-spawned Brian's handle (its `Drop`
+kills the child) → no live session. Unix `ARG_MAX` (~1MB) hid it in dev.
+Version → **1.0.0-rc2** pre-release.
+
+- **prompt via file** (`spawn.rs` + `session.rs`). `SpawnConfig.system_prompt`
+  → `system_prompt_path: PathBuf`; the assembled prompt is written to
+  `{agent}-system-prompt.txt` in the per-agent temp dir (beside the
+  mcp-config, same session-lifetime `TempDir`) and passed via
+  `--append-system-prompt-file` (append, not the replace variant). Command
+  line drops to a few hundred chars; cross-platform safe. Regression guard
+  asserts the inline `--append-system-prompt` is never emitted.
+- **full error chain** (`tauri_cmd/error.rs`). `AppError::from(anyhow::Error)`
+  used `e.to_string()` (outermost context only), which hid the OS error
+  behind the spawn-context string. Now `format!("{e:#}")` renders the whole
+  chain so the next failure is self-diagnosing (+1 lib test).
+
+Both fixes verified on macOS (528 tests green); end-to-end Windows
+confirmation pending the rc2 build.
 
 ---
 
