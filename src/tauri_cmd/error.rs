@@ -38,7 +38,11 @@ impl AppError {
 
 impl From<anyhow::Error> for AppError {
     fn from(e: anyhow::Error) -> Self {
-        AppError::Internal(e.to_string())
+        // `{:#}` renders the FULL anyhow chain (every context layer + the root
+        // cause), not just the outermost context that plain `Display`
+        // (`to_string()`) yields. Without it, a failed subprocess spawn surfaces
+        // only "spawning claude-code for agent …" and hides the real OS error.
+        AppError::Internal(format!("{e:#}"))
     }
 }
 
@@ -74,5 +78,20 @@ mod tests {
     fn anyhow_converts_to_internal() {
         let err = AppError::from(anyhow::anyhow!("boom"));
         assert!(matches!(err, AppError::Internal(_)));
+    }
+
+    #[test]
+    fn anyhow_internal_keeps_full_chain() {
+        // A failed spawn wraps the OS error in a context layer; the surfaced
+        // message must include BOTH the context and the root cause, not just the
+        // outermost context (which is all plain `to_string()` would give).
+        let root = std::io::Error::new(std::io::ErrorKind::NotFound, "os error 206");
+        let chained =
+            anyhow::Error::new(root).context("spawning claude-code for agent rain");
+        let AppError::Internal(msg) = AppError::from(chained) else {
+            panic!("expected Internal");
+        };
+        assert!(msg.contains("spawning claude-code"), "missing context: {msg}");
+        assert!(msg.contains("os error 206"), "missing root cause: {msg}");
     }
 }
