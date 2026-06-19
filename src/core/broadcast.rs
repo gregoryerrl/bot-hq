@@ -16,6 +16,26 @@ pub fn with_phase_envelope(phase: IpavPhase, body: &str) -> String {
     format!("[PHASE: {}]\n{body}", phase.name())
 }
 
+/// Like [`with_phase_envelope`] but also prepends a persistent EYES-findings
+/// banner when `open_blocking > 0`, so it rides every turn (it can't scroll
+/// away) until the findings are dispositioned — the salience half of the
+/// EYES-sign-off gate (post-mortem §5.2). `open_blocking == 0` delegates to the
+/// plain envelope, so there's zero overhead in the common (nothing-open) case.
+pub fn with_phase_and_findings_envelope(
+    phase: IpavPhase,
+    open_blocking: usize,
+    body: &str,
+) -> String {
+    if open_blocking == 0 {
+        return with_phase_envelope(phase, body);
+    }
+    format!(
+        "[PHASE: {}]\n⚠ {open_blocking} unresolved EYES blocking finding(s) — run \
+         check_open_findings and disposition each (fix/rebut) before you commit.\n{body}",
+        phase.name()
+    )
+}
+
 /// Persist a user-originated message and fan it out to both agents.
 pub async fn broadcast_user_message(
     storage: &Storage,
@@ -29,7 +49,13 @@ pub async fn broadcast_user_message(
     let id = storage
         .insert_message(session_id, Author::User, MessageKind::Text, text)
         .await?;
-    let wire = with_phase_envelope(phase, text);
+    // Ride the open-blocking-findings banner on every user turn (fail-safe 0 on
+    // any query error — the banner is salience, not a gate).
+    let open_blocking = storage
+        .count_open_blocking_findings(session_id)
+        .await
+        .unwrap_or(0) as usize;
+    let wire = with_phase_and_findings_envelope(phase, open_blocking, text);
     let msg = OutgoingUserMessage::text(wire);
     // Fan out to both agents. The message is persisted (above) regardless, but
     // a send error means that agent's input pump has exited (stdin gone) and
@@ -55,6 +81,7 @@ pub async fn peer_forward_message(
     peer_author: Author,
     text: &str,
     phase: IpavPhase,
+    open_blocking: usize,
     input_tx: &mpsc::Sender<OutgoingUserMessage>,
 ) {
     let prefix = match peer_author {
@@ -63,7 +90,7 @@ pub async fn peer_forward_message(
         Author::User => "",
     };
     let inner = format!("{prefix}{text}");
-    let wire = with_phase_envelope(phase, &inner);
+    let wire = with_phase_and_findings_envelope(phase, open_blocking, &inner);
     // A send error means this agent's input pump has exited (stdin gone) and it
     // won't SEE the peer's message. Mirrors broadcast_user_message: log per agent
     // so a one-sided peer-forward loss is diagnosable instead of silent (the same
@@ -149,7 +176,7 @@ mod tests {
     #[tokio::test]
     async fn peer_forward_envelopes_then_author_tags() {
         let (tx, mut rx) = mpsc::channel(8);
-        peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, &tx).await;
+        peer_forward_message(Author::Rain, "concerns?", IpavPhase::Plan, 0, &tx).await;
         let m = rx.recv().await.unwrap();
         assert!(
             m.message
@@ -159,5 +186,53 @@ mod tests {
             m.message.content
         );
         assert!(m.message.content.contains("concerns?"));
+    }
+
+    #[test]
+    fn findings_envelope_plain_when_none_else_banner() {
+        // 0 open → identical to the plain phase envelope (zero overhead).
+        assert_eq!(
+            with_phase_and_findings_envelope(IpavPhase::Apply, 0, "hi"),
+            with_phase_envelope(IpavPhase::Apply, "hi")
+        );
+        // >0 → a ⚠ banner rides between the phase tag and the body.
+        let w = with_phase_and_findings_envelope(IpavPhase::Apply, 2, "hi");
+        assert!(
+            w.starts_with("[PHASE: Apply]\n⚠ 2 unresolved EYES blocking finding(s)"),
+            "got: {w}"
+        );
+        assert!(w.ends_with("\nhi"), "body still trails the envelope: {w}");
+    }
+
+    #[tokio::test]
+    async fn broadcast_user_message_carries_findings_banner() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "test", None).await.unwrap();
+        s.insert_finding(
+            "s1",
+            "f1",
+            "rain",
+            crate::storage::FindingSeverity::Blocking,
+            "bug",
+            None,
+        )
+        .await
+        .unwrap();
+        let (btx, mut brx) = mpsc::channel(8);
+        broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, &btx, None)
+            .await
+            .unwrap();
+        let bm = brx.recv().await.unwrap();
+        assert!(
+            bm.message
+                .content
+                .contains("⚠ 1 unresolved EYES blocking finding"),
+            "user-turn wire should carry the banner: {}",
+            bm.message.content
+        );
+        assert!(bm.message.content.ends_with("\ngo"));
+        // Storage still keeps the RAW text (no envelope), unchanged by the banner.
+        let msgs = s.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs[0].content, "go");
     }
 }

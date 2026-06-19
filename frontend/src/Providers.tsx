@@ -72,6 +72,9 @@ const SESSION_LIST_KEYS = ["list_sessions"] as const;
 // Saved-model registry (upsert/delete) — DB-only, watcher-invisible; the Dashboard
 // picker is a cross-view consumer so it needs an explicit event.
 const MODEL_KEYS = ["list_models"] as const;
+// EYES-sign-off findings — the session-header banner refetches when the bridge
+// fires `session:findings_changed` (eyes_flag / disposition_finding / approve_finding).
+const FINDINGS_KEYS = ["list_session_findings"] as const;
 
 /**
  * Event-driven cache invalidation: each backend `session:*` event invalidates
@@ -102,6 +105,7 @@ function GlobalEventSync() {
     [invalidate],
   );
   const onModel = useCallback(() => invalidate(MODEL_KEYS), [invalidate]);
+  const onFindings = useCallback(() => invalidate(FINDINGS_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
   const clearHealth = useHealthStore((s) => s.clearSession);
   const onClose = useCallback(
@@ -132,6 +136,7 @@ function GlobalEventSync() {
         ...WORKTREE_KEYS,
         ...PROJECT_KEYS,
         ...MODEL_KEYS,
+        ...FINDINGS_KEYS,
       ]),
     [invalidate],
   );
@@ -142,6 +147,7 @@ function GlobalEventSync() {
   useTauriEvent("session:halt_cleared", onTray, [onTray]);
   useTauriEvent("session:phase_changed", onPhase, [onPhase]);
   useTauriEvent("session:doc_changed", onDoc, [onDoc]);
+  useTauriEvent("session:findings_changed", onFindings, [onFindings]);
   useTauriEvent("cl:changed", onCl, [onCl]);
   useTauriEvent("session:worktree_changed", onWorktree, [onWorktree]);
   useTauriEvent("project:changed", onProject, [onProject]);

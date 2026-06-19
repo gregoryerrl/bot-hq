@@ -696,6 +696,18 @@ async listPendingTray() : Promise<Result<SessionTrayView[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * All findings for a session, oldest-first. The banner computes the open-
+ * blocking count + escalation state; a future detail view can show the rest.
+ */
+async listSessionFindings(sessionId: string) : Promise<Result<FindingView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_session_findings", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async sessionDocSearch(sessionId: string, query: string | null, phase: string | null) : Promise<Result<SessionDocumentView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("session_doc_search", { sessionId, query, phase }) };
@@ -959,6 +971,20 @@ export type DiffLine = { kind: string; text: string }
  * Stat for a single config file (present / path / size).
  */
 export type FileStat = { present: boolean; path: string; bytes: number }
+/**
+ * One `findings` row projected for the frontend. snake_case (no `rename_all`),
+ * like `SessionTrayView` — the generated TS reads `finding_uid` / `code_ref` /
+ * etc. directly.
+ */
+export type FindingView = { id: number; session_id: string; finding_uid: string; agent: string; severity: string; summary: string; code_ref: string | null; status: string; disposition_reason: string | null; disposed_by: string | null; created_at: string; updated_at: string; 
+/**
+ * Times EYES raised this finding; `>= 2` = escalated (banner emphasis).
+ */
+raise_count: number; 
+/**
+ * True once EYES confirmed the resolution via `approve_finding`.
+ */
+eyes_approved: boolean }
 /**
  * Force-push gate.
  */
@@ -1355,7 +1381,13 @@ export type ViolationKind =
  * Audit-only in v1 — we log but don't block (yet). Catches the
  * "agent edits policy.yaml to remove forbidden words" attack.
  */
-"policy_mutation"
+"policy_mutation" | 
+/**
+ * A `git commit` / `git push` blocked by the EYES-sign-off gate — HANDS
+ * tried to ship with unresolved EYES `blocking` findings. Logged Denied by
+ * the pre-commit / pre-push hook on a block.
+ */
+"findings"
 export type ViolationOutcome = "approved" | "denied" | 
 /**
  * User dismissed/canceled before deciding (e.g., closed dialog).

@@ -29,6 +29,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
 mod cl_facade;
+mod findings;
 mod session_docs;
 mod tray;
 mod util;
@@ -106,6 +107,11 @@ pub enum SignalingEvent {
     /// invalidates its doc queries so a freshly-written phase doc appears
     /// without a manual tab-switch.
     DocChanged {
+        session_id: String,
+    },
+    /// A session's EYES findings changed (`eyes_flag` / `disposition_finding`).
+    /// The UI refetches the per-session findings banner so the ⚠ count is live.
+    FindingsChanged {
         session_id: String,
     },
     /// A session finished closing (after `core.close_session`). The UI

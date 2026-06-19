@@ -332,7 +332,13 @@ async fn flush_buffer(
         return;
     }
     let phase = ipav_state.lock().await.current_phase;
-    peer_forward_message(cfg.author, body.trim_end(), phase, peer_input_tx).await;
+    // Ride the open-blocking-findings banner on every peer forward, so it reaches
+    // HANDS each turn. Fail-safe 0 when there's no bridge (solo / test config).
+    let open_blocking = match &cfg.bridge {
+        Some(bridge) => bridge.open_blocking_count(&cfg.session_id).await,
+        None => 0,
+    };
+    peer_forward_message(cfg.author, body.trim_end(), phase, open_blocking, peer_input_tx).await;
     *flush_at = None;
 }
 

@@ -251,6 +251,92 @@ impl SessionTrayEntry {
     }
 }
 
+/// Severity of an EYES finding. Only `Blocking` gates a commit; `Advisory`
+/// (nits) never blocks — over-gating would train HANDS to ignore the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingSeverity {
+    Blocking,
+    Advisory,
+}
+
+impl FindingSeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FindingSeverity::Blocking => "blocking",
+            FindingSeverity::Advisory => "advisory",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "blocking" => FindingSeverity::Blocking,
+            "advisory" => FindingSeverity::Advisory,
+            _ => return None,
+        })
+    }
+}
+
+/// Lifecycle status of an EYES finding. `Open` gates (when blocking);
+/// `Fixed`/`Rebutted` are HANDS dispositions (both carry a reason and surface
+/// to the user); `Stale` is auto-marked when the referenced code is gone, or
+/// set by an explicit user override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingStatus {
+    Open,
+    Fixed,
+    Rebutted,
+    Stale,
+}
+
+impl FindingStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FindingStatus::Open => "open",
+            FindingStatus::Fixed => "fixed",
+            FindingStatus::Rebutted => "rebutted",
+            FindingStatus::Stale => "stale",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "open" => FindingStatus::Open,
+            "fixed" => FindingStatus::Fixed,
+            "rebutted" => FindingStatus::Rebutted,
+            "stale" => FindingStatus::Stale,
+            _ => return None,
+        })
+    }
+}
+
+/// A row from the `findings` table — an EYES review finding on a session.
+/// `severity`/`status` are stored as text; use [`FindingSeverity`]/
+/// [`FindingStatus`] `::parse` to type them. `finding_uid` is the public
+/// handle agents pass to `disposition_finding`.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Finding {
+    pub id: i64,
+    pub session_id: String,
+    pub finding_uid: String,
+    pub agent: String,
+    pub severity: String,
+    pub summary: String,
+    pub code_ref: Option<String>,
+    pub status: String,
+    pub disposition_reason: Option<String>,
+    pub disposed_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// How many times EYES has raised this finding (re-raise dedup). `>= 2` =
+    /// "escalated" — the frontend banner emphasizes it. Default 1.
+    pub raise_count: i64,
+    /// `1` once EYES confirmed the resolution via `approve_finding` (clears the
+    /// escalation signal); `0` otherwise. Orthogonal to `status`.
+    pub eyes_approved: i64,
+}
+
 /// A registered project. The special name `_globals` is the bot-hq root
 /// bucket (general-rules.md, etc.) and has NULL working_repo_path.
 ///

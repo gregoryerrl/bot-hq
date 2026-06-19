@@ -18,6 +18,7 @@ pub mod row_types;
 
 mod agent_config;
 mod cl_index;
+mod findings;
 mod messages;
 mod models;
 mod plugins;
@@ -29,9 +30,9 @@ mod tray;
 
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
-    AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Message, MessageKind, Model, Plugin,
-    Project, QuestionKind, QuestionStatus, Session, SessionDocument, SessionTrayEntry,
-    SessionWithPreview,
+    AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Finding, FindingSeverity, FindingStatus,
+    Message, MessageKind, Model, Plugin, Project, QuestionKind, QuestionStatus, Session,
+    SessionDocument, SessionTrayEntry, SessionWithPreview,
 };
 pub(crate) use time::now_utc;
 

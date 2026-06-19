@@ -94,7 +94,16 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     "request_approval",
     "action_gate",
     "supersede_question",
+    // EYES files findings; HANDS resolves them — so disposition is HANDS-only.
+    "disposition_finding",
 ];
+
+/// The inverse of [`HANDS_ONLY_TOOLS`]: tools only EYES (rain) may call.
+/// `eyes_flag` is EYES's state-writing tool — HANDS must not file blocking
+/// findings against its own work, or the independent-review gate is meaningless.
+/// `approve_finding` is EYES's sign-off that an escalated fix is real — only the
+/// reviewer who raised it can clear the escalation, so HANDS can't self-approve.
+const EYES_ONLY_TOOLS: &[&str] = &["eyes_flag", "approve_finding"];
 
 /// Tools that mutate CL annotations (folder descriptions, etc.). Brian (HANDS)
 /// owns mutations; Rain (EYES) reviews via the read
@@ -139,6 +148,12 @@ async fn call_tool(
     if CL_MUTATE_TOOLS.contains(&name) && caller.agent == "rain" {
         return Ok(ToolCallResult::error(format!(
             "tool '{name}' is reserved for HANDS (brian); rain is EYES — read folder descriptions via cl_folder_search instead",
+        )));
+    }
+    if EYES_ONLY_TOOLS.contains(&name) && caller.agent != "rain" {
+        return Ok(ToolCallResult::error(format!(
+            "tool '{name}' is reserved for the EYES agent (rain); {} is HANDS — EYES files review findings, HANDS resolves them via disposition_finding",
+            caller.agent
         )));
     }
     match name {
@@ -333,6 +348,70 @@ async fn call_tool(
                     Ok(ToolCallResult::text(format!("forbidden_word: {word}")))
                 }
             }
+        }
+        "eyes_flag" => {
+            let severity_str = arg_required_str(&args, "severity")?;
+            let severity = crate::storage::FindingSeverity::parse(&severity_str).ok_or_else(|| {
+                JsonRpcError::new(
+                    JsonRpcError::INVALID_PARAMS,
+                    format!("unknown severity '{severity_str}' (expected 'blocking' or 'advisory')"),
+                )
+            })?;
+            let summary = arg_required_str(&args, "summary")?;
+            let code_ref = arg_opt_str(&args, "code_ref");
+            let uid = bridge
+                .eyes_flag(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    severity,
+                    summary,
+                    code_ref,
+                )
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(format!("finding filed: {uid}")))
+        }
+        "disposition_finding" => {
+            let finding_id = arg_required_str(&args, "finding_id")?;
+            let status_str = arg_required_str(&args, "status")?;
+            // Agent dispositions are fixed | rebutted only; `stale` is the
+            // auto/user-clear path, not an agent action, and `open` isn't a
+            // resolution.
+            let status = crate::storage::FindingStatus::parse(&status_str)
+                .filter(|s| {
+                    matches!(
+                        s,
+                        crate::storage::FindingStatus::Fixed
+                            | crate::storage::FindingStatus::Rebutted
+                    )
+                })
+                .ok_or_else(|| {
+                    JsonRpcError::new(
+                        JsonRpcError::INVALID_PARAMS,
+                        format!("status must be 'fixed' or 'rebutted', got '{status_str}'"),
+                    )
+                })?;
+            let reason = arg_required_str(&args, "reason")?;
+            let result = bridge
+                .disposition_finding(finding_id, status, reason, caller.agent.clone())
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(result))
+        }
+        "check_open_findings" => {
+            let result = bridge
+                .check_open_findings(&caller.session_id)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(result))
+        }
+        "approve_finding" => {
+            let finding_id = arg_required_str(&args, "finding_id")?;
+            let result = bridge
+                .approve_finding(finding_id)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(result))
         }
         "list_my_pending_questions" => {
             let rows = bridge
@@ -818,6 +897,161 @@ mod tests {
                 "tool {tool} should explain HANDS-only restriction, got: {text}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn brian_rejected_from_eyes_only_eyes_flag() {
+        // eyes_flag is the inverse gate: EYES-only, so HANDS (brian) is rejected.
+        let bridge = SignalingBridge::new();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "eyes_flag", "arguments": {"severity": "blocking", "summary": "x"}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(true));
+        let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("reserved for the EYES"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn rain_rejected_from_disposition_finding() {
+        // disposition_finding joins HANDS_ONLY_TOOLS — EYES (rain) is rejected.
+        let bridge = SignalingBridge::new();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "disposition_finding", "arguments": {"finding_id": "f1", "status": "fixed", "reason": "x"}}),
+                1,
+            ),
+            &rain_caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(true));
+        let text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("reserved for the HANDS"), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn disposition_finding_rejects_non_disposition_status() {
+        // `stale`/`open` are not agent dispositions — only fixed|rebutted.
+        let bridge = SignalingBridge::new();
+        let err = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "disposition_finding", "arguments": {"finding_id": "f1", "status": "stale", "reason": "x"}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("fixed' or 'rebutted"), "msg: {}", err.message);
+    }
+
+    #[tokio::test]
+    async fn brian_rejected_from_approve_finding() {
+        // approve_finding is EYES-only — only the reviewer who raised a finding
+        // can sign off its fix; HANDS can't self-approve.
+        let bridge = SignalingBridge::new();
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "approve_finding", "arguments": {"finding_id": "f1"}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(true));
+        assert!(v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reserved for the EYES"));
+    }
+
+    #[tokio::test]
+    async fn findings_gate_round_trip_via_dispatch() {
+        // The full gate, end-to-end through dispatch: rain files blocking →
+        // check_open_findings blocks → brian dispositions → check returns ok.
+        // This is the s-3cb39c76 scenario in miniature.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        let filed = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "eyes_flag", "arguments": {"severity": "blocking", "summary": "NPE on null id", "code_ref": "job.rs:42"}}),
+                1,
+            ),
+            &rain_caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&filed).unwrap();
+        assert_eq!(v["result"]["isError"], json!(false));
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        let uid = text.trim_start_matches("finding filed: ").to_string();
+        assert!(!uid.is_empty(), "expected a finding uid, got: {text}");
+
+        let blocked = dispatch(
+            req("tools/call", json!({"name": "check_open_findings", "arguments": {}}), 1),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&blocked).unwrap();
+        assert!(
+            v["result"]["content"][0]["text"].as_str().unwrap().starts_with("blocked: 1"),
+            "commit-time check must block while the finding is open"
+        );
+
+        dispatch(
+            req(
+                "tools/call",
+                json!({"name": "disposition_finding", "arguments": {"finding_id": uid, "status": "fixed", "reason": "fixed in abc123"}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let ok = dispatch(
+            req("tools/call", json!({"name": "check_open_findings", "arguments": {}}), 1),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["result"]["content"][0]["text"], "ok", "gate clears after disposition");
     }
 
     #[tokio::test]

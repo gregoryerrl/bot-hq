@@ -29,6 +29,30 @@ impl Storage {
         Ok(res.last_insert_rowid())
     }
 
+    /// True if `author` posted any message in `session_id` with `created_at`
+    /// strictly after `since` (an RFC3339-Z timestamp). Powers the findings
+    /// re-raise turn-evidence guard: EYES only escalates a re-raise once HANDS
+    /// has had a turn since the finding's last raise, so buffer/turn latency
+    /// can't false-escalate.
+    pub async fn has_message_from_author_since(
+        &self,
+        session_id: &str,
+        author: &str,
+        since: &str,
+    ) -> Result<bool> {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM messages \
+             WHERE session_id = ? AND author = ? AND created_at > ?)",
+        )
+        .bind(session_id)
+        .bind(author)
+        .bind(since)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("checking {author} messages since {since}"))?;
+        Ok(exists != 0)
+    }
+
     /// All messages for the session, oldest first.
     /// If `since_id` is provided, returns only messages with id > since_id.
     pub async fn messages_for_session(

@@ -35,6 +35,10 @@ pub enum ViolationKind {
     /// Audit-only in v1 — we log but don't block (yet). Catches the
     /// "agent edits policy.yaml to remove forbidden words" attack.
     PolicyMutation,
+    /// A `git commit` / `git push` blocked by the EYES-sign-off gate — HANDS
+    /// tried to ship with unresolved EYES `blocking` findings. Logged Denied by
+    /// the pre-commit / pre-push hook on a block.
+    Findings,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, specta::Type)]

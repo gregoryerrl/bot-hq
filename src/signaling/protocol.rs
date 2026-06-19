@@ -254,6 +254,60 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "eyes_flag",
+            description: "EYES-only (rain). File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until HANDS dispositions it (the mechanical EYES-sign-off gate, mirroring the disguise gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id. Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains HANDS to ignore the gate). This is how EYES makes a finding STICK instead of relying on HANDS reading chat.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "severity": {
+                        "type": "string",
+                        "enum": ["blocking", "advisory"],
+                        "description": "blocking = gates commit until dispositioned; advisory = never gates."
+                    },
+                    "summary": { "type": "string", "description": "What the finding is — concise + actionable (the bug and its impact)." },
+                    "code_ref": { "type": "string", "description": "Optional file:line or symbol the finding points at." }
+                },
+                "required": ["severity", "summary"]
+            }),
+        },
+        ToolDescriptor {
+            name: "disposition_finding",
+            description: "HANDS-only (brian). Resolve an EYES `blocking` finding so it stops gating `git commit`. `status='fixed'` (you fixed it — `reason` should reference the fix: commit/line/test) or `status='rebutted'` (you disagree — `reason` must justify why). A rebuttal does NOT need EYES's agreement (so it can't deadlock) but IS surfaced to the user. `reason` is REQUIRED for both. Call this for each open blocking finding before committing; see what's open with `check_open_findings`.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "finding_id": { "type": "string", "description": "The finding id from eyes_flag / check_open_findings." },
+                    "status": {
+                        "type": "string",
+                        "enum": ["fixed", "rebutted"],
+                        "description": "fixed = resolved in code; rebutted = you disagree (with reason)."
+                    },
+                    "reason": { "type": "string", "description": "Required. The fix reference (fixed) or the justification (rebutted). Surfaced to the user." }
+                },
+                "required": ["finding_id", "status", "reason"]
+            }),
+        },
+        ToolDescriptor {
+            name: "check_open_findings",
+            description: "Check whether any EYES `blocking` findings are still unresolved for this session. Returns 'ok' if clear, or 'blocked: <N> unresolved blocking finding(s)' plus the list (each with its finding id). ALWAYS call this BEFORE `git commit`: if it's not 'ok', resolve each finding via `disposition_finding` (fix or rebut) first. The pre-commit / pre-push git hooks enforce this mechanically too, but checking here lets you resolve cleanly instead of hitting a blocked commit.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDescriptor {
+            name: "approve_finding",
+            description: "EYES-only (rain). Confirm that an escalated finding HANDS marked fixed is genuinely resolved — clears the escalation's 'awaiting EYES confirm' signal. Use this AFTER HANDS dispositions a finding you re-raised, once you've verified the fix is real. This does NOT gate commits (HANDS's disposition already cleared the commit gate); it's the sign-off that closes the loop. If you DON'T agree the fix is adequate, do NOT approve — re-file it with `eyes_flag` instead (a fresh open finding re-blocks the commit).",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "finding_id": { "type": "string", "description": "The finding id (from eyes_flag / check_open_findings) to confirm as resolved." }
+                },
+                "required": ["finding_id"]
+            }),
+        },
+        ToolDescriptor {
             name: "close_session",
             description: "Close the session this agent is running in. Kills both agents (the duo) and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. Fire-and-forget — your subprocess will be terminated shortly after this call returns.",
             input_schema: serde_json::json!({

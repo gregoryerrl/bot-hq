@@ -182,6 +182,13 @@ fn run_commit_msg(data_dir: &Path, project: Option<&str>, msg_path: &Path) -> Re
 /// commit-msg because pre-commit fires before git parses `-m`.
 fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-commit");
+    // Layer 1 — EYES-sign-off gate. Independent of the forbidden-word policy, so
+    // it must run BEFORE the empty-list early return below (a project with no
+    // forbidden words still needs review-completion enforced).
+    if check_findings_gate(data_dir, "pre-commit") != 0 {
+        return Ok(1);
+    }
+    // Layer 2 — forbidden-word disguise scan.
     let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
@@ -285,6 +292,12 @@ fn run_post_commit(data_dir: &Path, project: Option<&str>, session: Option<&str>
 /// session's user.
 fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     audit_at_hook(data_dir, project, "pre-push");
+    // EYES-sign-off backstop: a push must not carry unresolved blocking findings
+    // (catches a commit created before the finding was filed, an --amend, or a
+    // bypassed pre-commit). Independent of push_gate; fail-open on DB errors.
+    if check_findings_gate(data_dir, "pre-push") != 0 {
+        return Ok(1);
+    }
     let session_id = hook_session_id();
     let policy = Policy::resolve(data_dir, project, session_id.as_deref())?;
     use crate::policy::PushGateMode;
@@ -838,6 +851,145 @@ fn audit_at_hook(data_dir: &Path, project: Option<&str>, hook_name: &str) {
     }
 }
 
+// ---- EYES-sign-off gate (findings) ----
+//
+// The mechanical backstop for the EYES-sign-off gate: a `blocking` finding that
+// EYES filed (via `eyes_flag`) and HANDS hasn't dispositioned blocks `git commit`
+// (and, as a re-check, `git push`). The agent-facing MCP `check_open_findings`
+// tool is the prompted primary; this hook fires regardless of whether the agent
+// remembered to call it — the same two-layer model as the disguise gate.
+//
+// Findings live in the SQLite DB, so (unlike the YAML-only forbidden-word scan)
+// the hook reads the DB directly, READ-ONLY. It is FAIL-OPEN on every DB error
+// (missing/locked/corrupt DB, an un-migrated DB without the `findings` table,
+// SQLITE_BUSY mid-write): a DB hiccup must NEVER block a human's commit. A push/
+// commit with no `BOT_HQ_SESSION_ID` (a human at a terminal) skips the gate
+// entirely — findings are session-scoped, so there's nothing to enforce.
+//
+// Audit-logging of a hook block (a `Findings` ViolationKind) is intentionally
+// deferred — the block + banner are the enforcement; the audit row is additive.
+
+/// Gate decision for `hook` (commit/push). Returns 1 to BLOCK, 0 to proceed.
+/// 0 covers all the proceed cases: no session context, fail-open DB error, and
+/// no open blocking findings. On a block it prints the actionable banner.
+fn check_findings_gate(data_dir: &Path, hook: &str) -> i32 {
+    let Some(session_id) = hook_session_id() else {
+        return 0; // no bot-hq session context (e.g. a human commit) → gate N/A
+    };
+    let Some(findings) = open_blocking_findings(data_dir, &session_id) else {
+        return 0; // fail-open: DB unreadable for any reason
+    };
+    if findings.is_empty() {
+        return 0;
+    }
+    eprintln!("{}", blocked_banner(hook, &findings_block_body(&findings)));
+    log_findings_block(data_dir, hook, &session_id, findings.len());
+    1
+}
+
+/// Best-effort audit record for a findings-gate block (`Findings` / Denied), so
+/// violations.jsonl shows the gate fired — mirrors `run_post_commit`'s logging
+/// (own current-thread runtime; the hook is a sync subprocess). Never fails the
+/// hook: a logging error is swallowed (the block already landed via stderr).
+fn log_findings_block(data_dir: &Path, hook: &str, session_id: &str, n: usize) {
+    let agent = std::env::var("BOT_HQ_AGENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "brian".to_string());
+    let action = if hook == "pre-push" { "git push" } else { "git commit" };
+    let log = ViolationsLog::new(data_dir);
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    rt.block_on(async {
+        let _ = log
+            .record(
+                session_id.to_string(),
+                agent,
+                ViolationKind::Findings,
+                action.to_string(),
+                ViolationOutcome::Denied,
+                Some(format!("{n} unresolved EYES blocking finding(s)")),
+            )
+            .await;
+    });
+}
+
+/// Read open BLOCKING findings for `session_id` from the DB, read-only. Returns
+/// `None` on ANY error (the caller treats None as fail-open → proceed). Builds
+/// its own current-thread runtime — the hook runs in a sync context.
+fn open_blocking_findings(
+    data_dir: &Path,
+    session_id: &str,
+) -> Option<Vec<(String, String, Option<String>)>> {
+    let db_path = crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).db_path;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    match rt.block_on(query_open_blocking(&db_path, session_id)) {
+        Ok(rows) => Some(rows),
+        Err(e) => {
+            eprintln!(
+                "bot-hq: EYES-findings gate could not read the DB ({e}); proceeding (fail-open)."
+            );
+            None
+        }
+    }
+}
+
+/// Async core of [`open_blocking_findings`] — split out so tests can drive it
+/// under `#[tokio::test]` without nesting a runtime. Opens `db_path` READ-ONLY.
+async fn query_open_blocking(
+    db_path: &Path,
+    session_id: &str,
+) -> Result<Vec<(String, String, Option<String>)>> {
+    use sqlx::sqlite::SqliteConnectOptions;
+    use sqlx::ConnectOptions;
+    let mut conn = SqliteConnectOptions::new()
+        .filename(db_path)
+        .read_only(true)
+        .connect()
+        .await
+        .with_context(|| format!("opening {} read-only", db_path.display()))?;
+    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT finding_uid, summary, code_ref FROM findings \
+         WHERE session_id = ? AND status = 'open' AND severity = 'blocking' \
+         ORDER BY id ASC",
+    )
+    .bind(session_id)
+    .fetch_all(&mut conn)
+    .await
+    .context("querying open blocking findings")?;
+    Ok(rows)
+}
+
+/// Body of the block banner — lists each open blocking finding + how to clear it.
+fn findings_block_body(findings: &[(String, String, Option<String>)]) -> String {
+    let list = findings
+        .iter()
+        .map(|(uid, summary, code_ref)| {
+            let r = code_ref
+                .as_deref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            format!("  - [{uid}] {summary}{r}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "{n} unresolved EYES blocking finding(s) — blocked.\n\n{list}\n\n\
+         Resolve each before retrying: call `disposition_finding(finding_id, status, reason)` \
+         with status='fixed' (reference the fix) or 'rebutted' (justify why). A rebuttal needs \
+         no EYES agreement, so this cannot deadlock. Do NOT bypass with --no-verify.\n",
+        n = findings.len(),
+    )
+}
+
 // ---- git helpers ----
 
 fn read_staged_diff() -> Option<String> {
@@ -1078,6 +1230,99 @@ mod tests {
         let data = tempdir().unwrap();
         let code = run_pre_commit(data.path(), Some("nope")).unwrap();
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn findings_gate_fail_open_when_db_absent() {
+        // No DB at the data_dir → open_blocking_findings returns None (fail-open).
+        // A DB hiccup (missing/locked/corrupt) must NEVER block a commit.
+        let data = tempdir().unwrap();
+        assert_eq!(open_blocking_findings(data.path(), "s1"), None);
+    }
+
+    #[tokio::test]
+    async fn query_open_blocking_filters_to_open_blocking() {
+        // Only OPEN + BLOCKING findings count: advisory and already-disposed are
+        // excluded; the scan is scoped to the session.
+        let data = tempdir().unwrap();
+        let db_path = crate::paths::Paths::for_data_dir(data.path().to_path_buf()).db_path;
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let storage = crate::storage::Storage::open(&db_path).await.unwrap();
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage
+            .insert_finding(
+                "s1",
+                "f1",
+                "rain",
+                crate::storage::FindingSeverity::Blocking,
+                "real bug",
+                Some("a.rs:1"),
+            )
+            .await
+            .unwrap();
+        storage
+            .insert_finding(
+                "s1",
+                "f2",
+                "rain",
+                crate::storage::FindingSeverity::Advisory,
+                "nit",
+                None,
+            )
+            .await
+            .unwrap();
+        storage
+            .insert_finding(
+                "s1",
+                "f3",
+                "rain",
+                crate::storage::FindingSeverity::Blocking,
+                "fixed one",
+                None,
+            )
+            .await
+            .unwrap();
+        storage
+            .disposition_finding(
+                "f3",
+                crate::storage::FindingStatus::Fixed,
+                Some("done"),
+                "brian",
+            )
+            .await
+            .unwrap();
+
+        let rows = query_open_blocking(&db_path, "s1").await.unwrap();
+        assert_eq!(rows.len(), 1, "only the open blocking finding is returned");
+        assert_eq!(rows[0].0, "f1");
+        assert_eq!(rows[0].1, "real bug");
+        assert_eq!(rows[0].2.as_deref(), Some("a.rs:1"));
+
+        // Unknown session → nothing to gate.
+        assert!(query_open_blocking(&db_path, "other")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn findings_block_body_lists_each_finding() {
+        let findings = vec![
+            (
+                "uid1".to_string(),
+                "bug one".to_string(),
+                Some("x.rs:1".to_string()),
+            ),
+            ("uid2".to_string(), "bug two".to_string(), None),
+        ];
+        let body = findings_block_body(&findings);
+        assert!(body.contains("2 unresolved"));
+        assert!(body.contains("uid1") && body.contains("bug one") && body.contains("(x.rs:1)"));
+        assert!(body.contains("uid2") && body.contains("bug two"));
+        assert!(
+            body.contains("disposition_finding"),
+            "banner must tell the agent how to clear it"
+        );
     }
 
     #[test]

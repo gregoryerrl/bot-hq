@@ -11,6 +11,7 @@ import { ChatInput } from "../components/ChatInput";
 import { ChatMessage } from "../components/ChatMessage";
 import { DocumentPane } from "../components/DocumentPane";
 import { type Phase } from "../components/PhasePill";
+import { SessionFindingsBanner } from "../components/SessionFindingsBanner";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
 import type {
@@ -323,6 +324,7 @@ export function SessionView() {
                   </span>
                 </>
               )}
+              <SessionFindingsBanner sessionId={sessionId} />
               {session.base_repo_path && (
                 <>
                   <span className="mx-2 text-outline-variant">·</span>
