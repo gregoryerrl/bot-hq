@@ -171,18 +171,17 @@ impl Policy {
     /// Returns the first forbidden word found in `text`, if any.
     ///
     /// Case-INsensitive — a disguise check must not be evadable by re-casing
-    /// (the git co-author trailer's lowercase form is honored identically by
-    /// GitHub, so the canonical-cased entry must still catch it). A forbidden
-    /// brand word may therefore also match lowercase occurrences in diffs —
-    /// curate the list to avoid legitimate-substring false-positives. Matches
-    /// on WORD BOUNDARIES
-    /// (regex `\b` semantics, word char = `[A-Za-z0-9_]`), so a forbidden word
-    /// only trips when it stands alone: `Claude` matches "Claude" / "Claude:"
-    /// but NOT "ClaudeConfig"; a forbidden `rain` no longer matches inside
-    /// "constraint". Non-word chars *inside* a forbidden word are fine — a
-    /// hyphenated marker (e.g. `Foo-Bar-Baz`, like the AI-attribution footer
-    /// bot-hq forbids) is matched literally; boundaries are only checked at the
-    /// match edges, so it still trips when written as a standalone footer line.
+    /// (a forbidden term written in another case must still be caught, since
+    /// downstream systems may treat differing cases as equivalent). A forbidden
+    /// word may therefore also match lowercase occurrences in diffs — curate the
+    /// list to avoid legitimate-substring false-positives. Matches on WORD
+    /// BOUNDARIES (regex `\b` semantics, word char = `[A-Za-z0-9_]`), so a
+    /// forbidden word only trips when it stands alone: `Acme` matches "Acme" /
+    /// "Acme:" but NOT "AcmeWidget"; a forbidden `art` no longer matches inside
+    /// "start". Non-word chars *inside* a forbidden word are fine — a
+    /// hyphenated marker (e.g. `Foo-Bar-Baz`) is matched literally; boundaries
+    /// are only checked at the match edges, so it still trips even when written
+    /// inline among surrounding text.
     pub fn first_forbidden_word(&self, text: &str) -> Option<&str> {
         self.forbidden_in_commits
             .iter()
