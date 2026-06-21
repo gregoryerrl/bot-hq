@@ -66,14 +66,13 @@ done; work is now incremental.
 
 ## Critical rules
 
-- **NEVER add AI co-author trailers or watermarks** (footer lines
-  attributing the commit to an AI model) to commit messages or
-  generated content. The forbidden phrase list is enforced by the
-  `commit-msg` git hook + `check_commit_message` MCP tool — call the
-  MCP tool with the proposed message before every commit.
-- **No `--no-verify` or hook-skipping.** Fix root causes.
-- **Imperative-mood commit subjects, ≤72 chars** (`fix: foo`, `add:
-  bar`, NOT `Added foo`). One logical change per commit.
+- **Commit conventions are config-driven, not shipped here.** Subject
+  style and the forbidden-word list resolve from the project `policy.yaml`
+  + the user's `custom-general-rules.md` in the Context Library — personal
+  / per-project config, not product rules baked into this repo. Whatever
+  the resolved policy forbids is enforced by the `commit-msg` git hook +
+  the `check_commit_message` MCP tool; call that tool before every commit,
+  and don't bypass the hooks (`--no-verify` / hook-skipping).
 - **Push is governed by the session's `push_gate` policy toggle**
   (`auto` | `ask`, inherited general→project→session, editable in the
   gear tab). Under `ask`, just run `git push` — the pre-push hook

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (existing core, zero LOC delta in `src/agents`, `src/core`, `src/policy`, `src/storage`, `src/signaling`) + Tauri v2 (`tauri`, `tauri-build`, `tauri-specta`, `specta`) + React 18 + TypeScript + Tailwind + shadcn/ui (Vite build) + Zustand + TanStack Query + Vitest + React Testing Library.
 
-**Branch:** `tauri-v2-migration` in worktree `/Users/gregoryerrl/Projects/bot-hq-tauri`. Push grant: session-level, scope=specific, branches=["tauri-v2-migration"]. No `--no-verify`, no AI co-author trailers, imperative ≤72-char commit subjects.
+**Branch:** `tauri-v2-migration` in worktree `/Users/gregoryerrl/Projects/bot-hq-tauri`. Push grant: session-level, scope=specific, branches=["tauri-v2-migration"]. Commit conventions follow the repo's resolved policy (enforced by the git hooks).
 
 **Regression baseline:** 206 Rust tests must stay green through every commit (158 lib + 31 external_mcp + 7 signaling + 10 storage). `cargo test`, `cargo clippy`, `cd frontend && pnpm test`, `tsc --noEmit` gate every commit.
 

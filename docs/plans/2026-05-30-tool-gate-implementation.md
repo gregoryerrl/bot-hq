@@ -80,4 +80,4 @@ The "surface Approve/Reject → block until resolved → unblock the caller" flo
 - **Nothing else built.** Backend (config store, action_gate, hook rework), Settings UI, agent rules, and GrantPill removal are all TODO per §4.
 
 ## 7. Commit / disguise hygiene (bot-hq repo)
-Imperative-mood subjects ≤72 chars; one logical change per commit; **no AI co-author trailers or AI/Anthropic attribution** in commit messages (bot-hq `policy.yaml` forbids the AI co-author trailer; the git commit hook enforces it — call `check_commit_message` before committing). Push only with explicit user authorization.
+Commit messages follow the repo's resolved policy — forbidden words are enforced by the `commit-msg` git hook; call `check_commit_message` before committing. Push only with explicit user authorization.

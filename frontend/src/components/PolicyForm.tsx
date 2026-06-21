@@ -64,7 +64,7 @@ export function PolicyForm({
         <StringList
           items={value.forbidden_in_commits ?? []}
           disabled={disabled}
-          placeholder="e.g. an AI co-author trailer"
+          placeholder="e.g. an internal codename"
           onChange={(forbidden_in_commits) => patch({ forbidden_in_commits })}
         />
       </Field>
@@ -98,7 +98,7 @@ export function PolicyForm({
             value={value.commit_style ?? ""}
             disabled={disabled}
             onChange={(e) => patch({ commit_style: e.target.value })}
-            placeholder="e.g. imperative"
+            placeholder="(optional)"
             className={terminalInputClass}
           />
         </Field>

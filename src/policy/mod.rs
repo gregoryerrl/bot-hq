@@ -62,7 +62,7 @@ pub struct Policy {
     #[serde(default)]
     pub branch_pattern: String,
 
-    /// Free-form commit style note (imperative, conventional, etc).
+    /// Free-form commit style note.
     /// Surfaced to the agent in its system prompt.
     #[serde(default)]
     pub commit_style: String,
