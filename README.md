@@ -114,9 +114,6 @@ Library.
 bot-hq is the policy layer, so you can let the agents move quickly without letting
 them ship something you'll regret:
 
-- **Commit hygiene** — a configurable list of forbidden words/phrases is checked on
-  every commit (handy for keeping unwanted attribution lines, secrets, or banned
-  terms out of your history).
 - **Push approval** — pushes can be set to pause for a one-click Approve / Reject, so
   nothing reaches your remote without you.
 - **Review sign-off** — when Rain flags a real problem as *blocking*, Brian can't
