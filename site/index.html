@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>bot-hq — Two AI agents. One builds, one reviews. You orchestrate.</title>
+  <meta name="description" content="A desktop app for running AI-assisted coding sessions you can trust: a builder agent, an adversarial reviewer agent, a project knowledge base, and guardrails — with you in control." />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="bot-hq" />
+  <meta property="og:description" content="Two AI agents — one builds, one reviews. You orchestrate. A desktop app for disciplined, reviewable AI coding sessions." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://gregoryerrl.github.io/bot-hq/" />
+  <meta property="og:image" content="https://gregoryerrl.github.io/bot-hq/logo.png" />
+
+  <link rel="icon" type="image/png" href="favicon.png" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+  <style>
+    :root {
+      --navy:        #0b1326;
+      --navy-panel:  #0f1830;
+      --navy-card:   #111c38;
+      --line:        rgba(255, 255, 255, 0.08);
+      --line-strong: rgba(255, 255, 255, 0.14);
+
+      --hands:       #ff7a00;   /* Brian — HANDS */
+      --hands-soft:  #ffb68b;
+      --eyes:        #a259ff;   /* Rain — EYES  */
+      --eyes-soft:   #ddb7ff;
+      --user:        #adc6ff;   /* You — orchestrator */
+
+      --text:        #e8edf7;
+      --text-dim:    #9aa6bd;
+      --text-faint:  #6b7793;
+
+      --r-chip: 4px;
+      --r-card: 14px;
+      --maxw: 1080px;
+
+      --sans:  'Inter', system-ui, sans-serif;
+      --head:  'Hanken Grotesk', 'Inter', sans-serif;
+      --mono:  'JetBrains Mono', ui-monospace, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--navy);
+      color: var(--text);
+      font-family: var(--sans);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+    section { padding: 88px 0; border-top: 1px solid var(--line); }
+
+    h2 {
+      font-family: var(--head);
+      font-size: clamp(26px, 4vw, 38px);
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      margin-bottom: 14px;
+    }
+
+    .eyebrow {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--hands-soft);
+      margin-bottom: 12px;
+    }
+
+    .lead { color: var(--text-dim); font-size: 18px; max-width: 64ch; }
+
+    /* ---------- terminal mark ---------- */
+    .mark { font-family: var(--mono); font-weight: 700; white-space: nowrap; }
+    .mark .chevron { color: var(--hands); }
+    .mark .cursor  { color: var(--eyes); }
+
+    /* ---------- nav ---------- */
+    nav {
+      position: sticky; top: 0; z-index: 50;
+      background: rgba(11, 19, 38, 0.78);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line);
+    }
+    nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-family: var(--head); font-weight: 700; font-size: 19px; }
+    .brand .mark { font-size: 20px; }
+    .nav-links { display: flex; align-items: center; gap: 28px; }
+    .nav-links a { color: var(--text-dim); font-size: 14.5px; font-weight: 500; transition: color .15s; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta {
+      font-family: var(--mono); font-size: 13px; font-weight: 700;
+      color: var(--navy) !important; background: var(--hands);
+      padding: 8px 16px; border-radius: var(--r-chip);
+    }
+    .nav-cta:hover { background: var(--hands-soft); }
+    @media (max-width: 720px) { .nav-links a:not(.nav-cta) { display: none; } }
+
+    /* ---------- hero ---------- */
+    .hero { position: relative; padding: 96px 0 72px; border-top: none; overflow: hidden; }
+    .hero::before {
+      content: ""; position: absolute; top: -160px; left: 50%; transform: translateX(-50%);
+      width: 760px; height: 480px; pointer-events: none;
+      background: radial-gradient(ellipse at center, rgba(255,122,0,0.16), rgba(162,89,255,0.10) 45%, transparent 70%);
+      filter: blur(20px);
+    }
+    .hero .wrap { position: relative; display: grid; grid-template-columns: 1.05fr 0.95fr; gap: 56px; align-items: center; }
+    @media (max-width: 880px) { .hero .wrap { grid-template-columns: 1fr; gap: 40px; } }
+
+    .hero-logo { width: 58px; height: 58px; border-radius: 14px; margin-bottom: 26px; box-shadow: 0 8px 30px rgba(0,0,0,0.4); }
+    .hero h1 {
+      font-family: var(--head); font-weight: 800;
+      font-size: clamp(34px, 5.4vw, 56px); line-height: 1.05; letter-spacing: -0.03em;
+      margin-bottom: 20px;
+    }
+    .hero h1 .accent { color: var(--hands); }
+    .hero p.sub { color: var(--text-dim); font-size: 19px; max-width: 52ch; margin-bottom: 18px; }
+    .hero .who { font-size: 15px; color: var(--text-faint); margin-bottom: 32px; }
+    .hero .who b { color: var(--user); font-weight: 600; }
+
+    .cta-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+    .btn {
+      font-family: var(--mono); font-size: 14px; font-weight: 700;
+      padding: 13px 22px; border-radius: var(--r-chip); transition: all .15s;
+      display: inline-flex; align-items: center; gap: 9px; border: 1px solid transparent;
+    }
+    .btn-primary { background: var(--hands); color: var(--navy); }
+    .btn-primary:hover { background: var(--hands-soft); transform: translateY(-1px); }
+    .btn-ghost { background: transparent; color: var(--text); border-color: var(--line-strong); }
+    .btn-ghost:hover { border-color: var(--text-dim); background: rgba(255,255,255,0.03); }
+    .platforms { margin-top: 18px; font-family: var(--mono); font-size: 12.5px; color: var(--text-faint); letter-spacing: 0.04em; }
+
+    /* ---------- hero mock window ---------- */
+    .window {
+      background: var(--navy-panel); border: 1px solid var(--line-strong);
+      border-radius: var(--r-card); overflow: hidden; box-shadow: 0 24px 70px rgba(0,0,0,0.5);
+    }
+    .window-bar { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,0.02); }
+    .dots { display: flex; gap: 7px; }
+    .dots i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+    .dots i:nth-child(1){ background:#ff5f57;} .dots i:nth-child(2){ background:#febc2e;} .dots i:nth-child(3){ background:#28c840;}
+    .window-bar .title { font-family: var(--mono); font-size: 12.5px; color: var(--text-faint); }
+    .tabs { display: flex; gap: 6px; padding: 12px 16px 0; }
+    .tab {
+      font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+      padding: 6px 11px; border-radius: var(--r-chip) var(--r-chip) 0 0;
+      color: var(--text-faint); border: 1px solid var(--line); border-bottom: none; background: rgba(255,255,255,0.02);
+    }
+    .tab.active { color: var(--navy); background: var(--hands); border-color: var(--hands); }
+    .chatlog { padding: 16px; display: flex; flex-direction: column; gap: 13px; font-size: 13.5px; }
+    .msg { display: grid; grid-template-columns: 58px 1fr; gap: 12px; align-items: baseline; }
+    .who-tag { font-family: var(--mono); font-size: 11px; font-weight: 700; text-align: right; }
+    .who-tag.brian { color: var(--hands); }
+    .who-tag.rain  { color: var(--eyes); }
+    .who-tag.you   { color: var(--user); }
+    .msg p { color: var(--text-dim); line-height: 1.5; }
+    .msg p code { font-family: var(--mono); font-size: 12px; color: var(--hands-soft); background: rgba(255,122,0,0.08); padding: 1px 5px; border-radius: 3px; }
+    .phase-chip {
+      display: inline-block; font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+      letter-spacing: 0.1em; color: var(--eyes-soft); background: rgba(162,89,255,0.12);
+      border: 1px solid rgba(162,89,255,0.3); border-radius: var(--r-chip); padding: 2px 8px;
+    }
+
+    /* ---------- generic cards ---------- */
+    .grid { display: grid; gap: 20px; }
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 820px) { .grid-3 { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--navy-card); border: 1px solid var(--line);
+      border-radius: var(--r-card); padding: 26px;
+    }
+    .card h3 { font-family: var(--head); font-size: 19px; font-weight: 700; margin-bottom: 9px; letter-spacing: -0.01em; }
+    .card p { color: var(--text-dim); font-size: 15px; }
+    .card .icon { font-family: var(--mono); font-weight: 700; font-size: 15px; width: 38px; height: 38px; border-radius: 9px; display: flex; align-items: center; justify-content: center; margin-bottom: 16px; }
+
+    /* role cards */
+    .role-card { border-top: 3px solid var(--line-strong); }
+    .role-card.hands { border-top-color: var(--hands); }
+    .role-card.eyes  { border-top-color: var(--eyes); }
+    .role-card.you   { border-top-color: var(--user); }
+    .role-name { font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; margin-bottom: 6px; }
+    .role-card.hands .role-name { color: var(--hands); }
+    .role-card.eyes  .role-name { color: var(--eyes-soft); }
+    .role-card.you   .role-name { color: var(--user); }
+    .role-card h3 { font-size: 22px; margin-bottom: 10px; }
+
+    /* ---------- IPAV strip ---------- */
+    .ipav { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-top: 32px; }
+    @media (max-width: 820px) { .ipav { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 460px) { .ipav { grid-template-columns: 1fr; } }
+    .step { background: var(--navy-card); border: 1px solid var(--line); border-radius: var(--r-card); padding: 22px; position: relative; }
+    .step .letter {
+      font-family: var(--mono); font-weight: 700; font-size: 14px; color: var(--navy);
+      background: var(--hands); width: 30px; height: 30px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center; margin-bottom: 14px;
+    }
+    .step:nth-child(2) .letter { background: var(--hands-soft); }
+    .step:nth-child(3) .letter { background: var(--eyes); color: #fff; }
+    .step:nth-child(4) .letter { background: var(--user); }
+    .step h4 { font-family: var(--head); font-size: 16px; font-weight: 700; margin-bottom: 7px; }
+    .step p { color: var(--text-dim); font-size: 13.5px; line-height: 1.5; }
+
+    .note { margin-top: 28px; padding: 18px 22px; border-left: 3px solid var(--hands); background: rgba(255,122,0,0.05); border-radius: 0 var(--r-card) var(--r-card) 0; }
+    .note p { color: var(--text-dim); font-size: 15px; }
+    .note b { color: var(--text); }
+
+    /* ---------- split feature ---------- */
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; }
+    @media (max-width: 820px) { .split { grid-template-columns: 1fr; gap: 32px; } }
+    .split ul { list-style: none; margin-top: 20px; display: flex; flex-direction: column; gap: 14px; }
+    .split li { padding-left: 26px; position: relative; color: var(--text-dim); font-size: 15.5px; }
+    .split li::before { content: "›"; position: absolute; left: 6px; color: var(--hands); font-family: var(--mono); font-weight: 700; }
+    .split li b { color: var(--text); font-weight: 600; }
+
+    .filebox { background: var(--navy-panel); border: 1px solid var(--line-strong); border-radius: var(--r-card); padding: 8px; font-family: var(--mono); font-size: 13px; }
+    .filebox .row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; color: var(--text-dim); }
+    .filebox .row:hover { background: rgba(255,255,255,0.03); }
+    .filebox .row .ic { color: var(--eyes-soft); }
+    .filebox .row .desc { color: var(--text-faint); margin-left: auto; font-size: 11.5px; }
+    .filebox .header { color: var(--text-faint); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; padding: 10px 12px 6px; }
+
+    /* ---------- guardrails ---------- */
+    .guard-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 18px; margin-top: 8px; }
+    @media (max-width: 820px) { .guard-grid { grid-template-columns: 1fr; } }
+    .guard { display: flex; gap: 16px; padding: 22px; background: var(--navy-card); border: 1px solid var(--line); border-radius: var(--r-card); }
+    .guard .gi { font-family: var(--mono); font-weight: 700; color: var(--hands); flex-shrink: 0; font-size: 18px; line-height: 1; margin-top: 3px; }
+    .guard h4 { font-family: var(--head); font-size: 16.5px; font-weight: 700; margin-bottom: 5px; }
+    .guard p { color: var(--text-dim); font-size: 14px; }
+
+    /* ---------- download ---------- */
+    .download { text-align: center; }
+    .download .wrap { display: flex; flex-direction: column; align-items: center; }
+    .download h2 { max-width: 18ch; }
+    .download .lead { text-align: center; margin-bottom: 32px; }
+    .codeblock {
+      font-family: var(--mono); font-size: 13px; text-align: left; color: var(--text-dim);
+      background: var(--navy-panel); border: 1px solid var(--line); border-radius: var(--r-card);
+      padding: 20px 24px; margin-top: 30px; max-width: 620px; width: 100%; overflow-x: auto; line-height: 1.8;
+    }
+    .codeblock .c { color: var(--text-faint); }
+    .codeblock .p { color: var(--hands-soft); }
+
+    /* ---------- footer ---------- */
+    footer { border-top: 1px solid var(--line); padding: 48px 0; }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: space-between; }
+    footer .brand { font-size: 17px; }
+    .foot-links { display: flex; gap: 24px; flex-wrap: wrap; }
+    .foot-links a { color: var(--text-dim); font-size: 14px; transition: color .15s; }
+    .foot-links a:hover { color: var(--text); }
+    .foot-meta { width: 100%; color: var(--text-faint); font-size: 13px; font-family: var(--mono); padding-top: 8px; }
+  </style>
+</head>
+<body>
+
+  <!-- ============ NAV ============ -->
+  <nav>
+    <div class="wrap">
+      <a class="brand" href="#top">
+        <span class="mark"><span class="chevron">&gt;</span><span class="cursor">_</span></span>
+        bot-hq
+      </a>
+      <div class="nav-links">
+        <a href="#why">Why</a>
+        <a href="#duo">The duo</a>
+        <a href="#workflow">Workflow</a>
+        <a href="#library">Context Library</a>
+        <a class="nav-cta" href="https://github.com/gregoryerrl/bot-hq/releases">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ============ HERO ============ -->
+  <header class="hero" id="top">
+    <div class="wrap">
+      <div>
+        <img class="hero-logo" src="logo.png" alt="bot-hq logo" />
+        <h1>Two AI agents.<br />One <span class="accent">builds</span>, one reviews.<br />You orchestrate.</h1>
+        <p class="sub">bot-hq is a desktop app for running AI-assisted coding sessions you can actually trust — a builder, an adversarial reviewer, and a project knowledge base, all under your control.</p>
+        <p class="who">For developers &amp; teams who want the speed of AI coding without giving up oversight. <b>You stay the conductor.</b></p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/gregoryerrl/bot-hq/releases">⬇ Download</a>
+          <a class="btn btn-ghost" href="https://github.com/gregoryerrl/bot-hq">View on GitHub</a>
+        </div>
+        <p class="platforms">macOS · Linux · Windows — free &amp; open source (MIT)</p>
+      </div>
+
+      <!-- mock session window -->
+      <div class="window" aria-hidden="true">
+        <div class="window-bar">
+          <span class="dots"><i></i><i></i><i></i></span>
+          <span class="title">bot-hq — session S-4F2A</span>
+        </div>
+        <div class="tabs">
+          <span class="tab">I</span>
+          <span class="tab">P</span>
+          <span class="tab active">A</span>
+          <span class="tab">V</span>
+        </div>
+        <div class="chatlog">
+          <div class="msg"><span class="who-tag you">You</span><p>Fix the off-by-one in the pagination cursor.</p></div>
+          <div class="msg"><span class="who-tag brian">Brian</span><p>Found it in <code>paginate()</code> — patching the bound and adding a test. <span class="phase-chip">APPLY</span></p></div>
+          <div class="msg"><span class="who-tag rain">Rain</span><p>Reviewed the diff. The fix is right, but the test doesn't cover the empty-page case — flagging.</p></div>
+          <div class="msg"><span class="who-tag brian">Brian</span><p>Good catch. Added the empty-page assertion. Tests green.</p></div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============ WHY ============ -->
+  <section id="why">
+    <div class="wrap">
+      <p class="eyebrow">The problem</p>
+      <h2>One AI assistant is fast — but unaccountable.</h2>
+      <p class="lead">It can confidently ship a plausible-looking bug, forget your project's conventions, or rewrite a file you didn't want touched. bot-hq is built around three ideas that fix that.</p>
+
+      <div class="grid grid-3" style="margin-top: 40px;">
+        <div class="card">
+          <div class="icon" style="background: rgba(255,122,0,0.12); color: var(--hands);">01</div>
+          <h3>A builder <em>and</em> a reviewer</h3>
+          <p>Real review catches what the author misses — especially when the reviewer runs a different model and gives a genuine second opinion instead of an echo.</p>
+        </div>
+        <div class="card">
+          <div class="icon" style="background: rgba(162,89,255,0.12); color: var(--eyes-soft);">02</div>
+          <h3>A durable knowledge base</h3>
+          <p>Your conventions, gotchas, and project memory live in one place the agents read <em>before</em> they start — so they begin informed, not cold.</p>
+        </div>
+        <div class="card">
+          <div class="icon" style="background: rgba(173,198,255,0.14); color: var(--user);">03</div>
+          <h3>You stay in the loop</h3>
+          <p>Pushes, risky commands, and flagged problems pause for your approval. Everything else just flows. You decide when work is done.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ THE DUO ============ -->
+  <section id="duo">
+    <div class="wrap">
+      <p class="eyebrow">The duo you orchestrate</p>
+      <h2>Two roles. Enforced, not suggested.</h2>
+      <p class="lead">Every session spawns two agents with distinct jobs — and a hard boundary between them. The reviewer literally cannot edit files.</p>
+
+      <div class="grid grid-3" style="margin-top: 40px;">
+        <div class="card role-card hands">
+          <div class="role-name">Brian · HANDS</div>
+          <h3>The builder</h3>
+          <p>Writes code, runs commands, makes commits. Your AI pair-programmer doing the actual work in the repo.</p>
+        </div>
+        <div class="card role-card eyes">
+          <div class="role-name">Rain · EYES</div>
+          <h3>The reviewer</h3>
+          <p>Reads Brian's work and pushes back adversarially. Write tools are blocked at the source — review only, no surprises.</p>
+        </div>
+        <div class="card role-card you">
+          <div class="role-name">You · ORCHESTRATOR</div>
+          <h3>The conductor</h3>
+          <p>Give the task, answer what the agents park for you, approve the steps that need a human, call it done. They don't run off on their own.</p>
+        </div>
+      </div>
+
+      <div class="note">
+        <p><b>Why two models?</b> Rain can run on a different model than Brian. A reviewer that doesn't share the author's blind spots catches more — cross-model diversity buys a real second opinion instead of an echo chamber.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ WORKFLOW / IPAV ============ -->
+  <section id="workflow">
+    <div class="wrap">
+      <p class="eyebrow">How a session flows</p>
+      <h2>IPAV — and you can watch it happen.</h2>
+      <p class="lead">Every substantial task walks through four phases. Each one leaves behind a short write-up you can open — so you read the agents' own account instead of scrolling back through chat.</p>
+
+      <div class="ipav">
+        <div class="step">
+          <div class="letter">I</div>
+          <h4>Investigate</h4>
+          <p>Read the code, the docs, your project notes. Gather facts — nothing changes yet.</p>
+        </div>
+        <div class="step">
+          <div class="letter">P</div>
+          <h4>Plan</h4>
+          <p>Brian proposes the approach and tradeoffs; Rain reviews it <em>before</em> any code is written.</p>
+        </div>
+        <div class="step">
+          <div class="letter">A</div>
+          <h4>Apply</h4>
+          <p>Brian produces the work — the actual edits, commits, and commands.</p>
+        </div>
+        <div class="step">
+          <div class="letter">V</div>
+          <h4>Verify</h4>
+          <p>Check the result against the plan: run tests, read output, proof-read adversarially.</p>
+        </div>
+      </div>
+
+      <div class="note">
+        <p>The session view has an <b>I / P / A / V tab</b> for each phase, holding that phase's <b>session document</b>. The Apply tab also renders a live, color-coded <b>git diff</b> of the work — so you can eyeball the real changes at a glance. IPAV isn't bureaucracy: it's how an AI change is stopped from shipping on momentum.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ CONTEXT LIBRARY ============ -->
+  <section id="library">
+    <div class="wrap">
+      <div class="split">
+        <div>
+          <p class="eyebrow">The part most AI tools are missing</p>
+          <h2>The Context Library</h2>
+          <p class="lead">A curated knowledge base your agents read <em>before</em> they start working — the things that aren't in the code, that a fresh assistant would never know.</p>
+          <ul>
+            <li><b>Conventions</b> — how <em>this</em> project does commits, tests, formatting, branching.</li>
+            <li><b>Gotchas</b> — the trap that bit you last time, the flaky test, the file that looks dead but isn't.</li>
+            <li><b>Project memory</b> — decisions you made and why, so they don't get re-litigated every session.</li>
+          </ul>
+          <p style="margin-top: 22px; color: var(--text-dim); font-size: 15px;">You curate it in a dedicated tab; agents read it on demand and only ever write back in one narrow, audited way. The knowledge base stays <b style="color:var(--text)">yours</b>.</p>
+        </div>
+
+        <div class="filebox">
+          <div class="header">Context Library · my-project</div>
+          <div class="row"><span class="ic">📄</span> conventions.md <span class="desc">house style, gates</span></div>
+          <div class="row"><span class="ic">📄</span> notes.md <span class="desc">gotchas, where-things-live</span></div>
+          <div class="row"><span class="ic">📄</span> decisions.md <span class="desc">why we chose X</span></div>
+          <div class="row"><span class="ic">📄</span> policy.yaml <span class="desc">enforced gates</span></div>
+          <div class="header" style="margin-top:6px;">Indexed · searchable · read first</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ GUARDRAILS ============ -->
+  <section id="guardrails">
+    <div class="wrap">
+      <p class="eyebrow">Guardrails</p>
+      <h2>Move fast — without shipping a regret.</h2>
+      <p class="lead">bot-hq is the policy layer. Enforcement runs at two layers (the agents are told to check, <em>and</em> git hooks enforce it independently), so a guardrail holds even if an agent's attention drifts.</p>
+
+      <div class="guard-grid" style="margin-top: 36px;">
+        <div class="guard">
+          <span class="gi">⊘</span>
+          <div><h4>Commit hygiene</h4><p>A configurable list of forbidden words is checked on every commit — keep unwanted attribution lines, secrets, or banned terms out of your history.</p></div>
+        </div>
+        <div class="guard">
+          <span class="gi">↑</span>
+          <div><h4>Push approval</h4><p>Pushes can pause for a one-click Approve / Reject, so nothing reaches your remote without you.</p></div>
+        </div>
+        <div class="guard">
+          <span class="gi">✓</span>
+          <div><h4>Review sign-off</h4><p>When Rain flags a real problem as blocking, Brian can't commit over it until it's resolved or explicitly rebutted.</p></div>
+        </div>
+        <div class="guard">
+          <span class="gi">⌘</span>
+          <div><h4>Sensitive commands</h4><p>Gate specific commands by keyword so they ask before running — and isolate each session in its own git worktree so parallel work never collides.</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ DOWNLOAD ============ -->
+  <section class="download" id="download">
+    <div class="wrap">
+      <p class="eyebrow">Get started</p>
+      <h2>Run your first reviewed session.</h2>
+      <p class="lead">Download the desktop app for your platform, or build it from source. You'll also need the <code style="font-family:var(--mono);color:var(--hands-soft)">claude-code</code> CLI, which bot-hq drives under the hood.</p>
+
+      <div class="cta-row" style="justify-content: center;">
+        <a class="btn btn-primary" href="https://github.com/gregoryerrl/bot-hq/releases">⬇ Download a release</a>
+        <a class="btn btn-ghost" href="https://github.com/gregoryerrl/bot-hq/blob/main/INSTALL.md">Install notes</a>
+      </div>
+
+      <div class="codeblock">
+<span class="c"># …or build from source</span>
+git clone https://github.com/gregoryerrl/bot-hq.git
+<span class="p">cd</span> bot-hq
+cp .env.example .env
+(<span class="p">cd</span> frontend &amp;&amp; npm install)
+cargo tauri dev   <span class="c"># builds the UI + opens the app</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FOOTER ============ -->
+  <footer>
+    <div class="wrap">
+      <a class="brand" href="#top">
+        <span class="mark"><span class="chevron">&gt;</span><span class="cursor">_</span></span>
+        bot-hq
+      </a>
+      <div class="foot-links">
+        <a href="https://github.com/gregoryerrl/bot-hq">GitHub</a>
+        <a href="https://github.com/gregoryerrl/bot-hq/releases">Releases</a>
+        <a href="https://github.com/gregoryerrl/bot-hq/blob/main/README.md">Docs</a>
+        <a href="https://github.com/gregoryerrl/bot-hq/blob/main/ARCHITECTURE.md">Architecture</a>
+        <a href="https://github.com/gregoryerrl/bot-hq/blob/main/LICENSE">License</a>
+      </div>
+      <p class="foot-meta">A desktop app for disciplined, reviewable AI coding sessions. Free &amp; open source under the MIT License.</p>
+    </div>
+  </footer>
+
+</body>
+</html>
