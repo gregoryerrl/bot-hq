@@ -241,7 +241,7 @@ mod tests {
     fn first_read_records_baseline_no_mutation() {
         let data = tempdir().unwrap();
         std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
-        std::fs::write(crate::policy::general_policy_path(data.path()), "forbidden_in_commits:\n  - Claude\n").unwrap();
+        std::fs::write(crate::policy::general_policy_path(data.path()), "forbidden_in_commits:\n  - Acme\n").unwrap();
         let log = ViolationsLog::new(data.path());
         let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
         assert_eq!(outcomes.len(), 1);
@@ -255,7 +255,7 @@ mod tests {
     fn second_read_unchanged_no_mutation() {
         let data = tempdir().unwrap();
         std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
-        std::fs::write(crate::policy::general_policy_path(data.path()), "forbidden_in_commits:\n  - Claude\n").unwrap();
+        std::fs::write(crate::policy::general_policy_path(data.path()), "forbidden_in_commits:\n  - Acme\n").unwrap();
         let log = ViolationsLog::new(data.path());
         audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
         let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
@@ -268,12 +268,12 @@ mod tests {
         let data = tempdir().unwrap();
         std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
         let pol = crate::policy::general_policy_path(data.path());
-        std::fs::write(&pol, "forbidden_in_commits:\n  - Claude\n  - bot-hq\n").unwrap();
+        std::fs::write(&pol, "forbidden_in_commits:\n  - Acme\n  - bot-hq\n").unwrap();
         let log = ViolationsLog::new(data.path());
         // Baseline
         audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
         // Mutate: agent quietly removes "bot-hq"
-        std::fs::write(&pol, "forbidden_in_commits:\n  - Claude\n").unwrap();
+        std::fs::write(&pol, "forbidden_in_commits:\n  - Acme\n").unwrap();
         let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "agent").unwrap();
         assert!(matches!(outcomes[0].1, MutationOutcome::Changed { .. }));
         let recs = log.read_all().unwrap();
@@ -295,12 +295,12 @@ mod tests {
         let data = tempdir().unwrap();
         std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
         let policy = crate::policy::general_policy_path(data.path());
-        std::fs::write(&policy, "forbidden_in_commits:\n  - Claude\n").unwrap();
+        std::fs::write(&policy, "forbidden_in_commits:\n  - Acme\n").unwrap();
         let log = ViolationsLog::new(data.path());
         // Baseline read records the first hash.
         audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
         // Mutate so the next audit takes the Changed branch → records a mutation.
-        std::fs::write(&policy, "forbidden_in_commits:\n  - Claude\n  - Anthropic\n").unwrap();
+        std::fs::write(&policy, "forbidden_in_commits:\n  - Acme\n  - Globex\n").unwrap();
         let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
         assert!(matches!(outcomes[0].1, MutationOutcome::Changed { .. }));
         let recs = log.read_all().unwrap();
@@ -390,12 +390,12 @@ mod tests {
         let data = tempdir().unwrap();
         std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
         let pol = crate::policy::general_policy_path(data.path());
-        std::fs::write(&pol, "forbidden_in_commits:\n  - Claude\n").unwrap();
+        std::fs::write(&pol, "forbidden_in_commits:\n  - Acme\n").unwrap();
         let log = ViolationsLog::new(data.path());
         // Baseline read records the first hash.
         audit_policy_files(data.path(), None, Some(&log), "s1", "test").unwrap();
         // User edits via the editor command → write + record.
-        std::fs::write(&pol, "forbidden_in_commits:\n  - Claude\n  - bot-hq\n").unwrap();
+        std::fs::write(&pol, "forbidden_in_commits:\n  - Acme\n  - bot-hq\n").unwrap();
         record_policy_write(data.path(), &pol).unwrap();
         // Next audit sees the recorded hash → Unchanged, no violation.
         let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "agent").unwrap();

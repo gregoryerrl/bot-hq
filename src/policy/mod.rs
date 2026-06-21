@@ -499,7 +499,7 @@ mod tests {
     #[test]
     fn known_policy_keys_are_silent() {
         let path = Path::new("policy.yaml");
-        let body = "push_gate: ask\nforce_push: blocked\ncommit_style: imperative\n";
+        let body = "push_gate: ask\nforce_push: blocked\ncommit_style: house-style\n";
         assert!(check_unknown_policy_keys(path, body, POLICY_KNOWN_KEYS).is_empty());
         // tool_gate is allowed only for the session-snapshot key set.
         let with_gate = "tool_gate: []\npush_gate: auto\n";
@@ -515,7 +515,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write(
             &general_policy_path(dir.path()),
-            "forbidden_in_commits:\n  - Claude\n  - GPT\n",
+            "forbidden_in_commits:\n  - Acme\n  - Zeta\n",
         );
         write(
             &dir.path().join("library/projects/foo/policy.yaml"),
@@ -545,7 +545,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write(
             &general_policy_path(dir.path()),
-            "forbidden_in_commits:\n  - Claude\n",
+            "forbidden_in_commits:\n  - Acme\n",
         );
         write(
             &dir.path().join("library/projects/foo/policy.yaml"),
@@ -573,7 +573,7 @@ mod tests {
         let dir = tempdir().unwrap();
         write(
             &general_policy_path(dir.path()),
-            "forbidden_in_commits:\n  - Claude\n",
+            "forbidden_in_commits:\n  - Acme\n",
         );
         write(
             &dir.path().join("library/projects/foo/policy.yaml"),
@@ -588,10 +588,10 @@ mod tests {
         let dir = tempdir().unwrap();
         write(
             &general_policy_path(dir.path()),
-            "forbidden_in_commits:\n  - Claude\n",
+            "forbidden_in_commits:\n  - Acme\n",
         );
         let p = Policy::resolve(dir.path(), Some("nope"), None).unwrap();
-        assert_eq!(p.forbidden_in_commits, vec!["Claude"]);
+        assert_eq!(p.forbidden_in_commits, vec!["Acme"]);
     }
 
     #[test]
@@ -620,8 +620,8 @@ mod tests {
     #[allow(clippy::field_reassign_with_default)]
     fn first_forbidden_word_finds_match() {
         let mut p = Policy::default();
-        p.forbidden_in_commits = vec!["bot-hq".into(), "Claude".into()];
-        assert_eq!(p.first_forbidden_word("Co-authored by Claude"), Some("Claude"));
+        p.forbidden_in_commits = vec!["bot-hq".into(), "Acme".into()];
+        assert_eq!(p.first_forbidden_word("released by Acme"), Some("Acme"));
         assert_eq!(p.first_forbidden_word("clean commit"), None);
     }
 
@@ -633,7 +633,7 @@ mod tests {
         // bot-hq forbids — written synthetically so this test file doesn't itself
         // trip the (now word-boundary) pre-commit scan it's testing.
         p.forbidden_in_commits =
-            vec!["rain".into(), "Claude".into(), "Hyphen-Joined-Tag".into(), "GPT".into()];
+            vec!["rain".into(), "Acme".into(), "Hyphen-Joined-Tag".into(), "Zeta".into()];
 
         // The reported false positives no longer trip (substring, not whole word).
         for ok in [
@@ -641,8 +641,8 @@ mod tests {
             "drain the queue",
             "brain dump",
             "it was raining earlier",
-            "wire up ClaudeConfig.tsx",
-            "the ClaudeOverrides store",
+            "wire up AcmeConfig.tsx",
+            "the AcmeOverrides store",
             "rain_check is a word char boundary", // `_` is a word char
         ] {
             assert_eq!(p.first_forbidden_word(ok), None, "should NOT trip: {ok:?}");
@@ -651,13 +651,13 @@ mod tests {
         // Genuine whole-word brand/footer mentions still caught.
         assert_eq!(p.first_forbidden_word("let it rain"), Some("rain"));
         assert_eq!(p.first_forbidden_word("(rain)"), Some("rain"));
-        assert_eq!(p.first_forbidden_word("ship Claude Opus"), Some("Claude"));
-        assert_eq!(p.first_forbidden_word("the Claude: model"), Some("Claude"));
+        assert_eq!(p.first_forbidden_word("ship Acme Opus"), Some("Acme"));
+        assert_eq!(p.first_forbidden_word("the Acme: model"), Some("Acme"));
         assert_eq!(
             p.first_forbidden_word("Add Hyphen-Joined-Tag footer"),
             Some("Hyphen-Joined-Tag")
         );
-        assert_eq!(p.first_forbidden_word("uses GPT-4 here"), Some("GPT"));
+        assert_eq!(p.first_forbidden_word("uses Zeta-4 here"), Some("Zeta"));
     }
 
     #[test]
@@ -665,7 +665,7 @@ mod tests {
         assert!(contains_word("let it rain", "rain"));
         assert!(contains_word("rain.", "rain"));
         assert!(!contains_word("constraint", "rain"));
-        assert!(!contains_word("ClaudeConfig", "Claude"));
+        assert!(!contains_word("AcmeConfig", "Acme"));
         assert!(!contains_word("rain_check", "rain")); // `_` is a word char
         assert!(contains_word("bot-hq is here", "bot-hq")); // hyphen edges are boundaries
         assert!(!contains_word("anything", "")); // empty needle never matches
@@ -680,12 +680,12 @@ mod tests {
         assert!(contains_word("add hyphen-joined-tag footer", "Hyphen-Joined-Tag"));
         assert!(contains_word("HYPHEN-JOINED-TAG", "Hyphen-Joined-Tag"));
         assert!(contains_word("a Hyphen-Joined-By line", "hyphen-joined-by"));
-        assert!(contains_word("ship claude opus", "Claude"));
-        assert!(contains_word("uses gpt-4 here", "GPT"));
+        assert!(contains_word("ship acme opus", "Acme"));
+        assert!(contains_word("uses zeta-4 here", "Zeta"));
         // Word boundaries STILL apply case-insensitively — an embedded
         // identifier does not trip.
-        assert!(!contains_word("fooclaudeconfig", "Claude"));
-        assert!(!contains_word("claude_config", "Claude")); // `_` is a word char
+        assert!(!contains_word("fooacmeconfig", "Acme"));
+        assert!(!contains_word("acme_config", "Acme")); // `_` is a word char
         assert!(!contains_word("constraint", "rain"));
     }
 

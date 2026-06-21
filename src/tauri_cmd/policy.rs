@@ -206,7 +206,7 @@ mod tests {
             force_push: ForcePushMode::Blocked,
             per_action_approval: vec!["terraform apply".into()],
             branch_pattern: "feature/.*".into(),
-            commit_style: "imperative".into(),
+            commit_style: "house-style".into(),
         }
     }
 

@@ -774,7 +774,7 @@ mod tests {
         fs::write(root.join("version.txt"), "1\n").unwrap();
         fs::write(
             root.join("general-policy.yaml"),
-            "forbidden_in_commits:\n  - Claude\n",
+            "forbidden_in_commits:\n  - Acme\n",
         )
         .unwrap();
         fs::write(root.join("tool-gate.json"), "[]\n").unwrap();

@@ -1150,12 +1150,12 @@ mod tests {
         std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
             data.path().join("library/projects/foo/policy.yaml"),
-            "forbidden_in_commits:\n  - Claude\n  - Co-Authored-By\n",
+            "forbidden_in_commits:\n  - Acme\n  - Foo-Bar-Baz\n",
         )
         .unwrap();
         // Simulate git writing the commit message file.
         let msg_file = data.path().join("MSG");
-        std::fs::write(&msg_file, "feat: helped by Claude\n").unwrap();
+        std::fs::write(&msg_file, "feat: helped by Acme\n").unwrap();
         let code = run_commit_msg(data.path(), Some("foo"), &msg_file).unwrap();
         assert_eq!(code, 1);
     }
@@ -1166,7 +1166,7 @@ mod tests {
         std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
             data.path().join("library/projects/foo/policy.yaml"),
-            "forbidden_in_commits:\n  - Claude\n",
+            "forbidden_in_commits:\n  - Acme\n",
         )
         .unwrap();
         let msg_file = data.path().join("MSG");
@@ -1183,13 +1183,13 @@ mod tests {
         std::fs::create_dir_all(data.path().join("library/projects/foo")).unwrap();
         std::fs::write(
             data.path().join("library/projects/foo/policy.yaml"),
-            "forbidden_in_commits:\n  - Claude\n",
+            "forbidden_in_commits:\n  - Acme\n",
         )
         .unwrap();
         let msg_file = data.path().join("MSG");
         std::fs::write(
             &msg_file,
-            "feat: clean\n# Please enter the commit message — Claude can help\n",
+            "feat: clean\n# Please enter the commit message — Acme can help\n",
         )
         .unwrap();
         let code = run_commit_msg(data.path(), Some("foo"), &msg_file).unwrap();

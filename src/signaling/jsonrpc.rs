@@ -1649,7 +1649,7 @@ mod tests {
                 "tools/call",
                 json!({
                     "name": "check_commit_message",
-                    "arguments": {"message": "anything with Claude inside"}
+                    "arguments": {"message": "anything with Acme inside"}
                 }),
                 1,
             ),
@@ -1670,7 +1670,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("library/projects/foo")).unwrap();
         std::fs::write(
             tmp.path().join("library/projects/foo/policy.yaml"),
-            "forbidden_in_commits:\n  - bot-hq\n  - Claude\n",
+            "forbidden_in_commits:\n  - bot-hq\n  - Acme\n",
         )
         .unwrap();
         let log = crate::policy::ViolationsLog::new(tmp.path());
