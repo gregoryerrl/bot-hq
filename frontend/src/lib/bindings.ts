@@ -1170,7 +1170,7 @@ per_action_approval?: string[];
  */
 branch_pattern?: string; 
 /**
- * Free-form commit style note (imperative, conventional, etc).
+ * Free-form commit style note.
  * Surfaced to the agent in its system prompt.
  */
 commit_style?: string }
