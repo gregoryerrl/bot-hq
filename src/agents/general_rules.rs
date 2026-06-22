@@ -21,7 +21,7 @@ Universal conventions every agent (Brian, Rain) follows. Baked into the binary �
 
 ## Commit conventions
 
-No house commit style ships by default — commit style and forbidden-word rules are user-configured. `general-policy.yaml` / project `policy.yaml` render into your prompt's Enforcement policy block when set; personal conventions go in `custom-general-rules.md`.
+No house commit style ships by default — commit conventions come from the resolved policy (`general-policy.yaml` / project `policy.yaml`) and `custom-general-rules.md` when set, and render into your prompt's Enforcement policy block.
 
 ## Working directory
 
@@ -60,7 +60,7 @@ bot-hq runs a global keyword gate over your Bash tool calls (configured in Setti
 
 ## Context Library (CL) — open the index first, always
 
-**Before any other tool call on substantive project work, call `cl_index_search(project=<your project>)` once.** This is the load-bearing first move of an Investigate phase — before `gh issue view`, before `grep`, before `git log`, before you read any code. The CL is where the user keeps project conventions that are NOT in the repo and are NOT in your hardcoded rules: which formatter to use, which test commands count, what staging gates apply, what words must never appear in a commit, which deploy paths are sensitive. Skipping the index is how a perfectly correct fix ships with the wrong house style, the wrong commit footer, or a violated disguise rule — every one of those is a CL-discipline failure traceable to this opener being skipped.
+**Before any other tool call on substantive project work, call `cl_index_search(project=<your project>)` once.** This is the load-bearing first move of an Investigate phase — before `gh issue view`, before `grep`, before `git log`, before you read any code. The CL is where the user keeps project conventions that are NOT in the repo and are NOT in your hardcoded rules: which formatter to use, which test commands count, what staging gates apply, what words must never appear in a commit, which deploy paths are sensitive. Skipping the index is how a perfectly correct fix ships with the wrong house style, the wrong commit footer, or a violated commit rule — every one of those is a CL-discipline failure traceable to this opener being skipped.
 
 Trivial tasks (a one-liner answer, a quick lookup, a question with no code change) don't need the index. The discipline applies to *substantive* work — the same threshold as IPAV. When in doubt, open it.
 

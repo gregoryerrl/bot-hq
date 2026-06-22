@@ -247,9 +247,9 @@ collide with a running production bot-hq at `~/.bot-hq/`.
 - **Storage:** sqlite via sqlx — messages, sessions, agent/model configs, the
   durable awaiting-input tray, IPAV session documents, plugins, and the searchable CL
   index.
-- **Policy enforcement:** two layers over per-project rules (forbidden words, push
-  gate, force-push, branch pattern) — MCP tool calls as the primary path, git hooks
-  as a deterministic backstop. Audited to `violations.jsonl`.
+- **Policy enforcement:** two layers over per-project rules (push gate, force-push,
+  branch pattern) — MCP tool calls as the primary path, git hooks as a deterministic
+  backstop. Audited to `violations.jsonl`.
 
 ## Internal MCP tools (served to child agents)
 
@@ -267,7 +267,6 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `mark_awaiting_user(reason)` | Flag the session's `[Need User Input]` badge. Non-blocking. |
 | `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, per-action approval. |
 | `action_gate(command)` | Run a Bash command the Tool Gate blocked: bot-hq surfaces Approve/Reject and, on approve, executes it in the session repo and returns the output. |
-| `check_commit_message(message)` | Pre-commit grep for forbidden words. Returns `ok` or `forbidden_word:<word>`. |
 | `close_session()` | Ask the host to close this session. |
 | `list_my_pending_questions()` | List questions THIS agent has parked but haven't been answered. Used to avoid duplicate retries. |
 | `withdraw_question(choice_id)` | Withdraw a stale parked question. |
@@ -301,8 +300,6 @@ Each project can carry a `policy.yaml` under
 `<data_dir>/library/projects/<project>/`, layered over a machine-wide
 `config/general-policy.yaml`. Fields:
 
-- `forbidden_in_commits: [string]` — words/phrases that must not appear in commit
-  messages or staged diffs.
 - `push_gate: auto | ask` — `auto` lets pushes through; `ask` makes the `pre-push`
   hook surface a per-push Approve/Reject prompt and block on your pick.
 - `force_push: blocked | allowed` — controls `git push --force` /
@@ -310,14 +307,13 @@ Each project can carry a `policy.yaml` under
 - `per_action_approval: [prefix]` — bash commands that always ask, with no
   remembered approval.
 - `branch_pattern: regex` — branch names must match. Empty = no constraint.
-- `commit_style: text` — free-form note surfaced in the agent's system prompt.
 
 **Tool Gate.** Beyond `policy.yaml`, a global keyword list (Settings → "Gated Bash
 Keywords") gates agent Bash commands: a `gate` keyword blocks the command and routes
 it to the `action_gate` tool (Approve/Reject → bot-hq executes on approve); an
 `auto_allow` keyword lets it run with no prompt.
 
-**Two layers.** (1) MCP tools (`check_commit_message`, `request_approval`, …) are
+**Two layers.** (1) MCP tools (`request_approval`, `action_gate`, …) are
 the primary path — agents call them before the corresponding bash op, and skipping
 logs a `Denied` violation. (2) Git hooks (`commit-msg`, `pre-commit`, `post-commit`,
 `pre-push`), installed in the working repo by `bot-hq install-hooks`, re-resolve the

@@ -188,7 +188,7 @@ fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     if check_findings_gate(data_dir, "pre-commit") != 0 {
         return Ok(1);
     }
-    // Layer 2 — forbidden-word disguise scan.
+    // Layer 2 — forbidden-word scan.
     let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
@@ -530,8 +530,8 @@ async fn log_push_block(
 /// `gate` keyword BLOCKS the direct call (exit 2) and routes the agent to the
 /// `action_gate` MCP tool (which surfaces Approve/Reject and executes on
 /// approve); an `auto_allow`/unmatched command runs normally (exit 0). The
-/// config is global + bot-hq-side, so nothing is written into a working repo —
-/// disguise-safe for client repos. This replaces the per-project
+/// config is global + bot-hq-side, so nothing is written into a working repo.
+/// This replaces the per-project
 /// `tool_blocklist` role (post-2026-05-29 fabricated-comment incident) with a
 /// single user-configurable gate that can also EXECUTE the command on approval.
 ///
@@ -857,7 +857,7 @@ fn audit_at_hook(data_dir: &Path, project: Option<&str>, hook_name: &str) {
 // EYES filed (via `eyes_flag`) and HANDS hasn't dispositioned blocks `git commit`
 // (and, as a re-check, `git push`). The agent-facing MCP `check_open_findings`
 // tool is the prompted primary; this hook fires regardless of whether the agent
-// remembered to call it — the same two-layer model as the disguise gate.
+// remembered to call it — the same two-layer model as the commit-message gate.
 //
 // Findings live in the SQLite DB, so (unlike the YAML-only forbidden-word scan)
 // the hook reads the DB directly, READ-ONLY. It is FAIL-OPEN on every DB error

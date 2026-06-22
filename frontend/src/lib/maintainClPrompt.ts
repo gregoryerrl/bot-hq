@@ -13,7 +13,7 @@ export function maintainClPrompt(project: string): string {
 
 **Goal:** make \`${project}\`'s CL an accurate, high-signal "study notes" layer so future sessions orient from it instead of re-reading the whole codebase — and keep it LIGHTER than the codebase (prune as much as you add).
 
-**What belongs in CL** is what the code doesn't carry — a where-things-live map (subsystem → the 2-3 files + entry points), conventions (formatter, test/build commands, commit + disguise rules, deploy gates), gotchas, decision rationale, and "why it's weird here." If \`grep\` finds it in seconds, it does NOT belong in the CL.
+**What belongs in CL** is what the code doesn't carry — a where-things-live map (subsystem → the 2-3 files + entry points), conventions (formatter, test/build commands, commit rules, deploy gates), gotchas, decision rationale, and "why it's weird here." If \`grep\` finds it in seconds, it does NOT belong in the CL.
 
 Work the IPAV phases:
 

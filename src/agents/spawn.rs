@@ -846,7 +846,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // the HANDS branch, and she's already mechanically read-only via the
         // deny list above (her mutation surface is blocked regardless of any
         // hook). Injected via `--settings` (a process arg) so NOTHING is
-        // written into the working repo's tree — disguise-safe for client repos.
+        // written into the working repo's tree — it lives bot-hq-side, never in the working repo.
         match std::env::current_exe() {
             Ok(exe) => {
                 let mut hook_cmd = format!(

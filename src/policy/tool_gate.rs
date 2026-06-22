@@ -9,7 +9,7 @@
 //! `git push`).
 //!
 //! Stored as `<data_dir>/config/tool-gate.json` — bot-hq-side, NEVER written into a
-//! working repo, so it's disguise-safe for client projects. The same `load`
+//! working repo. The same `load`
 //! is read by THREE callers: the Tauri Settings commands (in-process), the
 //! `action_gate` bridge method (in-process), and the PreToolUse hook
 //! subprocess (which gets `--data-dir` on its command line). They must all

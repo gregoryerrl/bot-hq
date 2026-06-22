@@ -170,7 +170,7 @@ impl Policy {
 
     /// Returns the first forbidden word found in `text`, if any.
     ///
-    /// Case-INsensitive — a disguise check must not be evadable by re-casing
+    /// Case-INsensitive — a forbidden-word check must not be evadable by re-casing
     /// (a forbidden term written in another case must still be caught, since
     /// downstream systems may treat differing cases as equivalent). A forbidden
     /// word may therefore also match lowercase occurrences in diffs — curate the
@@ -206,7 +206,7 @@ impl Policy {
         );
 
         if !self.forbidden_in_commits.is_empty() {
-            out.push_str("### Commit-message disguise (pre-commit grep)\n\n");
+            out.push_str("### Forbidden words in commits (pre-commit grep)\n\n");
             out.push_str(
                 "Before every `git commit`, call \
                  `mcp__bot-hq-signaling__check_commit_message` with the proposed \
@@ -401,7 +401,7 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
         return false;
     }
     // Lowercase both sides so a forbidden term is caught in any casing (a
-    // disguise check must not be evadable by re-casing). Match AND boundary-check
+    // forbidden-word check must not be evadable by re-casing). Match AND boundary-check
     // against the SAME lowercased string so byte offsets stay aligned even when a
     // case fold changes byte length.
     let hay_lc = haystack.to_lowercase();
@@ -673,7 +673,7 @@ mod tests {
 
     #[test]
     fn contains_word_is_case_insensitive() {
-        // A disguise check must catch ALL casings, else re-casing evades it (the
+        // A forbidden-word check must catch ALL casings, else re-casing evades it (the
         // load-bearing real case is a git trailer whose lowercase form is honored
         // identically). "Hyphen-Joined-Tag" stands in for the real hyphenated
         // footer marker so this file doesn't itself trip the scan it tests.

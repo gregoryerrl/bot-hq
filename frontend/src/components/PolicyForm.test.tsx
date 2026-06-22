@@ -10,10 +10,8 @@ describe("PolicyForm", () => {
     render(<PolicyForm value={EMPTY} onChange={() => {}} />);
     expect(screen.getByText("Push gate")).toBeInTheDocument();
     expect(screen.getByText("Force push")).toBeInTheDocument();
-    expect(screen.getByText("Forbidden in commits")).toBeInTheDocument();
     expect(screen.getByText("Per-action approval")).toBeInTheDocument();
     expect(screen.getByText("Branch pattern")).toBeInTheDocument();
-    expect(screen.getByText("Commit style")).toBeInTheDocument();
   });
 
   it("defaults the toggles to auto / allowed when the policy is empty", () => {
@@ -39,35 +37,6 @@ describe("PolicyForm", () => {
     fireEvent.click(screen.getByText("Blocked"));
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({ force_push: "blocked" }),
-    );
-  });
-
-  it("adds a forbidden-word row", () => {
-    const onChange = vi.fn();
-    render(
-      <PolicyForm
-        value={{ forbidden_in_commits: ["Claude"] }}
-        onChange={onChange}
-      />,
-    );
-    // Two "+ Add" buttons (forbidden + per-action); the first is forbidden.
-    fireEvent.click(screen.getAllByText("+ Add")[0]);
-    expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({ forbidden_in_commits: ["Claude", ""] }),
-    );
-  });
-
-  it("removes a forbidden-word row", () => {
-    const onChange = vi.fn();
-    render(
-      <PolicyForm
-        value={{ forbidden_in_commits: ["Claude", "bot-hq"] }}
-        onChange={onChange}
-      />,
-    );
-    fireEvent.click(screen.getAllByLabelText("Remove entry")[0]);
-    expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({ forbidden_in_commits: ["bot-hq"] }),
     );
   });
 

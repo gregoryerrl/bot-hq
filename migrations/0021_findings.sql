@@ -5,7 +5,7 @@
 -- still `open` gates `git commit` — enforced by the MCP `check_open_findings`
 -- tool (prompted primary) PLUS the pre-commit/pre-push git hooks (mechanical
 -- backstop, read-only DB query). `advisory` findings never gate. This mirrors
--- the `check_commit_message` disguise gate's two-layer model.
+-- the `check_commit_message` gate's two-layer model.
 --
 -- Lifecycle (status):
 --   open     → filed, not yet resolved (gates when severity='blocking')

@@ -58,18 +58,6 @@ export function PolicyForm({
       </div>
 
       <Field
-        label="Forbidden in commits"
-        hint="Words/phrases blocked by the pre-commit grep (commit message + staged diff)."
-      >
-        <StringList
-          items={value.forbidden_in_commits ?? []}
-          disabled={disabled}
-          placeholder="e.g. an internal codename"
-          onChange={(forbidden_in_commits) => patch({ forbidden_in_commits })}
-        />
-      </Field>
-
-      <Field
         label="Per-action approval"
         hint="Bash command prefixes that require request_approval on every invocation."
       >
@@ -81,28 +69,16 @@ export function PolicyForm({
         />
       </Field>
 
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-        <Field label="Branch pattern" hint="Regex branch names must match. Empty = no constraint.">
-          <input
-            type="text"
-            value={value.branch_pattern ?? ""}
-            disabled={disabled}
-            onChange={(e) => patch({ branch_pattern: e.target.value })}
-            placeholder="(no constraint)"
-            className={terminalInputClass}
-          />
-        </Field>
-        <Field label="Commit style" hint="Free-form note surfaced to the agent's system prompt.">
-          <input
-            type="text"
-            value={value.commit_style ?? ""}
-            disabled={disabled}
-            onChange={(e) => patch({ commit_style: e.target.value })}
-            placeholder="(optional)"
-            className={terminalInputClass}
-          />
-        </Field>
-      </div>
+      <Field label="Branch pattern" hint="Regex branch names must match. Empty = no constraint.">
+        <input
+          type="text"
+          value={value.branch_pattern ?? ""}
+          disabled={disabled}
+          onChange={(e) => patch({ branch_pattern: e.target.value })}
+          placeholder="(no constraint)"
+          className={terminalInputClass}
+        />
+      </Field>
     </div>
   );
 }

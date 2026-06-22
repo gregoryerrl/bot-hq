@@ -255,7 +255,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "eyes_flag",
-            description: "EYES-only (rain). File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until HANDS dispositions it (the mechanical EYES-sign-off gate, mirroring the disguise gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id. Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains HANDS to ignore the gate). This is how EYES makes a finding STICK instead of relying on HANDS reading chat.",
+            description: "EYES-only (rain). File a review finding on this session — usually during Verify. `severity='blocking'` records a finding that GATES `git commit` until HANDS dispositions it (the mechanical EYES-sign-off gate, mirroring the commit-message gate — review-completion becomes enforced, not just socially expected); `severity='advisory'` is a nit that NEVER blocks. Returns the finding id. Use `blocking` for a real bug / correctness or safety issue you want fixed before ship; do NOT over-use it for style nits (that trains HANDS to ignore the gate). This is how EYES makes a finding STICK instead of relying on HANDS reading chat.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

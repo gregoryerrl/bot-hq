@@ -112,7 +112,7 @@ bot-hq emits no explicit "agent done" event, so the rollout loop infers it:
 
 - **CL contamination:** agents load the running instance's `general-rules.md` +
   `custom-instruction.md`. Against a prod data-dir that's bot-hq house rules
-  (CL-first, EOD, disguise) — noise that measures "Brian the maintainer", not a
+  (CL-first, EOD, commit rules) — noise that measures "Brian the maintainer", not a
   clean SWE agent. For real numbers, run bot-hq under a dedicated
   `BOT_HQ_DATA_DIR=~/.bot-hq-swebench/` with neutral instructions +
   `general-policy.yaml { push_gate.mode: auto }`. The hardcoded HANDS/EYES role

@@ -793,7 +793,7 @@ pub fn read_system_prompt(
          Only fall back to `ask_user_choice` if `_globals` also misses.\n\n\
          Per-project conventional files at `{cl}/projects/<project>/` \
          (the index covers everything under this path, not just these):\n\
-         - `conventions.md` — repo, stack, commands, gates, disguise rules\n\
+         - `conventions.md` — repo, stack, commands, gates, commit rules\n\
          - `notes.md` — current state, recurring trouble, gotchas\n\
          - `decisions.md` — chronological log of prior decisions\n\
          - `policy.yaml` — machine-enforced gates (already rendered into \

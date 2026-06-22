@@ -32,7 +32,7 @@ pub struct SessionPolicy {
 }
 
 /// Path for one session's policy snapshot. Lives under `.local/` alongside
-/// other runtime state (the SQLite db), NOT in a working repo — disguise-safe.
+/// other runtime state (the SQLite db), NOT in a working repo.
 pub fn session_policy_path(data_dir: &Path, session_id: &str) -> PathBuf {
     data_dir
         .join(".local")

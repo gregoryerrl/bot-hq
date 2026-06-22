@@ -286,10 +286,10 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**25 internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
-for the full list with descriptions): `ask_user_choice`,
+**Internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `advance_phase`, `request_phase_advance`,
-`request_approval`, `action_gate`, `check_commit_message`,
+`request_approval`, `action_gate`,
 `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_search`,
 `session_doc_read`, `cl_index_search`, `cl_register_read`, `cl_rescan`,
@@ -342,7 +342,7 @@ forgets to call the MCP tool.
 
 **Two layers** (`src/policy/`):
 
-1. **MCP tools** (`check_commit_message`, `request_approval`, …) are
+1. **MCP tools** (`request_approval`, `action_gate`, …) are
    the primary path. Agents are instructed in their system prompt to
    call them before the corresponding bash op. Skipping logs a
    `Denied` violation to `<data_dir>/violations.jsonl`.
@@ -359,9 +359,9 @@ forgets to call the MCP tool.
 - `<data_dir>/library/projects/<project>/policy.yaml` — per-project overlay
   (lists are replaced, not merged).
 
-Fields: `forbidden_in_commits`, `push_gate` (scalar `auto`|`ask`),
+Fields: `push_gate` (scalar `auto`|`ask`),
 `force_push` (scalar `blocked`|`allowed`), `per_action_approval`,
-`branch_pattern`, `commit_style`. (push_gate/force_push are per-tier
+`branch_pattern`. (push_gate/force_push are per-tier
 toggles inherited general→project→session; there are no per-branch
 "remembered approvals" or agent-side grants.)
 (`tool_blocklist` is RETIRED — superseded by the global Tool Gate
@@ -401,7 +401,7 @@ command on approval.
 - **Config:** one global list at `<data_dir>/config/tool-gate.json` —
   `[{keyword, mode}]`, `mode` ∈ `gate | auto_allow`, edited in Settings
   ("Gated Bash Keywords"). NOT per-project, NOT in `policy.yaml` —
-  bot-hq-side, so nothing is written into a working repo (disguise-safe).
+  bot-hq-side, so nothing is written into a working repo.
   Matching is case-insensitive substring against the tool name or command;
   `gate` wins over `auto_allow` on conflict.
 - **Tripwire:** the PreToolUse Bash hook (`policy-check tool-gate`, injected

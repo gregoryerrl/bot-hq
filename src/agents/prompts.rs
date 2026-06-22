@@ -49,7 +49,7 @@ Push and force-push are governed by the per-session policy in Session Settings (
 
 ## EYES-sign-off gate (before every commit)
 
-Rain (EYES) can file BLOCKING findings on your work via `eyes_flag`. A blocking finding MECHANICALLY gates `git commit` (and `git push`) until you resolve it — the pre-commit hook enforces this even if you never read chat, mirroring the disguise gate. So **before any `git commit`, call `check_open_findings`.** If it returns `blocked: …`, resolve EACH listed finding with `disposition_finding(finding_id, status, reason)`:
+Rain (EYES) can file BLOCKING findings on your work via `eyes_flag`. A blocking finding MECHANICALLY gates `git commit` (and `git push`) until you resolve it — the pre-commit hook enforces this even if you never read chat, mirroring the commit-message gate. So **before any `git commit`, call `check_open_findings`.** If it returns `blocked: …`, resolve EACH listed finding with `disposition_finding(finding_id, status, reason)`:
 - `status=\"fixed\"` — you fixed it; `reason` references the fix (commit / line / test).
 - `status=\"rebutted\"` — you disagree; `reason` justifies why. A rebuttal does NOT need Rain's agreement (so it can't deadlock), but it IS surfaced to the user — so rebut honestly; don't wave off a real bug just to clear the gate.
 
@@ -75,7 +75,7 @@ Trivial single-step work (one-line answer, quick lookup) doesn't need a doc — 
 
 ## Session opener — CL index, every time
 
-Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `gh issue view`, not `git log`, not `grep`. The CL is where project conventions live — formatter, test commands, disguise rules, deploy gates, naming patterns. None of those are in your hardcoded prompts and most aren't in the repo. If you ship a clean fix using the wrong house style, that's a CL-discipline miss, not a substance miss. Open the index, read `conventions.md` + any related audit-notes, then start work. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
+Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `gh issue view`, not `git log`, not `grep`. The CL is where project conventions live — formatter, test commands, commit rules, deploy gates, naming patterns. None of those are in your hardcoded prompts and most aren't in the repo. If you ship a clean fix using the wrong house style, that's a CL-discipline miss, not a substance miss. Open the index, read `conventions.md` + any related audit-notes, then start work. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
 ";
 
 pub const RAIN_ROLE: &str = "\
@@ -155,7 +155,7 @@ You do NOT see Brian's tool calls. `Edit` / `Write` / `Bash` / `Read` and their 
 
 ## Session opener — CL index, every time
 
-Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `git show`, not `grep`. The CL is where project conventions live (formatter, test commands, disguise rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If Brian skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
+Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `git show`, not `grep`. The CL is where project conventions live (formatter, test commands, commit rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If Brian skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
 ";
 
 /// Pick the role string for a given agent name. Unknown names get an empty

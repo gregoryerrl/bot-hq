@@ -18,7 +18,7 @@ A global, user-configured **keyword detector over agent Bash tool calls** that, 
 
 ### Confirmed decisions (with rationale — do not reopen)
 1. **Mechanism = a bot-hq feature ON TOP OF claude-code's PreToolUse hook.** Gating a tool call *before* it executes has exactly ONE tripwire for built-in tools: claude-code's PreToolUse hook. bot-hq otherwise sees tool calls only *after* they run (in the stream-json output). There is no zero-hook way to gate Bash. So: bot-hq owns the config + detect→gate→execute logic; the hook is just the tripwire, injected at spawn via `--settings` (bot-hq already does this — see §3).
-2. **KEEP `policy.yaml`.** The gate replaces only its `tool_blocklist` ROLE. `policy.yaml`'s `forbidden_in_commits` (the disguise words `bot-hq`/`Claude`/`Anthropic`/…) is enforced by the **git commit hooks** and is LOAD-BEARING — it's what stops an agent leaking those words into a *client* repo's commit. Also keep `push_gate`/`force_push`/`commit_style`/`branch_pattern`. Do NOT delete `policy.yaml`.
+2. **KEEP `policy.yaml`.** The gate replaces only its `tool_blocklist` ROLE. `policy.yaml`'s `forbidden_in_commits` is enforced by the **git commit hooks** and is LOAD-BEARING — it's what stops an agent leaking any user-configured forbidden words into a commit. Also keep `push_gate`/`force_push`/`commit_style`/`branch_pattern`. Do NOT delete `policy.yaml`.
 3. **Remove the commit/push GrantPills** (`SessionView.tsx`). Their auto-proceed behavior is replaced by `auto_allow` keyword entries in the global Settings.
 4. **Execute-on-approve is Bash-only** (can't execute a Write). Non-Bash exempt in v1.
 
@@ -46,8 +46,8 @@ The "surface Approve/Reject → block until resolved → unblock the caller" flo
 1. **`{"decision":"deny"}` JSON is SILENTLY IGNORED under `--dangerously-skip-permissions`.** HANDS/Emma run in bypass mode, where a JSON permission-decision from a PreToolUse hook is NOT honored. **Only EXIT CODE 2 blocks** (a "blocking error" that fires before the permission layer; stderr is fed to the agent). The current `tool_blocklist` hook and `approval-gate.js` were both fixed to exit-2 in `2fbab40`. **Your hook MUST block via exit 2, not JSON.** Verify empirically (below) — do not assume.
 2. **A hook subprocess CANNOT reach the running bot-hq app.** The signaling server binds an ephemeral, unpersisted 127.0.0.1 port; hooks get no token; and claude-code hooks have a timeout. So **do NOT** try to make the hook itself surface the prompt and wait. The hook only **blocks (exit 2) and routes to `action_gate`**; the wait + execute live in the `action_gate` MCP tool (agent-mediated, using the proven `oneshot`). This is why the design is agent-mediated, not hook-surfaces-and-waits.
 3. **`action_gate` EXECUTES the command** (the "action request" model) — bot-hq runs it as a subprocess in the session's `working_repo_path`, with a timeout, capturing combined output, returning it to the agent. It does NOT just return "approved" for the agent to re-run (the agent's Bash is hard-blocked for gated commands anyway).
-4. **Disguise safety:** the bcc client projects must never get `bot-hq`/`Claude` strings in their commits. The Tool Gate config is GLOBAL (bot-hq-side, under the data dir) — nothing is written into client repos, so it's disguise-safe. Keep it that way.
-5. **`git push` executed by the gate still hits the pre-push git hook** (`push_gate` per_branch_approval). RECONCILE: when `action_gate` executes an approved/auto_allow push, record the session grant first (reuse `permissions.rs`/the push-grant path) so the pre-push hook passes — otherwise the gate-run push is double-gated and blocked. (commit-msg/pre-commit hooks still fire on gate-run `git commit` — that's correct; disguise check stays.)
+4. **Working-repo cleanliness:** the Tool Gate config is GLOBAL (bot-hq-side, under the data dir) — nothing is written into the working repo. Keep it that way.
+5. **`git push` executed by the gate still hits the pre-push git hook** (`push_gate` per_branch_approval). RECONCILE: when `action_gate` executes an approved/auto_allow push, record the session grant first (reuse `permissions.rs`/the push-grant path) so the pre-push hook passes — otherwise the gate-run push is double-gated and blocked. (commit-msg/pre-commit hooks still fire on gate-run `git commit` — that's correct; the forbidden-word check stays.)
 
 ---
 
@@ -79,5 +79,5 @@ The "surface Approve/Reject → block until resolved → unblock the caller" flo
 - Working tree also has a pre-existing `frontend/src/lib/bindings.ts` modification and an untracked `.claude/scheduled_tasks.lock` — NOT part of this feature; leave them.
 - **Nothing else built.** Backend (config store, action_gate, hook rework), Settings UI, agent rules, and GrantPill removal are all TODO per §4.
 
-## 7. Commit / disguise hygiene (bot-hq repo)
+## 7. Commit conventions (bot-hq repo)
 Commit messages follow the repo's resolved policy — forbidden words are enforced by the `commit-msg` git hook; call `check_commit_message` before committing. Push only with explicit user authorization.
