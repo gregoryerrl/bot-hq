@@ -188,7 +188,14 @@ fn run_pre_commit(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     if check_findings_gate(data_dir, "pre-commit") != 0 {
         return Ok(1);
     }
-    // Layer 2 — forbidden-word scan.
+    // Layer 2 — immutable-artifact guard. Always-on (policy-independent), so it
+    // runs before the empty-forbidden-list early return below. Blocks a sweep or
+    // refactor from editing a committed append-only file (e.g. an applied sqlx
+    // migration whose bytes sqlx checksums) — editing one breaks boot.
+    if check_immutable_artifacts() != 0 {
+        return Ok(1);
+    }
+    // Layer 3 — forbidden-word scan.
     let policy = Policy::resolve(data_dir, project, hook_session_id().as_deref())?;
     if policy.forbidden_in_commits.is_empty() {
         return Ok(0);
@@ -233,6 +240,83 @@ fn added_lines_only(diff: &str) -> String {
         .map(|l| &l[1..])
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Files that are append-only once committed — a sweep/refactor must NEVER
+/// modify them. Applied sqlx migrations are the canonical case: sqlx checksums
+/// each migration file's bytes and refuses to boot if an applied one changed,
+/// even a comment ("migration N was previously applied but has been modified").
+/// Always-on for every project; extend the list (or add a per-project policy
+/// field later) for other content-hashed / immutable-once-shipped artifacts.
+const IMMUTABLE_GLOBS: &[&str] = &["migrations/*.sql"];
+
+/// Minimal glob match supporting a single `*` that does NOT cross `/`:
+/// `migrations/*.sql` matches `migrations/0021_x.sql` but not
+/// `migrations/sub/x.sql` or `src/x.sql`.
+fn glob_match(path: &str, pat: &str) -> bool {
+    match pat.split_once('*') {
+        None => path == pat,
+        Some((pre, suf)) => {
+            path.len() >= pre.len() + suf.len()
+                && path.starts_with(pre)
+                && path.ends_with(suf)
+                && !path[pre.len()..path.len() - suf.len()].contains('/')
+        }
+    }
+}
+
+/// Parse `git diff --cached --name-status` and return committed immutable files
+/// being MODIFIED / DELETED / RENAMED (status M/D/R). Newly-ADDED files (A) — a
+/// new migration — are fine; only edits to an already-committed immutable file
+/// are violations.
+fn immutable_violations(name_status: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    for line in name_status.lines() {
+        let mut cols = line.split('\t');
+        let code = cols.next().and_then(|s| s.chars().next()).unwrap_or(' ');
+        // A (added) and C (copied) leave the committed file's bytes intact.
+        if !matches!(code, 'M' | 'D' | 'R') {
+            continue;
+        }
+        // M/D: the path is the next column. R: `old<TAB>new` — the OLD path
+        // (next column) is the immutable file being moved away.
+        let Some(path) = cols.next() else { continue };
+        if IMMUTABLE_GLOBS.iter().any(|g| glob_match(path, g)) {
+            hits.push(path.to_string());
+        }
+    }
+    hits
+}
+
+/// Pre-commit layer: block staged edits to committed append-only artifacts.
+/// Returns 1 (block) on violation, else 0. Fail-open if the index can't be read
+/// (e.g. not a git repo). Bypass a genuinely-intentional edit with
+/// `BOTHQ_ALLOW_IMMUTABLE_EDIT=1` (since `--no-verify` is forbidden).
+fn check_immutable_artifacts() -> i32 {
+    if matches!(
+        std::env::var("BOTHQ_ALLOW_IMMUTABLE_EDIT").as_deref(),
+        Ok("1")
+    ) {
+        return 0;
+    }
+    let Some(status) = git_output(&["diff", "--cached", "--name-status"]) else {
+        return 0;
+    };
+    let hits = immutable_violations(&status);
+    if hits.is_empty() {
+        return 0;
+    }
+    eprintln!(
+        "{}",
+        blocked_banner(
+            "pre-commit",
+            &format!(
+                "Edit to a committed append-only artifact ({}). Migrations are immutable once committed: sqlx checksums each migration file, so editing a committed migration (even a comment) breaks boot with 'migration N was previously applied but has been modified'. Add a NEW migration instead. If this is genuinely intentional, re-run with BOTHQ_ALLOW_IMMUTABLE_EDIT=1 (do NOT use --no-verify).",
+                hits.join(", ")
+            )
+        )
+    );
+    1
 }
 
 /// post-commit verifier. Writes a violation if a forbidden word made it
@@ -1036,6 +1120,45 @@ mod tests {
             .current_dir(dir)
             .status()
             .unwrap();
+    }
+
+    #[test]
+    fn glob_match_single_star_does_not_cross_slash() {
+        assert!(glob_match("migrations/0021_findings.sql", "migrations/*.sql"));
+        assert!(glob_match("migrations/0001_init.sql", "migrations/*.sql"));
+        assert!(!glob_match("migrations/sub/x.sql", "migrations/*.sql")); // * stops at /
+        assert!(!glob_match("src/policy/hooks.rs", "migrations/*.sql"));
+        assert!(!glob_match("migrations/notes.txt", "migrations/*.sql")); // wrong suffix
+        assert!(glob_match("exact.txt", "exact.txt")); // no star = literal
+    }
+
+    #[test]
+    fn immutable_violations_blocks_edits_allows_new() {
+        // Modified / deleted / renamed committed migration -> violation.
+        assert_eq!(
+            immutable_violations("M\tmigrations/0021_findings.sql"),
+            vec!["migrations/0021_findings.sql".to_string()]
+        );
+        assert_eq!(
+            immutable_violations("D\tmigrations/0021_findings.sql"),
+            vec!["migrations/0021_findings.sql".to_string()]
+        );
+        assert_eq!(
+            immutable_violations(
+                "R100\tmigrations/0021_findings.sql\tmigrations/0099_renamed.sql"
+            ),
+            vec!["migrations/0021_findings.sql".to_string()]
+        );
+        // Newly-added migration is fine (append-only); non-migration edits too.
+        assert!(immutable_violations("A\tmigrations/0023_new.sql").is_empty());
+        assert!(immutable_violations("M\tsrc/policy/hooks.rs").is_empty());
+        // Mixed staging: only the modified committed migration trips it.
+        assert_eq!(
+            immutable_violations(
+                "A\tmigrations/0023_new.sql\nM\tsrc/main.rs\nM\tmigrations/0021_findings.sql"
+            ),
+            vec!["migrations/0021_findings.sql".to_string()]
+        );
     }
 
     #[test]
