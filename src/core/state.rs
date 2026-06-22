@@ -381,34 +381,39 @@ impl AppState {
         has_rain && prev == IpavPhase::Plan && target == IpavPhase::Apply
     }
 
-    pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<()> {
+    pub async fn resolve_choice(
+        &self,
+        choice_id: &str,
+        picked: String,
+        confirm_stale: bool,
+    ) -> Result<crate::signaling::ResolveOutcome> {
         use crate::signaling::ResolveOutcome;
-        match self.bridge.resolve_choice(choice_id, picked).await? {
-            ResolveOutcome::Delivered => Ok(()),
-            ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } => {
-                // The OOB message is already in storage (bridge wrote it). To
-                // actually wake the duo subprocess so they read + act on it,
-                // also: (1) clear the awaiting-user halt so the duo pump
-                // resumes peer-forwarding, (2) push the body through both
-                // agents' input_tx so their stdin receives a wake message.
-                // We deliberately do NOT call broadcast_user_message (which
-                // re-inserts) — the storage row already exists.
-                let sessions = self.sessions.lock().await;
-                let Some(handle) = sessions.get(&session_id) else {
-                    // Session closed in the gap between resolve and wake —
-                    // the OOB message persists in storage either way, so
-                    // future re-opens of the session view will still see it.
-                    return Ok(());
-                };
-                self.clear_awaiting(handle, &session_id).await;
+        let outcome = self
+            .bridge
+            .resolve_choice_confirmable(choice_id, picked, confirm_stale)
+            .await?;
+        // Only the timed-out fallback needs us to wake the duo subprocess. The
+        // OOB message is already in storage (bridge wrote it). To actually wake
+        // the duo so they read + act on it, also: (1) clear the awaiting-user
+        // halt so the duo pump resumes peer-forwarding, (2) push the body
+        // through both agents' input_tx so their stdin receives a wake message.
+        // We deliberately do NOT call broadcast_user_message (which re-inserts)
+        // — the storage row already exists. Delivered + StaleGateNeedsConfirm
+        // need no wake (the agent is live, or nothing ran).
+        if let ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body } = &outcome {
+            let sessions = self.sessions.lock().await;
+            if let Some(handle) = sessions.get(session_id) {
+                self.clear_awaiting(handle, session_id).await;
                 let phase = handle.ipav.lock().await.current_phase;
-                let wire = with_phase_envelope(phase, &body);
+                let wire = with_phase_envelope(phase, body);
                 handle
                     .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
                     .await;
-                Ok(())
             }
+            // else: session closed in the gap between resolve and wake — the OOB
+            // message persists in storage, so a future reopen still sees it.
         }
+        Ok(outcome)
     }
 
     pub fn subscribe_signaling(&self) -> broadcast::Receiver<SignalingEvent> {

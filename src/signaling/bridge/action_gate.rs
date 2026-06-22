@@ -286,7 +286,13 @@ mod tests {
         let _ = call.await;
         tokio::task::yield_now().await;
 
-        let outcome = bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
+        // confirm_stale = true: the user has acknowledged the agent moved on, so
+        // the durable command still executes (the safety gate is for UNconfirmed
+        // approves — see stale_gate_needs_confirm_before_executing).
+        let outcome = bridge
+            .resolve_choice_confirmable(&cid, "Approve".into(), true)
+            .await
+            .unwrap();
         match outcome {
             ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => assert!(
                 body.contains("exit 0"),
@@ -334,7 +340,11 @@ mod tests {
             .unwrap();
 
         // No in-memory Parked for cid-1 → resolve hits the None (post-restart) arm.
-        let outcome = bridge.resolve_choice("cid-1", "Approve".into()).await.unwrap();
+        // confirm_stale = true (post-restart is inherently "agent moved on").
+        let outcome = bridge
+            .resolve_choice_confirmable("cid-1", "Approve".into(), true)
+            .await
+            .unwrap();
         match outcome {
             ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => assert!(
                 body.contains("exit 0"),
@@ -384,12 +394,147 @@ mod tests {
             ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => body,
             other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
         };
-        let first = body_of(bridge.resolve_choice("cid-2", "Approve".into()).await.unwrap());
-        let second = body_of(bridge.resolve_choice("cid-2", "Approve".into()).await.unwrap());
+        // confirm_stale = true on both (no in-memory parked → stale path).
+        let first = body_of(
+            bridge
+                .resolve_choice_confirmable("cid-2", "Approve".into(), true)
+                .await
+                .unwrap(),
+        );
+        let second = body_of(
+            bridge
+                .resolve_choice_confirmable("cid-2", "Approve".into(), true)
+                .await
+                .unwrap(),
+        );
         assert!(first.contains("output below"), "first resolve must execute: {first}");
         assert!(
             !second.contains("output below"),
             "second resolve must NOT re-execute (exactly-once): {second}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_gate_needs_confirm_before_executing() {
+        // SAFETY: a gated command whose agent has moved on must NOT run on a
+        // plain (unconfirmed) approve — the user could be approving a command
+        // that's now invalid/destructive. confirm_stale=false → NeedsConfirm,
+        // nothing runs, the row stays pending; confirm_stale=true → it executes.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let marker = repo.path().join("ran.txt");
+        let cmd = format!("touch {}", marker.display());
+        let bridge =
+            SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage
+            .create_session("s1", "t", Some(&repo.path().display().to_string()))
+            .await
+            .unwrap();
+        let opts = vec!["Approve".to_string(), "Reject".to_string()];
+        storage
+            .insert_tray_entry(
+                "s1",
+                "cid-stale",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Run gated command in this session's repo?",
+                Some(&opts),
+                None,
+                Some(&cmd), // command_text → it's a gated command
+            )
+            .await
+            .unwrap();
+
+        // Unconfirmed approve of a stale gate → NeedsConfirm, no execution.
+        let outcome = bridge
+            .resolve_choice("cid-stale", "Approve".into())
+            .await
+            .unwrap();
+        match outcome {
+            ResolveOutcome::StaleGateNeedsConfirm { command, .. } => assert_eq!(command, cmd),
+            other => panic!("expected StaleGateNeedsConfirm, got {other:?}"),
+        }
+        assert!(!marker.exists(), "stale command must NOT run without confirm");
+        let row = storage.get_tray_entry("cid-stale").await.unwrap().unwrap();
+        assert_eq!(
+            row.status, "pending",
+            "unconfirmed stale resolve must not flip the row (confirmed retry needs it)"
+        );
+
+        // A Reject is always safe — no confirm needed, nothing executes.
+        // (Use a fresh row so the exactly-once flip doesn't interfere.)
+        storage
+            .insert_tray_entry(
+                "s1",
+                "cid-reject",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Run gated command in this session's repo?",
+                Some(&opts),
+                None,
+                Some(&cmd),
+            )
+            .await
+            .unwrap();
+        let outcome = bridge
+            .resolve_choice("cid-reject", "Reject".into())
+            .await
+            .unwrap();
+        assert!(
+            !matches!(outcome, ResolveOutcome::StaleGateNeedsConfirm { .. }),
+            "Reject must never require stale-confirm"
+        );
+        assert!(!marker.exists(), "Reject must not run the command");
+
+        // Confirmed approve → executes, delivers output OOB.
+        let outcome = bridge
+            .resolve_choice_confirmable("cid-stale", "Approve".into(), true)
+            .await
+            .unwrap();
+        match outcome {
+            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => {
+                assert!(body.contains("exit 0"), "confirmed run carries output: {body}")
+            }
+            other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
+        }
+        assert!(marker.exists(), "confirmed stale command must execute");
+    }
+
+    #[tokio::test]
+    async fn live_waiting_gates_tracks_receiver() {
+        // Fresh while the agent's blocking call is parked; stale the instant its
+        // receiver drops (client timeout). This is the pre-click UI signal.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(
+            data.path(),
+            &[gk("echo", GateMode::Gate)],
+            "s1",
+            repo.path(),
+        )
+        .await;
+        let mut sub = bridge.subscribe();
+        let b2 = Arc::clone(&bridge);
+        let call =
+            tokio::spawn(async move { b2.action_gate("s1".into(), "brian".into(), "echo hi".into()).await });
+        let cid = loop {
+            match sub.recv().await.unwrap() {
+                SignalingEvent::PendingChoice(p) => break p.choice_id,
+                _ => continue,
+            }
+        };
+        assert!(
+            bridge.live_waiting_gates().await.contains(&cid),
+            "agent still waiting → fresh"
+        );
+        call.abort();
+        let _ = call.await;
+        tokio::task::yield_now().await;
+        assert!(
+            !bridge.live_waiting_gates().await.contains(&cid),
+            "dropped receiver → no longer fresh (stale)"
         );
     }
 }

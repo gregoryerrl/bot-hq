@@ -660,9 +660,9 @@ async claudeConfigSetPluginEnabled(key: string, enabled: boolean | null) : Promi
     else return { status: "error", error: e  as any };
 }
 },
-async resolveChoice(choiceId: string, picked: string) : Promise<Result<null, AppError>> {
+async resolveChoice(choiceId: string, picked: string, confirmStale: boolean) : Promise<Result<ResolveResult, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("resolve_choice", { choiceId, picked }) };
+    return { status: "ok", data: await TAURI_INVOKE("resolve_choice", { choiceId, picked, confirmStale }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1229,6 +1229,13 @@ export type PushGateMode =
  */
 "ask"
 /**
+ * Outcome of resolving a choice. `NeedsStaleConfirm` means the pick would run a
+ * gated command whose requesting agent has moved on (client timeout / restart)
+ * — nothing ran; the UI must confirm (the command may be invalid/destructive
+ * against a changed repo) and re-call with `confirm_stale = true`.
+ */
+export type ResolveResult = { kind: "resolved" } | { kind: "needs_stale_confirm"; command: string; asked_at: string | null }
+/**
  * Per-session create-dialog picks beyond the positional args. Bundled into
  * one struct because `create_session` sits at tauri-specta's 10-arg command
  * limit; every field is `None` = inherit the configured default.
@@ -1287,7 +1294,14 @@ export type SessionTrayView = { id: number; session_id: string; choice_id: strin
 /**
  * The gated command (action_gate / ToolBlocklist approvals); null otherwise.
  */
-command_text: string | null; asked_at: string; answered_at: string | null }
+command_text: string | null; asked_at: string; answered_at: string | null; 
+/**
+ * True when this is a PENDING gated command whose requesting agent has moved
+ * on (client timeout / restart) — approving runs the command blind, so the
+ * UI warns + requires confirm. Computed at list time from the live in-memory
+ * pending map (false from the bare `From` conversion; the list commands set it).
+ */
+stale: boolean }
 /**
  * One scalar/env setting with provenance + inheritance.
  */

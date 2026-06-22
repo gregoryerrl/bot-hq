@@ -346,8 +346,46 @@ impl SignalingBridge {
         storage.pending_tray_open_sessions().await
     }
 
-    /// Called by the UI when the user clicks a choice button.
+    /// Convenience entry (`confirm_stale = false`): the external driver + tests
+    /// for fresh gates, rejects, and non-command asks. A STALE gated-command
+    /// Approve through this path returns `StaleGateNeedsConfirm` rather than
+    /// executing — see [`resolve_choice_confirmable`].
     pub async fn resolve_choice(&self, choice_id: &str, picked: String) -> Result<ResolveOutcome> {
+        self.resolve_choice_confirmable(choice_id, picked, false)
+            .await
+    }
+
+    /// Called by the UI when the user clicks a choice button. `confirm_stale =
+    /// true` lets an explicitly-confirmed Approve EXECUTE a stale gated command
+    /// (the requesting agent has moved on; the user has acknowledged the repo
+    /// state may have changed).
+    pub async fn resolve_choice_confirmable(
+        &self,
+        choice_id: &str,
+        picked: String,
+        confirm_stale: bool,
+    ) -> Result<ResolveOutcome> {
+        // SAFETY GATE: a gated command whose requesting agent has moved on
+        // (client-side MCP timeout / restart) would run blind on a one-click
+        // Approve, against a repo state that may have changed since it was
+        // parked. Detect that BEFORE the atomic flip and bail to
+        // StaleGateNeedsConfirm so nothing flips or executes until the user
+        // confirms. Reject / non-executing picks are always safe and skip this.
+        // (A vanishingly-small race exists if the agent's receiver drops in the
+        // window between this peek and the flip below; the cost is one execution
+        // of a command that was live <1ms ago — current context — so it's
+        // acceptable. The real target is long-stale / post-restart commands.)
+        if !confirm_stale
+            && matches!(
+                outcome_from_picked(&picked),
+                crate::policy::ViolationOutcome::Approved
+            )
+        {
+            if let Some((command, asked_at)) = self.stale_gated_command(choice_id).await {
+                return Ok(ResolveOutcome::StaleGateNeedsConfirm { command, asked_at });
+            }
+        }
+
         // Flip the row pending→answered first (so the UI/tray updates even if the
         // in-memory parked entry is gone — e.g. after a restart). `rows == 1`
         // means THIS call won the atomic transition; gate resolve-time
@@ -577,6 +615,61 @@ impl SignalingBridge {
             Ok(output) => body.push_str(&output),
             Err(e) => body.push_str(&format!("action_gate could not run `{command}`: {e}")),
         }
+    }
+
+    /// If `choice_id` is a PENDING gated command (action_gate / ToolBlocklist)
+    /// whose requesting agent is no longer live-waiting (client-side MCP timeout
+    /// / restart), return its `(command, asked_at)` — i.e. it is STALE and
+    /// approving it would execute blind. Returns None for fresh gates (agent
+    /// still waiting), non-command items, or already-resolved / unknown ids.
+    async fn stale_gated_command(&self, choice_id: &str) -> Option<(String, Option<String>)> {
+        // Fresh iff a parked entry exists with the agent still waiting on the
+        // blocking oneshot. `tx.is_closed()` flips true the instant that
+        // receiver is dropped — exactly "the agent moved on".
+        {
+            let pending = self.pending.lock().await;
+            if let Some(p) = pending.get(choice_id) {
+                let is_gate = matches!(
+                    p.choice.approval.as_ref().map(|a| &a.kind),
+                    Some(crate::policy::ViolationKind::ToolBlocklist)
+                );
+                if !is_gate {
+                    return None; // not a gated command
+                }
+                if !p.tx.is_closed() {
+                    return None; // agent still waiting → fresh, runs in-band
+                }
+                // tx closed → stale; fall through to read command + asked_at.
+            }
+        }
+        // No live parked (post-restart) or parked-but-dropped: consult the
+        // durable row. Only a still-pending row carrying a command_text is a
+        // stale GATE — non-command asks never execute, so they're never gated.
+        let storage = self.storage.lock().await.clone()?;
+        let row = storage.get_tray_entry(choice_id).await.ok()??;
+        if row.status != "pending" {
+            return None;
+        }
+        let command = row.command_text?;
+        Some((command, Some(row.asked_at)))
+    }
+
+    /// choice_ids of pending gated commands whose requesting agent is STILL
+    /// live-waiting (fresh). The UI marks any pending command row NOT in this
+    /// set as stale, so a one-click approve of a moved-on command can warn first.
+    pub async fn live_waiting_gates(&self) -> std::collections::HashSet<String> {
+        self.pending
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, p)| {
+                matches!(
+                    p.choice.approval.as_ref().map(|a| &a.kind),
+                    Some(crate::policy::ViolationKind::ToolBlocklist)
+                ) && !p.tx.is_closed()
+            })
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Snapshot the currently-parked choices. Used by the external MCP driver

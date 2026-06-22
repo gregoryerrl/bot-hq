@@ -60,6 +60,16 @@ pub struct ClRescanReport {
 pub enum ResolveOutcome {
     Delivered,
     AgentReceiverDroppedFellBack { session_id: String, body: String },
+    /// The pick would EXECUTE a gated command (action_gate / ToolBlocklist)
+    /// whose requesting agent has moved on (client-side MCP timeout / restart),
+    /// and the caller did not pass `confirm_stale`. NOTHING was flipped or
+    /// executed — the command may now be invalid or destructive against a
+    /// changed repo, so the UI must confirm and re-resolve with
+    /// `confirm_stale = true`. Reject / non-executing picks never reach here.
+    StaleGateNeedsConfirm {
+        command: String,
+        asked_at: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]

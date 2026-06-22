@@ -7,15 +7,36 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
 
+/// Outcome of resolving a choice. `NeedsStaleConfirm` means the pick would run a
+/// gated command whose requesting agent has moved on (client timeout / restart)
+/// — nothing ran; the UI must confirm (the command may be invalid/destructive
+/// against a changed repo) and re-call with `confirm_stale = true`.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResolveResult {
+    Resolved,
+    NeedsStaleConfirm {
+        command: String,
+        asked_at: Option<String>,
+    },
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn resolve_choice(
     core: tauri::State<'_, Arc<CoreAppState>>,
     choice_id: String,
     picked: String,
-) -> Result<(), AppError> {
-    core.resolve_choice(&choice_id, picked).await?;
-    Ok(())
+    confirm_stale: bool,
+) -> Result<ResolveResult, AppError> {
+    use crate::signaling::ResolveOutcome;
+    let outcome = core.resolve_choice(&choice_id, picked, confirm_stale).await?;
+    Ok(match outcome {
+        ResolveOutcome::StaleGateNeedsConfirm { command, asked_at } => {
+            ResolveResult::NeedsStaleConfirm { command, asked_at }
+        }
+        _ => ResolveResult::Resolved,
+    })
 }
 
 /// One durable `session_tray` row, projected for the session-view Tray tab.
@@ -37,6 +58,11 @@ pub struct SessionTrayView {
     pub command_text: Option<String>,
     pub asked_at: String,
     pub answered_at: Option<String>,
+    /// True when this is a PENDING gated command whose requesting agent has moved
+    /// on (client timeout / restart) — approving runs the command blind, so the
+    /// UI warns + requires confirm. Computed at list time from the live in-memory
+    /// pending map (false from the bare `From` conversion; the list commands set it).
+    pub stale: bool,
 }
 
 impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
@@ -55,7 +81,18 @@ impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
             command_text: e.command_text,
             asked_at: e.asked_at,
             answered_at: e.answered_at,
+            stale: false,
         }
+    }
+}
+
+impl SessionTrayView {
+    /// Set `stale` for a pending gated-command row: true unless its requesting
+    /// agent is still live-waiting (`live` = `bridge.live_waiting_gates()`).
+    fn with_staleness(mut self, live: &std::collections::HashSet<String>) -> Self {
+        self.stale =
+            self.status == "pending" && self.command_text.is_some() && !live.contains(&self.choice_id);
+        self
     }
 }
 
@@ -69,7 +106,11 @@ pub async fn list_session_tray(
     session_id: String,
 ) -> Result<Vec<SessionTrayView>, AppError> {
     let rows = bridge.list_questions_for_session(&session_id).await?;
-    Ok(rows.into_iter().map(Into::into).collect())
+    let live = bridge.live_waiting_gates().await;
+    Ok(rows
+        .into_iter()
+        .map(|e| SessionTrayView::from(e).with_staleness(&live))
+        .collect())
 }
 
 /// All pending tray rows for OPEN sessions across the whole app — powers the
@@ -83,7 +124,11 @@ pub async fn list_pending_tray(
     bridge: tauri::State<'_, Arc<SignalingBridge>>,
 ) -> Result<Vec<SessionTrayView>, AppError> {
     let rows = bridge.list_pending_tray_open().await?;
-    Ok(rows.into_iter().map(Into::into).collect())
+    let live = bridge.live_waiting_gates().await;
+    Ok(rows
+        .into_iter()
+        .map(|e| SessionTrayView::from(e).with_staleness(&live))
+        .collect())
 }
 
 #[cfg(test)]

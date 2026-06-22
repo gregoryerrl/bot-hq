@@ -444,7 +444,9 @@ async fn call_external_tool(
         "resolve_choice" => {
             let choice_id = arg_required_str(&args, "choice_id")?;
             let picked = arg_required_str(&args, "picked")?;
-            core.resolve_choice(&choice_id, picked)
+            // Headless driver: no human to confirm a stale gate, so auto-confirm
+            // (confirm_stale = true) — a parked command still executes on approve.
+            core.resolve_choice(&choice_id, picked, true)
                 .await
                 .map_err(|e| internal_err("resolve_choice", e))?;
             Ok(ok_response())

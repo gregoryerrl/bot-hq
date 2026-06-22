@@ -9,9 +9,26 @@ import { Markdown } from "./Markdown";
 import { cn } from "../lib/cn";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
 import type {
+  ResolveResult,
   SessionDocumentView,
   SessionTrayView,
 } from "../lib/bindings";
+
+// Relative age of an RFC3339-Z (UTC) timestamp, for stale-gate context. Both
+// Date.parse (UTC) and Date.now() are epoch-based, so the delta is correct
+// regardless of the viewer's local timezone.
+function relAgo(iso: string | null): string {
+  if (!iso) return "earlier";
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "earlier";
+  const secs = Math.max(0, (Date.now() - then) / 1000);
+  if (secs < 90) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 90) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
+  if (hrs < 36) return `${hrs}h ago`;
+  return `${Math.round(hrs / 24)}d ago`;
+}
 
 interface DocumentPaneProps {
   sessionId: string;
@@ -392,11 +409,32 @@ function TrayList({ sessionId }: { sessionId: string }) {
   // (the answered item then drops out of the pending filter).
   const [resolving, setResolving] = useState<Map<string, string>>(new Map());
   const [resolveError, setResolveError] = useState<string | null>(null);
+  // When approving a STALE gated command (its requesting agent has moved on),
+  // the backend returns needs_stale_confirm instead of running it — we hold the
+  // pick here and surface a confirmation before re-resolving with confirmStale.
+  const [staleConfirm, setStaleConfirm] = useState<{
+    choiceId: string;
+    picked: string;
+    command: string;
+    askedAt: string | null;
+  } | null>(null);
 
-  const onResolve = (choiceId: string, picked: string) => {
+  const onResolve = (choiceId: string, picked: string, confirmStale = false) => {
     setResolving((m) => new Map(m).set(choiceId, picked));
     setResolveError(null);
-    invoke("resolve_choice", { choiceId, picked })
+    invoke<ResolveResult>("resolve_choice", { choiceId, picked, confirmStale })
+      .then((res) => {
+        // Stale gate: don't run the (possibly now-invalid) command on a blind
+        // approve — park the pick and ask the user to confirm first.
+        if (res.kind === "needs_stale_confirm") {
+          setStaleConfirm({
+            choiceId,
+            picked,
+            command: res.command,
+            askedAt: res.asked_at,
+          });
+        }
+      })
       // Surface the failure — answering is the core HITL action, and a silent
       // console.error left the item stuck pending with no signal to the user.
       .catch((e) => setResolveError(errorMessage(e)))
@@ -436,6 +474,44 @@ function TrayList({ sessionId }: { sessionId: string }) {
           >
             dismiss
           </button>
+        </div>
+      )}
+      {staleConfirm && (
+        <div
+          role="alertdialog"
+          className="mb-3 rounded border border-error/50 bg-error-container/30 px-3 py-2 text-xs text-on-error-container"
+        >
+          <p className="font-semibold">
+            ⚠ This command's requesting agent has moved on
+          </p>
+          <p className="mt-1">
+            Requested {relAgo(staleConfirm.askedAt)} by an agent that has since
+            timed out. The repo state may have changed — running it now could be
+            invalid or destructive.
+          </p>
+          <pre className="mt-1 overflow-x-auto rounded bg-surface-container-high px-2 py-1 font-mono text-on-surface-variant">
+            {staleConfirm.command}
+          </pre>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className="rounded bg-error px-2 py-1 font-semibold text-on-error hover:opacity-90"
+              onClick={() => {
+                const sc = staleConfirm;
+                setStaleConfirm(null);
+                onResolve(sc.choiceId, sc.picked, true);
+              }}
+            >
+              Run anyway
+            </button>
+            <button
+              type="button"
+              className="rounded border border-outline/40 px-2 py-1 hover:bg-surface-container-high"
+              onClick={() => setStaleConfirm(null)}
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
       <ul className="space-y-3">
@@ -489,6 +565,13 @@ function TrayChoice({
         <pre className="mb-1 overflow-x-auto rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
           {entry.command_text}
         </pre>
+      )}
+      {entry.stale && (
+        <div className="mb-1 rounded border border-error/40 bg-error-container/20 px-2 py-1 text-[0.7rem] text-on-error-container">
+          ⚠ Stale — requested {relAgo(entry.asked_at)}; the requesting agent has
+          moved on. Review the command before approving (repo state may have
+          changed).
+        </div>
       )}
       <ChoicePrompt
         choice={choice}
