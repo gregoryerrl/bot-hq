@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn cl_section_demands_index_first_as_load_bearing() {
-        // Issue #378 (acme-app) shipped with partial-pint pollution
+        // Issue #378 (acme-app) shipped with partial-formatter pollution
         // because both Brian and Rain skipped `cl_index_search` entirely
         // — they treated the workflow line as a tip. The CL section must
         // open with a strong-framed "call cl_index_search BEFORE any other

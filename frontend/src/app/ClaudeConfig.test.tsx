@@ -30,7 +30,7 @@ const CONFIG = {
   ],
   skills: [
     {
-      name: "note",
+      name: "my-skill",
       kind: "user",
       disable_model_invocation: true,
       description: "take notes",
@@ -38,7 +38,7 @@ const CONFIG = {
       inheritance: inh(["brian"], ["rain"]),
     },
   ],
-  plugins: [{ key: "warp@mkt", enabled: true, inheritance: inh(["brian"], ["rain"]) }],
+  plugins: [{ key: "alpha@mkt", enabled: true, inheritance: inh(["brian"], ["rain"]) }],
   mcp_servers: [
     {
       name: "discord",
@@ -103,7 +103,7 @@ describe("Claude Config panel", () => {
     });
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /skills/i }));
-    expect(await screen.findByText("note")).toBeInTheDocument();
+    expect(await screen.findByText("my-skill")).toBeInTheDocument();
     expect(screen.getByText("brian inherits")).toBeInTheDocument();
     expect(screen.getByText("rain skips")).toBeInTheDocument();
   });
@@ -130,7 +130,7 @@ describe("Claude Config panel", () => {
         expect.objectContaining({
           overrides: expect.objectContaining({
             _all: expect.objectContaining({
-              skills: { note: "user-invocable-only" },
+              skills: { "my-skill": "user-invocable-only" },
             }),
           }),
         }),

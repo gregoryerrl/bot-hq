@@ -790,8 +790,8 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     if cfg.agent_name == "rain" {
         // Rain reaches her model through a third-party Anthropic-compatible
         // gateway (DeepSeek, via ANTHROPIC_BASE_URL). claude-code >= 2.1.156
-        // serializes a SessionStart hook's `additionalContext` (the user's
-        // superpowers plugin injects one) as a `role:"system"` entry inside
+        // serializes a SessionStart hook's `additionalContext` (a plugin's
+        // SessionStart hook injects one) as a `role:"system"` entry inside
         // the request's `messages` array. The real Anthropic API tolerates
         // that; DeepSeek's gateway only accepts user/assistant roles and
         // rejects it ("unknown variant `system`, expected user or assistant"
@@ -1041,7 +1041,7 @@ mod tests {
         store
             .brian
             .skills
-            .insert("note".into(), SkillVisibility::UserInvocableOnly);
+            .insert("my-skill".into(), SkillVisibility::UserInvocableOnly);
         store.brian.effort = Some("high".into());
         save_overrides(dir.path(), &store).unwrap();
 

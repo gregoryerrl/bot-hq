@@ -227,8 +227,8 @@ mod tests {
         store
             .brian
             .skills
-            .insert("note".into(), SkillVisibility::UserInvocableOnly);
-        store.brian.plugins.insert("warp@mkt".into(), false);
+            .insert("my-skill".into(), SkillVisibility::UserInvocableOnly);
+        store.brian.plugins.insert("alpha@mkt".into(), false);
         store.brian.effort = Some("high".into());
         save_overrides(dir.path(), &store).unwrap();
         assert_eq!(load_overrides(dir.path()), store);
@@ -262,12 +262,12 @@ mod tests {
     #[test]
     fn settings_fragment_shapes_skilloverrides_and_plugins() {
         let mut ov = AgentOverride::default();
-        ov.skills.insert("note".into(), SkillVisibility::Off);
-        ov.plugins.insert("warp@mkt".into(), false);
+        ov.skills.insert("my-skill".into(), SkillVisibility::Off);
+        ov.plugins.insert("alpha@mkt".into(), false);
         ov.ultracode = Some(true);
         let frag = settings_fragment(&ov);
-        assert_eq!(frag["skillOverrides"]["note"], Value::String("off".into()));
-        assert_eq!(frag["enabledPlugins"]["warp@mkt"], Value::Bool(false));
+        assert_eq!(frag["skillOverrides"]["my-skill"], Value::String("off".into()));
+        assert_eq!(frag["enabledPlugins"]["alpha@mkt"], Value::Bool(false));
         assert_eq!(frag["ultracode"], Value::Bool(true));
     }
 

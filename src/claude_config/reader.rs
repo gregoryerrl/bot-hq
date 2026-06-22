@@ -475,7 +475,7 @@ mod tests {
               "editorMode": "vim",
               "alwaysThinkingEnabled": true,
               "env": { "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000" },
-              "enabledPlugins": { "superpowers@mkt": true, "warp@mkt": false },
+              "enabledPlugins": { "beta@mkt": true, "alpha@mkt": false },
               "permissions": { "defaultMode": "default", "deny": ["Bash(rm:*)"] },
               "mcpServers": {
                 "bot-hq": { "type": "http", "url": "http://127.0.0.1:7892/mcp" },
@@ -492,8 +492,8 @@ mod tests {
         );
         write(&config.path().join("CLAUDE.md"), "user rules");
         write(
-            &config.path().join("skills/note/SKILL.md"),
-            "---\nname: note\ndescription: take notes\ndisable-model-invocation: true\n---\nbody",
+            &config.path().join("skills/my-skill/SKILL.md"),
+            "---\nname: my-skill\ndescription: take notes\ndisable-model-invocation: true\n---\nbody",
         );
         write(
             &config.path().join("skills/helper/SKILL.md"),
@@ -559,9 +559,9 @@ mod tests {
     #[test]
     fn skills_read_frontmatter_disable_flag() {
         let v = view();
-        let note = v.skills.iter().find(|s| s.name == "note").unwrap();
-        assert!(note.disable_model_invocation);
-        assert_eq!(note.kind, "user");
+        let my_skill = v.skills.iter().find(|s| s.name == "my-skill").unwrap();
+        assert!(my_skill.disable_model_invocation);
+        assert_eq!(my_skill.kind, "user");
         let helper = v.skills.iter().find(|s| s.name == "helper").unwrap();
         assert!(!helper.disable_model_invocation);
     }
@@ -572,11 +572,11 @@ mod tests {
         let sp = v
             .plugins
             .iter()
-            .find(|p| p.key == "superpowers@mkt")
+            .find(|p| p.key == "beta@mkt")
             .unwrap();
         assert!(sp.enabled);
-        let warp = v.plugins.iter().find(|p| p.key == "warp@mkt").unwrap();
-        assert!(!warp.enabled);
+        let alpha = v.plugins.iter().find(|p| p.key == "alpha@mkt").unwrap();
+        assert!(!alpha.enabled);
     }
 
     #[test]

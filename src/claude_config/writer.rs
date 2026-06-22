@@ -173,9 +173,9 @@ mod tests {
     #[test]
     fn plugin_toggle_roundtrip() {
         let dir = TempDir::new().unwrap();
-        set_plugin_enabled(dir.path(), "warp@mkt", Some(false)).unwrap();
-        assert_eq!(read_back(dir.path())["enabledPlugins"]["warp@mkt"], false);
-        set_plugin_enabled(dir.path(), "warp@mkt", None).unwrap();
+        set_plugin_enabled(dir.path(), "alpha@mkt", Some(false)).unwrap();
+        assert_eq!(read_back(dir.path())["enabledPlugins"]["alpha@mkt"], false);
+        set_plugin_enabled(dir.path(), "alpha@mkt", None).unwrap();
         assert!(read_back(dir.path()).get("enabledPlugins").is_none());
     }
 
