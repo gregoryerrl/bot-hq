@@ -785,11 +785,11 @@ pub fn read_system_prompt(
          `cl_folder_search`, `cl_register_read`, `cl_rescan` are in the \
          General rules section below.\n\n\
          **Bare-filename heuristic.** If the user references a bare \
-         filename (e.g. \"work on task 1 from tasks.md\", \"check eod.md\") \
+         filename (e.g. \"work on task 1 from tasks.md\", \"check scratch.md\") \
          and it's NOT in your working repo, do NOT keep `Glob`-searching \
          broader paths. Try `cl_index_search(project=\"_globals\", \
          query=<name>)` next — common cross-project files like `tasks.md` \
-         and `eod.md` live at the CL root and surface as `_globals` rows. \
+         and `scratch.md` live at the CL root and surface as `_globals` rows. \
          Only fall back to `ask_user_choice` if `_globals` also misses.\n\n\
          Per-project conventional files at `{cl}/projects/<project>/` \
          (the index covers everything under this path, not just these):\n\
@@ -1188,7 +1188,7 @@ mod tests {
         assert!(prompt.contains("cl_index_search"));
         assert!(prompt.contains("Index-first"));
         // Regression: when the user mentions a bare filename (tasks.md,
-        // eod.md), agents should head to _globals before falling back to
+        // scratch.md), agents should head to _globals before falling back to
         // ask_user_choice or broad Glob sweeps.
         assert!(prompt.contains("Bare-filename heuristic"));
         assert!(prompt.contains("_globals"));

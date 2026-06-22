@@ -322,7 +322,7 @@ fn main() -> Result<()> {
                     }
                 },
             );
-            // Filesystem watcher → CL/EOD freshness. Watches the Context Library
+            // Filesystem watcher → CL freshness. Watches the Context Library
             // dir; on a debounced change it re-syncs the index for the affected
             // scope and emits `cl:changed` so the UI refetches the now-current
             // index. Best-effort — a failure here just leaves CL views on their
@@ -343,7 +343,7 @@ fn main() -> Result<()> {
                     let _ = core_for_setup.fs_watcher.set(handle);
                 }
                 Err(e) => {
-                    tracing::warn!(?e, "fs watcher failed to start; CL/EOD + A-tab fall back to polling");
+                    tracing::warn!(?e, "fs watcher failed to start; CL + A-tab fall back to polling");
                 }
             }
             // SessionCloseRequest handler. The agent-facing `close_session`

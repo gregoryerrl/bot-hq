@@ -11,7 +11,7 @@
 //!   library/                       (Context Library — its own folder)
 //!     custom-general-rules.md      (optional user additions; hardcoded core
 //!                                   lives in agents::general_rules)
-//!     eod.md, tasks.md             (cross-project _globals files)
+//!     scratch.md, tasks.md         (cross-project _globals files)
 //!     agents/<name>/custom-instruction.md  (brian, rain — user tweaks)
 //!     projects/<p>/conventions.md
 //!     projects/<p>/notes.md
@@ -83,7 +83,7 @@ pub struct Paths {
     pub data_dir: PathBuf,
     /// Context Library root: `<data_dir>/library/`. Holds agent custom
     /// instructions, `custom-general-rules.md`, cross-project `_globals` files
-    /// (`eod.md`, `tasks.md`), and `projects/<p>/` (conventions, notes,
+    /// (`scratch.md`, `tasks.md`), and `projects/<p>/` (conventions, notes,
     /// decisions, and `policy.yaml`). Its own folder so it can be backed up /
     /// cloud-synced independently of host-local state.
     pub cl_dir: PathBuf,
@@ -374,7 +374,7 @@ impl Paths {
             "projects",
             "agents",
             "custom-general-rules.md",
-            "eod.md",
+            "scratch.md",
             "tasks.md",
         ] {
             let from = self.data_dir.join(name);
@@ -714,7 +714,7 @@ mod tests {
         fs::create_dir_all(root.join("agents/brian")).unwrap();
         fs::write(root.join("agents/brian/custom-instruction.md"), "hi\n").unwrap();
         fs::write(root.join("custom-general-rules.md"), "rules\n").unwrap();
-        fs::write(root.join("eod.md"), "eod\n").unwrap();
+        fs::write(root.join("scratch.md"), "scratch\n").unwrap();
         fs::write(root.join("cl-version.txt"), "1\n").unwrap();
         fs::write(root.join("mcp-token"), "tok\n").unwrap();
         fs::write(root.join("violations.jsonl"), "{}\n").unwrap();
@@ -733,7 +733,7 @@ mod tests {
         // CL content moved under library/.
         assert!(paths.cl_dir.join("projects/foo/conventions.md").exists());
         assert!(paths.cl_dir.join("custom-general-rules.md").exists());
-        assert!(paths.cl_dir.join("eod.md").exists());
+        assert!(paths.cl_dir.join("scratch.md").exists());
         assert!(paths
             .cl_dir
             .join("agents/brian/custom-instruction.md")

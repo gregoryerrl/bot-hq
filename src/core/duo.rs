@@ -443,7 +443,7 @@ mod tests {
         assert!(is_heartbeat_ack("Ready when you are."));
         assert!(is_heartbeat_ack("On standby."));
         assert!(is_heartbeat_ack("On standby for the next step."));
-        // Phrases from the 2026-05-28 ad-exporter volley that the original
+        // Phrases from the 2026-05-28 volley that the original
         // list missed (the bug): bare + parenthesized forms.
         assert!(is_heartbeat_ack("No response needed."));
         assert!(is_heartbeat_ack("(Silent.)"));

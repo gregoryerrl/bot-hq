@@ -871,7 +871,7 @@ mod tests {
         fs::create_dir_all(base.join("agents/brian")).unwrap();
         fs::write(base.join("agents/brian/custom-instruction.md"), b"x").unwrap();
         fs::write(base.join("custom-general-rules.md"), b"x").unwrap();
-        fs::write(base.join("eod.md"), b"x").unwrap();
+        fs::write(base.join("scratch.md"), b"x").unwrap();
         fs::create_dir_all(base.join("projects")).unwrap();
         fs::create_dir_all(base.join("notes")).unwrap();
         let root = base.canonicalize().unwrap();
@@ -886,7 +886,7 @@ mod tests {
         assert!(check("agents/brian/custom-instruction.md").is_err());
         assert!(check("custom-general-rules.md").is_err());
         // …loose cross-project content is not.
-        assert!(check("eod.md").is_ok());
+        assert!(check("scratch.md").is_ok());
         assert!(check("notes").is_ok());
 
         // The register-from-Global move target (projects/<name>) is allowed…

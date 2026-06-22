@@ -1,4 +1,4 @@
-//! Filesystem watcher: live CL/EOD freshness AND live Apply-tab working-tree diffs.
+//! Filesystem watcher: live CL freshness AND live Apply-tab working-tree diffs.
 //!
 //! One `notify` debouncer watches the Context Library dir plus every live
 //! session's working repo (registered/unregistered via [`WatcherHandle`]). For
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn scope_root_file_is_globals() {
         assert_eq!(
-            scope_for_path(&cl().join("eod.md"), &cl()),
+            scope_for_path(&cl().join("scratch.md"), &cl()),
             Some(Project::GLOBALS.to_string())
         );
     }

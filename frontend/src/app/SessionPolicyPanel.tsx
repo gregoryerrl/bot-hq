@@ -135,7 +135,7 @@ export function SessionPolicyPanel({
 
       <div className="min-h-0 flex-1 overflow-auto px-5 py-5">
         <p className="mb-4 rounded border border-outline-variant/40 bg-surface-container/60 px-3 py-2 font-code-sm text-code-sm text-on-surface-variant">
-          This session's policy. Push / force-push / forbidden-word enforcement
+          This session's policy. Push / force-push enforcement
           is <span className="text-on-surface">live</span> — the git hooks and
           MCP tools re-read this snapshot on every call. The agents' own
           system-prompt copy was fixed at spawn, so restart the session if you
@@ -183,7 +183,7 @@ export function SessionPolicyPanel({
 /**
  * Surfaces HOW this session's project (and therefore its policy) was resolved —
  * registered repo vs path-basename inference vs no project. Closes the
- * 2026-06-11 "why am I getting the full forbidden-word list?" gap: an
+ * 2026-06-11 "why am I getting the full inherited policy?" gap: an
  * unregistered repo silently inheriting general policy is now visible.
  */
 function PolicyOriginBadge({

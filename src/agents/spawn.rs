@@ -972,7 +972,7 @@ mod tests {
             claude_bin: Some("claude".into()),
             session_id: "test-session".into(),
             resume_session_id: None,
-            project: Some("bcc-ad-manager-ad-exporter".into()),
+            project: Some("acme-app-exporter".into()),
             data_dir: Path::new("/tmp/data").to_path_buf(),
             session_effort: None,
             session_ultracode: None,
@@ -1726,7 +1726,7 @@ mod tests {
             "hook must call the gate subcommand: {settings}"
         );
         assert!(
-            settings.contains("bcc-ad-manager-ad-exporter"),
+            settings.contains("acme-app-exporter"),
             "hook must be bound to the session's project: {settings}"
         );
         assert!(

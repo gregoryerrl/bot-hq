@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn both_duo_roles_have_session_opener() {
-        // Issue #378 (bcc-ad-manager) shipped with partial-pint pollution
+        // Issue #378 (acme-app) shipped with partial-pint pollution
         // because neither Brian nor Rain called cl_index_search at session
         // start — they jumped straight to `gh issue view` + `grep` and
         // missed the project's documented Pint formatter convention. Both

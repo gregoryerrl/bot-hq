@@ -146,7 +146,7 @@ impl AgentHealthEvent {
 
 /// Emitted by the filesystem watcher when a Context Library file changed on disk
 /// (after the index was re-synced for the affected scope). `project` is the CL
-/// scope: a named project, or `None` for `_globals`/root files (`eod.md`,
+/// scope: a named project, or `None` for `_globals`/root files (`scratch.md`,
 /// `tasks.md`, `agents/…`). The frontend invalidates its whole CL query family
 /// regardless of the scope (prefix-based invalidation), so this field is
 /// informational — it's here for future scoped consumers + parity with the other

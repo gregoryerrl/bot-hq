@@ -69,7 +69,7 @@ describe("isInternalGlobalsPath", () => {
   });
 
   it("leaves loose cross-project paths external", () => {
-    expect(isInternalGlobalsPath("eod.md")).toBe(false);
+    expect(isInternalGlobalsPath("scratch.md")).toBe(false);
     expect(isInternalGlobalsPath("tasks.md")).toBe(false);
     expect(isInternalGlobalsPath("notes/agents.md")).toBe(false);
     // prefix must be a path segment, not a substring
@@ -83,8 +83,8 @@ describe("splitGlobals", () => {
     const entries = [
       entry(1, "custom-general-rules.md"),
       entry(2, "agents/brian/custom-instruction.md"),
-      entry(3, "eod.md"),
-      entry(4, "notes/scratch.md"),
+      entry(3, "scratch.md"),
+      entry(4, "notes/draft.md"),
     ];
     const folders = ["agents", "agents/brian", "notes"];
     const split = splitGlobals(entries, folders);
@@ -95,8 +95,8 @@ describe("splitGlobals", () => {
     ]);
     expect(split.system.folderPaths).toEqual(["agents", "agents/brian"]);
     expect(split.global.entries.map((e) => e.file_path)).toEqual([
-      "eod.md",
-      "notes/scratch.md",
+      "scratch.md",
+      "notes/draft.md",
     ]);
     expect(split.global.folderPaths).toEqual(["notes"]);
   });

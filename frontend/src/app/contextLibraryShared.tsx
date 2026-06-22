@@ -95,7 +95,7 @@ export interface GlobalsSplit {
 }
 
 // Split the `_globals` bucket into the bot-hq-owned SYSTEM subtree and the
-// loose cross-project GLOBAL subtree (eod.md, tasks.md, user folders).
+// loose cross-project GLOBAL subtree (scratch.md, tasks.md, user folders).
 export function splitGlobals(
   entries: ClIndexEntryView[],
   folderPaths: string[],

@@ -1433,13 +1433,13 @@ mod tests {
             HookKind::PreCommit,
             "/usr/local/bin/bot-hq",
             Path::new("/home/u/.bot-hq-dev"),
-            Some("bcc-ad-manager"),
+            Some("acme-app"),
         );
         assert!(body.starts_with("#!/bin/sh"));
         assert!(body.contains(MANAGED_MARKER));
         assert!(body.contains("/usr/local/bin/bot-hq policy-check pre-commit"));
         assert!(body.contains("--data-dir /home/u/.bot-hq-dev"));
-        assert!(body.contains("--project bcc-ad-manager"));
+        assert!(body.contains("--project acme-app"));
     }
 
     #[test]

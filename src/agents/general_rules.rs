@@ -70,7 +70,7 @@ The index returns lightweight `{file_path, description, tags, updated_at}` rows 
 
 Tools:
 
-- `cl_index_search(project, query?)` — list relevant CL files. Pass your session's working project name (e.g. `\"bcc-ad-manager\"`) for project-scoped notes. Pass `\"_globals\"` for system rules + cross-project files. Omit `project` to search everything. Optional `query` does a case-insensitive substring filter across file_path/description/tags.
+- `cl_index_search(project, query?)` — list relevant CL files. Pass your session's working project name (e.g. `\"acme-app\"`) for project-scoped notes. Pass `\"_globals\"` for system rules + cross-project files. Omit `project` to search everything. Optional `query` does a case-insensitive substring filter across file_path/description/tags.
 - `cl_folder_search(project, query?)` — parallel to `cl_index_search` but for FOLDERS instead of files. Returns `{folder_path, description, tags, updated_at}` so you can scope a sweep before pulling individual files. `folder_path = \"\"` rows are project-root descriptions.
 - `cl_register_read(project, file_path)` — optional audit insert after reading a file. Powers a future \"what context did this agent have?\" view. Fire-and-forget.
 - `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. HANDS (brian) can call this; Rain is denied (read folder descriptions via `cl_folder_search`).
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn cl_section_demands_index_first_as_load_bearing() {
-        // Issue #378 (bcc-ad-manager) shipped with partial-pint pollution
+        // Issue #378 (acme-app) shipped with partial-pint pollution
         // because both Brian and Rain skipped `cl_index_search` entirely
         // — they treated the workflow line as a tip. The CL section must
         // open with a strong-framed "call cl_index_search BEFORE any other

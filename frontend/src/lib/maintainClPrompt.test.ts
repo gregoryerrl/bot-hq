@@ -3,9 +3,9 @@ import { maintainClPrompt } from "./maintainClPrompt";
 
 describe("maintainClPrompt", () => {
   it("names the project throughout, including the cl_index_search call", () => {
-    const p = maintainClPrompt("bcc-ad-manager");
-    expect(p).toContain("bcc-ad-manager");
-    expect(p).toContain('cl_index_search(project="bcc-ad-manager")');
+    const p = maintainClPrompt("acme-app");
+    expect(p).toContain("acme-app");
+    expect(p).toContain('cl_index_search(project="acme-app")');
   });
 
   it("encodes the study-notes model, all four IPAV phases, and boundaries", () => {
