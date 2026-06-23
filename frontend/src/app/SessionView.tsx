@@ -4,6 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useHealthStore } from "../stores/health";
+import { useActivityStore } from "../stores/activity";
 import { HealthDot } from "../components/HealthDot";
 import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useChatStore } from "../stores/chat";
@@ -115,6 +116,7 @@ export function SessionView() {
   const [dirtyCount, setDirtyCount] = useState(0);
   // B2: live agent health for this session (drives the header dots).
   const health = useHealthStore((s) => s.bySession[sessionId]);
+  const activity = useActivityStore((s) => s.bySession[sessionId]);
 
   // Inline title rename. `editingTitle === null` = display mode; a string =
   // the in-progress edit. Commit on Enter/blur, cancel on Escape.
@@ -499,8 +501,12 @@ export function SessionView() {
             key={sessionId}
             draftKey={`bothq:draft:${sessionId}`}
             placeholder="Broadcast to Brian + Rain…"
+            activity={activity}
             onSend={async (text) => {
               await invoke("broadcast_message", { sessionId, text });
+            }}
+            onCancel={async () => {
+              await invoke("cancel_session_turn", { sessionId });
             }}
           />
         </div>

@@ -2,11 +2,21 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "./ui/Button";
 import { Textarea } from "./ui/Textarea";
 import { errorMessage } from "../hooks/useInvoke";
+import { isLocked, type SessionActivity } from "../stores/activity";
 
 interface ChatInputProps {
   placeholder?: string;
   onSend: (text: string) => Promise<void> | void;
   disabled?: boolean;
+  /**
+   * The session's duo activity. When `busy`/`cancelling` the input locks and
+   * the Send button becomes a Stop button (interrupt redesign, Batch 4).
+   * `idle`/`awaiting_user`/undefined leave the input open.
+   */
+  activity?: SessionActivity;
+  /** Hard-cancel the in-flight turn (the Stop button). Required for Stop to
+   *  render — without it a locked input just disables, no Stop. */
+  onCancel?: () => Promise<void> | void;
   /**
    * localStorage key for draft persistence. When set, the in-progress text
    * survives unmounts (navigating to another session / app restart): seeded
@@ -17,13 +27,41 @@ interface ChatInputProps {
   draftKey?: string;
 }
 
-export function ChatInput({ placeholder, onSend, disabled, draftKey }: ChatInputProps) {
+export function ChatInput({
+  placeholder,
+  onSend,
+  disabled,
+  activity,
+  onCancel,
+  draftKey,
+}: ChatInputProps) {
   const [value, setValue] = useState(() =>
     draftKey ? (localStorage.getItem(draftKey) ?? "") : "",
   );
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // The duo is working → lock the textarea + swap Send for Stop.
+  const locked = isLocked(activity);
+  // Once the turn actually stops (activity leaves busy/cancelling) drop the
+  // local "Cancelling…" spinner. v1 has no explicit backend cancelling state
+  // (it goes busy → idle), so this is the post-press feedback.
+  useEffect(() => {
+    if (!locked) setCancelling(false);
+  }, [locked]);
+
+  const handleCancel = async () => {
+    if (!onCancel || cancelling) return;
+    setCancelling(true);
+    try {
+      await onCancel();
+    } catch (err) {
+      setError(errorMessage(err));
+      setCancelling(false);
+    }
+  };
 
   const updateValue = (next: string) => {
     setValue(next);
@@ -102,7 +140,7 @@ export function ChatInput({ placeholder, onSend, disabled, draftKey }: ChatInput
               handleSubmit(e as unknown as FormEvent);
             }
           }}
-          disabled={disabled || sending}
+          disabled={disabled || sending || locked}
           // Right padding leaves room for the kbd hint overlay.
           className="w-full resize-none pr-14"
         />
@@ -114,16 +152,30 @@ export function ChatInput({ placeholder, onSend, disabled, draftKey }: ChatInput
           {hint}
         </kbd>
       </div>
-      <Button
-        type="submit"
-        variant="primary"
-        disabled={!value.trim() || disabled || sending}
-        // Fixed min-width so the label cycle (Send → Sending… → Send)
-        // doesn't dance the layout on every submit.
-        className="min-w-[5.5rem]"
-      >
-        {sending ? "Sending…" : "Send"}
-      </Button>
+      {locked && onCancel ? (
+        <Button
+          type="button"
+          variant="danger"
+          onClick={handleCancel}
+          disabled={cancelling}
+          // Match Send's width so swapping Send↔Stop doesn't shift the layout.
+          className="min-w-[5.5rem]"
+          title="Stop the in-flight turn"
+        >
+          {cancelling ? "Cancelling…" : "Stop"}
+        </Button>
+      ) : (
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={!value.trim() || disabled || sending || locked}
+          // Fixed min-width so the label cycle (Send → Sending… → Send)
+          // doesn't dance the layout on every submit.
+          className="min-w-[5.5rem]"
+        >
+          {sending ? "Sending…" : "Send"}
+        </Button>
+      )}
       </form>
     </>
   );

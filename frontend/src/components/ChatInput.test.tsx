@@ -64,3 +64,44 @@ describe("ChatInput draft persistence", () => {
     expect(localStorage.length).toBe(0);
   });
 });
+
+describe("ChatInput activity lock + Stop", () => {
+  it("locks the textarea and swaps Send for Stop while busy", () => {
+    render(<ChatInput activity="busy" onSend={() => {}} onCancel={() => {}} />);
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+  });
+
+  it("keeps the input open on idle and awaiting-user (the user's turn)", () => {
+    const { rerender } = render(
+      <ChatInput activity="idle" onSend={() => {}} onCancel={() => {}} />,
+    );
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+
+    rerender(
+      <ChatInput activity="awaiting_user" onSend={() => {}} onCancel={() => {}} />,
+    );
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+  });
+
+  it("calls onCancel and shows Cancelling… when Stop is pressed", async () => {
+    const onCancel = vi.fn().mockResolvedValue(undefined);
+    render(<ChatInput activity="busy" onSend={() => {}} onCancel={onCancel} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
+    expect(
+      screen.getByRole("button", { name: "Cancelling…" }),
+    ).toBeInTheDocument();
+  });
+
+  it("disables the input but shows no Stop when busy without onCancel", () => {
+    render(<ChatInput activity="busy" onSend={() => {}} />);
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  });
+});

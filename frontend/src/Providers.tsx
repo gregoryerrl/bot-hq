@@ -6,6 +6,7 @@ import {
 import { useCallback, useState, type ReactNode } from "react";
 import { useTauriEvent } from "./hooks/useTauriEvent";
 import { useHealthStore, type AgentHealth } from "./stores/health";
+import { useActivityStore, type SessionActivity } from "./stores/activity";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -108,18 +109,27 @@ function GlobalEventSync() {
   const onFindings = useCallback(() => invalidate(FINDINGS_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
   const clearHealth = useHealthStore((s) => s.clearSession);
+  const setActivity = useActivityStore((s) => s.setActivity);
+  const clearActivity = useActivityStore((s) => s.clearSession);
   const onClose = useCallback(
     (p: { session_id: string }) => {
       invalidate(CLOSE_KEYS);
       clearHealth(p.session_id);
+      clearActivity(p.session_id);
     },
-    [invalidate, clearHealth],
+    [invalidate, clearHealth, clearActivity],
   );
   const onHealth = useCallback(
     (p: { session_id: string; agent: string; health: string }) => {
       setHealth(p.session_id, p.agent, p.health as AgentHealth);
     },
     [setHealth],
+  );
+  const onActivity = useCallback(
+    (p: { session_id: string; state: string }) => {
+      setActivity(p.session_id, p.state as SessionActivity);
+    },
+    [setActivity],
   );
   // Recovery: the backend emits `session:resync` when its broadcast receiver
   // lagged and dropped events — refetch every event-backed query so the UI
@@ -155,6 +165,7 @@ function GlobalEventSync() {
   useTauriEvent("model:changed", onModel, [onModel]);
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
+  useTauriEvent("session:activity", onActivity, [onActivity]);
   useTauriEvent("session:resync", onResync, [onResync]);
 
   return null;
