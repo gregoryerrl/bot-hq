@@ -42,6 +42,10 @@ pub async fn broadcast_user_message(
     session_id: &str,
     text: &str,
     phase: IpavPhase,
+    // Optional WIRE-ONLY system note prepended to the body — e.g. the
+    // post-cancel reconciliation directive. NOT persisted: storage keeps the
+    // raw user text, so chat history stays clean (like the findings banner).
+    system_prefix: Option<&str>,
     brian_input: &mpsc::Sender<OutgoingUserMessage>,
     // None for a solo session (Rain disabled) — Brian still receives the message.
     rain_input: Option<&mpsc::Sender<OutgoingUserMessage>>,
@@ -55,7 +59,11 @@ pub async fn broadcast_user_message(
         .count_open_blocking_findings(session_id)
         .await
         .unwrap_or(0) as usize;
-    let wire = with_phase_and_findings_envelope(phase, open_blocking, text);
+    let wire_body = match system_prefix {
+        Some(p) => format!("{p}\n{text}"),
+        None => text.to_string(),
+    };
+    let wire = with_phase_and_findings_envelope(phase, open_blocking, &wire_body);
     let msg = OutgoingUserMessage::text(wire);
     // Fan out to both agents. The message is persisted (above) regardless, but
     // a send error means that agent's input pump has exited (stdin gone) and
@@ -110,7 +118,7 @@ mod tests {
         s.create_session("s1", "test", None).await.unwrap();
         let (btx, mut brx) = mpsc::channel(8);
         let (rtx, mut rrx) = mpsc::channel(8);
-        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, &btx, Some(&rtx))
+        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, None, &btx, Some(&rtx))
             .await
             .unwrap();
         let bm = brx.recv().await.unwrap();
@@ -141,6 +149,7 @@ mod tests {
             "sess-a",
             "msg-into-a",
             IpavPhase::Investigate,
+            None,
             &btx,
             Some(&rtx),
         )
@@ -165,7 +174,7 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.create_session("solo", "test", None).await.unwrap();
         let (btx, mut brx) = mpsc::channel(8);
-        broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, &btx, None)
+        broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, None, &btx, None)
             .await
             .unwrap();
         let bm = brx.recv().await.unwrap();
@@ -219,7 +228,7 @@ mod tests {
         .await
         .unwrap();
         let (btx, mut brx) = mpsc::channel(8);
-        broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, &btx, None)
+        broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, None, &btx, None)
             .await
             .unwrap();
         let bm = brx.recv().await.unwrap();
@@ -234,5 +243,38 @@ mod tests {
         // Storage still keeps the RAW text (no envelope), unchanged by the banner.
         let msgs = s.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs[0].content, "go");
+    }
+
+    #[tokio::test]
+    async fn system_prefix_rides_the_wire_not_storage() {
+        // The post-cancel reconciliation directive is wire-only: the agent sees
+        // it prepended to the body, but storage keeps the raw user text so the
+        // chat history stays clean.
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "test", None).await.unwrap();
+        let (btx, mut brx) = mpsc::channel(8);
+        broadcast_user_message(
+            &s,
+            "s1",
+            "do the thing",
+            IpavPhase::Apply,
+            Some("[System: previous turn interrupted — verify workspace.]"),
+            &btx,
+            None,
+        )
+        .await
+        .unwrap();
+        let bm = brx.recv().await.unwrap();
+        assert!(
+            bm.message
+                .content
+                .contains("[System: previous turn interrupted"),
+            "wire carries the system prefix: {}",
+            bm.message.content
+        );
+        assert!(bm.message.content.ends_with("\ndo the thing"));
+        // Storage keeps the RAW text — no prefix.
+        let msgs = s.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs[0].content, "do the thing");
     }
 }

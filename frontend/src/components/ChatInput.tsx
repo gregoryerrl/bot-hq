@@ -157,12 +157,14 @@ export function ChatInput({
           type="button"
           variant="danger"
           onClick={handleCancel}
-          disabled={cancelling}
+          // Disabled while the cancel is in flight — either the local press
+          // latency (`cancelling`) or the backend's explicit `cancelling` state.
+          disabled={cancelling || activity === "cancelling"}
           // Match Send's width so swapping Send↔Stop doesn't shift the layout.
           className="min-w-[5.5rem]"
           title="Stop the in-flight turn"
         >
-          {cancelling ? "Cancelling…" : "Stop"}
+          {cancelling || activity === "cancelling" ? "Cancelling…" : "Stop"}
         </Button>
       ) : (
         <Button

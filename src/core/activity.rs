@@ -138,6 +138,14 @@ impl ActivityTracker {
     }
 
     fn recompute_locked(&self, g: &mut Inner) {
+        // A cancel auto-completes once BOTH agents have gone idle (the kill
+        // settled) — clear `cancelling` so the state transitions
+        // Cancelling → Idle instead of sticking. Done BEFORE derive so the
+        // emitted state reflects it. (Set true by `set_cancelling` on Stop;
+        // the agents' pumps then clear their `busy` as they die.)
+        if g.cancelling && !g.brian_busy && !g.rain_busy {
+            g.cancelling = false;
+        }
         let next = SessionActivity::derive(
             g.brian_busy,
             g.rain_busy,
@@ -219,16 +227,28 @@ mod tests {
             activity_state(&rx.recv().await.unwrap()),
             Some("awaiting_user")
         );
+        awaiting.store(false, Ordering::Release);
 
-        // cancel in flight overrides awaiting.
+        // Cancelling only "sticks" while an agent is busy (the kill is
+        // settling). An agent goes busy, Stop sets cancelling (overrides busy),
+        // then the agent dies (idle) → cancelling AUTO-CLEARS → Idle.
+        t.set_busy(Author::Brian, true);
+        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("busy"));
         t.set_cancelling(true);
         assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("cancelling"));
+        t.set_busy(Author::Brian, false);
+        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("idle"));
+    }
 
-        // cancel settles; awaiting still set -> back to awaiting_user.
-        t.set_cancelling(false);
-        assert_eq!(
-            activity_state(&rx.recv().await.unwrap()),
-            Some("awaiting_user")
-        );
+    #[tokio::test]
+    async fn cancelling_set_while_idle_auto_clears() {
+        // Defensive: if a cancel is somehow set when no agent is busy, it
+        // auto-clears immediately (the kill has nothing to settle) — never a
+        // stuck Cancelling that locks the input forever.
+        let bridge = SignalingBridge::new();
+        let awaiting = Arc::new(AtomicBool::new(false));
+        let t = ActivityTracker::new("s1", awaiting, bridge);
+        t.set_cancelling(true);
+        assert_eq!(t.current(), SessionActivity::Idle);
     }
 }

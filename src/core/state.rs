@@ -10,11 +10,19 @@ use crate::paths::Paths;
 use crate::signaling::{ExternalServer, SignalingBridge, SignalingEvent, SignalingServer};
 use crate::storage::{Author, MessageKind, Session, Storage};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use tauri::Emitter;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
+
+/// Wire-only directive prepended to the first user message after a cancel
+/// (interrupt redesign, Batch 3.1) so the `--resume`d agent reconciles any
+/// partial state the force-interrupted turn left behind before acting.
+const RECONCILE_DIRECTIVE: &str = "[System: your previous turn was force-interrupted (Stop). \
+     Before acting on the message below, run `git status` to check the workspace and clear any \
+     stale lock files or partial writes the interrupted operation may have left (e.g. a leftover \
+     .git/index.lock).]";
 
 pub struct AppState {
     pub paths: Paths,
@@ -45,6 +53,11 @@ pub struct AppState {
     /// session's Apply-tab diff updates live. `OnceLock` — write-once at startup,
     /// like `app_handle`.
     pub fs_watcher: std::sync::OnceLock<crate::tauri_events::WatcherHandle>,
+    /// Sessions awaiting a post-cancel reconciliation nudge (interrupt redesign,
+    /// Batch 3.1). `cancel_session_turn` inserts; the next `broadcast` consumes
+    /// it, prepending a wire-only directive so the resumed agent verifies the
+    /// workspace (lock files / partial writes) before acting on the new message.
+    pending_reconcile: Mutex<HashSet<String>>,
 }
 
 impl AppState {
@@ -62,6 +75,7 @@ impl AppState {
             external_server: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             fs_watcher: std::sync::OnceLock::new(),
+            pending_reconcile: Mutex::new(HashSet::new()),
         }
     }
 
@@ -188,14 +202,32 @@ impl AppState {
     /// isolation is the safety net. Tool-boundary deferral + a post-cancel
     /// reconciliation nudge are tracked refinements (Batch 3.1).
     pub async fn cancel_session_turn(&self, session_id: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(handle) = sessions.get_mut(session_id) {
-            // EYES (Rain) is review-only → side-effect-safe; cancel it first.
-            // HANDS (Brian) may be mid-tool, so kill it last.
-            if let Some(rain) = handle.rain.as_mut() {
-                rain.kill();
+        let killed = {
+            let mut sessions = self.sessions.lock().await;
+            if let Some(handle) = sessions.get_mut(session_id) {
+                // Mark Cancelling FIRST → the UI shows "Cancelling…" + keeps the
+                // input locked for the whole kill window. It auto-clears to Idle
+                // in the tracker once both agents' pumps go idle (kill settled).
+                handle.activity.set_cancelling(true);
+                // EYES (Rain) is review-only → side-effect-safe; cancel it first.
+                // HANDS (Brian) may be mid-tool, so kill it last.
+                if let Some(rain) = handle.rain.as_mut() {
+                    rain.kill();
+                }
+                handle.brian.kill();
+                true
+            } else {
+                false
             }
-            handle.brian.kill();
+        };
+        if killed {
+            // Queue a post-cancel reconciliation nudge for the next user message
+            // (consumed in `broadcast`) — separate lock, acquired after releasing
+            // `sessions`, so there's no nested lock ordering to deadlock on.
+            self.pending_reconcile
+                .lock()
+                .await
+                .insert(session_id.to_string());
             tracing::info!(session_id, "cancel: killed in-flight turn(s)");
         }
         Ok(())
@@ -239,6 +271,9 @@ impl AppState {
         // Drop the bridge's in-memory per-session state (project map + awaiting
         // flag) so closed sessions don't leak map entries for the process life.
         self.bridge.unregister_session(id).await;
+        // Drop any queued post-cancel reconciliation flag (a session cancelled
+        // then closed without a follow-up message would otherwise linger).
+        self.pending_reconcile.lock().await.remove(id);
         // Worktree-isolated session: remove its worktree if (and only if) it
         // is clean. Never forced — a dirty worktree outlives the session so
         // uncommitted work is recoverable; the session branch always survives.
@@ -329,11 +364,21 @@ impl AppState {
             Err(e) => tracing::warn!(?e, session_id, "clear_pending_halts failed"),
         }
         let phase = handle.ipav.lock().await.current_phase;
+        // Consume any queued post-cancel reconciliation directive for this
+        // session (set by cancel_session_turn) — prepended wire-only so the
+        // resumed agent reconciles partial state before acting on this message.
+        let reconcile = self
+            .pending_reconcile
+            .lock()
+            .await
+            .remove(session_id)
+            .then_some(RECONCILE_DIRECTIVE);
         let id = broadcast_user_message(
             &self.storage,
             session_id,
             text,
             phase,
+            reconcile,
             &handle.brian.input_tx,
             handle.rain.as_ref().map(|r| &r.input_tx),
         )

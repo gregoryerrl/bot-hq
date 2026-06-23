@@ -104,4 +104,14 @@ describe("ChatInput activity lock + Stop", () => {
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
   });
+
+  it("shows a disabled Cancelling… when the backend reports cancelling", () => {
+    render(
+      <ChatInput activity="cancelling" onSend={() => {}} onCancel={() => {}} />,
+    );
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    const stop = screen.getByRole("button", { name: "Cancelling…" });
+    expect(stop).toBeInTheDocument();
+    expect(stop).toBeDisabled();
+  });
 });
