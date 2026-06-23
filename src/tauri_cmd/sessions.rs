@@ -409,9 +409,13 @@ pub async fn respawn_session(
 }
 
 /// Hard-cancel a session's in-flight turn (the Stop button — interrupt
-/// redesign, Batch 3). Kills both agents' current turn; the session returns to
-/// `Idle` (the chat input unlocks) and the next message respawns each agent
-/// with `--resume`, restoring its prior context. No-op if the session isn't
+/// redesign, Batch 3 + 3.1 Part 1). Kills both agents' current turn; the
+/// session returns to `Idle` (the chat input unlocks) and the next message
+/// respawns each agent with `--resume`, restoring its prior context. If HANDS
+/// is mid an atomic op (`git commit`/`git push`/migration), the kill is
+/// DEFERRED until the op completes (≤ ~8s, then force-killed) so the working
+/// tree isn't left half-written — the command returns immediately and a
+/// detached task does the kill once the op clears. No-op if the session isn't
 /// live.
 #[tauri::command]
 #[specta::specta]
@@ -419,7 +423,34 @@ pub async fn cancel_session_turn(
     core: tauri::State<'_, Arc<CoreAppState>>,
     session_id: String,
 ) -> Result<(), AppError> {
-    core.cancel_session_turn(&session_id).await?;
+    use crate::core::state::CancelOutcome;
+    match core.cancel_session_turn(&session_id).await? {
+        CancelOutcome::Done => {}
+        CancelOutcome::Deferred(flag) => {
+            // HANDS is mid an atomic op. Poll the flag lock-free until it clears,
+            // then kill — with a hard ~8s cap so a hung op still gets
+            // force-interrupted. Detached so the command returns immediately and
+            // the UI keeps showing "Cancelling…" for the whole window. We own an
+            // `Arc<CoreAppState>` (not the `&self` core method) so the task can
+            // re-acquire `sessions` to kill without holding it during the poll.
+            let core = core.inner().clone();
+            tokio::spawn(async move {
+                let deadline =
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+                while flag.load(std::sync::atomic::Ordering::Acquire) {
+                    if tokio::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            %session_id,
+                            "cancel: atomic-op deferral hit ~8s cap — force-killing"
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                core.cancel_kill_now(&session_id).await;
+            });
+        }
+    }
     Ok(())
 }
 

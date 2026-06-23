@@ -75,6 +75,12 @@ pub struct SessionHandle {
     /// `cancelling` on cancel). Reads the same `awaiting` Arc above for the
     /// `AwaitingUser` state.
     pub activity: Arc<crate::core::ActivityTracker>,
+    /// Shared "HANDS is mid-atomic-tool" flag (interrupt redesign, Batch 3.1
+    /// Part 1) — read by `cancel_session_turn` to DEFER the kill until a
+    /// `git commit`/`git push`/migration finishes, so a cancel never leaves the
+    /// working tree half-written. Session-level (both pumps hold the Arc; only
+    /// HANDS sets it).
+    pub in_atomic_tool: Arc<std::sync::atomic::AtomicBool>,
     /// Keeps the mcp-config temp files alive for the lifetime of the session.
     _mcp_temp: TempDir,
 }
@@ -525,6 +531,11 @@ async fn spawn_session_handle(
         .register_session_awaiting(session.id.clone(), Arc::clone(&awaiting))
         .await;
 
+    // Shared "HANDS mid-atomic-tool" flag (interrupt redesign, Batch 3.1 Part
+    // 1) — lets a cancel defer the kill until a git commit/push/migration
+    // finishes. Session-level: both pumps hold the Arc, only HANDS sets it.
+    let in_atomic_tool = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     // Per-session activity tracker (interrupt redesign, Batch 2) — drives the
     // chat-input lock. Shares the `awaiting` Arc (for the AwaitingUser state);
     // both pumps flip per-agent `busy`, the dispatch paths set busy on send.
@@ -553,6 +564,7 @@ async fn spawn_session_handle(
         awaiting: Some(Arc::clone(&awaiting)),
         bridge: Some(Arc::clone(&bridge)),
         activity: Some(Arc::clone(&activity)),
+        in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
         // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
         // before the Apply phase.
         self_input_tx: Some(brian_handle.input_tx.clone()),
@@ -579,6 +591,7 @@ async fn spawn_session_handle(
             awaiting: Some(Arc::clone(&awaiting)),
             bridge: Some(Arc::clone(&bridge)),
             activity: Some(Arc::clone(&activity)),
+            in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
             ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
         };
         tokio::spawn(async move {
@@ -625,6 +638,7 @@ async fn spawn_session_handle(
         rain: rain_handle,
         awaiting,
         activity,
+        in_atomic_tool,
         _mcp_temp: mcp_temp,
     })
 }

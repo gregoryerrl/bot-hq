@@ -43,6 +43,13 @@ pub struct DuoConfig {
     /// PEER's `busy` when it forwards a chunk. `None` in tests / solo configs
     /// that don't drive the input lock.
     pub activity: Option<Arc<ActivityTracker>>,
+    /// Shared "this agent is mid-atomic-tool" flag (interrupt redesign, Batch
+    /// 3.1 Part 1). The pump sets it on an atomic `ToolUse` (git commit/push/
+    /// migration) and clears it on the matching `ToolResult`/`TurnComplete`, so
+    /// `cancel_session_turn` can DEFER a kill until the op completes (no
+    /// half-written worktree). Shared session-level; only HANDS trips it. `None`
+    /// in tests / solo configs that don't drive cancel deferral.
+    pub in_atomic_tool: Option<Arc<AtomicBool>>,
 }
 
 impl DuoConfig {
@@ -56,6 +63,7 @@ impl DuoConfig {
             bridge: None,
             self_input_tx: None,
             activity: None,
+            in_atomic_tool: None,
         }
     }
 
@@ -75,6 +83,29 @@ impl DuoConfig {
             bridge.notify_message_persisted(self.session_id.clone(), message_id);
         }
     }
+}
+
+/// True for a tool call that performs an atomic, hard-to-resume mutation — a
+/// `git commit`/`git push` or a DB migration. A cancel arriving mid-flight
+/// should DEFER the agent kill until such an op finishes, so the working tree /
+/// repo isn't left half-written (interrupt redesign, Batch 3.1 Part 1). Matches
+/// HANDS's two atomic-op surfaces: a direct `Bash` command, or an `action_gate`
+/// (a gated command — surfaced MCP-prefixed as
+/// `mcp__bot-hq-signaling__action_gate`, so match by suffix). Rain is read-only
+/// and never trips this. The `migrate` match is deliberately broad (sqlx /
+/// artisan / rails / npm): a false positive only defers a kill briefly (8s-
+/// capped, self-clears on the ToolResult); a false negative is the exact bug
+/// this prevents.
+fn is_atomic_command(name: &str, input: &serde_json::Value) -> bool {
+    let is_command_surface = name == "Bash" || name.ends_with("action_gate");
+    if !is_command_surface {
+        return false;
+    }
+    let cmd = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    cmd.contains("git commit") || cmd.contains("git push") || cmd.contains("migrate")
 }
 
 /// Pump events from one agent. Each text chunk is persisted; the peer-forward
@@ -99,6 +130,11 @@ pub async fn pump_agent(
     // A3a: one-shot guard so Brian gets at most one "you're mutating before
     // Apply" nudge per session (delivered to his own stdin via self_input_tx).
     let mut mutate_nudged = false;
+    // Batch 3.1 Part 1: the tool_use_id of an in-flight atomic op (git commit/
+    // push/migration), so a cancel can defer the kill until it completes. We
+    // match the clearing ToolResult by id — claude-code can emit parallel tool
+    // calls, so clearing on ANY result would race a still-running commit.
+    let mut atomic_tool_id: Option<String> = None;
 
     loop {
         let event = match flush_at {
@@ -145,6 +181,15 @@ pub async fn pump_agent(
                 // A tool call is substantive activity — reset the idle breaker
                 // so post-work ack chunks aren't pre-emptively suppressed.
                 consecutive_short = 0;
+                // Batch 3.1 Part 1: flag an atomic op (git commit/push/
+                // migration) so a cancel defers the kill until it completes.
+                // Shared session flag; only HANDS trips it (Rain is read-only).
+                if let Some(flag) = cfg.in_atomic_tool.as_ref() {
+                    if is_atomic_command(&name, &input) {
+                        flag.store(true, Ordering::Release);
+                        atomic_tool_id = Some(id.clone());
+                    }
+                }
                 // A3a (adherence): catch Brian mutating before the Apply phase —
                 // a one-time self-nudge to advance first. Brian-only (Rain can't
                 // mutate), gated by adherence_nudges, fired at most once.
@@ -192,6 +237,14 @@ pub async fn pump_agent(
                 content,
                 is_error,
             } => {
+                // Batch 3.1 Part 1: clear the atomic-op flag once THIS op's
+                // result returns (id-matched → parallel-call safe).
+                if atomic_tool_id.as_deref() == Some(tool_use_id.as_str()) {
+                    if let Some(flag) = cfg.in_atomic_tool.as_ref() {
+                        flag.store(false, Ordering::Release);
+                    }
+                    atomic_tool_id = None;
+                }
                 let payload = serde_json::json!({
                     "tool_use_id": tool_use_id,
                     "content": content,
@@ -230,6 +283,18 @@ pub async fn pump_agent(
                 // `Busy` with no momentary `Idle` flicker between the two.
                 if let Some(activity) = &cfg.activity {
                     activity.set_busy(cfg.author, false);
+                }
+                // Batch 3.1 Part 1: safety-clear a stranded atomic-op flag at
+                // turn end (an atomic ToolUse with no matching ToolResult
+                // shouldn't happen, but never strand the flag → never wedge a
+                // future cancel). Guarded by our own id so this pump can't clear
+                // a flag it didn't set (the flag is HANDS-only; Rain's pump
+                // never holds an id).
+                if atomic_tool_id.is_some() {
+                    if let Some(flag) = cfg.in_atomic_tool.as_ref() {
+                        flag.store(false, Ordering::Release);
+                    }
+                    atomic_tool_id = None;
                 }
             }
             AgentEvent::Init { session_id, .. } => {
@@ -278,6 +343,14 @@ pub async fn pump_agent(
     // session `Busy` with the chat input locked.
     if let Some(activity) = &cfg.activity {
         activity.set_busy(cfg.author, false);
+    }
+    // Batch 3.1 Part 1: crashed/stopped mid-atomic-tool → clear the flag so a
+    // pending deferred cancel can proceed (the agent's already dead) and a
+    // respawn isn't blocked. Guarded by our own id (Rain's pump never sets it).
+    if atomic_tool_id.is_some() {
+        if let Some(flag) = cfg.in_atomic_tool.as_ref() {
+            flag.store(false, Ordering::Release);
+        }
     }
     // B2: the event loop ended → the agent's supervisor returned (exhausted
     // retries / permanent error / process exit / intentional close). Flag it
@@ -453,6 +526,7 @@ mod tests {
             bridge: None,
             self_input_tx: None,
             activity: None,
+            in_atomic_tool: None,
         }
     }
 
@@ -857,6 +931,147 @@ mod tests {
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].kind, "tool_use");
+    }
+
+    #[test]
+    fn is_atomic_command_matrix() {
+        use serde_json::json;
+        // Bash + atomic git ops / migrations → true.
+        assert!(is_atomic_command("Bash", &json!({"command": "git commit -m x"})));
+        assert!(is_atomic_command(
+            "Bash",
+            &json!({"command": "git push origin main"})
+        ));
+        assert!(is_atomic_command(
+            "Bash",
+            &json!({"command": "cd repo && git commit -F /tmp/m"})
+        ));
+        assert!(is_atomic_command("Bash", &json!({"command": "sqlx migrate run"})));
+        assert!(is_atomic_command(
+            "Bash",
+            &json!({"command": "php artisan migrate"})
+        ));
+        // action_gate: the real wire name is MCP-prefixed; a bare alias also matches.
+        assert!(is_atomic_command(
+            "mcp__bot-hq-signaling__action_gate",
+            &json!({"command": "git push"})
+        ));
+        assert!(is_atomic_command(
+            "action_gate",
+            &json!({"command": "git commit -m x"})
+        ));
+        // Non-atomic commands on a command surface → false.
+        assert!(!is_atomic_command("Bash", &json!({"command": "git status"})));
+        assert!(!is_atomic_command("Bash", &json!({"command": "ls -la"})));
+        assert!(!is_atomic_command(
+            "mcp__bot-hq-signaling__action_gate",
+            &json!({"command": "git diff"})
+        ));
+        // Non-command tool surfaces → false even with a command-ish field.
+        assert!(!is_atomic_command("Edit", &json!({"command": "git commit"})));
+        assert!(!is_atomic_command("Read", &json!({})));
+        // Missing / null command → false (no panic).
+        assert!(!is_atomic_command("Bash", &json!({})));
+        assert!(!is_atomic_command("Bash", &json!({"command": null})));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn atomic_tool_sets_and_clears_flag() {
+        // An atomic ToolUse sets the shared flag; a NON-matching ToolResult does
+        // NOT clear it (parallel-call safety); the id-matching ToolResult clears.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let flag = Arc::new(AtomicBool::new(false));
+        let cfg = DuoConfig {
+            in_atomic_tool: Some(Arc::clone(&flag)),
+            ..fast_cfg(Author::Brian, Author::Rain)
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, None, storage, state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_commit".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "git commit -m x"}),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(flag.load(Ordering::Acquire), "atomic ToolUse sets the flag");
+
+        ev_tx
+            .send(AgentEvent::ToolResult {
+                tool_use_id: "tu_other".into(),
+                content: "ok".into(),
+                is_error: false,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            flag.load(Ordering::Acquire),
+            "a non-matching ToolResult must NOT clear the flag"
+        );
+
+        ev_tx
+            .send(AgentEvent::ToolResult {
+                tool_use_id: "tu_commit".into(),
+                content: "ok".into(),
+                is_error: false,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "the id-matching ToolResult clears the flag"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn turn_complete_safety_clears_atomic_flag() {
+        // A turn that ends with an atomic op still "in flight" (no ToolResult)
+        // must not strand the flag — TurnComplete safety-clears it.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let flag = Arc::new(AtomicBool::new(false));
+        let cfg = DuoConfig {
+            in_atomic_tool: Some(Arc::clone(&flag)),
+            ..fast_cfg(Author::Brian, Author::Rain)
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, None, storage, state));
+
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_push".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "git push"}),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(flag.load(Ordering::Acquire));
+
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "TurnComplete safety-clears a stranded atomic flag"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -13,6 +13,7 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use tauri::Emitter;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
@@ -23,6 +24,17 @@ const RECONCILE_DIRECTIVE: &str = "[System: your previous turn was force-interru
      Before acting on the message below, run `git status` to check the workspace and clear any \
      stale lock files or partial writes the interrupted operation may have left (e.g. a leftover \
      .git/index.lock).]";
+
+/// Outcome of initiating a cancel (`AppState::cancel_session_turn`).
+pub enum CancelOutcome {
+    /// Killed immediately, or the session wasn't live (no-op). Nothing more to do.
+    Done,
+    /// HANDS was mid an atomic op (git commit/push/migration); the kill is
+    /// DEFERRED. The caller must poll this flag lock-free until it clears (or a
+    /// timeout), then call `cancel_kill_now`. `Cancelling` is already set, so the
+    /// UI shows "Cancelling…" for the whole window.
+    Deferred(Arc<std::sync::atomic::AtomicBool>),
+}
 
 pub struct AppState {
     pub paths: Paths,
@@ -188,27 +200,61 @@ impl AppState {
     }
 
     /// Hard-cancel a session's in-flight turn — the Stop button (interrupt
-    /// redesign, Batch 3). Kills both agents' current incarnation: each
-    /// supervisor tears down, its pump's event channel closes, and the pump's
-    /// post-loop activity clear flips that agent to idle — so once both clear,
-    /// the session returns to `Idle` and the chat input unlocks, with no extra
-    /// plumbing. The handle is left in the map but goes stale (`input_tx`
-    /// closed); the next user message respawns each agent via `--resume`,
-    /// restoring its prior context. The session branch + (worktree-isolated)
-    /// working tree survive, so a mid-tool interrupt (e.g. mid-commit) is
-    /// recoverable. No-op if the session isn't live.
+    /// redesign, Batch 3 + 3.1 Part 1). Sets `Cancelling` (the UI shows
+    /// "Cancelling…" + keeps the input locked for the whole kill window), then
+    /// decides:
+    /// - **immediate** kill of both agents' current incarnation (today's path)
+    ///   when HANDS is not mid an atomic op, returning [`CancelOutcome::Done`];
+    /// - **deferred** kill ([`CancelOutcome::Deferred`]) when HANDS is mid a
+    ///   `git commit`/`git push`/migration — the caller polls the returned flag
+    ///   and calls [`cancel_kill_now`](Self::cancel_kill_now) once it clears, so
+    ///   the working tree is never left half-written.
     ///
-    /// v1 cancels at once (no tool-boundary deferral); per-session worktree
-    /// isolation is the safety net. Tool-boundary deferral + a post-cancel
-    /// reconciliation nudge are tracked refinements (Batch 3.1).
-    pub async fn cancel_session_turn(&self, session_id: &str) -> Result<()> {
+    /// On a kill, each supervisor tears down, its pump's event channel closes,
+    /// and the pump's post-loop activity clear flips that agent to idle — so once
+    /// both clear, the session returns to `Idle` and the chat input unlocks. The
+    /// handle is left in the map but goes stale (`input_tx` closed); the next
+    /// user message respawns each agent via `--resume`, restoring prior context.
+    /// No-op (`Done`) if the session isn't live.
+    pub async fn cancel_session_turn(&self, session_id: &str) -> Result<CancelOutcome> {
+        let deferred = {
+            let mut sessions = self.sessions.lock().await;
+            let Some(handle) = sessions.get_mut(session_id) else {
+                return Ok(CancelOutcome::Done); // not live → no-op
+            };
+            // Mark Cancelling FIRST → the UI shows "Cancelling…" + keeps the
+            // input locked for the whole kill window (immediate or deferred). It
+            // auto-clears to Idle in the tracker once both pumps go idle.
+            handle.activity.set_cancelling(true);
+            // HANDS mid an atomic op (git commit/push/migration)? Defer: hand the
+            // shared flag to the caller to poll, and do NOT kill yet.
+            handle
+                .in_atomic_tool
+                .load(Ordering::Acquire)
+                .then(|| Arc::clone(&handle.in_atomic_tool))
+        };
+        match deferred {
+            Some(flag) => {
+                tracing::info!(session_id, "cancel: deferring kill — mid atomic tool");
+                Ok(CancelOutcome::Deferred(flag))
+            }
+            None => {
+                self.cancel_kill_now(session_id).await;
+                Ok(CancelOutcome::Done)
+            }
+        }
+    }
+
+    /// The kill half of a cancel: tear down both agents NOW and queue the
+    /// post-cancel reconciliation nudge. Used by the immediate path of
+    /// [`cancel_session_turn`](Self::cancel_session_turn) and by the Tauri
+    /// command's deferred-poll task once a mid-flight atomic op finishes (or the
+    /// ~8s cap elapses → force kill). Re-acquires `sessions`; a no-op if the
+    /// session is already gone.
+    pub async fn cancel_kill_now(&self, session_id: &str) {
         let killed = {
             let mut sessions = self.sessions.lock().await;
             if let Some(handle) = sessions.get_mut(session_id) {
-                // Mark Cancelling FIRST → the UI shows "Cancelling…" + keeps the
-                // input locked for the whole kill window. It auto-clears to Idle
-                // in the tracker once both agents' pumps go idle (kill settled).
-                handle.activity.set_cancelling(true);
                 // EYES (Rain) is review-only → side-effect-safe; cancel it first.
                 // HANDS (Brian) may be mid-tool, so kill it last.
                 if let Some(rain) = handle.rain.as_mut() {
@@ -230,7 +276,6 @@ impl AppState {
                 .insert(session_id.to_string());
             tracing::info!(session_id, "cancel: killed in-flight turn(s)");
         }
-        Ok(())
     }
 
     /// Register a session's working repo with the filesystem watcher so its
