@@ -6,6 +6,7 @@
 //! - the per-session in-memory IPAV state
 //! - the per-session live agent handles
 
+pub mod activity;
 mod broadcast;
 pub mod duo;
 pub mod ipav;
@@ -14,6 +15,7 @@ pub mod state;
 pub mod updates;
 pub mod worktree;
 
+pub use activity::{ActivityTracker, SessionActivity};
 pub use broadcast::peer_forward_message;
 pub use ipav::{IpavPhase, IpavState};
 pub use session::{open_session, OpenSessionRequest, SessionHandle};

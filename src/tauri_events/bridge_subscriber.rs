@@ -21,7 +21,7 @@ use crate::storage::Storage;
 use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
     AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent, FindingsChangedEvent,
-    PendingChoiceEvent, PhaseChangedEvent, SessionClosedEvent,
+    PendingChoiceEvent, PhaseChangedEvent, SessionActivityEvent, SessionClosedEvent,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -150,6 +150,13 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             };
             emit_event(
                 AgentHealthEvent::EVENT_NAME,
+                serde_json::to_value(&payload).unwrap_or(Value::Null),
+            );
+        }
+        SignalingEvent::SessionActivity { session_id, state } => {
+            let payload = SessionActivityEvent { session_id, state };
+            emit_event(
+                SessionActivityEvent::EVENT_NAME,
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }

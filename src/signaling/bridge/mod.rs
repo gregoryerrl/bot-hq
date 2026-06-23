@@ -146,6 +146,15 @@ pub enum SignalingEvent {
         agent: String,
         health: String,
     },
+    /// A session's duo activity changed (idle / busy / awaiting-user /
+    /// cancelling). Drives the chat-input lock + Cancel button: the UI disables
+    /// input while `busy`/`cancelling`, re-enables on `idle`/`awaiting_user`.
+    /// `state` is the `SessionActivity::as_str` string — carried as a String so
+    /// the signaling layer stays decoupled from the core activity enum.
+    SessionActivity {
+        session_id: String,
+        state: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -524,6 +533,17 @@ impl SignalingBridge {
             session_id,
             agent: agent.to_string(),
             health: health.to_string(),
+        });
+    }
+
+    /// Publish a session's duo-activity change (idle / busy / awaiting-user /
+    /// cancelling). Fire-and-forget; the UI subscriber maps it to a
+    /// `session:activity` event that gates the chat input + Cancel button.
+    /// `state` is the `SessionActivity::as_str` string.
+    pub fn notify_session_activity(&self, session_id: String, state: &str) {
+        let _ = self.event_tx.send(SignalingEvent::SessionActivity {
+            session_id,
+            state: state.to_string(),
         });
     }
 }

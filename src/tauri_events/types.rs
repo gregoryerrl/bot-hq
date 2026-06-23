@@ -144,6 +144,19 @@ impl AgentHealthEvent {
     pub const EVENT_NAME: &'static str = "session:agent_health";
 }
 
+/// Emitted when a session's duo activity changes (idle / busy / awaiting-user /
+/// cancelling), so the chat input can lock while the duo is working and re-open
+/// when it's the user's turn. `state` is the `SessionActivity::as_str` string.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct SessionActivityEvent {
+    pub session_id: String,
+    pub state: String,
+}
+
+impl SessionActivityEvent {
+    pub const EVENT_NAME: &'static str = "session:activity";
+}
+
 /// Emitted by the filesystem watcher when a Context Library file changed on disk
 /// (after the index was re-synced for the affected scope). `project` is the CL
 /// scope: a named project, or `None` for `_globals`/root files (`scratch.md`,

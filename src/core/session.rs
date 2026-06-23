@@ -69,6 +69,12 @@ pub struct SessionHandle {
     /// forward Brian↔Rain chunks; cleared by `core::AppState::broadcast` when
     /// the user replies. See `duo::DuoConfig::is_awaiting`.
     pub awaiting: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-session duo-activity tracker (interrupt redesign, Batch 2) — drives
+    /// the chat-input lock. Shared with both pumps (which clear `busy` on
+    /// `TurnComplete`) and the dispatch paths in `AppState` (set `busy` on send,
+    /// `cancelling` on cancel). Reads the same `awaiting` Arc above for the
+    /// `AwaitingUser` state.
+    pub activity: Arc<crate::core::ActivityTracker>,
     /// Keeps the mcp-config temp files alive for the lifetime of the session.
     _mcp_temp: TempDir,
 }
@@ -79,8 +85,10 @@ impl SessionHandle {
     /// caller can't remediate.
     pub async fn send_to_both(&self, msg: crate::agents::OutgoingUserMessage) {
         let _ = self.brian.input_tx.send(msg.clone()).await;
+        self.activity.set_busy(crate::storage::Author::Brian, true);
         if let Some(rain) = &self.rain {
             let _ = rain.input_tx.send(msg).await;
+            self.activity.set_busy(crate::storage::Author::Rain, true);
         }
     }
 
@@ -517,6 +525,12 @@ async fn spawn_session_handle(
         .register_session_awaiting(session.id.clone(), Arc::clone(&awaiting))
         .await;
 
+    // Per-session activity tracker (interrupt redesign, Batch 2) — drives the
+    // chat-input lock. Shares the `awaiting` Arc (for the AwaitingUser state);
+    // both pumps flip per-agent `busy`, the dispatch paths set busy on send.
+    let activity =
+        crate::core::ActivityTracker::new(session.id.clone(), Arc::clone(&awaiting), Arc::clone(&bridge));
+
     // Per-agent pumps need to be spawned BEFORE we move the handles, so we
     // pull the receivers + input senders here. The handles keep their other
     // fields (kill signal, etc.).
@@ -538,6 +552,7 @@ async fn spawn_session_handle(
     let brian_duo = DuoConfig {
         awaiting: Some(Arc::clone(&awaiting)),
         bridge: Some(Arc::clone(&bridge)),
+        activity: Some(Arc::clone(&activity)),
         // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
         // before the Apply phase.
         self_input_tx: Some(brian_handle.input_tx.clone()),
@@ -563,6 +578,7 @@ async fn spawn_session_handle(
         let rain_duo = DuoConfig {
             awaiting: Some(Arc::clone(&awaiting)),
             bridge: Some(Arc::clone(&bridge)),
+            activity: Some(Arc::clone(&activity)),
             ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
         };
         tokio::spawn(async move {
@@ -608,6 +624,7 @@ async fn spawn_session_handle(
         brian: brian_handle,
         rain: rain_handle,
         awaiting,
+        activity,
         _mcp_temp: mcp_temp,
     })
 }

@@ -2,6 +2,7 @@
 //! out to the peer with the IPAV buffer rule.
 
 use crate::agents::{AgentEvent, AgentHealth, OutgoingUserMessage};
+use crate::core::activity::ActivityTracker;
 use crate::core::broadcast::peer_forward_message;
 use crate::core::ipav::{IpavPhase, IpavState};
 use crate::signaling::SignalingBridge;
@@ -37,6 +38,11 @@ pub struct DuoConfig {
     /// Investigate/Plan. `None` disables self-nudging (Rain; tests that don't
     /// need it). Set only for Brian's pump at spawn.
     pub self_input_tx: Option<mpsc::Sender<OutgoingUserMessage>>,
+    /// Per-session activity tracker (interrupt redesign, Batch 2). The pump
+    /// clears this agent's `busy` on `TurnComplete`/`Exited`, and sets the
+    /// PEER's `busy` when it forwards a chunk. `None` in tests / solo configs
+    /// that don't drive the input lock.
+    pub activity: Option<Arc<ActivityTracker>>,
 }
 
 impl DuoConfig {
@@ -49,6 +55,7 @@ impl DuoConfig {
             awaiting: None,
             bridge: None,
             self_input_tx: None,
+            activity: None,
         }
     }
 
@@ -218,6 +225,12 @@ pub async fn pump_agent(
                     // Always flush on a successful turn-complete, both phases.
                     flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
                 }
+                // Turn ended → this agent is idle. Runs AFTER flush_buffer so a
+                // peer hand-off (which set the peer busy) keeps the session
+                // `Busy` with no momentary `Idle` flicker between the two.
+                if let Some(activity) = &cfg.activity {
+                    activity.set_busy(cfg.author, false);
+                }
             }
             AgentEvent::Init { session_id, .. } => {
                 debug!(agent = ?cfg.author, ?session_id, "init received");
@@ -237,6 +250,9 @@ pub async fn pump_agent(
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");
                 flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                if let Some(activity) = &cfg.activity {
+                    activity.set_busy(cfg.author, false);
+                }
                 break;
             }
             AgentEvent::Error(msg) => {
@@ -256,6 +272,13 @@ pub async fn pump_agent(
         }
     }
 
+    // Pump terminated (channel closed — the supervisor suppresses per-incarnation
+    // Exited events, so a closed channel is the reliable "agent stopped" signal).
+    // Clear its busy unconditionally so a crashed/stopped agent can't strand the
+    // session `Busy` with the chat input locked.
+    if let Some(activity) = &cfg.activity {
+        activity.set_busy(cfg.author, false);
+    }
     // B2: the event loop ended → the agent's supervisor returned (exhausted
     // retries / permanent error / process exit / intentional close). Flag it
     // dead so the UI dot goes red. On an intentional close the session is being
@@ -339,6 +362,12 @@ async fn flush_buffer(
         None => 0,
     };
     peer_forward_message(cfg.author, body.trim_end(), phase, open_blocking, peer_input_tx).await;
+    // The peer just received input → it's now busy (this is the duo's
+    // turn-start signal). Set AFTER the forward so a failed send (dead peer)
+    // doesn't wrongly mark it busy.
+    if let Some(activity) = &cfg.activity {
+        activity.set_busy(cfg.peer_author, true);
+    }
     *flush_at = None;
 }
 
@@ -423,6 +452,7 @@ mod tests {
             awaiting: None,
             bridge: None,
             self_input_tx: None,
+            activity: None,
         }
     }
 
