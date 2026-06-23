@@ -48,11 +48,14 @@ pub fn reap_all_children() {
 /// semantics of ignoring the return value.
 #[cfg(unix)]
 fn kill_child(pid: u32) {
-    // SAFETY: libc::kill is async-signal-safe + thread-safe; valid
-    // pids are u32 from std/tokio's child.id() which fits in i32 for
-    // every realistic process number on darwin/linux.
+    // SAFETY: libc::kill is async-signal-safe + thread-safe; valid pids are
+    // u32 from std/tokio's child.id() which fits in i32 for every realistic
+    // process number on darwin/linux. We signal `-pid` — the process GROUP
+    // led by `pid`. Every agent is spawned as a group leader
+    // (`process_group(0)`), so this reaps its tool children (npm/pytest/
+    // dev-servers) too; they'd otherwise reparent to init and survive.
     unsafe {
-        libc::kill(pid as i32, libc::SIGKILL);
+        libc::kill(-(pid as i32), libc::SIGKILL);
     }
 }
 
@@ -239,6 +242,19 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // Put each agent (and every tool child it spawns via Bash — npm/pytest/
+    // dev-servers) in its OWN process group, so a cancel/close/crash-reap can
+    // kill the whole group instead of just the parent. Without this, a
+    // long-running tool child reparents to init on kill and keeps running
+    // (CPU, file locks). `process_group(0)` makes the child a group LEADER
+    // with PGID == its PID, so the registered `child.id()` doubles as the
+    // group id; the kill paths signal `-pid`. Unix-only — Windows job-object
+    // reaping is a tracked follow-up (the single-PID `kill_child` stands in).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
 
     let mut child = cmd.spawn().with_context(|| {
         format!(
@@ -273,6 +289,16 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         tokio::select! {
             _ = kill_rx => {
                 info!(agent = %agent_name, "kill signalled");
+                // Reap the whole process group, not just the leader: tool
+                // children the agent spawned via Bash share its PGID and would
+                // otherwise reparent to init and keep running. SIGKILL the
+                // group (`-pid`, valid because process_group(0) made the child
+                // a group leader), then let tokio reap the leader zombie.
+                #[cfg(unix)]
+                if let Some(pid) = child_pid {
+                    // SAFETY: kill(2) is thread-safe; -pid targets the group.
+                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                }
                 let _ = child.kill().await;
                 if let Some(pid) = child_pid {
                     CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).remove(&pid);
@@ -986,6 +1012,59 @@ mod tests {
         assert_eq!(AgentHealth::Running.as_str(), "running");
         assert_eq!(AgentHealth::Retrying.as_str(), "retrying");
         assert_eq!(AgentHealth::Dead.as_str(), "dead");
+    }
+
+    /// Batch 1 guarantee: killing an agent reaps its TOOL CHILDREN, not just the
+    /// parent. We spawn a group leader that backgrounds a long-lived grandchild,
+    /// group-kill via `kill_child(leader_pid)`, and assert the grandchild dies —
+    /// proving we signal the process GROUP (`-pid`), not the lone parent. Without
+    /// `process_group(0)` + the `-pid` signal this orphan would survive on init.
+    #[cfg(unix)]
+    #[test]
+    fn kill_child_reaps_the_whole_process_group() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command as StdCommand, Stdio};
+
+        // `sleep 600 &` = backgrounded grandchild; `echo $!` prints its pid; the
+        // leader then blocks so the group stays alive until we kill it. `sh -c`
+        // runs without job control, so the bg job shares the leader's PGID.
+        let mut leader = StdCommand::new("sh")
+            .arg("-c")
+            .arg("sleep 600 & echo $!; sleep 600")
+            .process_group(0) // mirror spawn_agent: leader is its group's leader
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn sh leader");
+
+        let stdout = leader.stdout.take().expect("piped stdout");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("read grandchild pid");
+        let grandchild: i32 = line.trim().parse().expect("parse grandchild pid");
+
+        // Alive before the kill.
+        assert_eq!(
+            unsafe { libc::kill(grandchild, 0) },
+            0,
+            "grandchild should be alive pre-kill"
+        );
+
+        // Group-kill through the production reaper.
+        kill_child(leader.id());
+
+        // Poll for the grandchild to vanish (signal delivery + init reaping the
+        // reparented zombie is near-instant; the slack just avoids flakiness).
+        let gone = (0..300).any(|_| {
+            if unsafe { libc::kill(grandchild, 0) } != 0 {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            false
+        });
+        let _ = leader.wait(); // reap the leader zombie
+        assert!(gone, "group-kill must reap the grandchild (tool child)");
     }
 
     #[test]
