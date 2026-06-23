@@ -768,8 +768,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn investigate_phase_buffers_text() {
-        let (storage, state) = setup().await;
+    async fn investigate_phase_doesnt_forward_until_turn_complete() {
+        // Batch 5: I/P is turn-based now — text does NOT forward mid-turn; it
+        // flushes to the peer only on TurnComplete (was: 1.5s interleave window).
+        let (storage, state) = setup().await; // default phase = Investigate
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let task = tokio::spawn(pump_agent(
@@ -781,8 +783,23 @@ mod tests {
         ));
 
         ev_tx.send(AgentEvent::Text("hello".into())).await.unwrap();
+        // Was the 50ms window — now nothing forwards mid-turn.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "Investigate must not forward mid-turn after Batch 5"
+        );
 
-        let forwarded = peer_rx.recv().await.expect("buffer flushes after window");
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+            })
+            .await
+            .unwrap();
+        let forwarded = peer_rx.recv().await.expect("flushes on turn complete");
         assert!(forwarded.message.content.contains("hello"));
 
         drop(ev_tx);
@@ -835,7 +852,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn turn_complete_flushes_in_both_phases() {
         let (storage, state) = setup().await;
-        // Default = Investigate (buffered).
+        // Default = Investigate (turn-based).
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let (peer_tx, mut peer_rx) = mpsc::channel(8);
         let task = tokio::spawn(pump_agent(
@@ -867,9 +884,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn awaiting_flag_halts_peer_forward() {
-        // When the awaiting flag is set, buffered text is dropped instead of
-        // forwarded to the peer (storage still receives it, of course). When
-        // the flag clears, the next chunk volleys normally again.
+        // While the awaiting flag is set, a completed turn's text is persisted
+        // but NOT forwarded to the peer (otherwise Rain sees Brian's "waiting
+        // for the user" monologue and replies, defeating the halt). When the
+        // flag clears, the next turn volleys normally again. (Batch 5: flush is
+        // turn-based — each turn ends with TurnComplete, not the old 1.5s timer.)
         let (storage, state) = setup().await;
         let awaiting = Arc::new(AtomicBool::new(true));
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
@@ -880,17 +899,41 @@ mod tests {
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, Some(peer_tx), storage.clone(), state));
 
-        // While awaiting, this text is persisted but NOT forwarded.
+        // While awaiting, this turn's text is persisted but NOT forwarded — and
+        // the halted flush clears the buffer (`std::mem::take`), so it can't
+        // resurface later.
         ev_tx.send(AgentEvent::Text("halted line".into())).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        assert!(peer_rx.try_recv().is_err(), "halted chunk leaked to peer");
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(peer_rx.try_recv().is_err(), "halted turn leaked to peer");
 
-        // Clearing the flag and sending more text causes the next flush to
-        // forward — including any newly arrived text.
+        // Clearing the flag and completing another turn forwards normally — the
+        // dropped "halted line" must NOT resurface.
         awaiting.store(false, Ordering::Release);
         ev_tx.send(AgentEvent::Text("resumed line".into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+            })
+            .await
+            .unwrap();
         let forwarded = peer_rx.recv().await.expect("peer should receive after resume");
         assert!(forwarded.message.content.contains("resumed line"));
+        assert!(
+            !forwarded.message.content.contains("halted line"),
+            "halted text must not resurface on resume"
+        );
 
         drop(ev_tx);
         task.await.unwrap();
