@@ -408,6 +408,21 @@ pub async fn respawn_session(
     Ok(())
 }
 
+/// Hard-cancel a session's in-flight turn (the Stop button — interrupt
+/// redesign, Batch 3). Kills both agents' current turn; the session returns to
+/// `Idle` (the chat input unlocks) and the next message respawns each agent
+/// with `--resume`, restoring its prior context. No-op if the session isn't
+/// live.
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_session_turn(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+) -> Result<(), AppError> {
+    core.cancel_session_turn(&session_id).await?;
+    Ok(())
+}
+
 /// Force-restart a live session's agents so they pick up a Claude-config change
 /// (overrides + inherited settings are read at spawn). Unlike `respawn_session`
 /// this is NOT a no-op on a healthy session — it evicts and re-spawns. Agents

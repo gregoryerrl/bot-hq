@@ -173,6 +173,34 @@ impl AppState {
         self.ensure_session_started(session_id).await
     }
 
+    /// Hard-cancel a session's in-flight turn — the Stop button (interrupt
+    /// redesign, Batch 3). Kills both agents' current incarnation: each
+    /// supervisor tears down, its pump's event channel closes, and the pump's
+    /// post-loop activity clear flips that agent to idle — so once both clear,
+    /// the session returns to `Idle` and the chat input unlocks, with no extra
+    /// plumbing. The handle is left in the map but goes stale (`input_tx`
+    /// closed); the next user message respawns each agent via `--resume`,
+    /// restoring its prior context. The session branch + (worktree-isolated)
+    /// working tree survive, so a mid-tool interrupt (e.g. mid-commit) is
+    /// recoverable. No-op if the session isn't live.
+    ///
+    /// v1 cancels at once (no tool-boundary deferral); per-session worktree
+    /// isolation is the safety net. Tool-boundary deferral + a post-cancel
+    /// reconciliation nudge are tracked refinements (Batch 3.1).
+    pub async fn cancel_session_turn(&self, session_id: &str) -> Result<()> {
+        let mut sessions = self.sessions.lock().await;
+        if let Some(handle) = sessions.get_mut(session_id) {
+            // EYES (Rain) is review-only → side-effect-safe; cancel it first.
+            // HANDS (Brian) may be mid-tool, so kill it last.
+            if let Some(rain) = handle.rain.as_mut() {
+                rain.kill();
+            }
+            handle.brian.kill();
+            tracing::info!(session_id, "cancel: killed in-flight turn(s)");
+        }
+        Ok(())
+    }
+
     /// Register a session's working repo with the filesystem watcher so its
     /// Apply-tab diff updates live on file changes. No-op if the watcher isn't up
     /// yet or the session has no working repo.
