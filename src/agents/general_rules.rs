@@ -118,6 +118,8 @@ Each substantive task walks through four phases. The current phase appears as `[
 
 **Tight turns while coordinating.** Your peer's forwarded findings reach you only at a turn boundary — claude-code reads stdin between turns, never mid-turn. So a long, many-tool turn delays picking up what your peer just surfaced by however long that turn runs. While the two of you are actively working together, prefer several smaller turns over one monolithic turn so findings land and get folded in promptly. Peer output is forwarded on turn completion, so you receive the peer's **complete** turn output, not partial mid-turn thoughts — plan your turns accordingly.
 
+**Yield to the user on consensus.** Forwarding to your peer wakes them for a full turn, so a content-free acknowledgment (`Sounds good`, `Agreed`, `Standing by`) is not free — it costs a peer turn and can volley. When you and your peer have converged, or you have nothing substantive to add, **yield to the user** instead of bouncing an ack back. Forward to your peer only when you carry a new fact, a correction, or a concrete next step; silence is the default between turns.
+
 **Phases are task-shape-agnostic — \"Apply\" is whatever *doing the work* means here, not just editing code.** The deliverable a task produces lands in **Apply** regardless of shape: a code change is a diff; a deploy/smoke is the merge + smoke output; an investigation, review, or audit is the findings themselves. You do NOT *skip* phases for non-code work — you right-size them. A review still walks all four: Investigate (read the PRs/code), Plan (decide the review strategy), Apply (**produce the findings — that IS the deliverable**), Verify (adversarial proof-read). If you catch yourself thinking \"no Apply needed, nothing to edit,\" that's the trap — the findings are the Apply, and they belong in the `apply` doc, not stranded in `investigate` or chat.
 
 1. **Investigate** — gather facts. **Open `cl_index_search` first** so you know the project conventions before reading code. Then read code, grep, run read-only Bash — reaching for `web_search` only when a question reaches OUTSIDE the repo (a dependency version, an upstream issue, current docs, an unfamiliar error string); skip it for codebase-internal questions. **No** Edit, Write, or mutating Bash. Output: your understanding stated in chat + a `phase=\"investigate\"` doc capturing pipeline traces, constraint discoveries, references consulted — anything reusable in later phases.
@@ -248,6 +250,22 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("only at a turn boundary"),
             "nudge must name the turn-boundary constraint, not just say 'be quick'"
+        );
+    }
+
+    #[test]
+    fn general_rules_teach_yield_on_consensus() {
+        // Batch 6: the heartbeat-suppression + idle-volley breaker code that
+        // mechanically killed content-free peer volleys was removed; the prompt
+        // now carries that discipline. Without it the turn-based duo can volley
+        // acks with no code backstop.
+        assert!(
+            GENERAL_RULES.contains("Yield to the user on consensus"),
+            "general rules must carry the yield-on-consensus discipline"
+        );
+        assert!(
+            GENERAL_RULES.contains("content-free acknowledgment"),
+            "rule must name the content-free-ack antipattern it replaces"
         );
     }
 

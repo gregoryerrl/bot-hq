@@ -25,8 +25,11 @@ pub struct DuoConfig {
     /// Override the buffer window — useful for tests. Defaults to BUFFER_WINDOW.
     pub buffer_window: Option<Duration>,
     /// Shared "user has been asked, halt the duo" flag. When set, flush_buffer
-    /// drains the buffer to storage but does NOT forward to the peer — stops
-    /// the Brian/Rain volley while we wait for the user. Cleared by
+    /// drains the buffer to storage but does NOT forward to the peer — the SOLE
+    /// mechanical await-halt: it stops trailing post-question prose from waking
+    /// the peer and restarting the volley while we wait for the user.
+    /// (`SessionActivity::AwaitingUser` is UI-only — it drives the input lock and
+    /// does NOT gate the pump, so it cannot replace this flag.) Cleared by
     /// `SessionState::broadcast` (core::state) on the user's next message.
     pub awaiting: Option<Arc<AtomicBool>>,
     /// Optional bridge for firing MessagePersisted events after every
@@ -386,10 +389,12 @@ async fn flush_buffer(
         return;
     };
     let body = std::mem::take(buffer);
-    // Halt: while the duo is awaiting the user, persist the agent's chunks
-    // to storage (so the user sees what they were saying) but DO NOT forward
-    // to the peer. Otherwise Rain sees Brian's "I'm waiting for the user"
-    // monologue and starts replying, defeating the halt.
+    // Await-halt — the SOLE mechanical one. While the duo is awaiting the user,
+    // persist the agent's chunks to storage (so the user sees what they were
+    // saying) but DO NOT forward to the peer. Otherwise trailing post-question
+    // prose ("I'm waiting for the user…") wakes the peer, it replies, and the
+    // volley defeats the halt. Turn-based forwarding alone doesn't prevent this:
+    // the forward still fires on TurnComplete — this flag is what suppresses it.
     if cfg.is_awaiting() {
         debug!(agent = ?cfg.author, "duo halted (awaiting user); skipping peer forward");
         *flush_at = None;
