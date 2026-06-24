@@ -47,6 +47,10 @@ pub struct DuoConfig {
     /// half-written worktree). Shared session-level; only HANDS trips it. `None`
     /// in tests / solo configs that don't drive cancel deferral.
     pub in_atomic_tool: Option<Arc<AtomicBool>>,
+    /// Per-agent liveness for the Batch 7 stall watchdog — the pump touches it on
+    /// every event and tracks tools-in-flight. `None` in tests / solo configs
+    /// that don't run the watchdog.
+    pub liveness: Option<Arc<crate::core::watchdog::AgentLiveness>>,
 }
 
 impl DuoConfig {
@@ -60,6 +64,7 @@ impl DuoConfig {
             self_input_tx: None,
             activity: None,
             in_atomic_tool: None,
+            liveness: None,
         }
     }
 
@@ -125,6 +130,11 @@ pub async fn pump_agent(
     loop {
         let Some(event) = event_rx.recv().await else { break };
 
+        // Batch 7: any event means the agent is alive — reset the stall timer.
+        if let Some(liveness) = &cfg.liveness {
+            liveness.touch();
+        }
+
         match event {
             AgentEvent::Text(text) => {
                 match storage
@@ -139,6 +149,11 @@ pub async fn pump_agent(
                 buffer.push('\n');
             }
             AgentEvent::ToolUse { id, name, input } => {
+                // Batch 7: a tool call started — suppress stall detection until
+                // its ToolResult (a long build/install emits no events meanwhile).
+                if let Some(liveness) = &cfg.liveness {
+                    liveness.tool_started();
+                }
                 // Batch 3.1 Part 1: flag an atomic op (git commit/push/
                 // migration) so a cancel defers the kill until it completes.
                 // Shared session flag; only HANDS trips it (Rain is read-only).
@@ -195,6 +210,10 @@ pub async fn pump_agent(
                 content,
                 is_error,
             } => {
+                // Batch 7: tool result returned — one fewer tool in flight.
+                if let Some(liveness) = &cfg.liveness {
+                    liveness.tool_finished();
+                }
                 // Batch 3.1 Part 1: clear the atomic-op flag once THIS op's
                 // result returns (id-matched → parallel-call safe).
                 if atomic_tool_id.as_deref() == Some(tool_use_id.as_str()) {
@@ -240,6 +259,11 @@ pub async fn pump_agent(
                 // `Busy` with no momentary `Idle` flicker between the two.
                 if let Some(activity) = &cfg.activity {
                     activity.set_busy(cfg.author, false);
+                }
+                // Batch 7: turn done → no tools can still be in flight; reset so a
+                // stranded ToolUse-without-ToolResult can't wedge stall detection.
+                if let Some(liveness) = &cfg.liveness {
+                    liveness.reset_tools();
                 }
                 // Batch 3.1 Part 1: safety-clear a stranded atomic-op flag at
                 // turn end (an atomic ToolUse with no matching ToolResult
@@ -387,6 +411,7 @@ mod tests {
             self_input_tx: None,
             activity: None,
             in_atomic_tool: None,
+            liveness: None,
         }
     }
 

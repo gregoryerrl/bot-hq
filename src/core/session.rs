@@ -560,11 +560,16 @@ async fn spawn_session_handle(
     let storage_clone = storage.clone();
     let ipav_clone = Arc::clone(&ipav);
     let session_id_clone = session.id.clone();
+    // Batch 7: per-agent liveness for the stall watchdog. The watchdog holds Weak
+    // refs, so it self-terminates once the pumps drop their Arcs (session end).
+    let brian_liveness = crate::core::watchdog::AgentLiveness::new();
+    let mut watchdog_agents = vec![(Author::Brian, Arc::downgrade(&brian_liveness))];
     let brian_duo = DuoConfig {
         awaiting: Some(Arc::clone(&awaiting)),
         bridge: Some(Arc::clone(&bridge)),
         activity: Some(Arc::clone(&activity)),
         in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
+        liveness: Some(Arc::clone(&brian_liveness)),
         // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
         // before the Apply phase.
         self_input_tx: Some(brian_handle.input_tx.clone()),
@@ -587,11 +592,14 @@ async fn spawn_session_handle(
         let storage_clone = storage.clone();
         let ipav_clone = Arc::clone(&ipav);
         let session_id_clone = session.id.clone();
+        let rain_liveness = crate::core::watchdog::AgentLiveness::new();
+        watchdog_agents.push((Author::Rain, Arc::downgrade(&rain_liveness)));
         let rain_duo = DuoConfig {
             awaiting: Some(Arc::clone(&awaiting)),
             bridge: Some(Arc::clone(&bridge)),
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
+            liveness: Some(Arc::clone(&rain_liveness)),
             ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
         };
         tokio::spawn(async move {
@@ -605,6 +613,15 @@ async fn spawn_session_handle(
             .await;
         });
     }
+
+    // Batch 7: spawn the per-session stall watchdog (solo + duo). It holds Weak
+    // liveness refs, so it self-terminates once the pumps drop their Arcs.
+    tokio::spawn(crate::core::watchdog::run_stall_watchdog(
+        session.id.clone(),
+        watchdog_agents,
+        Arc::clone(&activity),
+        Arc::clone(&bridge),
+    ));
 
     // A1 (adherence): one-shot session-start CL-opener nudge. Mechanically pages
     // the agent toward `cl_index_search` so a model that doesn't reliably follow

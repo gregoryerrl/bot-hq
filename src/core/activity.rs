@@ -137,6 +137,17 @@ impl ActivityTracker {
         )
     }
 
+    /// Whether a specific agent is mid-turn — the Batch 7 stall watchdog reads
+    /// this to tell a stall (busy + silent) from expected silence (idle).
+    pub fn is_busy(&self, author: Author) -> bool {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match author {
+            Author::Brian => g.brian_busy,
+            Author::Rain => g.rain_busy,
+            Author::User => false,
+        }
+    }
+
     fn recompute_locked(&self, g: &mut Inner) {
         // A cancel auto-completes once BOTH agents have gone idle (the kill
         // settled) — clear `cancelling` so the state transitions
