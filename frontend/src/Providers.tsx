@@ -3,10 +3,18 @@ import {
   QueryClientProvider,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useTauriEvent } from "./hooks/useTauriEvent";
 import { useHealthStore, type AgentHealth } from "./stores/health";
 import { useActivityStore, type SessionActivity } from "./stores/activity";
+import { seedRuntimeStores, type SessionRuntime } from "./stores/runtime";
 
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(
@@ -167,6 +175,23 @@ function GlobalEventSync() {
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
   useTauriEvent("session:activity", onActivity, [onActivity]);
   useTauriEvent("session:resync", onResync, [onResync]);
+
+  // Bug C: backfill the event-driven stores once on mount. The activity/health
+  // events fire on transitions and can be missed during the respawn window
+  // before these listeners are live, so fetch the current snapshot and seed the
+  // stores — otherwise the footer / tiles / input-indicator stay grey until the
+  // next transition. The ref guard survives React StrictMode's double-mount.
+  const didBackfill = useRef(false);
+  useEffect(() => {
+    if (didBackfill.current) return;
+    didBackfill.current = true;
+    invoke<SessionRuntime[]>("get_session_runtime")
+      .then((rows) => seedRuntimeStores(rows, setActivity, setHealth))
+      .catch(() => {
+        // Best-effort: a failed backfill just leaves the stores to the live
+        // events (the pre-fix behavior). Never block render.
+      });
+  }, [setActivity, setHealth]);
 
   return null;
 }

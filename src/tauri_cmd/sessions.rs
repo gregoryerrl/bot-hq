@@ -295,6 +295,40 @@ pub async fn get_session(
         .map_err(|e| AppError::DbError(e.to_string()))
 }
 
+/// Current runtime state (derived activity + per-agent health) for every LIVE
+/// session — a snapshot the frontend BACKFILLS its event-driven activity/health
+/// stores from on mount. Those stores are seeded only by `session:activity` /
+/// `session:agent_health` events, which fire on transitions and can be missed
+/// during the respawn window before the React listeners mount (Bug C: footer /
+/// tiles / input-indicator left stale until the next transition). snake_case
+/// return (mirrors `SessionInfo`); React reads `session_id`/`activity`/
+/// `brian_health`/`rain_health`.
+#[derive(Debug, Clone, Serialize, Type)]
+pub struct SessionRuntime {
+    pub session_id: String,
+    pub activity: String,
+    pub brian_health: Option<String>,
+    pub rain_health: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_session_runtime(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+) -> Result<Vec<SessionRuntime>, AppError> {
+    let sessions = core.sessions.lock().await;
+    let mut out = Vec::with_capacity(sessions.len());
+    for (id, handle) in sessions.iter() {
+        out.push(SessionRuntime {
+            session_id: id.clone(),
+            activity: handle.activity.current().as_str().to_string(),
+            brian_health: core.bridge.current_agent_health(id, "brian"),
+            rain_health: core.bridge.current_agent_health(id, "rain"),
+        });
+    }
+    Ok(out)
+}
+
 /// Uncommitted-work probe for the close-confirm dialog: how many entries
 /// `git status --porcelain` reports in the session's working tree. `has_repo`
 /// is false for a repo-less session (nothing to warn about). Best-effort —
