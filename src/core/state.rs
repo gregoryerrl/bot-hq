@@ -451,6 +451,13 @@ impl AppState {
         // Clear the awaiting halt BEFORE forwarding the user's reply so the
         // duo pumps see chunks again.
         self.clear_awaiting(handle, session_id).await;
+        // Reset the L2 volley hard-cap: the user just spoke, so the consecutive
+        // peer-forward counter (`duo::flush_buffer`) starts fresh. Deliberately
+        // here and not in `clear_awaiting` — `advance_phase` calls that too, and
+        // a phase self-advance is not a user message.
+        handle
+            .user_silent_forwards
+            .store(0, std::sync::atomic::Ordering::Release);
         // Flip every pending `mark_awaiting_user` row to 'answered' — the
         // user's reply IS the answer to a halt. `choice` rows stay pending
         // until the user actually picks an option. Emit HaltsCleared only when

@@ -69,6 +69,12 @@ pub struct SessionHandle {
     /// forward Brian↔Rain chunks; cleared by `core::AppState::broadcast` when
     /// the user replies. See `duo::DuoConfig::is_awaiting`.
     pub awaiting: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared count of consecutive peer-forwards with no intervening user
+    /// message — the L2 volley hard-cap (interrupt redesign). The duo pumps
+    /// increment it on each forward; `AppState::broadcast` resets it to 0 on the
+    /// user's next message; past the pump's hard cap the volley breaks. Unlike
+    /// `awaiting` it is NOT bridge-registered — no MCP tool touches it.
+    pub user_silent_forwards: Arc<std::sync::atomic::AtomicU32>,
     /// Per-session duo-activity tracker (interrupt redesign, Batch 2) — drives
     /// the chat-input lock. Shared with both pumps (which clear `busy` on
     /// `TurnComplete`) and the dispatch paths in `AppState` (set `busy` on send,
@@ -523,6 +529,10 @@ async fn spawn_session_handle(
 
     let ipav = Arc::new(Mutex::new(IpavState::default()));
     let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // L2 volley hard-cap counter — incremented per peer-forward by the duo
+    // pumps, reset on the user's next message in `broadcast`. Shared into both
+    // DuoConfigs + the SessionHandle (for the reset); no bridge registration.
+    let user_silent_forwards = Arc::new(std::sync::atomic::AtomicU32::new(0));
     // Register the flag with the bridge so user-blocking MCP tools can set it
     // synchronously (before the agent's next chunk volleys). The duo pumps
     // read the same Arc, so updates propagate to both pumps with no
@@ -570,6 +580,7 @@ async fn spawn_session_handle(
         activity: Some(Arc::clone(&activity)),
         in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
         liveness: Some(Arc::clone(&brian_liveness)),
+        user_silent_forwards: Some(Arc::clone(&user_silent_forwards)),
         // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
         // before the Apply phase.
         self_input_tx: Some(brian_handle.input_tx.clone()),
@@ -600,6 +611,7 @@ async fn spawn_session_handle(
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
             liveness: Some(Arc::clone(&rain_liveness)),
+            user_silent_forwards: Some(Arc::clone(&user_silent_forwards)),
             ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
         };
         tokio::spawn(async move {
@@ -654,6 +666,7 @@ async fn spawn_session_handle(
         brian: brian_handle,
         rain: rain_handle,
         awaiting,
+        user_silent_forwards,
         activity,
         in_atomic_tool,
         _mcp_temp: mcp_temp,

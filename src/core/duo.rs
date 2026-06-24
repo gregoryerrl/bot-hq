@@ -7,7 +7,7 @@ use crate::core::broadcast::peer_forward_message;
 use crate::core::ipav::{IpavPhase, IpavState};
 use crate::signaling::SignalingBridge;
 use crate::storage::{Author, MessageKind, Storage};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 // Test-only since Batch 6 removed the buffered-window timer (the sole non-test
 // `Duration` user); the test sleeps below still need it.
@@ -54,6 +54,14 @@ pub struct DuoConfig {
     /// every event and tracks tools-in-flight. `None` in tests / solo configs
     /// that don't run the watchdog.
     pub liveness: Option<Arc<crate::core::watchdog::AgentLiveness>>,
+    /// Shared count of consecutive peer-forwards with no intervening user
+    /// message — the absolute volley fail-safe (interrupt redesign, L2).
+    /// `flush_buffer` increments it on every forward; `SessionState::broadcast`
+    /// resets it to 0 on the user's next message. Past `VOLLEY_HARD_CAP`,
+    /// `flush_buffer` breaks the volley (suppresses the forward + sets both
+    /// agents idle so the chat input unlocks). Shared session-level (both
+    /// pumps). `None` in tests / solo configs that don't drive it.
+    pub user_silent_forwards: Option<Arc<AtomicU32>>,
 }
 
 impl DuoConfig {
@@ -68,6 +76,7 @@ impl DuoConfig {
             activity: None,
             in_atomic_tool: None,
             liveness: None,
+            user_silent_forwards: None,
         }
     }
 
@@ -376,6 +385,23 @@ async fn flush_buffer(
         debug!(agent = ?cfg.author, "duo halted (awaiting user); skipping peer forward");
         return;
     }
+    // L2 hard-cap fail-safe: bound the consecutive peer-forwards with no
+    // intervening user message. The cap is high — productive duo collaboration
+    // (e.g. a multi-turn Part A/B review) must never reach it; only a genuine
+    // runaway does (`SessionState::broadcast` resets the counter on the user's
+    // next message). On trip, suppress this forward AND set both agents idle so
+    // `derive()` returns Idle and the chat input unlocks. This is also the ONLY
+    // defense against a CYCLING volley — 3+ rotating ack phrasings whose
+    // consecutive similarity stays low, so the convergence detector never
+    // builds a streak.
+    if let Some(counter) = &cfg.user_silent_forwards {
+        let n = counter.fetch_add(1, Ordering::AcqRel) + 1;
+        if n > VOLLEY_HARD_CAP {
+            debug!(agent = ?cfg.author, count = n, "volley hard-cap reached; breaking volley + unlocking input");
+            break_volley(cfg);
+            return;
+        }
+    }
     let phase = ipav_state.lock().await.current_phase;
     // Ride the open-blocking-findings banner on every peer forward, so it reaches
     // HANDS each turn. Fail-safe 0 when there's no bridge (solo / test config).
@@ -391,6 +417,27 @@ async fn flush_buffer(
         activity.set_busy(cfg.peer_author, true);
     }
 }
+
+/// Break an idle volley: suppress further peer-forwarding for this turn and set
+/// BOTH agents idle so `ActivityTracker::derive` returns `Idle` and the chat
+/// input unlocks (the gain over the old suppress-only breaker). Shared by the L2
+/// hard-cap and the convergence breaker.
+fn break_volley(cfg: &DuoConfig) {
+    // Setting BOTH agents idle from one pump has a benign transient race: the
+    // peer pump may be mid-turn, about to set itself busy. Self-correcting — the
+    // peer's next forward also hits the breaker (the hard-cap counter is already
+    // past threshold), so the session converges to Idle within one turn.
+    if let Some(activity) = &cfg.activity {
+        activity.set_busy(cfg.author, false);
+        activity.set_busy(cfg.peer_author, false);
+    }
+}
+
+/// Max consecutive peer-forwards with no intervening user message before the L2
+/// hard-cap breaks the volley. High by design — productive duo collaboration
+/// (a multi-turn review) must never trip it; only a genuine runaway reaches it
+/// (`s-e4fc25`: 34 messages, 0 from the user).
+const VOLLEY_HARD_CAP: u32 = 18;
 
 #[cfg(test)]
 mod tests {
@@ -415,7 +462,52 @@ mod tests {
             activity: None,
             in_atomic_tool: None,
             liveness: None,
+            user_silent_forwards: None,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn volley_hard_cap_breaks_after_cap() {
+        // L2 absolute fail-safe: after VOLLEY_HARD_CAP consecutive peer-forwards
+        // with no intervening user message, the hard-cap breaks the volley — the
+        // peer receives exactly VOLLEY_HARD_CAP forwards, then further forwards
+        // are suppressed. Distinct bodies so the (commit-2) convergence detector
+        // never trips first; the cap is the sole reason forwarding stops here.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(256);
+        let (peer_tx, mut peer_rx) = mpsc::channel(256);
+        let counter = Arc::new(AtomicU32::new(0));
+        let cfg = DuoConfig {
+            user_silent_forwards: Some(Arc::clone(&counter)),
+            ..fast_cfg(Author::Brian, Author::Rain)
+        };
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, Some(peer_tx), storage.clone(), state));
+
+        // Each turn = one Text + one TurnComplete = one forward. Drive a few
+        // past the cap so the break path is exercised.
+        for i in 0..(VOLLEY_HARD_CAP + 3) {
+            ev_tx.send(AgentEvent::Text(format!("distinct line {i}"))).await.unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: None,
+                    is_error: false,
+                    api_error_status: None,
+                })
+                .await
+                .unwrap();
+        }
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let mut forwarded = 0u32;
+        while peer_rx.try_recv().is_ok() {
+            forwarded += 1;
+        }
+        assert_eq!(
+            forwarded, VOLLEY_HARD_CAP,
+            "peer receives exactly VOLLEY_HARD_CAP forwards, then the volley breaks"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
