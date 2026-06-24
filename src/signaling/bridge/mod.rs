@@ -239,6 +239,10 @@ pub struct SignalingBridge {
     /// duo reviewer is Stalled/Dead. `std::sync::Mutex` (not tokio) because
     /// `notify_agent_health` is sync — mirrors ActivityTracker's pattern.
     agent_health: std::sync::Mutex<HashMap<(String, String), String>>,
+    /// Batch 7: per-session HANDS override of the reviewer-down commit block —
+    /// session_id → reason. Set by `override_reviewer_block`, honored by
+    /// `check_open_findings`, auto-cleared when the reviewer recovers to running.
+    reviewer_override: std::sync::Mutex<HashMap<String, String>>,
 }
 
 impl SignalingBridge {
@@ -262,6 +266,7 @@ impl SignalingBridge {
             app_handle: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),
             agent_health: std::sync::Mutex::new(HashMap::new()),
+            reviewer_override: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -328,6 +333,10 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|(s, _), _| s != session_id);
+        self.reviewer_override
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
     }
 
     /// A3b: record that the agent ran `cl_rescan` this session — a proxy for
@@ -546,6 +555,14 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert((session_id.clone(), agent.to_string()), health.to_string());
+        // Batch 7: a recovered reviewer auto-clears any reviewer-down override —
+        // the override is scoped to one down-incident, never persistent.
+        if agent == "rain" && health == "running" {
+            self.reviewer_override
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&session_id);
+        }
         let _ = self.event_tx.send(SignalingEvent::AgentHealth {
             session_id,
             agent: agent.to_string(),
@@ -561,6 +578,34 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get(&(session_id.to_string(), agent.to_string()))
+            .cloned()
+    }
+
+    /// Batch 7: HANDS records an explicit override of the reviewer-down commit
+    /// block, with a reason (logged + surfaced in the gate response). The
+    /// fail-closed escape valve — mirrors a finding rebuttal; never wedged.
+    pub fn override_reviewer_block(&self, session_id: &str, reason: &str) -> String {
+        tracing::warn!(
+            session = %session_id,
+            reason = %reason,
+            "reviewer-down commit block OVERRIDDEN by HANDS"
+        );
+        self.reviewer_override
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(session_id.to_string(), reason.to_string());
+        format!(
+            "reviewer-down block overridden — commit allowed. Logged reason: {reason}. \
+             (Auto-clears when the reviewer recovers.)"
+        )
+    }
+
+    /// The active reviewer-down override reason for a session, if any.
+    pub fn reviewer_override_reason(&self, session_id: &str) -> Option<String> {
+        self.reviewer_override
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id)
             .cloned()
     }
 

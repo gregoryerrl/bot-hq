@@ -120,7 +120,24 @@ impl SignalingBridge {
     pub async fn check_open_findings(&self, session_id: &str) -> Result<String> {
         let storage = self.findings_storage().await?;
         let open = storage.open_blocking_findings_for_session(session_id).await?;
-        Ok(render_open_findings(&open))
+        let blocking = render_open_findings(&open);
+        if blocking != "ok" {
+            return Ok(blocking); // open blocking findings gate first
+        }
+        // Batch 7 fail-closed: in a DUO session, a Stalled/Dead reviewer (Rain)
+        // can't have reviewed this change — block commit unless HANDS overrode it.
+        // No-op in solo (no reviewer) or when Rain is healthy.
+        let duo = storage
+            .get_session(session_id)
+            .await?
+            .map(|s| s.rain_enabled != 0)
+            .unwrap_or(false);
+        let verdict = reviewer_block_decision(
+            duo,
+            self.current_agent_health(session_id, "rain").as_deref(),
+            self.reviewer_override_reason(session_id).as_deref(),
+        );
+        Ok(verdict.unwrap_or_else(|| "ok".to_string()))
     }
 
     /// Open-blocking-findings count for the per-turn banner. FAIL-SAFE: returns
@@ -169,10 +186,54 @@ fn render_open_findings(open: &[Finding]) -> String {
     )
 }
 
+/// Pure: the reviewer-down gate verdict (Batch 7). `Some(gate_string)` when a duo
+/// reviewer is down — either `blocked: …` or, with a HANDS override,
+/// `ok (reviewer-down overridden: …)`. `None` when the gate should fall through to
+/// plain "ok" (solo session, or the reviewer is healthy).
+fn reviewer_block_decision(
+    duo: bool,
+    rain_health: Option<&str>,
+    override_reason: Option<&str>,
+) -> Option<String> {
+    if !duo || !matches!(rain_health, Some("stalled") | Some("dead")) {
+        return None;
+    }
+    Some(match override_reason {
+        Some(r) => format!("ok (reviewer-down overridden: {r})"),
+        None => format!(
+            "blocked: reviewer down — review cannot be confirmed (Rain is {}). \
+             Restore the reviewer, or override with override_reviewer_block(reason) if \
+             you've confirmed the change is safe to ship unreviewed.",
+            rain_health.unwrap_or("down")
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::Storage;
+
+    #[test]
+    fn reviewer_block_decision_cases() {
+        // Solo (no reviewer) → never blocks.
+        assert_eq!(reviewer_block_decision(false, Some("stalled"), None), None);
+        // Duo + reviewer healthy (running / no transition yet) → no block.
+        assert_eq!(reviewer_block_decision(true, Some("running"), None), None);
+        assert_eq!(reviewer_block_decision(true, None, None), None);
+        // Duo + reviewer down + no override → blocked.
+        assert!(reviewer_block_decision(true, Some("stalled"), None)
+            .unwrap()
+            .starts_with("blocked: reviewer down"));
+        assert!(reviewer_block_decision(true, Some("dead"), None)
+            .unwrap()
+            .starts_with("blocked:"));
+        // Duo + reviewer down + override → ok-with-reason (not blocked).
+        let ov = reviewer_block_decision(true, Some("stalled"), Some("verified safe; reviewer crashed"))
+            .unwrap();
+        assert!(ov.starts_with("ok (reviewer-down overridden:"));
+        assert!(ov.contains("verified safe"));
+    }
 
     async fn bridge_with_session(sid: &str) -> Arc<SignalingBridge> {
         let bridge = SignalingBridge::new();

@@ -96,6 +96,8 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     "supersede_question",
     // EYES files findings; HANDS resolves them — so disposition is HANDS-only.
     "disposition_finding",
+    // HANDS overrides the reviewer-down commit block (fail-closed escape valve).
+    "override_reviewer_block",
 ];
 
 /// The inverse of [`HANDS_ONLY_TOOLS`]: tools only EYES (rain) may call.
@@ -403,6 +405,11 @@ async fn call_tool(
                 .check_open_findings(&caller.session_id)
                 .await
                 .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(result))
+        }
+        "override_reviewer_block" => {
+            let reason = arg_required_str(&args, "reason")?;
+            let result = bridge.override_reviewer_block(&caller.session_id, &reason);
             Ok(ToolCallResult::text(result))
         }
         "approve_finding" => {

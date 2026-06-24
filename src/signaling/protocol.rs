@@ -297,6 +297,17 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "override_reviewer_block",
+            description: "HANDS-only (brian). Override a 'reviewer down' commit block when the duo reviewer (Rain) is Stalled/Dead and you've confirmed the change is safe to ship unreviewed. `reason` is REQUIRED and is logged + shown in the gate response (the fail-closed escape valve — mirrors a finding rebuttal). The override auto-clears when the reviewer recovers. Only needed when check_open_findings returns 'blocked: reviewer down'.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reason": { "type": "string", "description": "Required. Why it's safe to commit without a live reviewer. Logged + surfaced." }
+                },
+                "required": ["reason"]
+            }),
+        },
+        ToolDescriptor {
             name: "approve_finding",
             description: "EYES-only (rain). Confirm that an escalated finding HANDS marked fixed is genuinely resolved — clears the escalation's 'awaiting EYES confirm' signal. Use this AFTER HANDS dispositions a finding you re-raised, once you've verified the fix is real. This does NOT gate commits (HANDS's disposition already cleared the commit gate); it's the sign-off that closes the loop. If you DON'T agree the fix is adequate, do NOT approve — re-file it with `eyes_flag` instead (a fresh open finding re-blocks the commit).",
             input_schema: serde_json::json!({
