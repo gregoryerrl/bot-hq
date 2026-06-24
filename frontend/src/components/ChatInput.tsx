@@ -9,9 +9,11 @@ interface ChatInputProps {
   onSend: (text: string) => Promise<void> | void;
   disabled?: boolean;
   /**
-   * The session's duo activity. When `busy`/`cancelling` the input locks and
-   * the Send button becomes a Stop button (interrupt redesign, Batch 4).
-   * `idle`/`awaiting_user`/undefined leave the input open.
+   * The session's duo activity. The input stays TYPEABLE in every state — when
+   * `busy`/`cancelling`, sending preempts the agents via a warm interrupt
+   * (the always-typeable unblock; the host interrupts on the next broadcast).
+   * `busy`/`cancelling` only swaps Send→Stop while the box is EMPTY, so an idle-
+   * looking busy state still offers a cancel without trapping the user.
    */
   activity?: SessionActivity;
   /** Hard-cancel the in-flight turn (the Stop button). Required for Stop to
@@ -43,7 +45,8 @@ export function ChatInput({
   const [cancelling, setCancelling] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // The duo is working → lock the textarea + swap Send for Stop.
+  // The duo is working. The input stays typeable (send-while-busy preempts the
+  // agents via a warm interrupt); `locked` now only swaps Send->Stop when empty.
   const locked = isLocked(activity);
   // Once the turn actually stops (activity leaves busy/cancelling) drop the
   // local "Cancelling…" spinner. v1 has no explicit backend cancelling state
@@ -140,7 +143,10 @@ export function ChatInput({
               handleSubmit(e as unknown as FormEvent);
             }
           }}
-          disabled={disabled || sending || locked}
+          // Always typeable — even while the duo is busy. Sending preempts them
+          // via a warm interrupt (the always-typeable unblock), so the user is
+          // never locked out. `sending` still disables during the brief round-trip.
+          disabled={disabled || sending}
           // Right padding leaves room for the kbd hint overlay.
           className="w-full resize-none pr-14"
         />
@@ -152,7 +158,7 @@ export function ChatInput({
           {hint}
         </kbd>
       </div>
-      {locked && onCancel ? (
+      {locked && onCancel && !value.trim() ? (
         <Button
           type="button"
           variant="danger"
@@ -170,7 +176,7 @@ export function ChatInput({
         <Button
           type="submit"
           variant="primary"
-          disabled={!value.trim() || disabled || sending || locked}
+          disabled={!value.trim() || disabled || sending}
           // Fixed min-width so the label cycle (Send → Sending… → Send)
           // doesn't dance the layout on every submit.
           className="min-w-[5.5rem]"

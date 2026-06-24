@@ -474,6 +474,20 @@ impl AppState {
             .await
             .remove(session_id)
             .then_some(RECONCILE_DIRECTIVE);
+        // Human preemption (the always-typeable unblock's spine): the user's
+        // message must take effect NOW, not queue behind a turn-in-flight (or an
+        // idle agent-to-agent volley). Fire a warm control_request interrupt at
+        // both agents BEFORE delivering. Verified harmless when idle
+        // (control_response{success}, process survives, next message still
+        // processed), and it aborts the in-flight turn when busy — so we don't
+        // gate on the flaky activity `busy` signal. The pump's biased control
+        // channel writes this ahead of the message on stdin, so each agent aborts
+        // then reads the new message. No SIGKILL escalation (unlike cancel) — the
+        // message IS the next work, and the process stays warm (no --resume).
+        handle.brian.interrupt("user-preempt");
+        if let Some(rain) = handle.rain.as_ref() {
+            rain.interrupt("user-preempt");
+        }
         let id = broadcast_user_message(
             &self.storage,
             session_id,
