@@ -11,14 +11,56 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-528 tests passing (477 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 102 frontend Vitest. Release build clean. Version **1.0.0-rc2**
+575 tests passing (524 lib + 33 external MCP + 7 signaling + 11 storage)
+plus 108 frontend Vitest. Release build clean. Version **1.0.0-rc2**
 (pre-release for Windows friend-testing; `1.0.0` reserved for the official
 market launch). **Tauri v2 migration landed 2026-05-26** on
 branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
 zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-24 — Interrupt redesign + L2 volley breaker + activity-freshness fixes
+
+Branch `brian/interrupt-redesign` (22 commits). Three related arcs: make Stop
+a real interrupt, give the duo a mechanical volley floor, and fix two
+activity-event freshness gaps.
+
+**Interrupt redesign.** Stop is now a genuine control-plane interrupt, not a
+process kill: `cancel_session_turn` issues a stdin `control_request` interrupt
+(claude-code v2.1.186 wire format) with a ~2s SIGKILL escalation fallback. A new
+`SessionActivity` state machine (`core/activity.rs`) drives the chat-input lock +
+Stop button; explicit `Cancelling` state + a post-cancel reconciliation nudge; a
+mid-flight atomic op (git commit/push/migration) defers the kill until it
+completes so the worktree is never half-written; agent kills reap the whole
+process group. All IPAV phases are turn-based (the I/P 1.5s interleave timer
+retired), and the compensating machinery was peeled — heartbeat-ack suppression,
+the idle-volley breaker, and the buffered-forward timer all removed. A
+per-session stall watchdog + a queryable agent-health registry emit a `Stalled`
+dot; the commit gate fails closed when a duo reviewer is down. The chat input is
+always typeable — sending preempts the agents (warm interrupt, no SIGKILL).
+
+**L2 volley breaker.** Re-introduced a mechanical floor against the idle volley
+(the peel above removed the old ones on a bet that turn-based forwarding +
+prompts would suffice; they didn't — proven live). Two layers in
+`core/duo.rs::flush_buffer`, both unlocking the input on trip: a hard-cap (>18
+consecutive peer-forwards with no user message) and a convergence detector
+(>=85% token-set-Jaccard-similar consecutive forwards → break after 2).
+Shape-based, not the old length/keyword heuristics that false-fired on real
+collaboration.
+
+**Activity-freshness fixes.** (B) `set_session_awaiting` now refreshes the
+ActivityTracker via a registered `Weak` ref, so `AwaitingUser` emits at park time
+instead of lagging to the agent's next turn-complete. (C) a new
+`get_session_runtime` command + a run-once backfill in `Providers.tsx` seed the
+event-driven activity/health stores on mount, so the footer/tiles are not grey
+after a restart (events fire during respawn before the React listeners mount).
+
+575 tests green (524 lib + 33 external MCP + 7 signaling + 11 storage) + 108
+frontend Vitest; release build clean. Live-GUI smoke (the dot/footer visuals +
+Stop-mid-commit) pending the merge-time human pass — not headless-testable.
 
 ---
 
