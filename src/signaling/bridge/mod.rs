@@ -233,6 +233,12 @@ pub struct SignalingBridge {
     /// whether we've already nudged it once on close. Drives the soft two-call
     /// gate in the `close_session` MCP handler.
     session_close_gate: Mutex<HashMap<String, CloseGateState>>,
+    /// Batch 7: latest health per (session_id, agent) — the wire string from
+    /// `AgentHealth::as_str` ("running"/"retrying"/"stalled"/"dead"). Written by
+    /// `notify_agent_health`; read by the fail-closed commit gate to block when a
+    /// duo reviewer is Stalled/Dead. `std::sync::Mutex` (not tokio) because
+    /// `notify_agent_health` is sync — mirrors ActivityTracker's pattern.
+    agent_health: std::sync::Mutex<HashMap<(String, String), String>>,
 }
 
 impl SignalingBridge {
@@ -255,6 +261,7 @@ impl SignalingBridge {
             storage: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),
+            agent_health: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -317,6 +324,10 @@ impl SignalingBridge {
         self.session_projects.lock().await.remove(session_id);
         self.session_awaiting.lock().await.remove(session_id);
         self.session_close_gate.lock().await.remove(session_id);
+        self.agent_health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(s, _), _| s != session_id);
     }
 
     /// A3b: record that the agent ran `cl_rescan` this session — a proxy for
@@ -529,11 +540,28 @@ impl SignalingBridge {
     /// the UI subscriber maps it to a `session:agent_health` event. `health` is
     /// the `AgentHealth::as_str` string ("running" / "retrying" / "dead").
     pub fn notify_agent_health(&self, session_id: String, agent: &str, health: &str) {
+        // Batch 7: cache the latest health so the fail-closed commit gate can read
+        // it (a Stalled/Dead duo reviewer blocks commit). Write BEFORE the move.
+        self.agent_health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert((session_id.clone(), agent.to_string()), health.to_string());
         let _ = self.event_tx.send(SignalingEvent::AgentHealth {
             session_id,
             agent: agent.to_string(),
             health: health.to_string(),
         });
+    }
+
+    /// Latest cached health for an agent ("running"/"retrying"/"stalled"/"dead"),
+    /// or `None` if no transition has been reported (assume running — events fire
+    /// only on change). Backs the Batch 7 fail-closed commit gate.
+    pub fn current_agent_health(&self, session_id: &str, agent: &str) -> Option<String> {
+        self.agent_health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(session_id.to_string(), agent.to_string()))
+            .cloned()
     }
 
     /// Publish a session's duo-activity change (idle / busy / awaiting-user /
@@ -545,5 +573,36 @@ impl SignalingBridge {
             session_id,
             state: state.to_string(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_health_registry_round_trips() {
+        // Batch 7: notify_agent_health caches health per (session, agent); the
+        // fail-closed commit gate reads it via current_agent_health.
+        let bridge = SignalingBridge::new();
+        assert_eq!(
+            bridge.current_agent_health("s1", "rain"),
+            None,
+            "unset = None (assume running; events fire only on change)"
+        );
+        bridge.notify_agent_health("s1".into(), "rain", "stalled");
+        assert_eq!(
+            bridge.current_agent_health("s1", "rain").as_deref(),
+            Some("stalled")
+        );
+        // Latest write wins (recovery overwrites).
+        bridge.notify_agent_health("s1".into(), "rain", "running");
+        assert_eq!(
+            bridge.current_agent_health("s1", "rain").as_deref(),
+            Some("running")
+        );
+        // Distinct agents + sessions stay independent.
+        assert_eq!(bridge.current_agent_health("s1", "brian"), None);
+        assert_eq!(bridge.current_agent_health("s2", "rain"), None);
     }
 }
