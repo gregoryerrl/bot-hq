@@ -11,19 +11,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::Instant;
 use tracing::{debug, warn};
-
-/// Window during which I/P-phase prose chunks accumulate before forwarding.
-pub const BUFFER_WINDOW: Duration = Duration::from_millis(1500);
 
 #[derive(Clone)]
 pub struct DuoConfig {
     pub session_id: String,
     pub author: Author,
     pub peer_author: Author,
-    /// Override the buffer window — useful for tests. Defaults to BUFFER_WINDOW.
-    pub buffer_window: Option<Duration>,
     /// Shared "user has been asked, halt the duo" flag. When set, flush_buffer
     /// drains the buffer to storage but does NOT forward to the peer — the SOLE
     /// mechanical await-halt: it stops trailing post-question prose from waking
@@ -61,17 +55,12 @@ impl DuoConfig {
             session_id: session_id.into(),
             author,
             peer_author,
-            buffer_window: None,
             awaiting: None,
             bridge: None,
             self_input_tx: None,
             activity: None,
             in_atomic_tool: None,
         }
-    }
-
-    fn window(&self) -> Duration {
-        self.buffer_window.unwrap_or(BUFFER_WINDOW)
     }
 
     fn is_awaiting(&self) -> bool {
@@ -124,7 +113,6 @@ pub async fn pump_agent(
     ipav_state: Arc<Mutex<IpavState>>,
 ) {
     let mut buffer = String::new();
-    let mut flush_at: Option<Instant> = None;
     // A3a: one-shot guard so Brian gets at most one "you're mutating before
     // Apply" nudge per session (delivered to his own stdin via self_input_tx).
     let mut mutate_nudged = false;
@@ -135,27 +123,7 @@ pub async fn pump_agent(
     let mut atomic_tool_id: Option<String> = None;
 
     loop {
-        let event = match flush_at {
-            Some(deadline) => {
-                let now = Instant::now();
-                if deadline <= now {
-                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state).await;
-                    continue;
-                }
-                let remaining = deadline - now;
-                tokio::select! {
-                    biased;
-                    ev = event_rx.recv() => ev,
-                    _ = tokio::time::sleep(remaining) => {
-                        flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state).await;
-                        continue;
-                    }
-                }
-            }
-            None => event_rx.recv().await,
-        };
-
-        let Some(event) = event else { break };
+        let Some(event) = event_rx.recv().await else { break };
 
         match event {
             AgentEvent::Text(text) => {
@@ -167,13 +135,8 @@ pub async fn pump_agent(
                     Err(e) => warn!(?e, "persisting text"),
                 }
 
-                let phase = ipav_state.lock().await.current_phase;
                 buffer.push_str(&text);
                 buffer.push('\n');
-
-                if phase.uses_buffered_interleave() && flush_at.is_none() {
-                    flush_at = Some(Instant::now() + cfg.window());
-                }
             }
             AgentEvent::ToolUse { id, name, input } => {
                 // Batch 3.1 Part 1: flag an atomic op (git commit/push/
@@ -268,10 +231,9 @@ pub async fn pump_agent(
                     // on the DeepSeek gateway, 2026-05-29). Drain silently.
                     debug!(agent = ?cfg.author, "errored turn; draining buffer without peer-forward");
                     buffer.clear();
-                    flush_at = None;
                 } else {
                     // Always flush on a successful turn-complete, both phases.
-                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state).await;
+                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state).await;
                 }
                 // Turn ended → this agent is idle. Runs AFTER flush_buffer so a
                 // peer hand-off (which set the peer busy) keeps the session
@@ -309,7 +271,7 @@ pub async fn pump_agent(
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");
-                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state).await;
+                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state).await;
                 if let Some(activity) = &cfg.activity {
                     activity.set_busy(cfg.author, false);
                 }
@@ -364,11 +326,9 @@ async fn flush_buffer(
     cfg: &DuoConfig,
     buffer: &mut String,
     peer_input_tx: Option<&mpsc::Sender<OutgoingUserMessage>>,
-    flush_at: &mut Option<Instant>,
     ipav_state: &Arc<Mutex<IpavState>>,
 ) {
     if buffer.trim().is_empty() {
-        *flush_at = None;
         buffer.clear();
         return;
     }
@@ -376,7 +336,6 @@ async fn flush_buffer(
     // storage in the Text arm, so just drop the forward buffer.
     let Some(peer_input_tx) = peer_input_tx else {
         buffer.clear();
-        *flush_at = None;
         return;
     };
     let body = std::mem::take(buffer);
@@ -388,7 +347,6 @@ async fn flush_buffer(
     // the forward still fires on TurnComplete — this flag is what suppresses it.
     if cfg.is_awaiting() {
         debug!(agent = ?cfg.author, "duo halted (awaiting user); skipping peer forward");
-        *flush_at = None;
         return;
     }
     let phase = ipav_state.lock().await.current_phase;
@@ -405,7 +363,6 @@ async fn flush_buffer(
     if let Some(activity) = &cfg.activity {
         activity.set_busy(cfg.peer_author, true);
     }
-    *flush_at = None;
 }
 
 #[cfg(test)]
@@ -425,7 +382,6 @@ mod tests {
             session_id: "s1".into(),
             author,
             peer_author: peer,
-            buffer_window: Some(Duration::from_millis(50)),
             awaiting: None,
             bridge: None,
             self_input_tx: None,

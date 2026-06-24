@@ -49,17 +49,6 @@ impl IpavPhase {
         "I/P/A/V or Investigate/Plan/Apply/Verify"
     }
 
-    /// Whether peer-forward uses the 1.5s interleave window (legacy) or pure
-    /// turn-based forwarding on `message_stop`. Batch 5 retired the interleave:
-    /// ALL phases are turn-based now — the peer receives your COMPLETE turn
-    /// output, not partial mid-turn thoughts. Returns `false` for every phase;
-    /// the inert timer machinery (`flush_at`/`window()`/`BUFFER_WINDOW`) it
-    /// gated is removed in Batch 6 (peeled inner-last, after the breakers that
-    /// wrap it).
-    pub fn uses_buffered_interleave(&self) -> bool {
-        false
-    }
-
     /// Strong-framed notice fed to agents when this phase becomes active.
     /// Used by `AppState::advance_phase` so transitions carry weight instead
     /// of degrading into a passive "phase advanced to X" log line.
@@ -108,23 +97,6 @@ mod tests {
         assert_eq!(s.current_phase, IpavPhase::Apply);
         assert_eq!(s.phase_log.len(), 2);
         assert_eq!(s.phase_log[0].0, IpavPhase::Plan);
-    }
-
-    #[test]
-    fn no_phase_uses_buffered_interleave() {
-        // Batch 5: all phases are turn-based — peer output forwards only on
-        // TurnComplete (the interleave window is retired).
-        for p in [
-            IpavPhase::Investigate,
-            IpavPhase::Plan,
-            IpavPhase::Apply,
-            IpavPhase::Verify,
-        ] {
-            assert!(
-                !p.uses_buffered_interleave(),
-                "{p:?} must be turn-based after Batch 5"
-            );
-        }
     }
 
     #[test]
