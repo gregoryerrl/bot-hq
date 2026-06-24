@@ -25,15 +25,27 @@ const RECONCILE_DIRECTIVE: &str = "[System: your previous turn was force-interru
      stale lock files or partial writes the interrupted operation may have left (e.g. a leftover \
      .git/index.lock).]";
 
+/// How long to wait for an interrupted agent to honor a `control_request` and go
+/// idle before escalating to a SIGKILL. The interrupt keeps the process alive
+/// (warm cache, no respawn); the SIGKILL fallback covers a dropped interrupt or a
+/// wedged agent.
+const INTERRUPT_ESCALATION: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Outcome of initiating a cancel (`AppState::cancel_session_turn`).
 pub enum CancelOutcome {
-    /// Killed immediately, or the session wasn't live (no-op). Nothing more to do.
+    /// The session wasn't live (no-op). Nothing more to do.
     Done,
-    /// HANDS was mid an atomic op (git commit/push/migration); the kill is
-    /// DEFERRED. The caller must poll this flag lock-free until it clears (or a
-    /// timeout), then call `cancel_kill_now`. `Cancelling` is already set, so the
-    /// UI shows "Cancelling…" for the whole window.
+    /// HANDS was mid an atomic op (git commit/push/migration); the cancel is
+    /// DEFERRED. The caller polls this flag lock-free until it clears (or a
+    /// timeout), THEN runs `interrupt_then_escalate` so the working tree isn't left
+    /// half-written. `Cancelling` is already set, so the UI shows "Cancelling…"
+    /// for the whole window.
     Deferred(Arc<std::sync::atomic::AtomicBool>),
+    /// The common path: the caller spawns a detached task that runs
+    /// `interrupt_then_escalate` — a `control_request` interrupt (abort the turn,
+    /// keep the process: warm cache, no respawn) with a ~2s SIGKILL fallback.
+    /// `Cancelling` is already set.
+    Interrupting,
 }
 
 pub struct AppState {
@@ -235,21 +247,65 @@ impl AppState {
         };
         match deferred {
             Some(flag) => {
-                tracing::info!(session_id, "cancel: deferring kill — mid atomic tool");
+                tracing::info!(session_id, "cancel: deferring interrupt — mid atomic tool");
                 Ok(CancelOutcome::Deferred(flag))
             }
-            None => {
-                self.cancel_kill_now(session_id).await;
-                Ok(CancelOutcome::Done)
+            None => Ok(CancelOutcome::Interrupting),
+        }
+    }
+
+    /// The interrupt half of a cancel: send a `control_request` interrupt to both
+    /// live agents (abort the in-flight turn, keep the process — warm cache, no
+    /// `--resume` respawn), wait up to `INTERRUPT_ESCALATION` for them to go idle,
+    /// and SIGKILL-escalate via [`cancel_kill_now`](Self::cancel_kill_now) only if
+    /// they don't honor it in time. Queues the post-cancel reconciliation nudge in
+    /// EITHER outcome. Driven by a detached task from the Tauri command — the
+    /// non-atomic path immediately, the atomic-deferred path once the op completes.
+    pub async fn interrupt_then_escalate(&self, session_id: &str) {
+        let activity = {
+            let sessions = self.sessions.lock().await;
+            let Some(handle) = sessions.get(session_id) else {
+                return; // session gone → nothing to cancel
+            };
+            // EYES (Rain) first (review-only, side-effect-safe), then HANDS —
+            // mirrors cancel_kill_now. `interrupt` is best-effort (&self try_send);
+            // a full/closed control channel returns false and the idle-watch below
+            // times out into the SIGKILL fallback.
+            if let Some(rain) = handle.rain.as_ref() {
+                rain.interrupt("cancel");
             }
+            handle.brian.interrupt("cancel");
+            Arc::clone(&handle.activity)
+        };
+
+        let deadline = tokio::time::Instant::now() + INTERRUPT_ESCALATION;
+        if activity.await_both_idle(deadline).await {
+            // Interrupt honored: process alive at a turn boundary (Cancelling has
+            // auto-cleared to Idle). Queue the nudge so the next user message
+            // reconciles the workspace before acting.
+            self.pending_reconcile
+                .lock()
+                .await
+                .insert(session_id.to_string());
+            tracing::info!(
+                session_id,
+                "cancel: interrupt honored — process kept alive (warm cache)"
+            );
+        } else {
+            tracing::warn!(
+                session_id,
+                secs = INTERRUPT_ESCALATION.as_secs(),
+                "cancel: interrupt not honored in time — SIGKILL fallback"
+            );
+            // cancel_kill_now kills the process group AND queues the nudge.
+            self.cancel_kill_now(session_id).await;
         }
     }
 
     /// The kill half of a cancel: tear down both agents NOW and queue the
-    /// post-cancel reconciliation nudge. Used by the immediate path of
-    /// [`cancel_session_turn`](Self::cancel_session_turn) and by the Tauri
-    /// command's deferred-poll task once a mid-flight atomic op finishes (or the
-    /// ~8s cap elapses → force kill). Re-acquires `sessions`; a no-op if the
+    /// post-cancel reconciliation nudge. The SIGKILL fallback for
+    /// [`interrupt_then_escalate`](Self::interrupt_then_escalate) when an agent
+    /// doesn't honor the interrupt in time. Re-acquires `sessions`; a no-op if the
     /// session is already gone.
     pub async fn cancel_kill_now(&self, session_id: &str) {
         let killed = {

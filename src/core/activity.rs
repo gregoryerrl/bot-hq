@@ -148,6 +148,27 @@ impl ActivityTracker {
         }
     }
 
+    /// Poll (50ms) until NEITHER agent is busy, or `deadline` elapses; returns
+    /// whether they went idle in time. The cancel interrupt-escalation uses this:
+    /// after a `control_request` interrupt, the turn's `result` event clears both
+    /// `busy` flags (and auto-clears Cancelling→Idle). If that doesn't land within
+    /// the window — interrupt dropped, or a wedged agent — the caller escalates to
+    /// a SIGKILL. A solo session never has Rain busy, so this just waits on Brian.
+    pub async fn await_both_idle(&self, deadline: tokio::time::Instant) -> bool {
+        loop {
+            {
+                let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+                if !g.brian_busy && !g.rain_busy {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     fn recompute_locked(&self, g: &mut Inner) {
         // A cancel auto-completes once BOTH agents have gone idle (the kill
         // settled) — clear `cancelling` so the state transitions
@@ -261,5 +282,39 @@ mod tests {
         let t = ActivityTracker::new("s1", awaiting, bridge);
         t.set_cancelling(true);
         assert_eq!(t.current(), SessionActivity::Idle);
+    }
+
+    #[tokio::test]
+    async fn await_both_idle_true_when_already_idle() {
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        assert!(t.await_both_idle(deadline).await);
+    }
+
+    #[tokio::test]
+    async fn await_both_idle_false_when_busy_past_deadline() {
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        t.set_busy(Author::Brian, true);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(120);
+        assert!(!t.await_both_idle(deadline).await);
+    }
+
+    #[tokio::test]
+    async fn await_both_idle_true_once_agent_goes_idle() {
+        // The realistic interrupt case: an agent is busy when cancel fires, then
+        // the interrupt's `result` event flips it idle within the window.
+        let t = Arc::new(ActivityTracker::new(
+            "s1",
+            Arc::new(AtomicBool::new(false)),
+            SignalingBridge::new(),
+        ));
+        t.set_busy(Author::Brian, true);
+        let t2 = Arc::clone(&t);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            t2.set_busy(Author::Brian, false);
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1000);
+        assert!(t.await_both_idle(deadline).await);
     }
 }

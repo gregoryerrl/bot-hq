@@ -408,15 +408,15 @@ pub async fn respawn_session(
     Ok(())
 }
 
-/// Hard-cancel a session's in-flight turn (the Stop button — interrupt
-/// redesign, Batch 3 + 3.1 Part 1). Kills both agents' current turn; the
-/// session returns to `Idle` (the chat input unlocks) and the next message
-/// respawns each agent with `--resume`, restoring its prior context. If HANDS
-/// is mid an atomic op (`git commit`/`git push`/migration), the kill is
-/// DEFERRED until the op completes (≤ ~8s, then force-killed) so the working
-/// tree isn't left half-written — the command returns immediately and a
-/// detached task does the kill once the op clears. No-op if the session isn't
-/// live.
+/// Cancel a session's in-flight turn (the Stop button — interrupt redesign,
+/// Batch 3 + 3.1, now interrupt-first). Sends a `control_request` interrupt to
+/// abort the turn while KEEPING the process alive (warm cache, no `--resume`
+/// respawn); if an agent doesn't honor it within ~2s it's SIGKILLed as a
+/// fallback. The session returns to `Idle` (the chat input unlocks). If HANDS is
+/// mid an atomic op (`git commit`/`git push`/migration), the interrupt is
+/// DEFERRED until the op completes (≤ ~8s cap) so the working tree isn't left
+/// half-written. The command returns immediately and a detached task drives the
+/// escalation. No-op if the session isn't live.
 #[tauri::command]
 #[specta::specta]
 pub async fn cancel_session_turn(
@@ -426,13 +426,22 @@ pub async fn cancel_session_turn(
     use crate::core::state::CancelOutcome;
     match core.cancel_session_turn(&session_id).await? {
         CancelOutcome::Done => {}
+        CancelOutcome::Interrupting => {
+            // The common path: interrupt both agents and drive the ~2s SIGKILL
+            // escalation off-thread. Detached so the command returns immediately
+            // and the UI shows "Cancelling…" for the window. We own an
+            // `Arc<CoreAppState>` (not the `&self` core method) so the task can
+            // re-acquire `sessions` without holding it across the wait.
+            let core = core.inner().clone();
+            tokio::spawn(async move {
+                core.interrupt_then_escalate(&session_id).await;
+            });
+        }
         CancelOutcome::Deferred(flag) => {
             // HANDS is mid an atomic op. Poll the flag lock-free until it clears,
-            // then kill — with a hard ~8s cap so a hung op still gets
-            // force-interrupted. Detached so the command returns immediately and
-            // the UI keeps showing "Cancelling…" for the whole window. We own an
-            // `Arc<CoreAppState>` (not the `&self` core method) so the task can
-            // re-acquire `sessions` to kill without holding it during the poll.
+            // THEN interrupt+escalate — with a hard ~8s cap so a hung op still
+            // gets cancelled (the SIGKILL fallback reaps it). Detached so the
+            // command returns immediately and the UI keeps showing "Cancelling…".
             let core = core.inner().clone();
             tokio::spawn(async move {
                 let deadline =
@@ -441,13 +450,13 @@ pub async fn cancel_session_turn(
                     if tokio::time::Instant::now() >= deadline {
                         tracing::warn!(
                             %session_id,
-                            "cancel: atomic-op deferral hit ~8s cap — force-killing"
+                            "cancel: atomic-op deferral hit ~8s cap — interrupting now"
                         );
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                core.cancel_kill_now(&session_id).await;
+                core.interrupt_then_escalate(&session_id).await;
             });
         }
     }
