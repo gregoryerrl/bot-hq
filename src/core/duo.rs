@@ -125,11 +125,6 @@ pub async fn pump_agent(
 ) {
     let mut buffer = String::new();
     let mut flush_at: Option<Instant> = None;
-    // Circuit breaker for the idle-volley antipattern: counts consecutive
-    // short (ack-shaped) peer-forwards. A substantive forward or any tool use
-    // resets it. Once it trips, further short forwards are suppressed so a
-    // novel ack phrasing the keyword list doesn't catch can't volley forever.
-    let mut consecutive_short: u32 = 0;
     // A3a: one-shot guard so Brian gets at most one "you're mutating before
     // Apply" nudge per session (delivered to his own stdin via self_input_tx).
     let mut mutate_nudged = false;
@@ -144,7 +139,7 @@ pub async fn pump_agent(
             Some(deadline) => {
                 let now = Instant::now();
                 if deadline <= now {
-                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state).await;
                     continue;
                 }
                 let remaining = deadline - now;
@@ -152,7 +147,7 @@ pub async fn pump_agent(
                     biased;
                     ev = event_rx.recv() => ev,
                     _ = tokio::time::sleep(remaining) => {
-                        flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                        flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state).await;
                         continue;
                     }
                 }
@@ -181,9 +176,6 @@ pub async fn pump_agent(
                 }
             }
             AgentEvent::ToolUse { id, name, input } => {
-                // A tool call is substantive activity — reset the idle breaker
-                // so post-work ack chunks aren't pre-emptively suppressed.
-                consecutive_short = 0;
                 // Batch 3.1 Part 1: flag an atomic op (git commit/push/
                 // migration) so a cancel defers the kill until it completes.
                 // Shared session flag; only HANDS trips it (Rain is read-only).
@@ -279,7 +271,7 @@ pub async fn pump_agent(
                     flush_at = None;
                 } else {
                     // Always flush on a successful turn-complete, both phases.
-                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state).await;
                 }
                 // Turn ended → this agent is idle. Runs AFTER flush_buffer so a
                 // peer hand-off (which set the peer busy) keeps the session
@@ -317,7 +309,7 @@ pub async fn pump_agent(
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");
-                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state, &mut consecutive_short).await;
+                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &mut flush_at, &ipav_state).await;
                 if let Some(activity) = &cfg.activity {
                     activity.set_busy(cfg.author, false);
                 }
@@ -374,7 +366,6 @@ async fn flush_buffer(
     peer_input_tx: Option<&mpsc::Sender<OutgoingUserMessage>>,
     flush_at: &mut Option<Instant>,
     ipav_state: &Arc<Mutex<IpavState>>,
-    consecutive_short: &mut u32,
 ) {
     if buffer.trim().is_empty() {
         *flush_at = None;
@@ -400,27 +391,6 @@ async fn flush_buffer(
         *flush_at = None;
         return;
     }
-    // Circuit breaker: even if the keyword list misses a novel ack phrasing,
-    // a run of short forwards is the volley's signature. Forward the first
-    // few (some are legit: "Done.", "Pushed."), but once too many short
-    // chunks volley in a row with no substantive message resetting the count,
-    // suppress further short forwards until a long one breaks the streak.
-    let is_short = body.trim().len() <= HEARTBEAT_MAX_LEN;
-    if is_short {
-        *consecutive_short += 1;
-    } else {
-        *consecutive_short = 0;
-    }
-    if is_short && *consecutive_short > MAX_CONSECUTIVE_SHORT_FORWARDS {
-        debug!(
-            agent = ?cfg.author,
-            streak = *consecutive_short,
-            body = %body.trim(),
-            "idle-volley breaker tripped; skipping peer forward"
-        );
-        *flush_at = None;
-        return;
-    }
     let phase = ipav_state.lock().await.current_phase;
     // Ride the open-blocking-findings banner on every peer forward, so it reaches
     // HANDS each turn. Fail-safe 0 when there's no bridge (solo / test config).
@@ -437,16 +407,6 @@ async fn flush_buffer(
     }
     *flush_at = None;
 }
-
-/// Max chars for a chunk to count as "short/ack-shaped" — shared by the
-/// keyword matcher and the circuit breaker.
-const HEARTBEAT_MAX_LEN: usize = 80;
-
-/// How many consecutive short forwards to allow before the idle-volley
-/// breaker suppresses further short chunks. Generous enough for legit rapid
-/// exchanges ("Done." / "Pushed." / "Confirmed."), tight enough to kill a
-/// runaway volley within a few turns.
-const MAX_CONSECUTIVE_SHORT_FORWARDS: u32 = 4;
 
 #[cfg(test)]
 mod tests {
@@ -518,85 +478,6 @@ mod tests {
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].content.contains("API Error"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn idle_volley_breaker_suppresses_runaway_short_forwards() {
-        // Novel ack phrasings the keyword list doesn't catch ("Ok.", "Sure.")
-        // still volley as short chunks. The breaker forwards the first
-        // MAX_CONSECUTIVE_SHORT_FORWARDS, then suppresses the rest.
-        let (storage, state) = setup().await;
-        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(64);
-        let (peer_tx, mut peer_rx) = mpsc::channel(64);
-        let task = tokio::spawn(pump_agent(
-            fast_cfg(Author::Rain, Author::Brian),
-            ev_rx,
-            Some(peer_tx),
-            storage.clone(),
-            state.clone(),
-        ));
-
-        // Six short, non-heartbeat chunks, each its own turn so each flushes.
-        for word in ["Ok.", "Sure.", "Yep.", "Right.", "Fine.", "Cool."] {
-            ev_tx.send(AgentEvent::Text(word.into())).await.unwrap();
-            ev_tx
-                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false, api_error_status: None })
-                .await
-                .unwrap();
-        }
-
-        drop(ev_tx);
-        task.await.unwrap();
-
-        // Exactly MAX_CONSECUTIVE_SHORT_FORWARDS reach the peer; the rest are
-        // suppressed by the breaker.
-        let mut forwarded = 0;
-        while peer_rx.try_recv().is_ok() {
-            forwarded += 1;
-        }
-        assert_eq!(forwarded, MAX_CONSECUTIVE_SHORT_FORWARDS as usize);
-
-        // All six still persisted for UI visibility.
-        let msgs = storage.messages_for_session("s1", None).await.unwrap();
-        assert_eq!(msgs.len(), 6);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn substantive_message_resets_idle_breaker() {
-        // A long (substantive) forward resets the short-streak counter, so a
-        // later short chunk forwards normally instead of being suppressed.
-        let (storage, state) = setup().await;
-        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(64);
-        let (peer_tx, mut peer_rx) = mpsc::channel(64);
-        let task = tokio::spawn(pump_agent(
-            fast_cfg(Author::Rain, Author::Brian),
-            ev_rx,
-            Some(peer_tx),
-            storage.clone(),
-            state.clone(),
-        ));
-
-        let long = "This is a substantive review comment that is clearly longer than the heartbeat length cap and carries real content.";
-        // 5 shorts (5th suppressed), then a long (resets), then a short (forwards).
-        let seq: [&str; 7] = ["a.", "b.", "c.", "d.", "e.", long, "f."];
-        for chunk in seq {
-            ev_tx.send(AgentEvent::Text(chunk.into())).await.unwrap();
-            ev_tx
-                .send(AgentEvent::TurnComplete { stop_reason: None, subtype: None, is_error: false, api_error_status: None })
-                .await
-                .unwrap();
-        }
-        drop(ev_tx);
-        task.await.unwrap();
-
-        let mut got = Vec::new();
-        while let Ok(m) = peer_rx.try_recv() {
-            got.push(m.message.content);
-        }
-        // 4 of the first 5 shorts + the long + the trailing short = 6.
-        assert_eq!(got.len(), 6, "got: {got:?}");
-        assert!(got.iter().any(|c| c.contains("substantive review comment")));
-        assert!(got.iter().any(|c| c.contains("f.")), "post-reset short should forward");
     }
 
     #[tokio::test(flavor = "current_thread")]
