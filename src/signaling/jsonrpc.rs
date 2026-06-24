@@ -98,6 +98,10 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     "disposition_finding",
     // HANDS overrides the reviewer-down commit block (fail-closed escape valve).
     "override_reviewer_block",
+    // `halt` yields the session to the USER (sets awaiting) — user-facing, so it
+    // follows mark_awaiting_user's HANDS-only precedent. EYES converges via
+    // peer_ack (not HANDS-only) instead of yielding to the user.
+    "halt",
 ];
 
 /// The inverse of [`HANDS_ONLY_TOOLS`]: tools only EYES (rain) may call.
@@ -192,6 +196,33 @@ async fn call_tool(
                 .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
                 .await;
             Ok(ToolCallResult::text("ok"))
+        }
+        "peer_ack" => {
+            // The effect is realized in the duo pump: it observes THIS ToolUse
+            // event and suppresses the turn's peer-forward (duo.rs::pump_agent).
+            // Nothing to do bridge-side — the call just needs to succeed so the
+            // agent's turn proceeds. Either agent may call it.
+            Ok(ToolCallResult::text(
+                "peer_ack noted — this turn won't be forwarded to your peer.",
+            ))
+        }
+        "halt" => {
+            // Yield to the user: reuse mark_awaiting_user's machinery (set the
+            // awaiting flag + Halt tray row + AwaitingUser event). `awaiting`
+            // outranks `busy` in SessionActivity::derive, so the input unlocks
+            // immediately — no busy-flag poking needed. HANDS-only (gated above).
+            let reason = args
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("Agent yielded — your move.")
+                .to_string();
+            bridge
+                .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
+                .await;
+            Ok(ToolCallResult::text(
+                "halted — yielded to the user; input unlocked.",
+            ))
         }
         "advance_phase" => {
             let target = arg_required_str(&args, "target")?;
@@ -745,6 +776,8 @@ mod tests {
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"ask_user_choice"));
         assert!(names.contains(&"mark_awaiting_user"));
+        assert!(names.contains(&"peer_ack"));
+        assert!(names.contains(&"halt"));
         assert!(names.contains(&"request_approval"));
         assert!(names.contains(&"action_gate"));
         assert!(names.contains(&"check_commit_message"));
@@ -870,6 +903,7 @@ mod tests {
             "ask_user_choice",
             "request_approval",
             "action_gate",
+            "halt",
         ] {
             let res = dispatch(
                 req(
@@ -1084,6 +1118,57 @@ mod tests {
             .contains("ok"));
         let ev = sub.recv().await.unwrap();
         assert!(matches!(ev, SignalingEvent::AwaitingUser { reason, .. } if reason == "wait"));
+    }
+
+    #[tokio::test]
+    async fn halt_dispatch_sets_awaiting() {
+        // halt yields to the user: it routes through mark_awaiting_user's
+        // machinery, so it emits AwaitingUser carrying the defaulted reason.
+        let bridge = SignalingBridge::new();
+        let mut sub = bridge.subscribe();
+        let res = dispatch(
+            req("tools/call", json!({"name": "halt", "arguments": {}}), 1),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert!(v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("halted"));
+        let ev = sub.recv().await.unwrap();
+        assert!(
+            matches!(ev, SignalingEvent::AwaitingUser { reason, .. } if reason.contains("yielded")),
+            "halt should emit AwaitingUser with the default 'yielded' reason"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_ack_allowed_for_either_agent() {
+        // peer_ack is NOT role-gated — both HANDS and EYES converge via it. (The
+        // real suppression happens in the duo pump; here we just assert the
+        // dispatch accepts the call from either agent.)
+        let bridge = SignalingBridge::new();
+        for c in [caller(), rain_caller()] {
+            let agent = c.agent.clone();
+            let res = dispatch(
+                req("tools/call", json!({"name": "peer_ack", "arguments": {}}), 1),
+                &c,
+                &bridge,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let v = serde_json::to_value(&res).unwrap();
+            assert_eq!(
+                v["result"]["isError"],
+                json!(false),
+                "peer_ack must be allowed for {agent}"
+            );
+        }
     }
 
     #[tokio::test]

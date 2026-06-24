@@ -265,6 +265,8 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 |---|---|
 | `ask_user_choice(question, options)` | Park a structured question for the user. Returns a parked ack; the pick arrives out-of-band. |
 | `mark_awaiting_user(reason)` | Flag the session's `[Need User Input]` badge. Non-blocking. |
+| `peer_ack()` | Acknowledge your peer WITHOUT waking them — suppresses this turn's peer-forward so a converged duo settles to Idle instead of volleying. Either agent. Sits on top of the mechanical volley-breaker. |
+| `halt(reason?)` | Yield to the user and unlock the chat input (sets awaiting, which outranks busy). Like `mark_awaiting_user` framed as a yield. HANDS only. |
 | `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, per-action approval. |
 | `action_gate(command)` | Run a Bash command the Tool Gate blocked: bot-hq surfaces Approve/Reject and, on approve, executes it in the session repo and returns the output. |
 | `close_session()` | Ask the host to close this session. |
@@ -289,8 +291,9 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `webview_press_key(key)` | Dispatch a keypress in the webview. |
 
 Role boundary: Rain (EYES) is blocked from `ask_user_choice`, `mark_awaiting_user`,
-`request_approval`, `action_gate`, `supersede_question`, and
-`cl_register_folder_description`. Brian (HANDS) gets the full set.
+`halt`, `request_approval`, `action_gate`, `supersede_question`, and
+`cl_register_folder_description` (Rain converges via `peer_ack`, which is not
+gated). Brian (HANDS) gets the full set.
 
 </details>
 

@@ -139,6 +139,21 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "peer_ack",
+            description: "Acknowledge your peer WITHOUT waking them — suppresses THIS turn's peer-forward. Use when you and your peer have converged (you agree, or have nothing substantive to add) and want to stop the back-and-forth instead of bouncing another ack that wakes the peer for a full turn. Your text is still saved to the chat (the user sees it); it is simply not forwarded to the peer, so the duo settles back to Idle. This is happy-path politeness layered ON TOP of the mechanical volley-breaker — it does not replace it. Either agent may call it; it takes no arguments.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDescriptor {
+            name: "halt",
+            description: "Yield control back to the user and unlock the chat input. Use when the duo has converged or you've finished the current slice and the next move is genuinely the user's — it ends the agent-to-agent loop cleanly. Sets the session to awaiting-user (the input unlocks even mid-turn, since awaiting outranks busy) and suppresses further peer-forwarding until the user's next message. HANDS-only. Like mark_awaiting_user but framed as a yield rather than a specific pending question; pass an optional reason shown in the tray.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reason": { "type": "string", "description": "Optional short note on why you're yielding (shown in the tray)." }
+                }
+            }),
+        },
+        ToolDescriptor {
             name: "advance_phase",
             description: "Move the IPAV phase chip yourself (no user gate). Use this whenever your work crosses a phase boundary during a substantive task — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify. The dashboard chip updates; both agents receive a [PHASE: X] transition notice on stdin. Phase is a self-discipline signal, not a permission gate. Use exact phase names: Investigate, Plan, Apply, Verify.",
             input_schema: serde_json::json!({

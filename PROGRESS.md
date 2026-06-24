@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-575 tests passing (524 lib + 33 external MCP + 7 signaling + 11 storage)
+581 tests passing (530 lib + 33 external MCP + 7 signaling + 11 storage)
 plus 108 frontend Vitest. Release build clean. Version **1.0.0-rc2**
 (pre-release for Windows friend-testing; `1.0.0` reserved for the official
 market launch). **Tauri v2 migration landed 2026-05-26** on
@@ -19,6 +19,39 @@ branch `tauri-v2-migration` (7 batches across foundation → Slint
 removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
 zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
 `src/storage/`, `src/signaling/` per the design-doc constraint.
+
+---
+
+## 2026-06-25 — peer_ack + halt duo-yield tools (behavioral layer on L2)
+
+Two new internal MCP tools that let an agent signal volley-ending intent
+explicitly, instead of the L2 breaker inferring convergence from text. They sit
+strictly ON TOP of L2 (the hard-cap + convergence breaker stay the mechanical
+floor) — weak models that never call them still hit L2.
+
+**`peer_ack`** (either agent) — "acknowledge the peer without waking them."
+Pump-observed: when the pump (`core/duo.rs::pump_agent`) sees the `peer_ack`
+ToolUse during a turn, the turn's `flush_buffer` suppresses the peer-forward
+(text is still persisted, so the user sees it) — the duo settles to Idle instead
+of bouncing another volley turn. Suppression happens BEFORE the L2 counters, so an
+explicit ack never bumps the hard-cap or the convergence streak. One-shot per turn
+(reset after every TurnComplete, so an errored turn can't leak it). No bridge
+state, no new DuoConfig field — `flush_buffer` just gained a by-value `peer_ack: bool`.
+
+**`halt`** (HANDS-only) — "yield + unlock." Reuses `mark_awaiting_user`'s machinery
+(set the awaiting flag + Halt tray row + AwaitingUser event). Because
+`SessionActivity::derive` ranks `awaiting > busy`, the chat input unlocks
+immediately even mid-turn — no busy-flag poking — and the existing `is_awaiting()`
+guard in `flush_buffer` stops further peer-forwarding until the user's next message.
+HANDS-only mirrors `mark_awaiting_user` (Brian owns user-facing yields; Rain
+converges via `peer_ack`).
+
+No `spawn.rs` change (the `mcp__bot-hq-signaling` server is granted as a unit, so
+new MCP tools are auto-allowed for both agents); no `bindings.ts`/frontend change
+(MCP tools, not Tauri commands; reuses the existing Idle/AwaitingUser states).
+Internal MCP tools 30→32. Role prompts (`agents/prompts.rs`) document both verbs.
+`src/signaling/{protocol,jsonrpc}.rs` + `src/core/duo.rs` + `src/agents/prompts.rs`
++ README/ARCHITECTURE tool lists. +6 lib tests.
 
 ---
 

@@ -118,6 +118,16 @@ fn is_atomic_command(name: &str, input: &serde_json::Value) -> bool {
     cmd.contains("git commit") || cmd.contains("git push") || cmd.contains("migrate")
 }
 
+/// True for the `peer_ack` MCP tool call — the bare alias (tests) or the
+/// MCP-prefixed wire name (`mcp__bot-hq-signaling__peer_ack`). When the pump
+/// sees this ToolUse, it suppresses the turn's peer-forward: the agent
+/// explicitly acknowledged its peer without wanting to wake it for a full turn.
+/// Behavioral happy-path layer ON TOP of the L2 volley-breaker, never a
+/// replacement (weak models that never call it still hit L2).
+fn is_peer_ack_tool(name: &str) -> bool {
+    name == "peer_ack" || name.ends_with("__peer_ack")
+}
+
 /// Pump events from one agent. Each text chunk is persisted; the peer-forward
 /// path depends on the current IPAV phase. `TurnComplete` flushes pending
 /// buffered text immediately regardless of phase.
@@ -137,6 +147,10 @@ pub async fn pump_agent(
     // a dissimilar forward or a tool use resets it.
     let mut last_forward: Option<String> = None;
     let mut similar_streak: u32 = 0;
+    // peer_ack (behavioral layer): set when the agent calls the `peer_ack` tool
+    // during this turn; consumed at the turn's flush to suppress that turn's
+    // peer-forward. Per-turn — reset after every TurnComplete (success OR error).
+    let mut peer_ack_pending = false;
     // A3a: one-shot guard so Brian gets at most one "you're mutating before
     // Apply" nudge per session (delivered to his own stdin via self_input_tx).
     let mut mutate_nudged = false;
@@ -172,6 +186,11 @@ pub async fn pump_agent(
                 // streak so post-work ack chunks aren't pre-emptively suppressed
                 // (mirrors the old length-breaker's reset on ToolUse).
                 similar_streak = 0;
+                // peer_ack: the agent explicitly acked its peer this turn — flag
+                // it so this turn's flush suppresses the peer-forward.
+                if is_peer_ack_tool(&name) {
+                    peer_ack_pending = true;
+                }
                 // Batch 7: a tool call started — suppress stall detection until
                 // its ToolResult (a long build/install emits no events meanwhile).
                 if let Some(liveness) = &cfg.liveness {
@@ -275,8 +294,11 @@ pub async fn pump_agent(
                     buffer.clear();
                 } else {
                     // Always flush on a successful turn-complete, both phases.
-                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state, &mut last_forward, &mut similar_streak).await;
+                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state, &mut last_forward, &mut similar_streak, peer_ack_pending).await;
                 }
+                // peer_ack is per-turn — reset after BOTH branches so an errored
+                // turn (which skips flush_buffer) can't leak the flag into the next.
+                peer_ack_pending = false;
                 // Turn ended → this agent is idle. Runs AFTER flush_buffer so a
                 // peer hand-off (which set the peer busy) keeps the session
                 // `Busy` with no momentary `Idle` flicker between the two.
@@ -318,7 +340,7 @@ pub async fn pump_agent(
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");
-                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state, &mut last_forward, &mut similar_streak).await;
+                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state, &mut last_forward, &mut similar_streak, peer_ack_pending).await;
                 if let Some(activity) = &cfg.activity {
                     activity.set_busy(cfg.author, false);
                 }
@@ -376,6 +398,10 @@ async fn flush_buffer(
     ipav_state: &Arc<Mutex<IpavState>>,
     last_forward: &mut Option<String>,
     similar_streak: &mut u32,
+    // peer_ack (behavioral layer): the agent called `peer_ack` this turn, so
+    // suppress the forward. Checked BEFORE the L2 counters — an explicit ack is
+    // not a volley contribution.
+    peer_ack: bool,
 ) {
     if buffer.trim().is_empty() {
         buffer.clear();
@@ -396,6 +422,17 @@ async fn flush_buffer(
     // the forward still fires on TurnComplete — this flag is what suppresses it.
     if cfg.is_awaiting() {
         debug!(agent = ?cfg.author, "duo halted (awaiting user); skipping peer forward");
+        return;
+    }
+    // peer_ack: the agent explicitly acknowledged its peer this turn and asked
+    // not to wake it. Suppress the forward BEFORE the L2 counters — an explicit
+    // ack is NOT a volley contribution, so it must not bump `user_silent_forwards`
+    // (the hard-cap) or extend the convergence streak. The buffer was already
+    // persisted (Text arm) and taken above; dropping `body` here just means the
+    // peer isn't woken, so the duo settles to Idle. Layered ON TOP of L2 — weak
+    // models that never call peer_ack still hit the hard-cap/convergence breaker.
+    if peer_ack {
+        debug!(agent = ?cfg.author, "peer_ack: suppressing peer forward this turn");
         return;
     }
     // L2 hard-cap fail-safe: bound the consecutive peer-forwards with no
@@ -963,6 +1000,134 @@ mod tests {
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].kind, "tool_use");
+    }
+
+    #[test]
+    fn is_peer_ack_tool_matches_bare_and_prefixed() {
+        // Bare alias (tests) + the real MCP-prefixed wire name both match.
+        assert!(is_peer_ack_tool("peer_ack"));
+        assert!(is_peer_ack_tool("mcp__bot-hq-signaling__peer_ack"));
+        // Other tools + near-misses without the MCP `__` separator do NOT match.
+        assert!(!is_peer_ack_tool("ask_user_choice"));
+        assert!(!is_peer_ack_tool("Edit"));
+        assert!(!is_peer_ack_tool("keeper_ack"));
+        assert!(!is_peer_ack_tool("speer_ack"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn peer_ack_suppresses_forward_but_persists() {
+        // peer_ack: the agent acknowledges its peer WITHOUT waking it. The turn's
+        // text is persisted (the user sees it) but NOT forwarded to the peer — so
+        // the duo settles to Idle instead of bouncing another volley turn.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let task = tokio::spawn(pump_agent(
+            fast_cfg(Author::Brian, Author::Rain),
+            ev_rx,
+            Some(peer_tx),
+            storage.clone(),
+            state,
+        ));
+
+        ev_tx
+            .send(AgentEvent::Text("Agreed — nothing to add.".into()))
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_ack".into(),
+                // The real wire name is MCP-prefixed.
+                name: "mcp__bot-hq-signaling__peer_ack".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "peer_ack must suppress the peer-forward"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
+        // The agent's text is still persisted for the user (so is the tool_use).
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(
+            msgs.iter()
+                .any(|m| m.content.contains("Agreed — nothing to add.")),
+            "peer_ack must still persist the agent's text"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn peer_ack_is_one_shot() {
+        // peer_ack suppresses only the turn it was called in. The NEXT turn (no
+        // peer_ack) forwards to the peer normally — the flag must not leak.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let (peer_tx, mut peer_rx) = mpsc::channel(8);
+        let task = tokio::spawn(pump_agent(
+            fast_cfg(Author::Brian, Author::Rain),
+            ev_rx,
+            Some(peer_tx),
+            storage.clone(),
+            state,
+        ));
+
+        // Turn 1: peer_ack → suppressed.
+        ev_tx.send(AgentEvent::Text("acked".into())).await.unwrap();
+        ev_tx
+            .send(AgentEvent::ToolUse {
+                id: "tu_ack".into(),
+                name: "peer_ack".into(),
+                input: serde_json::json!({}),
+            })
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+            })
+            .await
+            .unwrap();
+
+        // Turn 2: no peer_ack → must forward.
+        ev_tx
+            .send(AgentEvent::Text("real follow-up".into()))
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+            })
+            .await
+            .unwrap();
+
+        let forwarded = peer_rx.recv().await.expect("turn 2 should forward");
+        assert!(forwarded.message.content.contains("real follow-up"));
+        assert!(
+            !forwarded.message.content.contains("acked"),
+            "turn-1 acked text must not resurface on turn 2"
+        );
+
+        drop(ev_tx);
+        task.await.unwrap();
     }
 
     #[test]

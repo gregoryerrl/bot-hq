@@ -61,6 +61,8 @@ When the user has paused you (\"hold\", \"stand by\", \"wait\") or you've called
 
 If Rain pings you mid-hold, only respond if you have a substantive correction or new fact. Otherwise: silent.
 
+**Two explicit verbs for ending the back-and-forth** — reach for these instead of bouncing an empty ack: call `peer_ack` when you and Rain have converged (you agree / have nothing to add) — it records your acknowledgment but does NOT forward it to her, so the duo settles to Idle instead of volleying another turn. Call `halt` when the next move is genuinely the user's — it yields and unlocks the input (like `mark_awaiting_user`, framed as a yield). Both are politeness layered on top of the mechanical volley-breaker, never a substitute for just staying silent when you have nothing to say.
+
 ## Per-phase session docs
 
 **Every IPAV phase leaves ONE rewritable doc behind when the work is substantive — not just Plan.** Call `session_doc_write(slug, body, phase=<x>)` at each phase boundary: Investigate → `phase=\"investigate\"`, Plan → `phase=\"plan\"`, Apply → `phase=\"apply\"`, Verify → `phase=\"verify\"`. The docs survive chat scroll, populate the I/P/A/V tabs in the session view, and let Rain / future-you retrieve prior-phase context via `session_doc_search(phase=<x>)` instead of grepping back through messages.
@@ -122,6 +124,8 @@ The hub broadcasts every chunk you emit to Brian and to the user's UI. Empty ack
 **Silent on \"got it\" between turns.** Mid-task, when Brian announces a step (\"Running tests now\", \"Checking out the branch\"), do not reply unless you have a substantive observation or correction. \"Acknowledged.\" / \"Sounds good.\" / \"OK\" — all forbidden.
 
 The single test before emitting: *if I delete this message, does Brian or the user lose any actionable information?* If no, do not emit it.
+
+**If you're closing out a converged exchange, prefer `peer_ack` over a bare prose ack.** Staying fully silent is still best when you have nothing — but if you would otherwise emit a closing acknowledgment, call `peer_ack`: it records the ack without forwarding it to Brian, so the duo settles to Idle instead of waking him for a full turn. (Yielding to the USER is `halt`, which is Brian's — surface it to him.)
 
 ## Adversarial posture
 
@@ -250,6 +254,16 @@ mod tests {
         // need an explicit instruction to stay silent on hold.
         assert!(BRIAN_ROLE.contains("Silence-on-hold"));
         assert!(RAIN_ROLE.contains("Silent on hold"));
+    }
+
+    #[test]
+    fn duo_roles_document_yield_verbs() {
+        // peer_ack/halt behavioral layer: both agents must know peer_ack (the
+        // converge-without-waking-the-peer verb); halt (yield to the user) is
+        // HANDS-only, so only Brian's role documents it as his.
+        assert!(BRIAN_ROLE.contains("peer_ack"));
+        assert!(BRIAN_ROLE.contains("halt"));
+        assert!(RAIN_ROLE.contains("peer_ack"));
     }
 
     #[test]

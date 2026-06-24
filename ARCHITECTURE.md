@@ -288,7 +288,7 @@ submodule tree). Surface:
 
 **Internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
-`mark_awaiting_user`, `advance_phase`, `request_phase_advance`,
+`mark_awaiting_user`, `peer_ack`, `halt`, `advance_phase`, `request_phase_advance`,
 `request_approval`, `action_gate`,
 `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_search`,
