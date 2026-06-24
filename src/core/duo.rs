@@ -7,6 +7,7 @@ use crate::core::broadcast::peer_forward_message;
 use crate::core::ipav::{IpavPhase, IpavState};
 use crate::signaling::SignalingBridge;
 use crate::storage::{Author, MessageKind, Storage};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 // Test-only since Batch 6 removed the buffered-window timer (the sole non-test
@@ -130,6 +131,12 @@ pub async fn pump_agent(
     ipav_state: Arc<Mutex<IpavState>>,
 ) {
     let mut buffer = String::new();
+    // L2 convergence detector state (per-pump): this pump's last forwarded body
+    // and the count of consecutive near-identical forwards. A forward
+    // ≥VOLLEY_SIMILARITY_THRESHOLD similar to `last_forward` extends the streak;
+    // a dissimilar forward or a tool use resets it.
+    let mut last_forward: Option<String> = None;
+    let mut similar_streak: u32 = 0;
     // A3a: one-shot guard so Brian gets at most one "you're mutating before
     // Apply" nudge per session (delivered to his own stdin via self_input_tx).
     let mut mutate_nudged = false;
@@ -161,6 +168,10 @@ pub async fn pump_agent(
                 buffer.push('\n');
             }
             AgentEvent::ToolUse { id, name, input } => {
+                // L2: a tool call is substantive activity — reset the convergence
+                // streak so post-work ack chunks aren't pre-emptively suppressed
+                // (mirrors the old length-breaker's reset on ToolUse).
+                similar_streak = 0;
                 // Batch 7: a tool call started — suppress stall detection until
                 // its ToolResult (a long build/install emits no events meanwhile).
                 if let Some(liveness) = &cfg.liveness {
@@ -264,7 +275,7 @@ pub async fn pump_agent(
                     buffer.clear();
                 } else {
                     // Always flush on a successful turn-complete, both phases.
-                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state).await;
+                    flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state, &mut last_forward, &mut similar_streak).await;
                 }
                 // Turn ended → this agent is idle. Runs AFTER flush_buffer so a
                 // peer hand-off (which set the peer busy) keeps the session
@@ -307,7 +318,7 @@ pub async fn pump_agent(
             }
             AgentEvent::Exited(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent exited");
-                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state).await;
+                flush_buffer(&cfg, &mut buffer, peer_input_tx.as_ref(), &ipav_state, &mut last_forward, &mut similar_streak).await;
                 if let Some(activity) = &cfg.activity {
                     activity.set_busy(cfg.author, false);
                 }
@@ -363,6 +374,8 @@ async fn flush_buffer(
     buffer: &mut String,
     peer_input_tx: Option<&mpsc::Sender<OutgoingUserMessage>>,
     ipav_state: &Arc<Mutex<IpavState>>,
+    last_forward: &mut Option<String>,
+    similar_streak: &mut u32,
 ) {
     if buffer.trim().is_empty() {
         buffer.clear();
@@ -402,6 +415,27 @@ async fn flush_buffer(
             return;
         }
     }
+    // L2 convergence detector: a forward ≥VOLLEY_SIMILARITY_THRESHOLD similar to
+    // this pump's previous forward extends a streak; VOLLEY_SIMILAR_BREAK
+    // consecutive near-identical forwards is a self-repeating volley → break. A
+    // dissimilar forward resets the streak (the `_` arm), so productive, varied
+    // content never trips. Shape-based — no length threshold, no keyword/prefix
+    // list (the two fragile approaches the Batch 6 peel removed). The streak is
+    // deliberately NOT reset on break: it stays high so a sustained repetition
+    // keeps suppressing until the content actually changes.
+    let trimmed = body.trim_end();
+    match last_forward.as_deref() {
+        Some(prev) if jaccard_similarity(prev, trimmed) >= VOLLEY_SIMILARITY_THRESHOLD => {
+            *similar_streak += 1;
+        }
+        _ => *similar_streak = 0,
+    }
+    *last_forward = Some(trimmed.to_string());
+    if *similar_streak >= VOLLEY_SIMILAR_BREAK {
+        debug!(agent = ?cfg.author, streak = *similar_streak, "convergence breaker tripped; breaking volley + unlocking input");
+        break_volley(cfg);
+        return;
+    }
     let phase = ipav_state.lock().await.current_phase;
     // Ride the open-blocking-findings banner on every peer forward, so it reaches
     // HANDS each turn. Fail-safe 0 when there's no bridge (solo / test config).
@@ -409,7 +443,7 @@ async fn flush_buffer(
         Some(bridge) => bridge.open_blocking_count(&cfg.session_id).await,
         None => 0,
     };
-    peer_forward_message(cfg.author, body.trim_end(), phase, open_blocking, peer_input_tx).await;
+    peer_forward_message(cfg.author, trimmed, phase, open_blocking, peer_input_tx).await;
     // The peer just received input → it's now busy (this is the duo's
     // turn-start signal). Set AFTER the forward so a failed send (dead peer)
     // doesn't wrongly mark it busy.
@@ -438,6 +472,47 @@ fn break_volley(cfg: &DuoConfig) {
 /// (a multi-turn review) must never trip it; only a genuine runaway reaches it
 /// (`s-e4fc25`: 34 messages, 0 from the user).
 const VOLLEY_HARD_CAP: u32 = 18;
+
+/// Token-set Jaccard similarity of two forward bodies — the shape-based
+/// convergence signal (no length threshold, no keyword/prefix list, the two
+/// fragile approaches the Batch 6 peel removed). Tokenize: split on whitespace,
+/// trim each token of leading/trailing non-alphanumerics, lowercase, drop
+/// empties — so "OK.", "OK", "ok" all reduce to {ok}. Edge: BOTH token sets
+/// empty (pure punctuation / emoji like "." or "🤝", the canonical s-e4fc25
+/// volley) → 1.0, so convergence catches it fast rather than deferring to the
+/// hard-cap. One empty, one not → 0.0. Two DISTINCT substantive messages always
+/// carry alphanumeric tokens, so they can never collide at 1.0 via the
+/// both-empty path.
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    fn token_set(s: &str) -> HashSet<String> {
+        s.split_whitespace()
+            .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect()
+    }
+    let (sa, sb) = (token_set(a), token_set(b));
+    if sa.is_empty() && sb.is_empty() {
+        return 1.0;
+    }
+    let inter = sa.intersection(&sb).count();
+    let union = sa.union(&sb).count();
+    if union == 0 {
+        1.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
+/// Jaccard similarity at or above which two consecutive forwards from the same
+/// pump count as "the same content" for convergence detection.
+const VOLLEY_SIMILARITY_THRESHOLD: f64 = 0.85;
+
+/// Consecutive near-identical forwards before the convergence breaker trips.
+/// With 2: forward-1 sets the baseline (streak 0), forward-2 (similar) → streak
+/// 1, forward-3 (similar) → streak 2 → break. So the 3rd near-identical forward
+/// from a pump breaks the volley ("break after ~2-3"). Tighter than the old
+/// length-breaker's 4, but justified — it keys on similarity, not raw length.
+const VOLLEY_SIMILAR_BREAK: u32 = 2;
 
 #[cfg(test)]
 mod tests {
@@ -507,6 +582,131 @@ mod tests {
         assert_eq!(
             forwarded, VOLLEY_HARD_CAP,
             "peer receives exactly VOLLEY_HARD_CAP forwards, then the volley breaks"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn convergence_breaker_suppresses_repeating_forwards() {
+        // A pump that forwards the SAME body every turn is a self-repeating
+        // volley. Convergence forwards the first VOLLEY_SIMILAR_BREAK (baseline +
+        // streak-builders), then suppresses every later identical forward. No
+        // user_silent_forwards here, so ONLY convergence is active (hard-cap is
+        // None → skipped).
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (peer_tx, mut peer_rx) = mpsc::channel(64);
+        let task = tokio::spawn(pump_agent(
+            fast_cfg(Author::Brian, Author::Rain),
+            ev_rx,
+            Some(peer_tx),
+            storage.clone(),
+            state,
+        ));
+
+        for _ in 0..5 {
+            ev_tx
+                .send(AgentEvent::Text("Standing by, awaiting direction.".into()))
+                .await
+                .unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: None,
+                    is_error: false,
+                    api_error_status: None,
+                })
+                .await
+                .unwrap();
+        }
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let mut forwarded = 0u32;
+        while peer_rx.try_recv().is_ok() {
+            forwarded += 1;
+        }
+        assert_eq!(
+            forwarded, VOLLEY_SIMILAR_BREAK,
+            "identical repeats forward only the baseline streak, then the convergence breaker suppresses the rest"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn varied_substantive_forwards_never_break() {
+        // LOAD-BEARING false-fire guard: genuinely productive collaboration
+        // (distinct review/plan content each turn) must NEVER trip the
+        // convergence breaker. Each consecutive pair is well below the similarity
+        // threshold → the streak resets every turn → all forwards reach the peer.
+        let (storage, state) = setup().await;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (peer_tx, mut peer_rx) = mpsc::channel(64);
+        let task = tokio::spawn(pump_agent(
+            fast_cfg(Author::Brian, Author::Rain),
+            ev_rx,
+            Some(peer_tx),
+            storage.clone(),
+            state,
+        ));
+
+        let bodies = [
+            "The hard-cap counter belongs on SessionHandle so broadcast can reset it; \
+             wiring it through both DuoConfig clones keeps the pumps in sync without \
+             touching the bridge registration path at all.",
+            "Reviewing the migration: the answered_at column stays NULL on withdraw, so \
+             every time-based tray query needs COALESCE with asked_at before the boot GC \
+             cutoff can compare timestamps correctly against now_utc.",
+            "Frontend reactivity here is event-driven, not polled — the new activity store \
+             must emit a session-scoped event and map into GlobalEventSync, otherwise the \
+             footer dot stays stale until the next unrelated tab switch.",
+            "One concern about the watchdog: an HTTP 200 with an empty body is not a retried \
+             status class, so it falls through to a silent stale instead of surfacing a \
+             review-down banner the way a real connection drop would.",
+        ];
+        for body in bodies {
+            ev_tx.send(AgentEvent::Text(body.into())).await.unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: None,
+                    is_error: false,
+                    api_error_status: None,
+                })
+                .await
+                .unwrap();
+        }
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let mut forwarded = 0u32;
+        while peer_rx.try_recv().is_ok() {
+            forwarded += 1;
+        }
+        assert_eq!(
+            forwarded,
+            bodies.len() as u32,
+            "distinct substantive forwards must all reach the peer — convergence must not false-fire on real collaboration"
+        );
+    }
+
+    #[test]
+    fn jaccard_similarity_normalizes_and_handles_edges() {
+        // Identical → 1.0.
+        assert_eq!(jaccard_similarity("ready to go", "ready to go"), 1.0);
+        // Case + trailing punctuation normalize: "OK." and "ok" both → {ok}.
+        assert_eq!(jaccard_similarity("OK.", "ok"), 1.0);
+        // BOTH pure-punctuation / emoji (empty token sets) → 1.0: the canonical
+        // s-e4fc25 "." volley must be a convergence catch, not deferred.
+        assert_eq!(jaccard_similarity(".", "."), 1.0);
+        assert_eq!(jaccard_similarity("...", "—"), 1.0);
+        // One empty, one substantive → 0.0 (e.g. "." vs a real message).
+        assert_eq!(jaccard_similarity(".", "check line forty two"), 0.0);
+        // Fully disjoint vocabularies → 0.0.
+        assert_eq!(jaccard_similarity("alpha beta", "gamma delta"), 0.0);
+        // Partial overlap sits strictly between 0 and the break threshold.
+        let partial = jaccard_similarity("the quick brown fox", "the quick red hen");
+        assert!(
+            partial > 0.0 && partial < VOLLEY_SIMILARITY_THRESHOLD,
+            "partial overlap should not trip the breaker: {partial}"
         );
     }
 
