@@ -14,6 +14,19 @@ impl SignalingBridge {
         if let Some(flag) = self.session_awaiting.lock().await.get(session_id) {
             flag.store(true, Ordering::Release);
         }
+        // Reflect the flag flip into the derived activity NOW — emit AwaitingUser
+        // immediately instead of waiting for the agent's TurnComplete set_busy
+        // (the dot-lag bug). Weak upgrade: the tracker may be gone if the session
+        // closed mid-flight → silent no-op. The lock is dropped before refresh().
+        let tracker = self
+            .session_activity
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(Weak::upgrade);
+        if let Some(tracker) = tracker {
+            tracker.refresh();
+        }
     }
 
     /// Called by the MCP `tools/call` handler for `ask_user_choice`. Parks the
@@ -855,6 +868,44 @@ mod tests {
         assert!(
             matches!(ev, SignalingEvent::AwaitingUser { session_id, agent, reason }
             if session_id == "s1" && agent == "brian" && reason == "ping")
+        );
+    }
+
+    #[tokio::test]
+    async fn set_session_awaiting_refreshes_registered_activity_tracker() {
+        // Bug B: parking a question must reflect the awaiting flip into the
+        // derived activity IMMEDIATELY (emit AwaitingUser) via the registered
+        // tracker — not wait for the agent's next set_busy (the dot-lag bug).
+        use std::sync::atomic::AtomicBool;
+        let bridge = SignalingBridge::new();
+        let awaiting = Arc::new(AtomicBool::new(false));
+        bridge
+            .register_session_awaiting("s1".into(), Arc::clone(&awaiting))
+            .await;
+        // A real tracker sharing the same awaiting flag, registered as a Weak.
+        let tracker = ActivityTracker::new("s1", Arc::clone(&awaiting), bridge.clone());
+        bridge
+            .register_session_activity("s1".into(), Arc::downgrade(&tracker))
+            .await;
+
+        let mut sub = bridge.subscribe();
+        bridge
+            .mark_awaiting_user("s1".into(), "brian".into(), "ping".into())
+            .await;
+
+        // refresh() fires inside set_session_awaiting (before the AwaitingUser
+        // event) → a SessionActivity{awaiting_user} must be among the emitted events.
+        let mut saw_activity = false;
+        while let Ok(ev) = sub.try_recv() {
+            if let SignalingEvent::SessionActivity { session_id, state } = ev {
+                if session_id == "s1" && state == "awaiting_user" {
+                    saw_activity = true;
+                }
+            }
+        }
+        assert!(
+            saw_activity,
+            "set_session_awaiting must refresh the registered tracker → emit SessionActivity awaiting_user"
         );
     }
 

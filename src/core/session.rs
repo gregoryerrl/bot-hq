@@ -551,6 +551,13 @@ async fn spawn_session_handle(
     // both pumps flip per-agent `busy`, the dispatch paths set busy on send.
     let activity =
         crate::core::ActivityTracker::new(session.id.clone(), Arc::clone(&awaiting), Arc::clone(&bridge));
+    // Bug B: let the bridge reach this tracker so `set_session_awaiting` can emit
+    // AwaitingUser the moment a question is parked (instead of waiting for the
+    // agent's next TurnComplete set_busy). Weak — the tracker is owned here and by
+    // the SessionHandle; a strong bridge ref would cycle. Mirrors the awaiting reg.
+    bridge
+        .register_session_activity(session.id.clone(), Arc::downgrade(&activity))
+        .await;
 
     // Per-agent pumps need to be spawned BEFORE we move the handles, so we
     // pull the receivers + input senders here. The handles keep their other

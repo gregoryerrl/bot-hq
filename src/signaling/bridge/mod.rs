@@ -18,13 +18,14 @@
 //! - [`session_docs`] — per-session scratch documents
 //! - [`util`]         — free helper functions
 
+use crate::core::activity::ActivityTracker;
 use crate::policy::{Policy, ViolationKind, ViolationsLog};
 use crate::storage::Storage;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
@@ -213,6 +214,14 @@ pub struct SignalingBridge {
     /// fires, the bridge sets the flag synchronously BEFORE returning so
     /// Brian's next chunk doesn't volley to Rain before the halt takes effect.
     session_awaiting: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// session_id → Weak ref to the session's ActivityTracker. Lets
+    /// `set_session_awaiting` reflect an awaiting-flag flip into the derived
+    /// activity immediately (emit AwaitingUser) instead of waiting for the next
+    /// `set_busy`. Weak, not Arc: the tracker holds a strong
+    /// `Arc<SignalingBridge>` (activity.rs), so a strong back-ref here would
+    /// cycle and leak the tracker past session close; `upgrade()` returns None
+    /// after close → a silent no-op.
+    session_activity: Mutex<HashMap<String, Weak<ActivityTracker>>>,
     /// Storage handle for out-of-band message injection. Set once via
     /// `set_storage` at startup. When a `resolve_choice` lands after the
     /// agent's blocking `ask_user_choice` tool call already client-side
@@ -262,6 +271,7 @@ impl SignalingBridge {
             data_dir,
             session_projects: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
+            session_activity: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),
@@ -312,6 +322,14 @@ impl SignalingBridge {
         self.session_awaiting.lock().await.insert(session_id, flag);
     }
 
+    /// Hand the bridge a Weak ref to the session's ActivityTracker so
+    /// `set_session_awaiting` can refresh the derived activity the moment it
+    /// flips the awaiting flag (emit AwaitingUser without waiting for the next
+    /// `set_busy`). Weak — see the `session_activity` field doc.
+    pub async fn register_session_activity(&self, session_id: String, tracker: Weak<ActivityTracker>) {
+        self.session_activity.lock().await.insert(session_id, tracker);
+    }
+
     /// Clear the awaiting flag for a session — called by core.broadcast when
     /// the user sends a message (which resumes the duo).
     pub async fn clear_session_awaiting(&self, session_id: &str) {
@@ -328,6 +346,7 @@ impl SignalingBridge {
     pub async fn unregister_session(&self, session_id: &str) {
         self.session_projects.lock().await.remove(session_id);
         self.session_awaiting.lock().await.remove(session_id);
+        self.session_activity.lock().await.remove(session_id);
         self.session_close_gate.lock().await.remove(session_id);
         self.agent_health
             .lock()
