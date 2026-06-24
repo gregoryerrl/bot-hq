@@ -2,7 +2,7 @@ import { create } from "zustand";
 
 /** Agent liveness as reported by the backend `session:agent_health` event
  *  (mirrors Rust `AgentHealth::as_str`). */
-export type AgentHealth = "running" | "retrying" | "dead";
+export type AgentHealth = "running" | "retrying" | "stalled" | "dead";
 
 type SessionHealth = { brian?: AgentHealth; rain?: AgentHealth };
 
@@ -38,6 +38,7 @@ export const useHealthStore = create<HealthStore>((set) => ({
 export function worstHealth(h: SessionHealth | undefined): AgentHealth | undefined {
   if (!h) return undefined;
   if (h.brian === "dead" || h.rain === "dead") return "dead";
+  if (h.brian === "stalled" || h.rain === "stalled") return "stalled";
   if (h.brian === "retrying" || h.rain === "retrying") return "retrying";
   if (h.brian === "running" || h.rain === "running") return "running";
   return undefined;
@@ -49,17 +50,20 @@ export function worstHealth(h: SessionHealth | undefined): AgentHealth | undefin
  *  after a fresh launch until a reopened session's agent emits — don't claim
  *  "OK" then). */
 export function appHealthSummary(bySession: Record<string, SessionHealth>): {
-  state: "ok" | "retrying" | "dead" | "idle";
+  state: "ok" | "retrying" | "stalled" | "dead" | "idle";
   count: number;
 } {
   let dead = 0;
   let retrying = 0;
+  let stalled = 0;
   for (const h of Object.values(bySession)) {
     const w = worstHealth(h);
     if (w === "dead") dead += 1;
+    else if (w === "stalled") stalled += 1;
     else if (w === "retrying") retrying += 1;
   }
   if (dead > 0) return { state: "dead", count: dead };
+  if (stalled > 0) return { state: "stalled", count: stalled };
   if (retrying > 0) return { state: "retrying", count: retrying };
   if (Object.keys(bySession).length === 0) return { state: "idle", count: 0 };
   return { state: "ok", count: 0 };

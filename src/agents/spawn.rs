@@ -93,6 +93,11 @@ pub enum AgentHealth {
     Running,
     /// Hit a transient API error; backing off + auto-resuming.
     Retrying,
+    /// Mid-turn but silent too long — no tokens/tool events while busy with no
+    /// tool in flight (e.g. an upstream "HTTP 200 empty/malformed" loop the
+    /// supervisor can't classify as a retryable status). Recoverable: clears to
+    /// Running on the next event (Batch 7 stall watchdog).
+    Stalled,
     /// Supervisor gave up — permanent error / exhausted retries / exited.
     Dead,
 }
@@ -102,6 +107,7 @@ impl AgentHealth {
         match self {
             AgentHealth::Running => "running",
             AgentHealth::Retrying => "retrying",
+            AgentHealth::Stalled => "stalled",
             AgentHealth::Dead => "dead",
         }
     }
@@ -1011,6 +1017,7 @@ mod tests {
         // (session:agent_health payload + HealthDot styling) — lock them.
         assert_eq!(AgentHealth::Running.as_str(), "running");
         assert_eq!(AgentHealth::Retrying.as_str(), "retrying");
+        assert_eq!(AgentHealth::Stalled.as_str(), "stalled");
         assert_eq!(AgentHealth::Dead.as_str(), "dead");
     }
 

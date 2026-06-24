@@ -5,6 +5,7 @@ import type { AgentHealth } from "../stores/health";
 const STYLES: Record<AgentHealth, { dot: string; label: string }> = {
   running: { dot: "bg-success", label: "running" },
   retrying: { dot: "bg-warning animate-pulse", label: "retrying (transient API error)" },
+  stalled: { dot: "bg-error animate-pulse", label: "stalled — no response, possibly hung" },
   dead: { dot: "bg-error", label: "stopped — gave up after errors" },
 };
 

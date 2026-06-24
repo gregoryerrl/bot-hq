@@ -15,6 +15,7 @@ function FooterStatus() {
   const cfg = {
     ok: { dot: "bg-success", label: "Agents: OK" },
     retrying: { dot: "bg-warning animate-pulse", label: `${count} recovering` },
+    stalled: { dot: "bg-error animate-pulse", label: `${count} stalled` },
     dead: { dot: "bg-error", label: `${count} stopped` },
     idle: { dot: "bg-outline-variant", label: "Agents: idle" },
   }[state];
@@ -26,7 +27,7 @@ function FooterStatus() {
           ? "All agents running"
           : state === "idle"
             ? "No agents running yet"
-            : `${count} session${count === 1 ? "" : "s"} with ${state === "dead" ? "a stopped" : "a recovering"} agent`
+            : `${count} session${count === 1 ? "" : "s"} with ${state === "dead" ? "a stopped" : state === "stalled" ? "a stalled" : "a recovering"} agent`
       }
     >
       <span className={cn("size-2 rounded-full", cfg.dot)} />
