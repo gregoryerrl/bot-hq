@@ -9,6 +9,9 @@ use crate::signaling::SignalingBridge;
 use crate::storage::{Author, MessageKind, Storage};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+// Test-only since Batch 6 removed the buffered-window timer (the sole non-test
+// `Duration` user); the test sleeps below still need it.
+#[cfg(test)]
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};

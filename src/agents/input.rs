@@ -1,13 +1,20 @@
 //! Stdin writer: serializes outgoing user messages as stream-json.
 
-use crate::agents::protocol::OutgoingUserMessage;
+use crate::agents::protocol::{ControlRequest, OutgoingUserMessage};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-/// Drain the `rx` channel; write each message as one stream-json line to
-/// `stdin`. Exits cleanly when `rx` closes or the writer errors.
-/// Generic so tests can use `tokio::io::duplex`.
+/// Drain the user-message `rx` AND the `control_rx` channels; write each as one
+/// stream-json line to `stdin`. Exits cleanly when `rx` closes (agent teardown)
+/// or the writer errors. Generic so tests can use `tokio::io::duplex`.
+///
+/// `control_rx` carries `control_request` interrupts. We `select!` over both
+/// channels (rather than draining `rx` first) so a cancel can land an interrupt
+/// on stdin the instant it's sent, even while user messages sit queued — the
+/// binary reads control requests out-of-band and aborts the in-flight turn
+/// without dying. `control_open` disables the closed control branch so it can't
+/// busy-loop on `None` once the handle (and its `control_tx`) is dropped.
 ///
 /// `agent` is purely for diagnostics: a write error here means the
 /// subprocess's stdin is gone and this agent can no longer receive ANY input
@@ -18,13 +25,29 @@ use tracing::warn;
 pub async fn pump_inputs<W: AsyncWrite + Unpin>(
     mut stdin: W,
     mut rx: mpsc::Receiver<OutgoingUserMessage>,
+    mut control_rx: mpsc::Receiver<ControlRequest>,
     agent: String,
 ) {
-    while let Some(msg) = rx.recv().await {
-        let line = match serde_json::to_string(&msg) {
+    let mut control_open = true;
+    loop {
+        let line = tokio::select! {
+            msg = rx.recv() => match msg {
+                // The user channel closing is the agent-teardown signal.
+                None => break,
+                Some(m) => serde_json::to_string(&m),
+            },
+            ctl = control_rx.recv(), if control_open => match ctl {
+                None => {
+                    control_open = false;
+                    continue;
+                }
+                Some(c) => serde_json::to_string(&c),
+            },
+        };
+        let line = match line {
             Ok(s) => s,
             Err(err) => {
-                warn!(%agent, error = %err, "serialize outgoing user msg");
+                warn!(%agent, error = %err, "serialize outgoing stdin msg");
                 continue;
             }
         };
@@ -52,7 +75,8 @@ mod tests {
     async fn pump_inputs_writes_line_per_message() {
         let (write, read) = tokio::io::duplex(4096);
         let (tx, rx) = mpsc::channel(8);
-        let task = tokio::spawn(pump_inputs(write, rx, "test".into()));
+        let (_ctl_tx, ctl_rx) = mpsc::channel(8);
+        let task = tokio::spawn(pump_inputs(write, rx, ctl_rx, "test".into()));
         tx.send(OutgoingUserMessage::text("hello")).await.unwrap();
         tx.send(OutgoingUserMessage::text("world")).await.unwrap();
         drop(tx);
@@ -65,5 +89,28 @@ mod tests {
         let mut line2 = String::new();
         reader.read_line(&mut line2).await.unwrap();
         assert!(line2.contains("\"world\""));
+    }
+
+    #[tokio::test]
+    async fn pump_inputs_writes_control_request_out_of_band() {
+        let (write, read) = tokio::io::duplex(4096);
+        // No user message queued — the interrupt must still reach stdin on its own.
+        let (user_tx, rx) = mpsc::channel::<OutgoingUserMessage>(8);
+        let (ctl_tx, ctl_rx) = mpsc::channel(8);
+        let task = tokio::spawn(pump_inputs(write, rx, ctl_rx, "test".into()));
+
+        ctl_tx.send(ControlRequest::interrupt("r1")).await.unwrap();
+
+        // Read the control line deterministically before tearing the channels down.
+        let mut reader = BufReader::new(read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(line.contains("\"control_request\""));
+        assert!(line.contains("\"interrupt\""));
+        assert!(line.contains("\"r1\""));
+
+        drop(ctl_tx);
+        drop(user_tx); // close the user channel → pump exits
+        task.await.unwrap();
     }
 }

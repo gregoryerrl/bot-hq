@@ -174,6 +174,41 @@ impl OutgoingUserMessage {
     }
 }
 
+/// A stream-json `control_request` written to claude-code's stdin to ABORT the
+/// in-flight turn WITHOUT killing the process (warm cache, no `--resume`). The
+/// binary reads control requests on a channel separate from queued user input,
+/// so this preempts even when user messages sit buffered; it ACKs with
+/// `{"type":"control_response","response":{"subtype":"success","request_id":<id>}}`
+/// then emits a `result` with `terminal_reason:"aborted_streaming"` (is_error:true).
+/// Wire format verified live against claude-code v2.1.186. Used as the PRIMARY
+/// cancel; SIGKILL process-group kill is the escalation fallback.
+#[derive(Debug, Clone, Serialize)]
+pub struct ControlRequest {
+    #[serde(rename = "type")]
+    pub typ: &'static str,
+    pub request_id: String,
+    pub request: ControlRequestBody,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ControlRequestBody {
+    pub subtype: &'static str,
+}
+
+impl ControlRequest {
+    /// An `interrupt` control request. `request_id` correlates the
+    /// `control_response` ACK (any string unique enough per in-flight request).
+    pub fn interrupt(request_id: impl Into<String>) -> Self {
+        Self {
+            typ: "control_request",
+            request_id: request_id.into(),
+            request: ControlRequestBody {
+                subtype: "interrupt",
+            },
+        }
+    }
+}
+
 // ---- tests ----------------------------------------------------------------
 
 #[cfg(test)]
@@ -303,5 +338,16 @@ mod tests {
         assert!(s.contains("\"type\":\"user\""));
         assert!(s.contains("\"role\":\"user\""));
         assert!(s.contains("\"content\":\"hello\""));
+    }
+
+    #[test]
+    fn serializes_control_request_interrupt() {
+        // Must match the exact envelope verified live against claude-code v2.1.186:
+        // {"type":"control_request","request_id":"r1","request":{"subtype":"interrupt"}}
+        let c = ControlRequest::interrupt("r1");
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(s.contains("\"type\":\"control_request\""));
+        assert!(s.contains("\"request_id\":\"r1\""));
+        assert!(s.contains("\"request\":{\"subtype\":\"interrupt\"}"));
     }
 }

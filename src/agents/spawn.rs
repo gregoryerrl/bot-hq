@@ -15,7 +15,7 @@ use tracing::{debug, info, warn};
 
 use crate::agents::events;
 use crate::agents::input;
-use crate::agents::protocol::OutgoingUserMessage;
+use crate::agents::protocol::{ControlRequest, OutgoingUserMessage};
 use crate::storage::AgentConfig;
 
 /// Global registry of live claude-code child PIDs. Updated by
@@ -218,6 +218,10 @@ pub struct AgentHandle {
     pub name: String,
     pub event_rx: mpsc::Receiver<AgentEvent>,
     pub input_tx: mpsc::Sender<OutgoingUserMessage>,
+    /// Out-of-band stdin channel for `control_request` interrupts (the cancel
+    /// path). Separate from `input_tx` so an interrupt preempts queued user
+    /// messages, exactly as the binary's control protocol expects.
+    pub control_tx: mpsc::Sender<ControlRequest>,
     kill_tx: Option<oneshot::Sender<()>>,
 }
 
@@ -227,6 +231,17 @@ impl AgentHandle {
         if let Some(tx) = self.kill_tx.take() {
             let _ = tx.send(());
         }
+    }
+
+    /// Best-effort interrupt: queue a `control_request` to abort the in-flight
+    /// turn WITHOUT killing the process (warm cache, no `--resume`). Returns
+    /// whether it was queued; a full or closed control channel returns `false`
+    /// and the caller escalates to [`kill`](Self::kill). `request_id` correlates
+    /// the `control_response` ACK.
+    pub fn interrupt(&self, request_id: impl Into<String>) -> bool {
+        self.control_tx
+            .try_send(ControlRequest::interrupt(request_id))
+            .is_ok()
     }
 }
 
@@ -241,6 +256,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
     let (input_tx, input_rx) = mpsc::channel::<OutgoingUserMessage>(64);
+    let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
 
     let mut cmd = build_command(&cfg);
@@ -287,7 +303,12 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
 
     tokio::spawn(events::pump_events(stdout, event_tx.clone()));
     tokio::spawn(events::pump_stderr(stderr, cfg.agent_name.clone()));
-    tokio::spawn(input::pump_inputs(stdin, input_rx, cfg.agent_name.clone()));
+    tokio::spawn(input::pump_inputs(
+        stdin,
+        input_rx,
+        control_rx,
+        cfg.agent_name.clone(),
+    ));
 
     let event_tx_for_lifecycle = event_tx.clone();
     let agent_name = cfg.agent_name.clone();
@@ -333,6 +354,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         name: cfg.agent_name,
         event_rx,
         input_tx,
+        control_tx,
         kill_tx: Some(kill_tx),
     })
 }
@@ -385,6 +407,7 @@ impl RetryPolicy {
 pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Result<AgentHandle> {
     let (out_event_tx, out_event_rx) = mpsc::channel::<AgentEvent>(256);
     let (out_input_tx, out_input_rx) = mpsc::channel::<OutgoingUserMessage>(64);
+    let (out_control_tx, out_control_rx) = mpsc::channel::<ControlRequest>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
 
     let name = cfg.agent_name.clone();
@@ -396,6 +419,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
         first,
         out_event_tx,
         out_input_rx,
+        out_control_rx,
         kill_rx,
         spawn_agent,
     ));
@@ -404,6 +428,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
         name,
         event_rx: out_event_rx,
         input_tx: out_input_tx,
+        control_tx: out_control_tx,
         kill_tx: Some(kill_tx),
     })
 }
@@ -418,6 +443,7 @@ async fn supervise<S, Fut>(
     first: AgentHandle,
     out_event_tx: mpsc::Sender<AgentEvent>,
     mut out_input_rx: mpsc::Receiver<OutgoingUserMessage>,
+    mut out_control_rx: mpsc::Receiver<ControlRequest>,
     mut kill_rx: oneshot::Receiver<()>,
     mut spawn_next: S,
 ) where
@@ -428,6 +454,9 @@ async fn supervise<S, Fut>(
     let mut incarnation = first;
     let mut consecutive_transient: u32 = 0;
     let mut pending_nudge: Option<String> = None;
+    // Disabled once `out_control_rx` closes (handle dropped) so the closed branch
+    // can't busy-loop on `None`. The user-input `None` arm tears the loop down first.
+    let mut control_open = true;
 
     loop {
         // A freshly respawned `--resume` child idles until it receives input —
@@ -453,6 +482,19 @@ async fn supervise<S, Fut>(
                 _ = &mut kill_rx => {
                     incarnation.kill();
                     return;
+                }
+                ctl = out_control_rx.recv(), if control_open => {
+                    match ctl {
+                        // Relay the interrupt to the CURRENT incarnation's stdin
+                        // (follows respawns automatically). Best-effort: a full or
+                        // closed control channel just drops it and the cancel path
+                        // escalates to SIGKILL. Placed above user input so an
+                        // interrupt preempts any queued messages.
+                        Some(ctl) => {
+                            let _ = incarnation.control_tx.try_send(ctl);
+                        }
+                        None => control_open = false,
+                    }
                 }
                 msg = out_input_rx.recv() => {
                     match msg {
@@ -1293,11 +1335,13 @@ mod tests {
     ) {
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(16);
         let (in_tx, in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (control_tx, _control_rx) = mpsc::channel::<ControlRequest>(8);
         let (kill_tx, _kill_rx) = oneshot::channel::<()>();
         let handle = AgentHandle {
             name: "fake".into(),
             event_rx: ev_rx,
             input_tx: in_tx,
+            control_tx,
             kill_tx: Some(kill_tx),
         };
         (handle, ev_tx, in_rx)
@@ -1343,6 +1387,7 @@ mod tests {
 
         let (out_ev_tx, mut out_ev_rx) = mpsc::channel::<AgentEvent>(64);
         let (_out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (_out_ctl_tx, out_ctl_rx) = mpsc::channel::<ControlRequest>(8);
         let (_kill_tx, kill_rx) = oneshot::channel::<()>();
 
         let task = tokio::spawn(supervise(
@@ -1351,6 +1396,7 @@ mod tests {
             h1,
             out_ev_tx,
             out_in_rx,
+            out_ctl_rx,
             kill_rx,
             spawn_next,
         ));
@@ -1422,6 +1468,7 @@ mod tests {
 
         let (out_ev_tx, _out_ev_rx) = mpsc::channel::<AgentEvent>(64);
         let (out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (_out_ctl_tx, out_ctl_rx) = mpsc::channel::<ControlRequest>(8);
         let (_kill_tx, kill_rx) = oneshot::channel::<()>();
 
         let task = tokio::spawn(supervise(
@@ -1430,6 +1477,7 @@ mod tests {
             h1,
             out_ev_tx,
             out_in_rx,
+            out_ctl_rx,
             kill_rx,
             spawn_next,
         ));
@@ -1464,6 +1512,7 @@ mod tests {
 
         let (out_ev_tx, mut out_ev_rx) = mpsc::channel::<AgentEvent>(64);
         let (_out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (_out_ctl_tx, out_ctl_rx) = mpsc::channel::<ControlRequest>(8);
         let (_kill_tx, kill_rx) = oneshot::channel::<()>();
 
         let task = tokio::spawn(supervise(
@@ -1472,6 +1521,7 @@ mod tests {
             h1,
             out_ev_tx,
             out_in_rx,
+            out_ctl_rx,
             kill_rx,
             spawn_next,
         ));
@@ -1525,6 +1575,7 @@ mod tests {
 
         let (out_ev_tx, mut out_ev_rx) = mpsc::channel::<AgentEvent>(64);
         let (_out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
+        let (_out_ctl_tx, out_ctl_rx) = mpsc::channel::<ControlRequest>(8);
         let (_kill_tx, kill_rx) = oneshot::channel::<()>();
 
         let task = tokio::spawn(supervise(
@@ -1533,6 +1584,7 @@ mod tests {
             h1,
             out_ev_tx,
             out_in_rx,
+            out_ctl_rx,
             kill_rx,
             spawn_next,
         ));
