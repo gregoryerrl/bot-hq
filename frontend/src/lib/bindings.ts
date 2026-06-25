@@ -1321,7 +1321,12 @@ provenance: ProjectProvenance }
  * return (mirrors `SessionInfo`); React reads `session_id`/`activity`/
  * `brian_health`/`rain_health`.
  */
-export type SessionRuntime = { session_id: string; activity: string; brian_health: string | null; rain_health: string | null }
+export type SessionRuntime = { session_id: string; activity: string; brian_health: string | null; rain_health: string | null; 
+/**
+ * Peer-forward router liveness (duo only). `None` = solo, or never reported
+ * (assume alive — the event fires only on change). Seeds the UI router dot.
+ */
+router_alive: boolean | null }
 /**
  * One durable `session_tray` row, projected for the session-view Tray tab.
  * Unlike [`PendingChoiceView`] (live in-memory pending only), this surfaces
