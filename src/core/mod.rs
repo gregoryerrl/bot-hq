@@ -20,7 +20,7 @@ pub mod worktree;
 pub use activity::{ActivityTracker, SessionActivity};
 pub use broadcast::peer_forward_message;
 pub use ipav::{IpavPhase, IpavState};
-pub use router::{run_router, RouterCommand, RouterDeps};
+pub use router::{run_router, RouterCommand, RouterControl, RouterDeps};
 pub use session::{open_session, OpenSessionRequest, SessionHandle};
 pub use state::AppState;
 pub use watchdog::{run_stall_watchdog, AgentLiveness};

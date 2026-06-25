@@ -157,6 +157,19 @@ impl SessionActivityEvent {
     pub const EVENT_NAME: &'static str = "session:activity";
 }
 
+/// Emitted when the per-session peer-forward router's liveness changes, so the UI
+/// can show a router-health dot. `alive=false` means the router task died while
+/// agents are still live (peer-forwarding is down).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct RouterHealthEvent {
+    pub session_id: String,
+    pub alive: bool,
+}
+
+impl RouterHealthEvent {
+    pub const EVENT_NAME: &'static str = "session:router_health";
+}
+
 /// Emitted by the filesystem watcher when a Context Library file changed on disk
 /// (after the index was re-synced for the affected scope). `project` is the CL
 /// scope: a named project, or `None` for `_globals`/root files (`scratch.md`,

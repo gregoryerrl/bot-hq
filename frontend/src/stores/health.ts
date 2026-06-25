@@ -11,12 +11,18 @@ interface HealthStore {
    *  event; an agent with no entry is assumed running (events fire only on
    *  transitions). In-memory only — resets on app restart. */
   bySession: Record<string, SessionHealth>;
+  /** session_id -> peer-forward router liveness (true = alive). Populated live
+   *  from the `session:router_health` event; a session with no entry is assumed
+   *  alive (the event fires only on transitions). In-memory only. */
+  routerBySession: Record<string, boolean>;
   setHealth: (sessionId: string, agent: string, health: AgentHealth) => void;
+  setRouterHealth: (sessionId: string, alive: boolean) => void;
   clearSession: (sessionId: string) => void;
 }
 
 export const useHealthStore = create<HealthStore>((set) => ({
   bySession: {},
+  routerBySession: {},
   setHealth: (sessionId, agent, health) =>
     set((s) => ({
       bySession: {
@@ -24,12 +30,20 @@ export const useHealthStore = create<HealthStore>((set) => ({
         [sessionId]: { ...s.bySession[sessionId], [agent]: health },
       },
     })),
+  setRouterHealth: (sessionId, alive) =>
+    set((s) => ({
+      routerBySession: { ...s.routerBySession, [sessionId]: alive },
+    })),
   clearSession: (sessionId) =>
     set((s) => {
-      if (!s.bySession[sessionId]) return s;
-      const next = { ...s.bySession };
-      delete next[sessionId];
-      return { bySession: next };
+      const hadAgent = !!s.bySession[sessionId];
+      const hadRouter = sessionId in s.routerBySession;
+      if (!hadAgent && !hadRouter) return s;
+      const bySession = { ...s.bySession };
+      delete bySession[sessionId];
+      const routerBySession = { ...s.routerBySession };
+      delete routerBySession[sessionId];
+      return { bySession, routerBySession };
     }),
 }));
 

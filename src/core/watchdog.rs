@@ -10,9 +10,10 @@
 use crate::core::activity::ActivityTracker;
 use crate::signaling::SignalingBridge;
 use crate::storage::Author;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 /// How long an agent can be busy + silent (no events, no tool in flight) before
 /// it's flagged Stalled. Generous: tool execution is covered by `tools_in_flight`,
@@ -97,14 +98,28 @@ fn stall_decision(
     }
 }
 
+/// Weak refs to a duo session's router liveness + per-direction counters, so the
+/// watchdog can surface a router that died while agents are still live (the
+/// peer-forward subsystem going down without taking the agents with it). `Weak`
+/// so the watchdog never keeps the router state alive past the session. `None`
+/// for solo sessions (no router).
+pub struct RouterWatch {
+    pub alive: Weak<AtomicBool>,
+    pub fwd_brian_to_rain: Weak<AtomicU64>,
+    pub fwd_rain_to_brian: Weak<AtomicU64>,
+}
+
 /// Per-session watchdog loop. Holds `Weak<AgentLiveness>` per agent so it
 /// self-terminates once every pump has exited (the session ended) — no leaked
-/// task. Emits health only on change via the bridge registry.
+/// task. Emits health only on change via the bridge registry. Also watches the
+/// peer-forward router (`router`): a dead router while agents are live is an
+/// anomaly (forwarding is down) — warn + emit a router-health event once.
 pub async fn run_stall_watchdog(
     session_id: String,
     agents: Vec<(Author, Weak<AgentLiveness>)>,
     activity: Arc<ActivityTracker>,
     bridge: Arc<SignalingBridge>,
+    router: Option<RouterWatch>,
 ) {
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -124,6 +139,28 @@ pub async fn run_stall_watchdog(
             );
             if let Some(next) = decision {
                 bridge.notify_agent_health(session_id.clone(), author.as_str(), next);
+            }
+        }
+        // Router liveness: flag ONLY the anomaly — router dead while agents still
+        // live. At session end agents are gone too (`any_alive` false → we break
+        // below), so a normal shutdown never trips this. Emit once on transition
+        // (the registry is the only-on-change guard, like agent health).
+        if let (true, Some(rw)) = (any_alive, &router) {
+            if let Some(alive) = rw.alive.upgrade() {
+                if !alive.load(Ordering::Acquire)
+                    && bridge.current_router_health(&session_id) != Some(false)
+                {
+                    let load = |w: &Weak<AtomicU64>| {
+                        w.upgrade().map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
+                    };
+                    warn!(
+                        session_id = %session_id,
+                        fwd_brian_to_rain = load(&rw.fwd_brian_to_rain),
+                        fwd_rain_to_brian = load(&rw.fwd_rain_to_brian),
+                        "peer-forward router DIED while agents are live — forwarding is DOWN"
+                    );
+                    bridge.notify_router_health(session_id.clone(), false);
+                }
             }
         }
         if !any_alive {

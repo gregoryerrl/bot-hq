@@ -5,7 +5,7 @@ import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvok
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useHealthStore } from "../stores/health";
 import { useActivityStore } from "../stores/activity";
-import { HealthDot } from "../components/HealthDot";
+import { HealthDot, RouterHealthDot } from "../components/HealthDot";
 import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
@@ -116,6 +116,7 @@ export function SessionView() {
   const [dirtyCount, setDirtyCount] = useState(0);
   // B2: live agent health for this session (drives the header dots).
   const health = useHealthStore((s) => s.bySession[sessionId]);
+  const routerAlive = useHealthStore((s) => s.routerBySession[sessionId]);
   const activity = useActivityStore((s) => s.bySession[sessionId]);
 
   // Inline title rename. `editingTitle === null` = display mode; a string =
@@ -350,6 +351,14 @@ export function SessionView() {
                       <>
                         <span className="mx-1.5 text-outline-variant">·</span>
                         Rain <HealthDot health={health?.rain} name="Rain" />
+                        {routerAlive === false && (
+                          <>
+                            <span className="mx-1.5 text-outline-variant">·</span>
+                            <span className="text-error">
+                              router <RouterHealthDot alive={routerAlive} />
+                            </span>
+                          </>
+                        )}
                       </>
                     )}
                   </span>

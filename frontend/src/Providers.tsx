@@ -116,6 +116,7 @@ function GlobalEventSync() {
   const onModel = useCallback(() => invalidate(MODEL_KEYS), [invalidate]);
   const onFindings = useCallback(() => invalidate(FINDINGS_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
+  const setRouterHealth = useHealthStore((s) => s.setRouterHealth);
   const clearHealth = useHealthStore((s) => s.clearSession);
   const setActivity = useActivityStore((s) => s.setActivity);
   const clearActivity = useActivityStore((s) => s.clearSession);
@@ -132,6 +133,12 @@ function GlobalEventSync() {
       setHealth(p.session_id, p.agent, p.health as AgentHealth);
     },
     [setHealth],
+  );
+  const onRouterHealth = useCallback(
+    (p: { session_id: string; alive: boolean }) => {
+      setRouterHealth(p.session_id, p.alive);
+    },
+    [setRouterHealth],
   );
   const onActivity = useCallback(
     (p: { session_id: string; state: string }) => {
@@ -173,6 +180,7 @@ function GlobalEventSync() {
   useTauriEvent("model:changed", onModel, [onModel]);
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
+  useTauriEvent("session:router_health", onRouterHealth, [onRouterHealth]);
   useTauriEvent("session:activity", onActivity, [onActivity]);
   useTauriEvent("session:resync", onResync, [onResync]);
 
@@ -186,12 +194,12 @@ function GlobalEventSync() {
     if (didBackfill.current) return;
     didBackfill.current = true;
     invoke<SessionRuntime[]>("get_session_runtime")
-      .then((rows) => seedRuntimeStores(rows, setActivity, setHealth))
+      .then((rows) => seedRuntimeStores(rows, setActivity, setHealth, setRouterHealth))
       .catch(() => {
         // Best-effort: a failed backfill just leaves the stores to the live
         // events (the pre-fix behavior). Never block render.
       });
-  }, [setActivity, setHealth]);
+  }, [setActivity, setHealth, setRouterHealth]);
 
   return null;
 }

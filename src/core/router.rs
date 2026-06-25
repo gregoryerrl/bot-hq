@@ -21,9 +21,10 @@ use crate::core::ipav::IpavState;
 use crate::signaling::SignalingBridge;
 use crate::storage::Author;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tracing::debug;
 
 /// A command from a pump to the router. One variant today (the extensible seam):
@@ -52,6 +53,25 @@ pub struct RouterDeps {
     /// L2 hard-cap counter — consecutive peer-forwards with no intervening user
     /// message. `broadcast` resets it to 0 (UNCHANGED from the pre-router model).
     pub user_silent_forwards: Arc<AtomicU32>,
+    /// Set true by `broadcast` on each user message; consumed (swap→false) at the
+    /// convergence STAGE of `route_forward` to clear `last_forward`/`similar_streak`.
+    /// A user message is a hard boundary — without this, a pre-message convergence
+    /// streak survives an honored interrupt and can suppress the first post-resume
+    /// peer-forward (the bug Rain flagged). Consumed at the convergence stage (not
+    /// the top) so an awaiting/peer_ack/hard-cap early-return doesn't burn it.
+    pub convergence_reset: Arc<AtomicBool>,
+    /// Per-direction delivered-forward counters (diagnostics). Bumped AFTER a
+    /// forward actually reaches the peer's stdin. A one-sided break shows one
+    /// counter flat while the other climbs — the asymmetry signal a closed-channel
+    /// `warn!` can't give when the channel is wedged-open rather than dropped.
+    pub fwd_brian_to_rain: Arc<AtomicU64>,
+    pub fwd_rain_to_brian: Arc<AtomicU64>,
+    /// Liveness flag, true while the router task runs. An [`AliveGuard`] inside
+    /// `run_router` flips it false when the task ends for ANY reason — normal
+    /// return OR panic-unwind (tokio swallows task panics, so without this a
+    /// panicked router reads alive forever). The watchdog reads it: a dead router
+    /// while agents are alive = forwarding is down.
+    pub alive: Arc<AtomicBool>,
     /// Drives the chat-input lock. The router owns the busy hand-off on the
     /// forward path: set peer busy BEFORE the sender idle (no Idle flicker).
     /// `None` in tests that don't assert activity.
@@ -85,6 +105,48 @@ impl RouterDeps {
     }
 }
 
+/// Handle-side control + diagnostics for a duo session's router task. Stored as
+/// `Option<RouterControl>` on `SessionHandle` (`None` = solo, no router). Holds
+/// the Arcs/handle the SESSION side needs to touch the router; grows across the
+/// instrument+harden batches. Batch 1 carries the convergence-reset flag.
+pub struct RouterControl {
+    /// Shared with the router's [`RouterDeps`]. `broadcast` sets it true on a user
+    /// message; the router consumes it to clear its convergence streak.
+    pub convergence_reset: Arc<AtomicBool>,
+    /// Per-direction delivered-forward counters (shared with [`RouterDeps`]) — read
+    /// for diagnostics (e.g. the watchdog logs them when the router dies).
+    pub fwd_brian_to_rain: Arc<AtomicU64>,
+    pub fwd_rain_to_brian: Arc<AtomicU64>,
+    /// Liveness flag (shared with [`RouterDeps`]). Held here so it outlives the
+    /// task: the watchdog's `Weak` upgrade stays valid (reads `false` after the
+    /// task's guard ran) for as long as the session handle is alive.
+    pub alive: Arc<AtomicBool>,
+    /// The spawned router task. `Drop` aborts it so the router is torn down
+    /// deterministically the instant the session handle is removed (close /
+    /// evict / restart) — not left to the both-pumps-drop-their-`router_tx` race
+    /// the old detached-task model relied on (a partial rebuild could violate it,
+    /// leaving an old router alive alongside the new one — a split-brain one-way
+    /// break). Abort on an already-finished task is a no-op.
+    pub task: JoinHandle<()>,
+}
+
+impl Drop for RouterControl {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Flips a router's `alive` flag false on drop — i.e. when the router task ends
+/// for ANY reason (normal return or panic-unwind). Held as a local inside
+/// `run_router` so its destructor runs on both paths.
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// The peer of an agent in the 2-agent duo. Brian↔Rain; User has no peer.
 fn peer_of(author: Author) -> Author {
     match author {
@@ -101,6 +163,9 @@ fn peer_of(author: Author) -> Author {
 /// cross-agent volley (Brian "🤝" → Rain "🤝" → Brian "🤝") builds a breaking
 /// streak across the agent boundary instead of escaping to the hard-cap.
 pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>) {
+    // Liveness: dropped when this task ends (normal return OR panic-unwind) →
+    // flips `alive` false so the watchdog can surface a dead router.
+    let _alive_guard = AliveGuard(Arc::clone(&deps.alive));
     let mut last_forward: Option<String> = None;
     let mut similar_streak: u32 = 0;
     while let Some(cmd) = rx.recv().await {
@@ -172,6 +237,15 @@ async fn route_forward(
         break_volley(deps);
         return;
     }
+    // 3.5 Convergence reset across the user boundary: `broadcast` sets this on a
+    //     user message. Consumed HERE (not at the top) so the awaiting/peer_ack/
+    //     hard-cap early-returns above never burn it — the reset survives until a
+    //     forward actually reaches convergence evaluation, then clears the stale
+    //     pre-message streak so it can't suppress the first post-message forward.
+    if deps.convergence_reset.swap(false, Ordering::AcqRel) {
+        *last_forward = None;
+        *similar_streak = 0;
+    }
     // 4. L2 convergence over the SINGLE interleaved stream: a forward
     //    ≥VOLLEY_SIMILARITY_THRESHOLD similar to the PREVIOUS forward (from either
     //    agent) extends the streak; a dissimilar one resets it. Deliberately NOT
@@ -198,6 +272,18 @@ async fn route_forward(
         None => 0,
     };
     peer_forward_message(from, trimmed, phase, open_blocking, peer_tx).await;
+    // Diagnostics: count the DELIVERED forward by direction (after the send). A
+    // one-sided break shows one counter flat while the other climbs. `User` can't
+    // reach here (the peer-resolution early-return above handles it).
+    match from {
+        Author::Brian => {
+            deps.fwd_brian_to_rain.fetch_add(1, Ordering::Relaxed);
+        }
+        Author::Rain => {
+            deps.fwd_rain_to_brian.fetch_add(1, Ordering::Relaxed);
+        }
+        Author::User => {}
+    }
     if let Some(activity) = &deps.activity {
         activity.set_busy(peer, true);
         activity.set_busy(from, false);
@@ -274,6 +360,10 @@ mod tests {
             session_id: "s1".into(),
             awaiting,
             user_silent_forwards: counter,
+            convergence_reset: Arc::new(AtomicBool::new(false)),
+            fwd_brian_to_rain: Arc::new(AtomicU64::new(0)),
+            fwd_rain_to_brian: Arc::new(AtomicU64::new(0)),
+            alive: Arc::new(AtomicBool::new(true)),
             activity: None,
             bridge: None,
             ipav: Arc::new(Mutex::new(IpavState::default())),
@@ -424,6 +514,131 @@ mod tests {
             counter.load(Ordering::Acquire),
             1,
             "peer_ack must not count toward the hard-cap; only the real forward does"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn convergence_reset_clears_stale_streak() {
+        // A user message (broadcast sets `convergence_reset`) is a hard boundary:
+        // the pre-message convergence streak must NOT carry over to suppress the
+        // first post-message forward. Without the reset, three identical "🤝"
+        // forwards = deliver, deliver, SUPPRESS (streak hits VOLLEY_SIMILAR_BREAK).
+        // With a reset consumed before the third, the streak clears → all three
+        // deliver. Drives `route_forward` directly so the flag toggles
+        // deterministically between forwards (no task/channel race).
+        // Brian-origin forwards land on RAIN's channel (peer = Rain).
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, mut rrx) = mpsc::channel(64);
+        let reset = Arc::new(AtomicBool::new(false));
+        let mut d = deps(
+            btx,
+            Some(rtx),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        d.convergence_reset = Arc::clone(&reset);
+        let (mut last, mut streak) = (None, 0u32);
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false).await;
+        assert_eq!(streak, 1, "two identical forwards build a streak of 1");
+        // Simulate the user speaking → broadcast sets the flag.
+        reset.store(true, Ordering::Release);
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false).await;
+        assert_eq!(streak, 0, "the reset cleared the streak before the third forward");
+        let mut delivered = 0;
+        while rrx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered, 3,
+            "all three delivered — the reset prevented the third's suppression"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn convergence_reset_survives_a_suppressed_forward() {
+        // The reset is consumed at the CONVERGENCE stage, so a forward suppressed
+        // earlier (here: awaiting) must NOT burn it — it stays set for the next
+        // forward that actually reaches convergence. (Closes Rain's review edge:
+        // a reset consumed by a not-actually-delivered forward.)
+        // Brian-origin forwards land on RAIN's channel (peer = Rain).
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, mut rrx) = mpsc::channel(64);
+        let reset = Arc::new(AtomicBool::new(true));
+        let awaiting = Arc::new(AtomicBool::new(true));
+        let mut d = deps(btx, Some(rtx), Arc::clone(&awaiting), Arc::new(AtomicU32::new(0)));
+        d.convergence_reset = Arc::clone(&reset);
+        let (mut last, mut streak) = (Some("stale".to_string()), 5u32);
+        // Awaiting suppresses this forward — and must leave the reset intact.
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false).await;
+        assert!(
+            reset.load(Ordering::Acquire),
+            "an awaiting-suppressed forward must NOT consume the reset"
+        );
+        // User replies → awaiting clears; the next forward consumes the reset.
+        awaiting.store(false, Ordering::Release);
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "fresh line".into(), false).await;
+        assert!(
+            !reset.load(Ordering::Acquire),
+            "the forward that reached convergence consumed the reset"
+        );
+        assert_eq!(streak, 0, "stale streak cleared");
+        let mut delivered = 0;
+        while rrx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(delivered, 1, "only the post-await forward was delivered");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn counters_track_per_direction_on_delivery() {
+        // Delivered forwards bump the matching direction counter; a suppressed one
+        // does not (the bump is after the actual send).
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, _rrx) = mpsc::channel(64);
+        let b2r = Arc::new(AtomicU64::new(0));
+        let r2b = Arc::new(AtomicU64::new(0));
+        let awaiting = Arc::new(AtomicBool::new(false));
+        let mut d = deps(btx, Some(rtx), Arc::clone(&awaiting), Arc::new(AtomicU32::new(0)));
+        d.fwd_brian_to_rain = Arc::clone(&b2r);
+        d.fwd_rain_to_brian = Arc::clone(&r2b);
+        let (mut last, mut streak) = (None, 0u32);
+        // Distinct bodies → no convergence break; all delivered.
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "alpha".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "beta".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Rain, "gamma".into(), false).await;
+        // An awaiting-suppressed forward must NOT count.
+        awaiting.store(true, Ordering::Release);
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false).await;
+        assert_eq!(b2r.load(Ordering::Acquire), 2, "two delivered Brian→Rain forwards");
+        assert_eq!(r2b.load(Ordering::Acquire), 1, "one delivered Rain→Brian forward");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_router_control_aborts_the_task() {
+        // Explicit teardown: dropping the RouterControl (which happens whenever the
+        // session handle is removed — close / evict / restart) must abort the
+        // router task, so a rebuilt session can't leave an old router alive.
+        let task = tokio::spawn(std::future::pending::<()>());
+        let abort_handle = task.abort_handle();
+        let rc = RouterControl {
+            convergence_reset: Arc::new(AtomicBool::new(false)),
+            fwd_brian_to_rain: Arc::new(AtomicU64::new(0)),
+            fwd_rain_to_brian: Arc::new(AtomicU64::new(0)),
+            alive: Arc::new(AtomicBool::new(true)),
+            task,
+        };
+        assert!(!abort_handle.is_finished(), "task runs before the drop");
+        drop(rc); // RouterControl::Drop aborts the task.
+        for _ in 0..50 {
+            if abort_handle.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            abort_handle.is_finished(),
+            "dropping RouterControl must abort the router task"
         );
     }
 

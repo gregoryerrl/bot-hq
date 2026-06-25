@@ -156,6 +156,15 @@ pub enum SignalingEvent {
         session_id: String,
         state: String,
     },
+    /// The per-session peer-forward router's liveness changed. `alive=false` is
+    /// emitted by the watchdog when the router task has died while agents are
+    /// still live (forwarding is down); `alive=true` on (re)spawn. The UI shows a
+    /// router-health dot. Carried as a bool — the signaling layer stays decoupled
+    /// from core.
+    RouterHealth {
+        session_id: String,
+        alive: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +261,11 @@ pub struct SignalingBridge {
     /// session_id → reason. Set by `override_reviewer_block`, honored by
     /// `check_open_findings`, auto-cleared when the reviewer recovers to running.
     reviewer_override: std::sync::Mutex<HashMap<String, String>>,
+    /// Latest peer-forward-router liveness per session_id (true = alive). Written
+    /// by `notify_router_health`; read by `get_session_runtime` to seed the UI
+    /// router-health dot on mount (the event fires only on change, like
+    /// `agent_health`). Sync `Mutex` — `notify_router_health` is sync.
+    router_health: std::sync::Mutex<HashMap<String, bool>>,
 }
 
 impl SignalingBridge {
@@ -277,6 +291,7 @@ impl SignalingBridge {
             session_close_gate: Mutex::new(HashMap::new()),
             agent_health: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
+            router_health: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -598,6 +613,29 @@ impl SignalingBridge {
             .unwrap_or_else(|p| p.into_inner())
             .get(&(session_id.to_string(), agent.to_string()))
             .cloned()
+    }
+
+    /// Publish the peer-forward router's liveness change. Fire-and-forget; the UI
+    /// subscriber maps it to `session:router_health`. Caches the latest state so
+    /// `get_session_runtime` can seed the dot on a fresh mount.
+    pub fn notify_router_health(&self, session_id: String, alive: bool) {
+        self.router_health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(session_id.clone(), alive);
+        let _ = self
+            .event_tx
+            .send(SignalingEvent::RouterHealth { session_id, alive });
+    }
+
+    /// Latest cached router liveness for a session, or `None` if never reported
+    /// (assume alive — the event fires only on change).
+    pub fn current_router_health(&self, session_id: &str) -> Option<bool> {
+        self.router_health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id)
+            .copied()
     }
 
     /// Batch 7: HANDS records an explicit override of the reviewer-down commit

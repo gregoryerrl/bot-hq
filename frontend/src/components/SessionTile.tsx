@@ -4,7 +4,7 @@ import { formatRelative } from "../lib/time";
 import type { SessionInfo } from "../lib/bindings";
 import { SessionPhaseChip, phaseTintClasses } from "./SessionPhaseChip";
 import { useHealthStore, worstHealth } from "../stores/health";
-import { HealthDot } from "./HealthDot";
+import { HealthDot, RouterHealthDot } from "./HealthDot";
 import { authorColorClass } from "./authorColor";
 
 export interface SessionTileProps {
@@ -27,6 +27,7 @@ export function SessionTile({
   const tint = phaseTintClasses(phase, closed);
   // B2: session-level health dot (problem-only on the tile). Worst-of Brian+Rain.
   const health = useHealthStore((s) => s.bySession[session.id]);
+  const routerAlive = useHealthStore((s) => s.routerBySession[session.id]);
   // Slot 8 Quickview: first line of the latest text message (null until one exists).
   const quickview = firstLine(session.last_message);
 
@@ -81,6 +82,7 @@ export function SessionTile({
                 hideWhenHealthy
               />
             )}
+            {!closed && <RouterHealthDot alive={routerAlive} />}
             {!session.rain_enabled && (
               <span
                 className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"

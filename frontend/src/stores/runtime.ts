@@ -8,6 +8,7 @@ export interface SessionRuntime {
   activity: string;
   brian_health: string | null;
   rain_health: string | null;
+  router_alive: boolean | null;
 }
 
 /** Seed the event-driven activity + health stores from a one-shot runtime
@@ -21,6 +22,7 @@ export function seedRuntimeStores(
   rows: SessionRuntime[],
   setActivity: (id: string, a: SessionActivity) => void,
   setHealth: (id: string, agent: string, h: AgentHealth) => void,
+  setRouterHealth: (id: string, alive: boolean) => void,
 ): void {
   for (const r of rows) {
     setActivity(r.session_id, r.activity as SessionActivity);
@@ -28,5 +30,8 @@ export function seedRuntimeStores(
       setHealth(r.session_id, "brian", r.brian_health as AgentHealth);
     if (r.rain_health)
       setHealth(r.session_id, "rain", r.rain_health as AgentHealth);
+    // Null = solo / never reported → leave it (a missing entry reads as alive).
+    if (r.router_alive !== null && r.router_alive !== undefined)
+      setRouterHealth(r.session_id, r.router_alive);
   }
 }

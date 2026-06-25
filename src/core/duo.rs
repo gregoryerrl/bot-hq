@@ -277,16 +277,23 @@ pub async fn pump_agent(
                             // closed — e.g. it panicked), fall through to clear our
                             // own busy below, so a dead router can't strand this
                             // agent Busy with the chat input locked.
-                            if router_tx
+                            match router_tx
                                 .send(RouterCommand::Forward {
                                     from: cfg.author,
                                     body,
                                     peer_ack: peer_ack_pending,
                                 })
                                 .await
-                                .is_ok()
                             {
-                                router_owns_idle = true;
+                                Ok(()) => router_owns_idle = true,
+                                // The router task is gone (channel closed — panic or
+                                // an early exit). This agent's whole turn of prose is
+                                // DROPPED and never reaches its peer. Was silent —
+                                // the exact invisible one-way break. Make it loud.
+                                Err(_) => warn!(
+                                    agent = ?cfg.author,
+                                    "peer-forward DROPPED: router channel closed (router task gone) — this turn's prose did not reach the peer"
+                                ),
                             }
                         }
                     }
@@ -342,13 +349,20 @@ pub async fn pump_agent(
                 let body = std::mem::take(&mut buffer);
                 if !body.trim().is_empty() {
                     if let Some(router_tx) = &cfg.router_tx {
-                        let _ = router_tx
+                        if router_tx
                             .send(RouterCommand::Forward {
                                 from: cfg.author,
                                 body,
                                 peer_ack: peer_ack_pending,
                             })
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            warn!(
+                                agent = ?cfg.author,
+                                "peer-forward DROPPED on exit: router channel closed — trailing prose did not reach the peer"
+                            );
+                        }
                     }
                 }
                 // The agent is dying → force self-idle unconditionally (the

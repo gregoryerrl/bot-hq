@@ -48,6 +48,39 @@ pub enum CancelOutcome {
     Interrupting,
 }
 
+/// Outcome of a cancel's interrupt→SIGKILL escalation, decided AFTER the
+/// interrupt window. Pure (see [`AppState::escalation_outcome`]) so the
+/// honored > superseded > sigkill precedence is unit-tested without a live duo.
+#[derive(Debug, PartialEq, Eq)]
+enum EscalationOutcome {
+    /// Both agents went idle in time — the interrupt was honored, process kept.
+    InterruptHonored,
+    /// A user message arrived during the window — it already aborted the stuck
+    /// turn, so skip the SIGKILL (don't kill the user's fresh turn + warm cache).
+    SupersededByUser,
+    /// Interrupt not honored and not superseded — force-kill as the fallback.
+    Sigkill,
+}
+
+/// One step of `broadcast`'s auto-heal respawn loop. Pure (see
+/// [`AppState::broadcast_deliver_step`]) so the bounded-retry + branch logic is
+/// unit-tested without a live session.
+#[derive(Debug, PartialEq, Eq)]
+enum DeliverStep {
+    /// Healthy (or absent — errors at the `get` after the loop) → deliver under
+    /// the current lock hold.
+    Deliver,
+    /// Present but stale and under the retry cap → respawn, then re-check.
+    Respawn,
+    /// Present but stale and the retry cap is hit → deliver best-effort (the send
+    /// logs on failure) rather than loop forever.
+    GiveUpBestEffort,
+}
+
+/// Max respawn attempts in `broadcast`'s auto-heal loop before delivering
+/// best-effort. Bounds a pathological respawn→stale→respawn cycle.
+const BROADCAST_MAX_RESPAWNS: u32 = 3;
+
 pub struct AppState {
     pub paths: Paths,
     pub storage: Storage,
@@ -238,6 +271,12 @@ impl AppState {
             // input locked for the whole kill window (immediate or deferred). It
             // auto-clears to Idle in the tracker once both pumps go idle.
             handle.activity.set_cancelling(true);
+            // A fresh cancel begins un-superseded; `broadcast` flips this true if a
+            // user message arrives during the escalation window (then the SIGKILL
+            // is skipped). Reset here so a prior supersede can't suppress THIS kill.
+            handle
+                .cancel_superseded
+                .store(false, Ordering::Release);
             // HANDS mid an atomic op (git commit/push/migration)? Defer: hand the
             // shared flag to the caller to poll, and do NOT kill yet.
             handle
@@ -262,7 +301,7 @@ impl AppState {
     /// EITHER outcome. Driven by a detached task from the Tauri command — the
     /// non-atomic path immediately, the atomic-deferred path once the op completes.
     pub async fn interrupt_then_escalate(&self, session_id: &str) {
-        let activity = {
+        let (activity, cancel_superseded) = {
             let sessions = self.sessions.lock().await;
             let Some(handle) = sessions.get(session_id) else {
                 return; // session gone → nothing to cancel
@@ -275,30 +314,46 @@ impl AppState {
                 rain.interrupt("cancel");
             }
             handle.brian.interrupt("cancel");
-            Arc::clone(&handle.activity)
+            (
+                Arc::clone(&handle.activity),
+                Arc::clone(&handle.cancel_superseded),
+            )
         };
 
         let deadline = tokio::time::Instant::now() + INTERRUPT_ESCALATION;
-        if activity.await_both_idle(deadline).await {
-            // Interrupt honored: process alive at a turn boundary (Cancelling has
-            // auto-cleared to Idle). Queue the nudge so the next user message
-            // reconciles the workspace before acting.
-            self.pending_reconcile
-                .lock()
-                .await
-                .insert(session_id.to_string());
-            tracing::info!(
-                session_id,
-                "cancel: interrupt honored — process kept alive (warm cache)"
-            );
-        } else {
-            tracing::warn!(
-                session_id,
-                secs = INTERRUPT_ESCALATION.as_secs(),
-                "cancel: interrupt not honored in time — SIGKILL fallback"
-            );
-            // cancel_kill_now kills the process group AND queues the nudge.
-            self.cancel_kill_now(session_id).await;
+        let both_idle = activity.await_both_idle(deadline).await;
+        match Self::escalation_outcome(both_idle, cancel_superseded.load(Ordering::Acquire)) {
+            EscalationOutcome::InterruptHonored => {
+                // Process alive at a turn boundary (Cancelling auto-cleared to Idle).
+                // Queue the nudge so the next user message reconciles the workspace.
+                self.pending_reconcile
+                    .lock()
+                    .await
+                    .insert(session_id.to_string());
+                tracing::info!(
+                    session_id,
+                    "cancel: interrupt honored — process kept alive (warm cache)"
+                );
+            }
+            EscalationOutcome::SupersededByUser => {
+                // The user's message (with its own preempt interrupt in `broadcast`)
+                // already aborted the stuck turn — a SIGKILL would needlessly kill
+                // the fresh turn + warm cache. Skip it; clear any lingering Cancelling.
+                activity.set_cancelling(false);
+                tracing::info!(
+                    session_id,
+                    "cancel: superseded by a user message — skipping SIGKILL fallback"
+                );
+            }
+            EscalationOutcome::Sigkill => {
+                tracing::warn!(
+                    session_id,
+                    secs = INTERRUPT_ESCALATION.as_secs(),
+                    "cancel: interrupt not honored in time — SIGKILL fallback"
+                );
+                // cancel_kill_now kills the process group AND queues the nudge.
+                self.cancel_kill_now(session_id).await;
+            }
         }
     }
 
@@ -431,26 +486,59 @@ impl AppState {
         // Auto-heal: if the duo went stale (e.g. an agent's stdin pump died,
         // closing the public input channel — a now-deaf agent that would silently
         // drop this message), evict + respawn it before delivering so the user's
-        // message isn't lost. `ensure_session_started` is a no-op on a healthy
-        // session.
-        let stale = {
+        // message isn't lost. The check and the respawn can't be atomic
+        // (`ensure_session_started` needs the lock, so we must drop it), so the
+        // session could go stale again in the window between them — re-check under
+        // the SAME lock hold we deliver under, respawning up to a few times. The
+        // healthy `break sessions` keeps that hold through delivery (no TOCTOU);
+        // an absent session breaks too → the `ok_or` below errors as before.
+        let mut attempts = 0u32;
+        let sessions = loop {
             let sessions = self.sessions.lock().await;
-            sessions.get(session_id).is_some_and(|h| h.is_stale())
+            let present_and_stale = match sessions.get(session_id) {
+                Some(h) => h.is_stale(),
+                None => false, // absent → don't respawn here; error after the loop
+            };
+            match Self::broadcast_deliver_step(present_and_stale, attempts) {
+                // Healthy (deliver under this hold) or absent (→ ok_or err below).
+                DeliverStep::Deliver => break sessions,
+                DeliverStep::GiveUpBestEffort => {
+                    tracing::warn!(
+                        session_id,
+                        attempts,
+                        "session still stale after respawns; delivering best-effort"
+                    );
+                    break sessions;
+                }
+                DeliverStep::Respawn => {
+                    drop(sessions); // release before ensure_session_started (it locks)
+                    attempts += 1;
+                    tracing::info!(
+                        session_id,
+                        attempt = attempts,
+                        "session stale on broadcast; respawning before delivery"
+                    );
+                    self.ensure_session_started(session_id).await?;
+                }
+            }
         };
-        if stale {
-            tracing::info!(
-                session_id,
-                "session stale on broadcast; respawning before delivery"
-            );
-            self.ensure_session_started(session_id).await?;
-        }
-        let sessions = self.sessions.lock().await;
         let handle = sessions
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
         // Clear the awaiting halt BEFORE forwarding the user's reply so the
         // duo pumps see chunks again.
         self.clear_awaiting(handle, session_id).await;
+        // A user message supersedes any in-flight cancel escalation: set this so
+        // `interrupt_then_escalate` skips its SIGKILL (the message + its own
+        // preempt-interrupt below already abort the stuck turn — a kill would
+        // needlessly drop the fresh turn + warm cache). Set as EARLY as possible —
+        // ahead of the awaits and the preempt interrupt — to close the window
+        // where the ~2s escalation timer could fire first. Clear any lingering
+        // Cancelling so the input/UI doesn't stick.
+        handle
+            .cancel_superseded
+            .store(true, std::sync::atomic::Ordering::Release);
+        handle.activity.set_cancelling(false);
         // Reset the L2 volley hard-cap: the user just spoke, so the consecutive
         // peer-forward counter (`duo::flush_buffer`) starts fresh. Deliberately
         // here and not in `clear_awaiting` — `advance_phase` calls that too, and
@@ -458,6 +546,15 @@ impl AppState {
         handle
             .user_silent_forwards
             .store(0, std::sync::atomic::Ordering::Release);
+        // Same hard boundary for the router's convergence streak: clear it so a
+        // pre-message streak (surviving an honored interrupt) can't suppress the
+        // first post-message peer-forward. Router consumes the flag at its
+        // convergence stage; no-op for a solo session (no router).
+        if let Some(router) = &handle.router {
+            router
+                .convergence_reset
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         // Flip every pending `mark_awaiting_user` row to 'answered' — the
         // user's reply IS the answer to a halt. `choice` rows stay pending
         // until the user actually picks an option. Emit HaltsCleared only when
@@ -583,6 +680,32 @@ impl AppState {
         has_rain && prev == IpavPhase::Plan && target == IpavPhase::Apply
     }
 
+    /// Decide a cancel escalation's outcome after the interrupt window. Pure for
+    /// testing; precedence is honored > superseded > sigkill (a user message that
+    /// arrives can't resurrect a turn that already went idle, so `both_idle` wins).
+    fn escalation_outcome(both_idle: bool, cancel_superseded: bool) -> EscalationOutcome {
+        if both_idle {
+            EscalationOutcome::InterruptHonored
+        } else if cancel_superseded {
+            EscalationOutcome::SupersededByUser
+        } else {
+            EscalationOutcome::Sigkill
+        }
+    }
+
+    /// Decide one step of `broadcast`'s auto-heal loop. Pure for testing. A
+    /// healthy OR absent handle delivers (absent then errors at the `get`); a
+    /// present-but-stale handle respawns until the cap, then delivers best-effort.
+    fn broadcast_deliver_step(present_and_stale: bool, attempts: u32) -> DeliverStep {
+        if !present_and_stale {
+            DeliverStep::Deliver
+        } else if attempts >= BROADCAST_MAX_RESPAWNS {
+            DeliverStep::GiveUpBestEffort
+        } else {
+            DeliverStep::Respawn
+        }
+    }
+
     pub async fn resolve_choice(
         &self,
         choice_id: &str,
@@ -690,5 +813,78 @@ mod tests {
             IpavPhase::Apply,
             true
         ));
+    }
+
+    // --- Batch 6: cancel escalation decision (cancel/new-message race fix) ---
+
+    #[test]
+    fn escalation_honored_when_both_idle_regardless_of_supersede() {
+        // `both_idle` wins over supersede: a turn that already ended can't be
+        // "saved" by a later user message, and there's nothing left to kill.
+        assert_eq!(
+            AppState::escalation_outcome(true, false),
+            EscalationOutcome::InterruptHonored
+        );
+        assert_eq!(
+            AppState::escalation_outcome(true, true),
+            EscalationOutcome::InterruptHonored
+        );
+    }
+
+    #[test]
+    fn escalation_superseded_skips_sigkill() {
+        // Not idle, but a user message arrived during the window → skip the kill
+        // (the message already aborted the stuck turn; killing loses the fresh one).
+        assert_eq!(
+            AppState::escalation_outcome(false, true),
+            EscalationOutcome::SupersededByUser
+        );
+    }
+
+    #[test]
+    fn escalation_sigkill_when_not_honored_and_not_superseded() {
+        // Not idle, no user message → the interrupt was dropped/wedged → SIGKILL
+        // fallback so a hung turn can't leave the working tree half-written.
+        assert_eq!(
+            AppState::escalation_outcome(false, false),
+            EscalationOutcome::Sigkill
+        );
+    }
+
+    // --- Batch 7: broadcast auto-heal respawn loop decision (TOCTOU fix) ---
+
+    #[test]
+    fn broadcast_delivers_when_healthy_or_absent() {
+        // present_and_stale=false covers BOTH a healthy handle (deliver under the
+        // current lock hold — no TOCTOU) and an absent one (delivers to the loop
+        // exit, which then `ok_or`-errors). Either way: no respawn.
+        assert_eq!(
+            AppState::broadcast_deliver_step(false, 0),
+            DeliverStep::Deliver
+        );
+        assert_eq!(
+            AppState::broadcast_deliver_step(false, BROADCAST_MAX_RESPAWNS),
+            DeliverStep::Deliver
+        );
+    }
+
+    #[test]
+    fn broadcast_respawns_stale_under_cap_then_gives_up() {
+        // Present + stale → respawn each attempt up to the cap, then best-effort.
+        for attempts in 0..BROADCAST_MAX_RESPAWNS {
+            assert_eq!(
+                AppState::broadcast_deliver_step(true, attempts),
+                DeliverStep::Respawn,
+                "attempt {attempts} under the cap must respawn"
+            );
+        }
+        assert_eq!(
+            AppState::broadcast_deliver_step(true, BROADCAST_MAX_RESPAWNS),
+            DeliverStep::GiveUpBestEffort
+        );
+        assert_eq!(
+            AppState::broadcast_deliver_step(true, BROADCAST_MAX_RESPAWNS + 5),
+            DeliverStep::GiveUpBestEffort
+        );
     }
 }

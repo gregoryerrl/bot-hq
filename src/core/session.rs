@@ -87,6 +87,13 @@ pub struct SessionHandle {
     /// working tree half-written. Session-level (both pumps hold the Arc; only
     /// HANDS sets it).
     pub in_atomic_tool: Arc<std::sync::atomic::AtomicBool>,
+    /// Set by `broadcast` when a user message arrives, so an in-flight cancel
+    /// escalation skips its SIGKILL (the user superseded the cancel). Reset by
+    /// `cancel_session_turn`. Shared with `interrupt_then_escalate`.
+    pub cancel_superseded: Arc<std::sync::atomic::AtomicBool>,
+    /// Handle-side control for the duo peer-forward router (`None` = solo). Lets
+    /// `broadcast` reset the router's convergence streak on each user message.
+    pub router: Option<crate::core::RouterControl>,
     /// Keeps the mcp-config temp files alive for the lifetime of the session.
     _mcp_temp: TempDir,
 }
@@ -545,6 +552,12 @@ async fn spawn_session_handle(
     // 1) — lets a cancel defer the kill until a git commit/push/migration
     // finishes. Session-level: both pumps hold the Arc, only HANDS sets it.
     let in_atomic_tool = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // A user message sent during a cancel's interrupt→SIGKILL escalation window
+    // supersedes the cancel: `broadcast` sets this, and `interrupt_then_escalate`
+    // skips its SIGKILL when set (the user's message + its own preempt-interrupt
+    // already aborted the stuck turn — killing it would lose the fresh turn +
+    // warm cache). `cancel_session_turn` resets it false when a new cancel begins.
+    let cancel_superseded = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Per-session activity tracker (interrupt redesign, Batch 2) — drives the
     // chat-input lock. Shares the `awaiting` Arc (for the AwaitingUser state);
@@ -588,23 +601,55 @@ async fn spawn_session_handle(
     // explicit teardown). The shared `awaiting`/`user_silent_forwards` Arcs are
     // cloned in, so the bridge's awaiting set + broadcast's counter reset are
     // visible here with no extra plumbing.
-    let router_tx = match &rain_input {
+    // Shared across the user boundary: `broadcast` sets it on each user message;
+    // the router consumes it to clear its convergence streak (so a pre-message
+    // streak can't suppress the first post-message peer-forward).
+    let convergence_reset = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Per-direction delivered-forward counters (diagnostics).
+    let fwd_brian_to_rain = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let fwd_rain_to_brian = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // Router liveness flag (true while the task runs; the router's AliveGuard flips
+    // it false on exit/panic). The watchdog reads it via a Weak.
+    let router_alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (router_tx, router_control, router_watch) = match &rain_input {
         Some(rain_in) => {
             let (router_tx, router_rx) = tokio::sync::mpsc::channel(256);
             let deps = crate::core::RouterDeps {
                 session_id: session.id.clone(),
                 awaiting: Arc::clone(&awaiting),
                 user_silent_forwards: Arc::clone(&user_silent_forwards),
+                convergence_reset: Arc::clone(&convergence_reset),
+                fwd_brian_to_rain: Arc::clone(&fwd_brian_to_rain),
+                fwd_rain_to_brian: Arc::clone(&fwd_rain_to_brian),
+                alive: Arc::clone(&router_alive),
                 activity: Some(Arc::clone(&activity)),
                 bridge: Some(Arc::clone(&bridge)),
                 ipav: Arc::clone(&ipav),
                 brian_input: brian_handle.input_tx.clone(),
                 rain_input: Some(rain_in.clone()),
             };
-            tokio::spawn(crate::core::run_router(deps, router_rx));
-            Some(router_tx)
+            let task = tokio::spawn(crate::core::run_router(deps, router_rx));
+            // Seed the router-health dot "up" — also clears any stale `false` left
+            // by a prior (pre-rebuild) router for this same session id.
+            bridge.notify_router_health(session.id.clone(), true);
+            let watch = crate::core::watchdog::RouterWatch {
+                alive: Arc::downgrade(&router_alive),
+                fwd_brian_to_rain: Arc::downgrade(&fwd_brian_to_rain),
+                fwd_rain_to_brian: Arc::downgrade(&fwd_rain_to_brian),
+            };
+            (
+                Some(router_tx),
+                Some(crate::core::RouterControl {
+                    convergence_reset,
+                    fwd_brian_to_rain,
+                    fwd_rain_to_brian,
+                    alive: router_alive,
+                    task,
+                }),
+                Some(watch),
+            )
         }
-        None => None,
+        None => (None, None, None),
     };
     let brian_duo = DuoConfig {
         router_tx: router_tx.clone(),
@@ -648,6 +693,7 @@ async fn spawn_session_handle(
         watchdog_agents,
         Arc::clone(&activity),
         Arc::clone(&bridge),
+        router_watch,
     ));
 
     // A1 (adherence): one-shot session-start CL-opener nudge. Mechanically pages
@@ -684,6 +730,8 @@ async fn spawn_session_handle(
         user_silent_forwards,
         activity,
         in_atomic_tool,
+        cancel_superseded,
+        router: router_control,
         _mcp_temp: mcp_temp,
     })
 }

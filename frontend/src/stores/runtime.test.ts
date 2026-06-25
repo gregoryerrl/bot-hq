@@ -5,22 +5,25 @@ describe("seedRuntimeStores", () => {
   it("seeds activity for every row and health for non-null agents", () => {
     const setActivity = vi.fn();
     const setHealth = vi.fn();
+    const setRouterHealth = vi.fn();
     const rows: SessionRuntime[] = [
       {
         session_id: "s1",
         activity: "busy",
         brian_health: "running",
         rain_health: "retrying",
+        router_alive: false,
       },
       {
         session_id: "s2",
         activity: "awaiting_user",
         brian_health: "dead",
         rain_health: null,
+        router_alive: null,
       },
     ];
 
-    seedRuntimeStores(rows, setActivity, setHealth);
+    seedRuntimeStores(rows, setActivity, setHealth, setRouterHealth);
 
     expect(setActivity).toHaveBeenCalledWith("s1", "busy");
     expect(setActivity).toHaveBeenCalledWith("s2", "awaiting_user");
@@ -30,13 +33,18 @@ describe("seedRuntimeStores", () => {
     // s2.rain_health is null → no setHealth call for it.
     expect(setHealth).not.toHaveBeenCalledWith("s2", "rain", expect.anything());
     expect(setHealth).toHaveBeenCalledTimes(3);
+    // s1.router_alive is false → seeded; s2.router_alive is null → skipped.
+    expect(setRouterHealth).toHaveBeenCalledWith("s1", false);
+    expect(setRouterHealth).toHaveBeenCalledTimes(1);
   });
 
   it("is a no-op for an empty snapshot", () => {
     const setActivity = vi.fn();
     const setHealth = vi.fn();
-    seedRuntimeStores([], setActivity, setHealth);
+    const setRouterHealth = vi.fn();
+    seedRuntimeStores([], setActivity, setHealth, setRouterHealth);
     expect(setActivity).not.toHaveBeenCalled();
     expect(setHealth).not.toHaveBeenCalled();
+    expect(setRouterHealth).not.toHaveBeenCalled();
   });
 });

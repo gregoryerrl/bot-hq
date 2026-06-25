@@ -309,6 +309,9 @@ pub struct SessionRuntime {
     pub activity: String,
     pub brian_health: Option<String>,
     pub rain_health: Option<String>,
+    /// Peer-forward router liveness (duo only). `None` = solo, or never reported
+    /// (assume alive — the event fires only on change). Seeds the UI router dot.
+    pub router_alive: Option<bool>,
 }
 
 #[tauri::command]
@@ -324,6 +327,7 @@ pub async fn get_session_runtime(
             activity: handle.activity.current().as_str().to_string(),
             brian_health: core.bridge.current_agent_health(id, "brian"),
             rain_health: core.bridge.current_agent_health(id, "rain"),
+            router_alive: core.bridge.current_router_health(id),
         });
     }
     Ok(out)
