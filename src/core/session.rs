@@ -581,55 +581,63 @@ async fn spawn_session_handle(
     // refs, so it self-terminates once the pumps drop their Arcs (session end).
     let brian_liveness = crate::core::watchdog::AgentLiveness::new();
     let mut watchdog_agents = vec![(Author::Brian, Arc::downgrade(&brian_liveness))];
+    // Central peer-forward router (duo only). The single forward decision point +
+    // the interleaved convergence stream; both pumps emit RouterCommand to it.
+    // Lifecycle: when both pumps drop their router_tx clones (session end) the
+    // command channel closes and run_router returns (like the watchdog — no
+    // explicit teardown). The shared `awaiting`/`user_silent_forwards` Arcs are
+    // cloned in, so the bridge's awaiting set + broadcast's counter reset are
+    // visible here with no extra plumbing.
+    let router_tx = match &rain_input {
+        Some(rain_in) => {
+            let (router_tx, router_rx) = tokio::sync::mpsc::channel(256);
+            let deps = crate::core::RouterDeps {
+                session_id: session.id.clone(),
+                awaiting: Arc::clone(&awaiting),
+                user_silent_forwards: Arc::clone(&user_silent_forwards),
+                activity: Some(Arc::clone(&activity)),
+                bridge: Some(Arc::clone(&bridge)),
+                ipav: Arc::clone(&ipav),
+                brian_input: brian_handle.input_tx.clone(),
+                rain_input: Some(rain_in.clone()),
+            };
+            tokio::spawn(crate::core::run_router(deps, router_rx));
+            Some(router_tx)
+        }
+        None => None,
+    };
     let brian_duo = DuoConfig {
-        awaiting: Some(Arc::clone(&awaiting)),
+        router_tx: router_tx.clone(),
         bridge: Some(Arc::clone(&bridge)),
         activity: Some(Arc::clone(&activity)),
         in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
         liveness: Some(Arc::clone(&brian_liveness)),
-        user_silent_forwards: Some(Arc::clone(&user_silent_forwards)),
         // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
         // before the Apply phase.
         self_input_tx: Some(brian_handle.input_tx.clone()),
         ..DuoConfig::new(session_id_clone, Author::Brian, Author::Rain)
     };
     tokio::spawn(async move {
-        pump_agent(
-            brian_duo,
-            brian_events,
-            rain_input,
-            storage_clone,
-            ipav_clone,
-        )
-        .await;
+        pump_agent(brian_duo, brian_events, storage_clone, ipav_clone).await;
     });
 
     // Rain's pump only runs in a duo session.
     if let Some(rain_events) = rain_events {
-        let brian_input = brian_handle.input_tx.clone();
         let storage_clone = storage.clone();
         let ipav_clone = Arc::clone(&ipav);
         let session_id_clone = session.id.clone();
         let rain_liveness = crate::core::watchdog::AgentLiveness::new();
         watchdog_agents.push((Author::Rain, Arc::downgrade(&rain_liveness)));
         let rain_duo = DuoConfig {
-            awaiting: Some(Arc::clone(&awaiting)),
+            router_tx: router_tx.clone(),
             bridge: Some(Arc::clone(&bridge)),
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
             liveness: Some(Arc::clone(&rain_liveness)),
-            user_silent_forwards: Some(Arc::clone(&user_silent_forwards)),
             ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
         };
         tokio::spawn(async move {
-            pump_agent(
-                rain_duo,
-                rain_events,
-                Some(brian_input),
-                storage_clone,
-                ipav_clone,
-            )
-            .await;
+            pump_agent(rain_duo, rain_events, storage_clone, ipav_clone).await;
         });
     }
 
