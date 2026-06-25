@@ -294,6 +294,13 @@ const diffLineClass: Record<string, string> = {
 };
 
 function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
+  // Per-file collapse state, keyed by group index. Reset whenever the diff
+  // changes (new session / fresh apply) so each visit starts fully expanded.
+  const [closed, setClosed] = useState<Set<number>>(() => new Set());
+  useEffect(() => {
+    setClosed(new Set());
+  }, [diff]);
+
   if (!diff) {
     return (
       <p className="mb-6 text-xs text-on-surface-variant">Loading diff…</p>
@@ -306,14 +313,45 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
       </p>
     );
   }
+  const groups = groupDiffByFile(diff.lines);
+  // "All closed" drives the toggle's label/action. A fresh `closed` set means
+  // everything is open → button reads "Collapse all".
+  const allClosed = groups.length > 0 && closed.size === groups.length;
+  const toggleAll = () =>
+    setClosed(allClosed ? new Set() : new Set(groups.map((_, i) => i)));
   return (
     <section className="mb-6 rounded border border-outline-variant bg-surface-container-lowest">
-      <header className="border-b border-outline-variant px-3 py-1.5 text-[0.65rem] uppercase tracking-wide text-on-surface-variant">
-        git diff{diff.note ? ` — ${diff.note}` : ""}
+      <header className="flex items-center justify-between gap-2 border-b border-outline-variant px-3 py-1.5 text-[0.65rem] uppercase tracking-wide text-on-surface-variant">
+        <span>git diff{diff.note ? ` — ${diff.note}` : ""}</span>
+        {groups.length > 1 && (
+          <button
+            type="button"
+            onClick={toggleAll}
+            className="shrink-0 rounded border border-outline-variant px-1.5 py-0.5 font-semibold uppercase tracking-wide text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+            title={allClosed ? "Expand all files" : "Collapse all files"}
+          >
+            {allClosed ? "Expand all" : "Collapse all"}
+          </button>
+        )}
       </header>
       <div className="divide-y divide-outline-variant">
-        {groupDiffByFile(diff.lines).map((g, gi) => (
-          <details key={gi} open className="group">
+        {groups.map((g, gi) => (
+          <details
+            key={gi}
+            open={!closed.has(gi)}
+            // Sync native toggle (user clicking a file header) back into state so
+            // the collapse-all label stays accurate when files are toggled by hand.
+            onToggle={(e) => {
+              const isOpen = e.currentTarget.open;
+              setClosed((prev) => {
+                const next = new Set(prev);
+                if (isOpen) next.delete(gi);
+                else next.add(gi);
+                return next;
+              });
+            }}
+            className="group"
+          >
             <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-1.5 text-[0.7rem] hover:bg-surface-container-low">
               <span className="flex min-w-0 items-center gap-1.5">
                 <span
