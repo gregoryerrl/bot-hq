@@ -8,6 +8,7 @@ import type {
 import {
   baseName,
   buildTree,
+  CollapseAllIcon,
   collapseKey,
   type CtxTarget,
   FileIcon,
@@ -51,6 +52,7 @@ interface WorkspaceSidebarProps {
   rescanReport: ClRescanReportView | null;
   rescanFailures: string[];
   onRescan: () => void;
+  onCollapseAll: () => void;
   collapsed: Set<string>;
   onToggle: (project: string, folderPath: string) => void;
   activeTab: OpenTab | null;
@@ -75,6 +77,7 @@ export function WorkspaceSidebar({
   rescanReport,
   rescanFailures,
   onRescan,
+  onCollapseAll,
   collapsed,
   onToggle,
   activeTab,
@@ -162,6 +165,19 @@ export function WorkspaceSidebar({
         {/* New file/folder is created via right-click on a folder node (it
             needs the target folder + a name) — no header button for those. */}
         <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={onCollapseAll}
+            disabled={projectCount === 0}
+            aria-label="Collapse all folders"
+            title="Collapse all folders"
+            className={cn(
+              headerIconButtonClass,
+              "text-on-surface-variant hover:text-on-surface",
+            )}
+          >
+            <CollapseAllIcon />
+          </button>
           <button
             type="button"
             onClick={onRescan}

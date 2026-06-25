@@ -302,3 +302,23 @@ export function SaveIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
+// "Collapse all" — two chevrons meeting at the center (top points down, bottom
+// points up), the VS-Code tree-toolbar fold glyph.
+export function CollapseAllIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={cn("size-3.5", className)}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="7 8 12 12 17 8" />
+      <polyline points="7 16 12 12 17 16" />
+    </svg>
+  );
+}

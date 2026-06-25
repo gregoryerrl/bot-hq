@@ -9,11 +9,13 @@ import type {
 } from "../lib/bindings";
 import {
   baseName,
+  buildTree,
   collapseKey,
   type CtxTarget,
   isInternalGlobalsPath,
   tabKey,
   type OpenTab,
+  type TreeNode,
 } from "./contextLibraryShared";
 import { WorkspaceSidebar } from "./ContextLibrarySidebar";
 import { EditorArea } from "./ContextLibraryEditor";
@@ -553,6 +555,26 @@ export function ContextLibrary() {
     });
   };
 
+  // VS-Code-style "collapse all": fold every project-root + folder node by
+  // adding its collapse key. The three category sections (@cat:*) are left
+  // untouched so the top-level Projects/Global/System headers stay visible —
+  // only their contents collapse. Additive (keeps any existing collapsed keys).
+  const handleCollapseAll = () => {
+    const keys: string[] = [];
+    const walk = (project: string, node: TreeNode) => {
+      keys.push(collapseKey(project, node.path));
+      node.folders.forEach((child) => walk(project, child));
+    };
+    const ids = new Set([
+      ...Object.keys(byProject),
+      ...Object.keys(byProjectFolders),
+    ]);
+    for (const id of ids) {
+      walk(id, buildTree(byProject[id] ?? [], byProjectFolders[id] ?? []));
+    }
+    setCollapsed((prev) => new Set([...prev, ...keys]));
+  };
+
   return (
     <div ref={containerRef} className="flex h-full bg-background">
       <WorkspaceSidebar
@@ -569,6 +591,7 @@ export function ContextLibrary() {
         rescanReport={rescanReport}
         rescanFailures={rescanFailures}
         onRescan={handleRescan}
+        onCollapseAll={handleCollapseAll}
         collapsed={collapsed}
         onToggle={toggle}
         activeTab={activeTab}
