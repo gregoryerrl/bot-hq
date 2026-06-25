@@ -141,8 +141,16 @@ function GlobalEventSync() {
     [setRouterHealth],
   );
   const onActivity = useCallback(
-    (p: { session_id: string; state: string }) => {
-      setActivity(p.session_id, p.state as SessionActivity);
+    (p: {
+      session_id: string;
+      state: string;
+      brian_busy: boolean;
+      rain_busy: boolean;
+    }) => {
+      setActivity(p.session_id, p.state as SessionActivity, {
+        brian: p.brian_busy,
+        rain: p.rain_busy,
+      });
     },
     [setActivity],
   );

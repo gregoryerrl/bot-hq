@@ -3,7 +3,7 @@
 use crate::core::session::{resolve_session_project, ProjectProvenance};
 use crate::core::AppState as CoreAppState;
 use crate::signaling::SignalingBridge;
-use crate::storage::{Session, SessionWithPreview, Storage};
+use crate::storage::{Author, Session, SessionWithPreview, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -307,6 +307,10 @@ pub async fn get_session(
 pub struct SessionRuntime {
     pub session_id: String,
     pub activity: String,
+    /// Per-agent busy flags (the derived `activity` collapses them) so the chat
+    /// input can label which agent is working after a backfill, not just guess.
+    pub brian_busy: bool,
+    pub rain_busy: bool,
     pub brian_health: Option<String>,
     pub rain_health: Option<String>,
     /// Peer-forward router liveness (duo only). `None` = solo, or never reported
@@ -325,6 +329,8 @@ pub async fn get_session_runtime(
         out.push(SessionRuntime {
             session_id: id.clone(),
             activity: handle.activity.current().as_str().to_string(),
+            brian_busy: handle.activity.is_busy(Author::Brian),
+            rain_busy: handle.activity.is_busy(Author::Rain),
             brian_health: core.bridge.current_agent_health(id, "brian"),
             rain_health: core.bridge.current_agent_health(id, "rain"),
             router_alive: core.bridge.current_router_health(id),

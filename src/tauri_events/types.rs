@@ -146,11 +146,15 @@ impl AgentHealthEvent {
 
 /// Emitted when a session's duo activity changes (idle / busy / awaiting-user /
 /// cancelling), so the chat input can lock while the duo is working and re-open
-/// when it's the user's turn. `state` is the `SessionActivity::as_str` string.
+/// when it's the user's turn. `state` is the `SessionActivity::as_str` string;
+/// `brian_busy`/`rain_busy` are the per-agent flags the UI uses to label which
+/// agent is working (the derived `state` collapses them to a single `busy`).
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct SessionActivityEvent {
     pub session_id: String,
     pub state: String,
+    pub brian_busy: bool,
+    pub rain_busy: bool,
 }
 
 impl SessionActivityEvent {

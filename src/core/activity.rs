@@ -63,8 +63,15 @@ struct Inner {
     brian_busy: bool,
     rain_busy: bool,
     cancelling: bool,
-    /// Last state we emitted — so we only fire on an actual change.
+    /// Last derived state we emitted — so we only fire on an actual change.
     last: SessionActivity,
+    /// Last per-agent flags we emitted. Tracked separately from `last` because
+    /// the derived `state` collapses both agents to a single `Busy`: a broadcast
+    /// (Brian-busy → Rain-busy) or a peer hand-off (Rain-busy → Brian-idle)
+    /// leaves `state == Busy` throughout, so without this the per-agent
+    /// transition would be suppressed and the UI would mislabel who's working.
+    last_brian_busy: bool,
+    last_rain_busy: bool,
 }
 
 /// Per-session activity tracker. Hold via `Arc`; all mutators take `&self`.
@@ -90,6 +97,8 @@ impl ActivityTracker {
                 rain_busy: false,
                 cancelling: false,
                 last: SessionActivity::Idle,
+                last_brian_busy: false,
+                last_rain_busy: false,
             }),
             awaiting,
             bridge,
@@ -184,10 +193,21 @@ impl ActivityTracker {
             self.awaiting.load(Ordering::Acquire),
             g.cancelling,
         );
-        if next != g.last {
+        // Fire on a change to the derived state OR to either per-agent flag —
+        // the latter so a within-`Busy` transition (broadcast both-busy, peer
+        // hand-off) still reaches the UI to relabel who's working.
+        let agents_changed =
+            g.brian_busy != g.last_brian_busy || g.rain_busy != g.last_rain_busy;
+        if next != g.last || agents_changed {
             g.last = next;
-            self.bridge
-                .notify_session_activity(self.session_id.clone(), next.as_str());
+            g.last_brian_busy = g.brian_busy;
+            g.last_rain_busy = g.rain_busy;
+            self.bridge.notify_session_activity(
+                self.session_id.clone(),
+                next.as_str(),
+                g.brian_busy,
+                g.rain_busy,
+            );
         }
     }
 }
@@ -229,6 +249,18 @@ mod tests {
         }
     }
 
+    fn activity_tuple(ev: &SignalingEvent) -> Option<(&str, bool, bool)> {
+        match ev {
+            SignalingEvent::SessionActivity {
+                state,
+                brian_busy,
+                rain_busy,
+                ..
+            } => Some((state, *brian_busy, *rain_busy)),
+            _ => None,
+        }
+    }
+
     #[tokio::test]
     async fn tracker_emits_only_on_change() {
         let bridge = SignalingBridge::new();
@@ -236,17 +268,33 @@ mod tests {
         let awaiting = Arc::new(AtomicBool::new(false));
         let t = ActivityTracker::new("s1", awaiting.clone(), bridge.clone());
 
-        // idle -> busy
+        // idle -> busy(brian)
         t.set_busy(Author::Brian, true);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("busy"));
+        assert_eq!(
+            activity_tuple(&rx.recv().await.unwrap()),
+            Some(("busy", true, false))
+        );
 
-        // busy -> busy (rain also starts): no change, no emit.
+        // redundant set (brian already busy): nothing changed → no emit.
+        t.set_busy(Author::Brian, true);
+        assert!(rx.try_recv().is_err(), "no emit when nothing changed");
+
+        // busy(brian) -> busy(brian+rain): derived state stays `busy`, but the
+        // per-agent flags changed (a broadcast) → MUST re-emit so the UI can show
+        // BOTH agents working, not just Brian.
         t.set_busy(Author::Rain, true);
-        assert!(rx.try_recv().is_err(), "no emit when still busy");
+        assert_eq!(
+            activity_tuple(&rx.recv().await.unwrap()),
+            Some(("busy", true, true))
+        );
 
-        // one agent idle, other still busy: still busy, no emit.
+        // brian idle, rain still busy: still `busy`, but per-agent changed (a
+        // peer hand-off) → re-emit with the new flags so the label follows.
         t.set_busy(Author::Brian, false);
-        assert!(rx.try_recv().is_err(), "still busy via rain, no emit");
+        assert_eq!(
+            activity_tuple(&rx.recv().await.unwrap()),
+            Some(("busy", false, true))
+        );
 
         // both idle -> idle.
         t.set_busy(Author::Rain, false);

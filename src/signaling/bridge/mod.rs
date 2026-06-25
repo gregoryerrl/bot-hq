@@ -152,9 +152,14 @@ pub enum SignalingEvent {
     /// input while `busy`/`cancelling`, re-enables on `idle`/`awaiting_user`.
     /// `state` is the `SessionActivity::as_str` string — carried as a String so
     /// the signaling layer stays decoupled from the core activity enum.
+    /// `brian_busy`/`rain_busy` carry the per-agent busy flags (the derived
+    /// `state` collapses them) so the UI can show *which* agent is working —
+    /// e.g. a broadcast sets both busy at once.
     SessionActivity {
         session_id: String,
         state: String,
+        brian_busy: bool,
+        rain_busy: bool,
     },
     /// The per-session peer-forward router's liveness changed. `alive=false` is
     /// emitted by the watchdog when the router task has died while agents are
@@ -669,11 +674,20 @@ impl SignalingBridge {
     /// Publish a session's duo-activity change (idle / busy / awaiting-user /
     /// cancelling). Fire-and-forget; the UI subscriber maps it to a
     /// `session:activity` event that gates the chat input + Cancel button.
-    /// `state` is the `SessionActivity::as_str` string.
-    pub fn notify_session_activity(&self, session_id: String, state: &str) {
+    /// `state` is the `SessionActivity::as_str` string; `brian_busy`/`rain_busy`
+    /// are the per-agent flags the UI uses to label which agent is working.
+    pub fn notify_session_activity(
+        &self,
+        session_id: String,
+        state: &str,
+        brian_busy: bool,
+        rain_busy: bool,
+    ) {
         let _ = self.event_tx.send(SignalingEvent::SessionActivity {
             session_id,
             state: state.to_string(),
+            brian_busy,
+            rain_busy,
         });
     }
 }

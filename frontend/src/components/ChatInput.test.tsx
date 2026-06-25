@@ -65,33 +65,53 @@ describe("ChatInput draft persistence", () => {
   });
 });
 
-describe("ChatInput always-typeable + Stop", () => {
-  it("stays typeable and shows Stop (not Send) while busy with an empty box", () => {
-    render(<ChatInput activity="busy" onSend={() => {}} onCancel={() => {}} />);
-    // The input is NEVER hard-locked — sending while busy preempts the agents.
-    expect(screen.getByRole("textbox")).toBeEnabled();
-    // Empty box while busy → Stop (cancel-only) so an idle-looking busy state
-    // still offers a way out.
+describe("ChatInput turn-status + Stop", () => {
+  it("hides the textarea and shows the turn-status + Stop while busy", () => {
+    render(
+      <ChatInput
+        activity="busy"
+        busy={{ brian: true, rain: false }}
+        onSend={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    // While the duo works the input is replaced by the status line — no textarea.
+    expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    // Per-agent label: Brian (HANDS) is working.
+    expect(screen.getByText("Brian")).toBeInTheDocument();
+    expect(screen.getByText("is working")).toBeInTheDocument();
   });
 
-  it("swaps Stop→Send the moment the user types while busy (send preempts)", async () => {
-    const onSend = vi.fn().mockResolvedValue(undefined);
-    render(<ChatInput activity="busy" onSend={onSend} onCancel={() => {}} />);
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "do X instead" },
-    });
-    expect(screen.getByRole("textbox")).toBeEnabled();
-    // Typed text while busy → Stop gives way to an enabled Send (which preempts).
-    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
-    const send = screen.getByRole("button", { name: "Send" });
-    expect(send).toBeEnabled();
-    fireEvent.click(send);
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith("do X instead"));
+  it("labels Rain reviewing when only Rain is busy", () => {
+    render(
+      <ChatInput
+        activity="busy"
+        busy={{ brian: false, rain: true }}
+        onSend={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByText("Rain")).toBeInTheDocument();
+    expect(screen.getByText("is reviewing")).toBeInTheDocument();
+    expect(screen.queryByText("Brian")).toBeNull();
   });
 
-  it("keeps the input open on idle and awaiting-user (the user's turn)", () => {
+  it("shows both agents when a broadcast leaves both busy", () => {
+    render(
+      <ChatInput
+        activity="busy"
+        busy={{ brian: true, rain: true }}
+        onSend={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(screen.getByText("Brian")).toBeInTheDocument();
+    expect(screen.getByText("Rain")).toBeInTheDocument();
+  });
+
+  it("keeps the textarea + Send on idle and awaiting-user (the user's turn)", () => {
     const { rerender } = render(
       <ChatInput activity="idle" onSend={() => {}} onCancel={() => {}} />,
     );
@@ -108,7 +128,14 @@ describe("ChatInput always-typeable + Stop", () => {
 
   it("calls onCancel and shows Cancelling… when Stop is pressed", async () => {
     const onCancel = vi.fn().mockResolvedValue(undefined);
-    render(<ChatInput activity="busy" onSend={() => {}} onCancel={onCancel} />);
+    render(
+      <ChatInput
+        activity="busy"
+        busy={{ brian: true, rain: false }}
+        onSend={() => {}}
+        onCancel={onCancel}
+      />,
+    );
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => expect(onCancel).toHaveBeenCalledTimes(1));
     expect(
@@ -116,19 +143,27 @@ describe("ChatInput always-typeable + Stop", () => {
     ).toBeInTheDocument();
   });
 
-  it("stays typeable with no Stop when busy without onCancel; Send disabled while empty", () => {
-    render(<ChatInput activity="busy" onSend={() => {}} />);
-    expect(screen.getByRole("textbox")).toBeEnabled();
-    // No onCancel → no Stop; Send shows but is disabled while the box is empty.
+  it("shows the status with no Stop when busy without onCancel", () => {
+    render(
+      <ChatInput
+        activity="busy"
+        busy={{ brian: true, rain: false }}
+        onSend={() => {}}
+      />,
+    );
+    // No textarea, no Stop (no onCancel), no Send — just the status line.
+    expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    expect(screen.getByText("Brian")).toBeInTheDocument();
   });
 
-  it("stays typeable while cancelling; Stop reads Cancelling… and is disabled", () => {
+  it("reads Stopping… with a disabled Stop while cancelling", () => {
     render(
       <ChatInput activity="cancelling" onSend={() => {}} onCancel={() => {}} />,
     );
-    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.getByText(/Stopping/)).toBeInTheDocument();
     const stop = screen.getByRole("button", { name: "Cancelling…" });
     expect(stop).toBeInTheDocument();
     expect(stop).toBeDisabled();

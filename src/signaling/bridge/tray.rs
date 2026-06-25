@@ -897,7 +897,10 @@ mod tests {
         // event) → a SessionActivity{awaiting_user} must be among the emitted events.
         let mut saw_activity = false;
         while let Ok(ev) = sub.try_recv() {
-            if let SignalingEvent::SessionActivity { session_id, state } = ev {
+            if let SignalingEvent::SessionActivity {
+                session_id, state, ..
+            } = ev
+            {
                 if session_id == "s1" && state == "awaiting_user" {
                     saw_activity = true;
                 }

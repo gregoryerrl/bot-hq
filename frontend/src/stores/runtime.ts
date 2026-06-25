@@ -1,4 +1,4 @@
-import type { SessionActivity } from "./activity";
+import type { DuoBusy, SessionActivity } from "./activity";
 import type { AgentHealth } from "./health";
 
 /** One live session's runtime snapshot from the backend `get_session_runtime`
@@ -6,6 +6,8 @@ import type { AgentHealth } from "./health";
 export interface SessionRuntime {
   session_id: string;
   activity: string;
+  brian_busy: boolean;
+  rain_busy: boolean;
   brian_health: string | null;
   rain_health: string | null;
   router_alive: boolean | null;
@@ -20,12 +22,15 @@ export interface SessionRuntime {
  *  → skip (a missing entry reads as healthy, same as a missing event). */
 export function seedRuntimeStores(
   rows: SessionRuntime[],
-  setActivity: (id: string, a: SessionActivity) => void,
+  setActivity: (id: string, a: SessionActivity, busy?: DuoBusy) => void,
   setHealth: (id: string, agent: string, h: AgentHealth) => void,
   setRouterHealth: (id: string, alive: boolean) => void,
 ): void {
   for (const r of rows) {
-    setActivity(r.session_id, r.activity as SessionActivity);
+    setActivity(r.session_id, r.activity as SessionActivity, {
+      brian: r.brian_busy,
+      rain: r.rain_busy,
+    });
     if (r.brian_health)
       setHealth(r.session_id, "brian", r.brian_health as AgentHealth);
     if (r.rain_health)

@@ -154,8 +154,18 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }
-        SignalingEvent::SessionActivity { session_id, state } => {
-            let payload = SessionActivityEvent { session_id, state };
+        SignalingEvent::SessionActivity {
+            session_id,
+            state,
+            brian_busy,
+            rain_busy,
+        } => {
+            let payload = SessionActivityEvent {
+                session_id,
+                state,
+                brian_busy,
+                rain_busy,
+            };
             emit_event(
                 SessionActivityEvent::EVENT_NAME,
                 serde_json::to_value(&payload).unwrap_or(Value::Null),

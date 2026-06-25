@@ -10,6 +10,8 @@ describe("seedRuntimeStores", () => {
       {
         session_id: "s1",
         activity: "busy",
+        brian_busy: true,
+        rain_busy: false,
         brian_health: "running",
         rain_health: "retrying",
         router_alive: false,
@@ -17,6 +19,8 @@ describe("seedRuntimeStores", () => {
       {
         session_id: "s2",
         activity: "awaiting_user",
+        brian_busy: false,
+        rain_busy: false,
         brian_health: "dead",
         rain_health: null,
         router_alive: null,
@@ -25,8 +29,14 @@ describe("seedRuntimeStores", () => {
 
     seedRuntimeStores(rows, setActivity, setHealth, setRouterHealth);
 
-    expect(setActivity).toHaveBeenCalledWith("s1", "busy");
-    expect(setActivity).toHaveBeenCalledWith("s2", "awaiting_user");
+    expect(setActivity).toHaveBeenCalledWith("s1", "busy", {
+      brian: true,
+      rain: false,
+    });
+    expect(setActivity).toHaveBeenCalledWith("s2", "awaiting_user", {
+      brian: false,
+      rain: false,
+    });
     expect(setHealth).toHaveBeenCalledWith("s1", "brian", "running");
     expect(setHealth).toHaveBeenCalledWith("s1", "rain", "retrying");
     expect(setHealth).toHaveBeenCalledWith("s2", "brian", "dead");

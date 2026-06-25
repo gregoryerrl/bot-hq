@@ -118,6 +118,9 @@ export function SessionView() {
   const health = useHealthStore((s) => s.bySession[sessionId]);
   const routerAlive = useHealthStore((s) => s.routerBySession[sessionId]);
   const activity = useActivityStore((s) => s.bySession[sessionId]);
+  // Per-agent busy flags for the chat-input turn-status line ("Brian is
+  // working… / Rain is reviewing…"). Parallel to `activity`.
+  const busy = useActivityStore((s) => s.busyBySession[sessionId]);
 
   // Inline title rename. `editingTitle === null` = display mode; a string =
   // the in-progress edit. Commit on Enter/blur, cancel on Escape.
@@ -511,6 +514,7 @@ export function SessionView() {
             draftKey={`bothq:draft:${sessionId}`}
             placeholder="Broadcast to Brian + Rain…"
             activity={activity}
+            busy={busy}
             onSend={async (text) => {
               await invoke("broadcast_message", { sessionId, text });
             }}
