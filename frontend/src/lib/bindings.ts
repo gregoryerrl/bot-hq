@@ -129,6 +129,25 @@ async restartSession(sessionId: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * Cancel a session's in-flight turn (the Stop button — interrupt redesign,
+ * Batch 3 + 3.1, now interrupt-first). Sends a `control_request` interrupt to
+ * abort the turn while KEEPING the process alive (warm cache, no `--resume`
+ * respawn); if an agent doesn't honor it within ~2s it's SIGKILLed as a
+ * fallback. The session returns to `Idle` (the chat input unlocks). If HANDS is
+ * mid an atomic op (`git commit`/`git push`/migration), the interrupt is
+ * DEFERRED until the op completes (≤ ~8s cap) so the working tree isn't left
+ * half-written. The command returns immediately and a detached task drives the
+ * escalation. No-op if the session isn't live.
+ */
+async cancelSessionTurn(sessionId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_session_turn", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Rename a session (inline edit in the SessionView header). Blank titles are
  * rejected — an empty header is indistinguishable from a render bug.
  */
