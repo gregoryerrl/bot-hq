@@ -42,6 +42,14 @@ async getSession(sessionId: string) : Promise<Result<SessionInfo | null, AppErro
     else return { status: "error", error: e  as any };
 }
 },
+async getSessionRuntime() : Promise<Result<SessionRuntime[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_session_runtime") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Resolve a session's project + how it was derived, so the gear tab can show
  * WHY the session inherited its policy (registered repo vs path basename vs
@@ -1303,6 +1311,17 @@ project: string | null;
  * How `project` was derived — drives the gear-tab policy-origin badge.
  */
 provenance: ProjectProvenance }
+/**
+ * Current runtime state (derived activity + per-agent health) for every LIVE
+ * session — a snapshot the frontend BACKFILLS its event-driven activity/health
+ * stores from on mount. Those stores are seeded only by `session:activity` /
+ * `session:agent_health` events, which fire on transitions and can be missed
+ * during the respawn window before the React listeners mount (Bug C: footer /
+ * tiles / input-indicator left stale until the next transition). snake_case
+ * return (mirrors `SessionInfo`); React reads `session_id`/`activity`/
+ * `brian_health`/`rain_health`.
+ */
+export type SessionRuntime = { session_id: string; activity: string; brian_health: string | null; rain_health: string | null }
 /**
  * One durable `session_tray` row, projected for the session-view Tray tab.
  * Unlike [`PendingChoiceView`] (live in-memory pending only), this surfaces
