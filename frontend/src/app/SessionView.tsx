@@ -25,12 +25,6 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { GearIcon } from "../components/icons";
 import { invoke } from "@tauri-apps/api/core";
 
-interface PhaseChangedPayload {
-  session_id: string;
-  agent: string;
-  target: string;
-}
-
 const PHASE_NAMES: Phase[] = ["investigate", "plan", "apply", "verify"];
 
 function normalizePhase(raw: string | null | undefined): Phase | null {
@@ -212,9 +206,9 @@ export function SessionView() {
     [sessionId, applyBatch],
   );
 
-  // IPAV phase indicator. Initial value comes from `get_session_phase`
-  // (in-memory on `CoreAppState`); subsequent updates arrive via the
-  // `session:phase_changed` Tauri event fired by the bridge subscriber.
+  // IPAV phase indicator. `get_session_phase` (in-memory on `CoreAppState`) is
+  // invalidated by the global `session:phase_changed` listener in Providers, so
+  // a phase transition refetches it and the effect below re-syncs local state.
   const { data: initialPhase } = useTauriQuery<string | null>(
     "get_session_phase",
     { sessionId },
@@ -224,15 +218,6 @@ export function SessionView() {
   useEffect(() => {
     setPhase(normalizePhase(initialPhase));
   }, [initialPhase]);
-  useTauriEvent<PhaseChangedPayload>(
-    "session:phase_changed",
-    (payload) => {
-      if (payload.session_id !== sessionId) return;
-      const next = normalizePhase(payload.target);
-      if (next) setPhase(next);
-    },
-    [sessionId],
-  );
   // When THIS session finishes closing, purge its messages from the store
   // (closed sessions otherwise accumulate forever) and leave its now-dead
   // view for the dashboard instead of stranding the user inside it.

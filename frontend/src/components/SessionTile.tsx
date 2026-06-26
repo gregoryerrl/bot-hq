@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
@@ -17,7 +18,7 @@ export interface SessionTileProps {
   phase?: string | null;
 }
 
-export function SessionTile({
+function SessionTileImpl({
   session,
   pendingCount = 0,
   phase = null,
@@ -151,6 +152,11 @@ export function SessionTile({
     </div>
   );
 }
+
+// Memoized: the dashboard re-renders the whole tile grid on store/query churn;
+// a tile only needs to re-render when its own props (session/pendingCount/phase)
+// change.
+export const SessionTile = memo(SessionTileImpl);
 
 function formatSessionId(id: string): string {
   // sessions are spawned as `s-<8 hex>`; show `S-XXXX` to mirror the design.

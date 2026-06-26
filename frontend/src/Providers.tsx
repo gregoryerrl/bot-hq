@@ -46,12 +46,8 @@ export function Providers({ children }: { children: ReactNode }) {
 // (incl. `compute_apply_diff` spawning a `git` subprocess). Scope each event to
 // only what it can actually change.
 const TRAY_KEYS = ["list_pending_tray", "list_session_tray"] as const;
-const PHASE_KEYS = [
-  "get_session_phase",
-  "session_doc_search",
-  "compute_apply_diff",
-] as const;
-const DOC_KEYS = ["session_doc_search", "compute_apply_diff"] as const;
+const PHASE_KEYS = ["get_session_phase", "session_doc_search"] as const;
+const DOC_KEYS = ["session_doc_search"] as const;
 const CLOSE_KEYS = [
   "list_sessions",
   "list_closed_sessions",
