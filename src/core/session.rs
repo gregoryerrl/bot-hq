@@ -614,8 +614,11 @@ async fn spawn_session_handle(
     let (router_tx, router_control, router_watch) = match &rain_input {
         Some(rain_in) => {
             let (router_tx, router_rx) = tokio::sync::mpsc::channel(256);
+            // O1: seed + register the session's open-blocking-findings count cache;
+            // the router reads this Arc lock-free per forward instead of a
+            // per-forward SELECT COUNT(*) + storage-lock.
+            let open_blocking = bridge.register_open_blocking(session.id.clone()).await;
             let deps = crate::core::RouterDeps {
-                session_id: session.id.clone(),
                 awaiting: Arc::clone(&awaiting),
                 user_silent_forwards: Arc::clone(&user_silent_forwards),
                 convergence_reset: Arc::clone(&convergence_reset),
@@ -623,7 +626,7 @@ async fn spawn_session_handle(
                 fwd_rain_to_brian: Arc::clone(&fwd_rain_to_brian),
                 alive: Arc::clone(&router_alive),
                 activity: Some(Arc::clone(&activity)),
-                bridge: Some(Arc::clone(&bridge)),
+                open_blocking,
                 ipav: Arc::clone(&ipav),
                 brian_input: brian_handle.input_tx.clone(),
                 rain_input: Some(rain_in.clone()),

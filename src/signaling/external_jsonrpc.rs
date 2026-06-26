@@ -326,7 +326,7 @@ async fn wait_for_change(
             _ = &mut deadline => return Ok(Vec::new()),
             ev = rx.recv() => {
                 match ev {
-                    Ok(SignalingEvent::MessagePersisted { session_id: sid, .. }) if sid == session_id => {
+                    Ok(SignalingEvent::MessagePersisted { session_id: sid, .. }) if sid.as_ref() == session_id => {
                         let msgs = core.storage.messages_for_session(session_id, since_id).await?;
                         if !msgs.is_empty() {
                             return Ok(msgs);

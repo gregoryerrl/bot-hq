@@ -56,7 +56,9 @@ impl SignalingBridge {
         storage
             .insert_finding(&session_id, &uid, &agent, severity, &summary, code_ref.as_deref())
             .await?;
-        // Refresh the per-session findings banner (UI). Best-effort.
+        // A new blocking finding changes the open-blocking count → recompute the
+        // router's lock-free cache (cold path), then refresh the UI banner.
+        self.refresh_open_blocking(&session_id).await;
         let _ = self
             .event_tx
             .send(SignalingEvent::FindingsChanged { session_id });
@@ -107,6 +109,9 @@ impl SignalingBridge {
         // Refresh the banner — the disposed finding stops gating, so the count
         // drops. Look up its session_id from the (still-present) row.
         if let Ok(Some(f)) = storage.get_finding(&finding_uid).await {
+            // A disposed finding stops gating → the open-blocking count drops;
+            // recompute the router's cache (cold path) before the banner event.
+            self.refresh_open_blocking(&f.session_id).await;
             let _ = self
                 .event_tx
                 .send(SignalingEvent::FindingsChanged { session_id: f.session_id });

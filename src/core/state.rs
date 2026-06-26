@@ -610,7 +610,7 @@ impl AppState {
             handle.activity.set_busy(Author::Rain, true);
         }
         self.bridge
-            .notify_message_persisted(session_id.to_string(), id);
+            .notify_message_persisted(Arc::from(session_id), id);
         Ok(())
     }
 
@@ -646,7 +646,7 @@ impl AppState {
             .insert_message(session_id, Author::User, MessageKind::PhaseChange, &notice)
             .await?;
         self.bridge
-            .notify_message_persisted(session_id.to_string(), id);
+            .notify_message_persisted(Arc::from(session_id), id);
         // And fed to both agents' stdin so they pick it up as a natural prompt.
         handle.send_to_both(OutgoingUserMessage::text(notice)).await;
 

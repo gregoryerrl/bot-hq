@@ -18,10 +18,9 @@ use crate::agents::OutgoingUserMessage;
 use crate::core::activity::ActivityTracker;
 use crate::core::broadcast::peer_forward_message;
 use crate::core::ipav::IpavState;
-use crate::signaling::SignalingBridge;
 use crate::storage::Author;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -46,7 +45,6 @@ pub enum RouterCommand {
 /// hold — so `broadcast`'s counter reset and a user-blocking MCP tool's `awaiting`
 /// set are both visible here with no extra plumbing.
 pub struct RouterDeps {
-    pub session_id: String,
     /// Await-halt: while set, suppress all peer-forwarding (the user is being
     /// asked). Set by user-blocking MCP tools; cleared by `broadcast`.
     pub awaiting: Arc<AtomicBool>,
@@ -76,8 +74,12 @@ pub struct RouterDeps {
     /// forward path: set peer busy BEFORE the sender idle (no Idle flicker).
     /// `None` in tests that don't assert activity.
     pub activity: Option<Arc<ActivityTracker>>,
-    /// For the open-blocking-findings banner. `None` in tests → banner count 0.
-    pub bridge: Option<Arc<SignalingBridge>>,
+    /// Open-blocking-findings count for the wire banner — read LOCK-FREE per
+    /// forward. Owned by the bridge (which recomputes it via `refresh_open_blocking`
+    /// when findings change); the router holds this read clone. Replaces a
+    /// per-forward `SELECT COUNT(*)` + storage-`Mutex` acquire that ran on EVERY
+    /// peer-forward.
+    pub open_blocking: Arc<AtomicUsize>,
     /// Current IPAV phase, read at forward time for the wire envelope.
     pub ipav: Arc<Mutex<IpavState>>,
     /// Brian's stdin sender (peer target when Rain speaks).
@@ -167,7 +169,10 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
     // Liveness: dropped when this task ends (normal return OR panic-unwind) →
     // flips `alive` false so the watchdog can surface a dead router.
     let _alive_guard = AliveGuard(Arc::clone(&deps.alive));
-    let mut last_forward: Option<String> = None;
+    // Cache the PREVIOUS forward's token set (not its body string) — each forward
+    // tokenizes only its own body for the convergence check, and nothing is cloned
+    // just to seed the next comparison (O2).
+    let mut last_forward: Option<HashSet<String>> = None;
     let mut similar_streak: u32 = 0;
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -196,7 +201,7 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
 /// correctly. On a real forward we set the peer busy BEFORE the sender idle.
 async fn route_forward(
     deps: &RouterDeps,
-    last_forward: &mut Option<String>,
+    last_forward: &mut Option<HashSet<String>>,
     similar_streak: &mut u32,
     from: Author,
     body: String,
@@ -252,13 +257,14 @@ async fn route_forward(
     //    agent) extends the streak; a dissimilar one resets it. Deliberately NOT
     //    reset on break — a sustained repetition keeps suppressing until content
     //    changes.
-    match last_forward.as_deref() {
-        Some(prev) if jaccard_similarity(prev, trimmed) >= VOLLEY_SIMILARITY_THRESHOLD => {
+    let cur_tokens = token_set(trimmed);
+    match last_forward.as_ref() {
+        Some(prev) if jaccard_from_sets(prev, &cur_tokens) >= VOLLEY_SIMILARITY_THRESHOLD => {
             *similar_streak += 1;
         }
         _ => *similar_streak = 0,
     }
-    *last_forward = Some(trimmed.to_string());
+    *last_forward = Some(cur_tokens);
     if *similar_streak >= VOLLEY_SIMILAR_BREAK {
         debug!(agent = ?from, streak = *similar_streak, "router: convergence breaker tripped; breaking volley + unlocking input");
         break_volley(deps);
@@ -268,10 +274,7 @@ async fn route_forward(
     //    `derive()` never sees both-idle → no momentary Idle that unlocks input
     //    mid-handoff.
     let phase = deps.ipav.lock().await.current_phase;
-    let open_blocking = match &deps.bridge {
-        Some(bridge) => bridge.open_blocking_count(&deps.session_id).await,
-        None => 0,
-    };
+    let open_blocking = deps.open_blocking.load(Ordering::Relaxed);
     peer_forward_message(from, trimmed, phase, open_blocking, peer_tx).await;
     // Diagnostics: count the DELIVERED forward by direction (after the send). A
     // one-sided break shows one counter flat while the other climbs. `User` can't
@@ -307,33 +310,41 @@ fn break_volley(deps: &RouterDeps) {
 /// (`s-e4fc25`: 34 messages, 0 from the user).
 const VOLLEY_HARD_CAP: u32 = 18;
 
-/// Token-set Jaccard similarity of two forward bodies — the shape-based
-/// convergence signal (no length threshold, no keyword/prefix list). Tokenize:
-/// split on whitespace, trim each token of leading/trailing non-alphanumerics,
-/// lowercase, drop empties — so "OK.", "OK", "ok" all reduce to {ok}. Edge: BOTH
-/// token sets empty (pure punctuation / emoji like "." or "🤝", the canonical
-/// s-e4fc25 volley) → 1.0, so convergence catches it fast rather than deferring to
-/// the hard-cap. One empty, one not → 0.0. Two DISTINCT substantive messages
-/// always carry alphanumeric tokens, so they can never collide at 1.0 via the
-/// both-empty path.
-fn jaccard_similarity(a: &str, b: &str) -> f64 {
-    fn token_set(s: &str) -> HashSet<String> {
-        s.split_whitespace()
-            .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
-            .filter(|t| !t.is_empty())
-            .collect()
-    }
-    let (sa, sb) = (token_set(a), token_set(b));
+/// Tokenize a forward body for convergence comparison: split on whitespace, trim
+/// each token of leading/trailing non-alphanumerics, lowercase, drop empties — so
+/// "OK.", "OK", "ok" all reduce to {ok}.
+fn token_set(s: &str) -> HashSet<String> {
+    s.split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect()
+}
+
+/// Token-set Jaccard similarity — the shape-based convergence signal (no length
+/// threshold, no keyword/prefix list). Edge: BOTH sets empty (pure punctuation /
+/// emoji like "." or "🤝", the canonical s-e4fc25 volley) → 1.0, so convergence
+/// catches it fast rather than deferring to the hard-cap. One empty, one not →
+/// 0.0. Two DISTINCT substantive messages always carry alphanumeric tokens, so
+/// they can never collide at 1.0 via the both-empty path.
+fn jaccard_from_sets(sa: &HashSet<String>, sb: &HashSet<String>) -> f64 {
     if sa.is_empty() && sb.is_empty() {
         return 1.0;
     }
-    let inter = sa.intersection(&sb).count();
-    let union = sa.union(&sb).count();
+    let inter = sa.intersection(sb).count();
+    let union = sa.union(sb).count();
     if union == 0 {
         1.0
     } else {
         inter as f64 / union as f64
     }
+}
+
+/// String-level convenience wrapper (tokenizes BOTH sides). Test-only: the hot
+/// path keeps the previous forward's token set and calls `jaccard_from_sets`
+/// directly, so it never re-tokenizes the previous body.
+#[cfg(test)]
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    jaccard_from_sets(&token_set(a), &token_set(b))
 }
 
 /// Jaccard similarity at or above which two consecutive forwards count as "the
@@ -358,7 +369,6 @@ mod tests {
         counter: Arc<AtomicU32>,
     ) -> RouterDeps {
         RouterDeps {
-            session_id: "s1".into(),
             awaiting,
             user_silent_forwards: counter,
             convergence_reset: Arc::new(AtomicBool::new(false)),
@@ -366,7 +376,7 @@ mod tests {
             fwd_rain_to_brian: Arc::new(AtomicU64::new(0)),
             alive: Arc::new(AtomicBool::new(true)),
             activity: None,
-            bridge: None,
+            open_blocking: Arc::new(AtomicUsize::new(0)),
             ipav: Arc::new(Mutex::new(IpavState::default())),
             brian_input,
             rain_input,
@@ -569,7 +579,7 @@ mod tests {
         let awaiting = Arc::new(AtomicBool::new(true));
         let mut d = deps(btx, Some(rtx), Arc::clone(&awaiting), Arc::new(AtomicU32::new(0)));
         d.convergence_reset = Arc::clone(&reset);
-        let (mut last, mut streak) = (Some("stale".to_string()), 5u32);
+        let (mut last, mut streak) = (Some(HashSet::from(["stale".to_string()])), 5u32);
         // Awaiting suppresses this forward — and must leave the reset intact.
         route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false).await;
         assert!(

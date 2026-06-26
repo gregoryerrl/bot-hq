@@ -29,7 +29,7 @@ use crate::storage::Storage;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
@@ -96,7 +96,7 @@ pub enum SignalingEvent {
     /// external MCP's `wait_for_change` tool block server-side instead of
     /// asking clients to poll.
     MessagePersisted {
-        session_id: String,
+        session_id: Arc<str>,
         message_id: i64,
     },
     /// Agent asked to close its own session via the `close_session` MCP tool.
@@ -276,6 +276,13 @@ pub struct SignalingBridge {
     /// router-health dot on mount (the event fires only on change, like
     /// `agent_health`). Sync `Mutex` — `notify_router_health` is sync.
     router_health: std::sync::Mutex<HashMap<String, bool>>,
+    /// session_id → shared open-blocking-findings count. The router reads the
+    /// `Arc<AtomicUsize>` LOCK-FREE per peer-forward (for the wire banner) instead
+    /// of a per-forward `SELECT COUNT(*)` + storage-`Mutex` acquire; the findings
+    /// mutators recompute it after any change via `refresh_open_blocking`.
+    /// `std::sync::Mutex` over the MAP (brief, never held across `await`); the
+    /// per-session `Arc` is the lock-free read surface the router holds a clone of.
+    session_open_blocking: std::sync::Mutex<HashMap<String, Arc<AtomicUsize>>>,
 }
 
 impl SignalingBridge {
@@ -302,6 +309,7 @@ impl SignalingBridge {
             agent_health: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
             router_health: std::sync::Mutex::new(HashMap::new()),
+            session_open_blocking: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -355,6 +363,37 @@ impl SignalingBridge {
         self.session_activity.lock().await.insert(session_id, tracker);
     }
 
+    /// Register a session's open-blocking-findings count cache and return the
+    /// shared `Arc` the router reads LOCK-FREE per forward. Seeds from storage so a
+    /// re-spawned session with pre-existing findings starts at the right value (not
+    /// 0). Mirrors `register_session_awaiting`.
+    pub async fn register_open_blocking(&self, session_id: String) -> Arc<AtomicUsize> {
+        let count = self.open_blocking_count(&session_id).await;
+        let arc = Arc::new(AtomicUsize::new(count));
+        self.session_open_blocking
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(session_id, Arc::clone(&arc));
+        arc
+    }
+
+    /// Recompute a session's open-blocking-findings count from storage into its
+    /// cached `Arc` (no-op if the session isn't registered — headless / tests).
+    /// COLD path: called only by the findings mutators after a change, never per
+    /// forward. The map lock is released BEFORE the storage query, so it's never
+    /// held across the `await`.
+    pub async fn refresh_open_blocking(&self, session_id: &str) {
+        let arc = self
+            .session_open_blocking
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id)
+            .cloned();
+        let Some(arc) = arc else { return };
+        let count = self.open_blocking_count(session_id).await;
+        arc.store(count, Ordering::Release);
+    }
+
     /// Clear the awaiting flag for a session — called by core.broadcast when
     /// the user sends a message (which resumes the duo).
     pub async fn clear_session_awaiting(&self, session_id: &str) {
@@ -384,6 +423,10 @@ impl SignalingBridge {
         // router_health — std::Mutex (mirrors reviewer_override above); the
         // forward-path `insert` is never otherwise paired with a remove.
         self.router_health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
+        self.session_open_blocking
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id);
@@ -550,7 +593,7 @@ impl SignalingBridge {
     /// user-broadcast helper after `storage.insert_message` returns the new
     /// row id. The external MCP's `wait_for_change` tool subscribes for these
     /// so clients don't need to poll.
-    pub fn notify_message_persisted(&self, session_id: String, message_id: i64) {
+    pub fn notify_message_persisted(&self, session_id: Arc<str>, message_id: i64) {
         let _ = self.event_tx.send(SignalingEvent::MessagePersisted {
             session_id,
             message_id,

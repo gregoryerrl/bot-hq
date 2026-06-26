@@ -26,7 +26,7 @@ const FLUSH_WINDOW: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
 enum EmitMsg {
-    Touch { session_id: String },
+    Touch { session_id: Arc<str> },
     Flush,
 }
 
@@ -54,7 +54,7 @@ impl BatchEmitter {
     /// Signal that `session_id` has new messages. Fire-and-forget; returns
     /// immediately. Drops silently if the receiver task has exited
     /// (BatchEmitter dropped or shutdown signal).
-    pub fn touch(&self, session_id: String) {
+    pub fn touch(&self, session_id: Arc<str>) {
         let _ = self.tx.send(EmitMsg::Touch { session_id });
     }
 
@@ -72,8 +72,8 @@ async fn run_loop<F>(
 ) where
     F: Fn(Vec<AgentMessage>) + Send + Sync + 'static,
 {
-    let mut watermarks: HashMap<String, i64> = HashMap::new();
-    let mut dirty: HashSet<String> = HashSet::new();
+    let mut watermarks: HashMap<Arc<str>, i64> = HashMap::new();
+    let mut dirty: HashSet<Arc<str>> = HashSet::new();
     let mut touches_since_flush: usize = 0;
     let mut flush_at: Option<Instant> = None;
 
@@ -119,8 +119,8 @@ async fn run_loop<F>(
 
 async fn flush_once<F>(
     storage: &Storage,
-    watermarks: &mut HashMap<String, i64>,
-    dirty: &mut HashSet<String>,
+    watermarks: &mut HashMap<Arc<str>, i64>,
+    dirty: &mut HashSet<Arc<str>>,
     emit_fn: &Arc<F>,
 ) where
     F: Fn(Vec<AgentMessage>) + Send + Sync + 'static,
@@ -129,8 +129,12 @@ async fn flush_once<F>(
         return;
     }
     let mut all_msgs: Vec<AgentMessage> = Vec::new();
-    let session_ids: Vec<String> = dirty.drain().collect();
-    for sid in session_ids {
+    // Detach the dirty set so it isn't borrowed across the await below, then swap
+    // the emptied set — capacity intact — back at the end, so the next flush reuses
+    // it instead of allocating a throwaway `Vec` each time (O4). Draining moves each
+    // owned id, reused as the watermark key (no clone).
+    let mut pending = std::mem::take(dirty);
+    for sid in pending.drain() {
         let since = watermarks.get(&sid).copied();
         match storage.messages_for_session(&sid, since).await {
             Ok(msgs) => {
@@ -144,6 +148,7 @@ async fn flush_once<F>(
             }
         }
     }
+    *dirty = pending;
     if !all_msgs.is_empty() {
         emit_fn(all_msgs);
     }
@@ -179,8 +184,8 @@ mod tests {
             storage,
         );
 
-        emitter.touch("s1".to_string());
-        emitter.touch("s1".to_string());
+        emitter.touch("s1".into());
+        emitter.touch("s1".into());
 
         // No flush yet — under N=20 + within 50ms window
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -212,10 +217,10 @@ mod tests {
             .insert_message("s1", Author::Brian, MessageKind::Text, "b")
             .await
             .unwrap();
-        emitter.touch("s1".to_string());
+        emitter.touch("s1".into());
         let _ = id1;
         let _ = id2;
-        emitter.touch("s1".to_string());
+        emitter.touch("s1".into());
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Second batch: 1 new message, should fetch only it (watermark advanced)
@@ -223,7 +228,7 @@ mod tests {
             .insert_message("s1", Author::Brian, MessageKind::Text, "c")
             .await
             .unwrap();
-        emitter.touch("s1".to_string());
+        emitter.touch("s1".into());
         let _ = id3;
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -244,7 +249,7 @@ mod tests {
             storage,
         );
 
-        emitter.touch("s1".to_string());
+        emitter.touch("s1".into());
         emitter.flush();
         tokio::time::sleep(Duration::from_millis(50)).await;
 

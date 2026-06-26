@@ -16,9 +16,33 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
 
+/// Borrow-serialized row shapes for the message log (O3): serialized directly with
+/// `serde_json::to_string` instead of building an intermediate `serde_json::json!`
+/// `Value` (which re-boxes the already-owned `input`/`content`) only to
+/// `.to_string()` it. Fields are declared in the key order `serde_json` emits for a
+/// `json!` map (alphabetical — no `preserve_order` feature), so the stored JSON is
+/// byte-identical to the previous output.
+#[derive(serde::Serialize)]
+struct ToolUseRow<'a> {
+    input: &'a serde_json::Value,
+    name: &'a str,
+    tool_use_id: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct ToolResultRow<'a> {
+    content: &'a str,
+    is_error: bool,
+    tool_use_id: &'a str,
+}
+
 #[derive(Clone)]
 pub struct DuoConfig {
-    pub session_id: String,
+    /// `Arc<str>` (not `String`): cloned once per persisted message on the hottest
+    /// path (`notify_persisted` fires on every Text / ToolUse / ToolResult), so a
+    /// refcount bump beats a heap copy. Threaded as `Arc<str>` through
+    /// `MessagePersisted` into the `BatchEmitter` dirty-set / watermark keys (O5).
+    pub session_id: Arc<str>,
     pub author: Author,
     /// Sender to the central peer-forward router (`core::router`). The pump emits
     /// a `RouterCommand::Forward` here on each completed turn that buffered prose;
@@ -54,7 +78,7 @@ pub struct DuoConfig {
 }
 
 impl DuoConfig {
-    pub fn new(session_id: impl Into<String>, author: Author) -> Self {
+    pub fn new(session_id: impl Into<Arc<str>>, author: Author) -> Self {
         Self {
             session_id: session_id.into(),
             author,
@@ -195,17 +219,18 @@ pub async fn pump_agent(
                         }
                     }
                 }
-                let payload = serde_json::json!({
-                    "tool_use_id": id,
-                    "name": name,
-                    "input": input,
-                });
+                let payload = serde_json::to_string(&ToolUseRow {
+                    input: &input,
+                    name: &name,
+                    tool_use_id: &id,
+                })
+                .unwrap_or_else(|_| "{}".to_string());
                 match storage
                     .insert_message(
                         &cfg.session_id,
                         cfg.author,
                         MessageKind::ToolUse,
-                        &payload.to_string(),
+                        &payload,
                     )
                     .await
                 {
@@ -230,17 +255,18 @@ pub async fn pump_agent(
                     }
                     atomic_tool_id = None;
                 }
-                let payload = serde_json::json!({
-                    "tool_use_id": tool_use_id,
-                    "content": content,
-                    "is_error": is_error,
-                });
+                let payload = serde_json::to_string(&ToolResultRow {
+                    content: content.as_str(),
+                    is_error,
+                    tool_use_id: &tool_use_id,
+                })
+                .unwrap_or_else(|_| "{}".to_string());
                 match storage
                     .insert_message(
                         &cfg.session_id,
                         cfg.author,
                         MessageKind::ToolResult,
-                        &payload.to_string(),
+                        &payload,
                     )
                     .await
                 {
@@ -378,7 +404,7 @@ pub async fn pump_agent(
                 // UI as a health dot. Not persisted — purely a status signal.
                 if let Some(bridge) = &cfg.bridge {
                     bridge.notify_agent_health(
-                        cfg.session_id.clone(),
+                        cfg.session_id.to_string(),
                         cfg.author.as_str(),
                         state.as_str(),
                     );
@@ -408,7 +434,7 @@ pub async fn pump_agent(
     // removed anyway, so a late "dead" is harmless.
     if let Some(bridge) = &cfg.bridge {
         bridge.notify_agent_health(
-            cfg.session_id.clone(),
+            cfg.session_id.to_string(),
             cfg.author.as_str(),
             AgentHealth::Dead.as_str(),
         );

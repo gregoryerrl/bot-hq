@@ -560,7 +560,7 @@ impl SignalingBridge {
             }
         };
         if let Some(id) = inserted_id {
-            self.notify_message_persisted(session_id.clone(), id);
+            self.notify_message_persisted(Arc::from(session_id.as_str()), id);
         }
         // Without this the row flips to `answered` in the DB but the cached
         // pending counts (bell + tray) never invalidate.
@@ -734,7 +734,7 @@ impl SignalingBridge {
                     )
                     .await
                 {
-                    Ok(id) => self.notify_message_persisted(session_id.clone(), id),
+                    Ok(id) => self.notify_message_persisted(Arc::from(session_id.as_str()), id),
                     Err(e) => {
                         tracing::warn!(?e, "request_phase_advance insert_message failed")
                     }
@@ -1055,7 +1055,7 @@ mod tests {
         for _ in 0..8 {
             match sub.try_recv() {
                 Ok(SignalingEvent::MessagePersisted { session_id, .. })
-                    if session_id == "s-fallback" =>
+                    if session_id.as_ref() == "s-fallback" =>
                 {
                     saw_persisted = true;
                     break;

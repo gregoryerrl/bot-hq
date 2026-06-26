@@ -217,7 +217,7 @@ mod tests {
         // Yield to let the spawn_subscriber task subscribe to the broadcast.
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        bridge.notify_message_persisted("s1".to_string(), id);
+        bridge.notify_message_persisted("s1".into(), id);
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let captured = captured_msgs.lock().unwrap();
