@@ -91,10 +91,10 @@ impl Storage {
         project_id: &str,
         file_path: &str,
     ) -> Result<Option<ClIndexEntry>> {
-        let row = sqlx::query_as::<_, ClIndexEntry>(
-            "SELECT id, project_id, file_path, description, tags, created_at, updated_at \
-             FROM cl_index WHERE project_id = ? AND file_path = ?",
-        )
+        let row = sqlx::query_as::<_, ClIndexEntry>(&format!(
+            "SELECT {} FROM cl_index WHERE project_id = ? AND file_path = ?",
+            cl_columns("file_path")
+        ))
         .bind(project_id)
         .bind(file_path)
         .fetch_optional(&self.pool)
@@ -195,10 +195,10 @@ impl Storage {
         project: &str,
         folder_path: &str,
     ) -> Result<Option<ClFolder>> {
-        let row = sqlx::query_as::<_, ClFolder>(
-            "SELECT id, project_id, folder_path, description, tags, created_at, updated_at \
-             FROM cl_folders WHERE project_id = ? AND folder_path = ?",
-        )
+        let row = sqlx::query_as::<_, ClFolder>(&format!(
+            "SELECT {} FROM cl_folders WHERE project_id = ? AND folder_path = ?",
+            cl_columns("folder_path")
+        ))
         .bind(project)
         .bind(folder_path)
         .fetch_optional(&self.pool)

@@ -104,10 +104,7 @@ impl Storage {
             "cl_search_table: non-constant table name {table:?} — identifiers must not be dynamic"
         );
         let like = query.map(|q| format!("%{}%", q.to_lowercase()));
-        let select = format!(
-            "SELECT id, project_id, {path_column}, description, tags, created_at, updated_at \
-             FROM {table}"
-        );
+        let select = format!("SELECT {} FROM {table}", cl_columns(path_column));
         let rows: Vec<T> = match (project_id, like) {
             (Some(pid), Some(q)) => sqlx::query_as::<_, T>(&format!(
                 "{select} WHERE project_id = ? AND ( \
@@ -147,4 +144,12 @@ impl Storage {
         };
         Ok(rows)
     }
+}
+
+/// Column projection for `cl_index` / `cl_folders` reads. The path column differs
+/// per table (`file_path` vs `folder_path`); everything else is shared, so
+/// `get_cl_index` / `get_folder` and `cl_search_table` build from this and can't
+/// drift. `path_column` is a caller-controlled const, never user input.
+fn cl_columns(path_column: &str) -> String {
+    format!("id, project_id, {path_column}, description, tags, created_at, updated_at")
 }

@@ -4,6 +4,10 @@
 use super::*;
 use std::path::PathBuf;
 
+/// Full column projection for a `Project` — shared by every read so they can't
+/// drift (mirrors `sessions.rs::SESSION_COLUMNS`).
+const PROJECT_COLUMNS: &str = "name, display_name, working_repo_path, description, created_at, cl_path";
+
 impl Storage {
     /// Upsert a project. Used by the project-registration flow and by the
     /// startup backfill (which auto-creates a row for every projects/<name>
@@ -194,20 +198,18 @@ impl Storage {
     }
 
     pub async fn list_projects(&self) -> Result<Vec<Project>> {
-        let rows = sqlx::query_as::<_, Project>(
-            "SELECT name, display_name, working_repo_path, description, created_at, cl_path \
-             FROM projects ORDER BY name ASC",
-        )
+        let rows = sqlx::query_as::<_, Project>(&format!(
+            "SELECT {PROJECT_COLUMNS} FROM projects ORDER BY name ASC"
+        ))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
     }
 
     pub async fn get_project(&self, name: &str) -> Result<Option<Project>> {
-        let row = sqlx::query_as::<_, Project>(
-            "SELECT name, display_name, working_repo_path, description, created_at, cl_path \
-             FROM projects WHERE name = ?",
-        )
+        let row = sqlx::query_as::<_, Project>(&format!(
+            "SELECT {PROJECT_COLUMNS} FROM projects WHERE name = ?"
+        ))
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;

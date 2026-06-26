@@ -2,12 +2,16 @@
 
 use super::*;
 
+/// Full column projection for an `AgentConfig` — shared by every read so they
+/// can't drift (mirrors `sessions.rs::SESSION_COLUMNS`).
+const AGENT_CONFIG_COLUMNS: &str =
+    "agent_name, provider, model_name, base_url, auth_token, updated_at";
+
 impl Storage {
     pub async fn get_agent_config(&self, name: &str) -> Result<Option<AgentConfig>> {
-        let row = sqlx::query_as::<_, AgentConfig>(
-            "SELECT agent_name, provider, model_name, base_url, auth_token, updated_at \
-             FROM agent_configs WHERE agent_name = ?",
-        )
+        let row = sqlx::query_as::<_, AgentConfig>(&format!(
+            "SELECT {AGENT_CONFIG_COLUMNS} FROM agent_configs WHERE agent_name = ?"
+        ))
         .bind(name)
         .fetch_optional(&self.pool)
         .await?;
@@ -15,10 +19,9 @@ impl Storage {
     }
 
     pub async fn list_agent_configs(&self) -> Result<Vec<AgentConfig>> {
-        let rows = sqlx::query_as::<_, AgentConfig>(
-            "SELECT agent_name, provider, model_name, base_url, auth_token, updated_at \
-             FROM agent_configs ORDER BY agent_name",
-        )
+        let rows = sqlx::query_as::<_, AgentConfig>(&format!(
+            "SELECT {AGENT_CONFIG_COLUMNS} FROM agent_configs ORDER BY agent_name"
+        ))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
