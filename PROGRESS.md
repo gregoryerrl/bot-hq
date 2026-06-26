@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-592 Rust tests passing (541 lib + 33 external MCP + 7 signaling + 11
-storage) plus 108 frontend Vitest. Release build clean. Version
+594 Rust tests passing (543 lib + 33 external MCP + 7 signaling + 11
+storage) plus 109 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -21,6 +21,35 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-26 — codebase audit rounds 2 + 3 (remediation)
+
+Two read-only audit passes over the post-interrupt-redesign codebase, with
+remediation shipped.
+
+**Round 2** hardened + swept: the `force_push` gate is now enforced by the
+pre-push hook (non-fast-forward detection via `git merge-base --is-ancestor`,
+checked before the push-gate short-circuit; `ForcePushMode` default Allowed,
+opt-in). Plugged a per-session map leak in `unregister_session` (`pending` +
+`router_health`). Removed dead code (`QuestionStatus`, `DuoConfig.peer_author`,
+`IpavState.phase_log`, `FindingStatus::Stale`, et al.) and stale comments.
+
+**Round 3** deep-swept the under-covered `tauri_cmd` + frontend-screen slices and
+deduped:
+- **Phase vocab unified** — `session_doc_*` phase validation routes through
+  `IpavPhase::parse` (now case-insensitive, canonical `tag()`); the divergent
+  `VALID_PHASES` list is gone, so a lowercase `"apply"` can't be valid for one
+  phase tool yet rejected by another.
+- **Backend dedup** — `hook_runtime()` (the current-thread runtime built 5×),
+  `emit_halt_row`, shared `JsonRpcError::app_handle_missing`/`webview_missing`,
+  and `PROJECT_COLUMNS` / `AGENT_CONFIG_COLUMNS` / `cl_columns` SELECT consts.
+- **Frontend shared hooks/atoms** — `useServerDraft` (6 panels), `useDragResize`
+  (2), `useEscapeKey` (6 dialogs), `useListEditor`, a shared `SegToggle`,
+  `ErrorBanner`, `FieldLabel`; dropped dead exports + the hand-rolled
+  `ProbeResult` (→ generated `ValidateResult`).
+- **Hygiene** — removed the dead `session_doc_read` / `cl_register_read` Tauri
+  command wrappers (the MCP tools stay); fixed stale doc-comments (tool counts,
+  CL paths, a removed-type rustdoc link).
 
 ## 2026-06-26 — peer-forward router extraction + turn-status + collapse-all UI
 
