@@ -7,6 +7,7 @@ import { PhasePillRow, type Phase } from "./PhasePill";
 import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { cn } from "../lib/cn";
+import { formatRelative } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
 import type {
   ResolveResult,
@@ -14,20 +15,12 @@ import type {
   SessionTrayView,
 } from "../lib/bindings";
 
-// Relative age of an RFC3339-Z (UTC) timestamp, for stale-gate context. Both
-// Date.parse (UTC) and Date.now() are epoch-based, so the delta is correct
-// regardless of the viewer's local timezone.
+// Relative age for stale-gate context, with an "earlier" fallback for a
+// null/unparseable timestamp. Delegates to the shared, zone-safe formatRelative
+// (parseUtcMs) — a bare Date.parse misreads a zone-less timestamp as local time
+// (the "stale 8h" hallucination).
 function relAgo(iso: string | null): string {
-  if (!iso) return "earlier";
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return "earlier";
-  const secs = Math.max(0, (Date.now() - then) / 1000);
-  if (secs < 90) return "just now";
-  const mins = Math.round(secs / 60);
-  if (mins < 90) return `${mins}m ago`;
-  const hrs = Math.round(mins / 60);
-  if (hrs < 36) return `${hrs}h ago`;
-  return `${Math.round(hrs / 24)}d ago`;
+  return (iso ? formatRelative(iso) : "") || "earlier";
 }
 
 interface DocumentPaneProps {
