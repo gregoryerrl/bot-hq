@@ -1321,7 +1321,12 @@ provenance: ProjectProvenance }
  * return (mirrors `SessionInfo`); React reads `session_id`/`activity`/
  * `brian_health`/`rain_health`.
  */
-export type SessionRuntime = { session_id: string; activity: string; brian_busy: boolean; rain_busy: boolean; brian_health: string | null; rain_health: string | null;
+export type SessionRuntime = { session_id: string; activity: string; 
+/**
+ * Per-agent busy flags (the derived `activity` collapses them) so the chat
+ * input can label which agent is working after a backfill, not just guess.
+ */
+brian_busy: boolean; rain_busy: boolean; brian_health: string | null; rain_health: string | null; 
 /**
  * Peer-forward router liveness (duo only). `None` = solo, or never reported
  * (assume alive — the event fires only on change). Seeds the UI router dot.
