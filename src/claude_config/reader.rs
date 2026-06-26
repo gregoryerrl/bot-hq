@@ -101,7 +101,8 @@ fn core_knobs(settings: &Map<String, Value>) -> Vec<SettingItem> {
     // the only persistent lever that accepts `max` (the field rejects
     // `max`/`ultracode` — they are session-only in claude-code). Read env first,
     // fall back to the legacy `effortLevel` field so an existing setting still
-    // shows; the writer clears the legacy field on the next change.
+    // shows; the UI clears the legacy field on its next change (a second staged
+    // write), since the writer only touches the targeted key.
     let effort_env = settings
         .get("env")
         .and_then(|v| v.as_object())

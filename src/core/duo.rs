@@ -30,8 +30,8 @@ pub struct DuoConfig {
     /// successful storage.insert_message. None in tests that don't need
     /// event-driven readers.
     pub bridge: Option<Arc<SignalingBridge>>,
-    /// The agent's OWN stdin sender (distinct from the peer's `peer_input_tx`),
-    /// for A3a self-nudges — e.g. nudging Brian when he mutates during
+    /// The agent's OWN stdin sender (distinct from the router-owned peer-forward
+    /// path), for A3a self-nudges — e.g. nudging Brian when he mutates during
     /// Investigate/Plan. `None` disables self-nudging (Rain; tests that don't
     /// need it). Set only for Brian's pump at spawn.
     pub self_input_tx: Option<mpsc::Sender<OutgoingUserMessage>>,

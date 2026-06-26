@@ -116,7 +116,9 @@ impl ActivityTracker {
         match author {
             Author::Brian => g.brian_busy = busy,
             Author::Rain => g.rain_busy = busy,
-            Author::User => unreachable!(),
+            // Guarded by the early-return above; degrade to a no-op rather than
+            // panic if a future caller path ever reaches here.
+            Author::User => return,
         }
         self.recompute_locked(&mut g);
     }

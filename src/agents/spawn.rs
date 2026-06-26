@@ -198,8 +198,9 @@ pub struct SpawnConfig {
     /// a fresh UUID — we capture that one in the next `init` event.
     pub resume_session_id: Option<String>,
     /// Project name (CL / policy key) this session targets, if any. Threaded so
-    /// HANDS can be spawned with a PreToolUse `tool-blocklist` hook bound to
-    /// the project's `policy.yaml`. `None` for the projectless singleton.
+    /// HANDS's injected hooks resolve the project's policy at tool-call time
+    /// (push/commit gates; the Tool Gate keyword list itself is global, not
+    /// per-project). `None` for the projectless singleton.
     pub project: Option<String>,
     /// bot-hq data dir — the injected PreToolUse hook needs it to resolve the
     /// project's policy at tool-call time.

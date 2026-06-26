@@ -346,15 +346,6 @@ fn main() -> Result<()> {
                     tracing::warn!(?e, "fs watcher failed to start; CL + A-tab fall back to polling");
                 }
             }
-            // SessionCloseRequest handler. The agent-facing `close_session`
-            // MCP tool only broadcasts a SignalingEvent::SessionCloseRequest;
-            // nothing consumed it before (bridge_subscriber deliberately skips
-            // it, and the comment claiming "AppState handles it" was false), so
-            // close_session was a silent no-op — the subprocess kept running
-            // and the row never got `closed_at`. This task is that missing
-            // consumer: it routes the event to core.close_session, which kills
-            // the subprocesses, marks the row closed/archived, and wipes the
-            // session's permission grants.
             // Control-event consumer for the agent-facing `close_session` /
             // `advance_phase` MCP tools (they only broadcast a SignalingEvent;
             // bridge_subscriber deliberately skips SessionCloseRequest and only

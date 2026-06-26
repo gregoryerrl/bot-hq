@@ -17,6 +17,8 @@
 //! of the bridge's surface and contributes its own `impl SignalingBridge` block:
 //!
 //! - [`tray`]         — user-blocking tools (ask/resolve/supersede/await/phase)
+//! - [`action_gate`]  — Tool-Gate execute-on-approve (the `action_gate` tool)
+//! - [`findings`]     — EYES-sign-off review findings + the commit gate
 //! - [`cl_facade`]    — Context Library index/folder/rescan reads
 //! - [`session_docs`] — per-session scratch documents
 //! - [`util`]         — free helper functions

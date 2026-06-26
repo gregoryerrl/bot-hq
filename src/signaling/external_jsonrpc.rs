@@ -350,9 +350,6 @@ async fn wait_for_change(
     }
 }
 
-/// Redact an auth_token field for read-side display. Returns `<unset>` for
-/// empty/None, or `<set:****abcd>` showing only the last 4 chars so the user
-/// can verify which credential is loaded without exposing the full secret.
 /// `set_agent_config` semantics for a clearable string field: an empty string
 /// clears it (None), an absent key keeps `current`, any other value sets it.
 /// Shared by the base_url + auth_token fields.
@@ -364,6 +361,9 @@ fn arg_clear_on_empty(args: &Value, key: &str, current: Option<String>) -> Optio
     }
 }
 
+/// Redact an auth_token field for read-side display. Returns `<unset>` for
+/// empty/None, or `<set:****abcd>` showing only the last 4 chars so the user
+/// can verify which credential is loaded without exposing the full secret.
 fn redact_auth_token(t: &Option<String>) -> String {
     match t.as_deref() {
         None | Some("") => "<unset>".to_string(),

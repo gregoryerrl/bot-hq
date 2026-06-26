@@ -113,8 +113,9 @@ pub struct RouterControl {
     /// Shared with the router's [`RouterDeps`]. `broadcast` sets it true on a user
     /// message; the router consumes it to clear its convergence streak.
     pub convergence_reset: Arc<AtomicBool>,
-    /// Per-direction delivered-forward counters (shared with [`RouterDeps`]) — read
-    /// for diagnostics (e.g. the watchdog logs them when the router dies).
+    /// Per-direction delivered-forward counters (shared with [`RouterDeps`]). Held
+    /// here so the Arc outlives the router task — the watchdog reads the values
+    /// through its own `Weak` clones, not this struct.
     pub fwd_brian_to_rain: Arc<AtomicU64>,
     pub fwd_rain_to_brian: Arc<AtomicU64>,
     /// Liveness flag (shared with [`RouterDeps`]). Held here so it outlives the
