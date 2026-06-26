@@ -185,37 +185,6 @@ impl QuestionKind {
     }
 }
 
-/// Lifecycle status of a question row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QuestionStatus {
-    Pending,
-    Answered,
-    Withdrawn,
-    Superseded,
-}
-
-impl QuestionStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            QuestionStatus::Pending => "pending",
-            QuestionStatus::Answered => "answered",
-            QuestionStatus::Withdrawn => "withdrawn",
-            QuestionStatus::Superseded => "superseded",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "pending" => QuestionStatus::Pending,
-            "answered" => QuestionStatus::Answered,
-            "withdrawn" => QuestionStatus::Withdrawn,
-            "superseded" => QuestionStatus::Superseded,
-            _ => return None,
-        })
-    }
-}
-
 /// A row from the `session_tray` table. Mirrors a tray item the agent has
 /// surfaced to the user — a question, an approval, an action_gate gated
 /// command, or a `mark_awaiting_user` halt — via the per-session tray.

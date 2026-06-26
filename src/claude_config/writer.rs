@@ -43,7 +43,7 @@ fn write_object(path: &Path, root: &Map<String, Value>) -> Result<()> {
 /// Set (or remove, when `value` is `None`) a key in settings.json, preserving
 /// every other key. Supports one level of dotting (e.g. `env.FOO`); a parent
 /// left empty by a removal is pruned.
-pub fn set_value(config_dir: &Path, key: &str, value: Option<Value>) -> Result<()> {
+fn set_value(config_dir: &Path, key: &str, value: Option<Value>) -> Result<()> {
     let path = settings_path(config_dir);
     let mut root = read_object(&path)?;
     if let Some((parent, child)) = key.split_once('.') {

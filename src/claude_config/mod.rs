@@ -31,10 +31,6 @@ pub use writer::{set_bool, set_plugin_enabled, set_string};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// The two duo agents, in display order. `_all` in the override store is a
-/// fan-out default applied to each unless a per-agent entry overrides it.
-pub const AGENTS: [&str; 2] = ["brian", "rain"];
-
 /// Which agents pick up a given config surface from `~/.claude` at spawn, and
 /// which don't. Drives the per-surface inheritance badges in the UI. This is
 /// the canonical mapping derived from `spawn.rs::build_command` behavior:
@@ -60,11 +56,9 @@ pub enum Surface {
     Plugins,
     Hooks,
     Memory,
-    Mcp,
     CoreKnobs,
     Model,
     Permissions,
-    Keybindings,
 }
 
 fn agents(names: &[&str]) -> Vec<String> {
@@ -98,12 +92,6 @@ pub fn inheritance(surface: Surface) -> Inheritance {
             note: "Brian autodiscovers CLAUDE.md + auto-memory. Rain --bare skips it. bot-hq adds its own system prompt regardless.".into(),
             overridable: true,
         },
-        Surface::Mcp => Inheritance {
-            inherited_by: agents(&["brian"]),
-            skipped_by: agents(&["rain"]),
-            note: "Forwarded into Brian (bot-hq + claude-in-chrome filtered out). Rain gets none.".into(),
-            overridable: true,
-        },
         Surface::CoreKnobs => Inheritance {
             inherited_by: agents(&["brian", "rain"]),
             skipped_by: agents(&[]),
@@ -120,12 +108,6 @@ pub fn inheritance(surface: Surface) -> Inheritance {
             inherited_by: agents(&[]),
             skipped_by: agents(&["brian", "rain"]),
             note: "bot-hq sets each agent's permission posture (Brian bypass; Rain dontAsk + allow/deny).".into(),
-            overridable: false,
-        },
-        Surface::Keybindings => Inheritance {
-            inherited_by: agents(&[]),
-            skipped_by: agents(&["brian", "rain"]),
-            note: "Interactive-only; headless agents don't use keybindings.".into(),
             overridable: false,
         },
     }

@@ -31,7 +31,7 @@ mod tray;
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Finding, FindingSeverity, FindingStatus,
-    Message, MessageKind, Model, Plugin, Project, QuestionKind, QuestionStatus, Session,
+    Message, MessageKind, Model, Plugin, Project, QuestionKind, Session,
     SessionDocument, SessionTrayEntry, SessionWithPreview,
 };
 pub(crate) use time::now_utc;
