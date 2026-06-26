@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
@@ -74,7 +74,12 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
       { enabled: !!sessionId && activePhase === "apply" },
     );
 
-  const activeDocs = docs.filter((d) => d.phase === activePhase);
+  // Stable ref across unrelated re-renders (Tray toggle, TL;DR state) so the
+  // memoized <Markdown> children below aren't needlessly reconciled (O7).
+  const activeDocs = useMemo(
+    () => docs.filter((d) => d.phase === activePhase),
+    [docs, activePhase],
+  );
 
   // Pending count for the Tray pill badge — shows even on the I/P/A/V tabs so
   // accumulated input is visible without opening the Tray. Shares the
@@ -84,9 +89,10 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
     "list_session_tray",
     { sessionId },
   );
-  const pendingTrayCount = trayEntries.filter(
-    (e) => e.status === "pending",
-  ).length;
+  const pendingTrayCount = useMemo(
+    () => trayEntries.filter((e) => e.status === "pending").length,
+    [trayEntries],
+  );
 
   // One-shot "TL;DR" summary of a doc, rendered in a dispose-on-close dialog.
   // The backend `summarize_session_doc` runs a headless model in the

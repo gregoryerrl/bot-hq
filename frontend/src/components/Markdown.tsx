@@ -1,3 +1,4 @@
+import { memo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "../lib/cn";
@@ -15,7 +16,10 @@ interface MarkdownProps {
  * identical markdown — GFM tables, task lists, autolinks; code blocks get a
  * contained scroll; links open in a new tab.
  */
-export function Markdown({ children, className }: MarkdownProps) {
+export const Markdown = memo(function Markdown({
+  children,
+  className,
+}: MarkdownProps) {
   return (
     <div className={cn("prose-tight text-sm text-on-surface", className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
@@ -23,7 +27,7 @@ export function Markdown({ children, className }: MarkdownProps) {
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 const markdownComponents: Components = {
   p: ({ children }) => (
