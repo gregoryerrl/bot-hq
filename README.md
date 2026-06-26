@@ -269,6 +269,12 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `halt(reason?)` | Yield to the user and unlock the chat input (sets awaiting, which outranks busy). Like `mark_awaiting_user` framed as a yield. HANDS only. |
 | `request_approval(kind, action, …)` | Per-action approval gate. Used by push gate, force-push, per-action approval. |
 | `action_gate(command)` | Run a Bash command the Tool Gate blocked: bot-hq surfaces Approve/Reject and, on approve, executes it in the session repo and returns the output. |
+| `check_commit_message(message)` | Pre-commit grep of a proposed message against the project's forbidden-words policy. Returns `ok` or `forbidden_word:<w>`. |
+| `eyes_flag(severity, summary, …)` | **EYES only.** File a review finding; a `blocking` one gates HANDS's next `git commit` until resolved. |
+| `disposition_finding(finding_id, status, reason)` | **HANDS only.** Resolve a finding (`fixed` / `rebutted`), clearing the commit gate. |
+| `check_open_findings()` | Check for unresolved blocking findings before committing. Returns `ok` or the blocking list. |
+| `override_reviewer_block()` | **HANDS only.** Escape valve for the fail-closed "reviewer is down" commit block. |
+| `approve_finding(finding_id)` | **EYES only.** Sign off that an escalated fix HANDS marked fixed is genuinely resolved. |
 | `close_session()` | Ask the host to close this session. |
 | `list_my_pending_questions()` | List questions THIS agent has parked but haven't been answered. Used to avoid duplicate retries. |
 | `withdraw_question(choice_id)` | Withdraw a stale parked question. |
@@ -290,10 +296,12 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `webview_scroll(selector?, y)` | Scroll an element or the page in the webview. |
 | `webview_press_key(key)` | Dispatch a keypress in the webview. |
 
-Role boundary: Rain (EYES) is blocked from `ask_user_choice`, `mark_awaiting_user`,
-`halt`, `request_approval`, `action_gate`, `supersede_question`, and
-`cl_register_folder_description` (Rain converges via `peer_ack`, which is not
-gated). Brian (HANDS) gets the full set.
+Role boundary (enforced server-side, both directions): Rain (EYES) is blocked from the
+HANDS-only tools — `ask_user_choice`, `mark_awaiting_user`, `halt`, `request_approval`,
+`action_gate`, `supersede_question`, `disposition_finding`, `override_reviewer_block`,
+and `cl_register_folder_description` (Rain converges via `peer_ack`, which is not gated).
+Brian (HANDS) is blocked from the EYES-only tools — `eyes_flag` and `approve_finding`
+(HANDS can't file or sign off on findings against its own work).
 
 </details>
 

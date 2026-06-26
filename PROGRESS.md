@@ -11,16 +11,39 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-581 tests passing (530 lib + 33 external MCP + 7 signaling + 11 storage)
-plus 108 frontend Vitest. Release build clean. Version **1.0.0-rc2**
-(pre-release for Windows friend-testing; `1.0.0` reserved for the official
-market launch). **Tauri v2 migration landed 2026-05-26** on
-branch `tauri-v2-migration` (7 batches across foundation → Slint
-removal). Slint UI deleted (-7,560 LOC); React frontend in `frontend/`;
-zero LOC delta in `src/agents/`, `src/core/`, `src/policy/`,
-`src/storage/`, `src/signaling/` per the design-doc constraint.
+592 Rust tests passing (541 lib + 33 external MCP + 7 signaling + 11
+storage) plus 108 frontend Vitest. Release build clean. Version
+**1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
+for the official market launch). The codebase has moved well past the May
+Tauri v2 migration — live on main since: the **EYES-sign-off commit
+gate**, the **interrupt redesign** (stdin `control_request` cancel +
+`SessionActivity` state machine), the **peer-forward router extraction**
+(`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-26 — peer-forward router extraction + turn-status + collapse-all UI
+
+**Host-mediated reroute (the deferred deep fix), shipped.** Peer-forwarding
+is no longer peer-to-peer: each pump (`core/duo.rs::pump_agent`) now emits a
+`RouterCommand::Forward` to a single central task (`core/router.rs::run_router`)
+that owns the forward decision (`9908ac7`). All of the old `flush_buffer`
+logic — the awaiting guard, `peer_ack` suppression, the L2 hard-cap
+(`VOLLEY_HARD_CAP=18`) and convergence breaker (Jaccard ≥ `0.85`, break after
+`VOLLEY_SIMILAR_BREAK=2`) — moved into the router with full cross-agent
+visibility; `flush_buffer` is gone and the pump shrank to persist + emit. The
+router's liveness is tracked on `SessionHandle` (`Option<RouterControl>`; `Drop`
+aborts the task) and surfaces as a per-session router dot via the
+`router_alive` field on `SessionRuntime` (`a8cdb9e`, `d22151e`). See
+ARCHITECTURE.md "Bilateral duo coordination" for the forward ladder.
+
+**Per-agent turn status in chat (`05678c1`).** While the duo is busy the chat
+header labels which agent is working (Brian vs Rain), driven by the per-agent
+`brian_busy`/`rain_busy` flags on `SessionRuntime` rather than the collapsed
+`activity` string.
+
+**Collapse-all toggles (`fd33373`, `c0a1f17`).** A collapse-all control on the
+Context Library tree and on the Apply-tab git diff.
 
 ## 2026-06-25 — peer_ack + halt duo-yield tools (behavioral layer on L2)
 

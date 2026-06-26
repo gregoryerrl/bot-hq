@@ -14,12 +14,14 @@ For recent changes see [`PROGRESS.md`](PROGRESS.md).
 bot-hq is built and used. The rebuild milestone (v0.1.0) shipped and the
 **Tauri v2 migration landed 2026-05-26** on branch `tauri-v2-migration`
 (7 batches; see PROGRESS.md). React frontend in `frontend/`, Slint
-deleted, Rust core untouched. Since then: the 3-tier session-policy
-toggles, the global Tool Gate, the saved-model registry + per-session
-model pickers + solo-Brian toggle, the claude-code config surface, and
-the **v1.0.0 stabilization pass** (per-session git worktrees, dispatch
-defaults, prompt drafts, UX polish — 2026-06-11) all shipped (see
-PROGRESS.md).
+deleted, Rust core untouched. Since then a long arc shipped (see
+PROGRESS.md): the 3-tier session-policy toggles, the global Tool Gate, the
+saved-model registry + per-session model pickers + solo-Brian toggle, the
+claude-code config surface, the **v1.0.0 stabilization pass** (per-session
+git worktrees, dispatch defaults, prompt drafts, UX polish — 2026-06-11),
+and the **post-1.0 duo-reliability arc**: the EYES-sign-off commit gate,
+the interrupt redesign, the peer-forward router extraction,
+`peer_ack`/`halt`, agent-health dots, and event-driven UI freshness.
 
 Test + build status (live counts) lives in PROGRESS.md, not here — it
 drifts every commit.
@@ -28,9 +30,12 @@ drifts every commit.
 
 ## In flight
 
-The Tauri v2 migration merged to main (see PROGRESS.md), and the
-follow-on `broadcast_message` command + `compute_apply_diff` A-tab diff
-shipped. Remaining follow-ups:
+Past the Tauri v2 migration and the v1.0.0 stabilization pass, the active
+arc has been duo-reliability + UX: the interrupt redesign (stdin
+`control_request` cancel + `SessionActivity`), the peer-forward router
+extraction (`core/router.rs`), `peer_ack` / `halt`, the EYES-sign-off
+commit gate, agent-health dots, and the event-driven UI-freshness work all
+landed (see PROGRESS.md). Remaining follow-ups:
 
 - Live plugin *execution*: the per-plugin iframes at
   `https://plugin-<id>.localhost` + their ping/pong channel. The
@@ -40,11 +45,14 @@ shipped. Remaining follow-ups:
   (the frontend `PluginSlot.tsx` component was removed as dead code and
   needs rebuilding for this; the Rust `PluginSlot` manifest type stays).
 - Replace the placeholder `icons/icon.png` with the real bot-hq mark.
+- Host-mediated reroute: option (a) (centralize-only) shipped as
+  `core/router.rs` (2026-06-26); the explicit-handoff (b) / hybrid (c)
+  forward-policy variants remain open ideas only.
 
 The Context Library editor write-back + folder-view + right-click disk ops
-shipped 2026-05-29 (see PROGRESS.md). Deferred from that work: native folder
-picker (text-input path for now — needs the Tauri dialog plugin), rename
-re-derives the description, hard delete (no OS trash).
+shipped 2026-05-29, and the native folder picker shipped 2026-06-16
+(`71fab9a`). Still deferred from that work: rename re-derives the folder
+description, hard delete (no OS trash).
 
 ---
 
@@ -114,10 +122,10 @@ loading for the icon font.
 
 ## Architectural ideas (no commit yet)
 
-- **Move CL writes to a transaction model.** Today CL writes are
-  filesystem-direct + index re-stat. Wrapping in a transaction (write
-  to temp file → rename → index update in one sqlite tx) would harden
-  against partial-write failures.
+- **Move CL writes to a transaction model.** Partially shipped: CL writes
+  are now atomic (adjacent temp file → rename, `a040c08`), which hardens
+  against partial-write failures. What remains is folding the write + the
+  index update into one sqlite transaction so they can't diverge.
 - **Hot policy reload.** Today the policy block in an agent's system
   prompt is fixed at session spawn. Editing `policy.yaml` mid-session
   requires session restart for the agent to see new rules (though hooks
@@ -127,9 +135,10 @@ loading for the icon font.
   transitions are visible in chat as synthetic user messages, but the
   per-session phase history isn't queryable. Worth keeping for
   retrospectives (which phases consumed the most time).
-- **Tray garbage collection.** The `session_tray` table grows
-  unbounded — resolved rows stay forever. A periodic purge of resolved
-  rows older than N days would keep it bounded.
+- **Tray garbage collection.** ✅ Shipped — `purge_resolved_tray(90)` runs
+  a boot-time sweep of resolved tray rows older than 90 days
+  (`5d8d9f2`, `storage/tray.rs` + the main.rs boot sweep), keeping
+  `session_tray` bounded.
 - **Tighten CL ↔ agent stitching further** (deferred from the 2026-06-08
   pass — context window = cache, session-docs = RAM, CL = disk). F-A
   (gate phase-tagged `session_doc_write` to HANDS) + F-B (spawn-time CL

@@ -134,22 +134,44 @@ policy block in layer 5).
 
 ## Bilateral duo coordination
 
-Stream-json events flow Brian → Rain and Rain → Brian via the duo
-coordinator (`src/core/duo.rs`). Forwarding rules per phase:
+Stream-json prose flows Brian ↔ Rain through a central **router task**
+(`src/core/router.rs::run_router`) — not peer-to-peer. Each agent's pump
+(`src/core/duo.rs::pump_agent`) emits a `RouterCommand::Forward` on every
+completed turn that buffered prose; the router is the single decision
+point that forwards to the peer, suppresses, or lets the duo settle. All
+phases are turn-based — a forward is decided on turn completion (the old
+Investigate/Plan 1.5s-buffer vs Apply/Verify split was retired
+2026-06-24).
 
-- **Investigate / Plan:** 1.5s buffer OR until `result` event, whichever
-  first. Preserves live adversarial riff.
-- **Apply / Verify:** pure turn-based — forward only on `result` event.
-  Less interleaving, more execution focus.
+**Forward ladder** (router decides, in order):
+1. **Awaiting guard** — drop the forward while the session's `awaiting`
+   flag is set (silent-on-hold).
+2. **`peer_ack`** — if the turn called `peer_ack`, suppress (the duo
+   converged; the peer is not woken).
+3. **Hard cap** — after `VOLLEY_HARD_CAP` (18) consecutive user-silent
+   forwards, break the volley (suppress + settle both agents to Idle).
+   The counter (`user_silent_forwards` on `SessionHandle`) resets on the
+   next user message.
+4. **Convergence** — if a forward is ≥ `VOLLEY_SIMILARITY_THRESHOLD`
+   (0.85, token-set Jaccard) similar to the previous one for
+   `VOLLEY_SIMILAR_BREAK` (2) forwards running, break.
+5. Otherwise **forward** to the peer's stdin.
 
-**Suppressed from peer forwarding:**
+`peer_ack` + `halt` are the *behavioral* layer (agents signal volley-end
+intent); the hard-cap + convergence breaker is the *mechanical* floor for
+weak models that never signal.
+
+**Router lifecycle:** a duo session holds `Option<RouterControl>` on its
+`SessionHandle` (`None` = solo, no router). `RouterControl`'s `Drop`
+aborts the task, so closing/dropping a session tears the router down; its
+liveness surfaces to the UI as the per-session router dot (`router_alive`).
+
+**Suppressed from peer forwarding** (never reach the ladder):
 - Tool-use events (`ask_user_choice`, `mark_awaiting_user`,
-  `request_approval`, etc.) — these are agent ↔ UI signaling, not
-  agent-to-agent coordination.
-- Anything emitted while the session's `awaiting` flag is set —
-  silent-on-hold protocol. The flag is set by `mark_awaiting_user`,
-  `ask_user_choice` (until resolved), and `request_approval` (until
-  approved/denied). Forwarding resumes when the flag clears.
+  `request_approval`, etc.) — agent ↔ UI signaling, not agent-to-agent.
+- Anything emitted while `awaiting` is set (ladder step 1). The flag is
+  set by `mark_awaiting_user`, `ask_user_choice` / `request_approval`
+  (until resolved), and `halt`; forwarding resumes when it clears.
 
 ---
 
@@ -286,20 +308,33 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (32)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `halt`, `advance_phase`, `request_phase_advance`,
-`request_approval`, `action_gate`,
-`close_session`, `list_my_pending_questions`, `withdraw_question`,
+`request_approval`, `action_gate`, `check_commit_message`, `eyes_flag`,
+`disposition_finding`, `check_open_findings`, `override_reviewer_block`,
+`approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_search`,
 `session_doc_read`, `cl_index_search`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`, `web_search`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
 
-**Role enforcement at the dispatch layer:** `HANDS_ONLY_TOOLS` is a
-hard-coded list of tools Rain (EYES) cannot call. Tool calls from Rain
-to any HANDS-only tool return a `HANDS_ONLY_TOOLS` JSON-RPC error. The
+**Review findings gate (EYES sign-off).** `eyes_flag` /
+`disposition_finding` / `check_open_findings` / `override_reviewer_block` /
+`approve_finding` (+ the pre-commit `check_commit_message`) implement the
+EYES-sign-off gate: a `blocking` finding Rain files via `eyes_flag` gates
+HANDS's `git commit` (mechanically, via the pre-commit hook) until HANDS
+resolves it with `disposition_finding` (fixed / rebutted). The gate is
+fail-CLOSED when the reviewer is down; `override_reviewer_block` is the
+explicit escape valve. Backed by the `findings` table.
+
+**Role enforcement at the dispatch layer:** `HANDS_ONLY_TOOLS` and its
+inverse `EYES_ONLY_TOOLS` are hard-coded lists. A call to a HANDS-only
+tool from Rain (or an EYES-only tool from Brian) returns a JSON-RPC error.
+EYES-only = `eyes_flag`, `approve_finding` (Rain files / signs off on her
+own findings; HANDS can't self-review). HANDS-only adds `disposition_finding`,
+`override_reviewer_block`, `halt`, and the user-facing signaling tools. The
 boundary is structural, not just convention.
 
 **Bridge (`src/signaling/bridge/`)** owns:
@@ -513,14 +548,25 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   (`default_model_id`, `rain_disabled_default`, …).
 - `session_tray` (choice_id PK, session_id, agent, kind, prompt,
   options_json, command_text, status, supersedes_id, asked_at,
-  resolved_at, picked) — durable awaiting-input tray
+  answered_at, picked) — durable awaiting-input tray
   (choices/approvals/gated commands). Survives app restart. Renamed from
   `session_questions`/`questions` in migration 0010.
 - `session_documents` (id PK, session_id, slug, body, phase, …) —
   per-session IPAV scratch docs.
+- `findings` (id PK, session_id, finding_uid UNIQUE, agent, severity,
+  summary, code_ref, status, disposition_reason, disposed_by,
+  created_at, updated_at) — EYES review findings backing the commit
+  gate (migration 0021; FK → sessions ON DELETE CASCADE).
+- `projects` (name PK, display_name, working_repo_path, description,
+  created_at) — registered-project registry; FK target for `cl_index` /
+  `cl_folders` / `cl_reads`.
 - `plugins` — installed-plugin registry (scaffold).
 - `cl_index` (file_path PK, project, description, tags, size,
   modified_at, indexed_at) — SQLite-backed CL search index.
+- `cl_folders` (id PK, project_id → projects, folder_path, description,
+  tags, …) — folder-level CL descriptions (parallel to `cl_index`).
+- `cl_reads` (id PK, cl_index_id → cl_index, session_id, agent, read_at)
+  — audit of which CL files an agent read (the `cl_register_read` sink).
 
 **Author enum:** `user` / `brian` / `rain`. (The `messages.author` CHECK
 still permits `'emma'` for legacy reasons, but the Rust enum no longer
@@ -678,8 +724,8 @@ the `bot-hq` binary and does not run at app startup. See
   the gear tab. Push/force-push are pure toggles — no agent-side grants.
 - **Awaiting flag:** per-session `Arc<AtomicBool>` set by user-blocking
   tools (`mark_awaiting_user`, `ask_user_choice`, `request_approval`).
-  When set, duo coordinator suppresses peer-forwarding —
-  silent-on-hold protocol.
+  When set, the peer-forward router (`core/router.rs`) suppresses
+  forwarding — silent-on-hold protocol.
 - **Violations log:** append-only `violations.jsonl` at the data-dir
   root recording policy enforcement events (denied tool calls, post-
   commit greps that fired, policy file mutations).
