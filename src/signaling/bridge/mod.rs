@@ -361,11 +361,11 @@ impl SignalingBridge {
         }
     }
 
-    /// Drop a session's bridge-side state (project mapping + awaiting flag) when
-    /// it closes. Without this, `session_projects` + `session_awaiting` grow
-    /// unbounded across open→close cycles — each closed session leaks a map entry
-    /// (and a dangling `Arc<AtomicBool>`) for the process lifetime. Idempotent —
-    /// absent entries are fine. Called from `core::close_session`.
+    /// Drop ALL of a session's bridge-side per-session map state when it closes.
+    /// Without this, the per-session maps grow unbounded across open→close cycles —
+    /// each closed session leaks an entry (and dangling `Arc`s) for the process
+    /// lifetime. Idempotent — absent entries are fine. Called from
+    /// `core::close_session`.
     pub async fn unregister_session(&self, session_id: &str) {
         self.session_projects.lock().await.remove(session_id);
         self.session_awaiting.lock().await.remove(session_id);
@@ -379,6 +379,18 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(session_id);
+        // router_health — std::Mutex (mirrors reviewer_override above); the
+        // forward-path `insert` is never otherwise paired with a remove.
+        self.router_health
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
+        // pending — tokio Mutex of parked choices; a non-blocking ask_user_choice
+        // leaves a Parked entry whose receiver was dropped. Drop this session's.
+        self.pending
+            .lock()
+            .await
+            .retain(|_, p| p.choice.session_id != session_id);
     }
 
     /// A3b: record that the agent ran `cl_rescan` this session — a proxy for
