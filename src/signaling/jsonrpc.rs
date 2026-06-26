@@ -119,24 +119,29 @@ const EYES_ONLY_TOOLS: &[&str] = &["eyes_flag", "approve_finding"];
 /// the gate is about content authorship, not any write to a CL table.
 const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
 
-/// Valid IPAV phase tags accepted by `session_doc_write` / `session_doc_search`.
-/// Kept in sync with the `phase` enums in `protocol.rs` ToolDescriptors.
-const VALID_PHASES: [&str; 4] = ["investigate", "plan", "apply", "verify"];
-
 /// Parse + validate the optional `phase` arg shared by session_doc_write and
 /// session_doc_search. Returns Ok(None) when absent; Err with INVALID_PARAMS
-/// when present but outside the enum.
+/// when present but unparseable. Routed through `IpavPhase::parse` (the single
+/// source of truth, shared with `advance_phase`) and normalized to the canonical
+/// lowercase `tag()` — so the same phase string can't be valid for one phase
+/// tool and rejected by another (the old `VALID_PHASES` drift), and any accepted
+/// casing/chip stores as a consistent tag the IPAV tabs can match.
 fn parse_optional_phase(args: &Value) -> Result<Option<String>, JsonRpcError> {
     let raw = args.get("phase").and_then(Value::as_str);
-    if let Some(p) = raw {
-        if !VALID_PHASES.contains(&p) {
-            return Err(JsonRpcError::new(
+    match raw {
+        None => Ok(None),
+        Some(p) => match crate::core::ipav::IpavPhase::parse(p) {
+            Some(phase) => Ok(Some(phase.tag().to_string())),
+            None => Err(JsonRpcError::new(
                 JsonRpcError::INVALID_PARAMS,
-                format!("phase must be one of {:?}, got {:?}", VALID_PHASES, p),
-            ));
-        }
+                format!(
+                    "phase must be one of {}, got {:?}",
+                    crate::core::ipav::IpavPhase::error_hint(),
+                    p
+                ),
+            )),
+        },
     }
-    Ok(raw.map(str::to_string))
 }
 
 async fn call_tool(
@@ -236,12 +241,7 @@ async fn call_tool(
             let engine = args.get("engine").and_then(Value::as_str).map(str::to_string);
             let app = bridge
                 .app_handle()
-                .ok_or_else(|| {
-                    JsonRpcError::new(
-                        JsonRpcError::INTERNAL_ERROR,
-                        "Tauri AppHandle not yet initialized".to_string(),
-                    )
-                })?
+                .ok_or_else(JsonRpcError::app_handle_missing)?
                 .clone();
             match crate::signaling::web_search::run_search(app, &query, num_results, engine).await {
                 Ok(hits) => Ok(result_json(&hits, "[]")),
@@ -666,12 +666,9 @@ async fn call_tool(
             Ok(result_json(&report, "{}"))
         }
         "webview_screenshot" => {
-            let handle = bridge.app_handle().ok_or_else(|| {
-                JsonRpcError::new(
-                    JsonRpcError::INTERNAL_ERROR,
-                    "Tauri AppHandle not yet initialized".to_string(),
-                )
-            })?;
+            let handle = bridge
+                .app_handle()
+                .ok_or_else(JsonRpcError::app_handle_missing)?;
             let data_dir = bridge.data_dir().ok_or_else(|| {
                 JsonRpcError::new(
                     JsonRpcError::INTERNAL_ERROR,
@@ -700,18 +697,12 @@ async fn call_tool(
 
 fn eval_in_webview(bridge: &Arc<SignalingBridge>, js: &str) -> Result<(), JsonRpcError> {
     use tauri::Manager;
-    let handle = bridge.app_handle().ok_or_else(|| {
-        JsonRpcError::new(
-            JsonRpcError::INTERNAL_ERROR,
-            "Tauri AppHandle not yet initialized".to_string(),
-        )
-    })?;
-    let window = handle.get_webview_window("main").ok_or_else(|| {
-        JsonRpcError::new(
-            JsonRpcError::INTERNAL_ERROR,
-            "main webview not found".to_string(),
-        )
-    })?;
+    let handle = bridge
+        .app_handle()
+        .ok_or_else(JsonRpcError::app_handle_missing)?;
+    let window = handle
+        .get_webview_window("main")
+        .ok_or_else(JsonRpcError::webview_missing)?;
     window.eval(js).map_err(internal_err_no_prefix)?;
     Ok(())
 }

@@ -28,16 +28,33 @@ impl IpavPhase {
         }
     }
 
+    /// Canonical lowercase tag persisted as the `session_documents.phase` value
+    /// and matched by the IPAV document tabs. The single source of truth for the
+    /// session-doc phase vocabulary (`signaling/jsonrpc.rs::parse_optional_phase`
+    /// normalizes any accepted casing/chip through here).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            IpavPhase::Investigate => "investigate",
+            IpavPhase::Plan => "plan",
+            IpavPhase::Apply => "apply",
+            IpavPhase::Verify => "verify",
+        }
+    }
+
     /// Accept either single-letter chips (`I`/`P`/`A`/`V`) or full names
-    /// (`Investigate`/`Plan`/`Apply`/`Verify`). Used by both the external
-    /// driver MCP (chips) and the internal agent-callable advance_phase
-    /// (full names — matches what agents see in `[PHASE: …]` envelopes).
+    /// (`Investigate`/`Plan`/`Apply`/`Verify`), case-INSENSITIVELY. Used by
+    /// both the external driver MCP (chips) and the internal agent-callable
+    /// advance_phase (full names — matches what agents see in `[PHASE: …]`
+    /// envelopes). Case-insensitive so a lowercase `"apply"` arg (the form the
+    /// session-doc tools accept) can't be valid for one phase tool and rejected
+    /// by another — `signaling/jsonrpc.rs::parse_optional_phase` routes the
+    /// session-doc phase arg through here too.
     pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "I" | "Investigate" => IpavPhase::Investigate,
-            "P" | "Plan" => IpavPhase::Plan,
-            "A" | "Apply" => IpavPhase::Apply,
-            "V" | "Verify" => IpavPhase::Verify,
+        Some(match s.to_ascii_lowercase().as_str() {
+            "i" | "investigate" => IpavPhase::Investigate,
+            "p" | "plan" => IpavPhase::Plan,
+            "a" | "apply" => IpavPhase::Apply,
+            "v" | "verify" => IpavPhase::Verify,
             _ => return None,
         })
     }
@@ -105,8 +122,17 @@ mod tests {
         assert_eq!(IpavPhase::parse("Apply"), Some(IpavPhase::Apply));
         assert_eq!(IpavPhase::parse("V"), Some(IpavPhase::Verify));
         assert_eq!(IpavPhase::parse("Verify"), Some(IpavPhase::Verify));
-        assert_eq!(IpavPhase::parse("apply"), None, "case-sensitive");
         assert_eq!(IpavPhase::parse("Coffee"), None);
+    }
+
+    #[test]
+    fn parse_is_case_insensitive() {
+        // Lowercase full names (the form session_doc tools accept) now parse,
+        // so advance_phase and the session-doc phase arg can't drift on case.
+        assert_eq!(IpavPhase::parse("apply"), Some(IpavPhase::Apply));
+        assert_eq!(IpavPhase::parse("investigate"), Some(IpavPhase::Investigate));
+        assert_eq!(IpavPhase::parse("v"), Some(IpavPhase::Verify));
+        assert_eq!(IpavPhase::parse("PLAN"), Some(IpavPhase::Plan));
     }
 
     #[test]

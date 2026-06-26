@@ -35,6 +35,10 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
+    /// Optional structured error payload (JSON-RPC 2.0 §5.1 `data` member).
+    /// Reserved for spec-completeness — every error today is built via `new()`
+    /// with `data: None`, so it never serializes; populate it if a tool ever
+    /// needs to attach machine-readable error detail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
 }
@@ -51,6 +55,18 @@ impl JsonRpcError {
             message: message.into(),
             data: None,
         }
+    }
+
+    /// The Tauri `AppHandle` isn't wired yet (app still in setup, or a test
+    /// bridge has none). Shared by every webview / web_search tool in both the
+    /// internal and external dispatchers.
+    pub fn app_handle_missing() -> Self {
+        Self::new(Self::INTERNAL_ERROR, "Tauri AppHandle not yet initialized")
+    }
+
+    /// The "main" webview window wasn't found on the `AppHandle`.
+    pub fn webview_missing() -> Self {
+        Self::new(Self::INTERNAL_ERROR, "main webview not found")
     }
 }
 

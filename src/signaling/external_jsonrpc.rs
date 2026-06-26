@@ -665,13 +665,10 @@ async fn call_external_tool(
             Ok(result_json(&snapshot, "{}"))
         }
         "webview_screenshot" => {
-            let handle = core.app_handle.get().ok_or_else(|| {
-                JsonRpcError::new(
-                    JsonRpcError::INTERNAL_ERROR,
-                    "Tauri AppHandle not yet initialized (called before Tauri setup completed)"
-                        .to_string(),
-                )
-            })?;
+            let handle = core
+                .app_handle
+                .get()
+                .ok_or_else(JsonRpcError::app_handle_missing)?;
             let path =
                 crate::tauri_cmd::screenshot::capture_main_window(handle, &core.paths.data_dir)
                     .map_err(|e| internal_err("webview_screenshot", e))?;
@@ -697,18 +694,13 @@ async fn call_external_tool(
 /// inside it. Fire-and-forget — `eval()` doesn't return a value.
 fn eval_in_webview(core: &Arc<CoreAppState>, js: &str) -> Result<(), JsonRpcError> {
     use tauri::Manager;
-    let handle = core.app_handle.get().ok_or_else(|| {
-        JsonRpcError::new(
-            JsonRpcError::INTERNAL_ERROR,
-            "Tauri AppHandle not yet initialized".to_string(),
-        )
-    })?;
-    let window = handle.get_webview_window("main").ok_or_else(|| {
-        JsonRpcError::new(
-            JsonRpcError::INTERNAL_ERROR,
-            "main webview not found".to_string(),
-        )
-    })?;
+    let handle = core
+        .app_handle
+        .get()
+        .ok_or_else(JsonRpcError::app_handle_missing)?;
+    let window = handle
+        .get_webview_window("main")
+        .ok_or_else(JsonRpcError::webview_missing)?;
     window
         .eval(js)
         .map_err(|e| internal_err("webview.eval", e))?;
