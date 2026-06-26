@@ -3,6 +3,15 @@
 
 use super::*;
 
+/// The `sessions` columns every `query_as::<_, Session>` SELECT must list, in
+/// `Session` field order (also the flattened prefix for `SessionWithPreview`).
+/// Centralized so adding a column is one edit, not four — a missing column
+/// fails `query_as` at runtime, not compile time.
+const SESSION_COLUMNS: &str = "id, title, working_repo_path, created_at, closed_at, \
+    archived, brian_model_at_spawn, rain_model_at_spawn, brian_claude_session_id, \
+    rain_claude_session_id, rain_enabled, brian_model_id, rain_model_id, brian_effort, \
+    rain_effort, brian_ultracode, rain_ultracode, base_repo_path";
+
 impl Storage {
     pub async fn create_session(
         &self,
@@ -31,15 +40,9 @@ impl Storage {
     }
 
     pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        let row = sqlx::query_as::<_, Session>(
-            "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
-                    brian_model_at_spawn, rain_model_at_spawn, \
-                    brian_claude_session_id, rain_claude_session_id, \
-                    rain_enabled, brian_model_id, rain_model_id, \
-                    brian_effort, rain_effort, brian_ultracode, rain_ultracode, \
-                    base_repo_path \
-             FROM sessions WHERE id = ?",
-        )
+        let row = sqlx::query_as::<_, Session>(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE id = ?"
+        ))
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
@@ -79,20 +82,14 @@ impl Storage {
     /// tiebreaker so equal timestamps can't make tiles swap places between
     /// refreshes.
     pub async fn list_active_sessions(&self) -> Result<Vec<Session>> {
-        let rows = sqlx::query_as::<_, Session>(
-            "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
-                    brian_model_at_spawn, rain_model_at_spawn, \
-                    brian_claude_session_id, rain_claude_session_id, \
-                    rain_enabled, brian_model_id, rain_model_id, \
-                    brian_effort, rain_effort, brian_ultracode, rain_ultracode, \
-                    base_repo_path \
-             FROM sessions \
+        let rows = sqlx::query_as::<_, Session>(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions \
              WHERE archived = 0 AND closed_at IS NULL \
              ORDER BY COALESCE(\
                  (SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = sessions.id), \
                  created_at) DESC, \
-                 id ASC",
-        )
+                 id ASC"
+        ))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -104,13 +101,8 @@ impl Storage {
     /// `idx_messages_session_id` index the ORDER BY already uses, so there are
     /// no extra per-tile round-trips. Dashboard-only consumer (`list_sessions`).
     pub async fn list_active_sessions_with_preview(&self) -> Result<Vec<SessionWithPreview>> {
-        let rows = sqlx::query_as::<_, SessionWithPreview>(
-            "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
-                    brian_model_at_spawn, rain_model_at_spawn, \
-                    brian_claude_session_id, rain_claude_session_id, \
-                    rain_enabled, brian_model_id, rain_model_id, \
-                    brian_effort, rain_effort, brian_ultracode, rain_ultracode, \
-                    base_repo_path, \
+        let rows = sqlx::query_as::<_, SessionWithPreview>(&format!(
+            "SELECT {SESSION_COLUMNS}, \
                     (SELECT substr(m.content, 1, 200) FROM messages m \
                        WHERE m.session_id = sessions.id AND m.kind = 'text' \
                        ORDER BY m.id DESC LIMIT 1) AS last_message, \
@@ -122,8 +114,8 @@ impl Storage {
              ORDER BY COALESCE(\
                  (SELECT MAX(m.created_at) FROM messages m WHERE m.session_id = sessions.id), \
                  created_at) DESC, \
-                 id ASC",
-        )
+                 id ASC"
+        ))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -133,17 +125,11 @@ impl Storage {
     /// first. Surfaces in the Settings → Archive tab. `id ASC` tiebreaks the
     /// 1-second `datetime('now')` granularity for stable ordering.
     pub async fn list_closed_sessions(&self) -> Result<Vec<Session>> {
-        let rows = sqlx::query_as::<_, Session>(
-            "SELECT id, title, working_repo_path, created_at, closed_at, archived, \
-                    brian_model_at_spawn, rain_model_at_spawn, \
-                    brian_claude_session_id, rain_claude_session_id, \
-                    rain_enabled, brian_model_id, rain_model_id, \
-                    brian_effort, rain_effort, brian_ultracode, rain_ultracode, \
-                    base_repo_path \
-             FROM sessions \
+        let rows = sqlx::query_as::<_, Session>(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions \
              WHERE closed_at IS NOT NULL \
-             ORDER BY closed_at DESC, id ASC",
-        )
+             ORDER BY closed_at DESC, id ASC"
+        ))
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
