@@ -139,21 +139,6 @@ pub async fn cl_folder_search(
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn cl_register_read(
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
-    agent: String,
-    session_id: Option<String>,
-    project: String,
-    file_path: String,
-) -> Result<(), AppError> {
-    bridge
-        .cl_register_read(&agent, session_id.as_deref(), &project, &file_path)
-        .await?;
-    Ok(())
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct ClRescanReportView {
     pub added: Vec<String>,

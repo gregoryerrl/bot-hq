@@ -60,7 +60,6 @@ pub fn builder() -> Builder<tauri::Wry> {
         // CL
         cl::cl_index_search,
         cl::cl_folder_search,
-        cl::cl_register_read,
         cl::cl_rescan,
         cl::list_projects,
         cl::cl_read_file,
@@ -105,7 +104,6 @@ pub fn builder() -> Builder<tauri::Wry> {
         findings::list_session_findings,
         // Session documents
         docs::session_doc_search,
-        docs::session_doc_read,
         docs::compute_apply_diff,
         docs::summarize_session_doc,
         docs::validate_model,

@@ -48,17 +48,6 @@ pub async fn session_doc_search(
     Ok(docs.into_iter().map(Into::into).collect())
 }
 
-#[tauri::command]
-#[specta::specta]
-pub async fn session_doc_read(
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
-    session_id: String,
-    slug: String,
-) -> Result<Option<SessionDocumentView>, AppError> {
-    let doc = bridge.session_doc_read(&session_id, &slug).await?;
-    Ok(doc.map(Into::into))
-}
-
 /// One classified line of a unified `git diff`. `kind` is one of
 /// `"add" | "remove" | "hunk" | "file" | "context"` — order-sensitive
 /// classification per [`parse_diff_lines`].
