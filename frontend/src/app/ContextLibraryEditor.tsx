@@ -22,6 +22,7 @@ import {
 } from "./contextLibraryShared";
 import { FolderView } from "./ContextLibraryFolderView";
 import { PolicyForm } from "../components/PolicyForm";
+import { SegToggle } from "../components/ui/SegToggle";
 
 /** A CL file is a project policy blueprint when its basename is `policy.yaml`. */
 function isPolicyFile(filePath: string): boolean {
@@ -132,23 +133,15 @@ function ProjectPolicyEditor({
             {tab.project} · project policy
           </p>
         </div>
-        <div className="flex shrink-0 overflow-hidden rounded border border-outline-variant">
-          {(["form", "raw"] as const).map((v) => (
-            <button
-              key={v}
-              type="button"
-              onClick={() => setView(v)}
-              className={cn(
-                "px-3 py-1 font-label-caps text-label-caps transition-colors",
-                view === v
-                  ? "bg-primary/15 text-primary"
-                  : "bg-transparent text-on-surface-variant hover:text-on-surface",
-              )}
-            >
-              {v === "form" ? "Form" : "Raw YAML"}
-            </button>
-          ))}
-        </div>
+        <SegToggle<"form" | "raw">
+          value={view}
+          onChange={setView}
+          className="shrink-0"
+          options={[
+            { value: "form", label: "Form", tone: "warn" },
+            { value: "raw", label: "Raw YAML", tone: "warn" },
+          ]}
+        />
       </div>
       {view === "form" ? (
         <ProjectPolicyForm project={tab.project} />

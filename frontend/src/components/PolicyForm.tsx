@@ -2,6 +2,8 @@ import type { ForcePushMode, Policy, PushGateMode } from "../lib/bindings";
 import { cn } from "../lib/cn";
 import { terminalInputClass } from "../app/contextLibraryShared";
 import { Button } from "./ui/Button";
+import { SegToggle } from "./ui/SegToggle";
+import { useListEditor } from "../hooks/useListEditor";
 
 /**
  * Controlled, presentational editor for a {@link Policy}. Shared across all
@@ -109,50 +111,6 @@ function Field({
   );
 }
 
-type SegTone = "good" | "warn" | "danger";
-
-function SegToggle<T extends string>({
-  value,
-  options,
-  onChange,
-  disabled,
-}: {
-  value: T;
-  options: { value: T; label: string; tone: SegTone }[];
-  onChange: (v: T) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="flex overflow-hidden rounded border border-outline-variant">
-      {options.map((o) => {
-        const active = value === o.value;
-        const activeCls =
-          o.tone === "good"
-            ? "bg-success/15 text-success"
-            : o.tone === "warn"
-              ? "bg-primary/15 text-primary"
-              : "bg-error/20 text-on-error-container";
-        return (
-          <button
-            key={o.value}
-            type="button"
-            disabled={disabled}
-            onClick={() => onChange(o.value)}
-            className={cn(
-              "px-3 py-1 font-label-caps text-label-caps transition-colors disabled:opacity-50",
-              active
-                ? activeCls
-                : "bg-transparent text-on-surface-variant hover:text-on-surface",
-            )}
-          >
-            {o.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function StringList({
   items,
   placeholder,
@@ -164,10 +122,7 @@ function StringList({
   onChange: (next: string[]) => void;
   disabled?: boolean;
 }) {
-  const update = (i: number, v: string) =>
-    onChange(items.map((it, idx) => (idx === i ? v : it)));
-  const remove = (i: number) => onChange(items.filter((_, idx) => idx !== i));
-  const add = () => onChange([...items, ""]);
+  const { replaceAt, removeAt, append } = useListEditor(items, onChange);
 
   return (
     <div className="flex flex-col gap-2">
@@ -183,13 +138,13 @@ function StringList({
             value={it}
             disabled={disabled}
             placeholder={placeholder}
-            onChange={(e) => update(i, e.target.value)}
+            onChange={(e) => replaceAt(i, e.target.value)}
             className={cn(terminalInputClass, "flex-1")}
           />
           <button
             type="button"
             disabled={disabled}
-            onClick={() => remove(i)}
+            onClick={() => removeAt(i)}
             aria-label="Remove entry"
             className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
           >
@@ -198,7 +153,7 @@ function StringList({
         </div>
       ))}
       <div>
-        <Button variant="ghost" size="sm" onClick={add} disabled={disabled}>
+        <Button variant="ghost" size="sm" onClick={() => append("")} disabled={disabled}>
           + Add
         </Button>
       </div>

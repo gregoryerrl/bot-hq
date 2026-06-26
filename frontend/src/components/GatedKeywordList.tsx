@@ -1,8 +1,7 @@
 import type { ReactNode } from "react";
 import type { GatedKeyword, GateMode } from "../lib/bindings";
-import { cn } from "../lib/cn";
-
-const GATE_MODES: GateMode[] = ["gate", "auto_allow"];
+import { SegToggle } from "./ui/SegToggle";
+import { useListEditor } from "../hooks/useListEditor";
 
 interface GatedKeywordListProps {
   /** Current keyword rows (the caller's draft). */
@@ -35,11 +34,10 @@ export function GatedKeywordList({
   emptyState,
   footer,
 }: GatedKeywordListProps) {
+  const { replaceAt, removeAt, append } = useListEditor(value, onChange);
   const updateRow = (i: number, patch: Partial<GatedKeyword>) =>
-    onChange(value.map((k, idx) => (idx === i ? { ...k, ...patch } : k)));
-  const removeRow = (i: number) =>
-    onChange(value.filter((_, idx) => idx !== i));
-  const addRow = () => onChange([...value, { keyword: "", mode: "gate" }]);
+    replaceAt(i, { ...value[i], ...patch });
+  const addRow = () => append({ keyword: "", mode: "gate" });
 
   return (
     <>
@@ -56,33 +54,18 @@ export function GatedKeywordList({
                 placeholder={placeholder}
                 className={inputClassName}
               />
-              <div className="flex shrink-0 overflow-hidden rounded border border-outline-variant">
-                {GATE_MODES.map((m) => {
-                  const active = k.mode === m;
-                  const activeCls =
-                    m === "gate"
-                      ? "bg-primary/15 text-primary"
-                      : "bg-success/15 text-success";
-                  return (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => updateRow(i, { mode: m })}
-                      className={cn(
-                        "px-2.5 py-1 font-label-caps text-label-caps transition-colors",
-                        active
-                          ? activeCls
-                          : "bg-transparent text-on-surface-variant hover:text-on-surface",
-                      )}
-                    >
-                      {m === "gate" ? "Gate" : "Auto-allow"}
-                    </button>
-                  );
-                })}
-              </div>
+              <SegToggle<GateMode>
+                value={k.mode}
+                onChange={(mode) => updateRow(i, { mode })}
+                className="shrink-0"
+                options={[
+                  { value: "gate", label: "Gate", tone: "warn" },
+                  { value: "auto_allow", label: "Auto-allow", tone: "good" },
+                ]}
+              />
               <button
                 type="button"
-                onClick={() => removeRow(i)}
+                onClick={() => removeAt(i)}
                 aria-label="Remove keyword"
                 className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
               >
