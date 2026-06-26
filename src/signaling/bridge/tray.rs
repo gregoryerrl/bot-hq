@@ -667,16 +667,13 @@ impl SignalingBridge {
             .collect()
     }
 
-    /// Called by the MCP `tools/call` handler for `mark_awaiting_user`. This
-    /// is async (was previously sync) because we need to set the halt flag
-    /// before the agent's next chunk can volley.
-    ///
-    /// Also writes a `kind=halt` row to `session_tray` so the per-session tray
-    /// surfaces the wait alongside any actual choice/open-ask questions. The
-    /// dashboard tile counter and the header bell both read this DURABLE row via
-    /// `list_pending_tray` (NOT the in-memory pending map, which halts don't
-    /// populate) — so the wait is reflected and survives a restart.
-    pub async fn mark_awaiting_user(&self, session_id: String, agent: String, reason: String) {
+    /// Shared tail of `mark_awaiting_user` + `request_phase_advance`: flag the
+    /// session awaiting, write a durable `kind=halt` row to `session_tray` (so
+    /// the per-session tray, dashboard tile counter, and header bell reflect the
+    /// wait via `list_pending_tray` — NOT the in-memory pending map, which halts
+    /// don't populate — and it survives a restart), then emit `AwaitingUser` so
+    /// the duo's peer-forward halts until the user acts.
+    async fn emit_halt_row(&self, session_id: String, agent: String, text: String) {
         self.set_session_awaiting(&session_id).await;
         let choice_id = Uuid::new_v4().to_string();
         self.persist_question(
@@ -684,7 +681,7 @@ impl SignalingBridge {
             &choice_id,
             &agent,
             crate::storage::QuestionKind::Halt,
-            &reason,
+            &text,
             None,
             None,
             None,
@@ -693,8 +690,15 @@ impl SignalingBridge {
         let _ = self.event_tx.send(SignalingEvent::AwaitingUser {
             session_id,
             agent,
-            reason,
+            reason: text,
         });
+    }
+
+    /// Called by the MCP `tools/call` handler for `mark_awaiting_user`. This
+    /// is async (was previously sync) because we need to set the halt flag
+    /// before the agent's next chunk can volley.
+    pub async fn mark_awaiting_user(&self, session_id: String, agent: String, reason: String) {
+        self.emit_halt_row(session_id, agent, reason).await;
     }
 
     /// Agent-initiated IPAV phase advance request. Persists a chat message
@@ -737,24 +741,7 @@ impl SignalingBridge {
                 }
             }
         }
-        self.set_session_awaiting(&session_id).await;
-        let choice_id = Uuid::new_v4().to_string();
-        self.persist_question(
-            &session_id,
-            &choice_id,
-            &agent,
-            crate::storage::QuestionKind::Halt,
-            &body,
-            None,
-            None,
-            None,
-        )
-        .await;
-        let _ = self.event_tx.send(SignalingEvent::AwaitingUser {
-            session_id,
-            agent,
-            reason: body,
-        });
+        self.emit_halt_row(session_id, agent, body).await;
     }
 }
 
