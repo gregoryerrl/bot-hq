@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
+import { useDragResize } from "../hooks/useDragResize";
 import type {
   ClFolderView,
   ClIndexEntryView,
@@ -82,31 +83,14 @@ export function ContextLibrary() {
       ? saved
       : SIDEBAR_DEFAULT_PX;
   });
-  const onSidebarHandleDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const container = containerRef.current;
-    if (!container) return;
-    let latest = sidebarWidth;
-    const onMove = (ev: MouseEvent) => {
-      const rect = container.getBoundingClientRect();
-      latest = Math.min(
-        SIDEBAR_MAX_PX,
-        Math.max(SIDEBAR_MIN_PX, ev.clientX - rect.left),
-      );
-      setSidebarWidth(latest);
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      localStorage.setItem("bot-hq.cl.sidebarWidth", String(Math.round(latest)));
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  };
+  const onSidebarHandleDown = useDragResize({
+    containerRef,
+    value: sidebarWidth,
+    setValue: setSidebarWidth,
+    storageKey: "bot-hq.cl.sidebarWidth",
+    compute: (ev, rect) =>
+      Math.min(SIDEBAR_MAX_PX, Math.max(SIDEBAR_MIN_PX, ev.clientX - rect.left)),
+  });
 
   const [rescanning, setRescanning] = useState(false);
   const [rescanReport, setRescanReport] = useState<ClRescanReportView | null>(

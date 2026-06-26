@@ -5,13 +5,9 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
-import { terminalInputClass, SaveIcon } from "./contextLibraryShared";
-import type { ModelView } from "../lib/bindings";
+import { terminalInputClass, SaveIcon, FieldLabel } from "./contextLibraryShared";
+import type { ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
-
-// Inline shape of the backend `ValidateResult` (kept local so this feature
-// doesn't depend on the generated bindings — those land in their own regen).
-type ProbeResult = { ok: boolean; message: string };
 
 const selectClass =
   "w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary";
@@ -21,14 +17,6 @@ const PROVIDERS = ["anthropic", "openai", "deepseek", "local"] as const;
 // Shared 5-column grid for the header row + each model row.
 const rowGridClass =
   "grid grid-cols-[minmax(10rem,1.4fr)_8rem_minmax(8rem,1fr)_9rem_12rem] items-center gap-3 px-4";
-
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-      {children}
-    </span>
-  );
-}
 
 /**
  * Settings → Models. A pure registry of saved LLM endpoints (display name +
@@ -54,7 +42,7 @@ export function ModelsPanel() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   // B5: per-model pre-flight "Test connection" state + last result.
   const [testing, setTesting] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<Record<string, ProbeResult>>({});
+  const [testResult, setTestResult] = useState<Record<string, ValidateResult>>({});
 
   const onTest = async (id: string) => {
     setTesting(id);
@@ -64,7 +52,7 @@ export function ModelsPanel() {
       return next;
     });
     try {
-      const res = await invoke<ProbeResult>("validate_model", {
+      const res = await invoke<ValidateResult>("validate_model", {
         modelId: id,
       });
       setTestResult((r) => ({ ...r, [id]: res }));

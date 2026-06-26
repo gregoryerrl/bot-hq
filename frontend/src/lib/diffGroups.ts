@@ -8,7 +8,7 @@ export interface DiffLine {
   text: string;
 }
 
-export interface DiffFileGroup {
+interface DiffFileGroup {
   /** Display name (the new `b/` path, falling back to the old `a/` path). */
   file: string;
   lines: DiffLine[];

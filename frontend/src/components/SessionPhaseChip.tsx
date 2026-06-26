@@ -1,7 +1,7 @@
 import { cn } from "../lib/cn";
 import { phaseBucket } from "../lib/phase";
 
-export interface SessionPhaseChipProps {
+interface SessionPhaseChipProps {
   /** Raw phase string from `get_session_phase` (lowercased). Null = unknown / not live. */
   phase: string | null;
   /** True when the session row's `closed_at` is set — forces a DONE chip. */

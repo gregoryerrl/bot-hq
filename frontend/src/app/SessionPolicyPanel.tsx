@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { useServerDraft } from "../hooks/useServerDraft";
 import type {
   GatedKeyword,
   Policy,
@@ -43,17 +44,7 @@ export function SessionPolicyPanel({
 
   // Re-hydrate the draft whenever the server snapshot changes (initial load +
   // post-save refetch), matching the Settings draft/dirty idiom.
-  const serverJson = JSON.stringify(server ?? {});
-  const [draft, setDraft] = useState<Policy>(server ?? {});
-  const lastServer = useRef(serverJson);
-  useEffect(() => {
-    if (lastServer.current !== serverJson) {
-      lastServer.current = serverJson;
-      setDraft(server ?? {});
-    }
-  }, [serverJson, server]);
-
-  const dirty = JSON.stringify(draft) !== serverJson;
+  const { draft, setDraft, dirty } = useServerDraft<Policy>(server ?? {});
   const [saved, setSaved] = useState(false);
   useEffect(() => {
     if (!saved) return;
@@ -255,17 +246,7 @@ function SessionToolGateSection({ sessionId }: { sessionId: string }) {
     { sessionId: string; keywords: GatedKeyword[] }
   >("set_session_tool_gate");
 
-  const serverJson = JSON.stringify(server);
-  const [draft, setDraft] = useState<GatedKeyword[]>(server);
-  const lastServer = useRef(serverJson);
-  useEffect(() => {
-    if (lastServer.current !== serverJson) {
-      lastServer.current = serverJson;
-      setDraft(server);
-    }
-  }, [serverJson, server]);
-
-  const dirty = JSON.stringify(draft) !== serverJson;
+  const { draft, setDraft, dirty } = useServerDraft<GatedKeyword[]>(server);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
     if (!saved) return;

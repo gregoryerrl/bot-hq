@@ -9,7 +9,7 @@ import { HealthDot, RouterHealthDot } from "./HealthDot";
 import { authorColorClass } from "./authorColor";
 import { WarnIcon } from "./icons";
 
-export interface SessionTileProps {
+interface SessionTileProps {
   session: SessionInfo;
   /** Count of items awaiting the user for this session (durable tray). The tile
    *  only INDICATES — the user answers on the session's Tray tab. */

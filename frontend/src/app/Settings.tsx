@@ -2,10 +2,11 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from "rea
 import { Link, useBlocker } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
+import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
-import { terminalInputClass } from "./contextLibraryShared";
+import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
 import { SaveIcon } from "./contextLibraryShared";
 import { WrenchIcon, EyeIcon, GearIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
@@ -168,17 +169,7 @@ function GlobalPolicyPanel() {
   );
   const save = useTauriMutation<void, { policy: Policy }>("set_general_policy");
 
-  const serverJson = JSON.stringify(server ?? {});
-  const [draft, setDraft] = useState<Policy>(server ?? {});
-  const lastServer = useRef(serverJson);
-  useEffect(() => {
-    if (lastServer.current !== serverJson) {
-      lastServer.current = serverJson;
-      setDraft(server ?? {});
-    }
-  }, [serverJson, server]);
-
-  const dirty = JSON.stringify(draft) !== serverJson;
+  const { draft, setDraft, dirty } = useServerDraft<Policy>(server ?? {});
 
   const onSave = async () => {
     await save.mutateAsync({ policy: draft });
@@ -801,18 +792,7 @@ function ToolGateSection() {
   // The server list is the baseline; `draft` holds in-progress edits. Re-
   // hydrate the draft whenever the server list changes (initial load + after a
   // save's refetch) so dirty-tracking compares against the persisted state.
-  const serverJson = JSON.stringify(keywords);
-  const [draft, setDraft] = useState<GatedKeyword[]>(keywords);
-  const lastServer = useRef(serverJson);
-  useEffect(() => {
-    if (lastServer.current !== serverJson) {
-      lastServer.current = serverJson;
-      setDraft(keywords);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [serverJson]);
-
-  const dirty = JSON.stringify(draft) !== serverJson;
+  const { draft, setDraft, dirty } = useServerDraft<GatedKeyword[]>(keywords);
 
   const onSave = async () => {
     // Drop blank keywords — they match nothing and only clutter the file.
@@ -893,14 +873,6 @@ function ToolGateSection() {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-      {children}
-    </span>
-  );
-}
 
 function roleBorder(name: string): string {
   switch (name) {

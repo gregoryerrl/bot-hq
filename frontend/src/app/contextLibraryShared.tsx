@@ -46,6 +46,15 @@ export const terminalInputClass = cn(
   "focus:border-primary focus:outline-none",
 );
 
+/** Caps label above a form field. Shared by Settings + ModelsPanel. */
+export function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+      {children}
+    </span>
+  );
+}
+
 export function baseName(filePath: string): string {
   const parts = filePath.split("/");
   return parts[parts.length - 1] || filePath;

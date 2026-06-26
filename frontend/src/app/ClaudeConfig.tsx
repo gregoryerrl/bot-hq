@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
+import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { SaveIcon } from "./contextLibraryShared";
@@ -142,17 +143,8 @@ export function ClaudeConfigPanel() {
 
   // Draft override store, re-hydrated whenever the server copy changes
   // (initial load + after a save refetch) — same pattern as ToolGateSection.
-  const serverJson = JSON.stringify(serverOverrides ?? {});
-  const [draft, setDraft] = useState<ClaudeOverrides>(serverOverrides ?? {});
-  const lastServer = useRef(serverJson);
-  useEffect(() => {
-    if (lastServer.current !== serverJson) {
-      lastServer.current = serverJson;
-      setDraft(serverOverrides ?? {});
-    }
-  }, [serverJson, serverOverrides]);
-
-  const overridesDirty = JSON.stringify(draft) !== serverJson;
+  const { draft, setDraft, dirty: overridesDirty } =
+    useServerDraft<ClaudeOverrides>(serverOverrides ?? {});
   const dirty = overridesDirty || pendingCount > 0;
   const all: AgentOverride = draft._all ?? emptyAll();
   const brian: AgentOverride = draft.brian ?? emptyAll();
@@ -565,13 +557,12 @@ function Row({
 }
 
 /** Effort levels offered to agents + the global env-routed knob. `max` is
- *  session-only in claude-code and only persists via CLAUDE_CODE_EFFORT_LEVEL.
- *  Exported so the create-session dialog can reuse the same control. */
-export const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
+ *  session-only in claude-code and only persists via CLAUDE_CODE_EFFORT_LEVEL. */
+const EFFORT_OPTS = ["low", "medium", "high", "xhigh", "max"];
 
 /** Minimal shape `AgentEffortOverride` reads/writes — lets callers drive it from
  *  either the override store (`AgentOverride`) or plain local state (the dialog). */
-export type EffortOverrideValue = {
+type EffortOverrideValue = {
   effort?: string | null;
   ultracode?: boolean | null;
 };

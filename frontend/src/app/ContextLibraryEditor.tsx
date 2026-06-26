@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
+import { useServerDraft } from "../hooks/useServerDraft";
 import { cn } from "../lib/cn";
 import type {
   ClFileContentView,
@@ -171,17 +172,7 @@ function ProjectPolicyForm({ project }: { project: string }) {
     "set_project_policy",
   );
 
-  const serverJson = JSON.stringify(server ?? {});
-  const [draft, setDraft] = useState<Policy>(server ?? {});
-  const lastServer = useRef(serverJson);
-  useEffect(() => {
-    if (lastServer.current !== serverJson) {
-      lastServer.current = serverJson;
-      setDraft(server ?? {});
-    }
-  }, [serverJson, server]);
-
-  const dirty = JSON.stringify(draft) !== serverJson;
+  const { draft, setDraft, dirty } = useServerDraft<Policy>(server ?? {});
 
   const onSave = async () => {
     await save.mutateAsync({ project, policy: draft });

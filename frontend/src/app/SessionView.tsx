@@ -7,6 +7,7 @@ import { useHealthStore } from "../stores/health";
 import { useActivityStore } from "../stores/activity";
 import { HealthDot, RouterHealthDot } from "../components/HealthDot";
 import { useStickyScroll } from "../hooks/useStickyScroll";
+import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
 import { ChatMessage } from "../components/ChatMessage";
@@ -79,29 +80,14 @@ export function SessionView() {
     const saved = Number(localStorage.getItem("bothq:split:leftPct"));
     return Number.isFinite(saved) && saved >= 25 && saved <= 75 ? saved : 60;
   });
-  const onSplitHandleDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const container = splitContainerRef.current;
-    if (!container) return;
-    let latest = leftPct;
-    const onMove = (ev: MouseEvent) => {
-      const rect = container.getBoundingClientRect();
-      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
-      latest = Math.min(75, Math.max(25, pct));
-      setLeftPct(latest);
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      localStorage.setItem("bothq:split:leftPct", String(Math.round(latest)));
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-  };
+  const onSplitHandleDown = useDragResize({
+    containerRef: splitContainerRef,
+    value: leftPct,
+    setValue: setLeftPct,
+    storageKey: "bothq:split:leftPct",
+    compute: (ev, rect) =>
+      Math.min(75, Math.max(25, ((ev.clientX - rect.left) / rect.width) * 100)),
+  });
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
