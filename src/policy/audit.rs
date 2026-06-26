@@ -164,6 +164,16 @@ fn audit_one(
             *dirty = true;
             MutationOutcome::FirstSeen
         }
+        // Format migration (e.g. the v1 16-char DefaultHasher hash → the 64-char
+        // SHA-256): a different hash LENGTH means the algorithm changed, not the
+        // file's content. Re-baseline silently — record the new hash, log NO
+        // mutation — so an upgrade doesn't fire a spurious PolicyMutation for
+        // every policy file on its first post-upgrade audit.
+        Some(prev) if prev.len() != hash.len() => {
+            cache.entries.insert(key, hash);
+            *dirty = true;
+            MutationOutcome::FirstSeen
+        }
         Some(prev) if prev == hash => MutationOutcome::Unchanged,
         Some(prev) => {
             cache.entries.insert(key, hash.clone());
@@ -197,11 +207,16 @@ pub fn record_policy_write(data_dir: &Path, path: &Path) -> Result<()> {
     cache.save(data_dir)
 }
 
+/// SHA-256 hex digest (64 lowercase hex chars). Replaces the old non-cryptographic
+/// `DefaultHasher` (16 hex chars): the v1 hash was only 64-bit (weak collision
+/// resistance for a tamper-detection mechanism) AND `DefaultHasher` is explicitly
+/// NOT stable across Rust releases — a toolchain bump would have re-hashed every
+/// policy file and logged a spurious `PolicyMutation`. The digest LENGTH (64 vs the
+/// legacy 16) is also the format-migration discriminator in `audit_one`.
 fn content_hash(content: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut h);
-    format!("{:016x}", h.finish())
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(content.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Synchronously append a PolicyMutation entry to the log. This runs from both
@@ -306,6 +321,39 @@ mod tests {
         let recs = log.read_all().unwrap();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].kind, ViolationKind::PolicyMutation);
+    }
+
+    #[test]
+    fn legacy_short_hash_rebaselines_without_logging_a_mutation() {
+        // A pre-upgrade cache holds a v1 16-char DefaultHasher hash for the file.
+        // After the SHA-256 upgrade the new hash is 64 chars → the length differs →
+        // audit_one must RE-BASELINE (FirstSeen, no PolicyMutation), not report a
+        // spurious Changed for every policy file on first post-upgrade audit.
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(crate::paths::config_dir_path(data.path())).unwrap();
+        let pol = crate::policy::general_policy_path(data.path());
+        std::fs::write(&pol, "forbidden_in_commits:\n  - Acme\n").unwrap();
+        // Seed the cache with a legacy 16-char entry for this file.
+        let mut cache = HashCache::default();
+        cache
+            .entries
+            .insert(pol.display().to_string(), "0123456789abcdef".to_string());
+        cache.save(data.path()).unwrap();
+
+        let log = ViolationsLog::new(data.path());
+        let outcomes = audit_policy_files(data.path(), None, Some(&log), "s1", "agent").unwrap();
+        assert_eq!(
+            outcomes[0].1,
+            MutationOutcome::FirstSeen,
+            "legacy-length hash must re-baseline, not report Changed"
+        );
+        assert!(
+            log.read_all().unwrap().is_empty(),
+            "the format migration must not log a PolicyMutation"
+        );
+        // The cache now holds the 64-char SHA-256 → the next audit is Unchanged.
+        let outcomes2 = audit_policy_files(data.path(), None, Some(&log), "s1", "agent").unwrap();
+        assert_eq!(outcomes2[0].1, MutationOutcome::Unchanged);
     }
 
     #[test]
