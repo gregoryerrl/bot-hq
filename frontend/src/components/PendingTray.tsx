@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
+import { BellIcon } from "./icons";
 
 // `list_pending_tray` returns durable pending session_tray rows for open
 // sessions. Typed locally rather than via the generated `SessionTrayView`
@@ -126,21 +127,3 @@ export function PendingTray() {
   );
 }
 
-function BellIcon() {
-  return (
-    <svg
-      aria-hidden
-      viewBox="0 0 16 16"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M8 1.5a3.5 3.5 0 0 0-3.5 3.5v2.086c0 .31-.123.608-.343.828L3 9.07v.43h10v-.43l-1.157-1.157a1.17 1.17 0 0 1-.343-.828V5A3.5 3.5 0 0 0 8 1.5Z" />
-      <path d="M6.5 12a1.5 1.5 0 0 0 3 0" />
-    </svg>
-  );
-}

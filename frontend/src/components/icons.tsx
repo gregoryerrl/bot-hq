@@ -3,11 +3,10 @@ import type { SVGProps, ReactNode } from "react";
 export type IconProps = SVGProps<SVGSVGElement> & { size?: number };
 
 /**
- * Shared outline-icon base. Matches the house style of `PendingTray`'s
- * `BellIcon` — `fill="none"`, `stroke="currentColor"`, round caps/joins — so
- * every icon reads as an outline that inherits the surrounding text color.
- * Use these instead of emoji/dingbat glyphs (which render filled and clash
- * with the Industrial Terminal styling).
+ * Shared outline-icon base — `fill="none"`, `stroke="currentColor"`, round
+ * caps/joins — so every icon reads as an outline that inherits the surrounding
+ * text color. Use these instead of emoji/dingbat glyphs (which render filled
+ * and clash with the Industrial Terminal styling).
  */
 function Svg({
   size = 16,
@@ -29,6 +28,16 @@ function Svg({
     >
       {children}
     </svg>
+  );
+}
+
+/** Notification bell — the pending-tray indicator. */
+export function BellIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </Svg>
   );
 }
 
