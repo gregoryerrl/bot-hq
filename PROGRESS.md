@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-594 Rust tests passing (543 lib + 33 external MCP + 7 signaling + 11
+595 Rust tests passing (544 lib + 33 external MCP + 7 signaling + 11
 storage) plus 109 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,40 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-27 — codebase audit round 4 (optimizations + enhancements)
+
+A read-only audit through a NEW lens — performance + architecture (rounds
+1–3 exhausted dead-code / dedup / staleness) — with the safe wins shipped.
+An independent fan-out audit and EYES both converged: the codebase is lean
+and the schema well-indexed; the wins are targeted, not sweeping. On branch
+`brian/audit-round4` (6 commits).
+
+- **Peer-forward path allocations** — the per-turn forward path no longer
+  runs a `SELECT COUNT(*) FROM findings` + storage-lock for the banner (now
+  a lock-free `Arc<AtomicUsize>` the findings mutators recompute on their
+  cold path); the volley-convergence check caches the previous turn's token
+  set instead of cloning the body + re-tokenizing both sides; tool-event
+  rows serialize via borrow-structs (byte-identical JSON) not an
+  intermediate `serde_json::Value`; the batch emitter swaps its dirty set
+  back (`mem::take`) for zero steady-state flush allocs; and `session_id`
+  rides the message-persist path as `Arc<str>`.
+- **SQL** — added `idx_messages_session_author_time` (migration 0023) for
+  the one uncovered hot predicate (`has_message_from_author_since`); the
+  rest of the schema was confirmed well-indexed (no N+1; purpose-built
+  partial indexes already cover the tray + findings reads).
+- **Frontend renders** — the Context Library sidebar memoizes its O(files)
+  tree build (was rebuilt on every search keystroke + sidebar drag) plus its
+  nodes / editor pane (callbacks stabilized so the memos hold); the shared
+  Markdown renderer is memoized so IPAV docs stop re-parsing on tray / TL;DR
+  toggles.
+- **Policy-mutation hash → SHA-256** — replaced the non-cryptographic,
+  toolchain-unstable `DefaultHasher` with SHA-256, with a re-baseline guard
+  so the 16→64-char format change doesn't log a spurious `PolicyMutation`
+  for every policy file on upgrade.
+- **Docs** — un-staled PLAN.md's "persistent IPAV phase log" (phase changes
+  are already persisted as `kind='phase_change'` messages; only a queryable
+  view is missing).
 
 ## 2026-06-26 — codebase audit rounds 2 + 3 (remediation)
 
