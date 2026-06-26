@@ -298,14 +298,6 @@ async clFolderSearch(project: string | null, query: string | null) : Promise<Res
     else return { status: "error", error: e  as any };
 }
 },
-async clRegisterRead(agent: string, sessionId: string | null, project: string, filePath: string) : Promise<Result<null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cl_register_read", { agent, sessionId, project, filePath }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async clRescan(project: string) : Promise<Result<ClRescanReportView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cl_rescan", { project }) };
@@ -743,14 +735,6 @@ async sessionDocSearch(sessionId: string, query: string | null, phase: string | 
     else return { status: "error", error: e  as any };
 }
 },
-async sessionDocRead(sessionId: string, slug: string) : Promise<Result<SessionDocumentView | null, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("session_doc_read", { sessionId, slug }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * Run `git diff --no-color <session_start_sha>` (falling back to
  * `git diff HEAD` if the anchor was never captured) inside the session's
@@ -1051,9 +1035,9 @@ keyword: string; mode: GateMode }
 /**
  * Which agents pick up a given config surface from `~/.claude` at spawn, and
  * which don't. Drives the per-surface inheritance badges in the UI. This is
- * the canonical mapping derived from `spawn.rs::build_command` behavior:
- * Brian runs full claude-code (inherit), Rain runs `--bare` (skips
- * skills/plugins/hooks/CLAUDE.md), MCP is forwarded to Brian only, and
+ * the canonical mapping derived from `spawn.rs::build_command` behavior: both
+ * agents run full claude-code and inherit skills/plugins/hooks/CLAUDE.md
+ * (Rain's tool access is gated server-side, not by skipping inheritance);
  * model/permissions are overridden per-agent by bot-hq.
  */
 export type Inheritance = { 
@@ -1062,7 +1046,7 @@ export type Inheritance = {
  */
 inherited_by: string[]; 
 /**
- * Agents that do NOT (Rain via `--bare`, or because bot-hq overrides it).
+ * Agents that do NOT — because bot-hq overrides the surface per-agent.
  */
 skipped_by: string[]; 
 /**
@@ -1334,9 +1318,9 @@ brian_busy: boolean; rain_busy: boolean; brian_health: string | null; rain_healt
 router_alive: boolean | null }
 /**
  * One durable `session_tray` row, projected for the session-view Tray tab.
- * Unlike [`PendingChoiceView`] (live in-memory pending only), this surfaces
- * every tray item for the session — pending AND resolved history — so the tab
- * shows what accumulated even across restarts.
+ * Unlike the live in-memory pending view (`list_pending_choices`), this
+ * surfaces every tray item for the session — pending AND resolved history —
+ * so the tab shows what accumulated even across restarts.
  */
 export type SessionTrayView = { id: number; session_id: string; choice_id: string; agent: string; kind: string; prompt: string; options: string[]; status: string; picked_option: string | null; 
 /**
