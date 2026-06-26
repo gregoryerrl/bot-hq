@@ -20,7 +20,6 @@ use tracing::{debug, warn};
 pub struct DuoConfig {
     pub session_id: String,
     pub author: Author,
-    pub peer_author: Author,
     /// Sender to the central peer-forward router (`core::router`). The pump emits
     /// a `RouterCommand::Forward` here on each completed turn that buffered prose;
     /// the router is the single decision point (forward / suppress / break the
@@ -55,11 +54,10 @@ pub struct DuoConfig {
 }
 
 impl DuoConfig {
-    pub fn new(session_id: impl Into<String>, author: Author, peer_author: Author) -> Self {
+    pub fn new(session_id: impl Into<String>, author: Author) -> Self {
         Self {
             session_id: session_id.into(),
             author,
-            peer_author,
             router_tx: None,
             bridge: None,
             self_input_tx: None,
@@ -429,11 +427,10 @@ mod tests {
         (s, st)
     }
 
-    fn fast_cfg(author: Author, peer: Author) -> DuoConfig {
+    fn fast_cfg(author: Author) -> DuoConfig {
         DuoConfig {
             session_id: "s1".into(),
             author,
-            peer_author: peer,
             router_tx: None,
             bridge: None,
             self_input_tx: None,
@@ -447,11 +444,11 @@ mod tests {
     /// test can assert WHICH `RouterCommand`s the pump emits. The pump's contract
     /// is "emit the right Forward on a completed turn"; the router's decision logic
     /// (forward / suppress / break) is tested in `core::router`.
-    fn cfg_with_route(author: Author, peer: Author) -> (DuoConfig, mpsc::Receiver<RouterCommand>) {
+    fn cfg_with_route(author: Author) -> (DuoConfig, mpsc::Receiver<RouterCommand>) {
         let (route_tx, route_rx) = mpsc::channel(16);
         let cfg = DuoConfig {
             router_tx: Some(route_tx),
-            ..fast_cfg(author, peer)
+            ..fast_cfg(author)
         };
         (cfg, route_rx)
     }
@@ -476,7 +473,7 @@ mod tests {
         // unbounded error-spam loop. The pump must emit NO RouterCommand; the error
         // text is still persisted (UI visibility).
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Rain, Author::Brian);
+        let (cfg, mut route_rx) = cfg_with_route(Author::Rain);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -511,7 +508,7 @@ mod tests {
         // I/P is turn-based: text does NOT emit a Forward mid-turn; the pump emits
         // exactly one Forward on TurnComplete carrying the buffered text.
         let (storage, state) = setup().await; // default phase = Investigate
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian, Author::Rain);
+        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -549,7 +546,7 @@ mod tests {
         let (storage, state) = setup().await;
         state.lock().await.current_phase = IpavPhase::Apply;
 
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian, Author::Rain);
+        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -581,7 +578,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn turn_complete_emits_forward() {
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian, Author::Rain);
+        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
 
@@ -605,7 +602,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn tool_use_persists_but_emits_no_forward() {
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian, Author::Rain);
+        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -646,7 +643,7 @@ mod tests {
         // peer_ack is PASSED THROUGH to the router (which suppresses the wake): the
         // pump emits a Forward with peer_ack=true. The text is still persisted.
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian, Author::Rain);
+        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -691,7 +688,7 @@ mod tests {
         // The peer_ack flag applies only to the turn it was called in: turn 1's
         // Forward carries peer_ack=true, turn 2's (no ack) carries peer_ack=false.
         let (storage, state) = setup().await;
-        let (cfg, mut route_rx) = cfg_with_route(Author::Brian, Author::Rain);
+        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
 
@@ -789,7 +786,7 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(false));
         let cfg = DuoConfig {
             in_atomic_tool: Some(Arc::clone(&flag)),
-            ..fast_cfg(Author::Brian, Author::Rain)
+            ..fast_cfg(Author::Brian)
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
 
@@ -845,7 +842,7 @@ mod tests {
         let flag = Arc::new(AtomicBool::new(false));
         let cfg = DuoConfig {
             in_atomic_tool: Some(Arc::clone(&flag)),
-            ..fast_cfg(Author::Brian, Author::Rain)
+            ..fast_cfg(Author::Brian)
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
 
@@ -888,7 +885,7 @@ mod tests {
         let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = DuoConfig {
             self_input_tx: Some(self_tx),
-            ..fast_cfg(Author::Brian, Author::Rain)
+            ..fast_cfg(Author::Brian)
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
 
@@ -917,7 +914,7 @@ mod tests {
         let (self_tx, mut self_rx) = mpsc::channel(8);
         let cfg = DuoConfig {
             self_input_tx: Some(self_tx),
-            ..fast_cfg(Author::Brian, Author::Rain)
+            ..fast_cfg(Author::Brian)
         };
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
 

@@ -660,7 +660,7 @@ async fn spawn_session_handle(
         // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
         // before the Apply phase.
         self_input_tx: Some(brian_handle.input_tx.clone()),
-        ..DuoConfig::new(session_id_clone, Author::Brian, Author::Rain)
+        ..DuoConfig::new(session_id_clone, Author::Brian)
     };
     tokio::spawn(async move {
         pump_agent(brian_duo, brian_events, storage_clone, ipav_clone).await;
@@ -679,7 +679,7 @@ async fn spawn_session_handle(
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
             liveness: Some(Arc::clone(&rain_liveness)),
-            ..DuoConfig::new(session_id_clone, Author::Rain, Author::Brian)
+            ..DuoConfig::new(session_id_clone, Author::Rain)
         };
         tokio::spawn(async move {
             pump_agent(rain_duo, rain_events, storage_clone, ipav_clone).await;
