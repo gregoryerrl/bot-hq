@@ -131,10 +131,11 @@ loading for the icon font.
   requires session restart for the agent to see new rules (though hooks
   + MCP tools always re-resolve on call). Consider a "policy reload"
   banner that re-spawns the duo.
-- **Persistent IPAV phase log.** IPAV is in-memory only. Phase
-  transitions are visible in chat as synthetic user messages, but the
-  per-session phase history isn't queryable. Worth keeping for
-  retrospectives (which phases consumed the most time).
+- **Persistent IPAV phase log.** Phase transitions ARE already persisted
+  — `advance_phase` writes a `messages` row with `kind='phase_change'`
+  (`core/state.rs`), so the per-session phase history survives in storage.
+  What's missing is a dedicated *queryable view* / retrospective surface
+  (which phases consumed the most time); the data layer already exists.
 - **Tray garbage collection.** ✅ Shipped — `purge_resolved_tray(90)` runs
   a boot-time sweep of resolved tray rows older than 90 days
   (`5d8d9f2`, `storage/tray.rs` + the main.rs boot sweep), keeping
