@@ -3,14 +3,14 @@
 //! These are baked into the binary so role identity can't drift if a user
 //! edits or deletes a CL file. Each prompt is intentionally short — behaviors
 //! that vary by project or user preference belong in
-//! `~/.bot-hq/agents/<name>/custom-instruction.md` (loaded after this).
+//! `<data_dir>/library/agents/<name>/custom-instruction.md` (loaded after this).
 //!
 //! Layering at session spawn (see core::session::read_system_prompt):
 //!   1. role prompt (this file)              — identity + ask-close convention
 //!   2. CL location anchor                    — index-first orientation
 //!   3. agents::general_rules::GENERAL_RULES  — hardcoded universal rules
-//!   4. ~/.bot-hq/custom-general-rules.md     — optional user additions
-//!   5. ~/.bot-hq/agents/<name>/custom-instruction.md — per-agent overrides
+//!   4. <data_dir>/library/custom-general-rules.md — optional user additions
+//!   5. <data_dir>/library/agents/<name>/custom-instruction.md — per-agent overrides
 //!   6. policy directive block                — rendered from policy.yaml
 
 pub const BRIAN_ROLE: &str = "\

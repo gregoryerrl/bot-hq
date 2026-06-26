@@ -40,9 +40,9 @@ pub async fn resolve_choice(
 }
 
 /// One durable `session_tray` row, projected for the session-view Tray tab.
-/// Unlike [`PendingChoiceView`] (live in-memory pending only), this surfaces
-/// every tray item for the session — pending AND resolved history — so the tab
-/// shows what accumulated even across restarts.
+/// Unlike the live in-memory pending view (`list_pending_choices`), this
+/// surfaces every tray item for the session — pending AND resolved history —
+/// so the tab shows what accumulated even across restarts.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct SessionTrayView {
     pub id: i64,

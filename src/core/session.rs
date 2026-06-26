@@ -843,9 +843,9 @@ pub fn user_mcp_servers_for_agent(agent_name: &str) -> serde_json::Map<String, s
 ///      conventions every agent follows. Baked into the binary so the load-
 ///      bearing parts (push gates, CL workflow, IPAV, prod safety) can't
 ///      drift if a user edits a CL file.
-///   4. **`<data_dir>/custom-general-rules.md`** — user-editable additions
-///      to the universal rules (optional).
-///   5. **`<data_dir>/agents/<name>/custom-instruction.md`** — per-agent
+///   4. **`<data_dir>/library/custom-general-rules.md`** — user-editable
+///      additions to the universal rules (optional).
+///   5. **`<data_dir>/library/agents/<name>/custom-instruction.md`** — per-agent
 ///      overrides (optional).
 ///   6. **Policy directive block** — rendered from policy.yaml, project-aware.
 ///

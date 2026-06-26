@@ -3,15 +3,15 @@
 //! Baked into the binary so the load-bearing parts (push gates, CL
 //! workflow, IPAV discipline, session-doc usage, prod-data safety)
 //! can't drift if a user edits or deletes a CL file. User-specific additions
-//! go in `<data_dir>/custom-general-rules.md`, which `read_system_prompt`
+//! go in `<data_dir>/library/custom-general-rules.md`, which `read_system_prompt`
 //! appends after this constant.
 //!
 //! Layering at session spawn (see `core::session::read_system_prompt`):
 //!   1. role prompt                                — identity + tone (prompts.rs)
 //!   2. CL location + index-first anchor           — orientation
 //!   3. THIS constant                              — universal rules
-//!   4. <data_dir>/custom-general-rules.md         — optional user additions
-//!   5. <data_dir>/agents/<name>/custom-instruction.md — per-agent overrides
+//!   4. <data_dir>/library/custom-general-rules.md — optional user additions
+//!   5. <data_dir>/library/agents/<name>/custom-instruction.md — per-agent overrides
 //!   6. policy directive block                      — project policy.yaml
 
 pub const GENERAL_RULES: &str = "\
