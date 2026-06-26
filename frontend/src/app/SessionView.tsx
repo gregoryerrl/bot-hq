@@ -224,13 +224,13 @@ export function SessionView() {
 
   if (!session) {
     return (
-      <div className="p-6 text-sm text-on-surface-variant">
+      <div className="p-6 font-body-md text-body-md text-on-surface-variant">
         {sessionError ? (
           <>
             <p className="mb-2 text-on-error-container">
               Failed to load session: {sessionError.message}
             </p>
-            <p className="text-xs text-on-surface-variant">id: {sessionId}</p>
+            <p className="font-code-sm text-code-sm text-on-surface-variant">id: {sessionId}</p>
           </>
         ) : (
           <>Session not found.</>
@@ -251,7 +251,7 @@ export function SessionView() {
         <header className="flex items-center justify-between border-b border-outline-variant px-4 py-3">
           <div className="min-w-0">
             {editingTitle === null ? (
-              <h1 className="group flex items-center gap-1 truncate text-base font-semibold tracking-tight">
+              <h1 className="group flex items-center gap-1 truncate font-headline-md text-headline-md tracking-tight">
                 <span className="truncate">{session.title}</span>
                 <button
                   type="button"
@@ -261,7 +261,7 @@ export function SessionView() {
                     setRenameError(null);
                     setEditingTitle(session.title);
                   }}
-                  className="shrink-0 px-1 text-xs text-on-surface-variant opacity-0 transition-opacity hover:text-on-surface focus:opacity-100 group-hover:opacity-100"
+                  className="shrink-0 px-1 font-code-sm text-code-sm text-on-surface-variant opacity-0 transition-opacity hover:text-on-surface focus:opacity-100 group-hover:opacity-100"
                 >
                   ✎
                 </button>
@@ -282,15 +282,15 @@ export function SessionView() {
                   }
                 }}
                 aria-label="Session title"
-                className="w-full max-w-sm rounded border border-outline-variant bg-surface px-2 py-0.5 text-base font-semibold tracking-tight text-on-surface focus:border-primary focus:outline-none"
+                className="w-full max-w-sm rounded border border-outline-variant bg-surface px-2 py-0.5 font-headline-md text-headline-md tracking-tight text-on-surface focus:border-primary focus:outline-none"
               />
             )}
-            <p className="text-xs text-on-surface-variant">
+            <p className="font-code-sm text-code-sm text-on-surface-variant">
               <Link to="/" className="hover:text-on-surface">
                 ← Dashboard
               </Link>
               <span className="mx-2 text-outline-variant">·</span>
-              <code className="font-mono text-[0.65rem] text-on-surface-variant">
+              <code className="font-code-sm text-code-sm text-on-surface-variant">
                 {sessionId.slice(0, 8)}
               </code>
               {phase && (
@@ -306,7 +306,7 @@ export function SessionView() {
                 <>
                   <span className="mx-2 text-outline-variant">·</span>
                   <span
-                    className="font-mono text-[0.65rem] text-on-surface-variant"
+                    className="font-code-sm text-code-sm text-on-surface-variant"
                     title={`Isolated worktree of ${session.base_repo_path} — work lands on branch bothq/${sessionId}`}
                   >
                     ⎇ bothq/{sessionId}
@@ -389,7 +389,7 @@ export function SessionView() {
         />
 
         {respawnError && (
-          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">
+          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container">
             <span className="font-semibold">Agent spawn failed:</span>{" "}
             {respawnError.message}{" "}
             <button
@@ -408,7 +408,7 @@ export function SessionView() {
         )}
 
         {closeError && (
-          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">
+          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container">
             <span className="font-semibold">Close failed:</span> {closeError}
             <button
               className="ml-2 underline hover:text-error"
@@ -420,7 +420,7 @@ export function SessionView() {
         )}
 
         {renameError && (
-          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 text-xs text-on-error-container">
+          <div className="border-b border-outline-variant bg-error-container/30 px-4 py-2 font-code-sm text-code-sm text-on-error-container">
             <span className="font-semibold">Rename failed:</span> {renameError}
             <button
               className="ml-2 underline hover:text-error"
@@ -445,7 +445,7 @@ export function SessionView() {
           {messagesLoading && messages.length === 0 ? (
             <MessagesSkeleton />
           ) : messages.length === 0 ? (
-            <p className="text-sm text-on-surface-variant">No messages yet…</p>
+            <p className="font-body-md text-body-md text-on-surface-variant">No messages yet…</p>
           ) : (
             messages.map((m, i) => (
               <ChatMessage
@@ -466,7 +466,7 @@ export function SessionView() {
                 onClick={scrollToBottom}
                 className={cn(
                   "pointer-events-auto inline-flex items-center gap-1 rounded-full",
-                  "border border-outline-variant bg-surface-container-highest px-3 py-1 text-xs text-on-surface shadow-lg",
+                  "border border-outline-variant bg-surface-container-highest px-3 py-1 font-code-sm text-code-sm text-on-surface shadow-lg",
                   "hover:border-primary hover:text-on-surface transition-colors",
                 )}
               >
