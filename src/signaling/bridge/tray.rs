@@ -454,93 +454,36 @@ impl SignalingBridge {
                 match p.tx.send(picked) {
                     Ok(()) => Ok(ResolveOutcome::Delivered),
                     Err(picked) => {
-                        // The agent's blocking `ask_user_choice` tool call client-side
-                        // timed out before we got the user's pick. The answer is still
-                        // captured (the violations log is already written above) —
-                        // persist an out-of-band synthetic user message so the UI /
-                        // message-poll callers see the resolution.
-                        // CoreAppState::resolve_choice is the one that ALSO routes the
-                        // body through the duo input channels to wake the subprocess.
-                        let session_id = p.choice.session_id.clone();
-                        let mut body =
-                            oob_resolution_body(&p.choice.agent, &p.choice.question, &picked);
-                        // The agent's blocking call timed out, so its request future
-                        // (which would run an action_gate command in-band) was
-                        // cancelled before executing. Run the gated command now from
-                        // the in-memory approval ctx, gated on the atomic flip so a
-                        // duplicate resolve can't double-run. Done before the storage
-                        // lock — execute_gated locks storage internally.
-                        if flipped {
-                            let command = p.choice.approval.as_ref().and_then(|c| {
-                                matches!(c.kind, crate::policy::ViolationKind::ToolBlocklist)
-                                    .then_some(c.action.as_str())
-                            });
-                            self.maybe_run_gated(&session_id, command, &picked, &mut body)
-                                .await;
-                        }
-                        let inserted_id = {
-                            let storage_guard = self.storage.lock().await;
-                            match storage_guard.as_ref() {
-                                Some(storage) => match storage
-                                    .insert_message(
-                                        &session_id,
-                                        Author::User,
-                                        MessageKind::Text,
-                                        &body,
-                                    )
-                                    .await
-                                {
-                                    Ok(id) => Some(id),
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            ?e,
-                                            %session_id,
-                                            "out-of-band choice-resolution message failed to persist"
-                                        );
-                                        None
-                                    }
-                                },
-                                None => {
-                                    tracing::warn!(
-                                        %session_id,
-                                        "resolve_choice: agent receiver dropped AND no storage wired — \
-                                         pick recorded but not delivered"
-                                    );
-                                    None
-                                }
-                            }
-                        };
-                        // Fire the message event so the chat reflects the OOB
-                        // resolution without a manual tab-switch.
-                        if let Some(id) = inserted_id {
-                            self.notify_message_persisted(session_id.clone(), id);
-                        }
-                        // The agent's in-band ask call already timed out, so nothing
-                        // else emits ChoiceResolved for this OOB resolution. Without
-                        // it the row flips to `answered` in the DB but the cached
-                        // pending counts (bell + tray) never invalidate. Fire it here.
-                        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
-                            choice_id: choice_id.to_string(),
-                            picked: picked.clone(),
+                        // The agent's blocking `ask_user_choice` timed out client-side
+                        // before we delivered the pick (the answer is still captured —
+                        // violations already logged above). Fall back to OOB; the gated
+                        // command, if any, comes from the in-memory approval ctx.
+                        let command = p.choice.approval.as_ref().and_then(|c| {
+                            matches!(c.kind, crate::policy::ViolationKind::ToolBlocklist)
+                                .then_some(c.action.as_str())
                         });
-                        Ok(ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body })
+                        Ok(self
+                            .deliver_oob(
+                                choice_id,
+                                p.choice.session_id.clone(),
+                                &p.choice.agent,
+                                &p.choice.question,
+                                picked,
+                                command,
+                                flipped,
+                            )
+                            .await)
                     }
                 }
             }
             None => {
-                // No in-memory parked oneshot for this choice_id. The common
-                // cause is the #2 reopened-session bug: the session was closed
-                // (subprocess killed, its oneshot dropped) then reopened; the
+                // No in-memory parked oneshot (the #2 reopened-session bug: the
+                // session was closed — oneshot dropped — then reopened, and the
                 // resumed agent re-asked with a NEW choice_id while the user
-                // answered the OLD one still shown in their tray. Previously
-                // this arm errored, so `answer_question` (above) cleared the
-                // tray but the pick never reached the live agent — it waited
-                // forever. Instead, reconstruct the question from the durable
+                // answered the OLD tray row). Reconstruct from the durable
                 // session_tray row and fall back to OOB stdin delivery so
                 // CoreAppState injects the answer into the live (respawned)
-                // session. Stdin injection is the only channel to a resumed
-                // subprocess — re-parking a oneshot across a PID boundary is
-                // impossible.
+                // session — the only channel to a resumed subprocess.
                 let q = {
                     let storage_guard = self.storage.lock().await;
                     match storage_guard.as_ref() {
@@ -551,56 +494,81 @@ impl SignalingBridge {
                 let Some(q) = q else {
                     return Err(anyhow::anyhow!("no pending choice with id {choice_id}"));
                 };
-                let mut body = oob_resolution_body(&q.agent, &q.prompt, &picked);
-                // Post-restart / reopened path: the in-memory oneshot is gone, so
-                // execution can only come from the durable row. If it carries an
-                // action_gate command and the pick is Approved, run it now — gated
-                // on the atomic flip. This is the "approve hours/days later or after
-                // a restart and it still executes" case.
-                if flipped {
-                    self.maybe_run_gated(
-                        &q.session_id,
+                Ok(self
+                    .deliver_oob(
+                        choice_id,
+                        q.session_id.clone(),
+                        &q.agent,
+                        &q.prompt,
+                        picked,
                         q.command_text.as_deref(),
-                        &picked,
-                        &mut body,
+                        flipped,
                     )
-                    .await;
-                }
-                let inserted_id = {
-                    let storage_guard = self.storage.lock().await;
-                    match storage_guard.as_ref() {
-                        Some(storage) => match storage
-                            .insert_message(&q.session_id, Author::User, MessageKind::Text, &body)
-                            .await
-                        {
-                            Ok(id) => Some(id),
-                            Err(e) => {
-                                tracing::warn!(
-                                    ?e,
-                                    session_id = %q.session_id,
-                                    "OOB (reopened-session) choice-resolution message failed to persist"
-                                );
-                                None
-                            }
-                        },
-                        None => None,
-                    }
-                };
-                if let Some(id) = inserted_id {
-                    self.notify_message_persisted(q.session_id.clone(), id);
-                }
-                // Same as the timed-out branch above: invalidate the bell / tray
-                // caches for the post-restart / reopened-session OOB path.
-                let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
-                    choice_id: choice_id.to_string(),
-                    picked: picked.clone(),
-                });
-                Ok(ResolveOutcome::AgentReceiverDroppedFellBack {
-                    session_id: q.session_id,
-                    body,
-                })
+                    .await)
             }
         }
+    }
+
+    /// Persist + broadcast an out-of-band choice resolution for the two
+    /// receiver-gone paths (client-timeout `Err(picked)` and post-restart /
+    /// reopened `None`). Builds the synthetic user message, runs any approved
+    /// gated command when `flipped` (the atomic exactly-once already won),
+    /// invalidates the bell / tray via `ChoiceResolved`, and returns
+    /// `AgentReceiverDroppedFellBack` so `CoreAppState::resolve_choice` wakes the
+    /// live (respawned) subprocess via stdin. The callers differ only in where
+    /// `session_id` / `agent` / `question` / `command_text` come from.
+    async fn deliver_oob(
+        &self,
+        choice_id: &str,
+        session_id: String,
+        agent: &str,
+        question: &str,
+        picked: String,
+        command_text: Option<&str>,
+        flipped: bool,
+    ) -> ResolveOutcome {
+        let mut body = oob_resolution_body(agent, question, &picked);
+        if flipped {
+            self.maybe_run_gated(&session_id, command_text, &picked, &mut body)
+                .await;
+        }
+        let inserted_id = {
+            let storage_guard = self.storage.lock().await;
+            match storage_guard.as_ref() {
+                Some(storage) => match storage
+                    .insert_message(&session_id, Author::User, MessageKind::Text, &body)
+                    .await
+                {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        tracing::warn!(
+                            ?e,
+                            %session_id,
+                            "out-of-band choice-resolution message failed to persist"
+                        );
+                        None
+                    }
+                },
+                None => {
+                    tracing::warn!(
+                        %session_id,
+                        "resolve_choice: agent receiver gone AND no storage wired — \
+                         pick recorded but not delivered"
+                    );
+                    None
+                }
+            }
+        };
+        if let Some(id) = inserted_id {
+            self.notify_message_persisted(session_id.clone(), id);
+        }
+        // Without this the row flips to `answered` in the DB but the cached
+        // pending counts (bell + tray) never invalidate.
+        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+            choice_id: choice_id.to_string(),
+            picked,
+        });
+        ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body }
     }
 
     /// Run an approved action_gate (ToolBlocklist) command at resolve time and
