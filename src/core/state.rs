@@ -637,8 +637,7 @@ impl AppState {
             }
         }
 
-        let ts = chrono::Utc::now().to_rfc3339();
-        handle.ipav.lock().await.advance(target, ts);
+        handle.ipav.lock().await.advance(target);
         let notice = target.transition_notice().to_string();
 
         // Synthetic phase-change message in storage.

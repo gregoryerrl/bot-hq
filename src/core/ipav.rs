@@ -66,22 +66,19 @@ impl IpavPhase {
 #[derive(Debug, Clone)]
 pub struct IpavState {
     pub current_phase: IpavPhase,
-    pub phase_log: Vec<(IpavPhase, String)>, // (phase, timestamp ISO)
 }
 
 impl Default for IpavState {
     fn default() -> Self {
         Self {
             current_phase: IpavPhase::Investigate,
-            phase_log: Vec::new(),
         }
     }
 }
 
 impl IpavState {
-    pub fn advance(&mut self, target: IpavPhase, timestamp: String) {
+    pub fn advance(&mut self, target: IpavPhase) {
         self.current_phase = target;
-        self.phase_log.push((target, timestamp));
     }
 }
 
@@ -90,13 +87,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advance_records_history() {
+    fn advance_sets_current_phase() {
         let mut s = IpavState::default();
-        s.advance(IpavPhase::Plan, "t1".into());
-        s.advance(IpavPhase::Apply, "t2".into());
+        s.advance(IpavPhase::Plan);
+        assert_eq!(s.current_phase, IpavPhase::Plan);
+        s.advance(IpavPhase::Apply);
         assert_eq!(s.current_phase, IpavPhase::Apply);
-        assert_eq!(s.phase_log.len(), 2);
-        assert_eq!(s.phase_log[0].0, IpavPhase::Plan);
     }
 
     #[test]
