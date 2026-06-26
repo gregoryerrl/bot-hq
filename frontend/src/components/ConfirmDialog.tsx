@@ -1,5 +1,6 @@
-import { useEffect, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
 
@@ -34,18 +35,7 @@ export function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const trapRef = useFocusTrap<HTMLDivElement>(open);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onCancel]);
+  useEscapeKey(onCancel, open);
 
   if (!open) return null;
 

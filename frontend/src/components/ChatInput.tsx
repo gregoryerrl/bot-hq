@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Button } from "./ui/Button";
 import { Textarea } from "./ui/Textarea";
+import { ErrorBanner } from "./ErrorBanner";
 import { errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { isLocked, type DuoBusy, type SessionActivity } from "../stores/activity";
@@ -112,19 +113,12 @@ export function ChatInput({
   return (
     <>
       {error && (
-        <div
-          role="alert"
-          className="mx-3 mt-2 rounded border border-error/40 bg-error-container/30 px-3 py-1.5 text-xs text-on-error-container"
-        >
-          <span className="font-semibold">Send failed:</span> {error}
-          <button
-            type="button"
-            className="ml-2 underline hover:text-error"
-            onClick={() => setError(null)}
-          >
-            dismiss
-          </button>
-        </div>
+        <ErrorBanner
+          label="Send failed:"
+          message={error}
+          onDismiss={() => setError(null)}
+          className="mx-3 mt-2"
+        />
       )}
       <form
         onSubmit={handleSubmit}

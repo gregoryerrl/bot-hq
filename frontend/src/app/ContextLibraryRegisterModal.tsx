@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
 import { baseName, pickFolder, terminalInputClass } from "./contextLibraryShared";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 // ============================================================================
 // New-project modal — the primary "add a project" flow.
@@ -37,17 +38,7 @@ export function RegisterProjectModal({
 
   // Escape closes, mirroring ConfirmDialog. Guarded on `open` because this
   // modal stays mounted while hidden.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useEscapeKey(onClose, open);
 
   if (!open) return null;
 

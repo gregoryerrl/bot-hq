@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { terminalInputClass } from "./contextLibraryShared";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 // ============================================================================
 // ContextMenu — VSCode-style right-click menu, fixed at the cursor. Closes on
@@ -102,16 +103,7 @@ export function ActionModal({
   const trapRef = useFocusTrap<HTMLDivElement>();
   // Escape closes, mirroring ConfirmDialog (the modal is conditionally
   // mounted by its parent, so no `open` guard is needed).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useEscapeKey(onClose);
   const hasInput = inputLabel != null;
   const canConfirm = !busy && (!hasInput || value.trim().length > 0);
   const submit = () => {

@@ -3,9 +3,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import { PhasePillRow, type Phase } from "./PhasePill";
 import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
+import { ErrorBanner } from "./ErrorBanner";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
@@ -210,17 +212,7 @@ function SummaryDialog({
   onClose: () => void;
 }) {
   const trapRef = useFocusTrap<HTMLDivElement>(open);
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useEscapeKey(onClose, open);
 
   if (!open) return null;
 
@@ -492,20 +484,12 @@ function TrayList({ sessionId }: { sessionId: string }) {
   return (
     <>
       {resolveError && (
-        <div
-          role="alert"
-          className="mb-3 rounded border border-error/40 bg-error-container/30 px-3 py-1.5 text-xs text-on-error-container"
-        >
-          <span className="font-semibold">Couldn't submit your answer:</span>{" "}
-          {resolveError}
-          <button
-            type="button"
-            className="ml-2 underline hover:text-error"
-            onClick={() => setResolveError(null)}
-          >
-            dismiss
-          </button>
-        </div>
+        <ErrorBanner
+          label="Couldn't submit your answer:"
+          message={resolveError}
+          onDismiss={() => setResolveError(null)}
+          className="mb-3"
+        />
       )}
       {staleConfirm && (
         <div

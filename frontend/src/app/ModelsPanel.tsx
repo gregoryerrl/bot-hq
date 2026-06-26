@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { terminalInputClass, SaveIcon, FieldLabel } from "./contextLibraryShared";
@@ -265,16 +266,7 @@ function ModelDialog({
   const upsert = useTauriMutation<void, { model: ModelView }>("upsert_model");
   const trapRef = useFocusTrap<HTMLDivElement>();
   // Escape closes, mirroring ConfirmDialog (conditionally mounted — no guard).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  useEscapeKey(onClose);
 
   const title = initial ? "Edit model" : "Add model";
   const providerIsCustom = !PROVIDERS.includes(

@@ -12,6 +12,7 @@ import { GatedKeywordList } from "../components/GatedKeywordList";
 import { CloseIcon, SaveIcon } from "./contextLibraryShared";
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useEscapeKey";
 
 /**
  * Right-side drawer for editing a session's canonical policy snapshot
@@ -56,17 +57,7 @@ export function SessionPolicyPanel({
   const trapRef = useFocusTrap<HTMLElement>(open);
 
   // Escape-to-close, scoped to open so it doesn't fight other handlers.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useEscapeKey(onClose, open);
 
   if (!open) return null;
 
