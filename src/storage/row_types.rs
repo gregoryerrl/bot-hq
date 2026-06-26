@@ -248,15 +248,13 @@ impl FindingSeverity {
 
 /// Lifecycle status of an EYES finding. `Open` gates (when blocking);
 /// `Fixed`/`Rebutted` are HANDS dispositions (both carry a reason and surface
-/// to the user); `Stale` is auto-marked when the referenced code is gone, or
-/// set by an explicit user override.
+/// to the user).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingStatus {
     Open,
     Fixed,
     Rebutted,
-    Stale,
 }
 
 impl FindingStatus {
@@ -265,7 +263,6 @@ impl FindingStatus {
             FindingStatus::Open => "open",
             FindingStatus::Fixed => "fixed",
             FindingStatus::Rebutted => "rebutted",
-            FindingStatus::Stale => "stale",
         }
     }
 
@@ -274,7 +271,6 @@ impl FindingStatus {
             "open" => FindingStatus::Open,
             "fixed" => FindingStatus::Fixed,
             "rebutted" => FindingStatus::Rebutted,
-            "stale" => FindingStatus::Stale,
             _ => return None,
         })
     }

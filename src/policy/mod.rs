@@ -160,14 +160,6 @@ impl Policy {
         Ok(merge(base, overlay))
     }
 
-    /// Returns true if `command` matches any prefix in `per_action_approval`.
-    pub fn requires_per_action_approval(&self, command: &str) -> bool {
-        let cmd = command.trim();
-        self.per_action_approval
-            .iter()
-            .any(|prefix| cmd.starts_with(prefix.trim()))
-    }
-
     /// Returns the first forbidden word found in `text`, if any.
     ///
     /// Case-INsensitive — a forbidden-word check must not be evadable by re-casing
@@ -603,17 +595,6 @@ mod tests {
         );
         let err = Policy::resolve(dir.path(), None, None).unwrap_err();
         assert!(err.to_string().contains("parsing"));
-    }
-
-    #[test]
-    fn requires_per_action_approval_prefix_match() {
-        let p = Policy {
-            per_action_approval: vec!["gh release".into(), "terraform apply".into()],
-            ..Policy::default()
-        };
-        assert!(p.requires_per_action_approval("gh release create v1"));
-        assert!(p.requires_per_action_approval("terraform apply -auto-approve"));
-        assert!(!p.requires_per_action_approval("gh pr list"));
     }
 
     #[test]

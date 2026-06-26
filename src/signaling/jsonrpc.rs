@@ -407,9 +407,8 @@ async fn call_tool(
         "disposition_finding" => {
             let finding_id = arg_required_str(&args, "finding_id")?;
             let status_str = arg_required_str(&args, "status")?;
-            // Agent dispositions are fixed | rebutted only; `stale` is the
-            // auto/user-clear path, not an agent action, and `open` isn't a
-            // resolution.
+            // Agent dispositions are fixed | rebutted only; `open` isn't a
+            // resolution (and there is no agent-driven "stale" disposition).
             let status = crate::storage::FindingStatus::parse(&status_str)
                 .filter(|s| {
                     matches!(

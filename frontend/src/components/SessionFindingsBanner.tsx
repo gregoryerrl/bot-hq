@@ -59,8 +59,7 @@ export function SessionFindingsBanner({ sessionId }: { sessionId: string }) {
     (f) =>
       f.raise_count >= 2 &&
       !f.eyes_approved &&
-      f.status !== "open" &&
-      f.status !== "stale",
+      f.status !== "open",
   );
   if (awaitingConfirm.length > 0) {
     return (
