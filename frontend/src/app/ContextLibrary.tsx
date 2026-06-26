@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { useDragResize } from "../hooks/useDragResize";
@@ -166,11 +166,11 @@ export function ContextLibrary() {
 
   // After register/unregister: refresh projects + index + folders so the tree,
   // the project filter, and any open folder-view all reflect the change.
-  const onProjectChanged = () => {
+  const onProjectChanged = useCallback(() => {
     refetchProjects();
     refetch();
     refetchFolders();
-  };
+  }, [refetchProjects, refetch, refetchFolders]);
 
   // Right-click context menu + the new-file / rename / delete action modal.
   const [menu, setMenu] = useState<{
@@ -426,26 +426,35 @@ export function ContextLibrary() {
   const [activeTabIndex, setActiveTabIndex] = useState(0);
   const activeTab: OpenTab | null = tabs[activeTabIndex] ?? null;
 
-  const openTab = (tab: OpenTab) => {
-    const key = tabKey(tab);
-    const idx = tabs.findIndex((t) => tabKey(t) === key);
-    if (idx >= 0) {
-      setActiveTabIndex(idx);
-    } else {
-      setTabs((prev) => {
-        const next = [...prev, tab];
-        // Activate the freshly-pushed tab. Index is the prev length.
-        setActiveTabIndex(prev.length);
-        return next;
-      });
-    }
-  };
-  const openFile = (project: string, filePath: string) =>
-    openTab({ kind: "file", project, filePath });
-  const openFolder = (project: string, folderPath: string) =>
-    openTab({ kind: "folder", project, folderPath });
+  const openTab = useCallback(
+    (tab: OpenTab) => {
+      const key = tabKey(tab);
+      const idx = tabs.findIndex((t) => tabKey(t) === key);
+      if (idx >= 0) {
+        setActiveTabIndex(idx);
+      } else {
+        setTabs((prev) => {
+          const next = [...prev, tab];
+          // Activate the freshly-pushed tab. Index is the prev length.
+          setActiveTabIndex(prev.length);
+          return next;
+        });
+      }
+    },
+    [tabs],
+  );
+  const openFile = useCallback(
+    (project: string, filePath: string) =>
+      openTab({ kind: "file", project, filePath }),
+    [openTab],
+  );
+  const openFolder = useCallback(
+    (project: string, folderPath: string) =>
+      openTab({ kind: "folder", project, folderPath }),
+    [openTab],
+  );
 
-  const closeTab = (index: number) => {
+  const closeTab = useCallback((index: number) => {
     setTabs((prev) => {
       const next = prev.filter((_, i) => i !== index);
       setActiveTabIndex((current) => {
@@ -456,25 +465,28 @@ export function ContextLibrary() {
       });
       return next;
     });
-  };
+  }, []);
 
   // A project was deleted (no replacement) or renamed (replacement = new name).
   // Drop its open tabs, refresh the tree, and retarget the filter / reopen the
   // renamed root so the user isn't left staring at a stale view.
-  const onProjectGone = (name: string, replacement?: string) => {
-    setTabs((prev) => {
-      const next = prev.filter((t) => t.project !== name);
-      setActiveTabIndex((cur) => Math.min(cur, Math.max(0, next.length - 1)));
-      return next;
-    });
-    if (project === name) setProject(replacement ?? null);
-    onProjectChanged();
-    if (replacement) {
-      setQuery("");
-      setProject(replacement);
-      openFolder(replacement, "");
-    }
-  };
+  const onProjectGone = useCallback(
+    (name: string, replacement?: string) => {
+      setTabs((prev) => {
+        const next = prev.filter((t) => t.project !== name);
+        setActiveTabIndex((cur) => Math.min(cur, Math.max(0, next.length - 1)));
+        return next;
+      });
+      if (project === name) setProject(replacement ?? null);
+      onProjectChanged();
+      if (replacement) {
+        setQuery("");
+        setProject(replacement);
+        openFolder(replacement, "");
+      }
+    },
+    [project, onProjectChanged, openFolder],
+  );
 
   const handleRescan = async () => {
     if (rescanning) return;
@@ -529,7 +541,7 @@ export function ContextLibrary() {
     }
   };
 
-  const toggle = (project: string, folderPath: string) => {
+  const toggle = useCallback((project: string, folderPath: string) => {
     const key = collapseKey(project, folderPath);
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -537,7 +549,20 @@ export function ContextLibrary() {
       else next.add(key);
       return next;
     });
-  };
+  }, []);
+
+  // Stable context-menu handler for the (memoized) tree nodes. The empty-menu
+  // check is a pure target predicate — it mirrors menuItems() returning [] for
+  // the read-only internal globals subtree — so this needs no menuItems dep.
+  const handleContextMenu = useCallback(
+    (target: CtxTarget, x: number, y: number) => {
+      if (target.project === "_globals" && isInternalGlobalsPath(target.path)) {
+        return;
+      }
+      setMenu({ target, x, y });
+    },
+    [],
+  );
 
   // VS-Code-style "collapse all": fold every project-root + folder node by
   // adding its collapse key. The three category sections (@cat:*) are left
@@ -583,11 +608,7 @@ export function ContextLibrary() {
         onOpenFolder={openFolder}
         onRequestRegister={() => setRegisterOpen(true)}
         onRequestMaintain={() => setMaintainOpen(true)}
-        onContextMenu={(target, x, y) => {
-          // SYSTEM nodes have no actions at all — show nothing.
-          if (menuItems(target).length === 0) return;
-          setMenu({ target, x, y });
-        }}
+        onContextMenu={handleContextMenu}
       />
       <div
         onMouseDown={onSidebarHandleDown}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useServerDraft } from "../hooks/useServerDraft";
@@ -48,7 +48,7 @@ interface EditorAreaProps {
   onProjectGone: (name: string, replacement?: string) => void;
 }
 
-export function EditorArea({
+function EditorAreaImpl({
   tabs,
   activeTabIndex,
   onSelectTab,
@@ -104,6 +104,12 @@ export function EditorArea({
     </div>
   );
 }
+
+// Memoized (O6): EditorArea is unrelated to CL search typing / sidebar drag, so
+// it skips re-render while those churn the parent — its callbacks are stabilized
+// (useCallback) in ContextLibrary and its data props are referentially stable
+// between index refetches.
+export const EditorArea = memo(EditorAreaImpl);
 
 // ============================================================================
 // ProjectPolicyEditor — structured project-policy editor for `policy.yaml`,

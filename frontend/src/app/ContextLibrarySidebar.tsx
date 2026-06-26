@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { memo, useMemo, type ReactNode } from "react";
 import { cn } from "../lib/cn";
 import type {
   ClIndexEntryView,
@@ -24,6 +24,11 @@ import {
 import { RescanIcon, WarnIcon, WrenchIcon } from "../components/icons";
 
 const INDENT_PX = 12;
+
+// Shared read-only empty tree for a registered-but-empty project (no files, no
+// described folders) — lets the memoized tree map fall back without an inline
+// buildTree([], []) per such node. Never mutated (nodes only read it).
+const EMPTY_TREE: TreeNode = { name: "", path: "", folders: [], files: [] };
 
 // Icon-only header action. Color is applied per-button (cn is plain clsx —
 // conflicting text-* classes would both stick).
@@ -101,18 +106,31 @@ export function WorkspaceSidebar({
   // shouldn't occur (rescan upserts a project row) — they land in GLOBAL as a
   // defensive catch-all.
   const registered = new Set(projects.map((p) => p.name));
-  const globalsSplit = splitGlobals(
-    byProject["_globals"] ?? [],
-    byProjectFolders["_globals"] ?? [],
-  );
-  const globalTree = buildTree(
-    globalsSplit.global.entries,
-    globalsSplit.global.folderPaths,
-  );
-  const systemTree = buildTree(
-    globalsSplit.system.entries,
-    globalsSplit.system.folderPaths,
-  );
+  // Memoize the O(files) tree builds on the index data (O6): search typing,
+  // sidebar drag-resize, and collapse toggles re-render this component but DON'T
+  // change byProject/byProjectFolders, so the trees are reused instead of every
+  // project's tree being rebuilt + re-sorted each render.
+  const { globalsSplit, globalTree, systemTree, projectTrees } = useMemo(() => {
+    const split = splitGlobals(
+      byProject["_globals"] ?? [],
+      byProjectFolders["_globals"] ?? [],
+    );
+    const trees: Record<string, TreeNode> = {};
+    const ids = new Set([
+      ...Object.keys(byProject),
+      ...Object.keys(byProjectFolders),
+    ]);
+    for (const id of ids) {
+      if (id === "_globals") continue;
+      trees[id] = buildTree(byProject[id] ?? [], byProjectFolders[id] ?? []);
+    }
+    return {
+      globalsSplit: split,
+      globalTree: buildTree(split.global.entries, split.global.folderPaths),
+      systemTree: buildTree(split.system.entries, split.system.folderPaths),
+      projectTrees: trees,
+    };
+  }, [byProject, byProjectFolders]);
   const projectCategoryIds = projectIds.filter(
     (id) => id !== "_globals" && registered.has(id),
   );
@@ -296,10 +314,7 @@ export function WorkspaceSidebar({
                   <FolderNode
                     key={projectId}
                     project={projectId}
-                    node={buildTree(
-                      byProject[projectId] ?? [],
-                      byProjectFolders[projectId] ?? [],
-                    )}
+                    node={projectTrees[projectId] ?? EMPTY_TREE}
                     depth={1}
                     isProjectRoot
                     {...nodeProps}
@@ -342,7 +357,7 @@ export function WorkspaceSidebar({
                       activeTab.project === f.project_id &&
                       activeTab.filePath === f.file_path
                     }
-                    onOpen={() => onOpenFile(f.project_id, f.file_path)}
+                    onOpenFile={onOpenFile}
                     onContextMenu={onContextMenu}
                   />
                 ))}
@@ -350,10 +365,7 @@ export function WorkspaceSidebar({
                   <FolderNode
                     key={projectId}
                     project={projectId}
-                    node={buildTree(
-                      byProject[projectId] ?? [],
-                      byProjectFolders[projectId] ?? [],
-                    )}
+                    node={projectTrees[projectId] ?? EMPTY_TREE}
                     depth={1}
                     isProjectRoot
                     {...nodeProps}
@@ -389,7 +401,7 @@ export function WorkspaceSidebar({
                       activeTab.project === f.project_id &&
                       activeTab.filePath === f.file_path
                     }
-                    onOpen={() => onOpenFile(f.project_id, f.file_path)}
+                    onOpenFile={onOpenFile}
                     onContextMenu={onContextMenu}
                   />
                 ))}
@@ -478,7 +490,14 @@ function countFiles(node: TreeNode): number {
   );
 }
 
-function FolderNode({
+// Memoized (O6): a node skips re-render when its props (the memoized `node`,
+// `collapsed`, `activeTab`, and the stabilized callbacks) are unchanged — so
+// search typing / drag-resize don't re-render every node. Recursive children
+// render via the memoized `FolderNode` const (function hoisting makes the impl
+// available to `memo()` above its declaration).
+const FolderNode = memo(FolderNodeImpl);
+
+function FolderNodeImpl({
   project,
   node,
   depth,
@@ -580,7 +599,7 @@ function FolderNode({
                 activeTab.project === f.project_id &&
                 activeTab.filePath === f.file_path
               }
-              onOpen={() => onOpenFile(f.project_id, f.file_path)}
+              onOpenFile={onOpenFile}
               onContextMenu={onContextMenu}
             />
           ))}
@@ -594,23 +613,25 @@ function FolderNode({
 // FileRow — single clickable file entry in the tree
 // ============================================================================
 
-function FileRow({
+const FileRow = memo(FileRowImpl);
+
+function FileRowImpl({
   file,
   depth,
   isActive,
-  onOpen,
+  onOpenFile,
   onContextMenu,
 }: {
   file: ClIndexEntryView;
   depth: number;
   isActive: boolean;
-  onOpen: () => void;
+  onOpenFile: (project: string, filePath: string) => void;
   onContextMenu: (target: CtxTarget, x: number, y: number) => void;
 }) {
   return (
     <button
       type="button"
-      onClick={onOpen}
+      onClick={() => onOpenFile(file.project_id, file.file_path)}
       onContextMenu={(e) => {
         e.preventDefault();
         onContextMenu(
