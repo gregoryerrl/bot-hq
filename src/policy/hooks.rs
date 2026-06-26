@@ -367,6 +367,88 @@ fn run_post_commit(data_dir: &Path, project: Option<&str>, session: Option<&str>
 
 /// pre-push handler. Allows the push when `push_gate == auto` (exit 0). When
 /// `push_gate == ask` AND the push originates inside a live bot-hq session, it
+/// `BOT_HQ_AGENT` env (trimmed, non-empty) or the "brian" default. Shared by the
+/// pre-push + findings-gate hooks so the fallback can't drift between them.
+fn hook_agent() -> String {
+    std::env::var("BOT_HQ_AGENT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "brian".to_string())
+}
+
+/// True for git's all-zero object id (the remote side of a ref create / the
+/// local side of a delete).
+fn is_zero_oid(oid: &str) -> bool {
+    !oid.is_empty() && oid.bytes().all(|b| b == b'0')
+}
+
+/// Classify one pre-push stdin line — `<local ref> <local oid> <remote ref>
+/// <remote oid>` — as a non-fast-forward (force) update, given an ancestry oracle
+/// `is_ancestor(remote_oid, local_oid)`. Creates (remote all-zero), deletes
+/// (local all-zero), and malformed lines are NOT force updates. Pure, so the
+/// classification is unit-testable without a git process.
+fn line_is_force(line: &str, is_ancestor: impl Fn(&str, &str) -> bool) -> bool {
+    let mut f = line.split_whitespace();
+    let _local_ref = f.next();
+    let local_oid = f.next().unwrap_or("");
+    let _remote_ref = f.next();
+    let remote_oid = f.next().unwrap_or("");
+    if local_oid.is_empty() || remote_oid.is_empty() {
+        return false;
+    }
+    if is_zero_oid(local_oid) || is_zero_oid(remote_oid) {
+        return false;
+    }
+    // Non-fast-forward = the remote tip is not an ancestor of the local tip.
+    !is_ancestor(remote_oid, local_oid)
+}
+
+/// Whether the in-flight push rewrites published history — git's pre-push signal
+/// for `--force` / `--force-with-lease` (the flag itself is never passed to the
+/// hook). Reads the ref updates on stdin and asks git for ancestry. Fail-OPEN
+/// (returns false) if stdin can't be read, so a read glitch never blocks a plain
+/// fast-forward push. A remote tip missing locally makes `--is-ancestor` error,
+/// which is treated as a rewrite (safe direction for a `blocked` policy).
+fn pushing_non_fast_forward() -> bool {
+    use std::io::Read;
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        return false;
+    }
+    input.lines().any(|line| {
+        line_is_force(line, |remote, local| {
+            std::process::Command::new("git")
+                .args(["merge-base", "--is-ancestor", remote, local])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+    })
+}
+
+/// Best-effort fail-closed `ForcePush`/Denied violation for a force-push the hook
+/// blocked. Mirrors `log_push_block`.
+async fn log_force_push_block(
+    data_dir: &Path,
+    session_id: &str,
+    agent: &str,
+    branch: Option<&str>,
+) {
+    let action = crate::policy::push_gate_action(branch);
+    let log = ViolationsLog::new(data_dir);
+    let _ = log
+        .record(
+            session_id.to_string(),
+            agent.to_string(),
+            ViolationKind::ForcePush,
+            action,
+            ViolationOutcome::Denied,
+            Some("pre-push blocked: force_push policy is 'blocked'".into()),
+        )
+        .await;
+}
+
 /// POSTs the running app's `/hooks/pre-push` route to surface a per-push
 /// Approve/Reject prompt (reusing the same `request_approval` machinery as the
 /// agent-facing tools), blocking until the user picks: Approve → exit 0,
@@ -384,7 +466,37 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     }
     let session_id = hook_session_id();
     let policy = Policy::resolve(data_dir, project, session_id.as_deref())?;
-    use crate::policy::PushGateMode;
+    use crate::policy::{ForcePushMode, PushGateMode};
+
+    // force_push gate — independent of push_gate and checked FIRST, so a
+    // force-push can't ride through on push_gate=auto. A non-fast-forward push is
+    // git's pre-push signal for --force / --force-with-lease (the flag is never
+    // passed to the hook). Blocked outright when force_push == Blocked.
+    if matches!(policy.force_push, ForcePushMode::Blocked) && pushing_non_fast_forward() {
+        let branch = current_branch();
+        if let Some(sid) = session_id.as_deref() {
+            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                rt.block_on(log_force_push_block(data_dir, sid, &hook_agent(), branch.as_deref()));
+            }
+        }
+        eprintln!(
+            "{}",
+            blocked_banner(
+                "pre-push",
+                "Force-push BLOCKED: this push rewrites published history \
+                 (non-fast-forward) and the force_push policy is 'blocked'.\n\
+                 \n\
+                 Do not retry with --force / --force-with-lease. If a history rewrite is \
+                 genuinely required, ask the user to set force_push to 'allowed' in Session \
+                 Settings (per-action authorized), then push again.\n"
+            )
+        );
+        return Ok(1);
+    }
+
     if matches!(policy.push_gate, PushGateMode::Auto) {
         return Ok(0);
     }
@@ -411,11 +523,7 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
         return Ok(1);
     };
 
-    let agent = std::env::var("BOT_HQ_AGENT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "brian".to_string());
+    let agent = hook_agent();
 
     // One non-alarming line so the agent doesn't mistake the wait for a block and
     // try to work around it. Silent until the user answers.
@@ -976,11 +1084,7 @@ fn check_findings_gate(data_dir: &Path, hook: &str) -> i32 {
 /// (own current-thread runtime; the hook is a sync subprocess). Never fails the
 /// hook: a logging error is swallowed (the block already landed via stderr).
 fn log_findings_block(data_dir: &Path, hook: &str, session_id: &str, n: usize) {
-    let agent = std::env::var("BOT_HQ_AGENT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "brian".to_string());
+    let agent = hook_agent();
     let action = if hook == "pre-push" { "git push" } else { "git commit" };
     let log = ViolationsLog::new(data_dir);
     let Ok(rt) = tokio::runtime::Builder::new_current_thread()
@@ -1120,6 +1224,34 @@ mod tests {
             .current_dir(dir)
             .status()
             .unwrap();
+    }
+
+    #[test]
+    fn is_zero_oid_only_matches_all_zeros() {
+        assert!(is_zero_oid("0000000000000000000000000000000000000000"));
+        assert!(!is_zero_oid("0000000000000000000000000000000000000001"));
+        assert!(!is_zero_oid("deadbeef"));
+        assert!(!is_zero_oid("")); // empty is not the zero oid
+    }
+
+    #[test]
+    fn line_is_force_flags_only_non_fast_forward() {
+        let local = "1111111111111111111111111111111111111111";
+        let remote = "2222222222222222222222222222222222222222";
+        let zero = "0000000000000000000000000000000000000000";
+        let r = "refs/heads/main";
+
+        // Fast-forward: remote IS an ancestor of local → not a force.
+        assert!(!line_is_force(&format!("{r} {local} {r} {remote}"), |_, _| true));
+        // Non-fast-forward: remote is NOT an ancestor of local → force.
+        assert!(line_is_force(&format!("{r} {local} {r} {remote}"), |_, _| false));
+        // Create (remote all-zero) is never a force, even if the oracle says no.
+        assert!(!line_is_force(&format!("{r} {local} {r} {zero}"), |_, _| false));
+        // Delete (local all-zero) is never a force.
+        assert!(!line_is_force(&format!("{r} {zero} {r} {remote}"), |_, _| false));
+        // Malformed lines (missing oids) are never a force.
+        assert!(!line_is_force("refs/heads/main", |_, _| false));
+        assert!(!line_is_force("", |_, _| false));
     }
 
     #[test]
