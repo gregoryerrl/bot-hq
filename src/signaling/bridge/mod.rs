@@ -5,10 +5,13 @@
 //!
 //! 1. A [`SignalingEvent`] is broadcast over `event_tx`; the UI subscribes and
 //!    paints choice buttons or sets the awaiting-user flag.
-//! 2. For `ask_user_choice`, a fresh `oneshot::Sender<String>` is parked in
-//!    `pending`. The MCP handler awaits on the matching `oneshot::Receiver`;
-//!    the UI later calls [`SignalingBridge::resolve_choice`] with the chosen
-//!    option. The result flows back to the agent as the tool's return value.
+//! 2. A `oneshot::Sender<String>` is parked in `pending`. For the blocking
+//!    `request_approval`, the MCP handler awaits the matching
+//!    `oneshot::Receiver` and the chosen option returns as the tool's value.
+//!    For the non-blocking `ask_user_choice`, the handler returns a `{parked}`
+//!    ack immediately and the user's pick is delivered out-of-band as a
+//!    synthetic user message (not the tool's return value). The UI calls
+//!    [`SignalingBridge::resolve_choice`] with the chosen option either way.
 //!
 //! The implementation is split across submodules — each owns one cohesive slice
 //! of the bridge's surface and contributes its own `impl SignalingBridge` block:

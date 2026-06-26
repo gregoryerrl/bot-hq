@@ -108,7 +108,7 @@ pub struct SessionWithPreview {
     /// First 200 chars of the most recent `kind='text'` message, or None when
     /// the session has no text messages yet.
     pub last_message: Option<String>,
-    /// Author of that latest text message ('user' | 'brian' | 'rain' | 'emma').
+    /// Author of that latest text message ('user' | 'brian' | 'rain').
     pub last_author: Option<String>,
 }
 

@@ -65,14 +65,14 @@ pub struct SessionHandle {
     /// None when this session runs solo-Brian (Rain disabled at create).
     pub rain: Option<AgentHandle>,
     /// Shared "duo is awaiting user input" flag. Set by the bridge when any
-    /// user-blocking MCP tool fires; checked by the duo pumps before they
-    /// forward Brian↔Rain chunks; cleared by `core::AppState::broadcast` when
-    /// the user replies. See `duo::DuoConfig::is_awaiting`.
+    /// user-blocking MCP tool fires; checked by `router::route_forward`
+    /// before it forwards Brian↔Rain chunks; cleared by
+    /// `core::AppState::broadcast` when the user replies.
     pub awaiting: Arc<std::sync::atomic::AtomicBool>,
     /// Shared count of consecutive peer-forwards with no intervening user
-    /// message — the L2 volley hard-cap (interrupt redesign). The duo pumps
-    /// increment it on each forward; `AppState::broadcast` resets it to 0 on the
-    /// user's next message; past the pump's hard cap the volley breaks. Unlike
+    /// message — the L2 volley hard-cap (interrupt redesign). The router
+    /// increments it on each forward; `AppState::broadcast` resets it to 0 on the
+    /// user's next message; past the router's hard cap the volley breaks. Unlike
     /// `awaiting` it is NOT bridge-registered — no MCP tool touches it.
     pub user_silent_forwards: Arc<std::sync::atomic::AtomicU32>,
     /// Per-session duo-activity tracker (interrupt redesign, Batch 2) — drives

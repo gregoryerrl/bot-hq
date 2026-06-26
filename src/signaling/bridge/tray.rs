@@ -1,8 +1,10 @@
-//! User-blocking signaling tools: `ask_user_choice` / `request_approval` and
-//! their supersede + resolve machinery, plus `mark_awaiting_user`,
+//! Signaling tools that park a tray entry: `ask_user_choice` (non-blocking —
+//! parks and returns a `{parked}` ack; the pick arrives out-of-band) and
+//! `request_approval` (blocking — awaits the user's oneshot), plus their
+//! supersede + resolve machinery, `mark_awaiting_user`,
 //! `request_phase_advance`, and the pending-choice snapshots. This is the
 //! biggest slice of the bridge — everything that parks a oneshot, mirrors a
-//! question row, or sets the duo's awaiting-halt flag.
+//! tray row, or sets the duo's awaiting-halt flag.
 
 use super::util::{oob_resolution_body, outcome_from_picked};
 use super::*;
@@ -441,7 +443,7 @@ impl SignalingBridge {
                 // Clear the awaiting halt the matching ask set, BEFORE delivering
                 // the pick. The agent's blocking call returns on `p.tx.send`, so
                 // the duo pump must already see `awaiting == false` by the time the
-                // resumed agent's first chunk arrives — else `duo::flush_buffer`
+                // resumed agent's first chunk arrives — else `router::route_forward`
                 // suppresses that chunk (and every later Brian<->Rain peer-forward)
                 // until the user types free text or advances a phase (the duo goes
                 // silent right after the user answers). The bridge set the flag
@@ -1156,8 +1158,8 @@ mod tests {
     #[tokio::test]
     async fn resolve_choice_delivered_clears_awaiting() {
         // Regression for "the duo goes silent after the user answers": a Delivered
-        // resolve must clear the awaiting halt the gate set, or the duo pump keeps
-        // dropping every Brian<->Rain peer-forward (duo::flush_buffer is gated on
+        // resolve must clear the awaiting halt the gate set, or the router keeps
+        // dropping every Brian<->Rain peer-forward (router::route_forward is gated on
         // this flag). Uses request_approval (the blocking path that yields
         // Delivered); the non-blocking ask_user_choice clears awaiting on its OOB
         // resolve too — see ask_user_choice_parks_and_returns_immediately.

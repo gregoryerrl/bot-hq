@@ -11,10 +11,10 @@ const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text";
 
 impl Storage {
-    /// Insert a fresh question row in `pending` status. Returns the row id.
+    /// Insert a fresh tray-entry row in `pending` status. Returns the row id.
     /// `options` is required when kind=Choice (encoded to JSON); ignored
-    /// otherwise. `supersedes_id` links to the question this one replaces
-    /// (when an agent rephrases via `update_question`).
+    /// otherwise. `supersedes_id` links to the entry this one replaces
+    /// (when an agent rephrases via `supersede_tray_entry`).
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_tray_entry(
         &self,
@@ -46,11 +46,11 @@ impl Storage {
         .bind(now_utc())
         .execute(&self.pool)
         .await
-        .with_context(|| format!("inserting question {choice_id} for session {session_id}"))?;
+        .with_context(|| format!("inserting tray entry {choice_id} for session {session_id}"))?;
         Ok(res.last_insert_rowid())
     }
 
-    /// Mark a question as answered + record the picked option (for choices)
+    /// Mark a tray entry as answered + record the picked option (for choices)
     /// or the typed reply (for open_ask). Idempotent on already-answered:
     /// returns Ok with 0 rows affected so callers don't have to guard.
     pub async fn answer_tray_entry(&self, choice_id: &str, picked: &str) -> Result<u64> {
@@ -64,7 +64,7 @@ impl Storage {
         .bind(choice_id)
         .execute(&self.pool)
         .await
-        .with_context(|| format!("answering question {choice_id}"))?;
+        .with_context(|| format!("answering tray entry {choice_id}"))?;
         Ok(res.rows_affected())
     }
 
@@ -88,7 +88,7 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
-    /// Mark a question as withdrawn (agent abandons it; never to be answered).
+    /// Mark a tray entry as withdrawn (agent abandons it; never to be answered).
     pub async fn withdraw_tray_entry(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE session_tray \
@@ -98,11 +98,11 @@ impl Storage {
         .bind(choice_id)
         .execute(&self.pool)
         .await
-        .with_context(|| format!("withdrawing question {choice_id}"))?;
+        .with_context(|| format!("withdrawing tray entry {choice_id}"))?;
         Ok(res.rows_affected())
     }
 
-    /// Mark a question as superseded by another (agent rephrased).
+    /// Mark a tray entry as superseded by another (agent rephrased).
     pub async fn supersede_tray_entry(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE session_tray \
@@ -112,11 +112,11 @@ impl Storage {
         .bind(choice_id)
         .execute(&self.pool)
         .await
-        .with_context(|| format!("superseding question {choice_id}"))?;
+        .with_context(|| format!("superseding tray entry {choice_id}"))?;
         Ok(res.rows_affected())
     }
 
-    /// Read all questions for a session, ordered oldest-first. Use for the
+    /// Read all tray entries for a session, ordered oldest-first. Use for the
     /// in-chat tray (filter to status=pending in the UI) and the dashboard
     /// counter (count where status=pending).
     pub async fn tray_entries_for_session(&self, session_id: &str) -> Result<Vec<SessionTrayEntry>> {
@@ -130,7 +130,7 @@ impl Storage {
         Ok(rows)
     }
 
-    /// Look up a question by its `choice_id`. Returns None if absent.
+    /// Look up a tray entry by its `choice_id`. Returns None if absent.
     pub async fn get_tray_entry(&self, choice_id: &str) -> Result<Option<SessionTrayEntry>> {
         let row = sqlx::query_as::<_, SessionTrayEntry>(&format!(
             "SELECT {TRAY_COLUMNS} FROM session_tray WHERE choice_id = ?"

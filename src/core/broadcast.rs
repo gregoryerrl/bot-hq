@@ -82,9 +82,10 @@ pub async fn broadcast_user_message(
     Ok(id)
 }
 
-/// Forward a peer's prose chunk into an agent's stdin. Called by the duo
-/// coordinator after the buffer-rule flush. The message is rendered as if
-/// from the user but tagged so the agent knows who said it.
+/// Forward a peer's prose chunk into an agent's stdin. Called by
+/// `core::router::route_forward` once the forward ladder decides to forward.
+/// The message is rendered as if from the user but tagged so the agent knows
+/// who said it.
 pub async fn peer_forward_message(
     peer_author: Author,
     text: &str,

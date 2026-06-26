@@ -540,7 +540,7 @@ impl AppState {
             .store(true, std::sync::atomic::Ordering::Release);
         handle.activity.set_cancelling(false);
         // Reset the L2 volley hard-cap: the user just spoke, so the consecutive
-        // peer-forward counter (`duo::flush_buffer`) starts fresh. Deliberately
+        // peer-forward counter (`router::route_forward`) starts fresh. Deliberately
         // here and not in `clear_awaiting` — `advance_phase` calls that too, and
         // a phase self-advance is not a user message.
         handle
