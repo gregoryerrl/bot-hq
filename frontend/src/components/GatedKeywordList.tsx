@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { GatedKeyword, GateMode } from "../lib/bindings";
 import { cn } from "../lib/cn";
 
-export const GATE_MODES: GateMode[] = ["gate", "auto_allow"];
+const GATE_MODES: GateMode[] = ["gate", "auto_allow"];
 
 interface GatedKeywordListProps {
   /** Current keyword rows (the caller's draft). */
