@@ -33,15 +33,15 @@ use specta::Type;
 
 /// Which agents pick up a given config surface from `~/.claude` at spawn, and
 /// which don't. Drives the per-surface inheritance badges in the UI. This is
-/// the canonical mapping derived from `spawn.rs::build_command` behavior:
-/// Brian runs full claude-code (inherit), Rain runs `--bare` (skips
-/// skills/plugins/hooks/CLAUDE.md), MCP is forwarded to Brian only, and
+/// the canonical mapping derived from `spawn.rs::build_command` behavior: both
+/// agents run full claude-code and inherit skills/plugins/hooks/CLAUDE.md
+/// (Rain's tool access is gated server-side, not by skipping inheritance);
 /// model/permissions are overridden per-agent by bot-hq.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
 pub struct Inheritance {
     /// Agents that inherit this surface from `~/.claude` at spawn.
     pub inherited_by: Vec<String>,
-    /// Agents that do NOT (Rain via `--bare`, or because bot-hq overrides it).
+    /// Agents that do NOT — because bot-hq overrides the surface per-agent.
     pub skipped_by: Vec<String>,
     /// Short human note for the badge tooltip.
     pub note: String,
@@ -69,27 +69,27 @@ fn agents(names: &[&str]) -> Vec<String> {
 pub fn inheritance(surface: Surface) -> Inheritance {
     match surface {
         Surface::Skills => Inheritance {
-            inherited_by: agents(&["brian"]),
-            skipped_by: agents(&["rain"]),
-            note: "Brian loads your skills (a skill can self-invoke). Rain runs --bare and skips them.".into(),
+            inherited_by: agents(&["brian", "rain"]),
+            skipped_by: agents(&[]),
+            note: "Both agents load your skills (a skill can self-invoke). bot-hq gates Rain's tools server-side.".into(),
             overridable: true,
         },
         Surface::Plugins => Inheritance {
-            inherited_by: agents(&["brian"]),
-            skipped_by: agents(&["rain"]),
-            note: "Brian loads enabled plugins (and their skills/hooks/MCP). Rain --bare skips plugin sync.".into(),
+            inherited_by: agents(&["brian", "rain"]),
+            skipped_by: agents(&[]),
+            note: "Both agents load enabled plugins (and their skills/hooks/MCP). bot-hq gates Rain's tools server-side.".into(),
             overridable: true,
         },
         Surface::Hooks => Inheritance {
-            inherited_by: agents(&["brian"]),
-            skipped_by: agents(&["rain"]),
-            note: "Brian runs your hooks alongside bot-hq's PreToolUse hook. Rain --bare skips hooks. Granular per-hook suppression is limited.".into(),
+            inherited_by: agents(&["brian", "rain"]),
+            skipped_by: agents(&[]),
+            note: "Both agents run your hooks alongside bot-hq's PreToolUse hook. Rain's write tools are denied at spawn.".into(),
             overridable: false,
         },
         Surface::Memory => Inheritance {
-            inherited_by: agents(&["brian"]),
-            skipped_by: agents(&["rain"]),
-            note: "Brian autodiscovers CLAUDE.md + auto-memory. Rain --bare skips it. bot-hq adds its own system prompt regardless.".into(),
+            inherited_by: agents(&["brian", "rain"]),
+            skipped_by: agents(&[]),
+            note: "Both agents autodiscover CLAUDE.md + auto-memory. bot-hq adds its own system prompt regardless.".into(),
             overridable: true,
         },
         Surface::CoreKnobs => Inheritance {
@@ -228,10 +228,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skills_inherited_by_brian_not_rain() {
+    fn skills_inherited_by_both_agents() {
         let inh = inheritance(Surface::Skills);
         assert!(inh.inherited_by.contains(&"brian".to_string()));
-        assert!(inh.skipped_by.contains(&"rain".to_string()));
+        assert!(inh.inherited_by.contains(&"rain".to_string()));
+        assert!(inh.skipped_by.is_empty());
         assert!(inh.overridable);
     }
 
