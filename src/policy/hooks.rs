@@ -343,10 +343,7 @@ fn run_post_commit(data_dir: &Path, project: Option<&str>, session: Option<&str>
         );
         let log = ViolationsLog::new(data_dir);
         // Best-effort log. Use a tokio runtime since the log API is async.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("building runtime for post-commit log")?;
+        let rt = hook_runtime().context("building runtime for post-commit log")?;
         rt.block_on(async {
             let _ = log
                 .record(
@@ -365,16 +362,26 @@ fn run_post_commit(data_dir: &Path, project: Option<&str>, session: Option<&str>
     Ok(0)
 }
 
-/// pre-push handler. Allows the push when `push_gate == auto` (exit 0). When
-/// `push_gate == ask` AND the push originates inside a live bot-hq session, it
-/// `BOT_HQ_AGENT` env (trimmed, non-empty) or the "brian" default. Shared by the
-/// pre-push + findings-gate hooks so the fallback can't drift between them.
+/// The pushing/committing agent for hook attribution: the `BOT_HQ_AGENT` env
+/// (trimmed, non-empty) or the "brian" default. Shared by the pre-push +
+/// findings-gate hooks so the fallback can't drift between them.
 fn hook_agent() -> String {
     std::env::var("BOT_HQ_AGENT")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "brian".to_string())
+}
+
+/// Build a current-thread runtime to drive async calls from a sync git-hook
+/// subprocess (hooks run outside any runtime). Returns the builder's
+/// `io::Result` so each caller keeps its own failure policy — the post-commit,
+/// pre-push, and findings-gate hooks variously skip / propagate / fail-closed.
+/// Centralizes the `new_current_thread().enable_all().build()` boilerplate.
+fn hook_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
 }
 
 /// True for git's all-zero object id (the remote side of a ref create / the
@@ -475,10 +482,7 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     if matches!(policy.force_push, ForcePushMode::Blocked) && pushing_non_fast_forward() {
         let branch = current_branch();
         if let Some(sid) = session_id.as_deref() {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
+            if let Ok(rt) = hook_runtime() {
                 rt.block_on(log_force_push_block(data_dir, sid, &hook_agent(), branch.as_deref()));
             }
         }
@@ -539,10 +543,7 @@ fn run_pre_push(data_dir: &Path, project: Option<&str>) -> Result<i32> {
     // directly — POST `/hooks/pre-push` and block on the user's pick. One
     // current-thread runtime drives both the HTTP call and the fail-closed
     // violation log (mirrors run_post_commit).
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let rt = match hook_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!(
@@ -1087,10 +1088,7 @@ fn log_findings_block(data_dir: &Path, hook: &str, session_id: &str, n: usize) {
     let agent = hook_agent();
     let action = if hook == "pre-push" { "git push" } else { "git commit" };
     let log = ViolationsLog::new(data_dir);
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
+    let Ok(rt) = hook_runtime() else {
         return;
     };
     rt.block_on(async {
@@ -1115,16 +1113,16 @@ fn open_blocking_findings(
     session_id: &str,
 ) -> Option<Vec<(String, String, Option<String>)>> {
     let db_path = crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).db_path;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
+    let rt = hook_runtime().ok()?;
     match rt.block_on(query_open_blocking(&db_path, session_id)) {
         Ok(rows) => Some(rows),
         Err(e) => {
-            eprintln!(
-                "bot-hq: EYES-findings gate could not read the DB ({e}); proceeding (fail-open)."
-            );
+            // Fail-open silently, like the other DB/git reads in this file. A
+            // host-side warn rather than agent-facing stderr so a transient
+            // SQLITE_BUSY doesn't surface a scary "could not read the DB" line in
+            // the HANDS transcript on every blocked-from-reading commit. (No-op in
+            // the subscriber-less hook subprocess; captured if ever app-hosted.)
+            tracing::warn!(?e, "EYES-findings gate could not read the DB; proceeding (fail-open)");
             None
         }
     }
