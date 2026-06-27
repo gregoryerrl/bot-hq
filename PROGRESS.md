@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-595 Rust tests passing (544 lib + 33 external MCP + 7 signaling + 11
+597 Rust tests passing (546 lib + 33 external MCP + 7 signaling + 11
 storage) plus 109 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,25 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-27 — Context Library Phase 1 (index freshness + primer pins)
+
+First slice of the CL token-efficiency arc (assessment:
+`docs/plans/2026-06-27-context-library-v2-assessment.md`). Two surgical
+fixes so the cold-start CL surface stops drifting and stops burying the
+highest-value files. On `main`; both fixes carry a unit test (+2 → 546 lib).
+
+- **Index descriptions no longer freeze (Fix B, `5766291`).** The
+  `cl_rescan` changed-file branch now re-derives the description from the
+  fresh on-disk snippet via `refresh_cl_index_description`
+  (`storage/cl_index.rs`) — and preserves user-set tags — instead of only
+  bumping the timestamp. Before, a row's description was stuck at
+  first-index even as the file's content changed.
+- **Cold-start primer pins the stable files (Fix C, `acf096d`).**
+  `render_cl_primer` (`core/session.rs`) now pins `conventions.md` /
+  `decisions.md` to the front and excludes `plans/*` handoffs, then fills
+  the remaining slots by recency — instead of a pure top-N-by-recency list
+  that let ephemeral handoffs crowd conventions/decisions out of the TOC.
 
 ## 2026-06-27 — codebase audit round 4 (optimizations + enhancements)
 
