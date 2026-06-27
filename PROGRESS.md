@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-597 Rust tests passing (546 lib + 33 external MCP + 7 signaling + 11
+613 Rust tests passing (562 lib + 33 external MCP + 7 signaling + 11
 storage) plus 109 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,28 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-28 — Context Library Phase 3 (FTS5 queryable retrieval)
+
+The CL becomes queryable: agents pull the relevant CL *content* on a topic
+instead of reading whole files. On branch `brian/cl-phase3-fts5` (retrieval
+increment; `cl_propose` review-queue + measurement deferred to a follow-up).
+
+- **FTS5 atom index (migration 0024).** Each CL file splits into
+  heading-delimited atoms (`split_into_atoms`); `cl_rescan` populates a
+  standalone FTS5 `cl_atoms` table (BM25-rankable, porter stemming) on the
+  same disk walk that feeds `cl_index`. SHA-256 `body_hash` stored for
+  future stale-flagging.
+- **`cl_retrieve(project, query, paths?, budget_tokens?)`** — the headline
+  read side: FTS5/BM25 ranking + project scope + optional path filter +
+  conventions/decisions pin + freshness, returning atom bodies inline under
+  a token budget. Raw queries are sanitized into a safe MATCH expression
+  (operators/metacharacters quoted as literals) without losing stemming.
+  Exposed as an MCP tool (read-only, both agents).
+- **Cold-start primer** now advertises `cl_retrieve` for CL content instead
+  of "Read whole files", so the tool actually gets used.
+
++16 Rust tests (8 index/population, 7 retrieval, 1 stemming guard) → 562 lib.
 
 ## 2026-06-27 — Context Library Phase 1 (index freshness + primer pins)
 
