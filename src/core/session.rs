@@ -998,8 +998,28 @@ const CL_PRIMER_DESC_MAX: usize = 100;
 /// bodies. `policy.yaml` is skipped (already rendered as the policy block).
 /// Returns "" when there's nothing useful to list.
 fn render_cl_primer(entries: &[ClIndexEntry]) -> String {
+    // Problem C: the primer was the top-N by recency, so ephemeral `plans/*`
+    // handoffs crowded out the stable, highest-value files (conventions /
+    // decisions fell below the row cap and never appeared). Pin those to the
+    // front and drop handoffs from the cold-start TOC — both stay discoverable
+    // via `cl_index_search`. `policy.yaml` stays excluded (rendered as the
+    // policy block). `entries` arrives most-recently-updated first.
+    const PINNED: [&str; 2] = ["conventions.md", "decisions.md"];
+    let excluded = |p: &str| p == "policy.yaml" || p.starts_with("plans/");
+
+    // Pinned first (in PINNED order, only if present), then the rest by the
+    // incoming recency order, skipping excluded + already-pinned.
+    let ordered = PINNED
+        .iter()
+        .filter_map(|name| entries.iter().find(|e| e.file_path == *name))
+        .chain(
+            entries
+                .iter()
+                .filter(|e| !excluded(e.file_path.as_str()) && !PINNED.contains(&e.file_path.as_str())),
+        );
+
     let mut lines = Vec::new();
-    for e in entries.iter().filter(|e| e.file_path != "policy.yaml") {
+    for e in ordered.take(CL_PRIMER_MAX_ROWS) {
         let desc = e.description.trim();
         if desc.is_empty() {
             lines.push(format!("- `{}`", e.file_path));
@@ -1007,19 +1027,17 @@ fn render_cl_primer(entries: &[ClIndexEntry]) -> String {
             let desc = truncate_chars(desc, CL_PRIMER_DESC_MAX);
             lines.push(format!("- `{}` — {}", e.file_path, desc));
         }
-        if lines.len() >= CL_PRIMER_MAX_ROWS {
-            break;
-        }
     }
     if lines.is_empty() {
         return String::new();
     }
     format!(
         "## Project CL — files available (this project's index)\n\n\
-         These are the CL index rows for this project (most-recently-updated \
-         first) so you know what context EXISTS without a cold-start \
-         `cl_index_search`. Bodies are NOT inlined — pull the ones you need \
-         with `Read` (or re-run `cl_index_search` for the full, live list):\n\n\
+         These are the CL index rows for this project (key files first, then \
+         most-recently-updated) so you know what context EXISTS without a \
+         cold-start `cl_index_search`. Bodies are NOT inlined — pull the ones \
+         you need with `Read` (or re-run `cl_index_search` for the full, live \
+         list):\n\n\
          {}\n",
         lines.join("\n")
     )
@@ -1299,6 +1317,33 @@ mod tests {
             !out.contains(&"x".repeat(CL_PRIMER_DESC_MAX + 1)),
             "full over-long description must not appear in the primer"
         );
+    }
+
+    #[test]
+    fn render_cl_primer_pins_stable_files_and_drops_handoffs() {
+        // Problem C: even when ephemeral handoffs are the most-recently-updated
+        // rows, conventions.md + decisions.md must surface (pinned, first), and
+        // `plans/*` handoffs must NOT appear in the cold-start TOC at all.
+        let entries = vec![
+            // recency order (as cl_index_search returns it): handoffs newest.
+            cl_entry("plans/2026-06-26-handoff.md", "latest handoff"),
+            cl_entry("plans/2026-06-25-handoff.md", "older handoff"),
+            cl_entry("notes.md", "durable gotchas"),
+            cl_entry("conventions.md", "repo, stack, commands"),
+            cl_entry("decisions.md", "decision log"),
+        ];
+        let out = render_cl_primer(&entries);
+        assert!(
+            !out.contains("plans/"),
+            "handoff docs must be dropped from the cold-start primer"
+        );
+        assert!(out.contains("`conventions.md`"), "conventions.md must be pinned in");
+        assert!(out.contains("`decisions.md`"), "decisions.md must be pinned in");
+        assert!(out.contains("`notes.md`"), "non-handoff recency rows still appear");
+        // Pinned files precede the recency fill.
+        let conv = out.find("conventions.md").unwrap();
+        let notes = out.find("notes.md").unwrap();
+        assert!(conv < notes, "pinned conventions.md must precede the recency fill");
     }
 
     #[test]
