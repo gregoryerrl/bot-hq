@@ -17,6 +17,7 @@ use std::str::FromStr;
 pub mod row_types;
 
 mod agent_config;
+mod cl_atoms;
 mod cl_index;
 mod findings;
 mod messages;
@@ -28,6 +29,7 @@ mod sessions;
 mod time;
 mod tray;
 
+pub use cl_atoms::Atom;
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Finding, FindingSeverity, FindingStatus,
