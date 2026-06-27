@@ -160,10 +160,16 @@ fn atom_body_hash(body: &str) -> String {
 }
 
 /// Turn an arbitrary user query into a safe FTS5 MATCH expression: extract
-/// alphanumeric tokens, quote each as a literal (which neutralizes FTS5 operators
-/// like AND/OR/NOT/NEAR and metacharacters like `* " -`), and OR them for recall
-/// — BM25 then ranks by how well each atom matches. Empty when the query has no
-/// alphanumeric tokens (the caller treats that as "no results").
+/// alphanumeric tokens, quote each one INDIVIDUALLY (which neutralizes FTS5
+/// operators like AND/OR/NOT/NEAR and metacharacters like `* " -`), and OR them
+/// for recall — BM25 then ranks by how well each atom matches. Empty when the
+/// query has no alphanumeric tokens (the caller treats that as "no results").
+///
+/// Quoting per-token does NOT disable stemming: FTS5 tokenizes the contents of a
+/// quoted string, so `porter` still applies (migrate / migration / migrations
+/// share a stem — guarded by `cl_retrieve_stems_across_inflections`). Quoting each
+/// token SEPARATELY (vs quoting the whole query as one phrase) also avoids
+/// imposing phrase-adjacency, so word order doesn't constrain matches.
 fn to_fts5_match(query: &str) -> String {
     query
         .split(|c: char| !c.is_alphanumeric())
@@ -352,5 +358,22 @@ mod tests {
         assert_eq!(super::to_fts5_match("alpha AND beta"), "\"alpha\" OR \"AND\" OR \"beta\"");
         assert_eq!(super::to_fts5_match("  *!*  "), "");
         assert_eq!(super::to_fts5_match("one"), "\"one\"");
+    }
+
+    #[tokio::test]
+    async fn cl_retrieve_stems_across_inflections() {
+        let s = Storage::memory().await.unwrap();
+        s.replace_atoms_for_file("p", "n.md", &[atom("H", "applied migrations are immutable")], "t")
+            .await
+            .unwrap();
+        // Query inflections the body does NOT contain verbatim. FTS5 tokenizes the
+        // contents of a quoted string, so `porter` stemming still applies through
+        // to_fts5_match's quoting: migrate/migration/migrations share a stem.
+        for q in ["migrate", "migration", "MIGRATING"] {
+            assert!(
+                !s.cl_retrieve("p", q, None, 10_000).await.unwrap().is_empty(),
+                "porter stemming should match {q:?} -> migrations (quoting keeps the tokenizer)"
+            );
+        }
     }
 }
