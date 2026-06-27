@@ -45,6 +45,23 @@ impl SignalingBridge {
         storage.cl_index_search(project, query).await
     }
 
+    /// Read-side ranked retrieval for agents: returns the CL atom bodies best
+    /// matching `query` under a token budget. Wraps `storage.cl_retrieve`; empty
+    /// when storage isn't configured (test bridges).
+    pub async fn cl_retrieve(
+        &self,
+        project: &str,
+        query: &str,
+        paths: Option<&[String]>,
+        budget_tokens: i64,
+    ) -> Result<Vec<crate::storage::RetrievedAtom>> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        storage.cl_retrieve(project, query, paths, budget_tokens).await
+    }
+
     /// Read-side discovery for FOLDER descriptions. Parallel to
     /// [`cl_index_search`]. Returns lightweight rows; empty list when storage
     /// isn't configured (test bridges).

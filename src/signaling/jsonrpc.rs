@@ -601,6 +601,37 @@ async fn call_tool(
                 .collect();
             Ok(result_json(&trimmed, "[]"))
         }
+        "cl_retrieve" => {
+            let project = arg_required_str(&args, "project")?;
+            let query = arg_required_str(&args, "query")?;
+            let paths: Option<Vec<String>> = args
+                .get("paths")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+            let budget = args
+                .get("budget_tokens")
+                .and_then(Value::as_i64)
+                .unwrap_or(3000);
+            let atoms = bridge
+                .cl_retrieve(&project, &query, paths.as_deref(), budget)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            // Inline the atom bodies as readable `## file > heading` blocks — the
+            // whole point is to hand the agent the CONTENT, not a TOC.
+            let text = if atoms.is_empty() {
+                format!("(no matching CL atoms for: {query})")
+            } else {
+                let mut out = String::new();
+                for atom in &atoms {
+                    out.push_str(&format!(
+                        "## {} > {}\n{}\n\n",
+                        atom.file_path, atom.heading_path, atom.body
+                    ));
+                }
+                out.trim_end().to_string()
+            };
+            Ok(ToolCallResult::text(text))
+        }
         "cl_register_read" => {
             let project = arg_required_str(&args, "project")?;
             let file_path = arg_required_str(&args, "file_path")?;
@@ -1134,6 +1165,62 @@ mod tests {
             matches!(ev, SignalingEvent::AwaitingUser { reason, .. } if reason.contains("yielded")),
             "halt should emit AwaitingUser with the default 'yielded' reason"
         );
+    }
+
+    #[tokio::test]
+    async fn cl_retrieve_dispatch_inlines_bodies_and_handles_no_match() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage
+            .replace_atoms_for_file(
+                "p",
+                "notes.md",
+                &[crate::storage::Atom {
+                    heading_path: "Gotchas".into(),
+                    body: "the migration is immutable".into(),
+                }],
+                "t",
+            )
+            .await
+            .unwrap();
+        bridge.set_storage(storage).await;
+
+        // A real query inlines the matching atom body under a `## file > heading`.
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "cl_retrieve", "arguments": {"project": "p", "query": "migration"}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("## notes.md > Gotchas"), "header present: {text}");
+        assert!(text.contains("the migration is immutable"), "body inlined: {text}");
+
+        // A term-less query returns a friendly no-match string, not an error.
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "cl_retrieve", "arguments": {"project": "p", "query": "***"}}),
+                2,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        assert!(v["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("no matching CL atoms"));
     }
 
     #[tokio::test]

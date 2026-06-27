@@ -486,6 +486,33 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "cl_retrieve",
+            description: "Pull the most relevant Context Library CONTENT for a query as ranked atom BODIES inline, under a token budget — instead of the cl_index_search -> eyeball descriptions -> Read the whole file loop. Each CL file is split into heading-delimited atoms; this returns the best BM25 matches (conventions/decisions win ties, newest first) formatted as `## file_path > heading_path` blocks. Use it when you need the actual CL content on a topic, not just which files exist.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project to search. Use the session's project for project-scoped CL, '_globals' for system-wide rules."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Free-text query, matched against atom heading_path + body (FTS5/BM25). Operators and punctuation are treated as literal words, so arbitrary text is safe."
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional: restrict retrieval to these file paths (relative to the project root, as in cl_index_search results)."
+                    },
+                    "budget_tokens": {
+                        "type": "integer",
+                        "description": "Optional soft cap on total body tokens returned (~chars/4 estimate). Defaults to 3000. The top atom is always returned even if it alone exceeds the budget."
+                    }
+                },
+                "required": ["project", "query"]
+            }),
+        },
+        ToolDescriptor {
             name: "cl_register_read",
             description: "Record that this agent read a CL file. Powers the audit trail (cl_reads) — answers 'what context did this agent see before making a decision?'. Optional but encouraged on important reads. Fire-and-forget; failures are silently logged.",
             input_schema: serde_json::json!({

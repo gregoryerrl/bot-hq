@@ -29,7 +29,7 @@ mod sessions;
 mod time;
 mod tray;
 
-pub use cl_atoms::Atom;
+pub use cl_atoms::{Atom, RetrievedAtom};
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Finding, FindingSeverity, FindingStatus,
