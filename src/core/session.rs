@@ -1035,9 +1035,11 @@ fn render_cl_primer(entries: &[ClIndexEntry]) -> String {
         "## Project CL — files available (this project's index)\n\n\
          These are the CL index rows for this project (key files first, then \
          most-recently-updated) so you know what context EXISTS without a \
-         cold-start `cl_index_search`. Bodies are NOT inlined — pull the ones \
-         you need with `Read` (or re-run `cl_index_search` for the full, live \
-         list):\n\n\
+         cold-start `cl_index_search`. Bodies are NOT inlined below — to pull \
+         the actual CL content on a topic, call `cl_retrieve(project, query)`, \
+         which returns the most relevant atom bodies inline under a token \
+         budget instead of making you read whole files. Use `cl_index_search` \
+         for the live file list and `Read` for one specific whole file.\n\n\
          {}\n",
         lines.join("\n")
     )
@@ -1344,6 +1346,8 @@ mod tests {
         let conv = out.find("conventions.md").unwrap();
         let notes = out.find("notes.md").unwrap();
         assert!(conv < notes, "pinned conventions.md must precede the recency fill");
+        // The primer must steer agents to cl_retrieve for CL content (not Read).
+        assert!(out.contains("cl_retrieve"), "primer must advertise cl_retrieve");
     }
 
     #[test]
