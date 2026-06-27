@@ -42,18 +42,24 @@ impl Storage {
         Ok(row.0)
     }
 
-    /// Update only the updated_at timestamp — used by lazy stat sync when
-    /// disk mtime is newer than stored. Does not touch description/tags.
-    pub async fn touch_cl_index(
+    /// Refresh the auto-derived `description` (and `updated_at`) when a file's
+    /// body changed on disk — used by the rescan sync when disk mtime is newer
+    /// than the stored row. Unlike [`Self::upsert_cl_index`] it leaves user-set
+    /// `tags` intact (upsert binds `tags = excluded.tags`, which a `None` would
+    /// wipe). Without this the description froze at first-index and drifted from
+    /// the file's actual content.
+    pub async fn refresh_cl_index_description(
         &self,
         project_id: &str,
         file_path: &str,
+        description: &str,
         updated_at: &str,
     ) -> Result<()> {
         sqlx::query(
-            "UPDATE cl_index SET updated_at = ? \
+            "UPDATE cl_index SET description = ?, updated_at = ? \
              WHERE project_id = ? AND file_path = ?",
         )
+        .bind(description)
         .bind(updated_at)
         .bind(project_id)
         .bind(file_path)
@@ -238,5 +244,23 @@ mod tests {
         // Scoped by session: s2 has its own row, an unknown session has none.
         assert_eq!(s.cl_reads_for_session("s2").await.unwrap().len(), 1);
         assert!(s.cl_reads_for_session("nope").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_cl_index_description_updates_desc_but_preserves_tags() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("p", "p", None, None, None).await.unwrap();
+        s.upsert_cl_index("p", "notes.md", "old description", Some("tag-a,tag-b"))
+            .await
+            .unwrap();
+
+        s.refresh_cl_index_description("p", "notes.md", "fresh description", "2030-01-01T00:00:00+00:00")
+            .await
+            .unwrap();
+
+        let row = s.get_cl_index("p", "notes.md").await.unwrap().unwrap();
+        assert_eq!(row.description, "fresh description"); // re-derived (Problem B fix)
+        assert_eq!(row.tags.as_deref(), Some("tag-a,tag-b")); // user tags survive
+        assert_eq!(row.updated_at, "2030-01-01T00:00:00+00:00");
     }
 }

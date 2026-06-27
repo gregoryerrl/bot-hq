@@ -152,7 +152,13 @@ impl SignalingBridge {
                     report.added.push(rel.clone());
                 }
                 Some(row) if row.updated_at.as_str() < mtime.as_str() => {
-                    storage.touch_cl_index(project, rel, mtime).await?;
+                    // Body changed on disk → re-derive the description from the
+                    // fresh snippet `walk_cl_dir` already computed (don't just
+                    // bump the timestamp), so the index TOC can't drift from the
+                    // file. User-set tags are preserved.
+                    storage
+                        .refresh_cl_index_description(project, rel, snippet, mtime)
+                        .await?;
                     report.touched.push(rel.clone());
                 }
                 _ => {}
