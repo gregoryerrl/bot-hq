@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-629 Rust tests passing (578 lib + 33 external MCP + 7 signaling + 11
+636 Rust tests passing (585 lib + 33 external MCP + 7 signaling + 11
 storage) plus 112 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -19,6 +19,40 @@ Tauri v2 migration — live on main since: the **EYES-sign-off commit
 gate**, the **interrupt redesign** (stdin `control_request` cancel +
 `SessionActivity` state machine), the **peer-forward router extraction**
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
+
+---
+
+## 2026-06-29 — CL v2 deferred remainder: propose-don't-mutate, atom bounding, stale-flagging
+
+Landed the three deferred items the audit entry below left open
+(P1.1/P2.3/P1.2 from `plans/2026-06-29-cl-audit-remaining-handoff.md`).
+
+- **Close-out re-wired to `cl_propose` (P1.1).** Agents no longer `Write`
+  learnings straight into `notes.md` at session close — they PROPOSE (read
+  the file, append under `## Learnings`, `cl_propose kind=correct` with the
+  full body) and the user approves the write-back in the review queue: the
+  brief's "propose, don't mutate" keystone. Re-pointed the three prompt
+  sites (general_rules close section, prompts.rs close-ask, jsonrpc close
+  nudge) and added the `cl_retrieve` advisory contract. Filing a proposal
+  now marks the close-delta gate, so a proposing agent isn't re-nudged into
+  a duplicate. Prompt + one Rust line.
+- **Bullet-level atomization + token bound (P2.3).** `split_into_atoms`
+  sub-splits a section over ~200 tokens into bounded atoms at column-0
+  bullets + blank-line paragraphs (fence-aware); sections within the bound
+  keep their text verbatim. A growing `## Learnings` block was previously
+  one ever-growing atom that crowded the retrieval budget. `estimate_tokens`
+  is now `pub(crate)` (shared with the budget), and `cl_retrieve` gains a
+  `rowid` final tie-break so same-heading sub-atoms trim deterministically.
+- **Retrieval-time stale-flagging (P1.2, migration 0027).** `cl_atoms`
+  gains a `code_hash` column. A new `cl_refs` module extracts repo-relative
+  source refs from an atom body (disk-validated, `:line` stripped) and
+  hashes their content; `cl_rescan` stamps each atom's `code_hash` against
+  the project's `working_repo_path`, and the bridge `cl_retrieve` wrapper
+  recomputes it at read time, prefixing a ⚠ when the cited code has drifted.
+  Storage stays pure (hash passed in / returned; repo I/O lives in the
+  bridge). Whole-file granularity; `body_hash` stays as-is (it hashes the
+  atom's own text — a different question). Measurement (Stage-4b) and
+  embeddings remain deferred.
 
 ---
 
