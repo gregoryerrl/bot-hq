@@ -306,6 +306,30 @@ async clRescan(project: string) : Promise<Result<ClRescanReportView, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
+async clListProposals(project: string, status: string | null) : Promise<Result<ClProposalView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_list_proposals", { project, status }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async clApproveProposal(proposalUid: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_approve_proposal", { proposalUid }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async clRejectProposal(proposalUid: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_reject_proposal", { proposalUid }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listProjects() : Promise<Result<ProjectView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_projects") };
@@ -937,6 +961,7 @@ truncated: boolean;
 binary: boolean }
 export type ClFolderView = { id: number; project_id: string; folder_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
+export type ClProposalView = { id: number; proposal_uid: string; project: string; file_path: string; kind: string; target_excerpt: string | null; proposed_body: string; evidence: string; status: string; proposed_by: string; session_id: string | null; created_at: string; updated_at: string }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
 /**
  * The full resolved view of the user's Claude Code config.
