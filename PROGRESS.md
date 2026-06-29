@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-613 Rust tests passing (562 lib + 33 external MCP + 7 signaling + 11
+623 Rust tests passing (573 lib + 33 external MCP + 7 signaling + 11
 storage) plus 109 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,27 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-29 — Context Library Phase 3 (`cl_propose` MVP)
+
+The CL now has a durable proposal queue so agents can suggest CL edits without
+mutating files directly. On branch `brian/cl-proposals-mvp` (polished frontend
+review queue deferred to the next slice).
+
+- **Project-scoped proposal storage (migration 0025).** New `cl_proposals`
+  table stores stable `proposal_uid` rows by project/file with nullable
+  audit-only `session_id`, `open`/`approved`/`rejected` status, and indexes for
+  project/status + file/status review queues.
+- **Agent-facing MCP tools.** `cl_propose` queues non-mutating proposals and
+  `cl_list_proposals(project, status?)` gives agents a read-side status view.
+  Both Brian and Rain can use them because proposal creation/listing does not
+  write CL content.
+- **Host-mediated approval path.** Supported MVP approvals write atomically and
+  call `cl_rescan`: `add` creates a new file only, `correct` replaces the full
+  existing file, and `delete` approval is explicitly deferred/unsupported.
+  Rejection marks proposals without touching disk.
+
++11 Rust tests (2 storage, 8 bridge, 1 JSON-RPC dispatch) → 573 lib.
 
 ## 2026-06-28 — Context Library Phase 3 (FTS5 queryable retrieval)
 

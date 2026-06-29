@@ -513,6 +513,60 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "cl_propose",
+            description: "Create a durable project-scoped Context Library edit proposal without mutating CL files. Both agents may propose; human/host approval owns write-back. MVP semantics: add creates a new file, correct replaces the full existing file, delete approval is deferred.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project the proposed CL edit belongs to."
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": "Target CL-relative file path within the project."
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["add", "correct", "delete"],
+                        "description": "MVP: add = create new file, correct = replace full existing file, delete = proposal only (approval deferred)."
+                    },
+                    "target_excerpt": {
+                        "type": "string",
+                        "description": "Optional evidence/context excerpt. For MVP correct proposals this is advisory only, not a patch anchor. Must be omitted/empty for add."
+                    },
+                    "proposed_body": {
+                        "type": "string",
+                        "description": "Complete proposed file body for add/correct proposals. Optional and ignored for delete proposals in the MVP."
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": "Why this CL change is warranted."
+                    }
+                },
+                "required": ["project", "file_path", "kind", "evidence"]
+            }),
+        },
+        ToolDescriptor {
+            name: "cl_list_proposals",
+            description: "List durable Context Library edit proposals for a project. Read-only; use it to inspect pending/resolved proposal state after cl_propose.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project whose proposals should be listed."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["open", "approved", "rejected"],
+                        "description": "Optional proposal lifecycle filter."
+                    }
+                },
+                "required": ["project"]
+            }),
+        },
+        ToolDescriptor {
             name: "cl_register_read",
             description: "Record that this agent read a CL file. Powers the audit trail (cl_reads) — answers 'what context did this agent see before making a decision?'. Optional but encouraged on important reads. Fire-and-forget; failures are silently logged.",
             input_schema: serde_json::json!({

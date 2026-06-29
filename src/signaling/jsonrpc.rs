@@ -632,6 +632,56 @@ async fn call_tool(
             };
             Ok(ToolCallResult::text(text))
         }
+        "cl_propose" => {
+            let project = arg_required_str(&args, "project")?;
+            let file_path = arg_required_str(&args, "file_path")?;
+            let kind = arg_required_str(&args, "kind")?;
+            let target_excerpt = arg_opt_str(&args, "target_excerpt");
+            let proposed_body = arg_opt_str(&args, "proposed_body").unwrap_or_default();
+            let evidence = arg_required_str(&args, "evidence")?;
+            let uid = bridge
+                .cl_propose(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    project,
+                    file_path,
+                    kind,
+                    target_excerpt,
+                    proposed_body,
+                    evidence,
+                )
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(format!("proposal filed: {uid}")))
+        }
+        "cl_list_proposals" => {
+            let project = arg_required_str(&args, "project")?;
+            let status = arg_opt_str(&args, "status");
+            let rows = bridge
+                .cl_list_proposals(project, status)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            let trimmed: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "proposal_uid": p.proposal_uid,
+                        "project": p.project_id,
+                        "file_path": p.file_path,
+                        "kind": p.kind,
+                        "target_excerpt": p.target_excerpt,
+                        "proposed_body": p.proposed_body,
+                        "evidence": p.evidence,
+                        "status": p.status,
+                        "proposed_by": p.proposed_by,
+                        "session_id": p.session_id,
+                        "created_at": p.created_at,
+                        "updated_at": p.updated_at,
+                    })
+                })
+                .collect();
+            Ok(result_json(&trimmed, "[]"))
+        }
         "cl_register_read" => {
             let project = arg_required_str(&args, "project")?;
             let file_path = arg_required_str(&args, "file_path")?;
@@ -805,6 +855,8 @@ mod tests {
         assert!(names.contains(&"close_session"));
         assert!(names.contains(&"list_my_pending_questions"));
         assert!(names.contains(&"withdraw_question"));
+        assert!(names.contains(&"cl_propose"));
+        assert!(names.contains(&"cl_list_proposals"));
         assert_eq!(
             tools.len(),
             names.iter().collect::<std::collections::HashSet<_>>().len(),
@@ -1221,6 +1273,91 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no matching CL atoms"));
+    }
+
+    #[tokio::test]
+    async fn cl_proposal_dispatch_allows_rain_to_create_and_list() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage
+            .upsert_project("bot-hq", "bot-hq", None, None, None)
+            .await
+            .unwrap();
+        storage.create_session("s1", "CL proposals", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "cl_propose", "arguments": {
+                    "project": "bot-hq",
+                    "file_path": "notes.md",
+                    "kind": "correct",
+                    "target_excerpt": "old",
+                    "proposed_body": "complete corrected body",
+                    "evidence": "stale wording"
+                }}),
+                1,
+            ),
+            &rain_caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("proposal filed: "), "proposal response: {text}");
+
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "cl_propose", "arguments": {
+                    "project": "bot-hq",
+                    "file_path": "obsolete.md",
+                    "kind": "delete",
+                    "evidence": "obsolete note"
+                }}),
+                2,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("proposal filed: "), "Brian proposal response: {text}");
+
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({"name": "cl_list_proposals", "arguments": {
+                    "project": "bot-hq",
+                    "status": "open"
+                }}),
+                3,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["project"], "bot-hq");
+        assert_eq!(rows[0]["file_path"], "notes.md");
+        assert_eq!(rows[0]["kind"], "correct");
+        assert_eq!(rows[0]["status"], "open");
+        assert_eq!(rows[0]["proposed_by"], "rain");
+        assert_eq!(rows[1]["file_path"], "obsolete.md");
+        assert_eq!(rows[1]["kind"], "delete");
+        assert_eq!(rows[1]["proposed_body"], "");
+        assert_eq!(rows[1]["proposed_by"], "brian");
     }
 
     #[tokio::test]

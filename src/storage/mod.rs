@@ -19,6 +19,7 @@ pub mod row_types;
 mod agent_config;
 mod cl_atoms;
 mod cl_index;
+mod cl_proposals;
 mod findings;
 mod messages;
 mod models;
@@ -32,9 +33,9 @@ mod tray;
 pub use cl_atoms::{Atom, RetrievedAtom};
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
-    AgentConfig, Author, ClFolder, ClIndexEntry, ClRead, Finding, FindingSeverity, FindingStatus,
-    Message, MessageKind, Model, Plugin, Project, QuestionKind, Session,
-    SessionDocument, SessionTrayEntry, SessionWithPreview,
+    AgentConfig, Author, ClFolder, ClIndexEntry, ClProposal, ClProposalStatus, ClRead,
+    Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
+    QuestionKind, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
 };
 pub(crate) use time::now_utc;
 
