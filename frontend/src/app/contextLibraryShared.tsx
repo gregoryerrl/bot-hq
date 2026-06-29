@@ -10,18 +10,20 @@ import type { ClIndexEntryView } from "../lib/bindings";
 // view). Discriminated on `kind` so the tab strip + editor area can route.
 export type OpenTab =
   | { kind: "file"; project: string; filePath: string }
-  | { kind: "folder"; project: string; folderPath: string };
+  | { kind: "folder"; project: string; folderPath: string }
+  | { kind: "proposals"; project: string };
 
 // Stable identity for dedup, React keys, and active-tab matching.
 export function tabKey(tab: OpenTab): string {
-  return tab.kind === "file"
-    ? `file:${tab.project}/${tab.filePath}`
-    : `folder:${tab.project}/${tab.folderPath}`;
+  if (tab.kind === "file") return `file:${tab.project}/${tab.filePath}`;
+  if (tab.kind === "folder") return `folder:${tab.project}/${tab.folderPath}`;
+  return `proposals:${tab.project}`;
 }
 
 // Tab strip label. A folder with an empty path is the project root, so it
 // shows the project name; everything else shows the trailing path segment.
 export function tabLabel(tab: OpenTab): string {
+  if (tab.kind === "proposals") return `${tab.project} / Proposals`;
   const path = tab.kind === "file" ? tab.filePath : tab.folderPath;
   return path === "" ? tab.project : baseName(path);
 }
@@ -236,6 +238,26 @@ export function RefreshIcon({ className }: { className?: string }) {
     >
       <polyline points="23 4 23 10 17 10" />
       <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
+    </svg>
+  );
+}
+
+export function ProposalsIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={cn("size-3.5", className)}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M5 4h14v5l-2 3H7L5 9V4z" />
+      <path d="M7 12v7h10v-7" />
+      <path d="M9 8h6" />
+      <path d="M9 16h6" />
     </svg>
   );
 }

@@ -12,7 +12,7 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 623 Rust tests passing (573 lib + 33 external MCP + 7 signaling + 11
-storage) plus 109 frontend Vitest. Release build clean. Version
+storage) plus 112 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -21,6 +21,27 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-29 — Context Library proposal review queue UI
+
+The `cl_propose` backend is now human-operable from the Context Library. A
+selected project can open a `Proposals` editor tab with open proposals rendered
+as compact Industrial Terminal review docket cards.
+
+- **Tauri proposal commands.** Added `cl_list_proposals`,
+  `cl_approve_proposal`, and `cl_reject_proposal` as thin command wrappers over
+  the bridge methods, plus Specta export coverage so the command surface stays
+  registered.
+- **Context Library proposal tab.** `OpenTab` now supports project-scoped
+  proposal tabs. The Library sidebar exposes a purple `Proposals` action when a
+  project filter is selected; the editor renders open proposals with evidence,
+  target excerpt, proposed body preview, and approve/reject controls.
+- **Safe MVP UX.** `add`/`correct` can be approved (`correct` warns that it is a
+  full-file replacement); `delete` approval is disabled and labeled as deferred.
+  Mutations refetch proposals and refresh the CL workspace so the tree/editor
+  pick up approved writes.
+
++3 frontend Vitest cases → 112 frontend tests.
 
 ## 2026-06-29 — Context Library Phase 3 (`cl_propose` MVP)
 

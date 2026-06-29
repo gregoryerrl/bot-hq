@@ -67,6 +67,7 @@ const CL_KEYS = [
   "list_projects",
   "cl_folder_search",
   "cl_read_file",
+  "cl_list_proposals",
 ] as const;
 // Working-tree freshness: the fs watcher fires `session:worktree_changed` when a
 // file changes inside a live session's repo, so the Apply-tab diff re-runs live

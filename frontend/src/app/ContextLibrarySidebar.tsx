@@ -15,6 +15,7 @@ import {
   FolderIcon,
   type OpenTab,
   PlusIcon,
+  ProposalsIcon,
   RefreshIcon,
   splitGlobals,
   terminalInputClass,
@@ -63,6 +64,7 @@ interface WorkspaceSidebarProps {
   activeTab: OpenTab | null;
   onOpenFile: (project: string, filePath: string) => void;
   onOpenFolder: (project: string, folderPath: string) => void;
+  onOpenProposals: (project: string) => void;
   onRequestRegister: () => void;
   onRequestMaintain: () => void;
   onContextMenu: (target: CtxTarget, x: number, y: number) => void;
@@ -88,6 +90,7 @@ export function WorkspaceSidebar({
   activeTab,
   onOpenFile,
   onOpenFolder,
+  onOpenProposals,
   onRequestRegister,
   onRequestMaintain,
   onContextMenu,
@@ -208,6 +211,16 @@ export function WorkspaceSidebar({
             )}
           >
             <RefreshIcon className={rescanning ? "animate-spin" : undefined} />
+          </button>
+          <button
+            type="button"
+            onClick={() => project && onOpenProposals(project)}
+            disabled={!project}
+            aria-label="Open project proposals"
+            title={project ? `Review proposals for ${project}` : "Select a project to review proposals"}
+            className={cn(headerIconButtonClass, "text-secondary hover:text-secondary-fixed")}
+          >
+            <ProposalsIcon className="size-3.5" />
           </button>
           <button
             type="button"

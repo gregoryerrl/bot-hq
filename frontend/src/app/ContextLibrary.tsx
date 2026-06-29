@@ -453,6 +453,10 @@ export function ContextLibrary() {
       openTab({ kind: "folder", project, folderPath }),
     [openTab],
   );
+  const openProposals = useCallback(
+    (project: string) => openTab({ kind: "proposals", project }),
+    [openTab],
+  );
 
   const closeTab = useCallback((index: number) => {
     setTabs((prev) => {
@@ -606,6 +610,7 @@ export function ContextLibrary() {
         activeTab={activeTab}
         onOpenFile={openFile}
         onOpenFolder={openFolder}
+        onOpenProposals={openProposals}
         onRequestRegister={() => setRegisterOpen(true)}
         onRequestMaintain={() => setMaintainOpen(true)}
         onContextMenu={handleContextMenu}

@@ -2,7 +2,7 @@
 //! Context-Library tab + plugin manager + audit views all hit one surface.
 
 use crate::signaling::SignalingBridge;
-use crate::storage::{ClFolder, ClIndexEntry, Project, Storage};
+use crate::storage::{ClFolder, ClIndexEntry, ClProposal, Project, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -111,6 +111,78 @@ impl From<ClFolder> for ClFolderView {
             updated_at: f.updated_at,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ClProposalView {
+    pub id: i64,
+    pub proposal_uid: String,
+    pub project: String,
+    pub file_path: String,
+    pub kind: String,
+    pub target_excerpt: Option<String>,
+    pub proposed_body: String,
+    pub evidence: String,
+    pub status: String,
+    pub proposed_by: String,
+    pub session_id: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<ClProposal> for ClProposalView {
+    fn from(p: ClProposal) -> Self {
+        Self {
+            id: p.id,
+            proposal_uid: p.proposal_uid,
+            project: p.project_id,
+            file_path: p.file_path,
+            kind: p.kind,
+            target_excerpt: p.target_excerpt,
+            proposed_body: p.proposed_body,
+            evidence: p.evidence,
+            status: p.status,
+            proposed_by: p.proposed_by,
+            session_id: p.session_id,
+            created_at: p.created_at,
+            updated_at: p.updated_at,
+        }
+    }
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_list_proposals(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    project: String,
+    status: Option<String>,
+) -> Result<Vec<ClProposalView>, AppError> {
+    let rows = bridge.cl_list_proposals(project, status).await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_approve_proposal(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    app: tauri::AppHandle,
+    proposal_uid: String,
+) -> Result<String, AppError> {
+    let result = bridge.approve_cl_proposal(proposal_uid).await?;
+    emit_cl_changed(&app, None);
+    Ok(result)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_reject_proposal(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    app: tauri::AppHandle,
+    proposal_uid: String,
+) -> Result<String, AppError> {
+    let result = bridge.reject_cl_proposal(proposal_uid).await?;
+    emit_cl_changed(&app, None);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -469,12 +541,17 @@ pub async fn cl_unregister_project(
 /// filesystem-watcher event, so create/delete/rename emit `cl:changed`
 /// themselves or the tree would stay stale until the next disk touch.
 fn emit_project_and_cl_changed(app: &tauri::AppHandle, project: &str) {
-    use crate::tauri_events::types::{ClChangedEvent, PROJECT_CHANGED};
+    use crate::tauri_events::types::PROJECT_CHANGED;
     let _ = app.emit(PROJECT_CHANGED, ());
+    emit_cl_changed(app, Some(project));
+}
+
+fn emit_cl_changed(app: &tauri::AppHandle, project: Option<&str>) {
+    use crate::tauri_events::types::ClChangedEvent;
     let _ = app.emit(
         ClChangedEvent::EVENT_NAME,
         ClChangedEvent {
-            project: Some(project.to_string()),
+            project: project.map(str::to_string),
         },
     );
 }
