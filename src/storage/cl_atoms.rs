@@ -48,13 +48,17 @@ impl Storage {
             .bind(file_path)
             .execute(&mut *tx)
             .await?;
+        // kind is per-FILE (derived from its path), stamped on every atom so
+        // retrieval can pin/decay by kind without re-deriving from the filename.
+        let kind = cl_kind_for_path(file_path);
         for atom in atoms {
             sqlx::query(
-                "INSERT INTO cl_atoms(project_id, file_path, heading_path, body, mtime, body_hash) \
-                 VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cl_atoms(project_id, file_path, kind, heading_path, body, mtime, body_hash) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(project_id)
             .bind(file_path)
+            .bind(kind)
             .bind(&atom.heading_path)
             .bind(&atom.body)
             .bind(mtime)
@@ -172,6 +176,30 @@ fn atom_body_hash(body: &str) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Classify a CL file by its project-relative path into a coarse `kind`
+/// (convention|decision|policy|issue|idea|handoff|gotcha|note), stamped on every
+/// atom of that file so retrieval can pin/decay by kind instead of by hardcoded
+/// filenames. Inferred from the canonical filenames + the `plans/` handoff
+/// convention (CL-v2 assessment §4: "kind inferred from source file"). `note` is
+/// the catch-all for anything off the canonical set — an extension of the brief's
+/// taxonomy, but better than NULL. Only the canonical ROOT path matches (a nested
+/// `sub/conventions.md` is `note`), so the retrieval pin can't be fooled by a
+/// same-named file deeper in the tree.
+fn cl_kind_for_path(file_path: &str) -> &'static str {
+    if file_path.starts_with("plans/") {
+        return "handoff";
+    }
+    match file_path {
+        "conventions.md" => "convention",
+        "decisions.md" => "decision",
+        "policy.yaml" => "policy",
+        "issues.md" => "issue",
+        "ideas.md" => "idea",
+        "notes.md" => "gotcha",
+        _ => "note",
+    }
+}
+
 /// Turn an arbitrary user query into a safe FTS5 MATCH expression: extract
 /// alphanumeric tokens, quote each one INDIVIDUALLY (which neutralizes FTS5
 /// operators like AND/OR/NOT/NEAR and metacharacters like `* " -`), and OR them
@@ -280,6 +308,43 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(remaining.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), vec!["b.md"]);
+    }
+
+    #[tokio::test]
+    async fn replace_atoms_stamps_kind_from_path() {
+        let s = Storage::memory().await.unwrap();
+        // kind is derived from the file path (one kind per file), not the section.
+        s.replace_atoms_for_file("p", "conventions.md", &[atom("H", "b")], "t").await.unwrap();
+        s.replace_atoms_for_file("p", "plans/2026-handoff.md", &[atom("H", "b")], "t").await.unwrap();
+        s.replace_atoms_for_file("p", "weird.txt", &[atom("H", "b")], "t").await.unwrap();
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT file_path, kind FROM cl_atoms WHERE project_id='p' ORDER BY file_path",
+        )
+        .fetch_all(s.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("conventions.md".into(), "convention".into()),
+                ("plans/2026-handoff.md".into(), "handoff".into()),
+                ("weird.txt".into(), "note".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cl_kind_for_path_maps_canonical_files() {
+        use super::cl_kind_for_path;
+        assert_eq!(cl_kind_for_path("conventions.md"), "convention");
+        assert_eq!(cl_kind_for_path("decisions.md"), "decision");
+        assert_eq!(cl_kind_for_path("policy.yaml"), "policy");
+        assert_eq!(cl_kind_for_path("issues.md"), "issue");
+        assert_eq!(cl_kind_for_path("ideas.md"), "idea");
+        assert_eq!(cl_kind_for_path("notes.md"), "gotcha");
+        assert_eq!(cl_kind_for_path("plans/anything.md"), "handoff");
+        assert_eq!(cl_kind_for_path("subdir/conventions.md"), "note"); // only the canonical root path pins
+        assert_eq!(cl_kind_for_path("whatever.md"), "note");
     }
 
     #[test]
