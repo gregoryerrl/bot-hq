@@ -31,6 +31,7 @@ mod time;
 mod tray;
 
 pub use cl_atoms::{Atom, RetrievedAtom};
+pub(crate) use cl_atoms::estimate_tokens;
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClProposal, ClProposalStatus, ClRead,

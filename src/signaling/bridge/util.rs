@@ -132,14 +132,24 @@ fn heading_level(line: &str) -> Option<(usize, &str)> {
 /// still appears in its children's paths. h4+ and non-line-start `#` are body.
 pub(super) fn split_into_atoms(content: &str) -> Vec<Atom> {
     fn flush(path: &Option<String>, body: &[&str], atoms: &mut Vec<Atom>) {
-        let text = body.join("\n").trim().to_string();
-        if text.is_empty() {
+        let trimmed = body.join("\n").trim().to_string();
+        if trimmed.is_empty() {
             return;
         }
-        atoms.push(Atom {
-            heading_path: path.clone().unwrap_or_else(|| "(intro)".to_string()),
-            body: text,
-        });
+        let heading_path = path.clone().unwrap_or_else(|| "(intro)".to_string());
+        // Fast path: a section within the token bound stays ONE atom with its
+        // original text intact (preserves prior behavior). Only an over-long
+        // section — e.g. an ever-growing `## Learnings` list — is sub-split into
+        // token-bounded atoms at block boundaries so it can't become a single
+        // unbounded atom that crowds the retrieval budget. Sub-atoms share the
+        // section heading_path; retrieval's rowid tie-break keeps them ordered.
+        if crate::storage::estimate_tokens(&trimmed) <= MAX_ATOM_TOKENS {
+            atoms.push(Atom { heading_path, body: trimmed });
+            return;
+        }
+        for chunk in pack_blocks(split_into_blocks(&trimmed)) {
+            atoms.push(Atom { heading_path: heading_path.clone(), body: chunk });
+        }
     }
 
     let mut atoms = Vec::new();
@@ -162,6 +172,81 @@ pub(super) fn split_into_atoms(content: &str) -> Vec<Atom> {
     }
     flush(&path, &body, &mut atoms);
     atoms
+}
+
+/// Token ceiling for a single atom. A heading-delimited section larger than this
+/// is sub-split at block boundaries so one ever-growing section can't become a
+/// single unbounded atom that crowds the retrieval budget. ~200 tokens is a few
+/// bullet entries; re-atomization is free (boot rescan re-splits).
+const MAX_ATOM_TOKENS: i64 = 200;
+
+/// Break a section body into blocks: each top-level (column-0) markdown list item
+/// starts a new block, and blank lines separate paragraphs. Fence-aware — lines
+/// inside a fenced code block (delimited by triple backticks) never start a block,
+/// so fenced code is not split mid-block. Indented continuation / sub-bullets stay
+/// with their parent block.
+fn split_into_blocks(text: &str) -> Vec<String> {
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut cur: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        let is_fence = line.trim_start().starts_with("```");
+        if !in_fence && !is_fence {
+            if line.trim().is_empty() {
+                if !cur.is_empty() {
+                    blocks.push(std::mem::take(&mut cur));
+                }
+                continue; // drop the blank separator
+            }
+            if is_top_level_list_item(line) && !cur.is_empty() {
+                blocks.push(std::mem::take(&mut cur));
+            }
+        }
+        if is_fence {
+            in_fence = !in_fence;
+        }
+        cur.push(line);
+    }
+    if !cur.is_empty() {
+        blocks.push(cur);
+    }
+    blocks.into_iter().map(|b| b.join("\n")).collect()
+}
+
+/// True if `line` begins (at column 0) with a markdown list marker: `- `, `* `,
+/// `+ `, or an ordered `N.` / `N)` followed by a space. Indented markers are not
+/// top-level — they belong to the enclosing block.
+fn is_top_level_list_item(line: &str) -> bool {
+    if line.starts_with("- ") || line.starts_with("* ") || line.starts_with("+ ") {
+        return true;
+    }
+    let digits = line.bytes().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && (line[digits..].starts_with(". ") || line[digits..].starts_with(") "))
+}
+
+/// Greedily pack blocks into atoms of <= [`MAX_ATOM_TOKENS`], breaking only at
+/// block boundaries. A single block that alone exceeds the bound becomes its own
+/// atom (we never split mid-block). Returns at least one chunk for non-empty input.
+fn pack_blocks(blocks: Vec<String>) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_tokens = 0i64;
+    for block in blocks {
+        let bt = crate::storage::estimate_tokens(&block);
+        if !cur.is_empty() && cur_tokens + bt > MAX_ATOM_TOKENS {
+            chunks.push(std::mem::take(&mut cur));
+            cur_tokens = 0;
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(&block);
+        cur_tokens += bt;
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
 }
 
 /// Map a picked option string to an outcome enum. Anything that starts with
@@ -246,6 +331,59 @@ mod tests {
                 ("Title > Section B", "content B"),
             ]
         );
+    }
+
+    #[test]
+    fn split_into_atoms_splits_oversized_bulleted_section() {
+        // A `## Learnings` list that outgrows the token bound is sub-split into
+        // several atoms — instead of one ever-growing atom — all keeping the real
+        // section heading_path (no synthetic "(entry N)" suffix).
+        let mut md = String::from("## Learnings\n");
+        for i in 0..14 {
+            md.push_str(&format!(
+                "- Learning {i}: a reasonably long one-line note about a specific gotcha somewhere in the codebase that we had to infer.\n"
+            ));
+        }
+        let atoms = split_into_atoms(&md);
+        assert!(atoms.len() >= 2, "oversized section should split, got {}", atoms.len());
+        assert!(atoms.iter().all(|a| a.heading_path == "Learnings"));
+        // No single atom holds the whole list, and every bullet survives somewhere.
+        assert!(atoms
+            .iter()
+            .all(|a| !(a.body.contains("Learning 0:") && a.body.contains("Learning 13:"))));
+        for i in 0..14 {
+            assert!(
+                atoms.iter().any(|a| a.body.contains(&format!("Learning {i}:"))),
+                "bullet {i} missing after split"
+            );
+        }
+    }
+
+    #[test]
+    fn split_into_atoms_keeps_small_section_verbatim() {
+        // Under the token bound → one atom with the original text (incl. its blank
+        // line) preserved exactly: the fast path does not reflow content.
+        let md = "## Notes\nfirst paragraph\n\nsecond paragraph\n";
+        let atoms = split_into_atoms(md);
+        assert_eq!(atoms.len(), 1);
+        assert_eq!(atoms[0].heading_path, "Notes");
+        assert_eq!(atoms[0].body, "first paragraph\n\nsecond paragraph");
+    }
+
+    #[test]
+    fn split_into_atoms_does_not_split_inside_code_fence() {
+        // An over-long section whose bulk is a fenced code block (with blank lines
+        // and bullet-like lines inside) stays a single atom — the fence is one
+        // indivisible block.
+        let mut md = String::from("## Example\n```\n");
+        for i in 0..40 {
+            md.push_str(&format!("- looks like a bullet but is code line {i} with padding text\n\n"));
+        }
+        md.push_str("```\n");
+        let atoms = split_into_atoms(&md);
+        assert_eq!(atoms.len(), 1, "fenced block must not be split, got {}", atoms.len());
+        assert!(atoms[0].body.starts_with("```"));
+        assert!(atoms[0].body.trim_end().ends_with("```"));
     }
 
     #[test]

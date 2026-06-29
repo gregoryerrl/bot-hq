@@ -123,7 +123,9 @@ impl Storage {
         // and a budget trim could drop different atoms run-to-run). The pinned
         // kinds are constant literals (no injection); the optional path filter
         // binds each path as a parameter. A safety LIMIT caps rows pulled before
-        // the Rust-side token-budget trim.
+        // the Rust-side token-budget trim. rowid is the ultimate key: a section
+        // can emit multiple sub-atoms sharing one heading_path, so document order
+        // keeps the budget trim deterministic.
         let mut sql = String::from(
             "SELECT file_path, heading_path, body FROM cl_atoms \
              WHERE project_id = ? AND cl_atoms MATCH ?",
@@ -141,7 +143,7 @@ impl Storage {
         sql.push_str(
             " ORDER BY bm25(cl_atoms), \
              CASE WHEN kind IN ('convention', 'decision') THEN 0 ELSE 1 END, \
-             mtime DESC, file_path, heading_path LIMIT 128",
+             mtime DESC, file_path, heading_path, rowid LIMIT 128",
         );
 
         let mut q = sqlx::query_as::<_, (String, String, String)>(&sql)
@@ -228,7 +230,7 @@ fn to_fts5_match(query: &str) -> String {
 /// Rough token estimate for budgeting: ~4 chars per token. Coarse and English-
 /// biased — it UNDERSHOOTS for CJK/multibyte text (1 char ≉ 0.25 tokens) — but it
 /// is only a budget guardrail, not a billing figure.
-fn estimate_tokens(text: &str) -> i64 {
+pub(crate) fn estimate_tokens(text: &str) -> i64 {
     (text.chars().count() as i64 + 3) / 4
 }
 
