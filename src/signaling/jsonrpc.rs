@@ -316,15 +316,16 @@ async fn call_tool(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             // A3b (adherence): soft-gate the FIRST close with no CL learnings
-            // delta this session — nudge to run write-then-prune, then close on
+            // delta this session — nudge to run propose-don't-mutate, then close on
             // the retry. The UI force-close path (tauri_cmd) is separate + ungated.
             if bridge.should_nudge_close(&caller.session_id).await {
                 Ok(ToolCallResult::text(
-                    "Before closing: append this session's bounded learnings delta to the \
-                     project's notes.md (the write-then-prune loop) and call cl_rescan, so the \
-                     next session doesn't re-discover what this one learned. Then call \
-                     close_session again. (If there's genuinely nothing to persist, just call \
-                     close_session again and it will close.)",
+                    "Before closing: PROPOSE this session's bounded learnings delta via \
+                     cl_propose (read the project's notes.md, append under ## Learnings, and \
+                     propose kind=correct with the full body), so the next session doesn't \
+                     re-discover what this one learned. Then call close_session again. (If \
+                     there's genuinely nothing to persist, just call close_session again and \
+                     it will close.)",
                 ))
             } else {
                 bridge.request_session_close(

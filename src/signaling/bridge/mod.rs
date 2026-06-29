@@ -439,8 +439,9 @@ impl SignalingBridge {
             .retain(|_, p| p.choice.session_id != session_id);
     }
 
-    /// A3b: record that the agent ran `cl_rescan` this session — a proxy for
-    /// "appended a learnings delta", which lifts the close-delta gate.
+    /// A3b: record that the agent ran `cl_rescan` OR filed a `cl_propose` this
+    /// session — a proxy for "persisted a learnings delta", which lifts the
+    /// close-delta gate.
     pub async fn mark_cl_rescan(&self, session_id: &str) {
         self.session_close_gate
             .lock()

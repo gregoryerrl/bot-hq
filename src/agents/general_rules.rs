@@ -64,7 +64,7 @@ bot-hq runs a global keyword gate over your Bash tool calls (configured in Setti
 
 Trivial tasks (a one-liner answer, a quick lookup, a question with no code change) don't need the index. The discipline applies to *substantive* work — the same threshold as IPAV. When in doubt, open it.
 
-The index returns lightweight `{file_path, description, tags, updated_at}` rows so you can decide what's worth reading without burning context on irrelevant files. Open `conventions.md`, `decisions.md`, and any audit-notes that look related; skip everything else.
+The index returns lightweight `{file_path, description, tags, updated_at}` rows so you can decide what's worth reading without burning context on irrelevant files. Open `conventions.md`, `decisions.md`, and any audit-notes that look related; skip everything else. To pull relevant CL *content* on a topic without opening whole files, call `cl_retrieve(project, query)` — it returns ranked atom bodies under a token budget. Atoms are **advisory; reality wins** — verify against the live code/tests, then file a correction via `cl_propose`.
 
 **CL is study notes, not a textbook.** It holds what the *code doesn't carry* — a where-things-live map (feature -> the 2-3 files + entry points), conventions, gotchas, and *why it's weird here*. Lean on it to jump straight to the handful of files that matter instead of digesting the tree: read the index + `cl_folder_search` map, then `Read` ONLY the files it points at. If a fact is recoverable by `grep` in seconds it doesn't belong in CL — so when you DO write to CL, keep it to high-signal one-liners. (Some projects keep this map in-repo — e.g. an `ARCHITECTURE.md` — and then the CL's job is to point you there, not duplicate it.)
 
@@ -78,14 +78,14 @@ Tools:
 
 **`_globals` is not a real working project** — it's a bucket for system-level CL (custom rules, agent custom instructions). When you see a result with `project: \"_globals\"` in `cl_index_search`, treat the file as cross-cutting, not as belonging to a specific project.
 
-## Keeping the CL fresh — write-then-prune at session close
+## Keeping the CL fresh — propose, don't mutate
 
-So the next session doesn't re-discover what this one learned, the HANDS agent appends a small delta before the session closes. This is the ONE sanctioned agent-initiated CL write — mid-session, CL stays user-driven.
+So the next session doesn't re-discover what this one learned, the HANDS agent files a small learnings proposal before the session closes. **Agents PROPOSE; the user approves/rejects in the review queue — agents never mutate CL canon directly.** The CL is NOT git-tracked, so a direct write is permanent; a proposal is safe and reversible.
 
 - **Trigger:** right before calling `close_session` (after the user approves the close).
 - **What:** at most ~5 one-line, NON-OBVIOUS discoveries — a gotcha, a where-things-live pointer, a convention you had to infer. If `grep` surfaces it in seconds, leave it out.
-- **Where:** append to the project's `notes.md` (under a `## Learnings` area) via `Write`, then `cl_rescan(project)`. Append-only — never rewrite or delete existing CL content.
-- **Write-then-prune:** no approval needed for this bounded delta; the user curates or prunes it later in the Context Library tab. Keep it tight — CL must stay lighter than the codebase or it loses its purpose.
+- **How:** call `cl_propose(project, file_path, kind, evidence, proposed_body)`. To add a learning to an existing file (e.g. `notes.md`): read its current body, append your delta under the `## Learnings` area, and propose `kind=\"correct\"` with `proposed_body` = the FULL replacement text (`correct` replaces the whole file, so keep the existing content verbatim — never drop it). For a brand-new file use `kind=\"add\"`. Inspect the queue with `cl_list_proposals(project, status=\"open\")`.
+- **Propose, don't mutate:** the proposal lands in the review queue; the user approves it (which writes it back AND re-indexes) or prunes it in the Context Library tab. No agent-side `cl_rescan` is needed — approval owns the write-back. Keep it tight — CL must stay lighter than the codebase or it loses its purpose.
 
 ## Session-scoped documents
 
@@ -215,11 +215,11 @@ mod tests {
     }
 
     #[test]
-    fn cl_close_loop_is_write_then_prune_and_bounded() {
-        // The session-close freshness loop: bounded, append-only, pruned by
-        // the user later.
+    fn cl_close_loop_is_propose_dont_mutate_and_bounded() {
+        // The session-close freshness loop: bounded, proposed (not mutated),
+        // pruned by the user later.
         assert!(
-            GENERAL_RULES.contains("write-then-prune at session close"),
+            GENERAL_RULES.contains("propose, don't mutate"),
             "CL section must carry the close-time freshness loop"
         );
         assert!(

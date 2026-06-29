@@ -50,6 +50,9 @@ impl SignalingBridge {
                 Some(&session_id),
             )
             .await?;
+        // Proposing engages the CL — lift the close-out nudge gate so an agent
+        // that files its learnings delta as a proposal isn't re-nudged at close.
+        self.mark_cl_rescan(&session_id).await;
         Ok(uid)
     }
 
@@ -279,6 +282,38 @@ mod tests {
         assert_eq!(proposal.status, "open");
         assert_eq!(proposal.proposed_by, "rain");
         assert_eq!(proposal.session_id.as_deref(), Some("s1"));
+    }
+
+    #[tokio::test]
+    async fn cl_propose_marks_close_gate_so_no_nudge() {
+        let (bridge, _storage) = bridge_with_storage().await;
+
+        // Control: a session that engaged the CL in no way is nudged on its
+        // first close (adherence nudges are on by default).
+        assert!(
+            bridge.should_nudge_close("s2").await,
+            "a session with no CL activity should be nudged"
+        );
+
+        // Filing a proposal counts as engaging the CL, so the close-out nudge
+        // is lifted — the agent persisted its learnings via cl_propose.
+        bridge
+            .cl_propose(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "notes.md".to_string(),
+                "add".to_string(),
+                None,
+                "a session learning".to_string(),
+                "non-obvious discovery".to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !bridge.should_nudge_close("s1").await,
+            "filing a cl_propose should mark the close gate and suppress the nudge"
+        );
     }
 
     #[tokio::test]
