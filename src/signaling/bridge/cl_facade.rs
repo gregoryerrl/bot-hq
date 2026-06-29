@@ -172,7 +172,7 @@ impl SignalingBridge {
                         .await?;
                     report.added.push(rel.clone());
                 }
-                Some(row) if row.updated_at.as_str() < mtime.as_str() => {
+                Some(row) if disk_is_newer(&row.updated_at, mtime) => {
                     // Body changed on disk → re-derive the description from the
                     // fresh snippet AND re-split the body into fresh atoms (don't
                     // just bump the timestamp), so neither the index TOC nor the
@@ -230,10 +230,49 @@ impl SignalingBridge {
     }
 }
 
+/// True if the on-disk file mtime is strictly newer than the stored index
+/// timestamp — the rescan "did this file change?" check. Parses both as RFC3339
+/// instants so a FORMAT difference can't make the comparison misfire:
+/// `now_utc()` writes `Z`/millisecond (`2026-..T12:00:00.500Z`) while a disk
+/// mtime is `+00:00`/nanosecond (`2026-..T12:00:00.500999999+00:00`), and a
+/// lexicographic string compare mis-orders those (`Z` sorts AFTER the nanosecond
+/// digits). Unparseable timestamps are treated as "changed" so a malformed value
+/// re-derives rather than silently skipping the file forever.
+fn disk_is_newer(stored_updated_at: &str, disk_mtime: &str) -> bool {
+    use chrono::DateTime;
+    match (
+        DateTime::parse_from_rfc3339(stored_updated_at),
+        DateTime::parse_from_rfc3339(disk_mtime),
+    ) {
+        (Ok(stored), Ok(disk)) => disk > stored,
+        _ => true, // unparseable → assume changed; re-derive rather than skip
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::signaling::bridge::SignalingBridge;
     use crate::storage::Storage;
+
+    #[test]
+    fn disk_is_newer_parses_mixed_rfc3339_formats() {
+        use super::disk_is_newer;
+        // The discriminating case: stored is now_utc() (Z/millis); the disk mtime
+        // is the SAME millisecond but later in nanoseconds (+00:00/nanos). It IS
+        // newer, but a lexicographic compare missed it ('Z' > the nanos digits).
+        assert!(
+            disk_is_newer("2026-06-29T12:00:00.500Z", "2026-06-29T12:00:00.500999999+00:00"),
+            "a disk mtime later within the same millisecond is newer"
+        );
+        // Exact same instant across the two formats → NOT newer (no spurious re-derive).
+        assert!(!disk_is_newer("2026-06-29T12:00:00.000Z", "2026-06-29T12:00:00.000000000+00:00"));
+        // Disk clearly earlier / clearly later.
+        assert!(!disk_is_newer("2026-06-29T12:05:00.000Z", "2026-06-29T12:00:00.000000000+00:00"));
+        assert!(disk_is_newer("2026-06-29T12:00:00.000Z", "2026-06-29T13:00:00.000000000+00:00"));
+        // Unparseable on either side → treat as changed (safe re-derive).
+        assert!(disk_is_newer("garbage", "2026-06-29T12:00:00.000Z"));
+        assert!(disk_is_newer("2026-06-29T12:00:00.000Z", "not-a-date"));
+    }
 
     #[tokio::test]
     async fn cl_rescan_backfills_atoms_for_existing_unchanged_index_rows() {
