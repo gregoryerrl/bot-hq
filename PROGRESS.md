@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-623 Rust tests passing (573 lib + 33 external MCP + 7 signaling + 11
+625 Rust tests passing (574 lib + 33 external MCP + 7 signaling + 11
 storage) plus 112 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,23 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-29 — Context Library atom backfill fix
+
+Smoke after the CL Phase 3 rebuild revealed that `cl_retrieve` returned no
+results on existing installs: `cl_index` had rows, but `cl_atoms` was empty.
+The migration creates the FTS5 table, but unchanged files that were already in
+`cl_index` before migration 0024 hit `cl_rescan`'s no-op branch and were never
+atomized.
+
+- **Backfill atomless indexed files.** `cl_rescan` now checks existing unchanged
+  files for zero `cl_atoms` rows; if missing, it splits the file into atoms,
+  inserts them with `replace_atoms_for_file`, and reports the file as touched.
+- **Regression coverage.** Added a test for an already-indexed unchanged file
+  with zero atoms, then verifies `cl_rescan` backfills atoms and `cl_retrieve`
+  can return the content.
+
++1 Rust lib test → 574 lib.
 
 ## 2026-06-29 — Context Library proposal review queue UI
 

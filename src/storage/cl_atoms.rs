@@ -78,6 +78,19 @@ impl Storage {
         Ok(res.rows_affected())
     }
 
+    /// Count atoms for one file. Used by `cl_rescan` to backfill the derived FTS
+    /// layer after migration 0024 when `cl_index` rows predate `cl_atoms`.
+    pub async fn count_atoms_for_file(&self, project_id: &str, file_path: &str) -> Result<i64> {
+        let n = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cl_atoms WHERE project_id = ? AND file_path = ?",
+        )
+        .bind(project_id)
+        .bind(file_path)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n)
+    }
+
     /// Ranked body retrieval over the FTS atom index — the read side of Phase 3.
     /// Returns the atoms whose `heading_path`/`body` best match `query` (FTS5
     /// BM25), scoped to `project_id`, optionally restricted to `paths`, and

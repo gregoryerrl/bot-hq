@@ -185,7 +185,14 @@ impl SignalingBridge {
                         .await?;
                     report.touched.push(rel.clone());
                 }
-                _ => {}
+                _ => {
+                    if storage.count_atoms_for_file(project, rel).await? == 0 {
+                        storage
+                            .replace_atoms_for_file(project, rel, &split_into_atoms(body), mtime)
+                            .await?;
+                        report.touched.push(rel.clone());
+                    }
+                }
             }
         }
 
@@ -227,6 +234,57 @@ impl SignalingBridge {
 mod tests {
     use crate::signaling::bridge::SignalingBridge;
     use crate::storage::Storage;
+
+    #[tokio::test]
+    async fn cl_rescan_backfills_atoms_for_existing_unchanged_index_rows() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "bot-hq-rescan-backfill-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let lib = data_dir.join("library");
+        std::fs::create_dir_all(&lib).unwrap();
+        let file = lib.join("notes.md");
+        std::fs::write(&file, "# Notes\n## Retrieval\nqueryable context works\n").unwrap();
+
+        let storage = Storage::memory().await.unwrap();
+        storage
+            .upsert_cl_index("_globals", "notes.md", "old indexed row", None)
+            .await
+            .unwrap();
+        let bridge = SignalingBridge::new_with(None, Some(data_dir.clone()));
+        bridge.set_storage(storage.clone()).await;
+
+        let before: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM cl_atoms WHERE project_id = '_globals' AND file_path = 'notes.md'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(before.0, 0, "test starts with an indexed file but no atoms");
+
+        let report = bridge.cl_rescan("_globals").await.unwrap();
+        assert!(
+            report.touched.iter().any(|p| p == "notes.md"),
+            "backfilled atomless files are reported as touched"
+        );
+        let after: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM cl_atoms WHERE project_id = '_globals' AND file_path = 'notes.md'",
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+        assert_eq!(after.0, 1, "existing unchanged file should be atomized");
+
+        let retrieved = storage
+            .cl_retrieve("_globals", "queryable", None, 1000)
+            .await
+            .unwrap();
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(retrieved[0].file_path, "notes.md");
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 
     /// End-to-end: `cl_rescan` splits a CL file into atoms on add, and purges them
     /// on orphan. The touch/update path is covered at the storage layer by
