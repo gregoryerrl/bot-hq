@@ -6,6 +6,20 @@ use super::util::{split_into_atoms, walk_cl_dir, WalkedFile};
 use super::*;
 use crate::storage::{ClIndexEntry, Project};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+/// Build the atoms for a CL file, stamping each with a hash of the repo source it
+/// cites (`None` when there's no repo or no valid ref) so retrieval can flag
+/// drift. Storage stays pure — the repo coupling is computed here in the bridge.
+fn atoms_with_code_hash(body: &str, repo_root: Option<&Path>) -> Vec<crate::storage::Atom> {
+    let mut atoms = split_into_atoms(body);
+    if let Some(root) = repo_root {
+        for a in &mut atoms {
+            a.code_hash = cl_refs::compute_code_hash(&a.body, root);
+        }
+    }
+    atoms
+}
 
 impl SignalingBridge {
     // ---- Context Library (CL) index ------------------------------------
@@ -55,11 +69,29 @@ impl SignalingBridge {
         paths: Option<&[String]>,
         budget_tokens: i64,
     ) -> Result<Vec<crate::storage::RetrievedAtom>> {
-        let storage_guard = self.storage.lock().await;
-        let Some(storage) = storage_guard.as_ref() else {
+        let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
-        storage.cl_retrieve(project, query, paths, budget_tokens).await
+        let mut atoms = storage.cl_retrieve(project, query, paths, budget_tokens).await?;
+        // Flag atoms whose cited code drifted since indexing. Repo coupling lives
+        // in the bridge (storage stays pure): recompute each atom's code_hash from
+        // the current repo and compare to the stored baseline.
+        let repo_root = storage
+            .get_project(project)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.working_repo_path);
+        if let Some(repo_root) = repo_root {
+            let repo_root = PathBuf::from(repo_root);
+            for atom in &mut atoms {
+                if let Some(stored) = atom.code_hash.as_deref() {
+                    let current = cl_refs::compute_code_hash(&atom.body, &repo_root);
+                    atom.stale = current.as_deref() != Some(stored);
+                }
+            }
+        }
+        Ok(atoms)
     }
 
     /// Read-side discovery for FOLDER descriptions. Parallel to
@@ -149,6 +181,17 @@ impl SignalingBridge {
             return Ok(report);
         }
 
+        // The project's CODE repo (for atom->code stale-flagging): atoms cite
+        // source paths relative to this root. None when unregistered / _globals,
+        // so code_hash stays None and nothing is stale-flagged.
+        let repo_root = storage
+            .get_project(project)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.working_repo_path)
+            .map(PathBuf::from);
+
         // Walk disk; collect relative_path -> WalkedFile { mtime, snippet, body }.
         let mut on_disk: HashMap<String, WalkedFile> = HashMap::new();
         walk_cl_dir(&root, &root, project, &mut on_disk);
@@ -168,7 +211,7 @@ impl SignalingBridge {
                 None => {
                     storage.upsert_cl_index(project, rel, snippet, None).await?;
                     storage
-                        .replace_atoms_for_file(project, rel, &split_into_atoms(body), mtime)
+                        .replace_atoms_for_file(project, rel, &atoms_with_code_hash(body, repo_root.as_deref()), mtime)
                         .await?;
                     report.added.push(rel.clone());
                 }
@@ -181,14 +224,14 @@ impl SignalingBridge {
                         .refresh_cl_index_description(project, rel, snippet, mtime)
                         .await?;
                     storage
-                        .replace_atoms_for_file(project, rel, &split_into_atoms(body), mtime)
+                        .replace_atoms_for_file(project, rel, &atoms_with_code_hash(body, repo_root.as_deref()), mtime)
                         .await?;
                     report.touched.push(rel.clone());
                 }
                 _ => {
                     if storage.count_atoms_for_file(project, rel).await? == 0 {
                         storage
-                            .replace_atoms_for_file(project, rel, &split_into_atoms(body), mtime)
+                            .replace_atoms_for_file(project, rel, &atoms_with_code_hash(body, repo_root.as_deref()), mtime)
                             .await?;
                         report.touched.push(rel.clone());
                     }
@@ -323,6 +366,56 @@ mod tests {
         assert_eq!(retrieved[0].file_path, "notes.md");
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// End-to-end P1.2: an atom that cites repo code is flagged stale once that
+    /// code changes after indexing, while a code-free atom never is.
+    #[tokio::test]
+    async fn cl_retrieve_flags_atom_when_cited_code_changes() {
+        let base = std::env::temp_dir().join(format!("bot-hq-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // A code repo with a source file the note will cite.
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let repo_s = repo.canonicalize().unwrap();
+        std::fs::write(repo_s.join("src/foo.rs"), "fn foo() {}").unwrap();
+        // The project's CL dir (named-project fallback: <data_dir>/library/projects/<name>).
+        let cl_dir = base.join("library/projects/proj");
+        std::fs::create_dir_all(&cl_dir).unwrap();
+        std::fs::write(
+            cl_dir.join("notes.md"),
+            "# Notes\n## Foo\nThe helper lives in src/foo.rs and does the thing.\n\
+             ## Bare\nJust prose with no code reference here at all.\n",
+        )
+        .unwrap();
+
+        let storage = Storage::memory().await.unwrap();
+        storage
+            .upsert_project("proj", "proj", repo_s.to_str(), None, None)
+            .await
+            .unwrap();
+        let bridge = SignalingBridge::new_with(None, Some(base.clone()));
+        bridge.set_storage(storage.clone()).await;
+        bridge.cl_rescan("proj").await.unwrap();
+
+        // Fresh index: the cited code is unchanged → not stale.
+        let hits = bridge.cl_retrieve("proj", "helper", None, 1000).await.unwrap();
+        assert!(!hits.is_empty(), "atom should be retrievable");
+        assert!(hits.iter().all(|h| !h.stale), "fresh atom is not stale");
+
+        // The cited code changes (no re-rescan) → the citing atom is flagged stale...
+        std::fs::write(repo_s.join("src/foo.rs"), "fn foo() { changed() }").unwrap();
+        let foo_hits = bridge.cl_retrieve("proj", "helper", None, 1000).await.unwrap();
+        assert!(foo_hits.iter().any(|h| h.stale), "atom citing changed code is stale");
+
+        // ...but an atom that cites no code is never flagged.
+        let bare_hits = bridge.cl_retrieve("proj", "prose", None, 1000).await.unwrap();
+        assert!(
+            !bare_hits.is_empty() && bare_hits.iter().all(|h| !h.stale),
+            "no-ref atom is never stale"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// End-to-end: `cl_rescan` splits a CL file into atoms on add, and purges them

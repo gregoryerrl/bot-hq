@@ -144,11 +144,11 @@ pub(super) fn split_into_atoms(content: &str) -> Vec<Atom> {
         // unbounded atom that crowds the retrieval budget. Sub-atoms share the
         // section heading_path; retrieval's rowid tie-break keeps them ordered.
         if crate::storage::estimate_tokens(&trimmed) <= MAX_ATOM_TOKENS {
-            atoms.push(Atom { heading_path, body: trimmed });
+            atoms.push(Atom { heading_path, body: trimmed, code_hash: None });
             return;
         }
         for chunk in pack_blocks(split_into_blocks(&trimmed)) {
-            atoms.push(Atom { heading_path: heading_path.clone(), body: chunk });
+            atoms.push(Atom { heading_path: heading_path.clone(), body: chunk, code_hash: None });
         }
     }
 

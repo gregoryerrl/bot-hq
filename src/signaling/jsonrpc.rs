@@ -624,9 +624,14 @@ async fn call_tool(
             } else {
                 let mut out = String::new();
                 for atom in &atoms {
+                    let flag = if atom.stale {
+                        "⚠ possibly stale (cited code changed since indexed) — verify against the source.\n"
+                    } else {
+                        ""
+                    };
                     out.push_str(&format!(
-                        "## {} > {}\n{}\n\n",
-                        atom.file_path, atom.heading_path, atom.body
+                        "## {} > {}\n{}{}\n\n",
+                        atom.file_path, atom.heading_path, flag, atom.body
                     ));
                 }
                 out.trim_end().to_string()
@@ -1231,6 +1236,7 @@ mod tests {
                 &[crate::storage::Atom {
                     heading_path: "Gotchas".into(),
                     body: "the migration is immutable".into(),
+                    code_hash: None,
                 }],
                 "t",
             )

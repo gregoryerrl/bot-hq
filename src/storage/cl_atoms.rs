@@ -18,6 +18,12 @@ use super::*;
 pub struct Atom {
     pub heading_path: String,
     pub body: String,
+    /// SHA-256 over the repo source files this atom cites (e.g. `src/foo.rs`), as
+    /// they were when the atom was indexed — `None` when the atom cites no
+    /// existing source. Computed by the bridge (which has repo access) before
+    /// insertion; retrieval recomputes it to flag possibly-stale atoms. See
+    /// `signaling::bridge::cl_refs`.
+    pub code_hash: Option<String>,
 }
 
 /// One atom returned by [`Storage::cl_retrieve`]: which file/section it came from
@@ -28,6 +34,14 @@ pub struct RetrievedAtom {
     pub file_path: String,
     pub heading_path: String,
     pub body: String,
+    /// Stored `code_hash` baseline (see [`Atom::code_hash`]); `None` when the atom
+    /// cites no code. Storage returns it; the bridge wrapper uses it to compute
+    /// `stale` and callers generally don't read it directly.
+    pub code_hash: Option<String>,
+    /// Set by the bridge `cl_retrieve` wrapper (NOT storage): the cited code has
+    /// drifted since indexing, so the atom may be out of date. Storage always
+    /// returns `false`; the MCP layer renders a ⚠ prefix when true.
+    pub stale: bool,
 }
 
 impl Storage {
@@ -53,8 +67,8 @@ impl Storage {
         let kind = cl_kind_for_path(file_path);
         for atom in atoms {
             sqlx::query(
-                "INSERT INTO cl_atoms(project_id, file_path, kind, heading_path, body, mtime, body_hash) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cl_atoms(project_id, file_path, kind, heading_path, body, mtime, body_hash, code_hash) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(project_id)
             .bind(file_path)
@@ -63,6 +77,7 @@ impl Storage {
             .bind(&atom.body)
             .bind(mtime)
             .bind(atom_body_hash(&atom.body))
+            .bind(atom.code_hash.as_deref())
             .execute(&mut *tx)
             .await?;
         }
@@ -127,7 +142,7 @@ impl Storage {
         // can emit multiple sub-atoms sharing one heading_path, so document order
         // keeps the budget trim deterministic.
         let mut sql = String::from(
-            "SELECT file_path, heading_path, body FROM cl_atoms \
+            "SELECT file_path, heading_path, body, code_hash FROM cl_atoms \
              WHERE project_id = ? AND cl_atoms MATCH ?",
         );
         if let Some(paths) = path_filter {
@@ -146,7 +161,7 @@ impl Storage {
              mtime DESC, file_path, heading_path, rowid LIMIT 128",
         );
 
-        let mut q = sqlx::query_as::<_, (String, String, String)>(&sql)
+        let mut q = sqlx::query_as::<_, (String, String, String, Option<String>)>(&sql)
             .bind(project_id)
             .bind(&match_expr);
         if let Some(paths) = path_filter {
@@ -160,13 +175,13 @@ impl Storage {
         // oversized atom can't make the whole retrieval return empty.
         let mut out = Vec::new();
         let mut used = 0i64;
-        for (file_path, heading_path, body) in rows {
+        for (file_path, heading_path, body, code_hash) in rows {
             let cost = estimate_tokens(&body);
             if !out.is_empty() && used + cost > budget_tokens {
                 break;
             }
             used += cost;
-            out.push(RetrievedAtom { file_path, heading_path, body });
+            out.push(RetrievedAtom { file_path, heading_path, body, code_hash, stale: false });
         }
         Ok(out)
     }
@@ -240,7 +255,7 @@ mod tests {
     use crate::storage::Storage;
 
     fn atom(heading: &str, body: &str) -> Atom {
-        Atom { heading_path: heading.into(), body: body.into() }
+        Atom { heading_path: heading.into(), body: body.into(), code_hash: None }
     }
 
     /// Stage-0 de-risk gate (kept): proves FTS5 is compiled into the bundled sqlite

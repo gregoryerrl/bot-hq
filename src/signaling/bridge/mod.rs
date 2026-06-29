@@ -36,6 +36,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 mod action_gate;
 mod cl_facade;
 mod cl_proposals;
+mod cl_refs;
 mod findings;
 mod session_docs;
 mod tray;
