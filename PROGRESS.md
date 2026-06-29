@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-625 Rust tests passing (574 lib + 33 external MCP + 7 signaling + 11
+629 Rust tests passing (578 lib + 33 external MCP + 7 signaling + 11
 storage) plus 112 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,35 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-06-29 — Context Library audit + retrieval/index hardening
+
+Audited the shipped CL against the "Context Library v2" brief
+(`ideas.md`) and the in-repo assessment
+(`docs/plans/2026-06-27-context-library-v2-assessment.md`). The
+implementation is a deliberate FTS5-first slice of that plan; the audit
+flagged a few cheap correctness/structural wins, landed here. The larger
+items (close-out keystone re-wire to `cl_propose`, retrieval-time
+stale-flagging, bullet-level atomization) are deferred.
+
+- **`kind` on atoms (migration 0026).** `cl_atoms` gains an UNINDEXED
+  `kind` column (convention|decision|policy|issue|idea|handoff|gotcha|
+  note), derived per-file from the path (`cl_kind_for_path`). FTS5 can't
+  `ALTER`, so the disposable vtable is dropped + recreated; the per-project
+  boot rescan + zero-atom backfill repopulate it (the migration-0024 path).
+  Backbone for future kind-specific freshness / concept-map / pin-by-kind.
+- **Retrieval ordering.** `cl_retrieve` now pins by `kind IN
+  ('convention','decision')` (was hardcoded filenames) and adds a
+  `file_path, heading_path` final tie-break, so identical queries return a
+  deterministic order — full BM25/pin/mtime ties were SQLite-unspecified,
+  so a token-budget trim could drop different atoms run-to-run.
+- **Rescan change detection.** The "did this file change?" check parses the
+  stored index timestamp and the disk mtime as RFC3339 instants instead of
+  comparing strings (`now_utc()` writes Z/millis, disk mtimes are
+  +00:00/nanos — a lexicographic compare mis-orders the two formats).
+
+Requires a rebuild + restart to apply migration 0026; `cl_atoms`
+repopulates on the next boot scan.
 
 ## 2026-06-29 — Context Library atom backfill fix
 
