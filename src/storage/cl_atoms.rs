@@ -99,7 +99,8 @@ impl Storage {
     /// Returns the atoms whose `heading_path`/`body` best match `query` (FTS5
     /// BM25), scoped to `project_id`, optionally restricted to `paths`, and
     /// accumulated under `budget_tokens` (a coarse ~chars/4 estimate). On a BM25
-    /// tie, conventions/decisions atoms win (pin), then fresher atoms (mtime).
+    /// tie, convention/decision-kind atoms win (pin), then fresher atoms (mtime),
+    /// then file_path/heading_path for a deterministic, repeatable order.
     /// The query is sanitized into a safe FTS5 MATCH expression so arbitrary input
     /// can't throw a syntax error; a query with no searchable tokens returns empty.
     pub async fn cl_retrieve(
@@ -115,10 +116,14 @@ impl Storage {
         }
         let path_filter = paths.filter(|p| !p.is_empty());
 
-        // Pin (conventions/decisions) + freshness are tie-breakers AFTER bm25
-        // relevance. The pinned names are constant literals (no injection); the
-        // optional path filter binds each path as a parameter. A safety LIMIT caps
-        // rows pulled before the Rust-side token-budget trim.
+        // Pin (convention/decision kind) + freshness are tie-breakers AFTER bm25
+        // relevance, then file_path/heading_path as a DETERMINISTIC final key so
+        // identical queries return identical order (without it, full ties — same
+        // bm25, kind, and mtime, e.g. all atoms of one file — are SQLite-ordered
+        // and a budget trim could drop different atoms run-to-run). The pinned
+        // kinds are constant literals (no injection); the optional path filter
+        // binds each path as a parameter. A safety LIMIT caps rows pulled before
+        // the Rust-side token-budget trim.
         let mut sql = String::from(
             "SELECT file_path, heading_path, body FROM cl_atoms \
              WHERE project_id = ? AND cl_atoms MATCH ?",
@@ -135,8 +140,8 @@ impl Storage {
         }
         sql.push_str(
             " ORDER BY bm25(cl_atoms), \
-             CASE WHEN file_path IN ('conventions.md', 'decisions.md') THEN 0 ELSE 1 END, \
-             mtime DESC LIMIT 128",
+             CASE WHEN kind IN ('convention', 'decision') THEN 0 ELSE 1 END, \
+             mtime DESC, file_path, heading_path LIMIT 128",
         );
 
         let mut q = sqlx::query_as::<_, (String, String, String)>(&sql)
@@ -429,6 +434,19 @@ mod tests {
             .unwrap();
         let hits = s.cl_retrieve("p", "deploy gate keyword", None, 10_000).await.unwrap();
         assert_eq!(hits[0].file_path, "conventions.md", "pinned file wins the bm25 tie");
+    }
+
+    #[tokio::test]
+    async fn cl_retrieve_tie_order_is_deterministic_by_path() {
+        let s = Storage::memory().await.unwrap();
+        // Identical body → BM25 tie; identical mtime; neither pinned (kind=note)
+        // → the deterministic file_path/heading_path tie-break decides order.
+        // Without it SQLite order is unspecified and a budget trim could vary.
+        s.replace_atoms_for_file("p", "zeta.md", &[atom("H", "shared body keyword")], "t").await.unwrap();
+        s.replace_atoms_for_file("p", "alpha.md", &[atom("H", "shared body keyword")], "t").await.unwrap();
+        let hits = s.cl_retrieve("p", "shared body keyword", None, 10_000).await.unwrap();
+        let order: Vec<&str> = hits.iter().map(|h| h.file_path.as_str()).collect();
+        assert_eq!(order, vec!["alpha.md", "zeta.md"], "full ties order by file_path");
     }
 
     #[test]
