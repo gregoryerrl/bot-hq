@@ -11,12 +11,14 @@ import type { ClIndexEntryView } from "../lib/bindings";
 export type OpenTab =
   | { kind: "file"; project: string; filePath: string }
   | { kind: "folder"; project: string; folderPath: string }
-  | { kind: "proposals"; project: string };
+  | { kind: "proposals"; project: string }
+  | { kind: "measurement"; project: string };
 
 // Stable identity for dedup, React keys, and active-tab matching.
 export function tabKey(tab: OpenTab): string {
   if (tab.kind === "file") return `file:${tab.project}/${tab.filePath}`;
   if (tab.kind === "folder") return `folder:${tab.project}/${tab.folderPath}`;
+  if (tab.kind === "measurement") return `measurement:${tab.project}`;
   return `proposals:${tab.project}`;
 }
 
@@ -24,6 +26,7 @@ export function tabKey(tab: OpenTab): string {
 // shows the project name; everything else shows the trailing path segment.
 export function tabLabel(tab: OpenTab): string {
   if (tab.kind === "proposals") return `${tab.project} / Proposals`;
+  if (tab.kind === "measurement") return `${tab.project} / Measurement`;
   const path = tab.kind === "file" ? tab.filePath : tab.folderPath;
   return path === "" ? tab.project : baseName(path);
 }
@@ -258,6 +261,27 @@ export function ProposalsIcon({ className }: { className?: string }) {
       <path d="M7 12v7h10v-7" />
       <path d="M9 8h6" />
       <path d="M9 16h6" />
+    </svg>
+  );
+}
+
+export function MeasurementIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={cn("size-3.5", className)}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M4 20V4" />
+      <path d="M4 20h16" />
+      <rect x="7" y="12" width="3" height="5" />
+      <rect x="12" y="8" width="3" height="9" />
+      <rect x="17" y="14" width="3" height="3" />
     </svg>
   );
 }

@@ -12,7 +12,7 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 640 Rust tests passing (589 lib + 33 external MCP + 7 signaling + 11
-storage) plus 112 frontend Vitest. Release build clean. Version
+storage) plus 114 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -21,6 +21,27 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-07-02 — CL measurement (Stage 4b): retrieval stats surfacing
+
+Makes the B1 telemetry readable — a project-scoped Measurement view in the
+Context Library so the "is the CL helping" numbers are visible, not just
+logged.
+
+- **`cl_retrieval_stats` command** (`src/tauri_cmd/cl.rs`) — thin wrapper over
+  `Storage::retrieval_stats(project?, since?)` returning a
+  `RetrievalStatsView` DTO; registered in `tauri_specta_gen.rs`, bindings
+  regenerated (`export-bindings`).
+- **Measurement tab** — new `OpenTab` variant `measurement`
+  (`contextLibraryShared.tsx`) + a tertiary sidebar action, mirroring the
+  Proposals docket wiring. `MeasurementView` (`ContextLibraryEditor.tsx`)
+  renders stat tiles: tokens/session (the tokens-per-task headline),
+  tokens/retrieval, retrievals, sessions, atoms, total tokens, and stale-hit
+  + retrieval-miss rates (warn-colored when > 0), with a loading/empty/error
+  state.
+
++2 frontend Vitest (114). Escape-hatch ratio (whole-file CL Read vs retrieve)
+deferred to a follow-up per plan.
 
 ## 2026-07-02 — CL measurement (Stage 4b): retrieval_events log
 

@@ -330,6 +330,19 @@ async clRejectProposal(proposalUid: string) : Promise<Result<string, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Read-side telemetry for the Library measurement card. `project` scopes to one
+ * CL project (None = all); `since` is an RFC3339 lower bound on `created_at`
+ * (None = all time).
+ */
+async clRetrievalStats(project: string | null, since: string | null) : Promise<Result<RetrievalStatsView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_retrieval_stats", { project, since }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listProjects() : Promise<Result<ProjectView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_projects") };
@@ -1271,6 +1284,13 @@ export type PushGateMode =
  * against a changed repo) and re-call with `confirm_stale = true`.
  */
 export type ResolveResult = { kind: "resolved" } | { kind: "needs_stale_confirm"; command: string; asked_at: string | null }
+/**
+ * Aggregated `cl_retrieve` telemetry for the Context Library measurement card
+ * (Stage 4b). Mirrors [`crate::storage::RetrievalStats`]; the ratios are the
+ * "is the CL helping" signals — avg tokens/session is the tokens-per-task
+ * proxy, stale-hit + empty-return rates should trend toward 0.
+ */
+export type RetrievalStatsView = { event_count: number; distinct_sessions: number; total_tokens: number; total_atoms: number; stale_hits: number; empty_returns: number; avg_tokens_per_event: number; avg_tokens_per_session: number; stale_hit_rate: number; empty_return_rate: number }
 /**
  * Per-session create-dialog picks beyond the positional args. Bundled into
  * one struct because `create_session` sits at tauri-specta's 10-arg command

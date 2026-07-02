@@ -64,6 +64,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         cl::cl_list_proposals,
         cl::cl_approve_proposal,
         cl::cl_reject_proposal,
+        cl::cl_retrieval_stats,
         cl::list_projects,
         cl::cl_read_file,
         cl::cl_write_file,

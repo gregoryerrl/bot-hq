@@ -271,3 +271,49 @@ describe("Context Library editor", () => {
     expect(screen.getByText(/delete approval is deferred/i)).toBeInTheDocument();
   });
 });
+
+describe("Context Library measurement", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  const STATS = {
+    event_count: 12,
+    distinct_sessions: 4,
+    total_tokens: 6000,
+    total_atoms: 30,
+    stale_hits: 3,
+    empty_returns: 2,
+    avg_tokens_per_event: 500,
+    avg_tokens_per_session: 1500,
+    stale_hit_rate: 0.1,
+    empty_return_rate: 0.1667,
+  };
+
+  it("renders retrieval telemetry from cl_retrieval_stats", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cl_retrieval_stats") return STATS;
+      return null;
+    });
+
+    renderEditor({ kind: "measurement", project: "p" });
+
+    // Await a data-dependent tile so the query has resolved past "Loading…".
+    // Locale-independent assertions: the toFixed rates, not comma-grouped ints.
+    expect(await screen.findByText("10.0%")).toBeInTheDocument(); // stale-hit rate
+    expect(screen.getByText("Retrieval measurement")).toBeInTheDocument();
+    expect(screen.getByText("Tokens / session")).toBeInTheDocument();
+    expect(screen.getByText("16.7%")).toBeInTheDocument(); // retrieval-miss rate
+  });
+
+  it("shows an empty state when no retrievals are logged", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "cl_retrieval_stats") return { ...STATS, event_count: 0 };
+      return null;
+    });
+
+    renderEditor({ kind: "measurement", project: "p" });
+
+    expect(
+      await screen.findByText("No retrievals logged yet"),
+    ).toBeInTheDocument();
+  });
+});

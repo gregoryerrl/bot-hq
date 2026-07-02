@@ -2,7 +2,7 @@
 //! Context-Library tab + plugin manager + audit views all hit one surface.
 
 use crate::signaling::SignalingBridge;
-use crate::storage::{ClFolder, ClIndexEntry, ClProposal, Project, Storage};
+use crate::storage::{ClFolder, ClIndexEntry, ClProposal, Project, RetrievalStats, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -183,6 +183,57 @@ pub async fn cl_reject_proposal(
     let result = bridge.reject_cl_proposal(proposal_uid).await?;
     emit_cl_changed(&app, None);
     Ok(result)
+}
+
+/// Aggregated `cl_retrieve` telemetry for the Context Library measurement card
+/// (Stage 4b). Mirrors [`crate::storage::RetrievalStats`]; the ratios are the
+/// "is the CL helping" signals — avg tokens/session is the tokens-per-task
+/// proxy, stale-hit + empty-return rates should trend toward 0.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct RetrievalStatsView {
+    pub event_count: i64,
+    pub distinct_sessions: i64,
+    pub total_tokens: i64,
+    pub total_atoms: i64,
+    pub stale_hits: i64,
+    pub empty_returns: i64,
+    pub avg_tokens_per_event: f64,
+    pub avg_tokens_per_session: f64,
+    pub stale_hit_rate: f64,
+    pub empty_return_rate: f64,
+}
+
+impl From<RetrievalStats> for RetrievalStatsView {
+    fn from(s: RetrievalStats) -> Self {
+        Self {
+            event_count: s.event_count,
+            distinct_sessions: s.distinct_sessions,
+            total_tokens: s.total_tokens,
+            total_atoms: s.total_atoms,
+            stale_hits: s.stale_hits,
+            empty_returns: s.empty_returns,
+            avg_tokens_per_event: s.avg_tokens_per_event,
+            avg_tokens_per_session: s.avg_tokens_per_session,
+            stale_hit_rate: s.stale_hit_rate,
+            empty_return_rate: s.empty_return_rate,
+        }
+    }
+}
+
+/// Read-side telemetry for the Library measurement card. `project` scopes to one
+/// CL project (None = all); `since` is an RFC3339 lower bound on `created_at`
+/// (None = all time).
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_retrieval_stats(
+    storage: tauri::State<'_, Arc<Storage>>,
+    project: Option<String>,
+    since: Option<String>,
+) -> Result<RetrievalStatsView, AppError> {
+    let stats = storage
+        .retrieval_stats(project.as_deref(), since.as_deref())
+        .await?;
+    Ok(stats.into())
 }
 
 #[tauri::command]
