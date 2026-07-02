@@ -25,6 +25,7 @@ mod messages;
 mod models;
 mod plugins;
 mod projects;
+mod retrieval_events;
 mod session_docs;
 mod sessions;
 mod time;
@@ -36,7 +37,7 @@ pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
     AgentConfig, Author, ClFolder, ClIndexEntry, ClProposal, ClProposalStatus, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
-    QuestionKind, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
+    QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
 };
 pub(crate) use time::now_utc;
 

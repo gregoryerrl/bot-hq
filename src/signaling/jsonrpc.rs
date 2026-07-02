@@ -617,6 +617,18 @@ async fn call_tool(
                 .cl_retrieve(&project, &query, paths.as_deref(), budget)
                 .await
                 .map_err(internal_err_no_prefix)?;
+            // Stage-4b measurement: log this retrieval (best-effort; never fails
+            // the call). `caller` carries the session/agent context here.
+            bridge
+                .log_retrieval_event(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    &project,
+                    &query,
+                    &atoms,
+                    budget,
+                )
+                .await;
             // Inline the atom bodies as readable `## file > heading` blocks — the
             // whole point is to hand the agent the CONTENT, not a TOC.
             let text = if atoms.is_empty() {
@@ -1280,6 +1292,49 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("no matching CL atoms"));
+    }
+
+    #[tokio::test]
+    async fn cl_retrieve_dispatch_logs_a_retrieval_event() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage
+            .replace_atoms_for_file(
+                "p",
+                "notes.md",
+                &[crate::storage::Atom {
+                    heading_path: "Gotchas".into(),
+                    body: "the migration is immutable".into(),
+                    code_hash: None,
+                }],
+                "t",
+            )
+            .await
+            .unwrap();
+        // Storage is Clone (shared pool) — keep a probe to read the log after dispatch.
+        let probe = storage.clone();
+        bridge.set_storage(storage).await;
+
+        dispatch(
+            req(
+                "tools/call",
+                json!({"name": "cl_retrieve", "arguments": {"project": "p", "query": "migration"}}),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        // The Stage-4b hook wrote exactly one retrieval_events row for session "s1".
+        let stats = probe.retrieval_stats(Some("p"), None).await.unwrap();
+        assert_eq!(stats.event_count, 1, "one retrieval logged");
+        assert_eq!(stats.distinct_sessions, 1);
+        assert_eq!(stats.total_atoms, 1, "the one returned atom was recorded");
+        assert!(stats.total_tokens > 0, "token estimate recorded: {}", stats.total_tokens);
+        assert_eq!(stats.empty_returns, 0);
     }
 
     #[tokio::test]

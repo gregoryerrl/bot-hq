@@ -94,6 +94,59 @@ impl SignalingBridge {
         Ok(atoms)
     }
 
+    /// Best-effort Stage-4b telemetry: log one `cl_retrieve` call to
+    /// `retrieval_events`. Derives atom/token/stale counts from the returned
+    /// atoms (token estimate matches the retrieval budget's own estimator). A
+    /// logging failure is swallowed (warn only) — measurement must never break a
+    /// retrieval, mirroring the fail-open DB-hook pattern.
+    pub async fn log_retrieval_event(
+        &self,
+        session_id: String,
+        agent: String,
+        project: &str,
+        query: &str,
+        atoms: &[crate::storage::RetrievedAtom],
+        budget: i64,
+    ) {
+        let Some(storage) = self.storage.lock().await.clone() else {
+            return;
+        };
+        let atom_count = atoms.len() as i64;
+        let tokens_returned: i64 = atoms
+            .iter()
+            .map(|a| crate::storage::estimate_tokens(&a.body))
+            .sum();
+        let stale_count = atoms.iter().filter(|a| a.stale).count() as i64;
+        let returned: Vec<serde_json::Value> = atoms
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "file_path": a.file_path,
+                    "heading_path": a.heading_path,
+                    "tokens": crate::storage::estimate_tokens(&a.body),
+                    "stale": a.stale,
+                })
+            })
+            .collect();
+        let returned_atoms = serde_json::to_string(&returned).unwrap_or_else(|_| "[]".to_string());
+        if let Err(e) = storage
+            .log_retrieval_event(
+                Some(&session_id),
+                Some(&agent),
+                project,
+                query,
+                atom_count,
+                tokens_returned,
+                budget,
+                stale_count,
+                &returned_atoms,
+            )
+            .await
+        {
+            tracing::warn!("failed to log retrieval_event for {project}: {e:#}");
+        }
+    }
+
     /// Read-side discovery for FOLDER descriptions. Parallel to
     /// [`cl_index_search`]. Returns lightweight rows; empty list when storage
     /// isn't configured (test bridges).

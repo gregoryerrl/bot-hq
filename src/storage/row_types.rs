@@ -350,6 +350,33 @@ pub struct ClProposal {
     pub updated_at: String,
 }
 
+/// Aggregated `retrieval_events` telemetry (Stage 4b measurement). Raw counts
+/// come from SQL; the ratios are derived in Rust to dodge SQL float/NULL edge
+/// cases. See [`Storage::retrieval_stats`](crate::storage::Storage::retrieval_stats).
+#[derive(Debug, Clone, Serialize)]
+pub struct RetrievalStats {
+    /// Number of `cl_retrieve` calls logged in scope.
+    pub event_count: i64,
+    /// Distinct sessions that issued a retrieval.
+    pub distinct_sessions: i64,
+    /// Total atom-body tokens handed back across all events.
+    pub total_tokens: i64,
+    /// Total atoms handed back across all events.
+    pub total_atoms: i64,
+    /// Atoms returned with the ⚠ drift flag set.
+    pub stale_hits: i64,
+    /// Events that returned zero atoms (a retrieval miss).
+    pub empty_returns: i64,
+    /// `total_tokens / event_count` (0.0 when no events).
+    pub avg_tokens_per_event: f64,
+    /// `total_tokens / distinct_sessions` — the tokens-per-task proxy.
+    pub avg_tokens_per_session: f64,
+    /// `stale_hits / total_atoms` — should trend toward 0.
+    pub stale_hit_rate: f64,
+    /// `empty_returns / event_count` — retrieval-miss rate.
+    pub empty_return_rate: f64,
+}
+
 /// A registered project. The special name `_globals` is the bot-hq root
 /// bucket (general-rules.md, etc.) and has NULL working_repo_path.
 ///

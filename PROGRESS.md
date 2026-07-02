@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-636 Rust tests passing (585 lib + 33 external MCP + 7 signaling + 11
+640 Rust tests passing (589 lib + 33 external MCP + 7 signaling + 11
 storage) plus 112 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,38 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-07-02 — CL measurement (Stage 4b): retrieval_events log
+
+First slice of the deferred CL measurement layer — the assessment made
+measurement "the gate" for the retrieval engine, but the engine shipped
+ahead of it, so there was zero telemetry on whether `cl_retrieve` helps.
+This lands the append-only spine so tokens-per-task, stale-hit rate, and
+retrieval-miss rate become answerable with data.
+
+- **`retrieval_events` table (migration 0028).** Append-only, FK-free
+  (immutable telemetry: a `_globals` retrieval must log, an insert must
+  never fail on an absent session row, and pruning a session must not
+  rewrite history via cascade). Columns: session_id/agent (nullable audit),
+  project_id, query, atom_count, tokens_returned, budget_tokens,
+  stale_count, returned_atoms (JSON), used_atoms (reserved, unused in v1),
+  created_at; indexed by (project_id, created_at) and (session_id, created_at).
+- **`Storage::log_retrieval_event` + `retrieval_stats`** (`src/storage/
+  retrieval_events.rs`). Stats aggregate in one query via the
+  `(? IS NULL OR col = ?)` filter idiom; ratios (avg tokens/event, avg
+  tokens/session = the tokens-per-task proxy, stale-hit rate, empty-return
+  rate) are derived in Rust to dodge SQL float/NULL edges. `RetrievalStats`
+  in `row_types.rs`.
+- **Hook = jsonrpc dispatch, best-effort.** The `cl_retrieve` arm
+  (`src/signaling/jsonrpc.rs`) logs via a new
+  `SignalingBridge::log_retrieval_event` (`bridge/cl_facade.rs`) that
+  derives counts/tokens (reusing `estimate_tokens`) + a returned-atoms JSON
+  from the atoms already in hand. Only the dispatch layer has both
+  `caller.session_id`/`caller.agent` and the atoms. A logging failure warns
+  and is swallowed — measurement never breaks a retrieval.
+
+Surfacing (a `cl_retrieval_stats` command + a Library measurement card) and
+the CL-poison behavioral eval are the next two slices. +4 lib tests → 589.
 
 ## 2026-06-29 — CL v2 deferred remainder: propose-don't-mutate, atom bounding, stale-flagging
 
