@@ -7,6 +7,7 @@ import type {
   ClFileContentView,
   ClFolderView,
   ClIndexEntryView,
+  ClProposalView,
   Policy,
   ProjectView,
   RetrievalStatsView,
@@ -249,7 +250,8 @@ function TabStrip({
             ? t.filePath
             : t.kind === "folder"
               ? t.folderPath
-              : "proposals";
+              : t.kind; // "proposals" | "measurement" — tooltip + close aria-label
+
         return (
           <div
             key={tabKey(t)}
@@ -713,22 +715,6 @@ function MeasurementView({ project }: { project: string }) {
 // ============================================================================
 // ProposalQueue — project-scoped CL proposal review docket
 // ============================================================================
-
-type ClProposalView = {
-  id: number;
-  proposal_uid: string;
-  project: string;
-  file_path: string;
-  kind: "add" | "correct" | "delete" | string;
-  target_excerpt: string | null;
-  proposed_body: string;
-  evidence: string;
-  status: string;
-  proposed_by: string;
-  session_id: string | null;
-  created_at: string;
-  updated_at: string;
-};
 
 function ProposalQueue({
   project,
