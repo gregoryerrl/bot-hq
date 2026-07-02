@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-642 Rust tests passing (591 lib + 33 external MCP + 7 signaling + 11
-storage) plus 114 frontend Vitest. Release build clean. Version
+644 Rust tests passing (593 lib + 33 external MCP + 7 signaling + 11
+storage) plus 118 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -21,6 +21,43 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-07-03 — Context Library subtabs: Library Tree | Context Manager
+
+The CL page now splits into two Settings-style subtabs, fixing proposal
+discoverability (the docket — the human half of propose-don't-mutate —
+was buried behind "pick project in dropdown → click icon"). The pill row
+IS the page header; no panel repeats its label as a heading.
+
+- **Library Tree** — the file explorer + editor, simplified: the
+  "Library Tree" sidebar header, the project-filter dropdown (YAGNI),
+  and the proposals/measurement toolbar icons are gone. Rescan is now
+  always all-projects (the parallel branch that already existed);
+  the per-project form moved to the Context Manager header.
+  `OpenTab` shrinks back to `file | folder`.
+- **Context Manager** — a per-project management surface (NOT a file
+  explorer): left rail lists registered projects (`_globals` pinned
+  last) with open-proposal count badges; the right panel shows the
+  selected project's header strip (repo path, per-project Rescan,
+  Maintain CL preselecting the project) over Proposals | Measurement
+  inner pills. Default selection = first project with open proposals.
+  The Context Manager subtab pill carries the cross-project open total,
+  visible the moment the page opens.
+- **Badge freshness (backend).** `cl_proposal_counts` Tauri command
+  (one `GROUP BY` over open proposals) + a new
+  `SignalingEvent::ClProposalsChanged` emitted from the bridge's
+  propose/approve/reject paths → `cl:proposals_changed` Tauri event →
+  Providers invalidation. Needed because filing + rejection are DB-only
+  writes the CL fs-watcher can't see (approval rewrites a file, so it
+  incidentally fired `cl:changed`; the overlap is a harmless refetch).
+- **P3 consolidation (partial).** `ProposalQueue` + `MeasurementView`
+  extracted out of `ContextLibraryEditor.tsx` into their own files
+  (with their tests); `SubTabButton` extracted from `Settings.tsx` into
+  a shared component (+ optional `badge` prop).
+
++1 storage test (counts aggregate), +1 bridge test (propose emits the
+event), +4 ContextManager Vitest; 5 editor tests migrated to the
+extracted components' files. Rust 591→593 lib; Vitest 114→118.
 
 ## 2026-07-02 — CL v2 audit + P1/P2 remediation
 

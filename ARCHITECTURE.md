@@ -223,11 +223,18 @@ renders the live color-coded `git diff` for the session's working repo
 via the `compute_apply_diff` Tauri command (`src/tauri_cmd/docs.rs`,
 parser `parse_diff_lines`), consumed by `DocumentPane.tsx`.
 
-**Context Library tab:** 2-pane "Library Tree" sidebar + tabbed editor. The
-tree renders nested collapsible folders (`cl_index_search` + `cl_folder_search`).
-Files open a read-write editor (`cl_read_file` / `cl_write_file`; binary +
-truncated files are read-only so a lossy save can't corrupt them). Folders open
-a folder-view that edits the folder description (`cl_set_folder_description`)
+**Context Library tab:** two Settings-style subtabs — **Library Tree** |
+**Context Manager** — whose pill row is the page header (no panel repeats
+its label; the Context Manager pill carries the cross-project open-proposal
+count badge, kept live by `cl:proposals_changed`).
+
+*Library Tree* — 2-pane file explorer + tabbed editor. The tree renders
+nested collapsible folders (`cl_index_search` + `cl_folder_search`) with
+substring search (no project filter — removed as YAGNI; Rescan is always
+all-projects, in parallel with per-project failures surfaced). Files open a
+read-write editor (`cl_read_file` / `cl_write_file`; binary + truncated
+files are read-only so a lossy save can't corrupt them). Folders open a
+folder-view that edits the folder description (`cl_set_folder_description`)
 and, at the project root, manages the project: set the working repo, rename
 (`cl_rename_project`), unbind (`cl_unregister_project` — soft: clears repo +
 custom cl_path, keeps content), and hard-delete (`cl_delete_project` — purges
@@ -243,13 +250,19 @@ file / new folder / rename / delete (`cl_create_file` / `cl_mkdir` / `cl_rename`
 on a top-level Global folder (moves it into `projects/` + registers). Path
 inputs (working-repo, cl_path) use a native folder picker via
 `tauri-plugin-dialog`. The New-session dialog can also pick an ad-hoc working
-repo directly (no pre-registration). Substring search + project filter.
-With a project selected, the sidebar also opens two project-scoped tabs:
-**Proposals** (review docket for agent-filed `cl_proposals` — approve /
+repo directly (no pre-registration).
+
+*Context Manager* — the per-project management surface (NOT a file
+explorer): a left rail of registered projects (`_globals` pinned last) with
+open-proposal badges (`cl_proposal_counts`), and a right panel for the
+selected project — header strip (repo path, per-project Rescan, Maintain CL
+preselecting the project) over **Proposals** | **Measurement** inner pills.
+Proposals = the review docket for agent-filed `cl_proposals` (approve /
 reject with full-body preview; `correct` warns it replaces the whole file,
-`delete` approval is deferred) and **Measurement** (`cl_retrieval_stats`
-tiles over `retrieval_events`: tokens/session, tokens/retrieval,
-stale-hit + retrieval-miss rates).
+`delete` approval is deferred). Measurement = `cl_retrieval_stats` tiles
+over `retrieval_events` (tokens/session, tokens/retrieval, stale-hit +
+retrieval-miss rates). Default selection is the first project with open
+proposals.
 
 **Plugins tab:** Functional management UI (`PluginManager.tsx`) over
 `tauri_cmd/plugins.rs` — install from a local path, enable / disable /
