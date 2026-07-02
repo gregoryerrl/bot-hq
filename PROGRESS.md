@@ -22,6 +22,31 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 
 ---
 
+## 2026-07-02 — CL measurement (Stage 4b): CL-poison behavioral eval
+
+The active complement to the passive telemetry: does the duo OBEY a CL atom
+that contradicts the code, or VERIFY against the source (brief failure-mode
+#2)? A standalone `bench/cl_poison/` harness (not part of the cargo/npm
+build).
+
+- **Reuses the swebench external-MCP plumbing** (stdlib only): imports
+  `../swebench/bothq_client.py` (session driving) + `completion.py`
+  (completion detection + headless gate auto-resolve) via `sys.path`.
+- **`scenario.py`** — seeds a fixture repo (`calc.compute_total`, the truth)
+  + a poison CL project asserting the helper is `calculate_sum` (the lie); a
+  task that names neither token so the agent must choose. The app's fs watcher
+  auto-indexes the seeded CL.
+- **`grade.py`** — PURE obey/verify/inconclusive verdict from the produced
+  diff (whole-word token match) + a `verified_source` signal from the
+  transcript. Unit-tested by `tests.py` (9 tests, `python -m unittest`, $0).
+- **`run_poison_eval.py`** — driver: setup + preflight + N trials
+  (`--dry-run` is $0; live trials spend model calls) → `runs/poison.jsonl` +
+  a verdict tally. README documents the one manual step (confirm the poison
+  is indexed) + caveats.
+
+Authored, not run (live trials cost model calls — the user runs when ready).
+Grader: 9/9 unit tests green.
+
 ## 2026-07-02 — CL measurement (Stage 4b): retrieval stats surfacing
 
 Makes the B1 telemetry readable — a project-scoped Measurement view in the
