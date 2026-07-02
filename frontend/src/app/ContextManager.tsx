@@ -2,7 +2,11 @@ import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
-import type { ClRescanReportView, ProjectView } from "../lib/bindings";
+import type {
+  ClProposalCountView,
+  ClRescanReportView,
+  ProjectView,
+} from "../lib/bindings";
 import { SubTabButton } from "../components/SubTabButton";
 import { ProposalQueue } from "./ProposalQueue";
 import { MeasurementView } from "./MeasurementView";
@@ -22,10 +26,7 @@ import { WrenchIcon } from "../components/icons";
 
 /** Open-proposal counts, shared with the shell's pill badge via query key. */
 export function useProposalCounts() {
-  return useTauriQuery<{ project_id: string; open_count: number }[]>(
-    "cl_proposal_counts",
-    {},
-  );
+  return useTauriQuery<ClProposalCountView[]>("cl_proposal_counts", {});
 }
 
 type ManagerTab = "proposals" | "measurement";

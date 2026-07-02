@@ -314,6 +314,20 @@ async clListProposals(project: string, status: string | null) : Promise<Result<C
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Open-proposal counts per project in one call — feeds the Context Manager
+ * sidebar badges and the subtab pill's cross-project sum. Kept fresh by the
+ * `cl:proposals_changed` event (filing/rejection are DB-only writes the CL
+ * fs-watcher can't see).
+ */
+async clProposalCounts() : Promise<Result<ClProposalCountView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_proposal_counts") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async clApproveProposal(proposalUid: string) : Promise<Result<string, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cl_approve_proposal", { proposalUid }) };
@@ -974,6 +988,11 @@ truncated: boolean;
 binary: boolean }
 export type ClFolderView = { id: number; project_id: string; folder_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
+/**
+ * One project's open-proposal tally for the Context Manager sidebar badges.
+ * Projects with zero open proposals are absent from the list.
+ */
+export type ClProposalCountView = { project_id: string; open_count: number }
 export type ClProposalView = { id: number; proposal_uid: string; project: string; file_path: string; kind: string; target_excerpt: string | null; proposed_body: string; evidence: string; status: string; proposed_by: string; session_id: string | null; created_at: string; updated_at: string }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
 /**
