@@ -174,7 +174,7 @@ export function WorkspaceSidebar({
     >
       {/* No "Library Tree" label here — the subtab pill above IS the header.
           Proposals/measurement moved to the Context Manager subtab. */}
-      <header className="flex items-center justify-end border-b border-outline-variant px-3 py-2">
+      <header className="flex items-center border-b border-outline-variant px-3 py-2">
         {/* New file/folder is created via right-click on a folder node (it
             needs the target folder + a name) — no header button for those. */}
         <div className="flex items-center gap-1">
