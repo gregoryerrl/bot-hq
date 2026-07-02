@@ -72,6 +72,8 @@ Tools:
 
 - `cl_index_search(project, query?)` — list relevant CL files. Pass your session's working project name (e.g. `\"acme-app\"`) for project-scoped notes. Pass `\"_globals\"` for system rules + cross-project files. Omit `project` to search everything. Optional `query` does a case-insensitive substring filter across file_path/description/tags.
 - `cl_folder_search(project, query?)` — parallel to `cl_index_search` but for FOLDERS instead of files. Returns `{folder_path, description, tags, updated_at}` so you can scope a sweep before pulling individual files. `folder_path = \"\"` rows are project-root descriptions.
+- `cl_retrieve(project, query, paths?, budget_tokens?)` — ranked CL CONTENT: returns the best-matching atom bodies inline under a token budget (default 3000). The 95% path for pulling CL knowledge on a topic; atoms flagged `⚠ possibly stale` cite code that drifted — verify before trusting.
+- `cl_propose(project, file_path, kind, evidence, proposed_body, target_excerpt?)` — file a durable CL edit proposal (`add` new file | `correct` full-file replacement | `delete`). Non-mutating; the user approves in the review queue. `cl_list_proposals(project, status?)` inspects the queue.
 - `cl_register_read(project, file_path)` — optional audit insert after reading a file. Powers a future \"what context did this agent have?\" view. Fire-and-forget.
 - `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. HANDS (brian) can call this; Rain is denied (read folder descriptions via `cl_folder_search`).
 - `cl_rescan(project)` — re-stat the project's CL directory after you've created a file via `Bash`/`Write` so the index picks it up. Cheap, idempotent.
@@ -155,6 +157,25 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("Before any other tool call on substantive project work"),
             "CL workflow must be framed as the FIRST tool call, not a tip"
+        );
+    }
+
+    #[test]
+    fn cl_tools_list_enumerates_retrieve_and_propose() {
+        // The enumerated "Tools:" list is the canonical signature reference
+        // agents scan; cl_retrieve / cl_propose were prose-only for a cycle
+        // (learnings-2026-06-29) and got missed. Keep them listed.
+        assert!(
+            GENERAL_RULES.contains("`cl_retrieve(project, query, paths?, budget_tokens?)`"),
+            "Tools list must enumerate cl_retrieve with its signature"
+        );
+        assert!(
+            GENERAL_RULES.contains("`cl_propose(project, file_path, kind, evidence"),
+            "Tools list must enumerate cl_propose with its signature"
+        );
+        assert!(
+            GENERAL_RULES.contains("`cl_list_proposals(project, status?)`"),
+            "Tools list must mention the proposal queue read side"
         );
     }
 

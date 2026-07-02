@@ -189,9 +189,11 @@ impl Storage {
 
 /// SHA-256 hex digest (64 lowercase hex chars) of an atom body. Deterministic and
 /// stable across processes AND Rust releases — mirrors `policy::audit::content_hash`.
-/// Stored for future retrieval-time stale-flagging. NOT `DefaultHasher`, whose
-/// algorithm is std-documented as unstable across releases (a toolchain bump would
-/// re-hash every body and report spurious "changed").
+/// Currently write-only: retrieval-time stale-flagging ships on `code_hash` (the
+/// cited CODE's hash), not this. Kept as the change-detection key for future
+/// incremental re-atomization (CL brief §4); drop it if that never lands. NOT
+/// `DefaultHasher`, whose algorithm is std-documented as unstable across releases
+/// (a toolchain bump would re-hash every body and report spurious "changed").
 fn atom_body_hash(body: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(body.as_bytes());

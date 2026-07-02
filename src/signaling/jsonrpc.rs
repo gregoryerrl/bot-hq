@@ -632,7 +632,14 @@ async fn call_tool(
             // Inline the atom bodies as readable `## file > heading` blocks — the
             // whole point is to hand the agent the CONTENT, not a TOC.
             let text = if atoms.is_empty() {
-                format!("(no matching CL atoms for: {query})")
+                // Failure-mode #5 (CL brief): an empty retrieval must never read
+                // as "no constraints exist" — the fact may simply rank below the
+                // match threshold or use different words.
+                format!(
+                    "(no matching CL atoms for: {query} — this does NOT mean no \
+                     conventions/constraints exist; rephrase the query or check \
+                     cl_index_search.)"
+                )
             } else {
                 let mut out = String::new();
                 for atom in &atoms {
@@ -703,8 +710,8 @@ async fn call_tool(
         "cl_register_read" => {
             let project = arg_required_str(&args, "project")?;
             let file_path = arg_required_str(&args, "file_path")?;
-            // Fire-and-forget at the tool layer too — caller doesn't gain
-            // anything by waiting on an audit insert.
+            // Awaited audit insert (cheap single-row write). Unknown paths
+            // no-op inside the bridge; only real DB failures surface as errors.
             bridge
                 .cl_register_read(
                     &caller.agent,
