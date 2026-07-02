@@ -13,10 +13,8 @@ import {
   type CtxTarget,
   FileIcon,
   FolderIcon,
-  MeasurementIcon,
   type OpenTab,
   PlusIcon,
-  ProposalsIcon,
   RefreshIcon,
   splitGlobals,
   terminalInputClass,
@@ -47,8 +45,6 @@ const headerIconButtonClass = cn(
 interface WorkspaceSidebarProps {
   /** Pixel width, owned by ContextLibrary's drag-resize state. */
   width: number;
-  project: string | null;
-  setProject: (v: string | null) => void;
   query: string;
   setQuery: (v: string) => void;
   projects: ProjectView[];
@@ -65,8 +61,6 @@ interface WorkspaceSidebarProps {
   activeTab: OpenTab | null;
   onOpenFile: (project: string, filePath: string) => void;
   onOpenFolder: (project: string, folderPath: string) => void;
-  onOpenProposals: (project: string) => void;
-  onOpenMeasurement: (project: string) => void;
   onRequestRegister: () => void;
   onRequestMaintain: () => void;
   onContextMenu: (target: CtxTarget, x: number, y: number) => void;
@@ -74,8 +68,6 @@ interface WorkspaceSidebarProps {
 
 export function WorkspaceSidebar({
   width,
-  project,
-  setProject,
   query,
   setQuery,
   projects,
@@ -92,8 +84,6 @@ export function WorkspaceSidebar({
   activeTab,
   onOpenFile,
   onOpenFolder,
-  onOpenProposals,
-  onOpenMeasurement,
   onRequestRegister,
   onRequestMaintain,
   onContextMenu,
@@ -102,7 +92,7 @@ export function WorkspaceSidebar({
     Object.keys(byProject),
     projects.map((p) => p.name),
     query.trim() !== "",
-    project,
+    null,
   );
   const projectCount = projectIds.length;
 
@@ -144,10 +134,10 @@ export function WorkspaceSidebar({
     (id) => id !== "_globals" && !registered.has(id),
   );
 
-  // With a search/filter active, hide categories that have nothing to show;
+  // With a search active, hide categories that have nothing to show;
   // otherwise all three headers always render (GLOBAL must stay right-click
   // reachable even when empty).
-  const filterActive = query.trim() !== "" || project !== null;
+  const filterActive = query.trim() !== "";
   const hasProjects = projectCategoryIds.length > 0;
   const hasGlobal =
     globalsSplit.global.entries.length > 0 ||
@@ -182,10 +172,9 @@ export function WorkspaceSidebar({
       className="flex h-full flex-shrink-0 flex-col border-r border-outline-variant bg-surface-container"
       style={{ width }}
     >
-      <header className="flex items-center justify-between border-b border-outline-variant px-3 py-2">
-        <span className="font-label-caps text-label-caps text-on-surface-variant">
-          Library Tree
-        </span>
+      {/* No "Library Tree" label here — the subtab pill above IS the header.
+          Proposals/measurement moved to the Context Manager subtab. */}
+      <header className="flex items-center justify-end border-b border-outline-variant px-3 py-2">
         {/* New file/folder is created via right-click on a folder node (it
             needs the target folder + a name) — no header button for those. */}
         <div className="flex items-center gap-1">
@@ -205,35 +194,15 @@ export function WorkspaceSidebar({
           <button
             type="button"
             onClick={onRescan}
-            disabled={rescanning || (!project && projectCount === 0)}
-            aria-label={project ? `Rescan ${project}` : "Rescan all projects"}
-            title={project ? `Rescan ${project}` : "Rescan all projects"}
+            disabled={rescanning || projectCount === 0}
+            aria-label="Rescan all projects"
+            title="Rescan all projects"
             className={cn(
               headerIconButtonClass,
               "text-on-surface-variant hover:text-on-surface",
             )}
           >
             <RefreshIcon className={rescanning ? "animate-spin" : undefined} />
-          </button>
-          <button
-            type="button"
-            onClick={() => project && onOpenProposals(project)}
-            disabled={!project}
-            aria-label="Open project proposals"
-            title={project ? `Review proposals for ${project}` : "Select a project to review proposals"}
-            className={cn(headerIconButtonClass, "text-secondary hover:text-secondary-fixed")}
-          >
-            <ProposalsIcon className="size-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => project && onOpenMeasurement(project)}
-            disabled={!project}
-            aria-label="Open retrieval measurement"
-            title={project ? `Retrieval measurement for ${project}` : "Select a project to see retrieval measurement"}
-            className={cn(headerIconButtonClass, "text-tertiary hover:text-tertiary-fixed")}
-          >
-            <MeasurementIcon className="size-3.5" />
           </button>
           <button
             type="button"
@@ -267,19 +236,6 @@ export function WorkspaceSidebar({
           placeholder="Search files…"
           className={terminalInputClass}
         />
-        <select
-          value={project ?? ""}
-          onChange={(e) => setProject(e.target.value || null)}
-          aria-label="Project filter"
-          className="w-full rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-        >
-          <option value="">All projects</option>
-          {projects.map((p) => (
-            <option key={p.name} value={p.name}>
-              {p.display_name || p.name}
-            </option>
-          ))}
-        </select>
         {(rescanReport || rescanFailures.length > 0) && (
           <div className="flex flex-wrap gap-2 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm">
             {rescanReport && (
@@ -321,9 +277,7 @@ export function WorkspaceSidebar({
           </div>
         ) : projectCount === 0 ? (
           <p className="px-2 py-3 font-code-sm text-code-sm text-on-surface-variant">
-            {query.trim() || project
-              ? "No matches."
-              : "Empty. Use Rescan to populate."}
+            {query.trim() ? "No matches." : "Empty. Use Rescan to populate."}
           </p>
         ) : (
           <>

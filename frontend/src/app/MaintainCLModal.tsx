@@ -11,6 +11,8 @@ import type { ProjectView, SessionInfo } from "../lib/bindings";
 interface MaintainCLModalProps {
   open: boolean;
   onClose: () => void;
+  /** Preselects the project (Context Manager's per-project launch). */
+  initialProject?: string;
 }
 
 /**
@@ -20,7 +22,11 @@ interface MaintainCLModalProps {
  * `dispatch_session` command), then navigates into it. The agents start
  * maintaining that project's Context Library immediately — no follow-up needed.
  */
-export function MaintainCLModal({ open, onClose }: MaintainCLModalProps) {
+export function MaintainCLModal({
+  open,
+  onClose,
+  initialProject,
+}: MaintainCLModalProps) {
   const navigate = useNavigate();
   // Live via the `project:changed` event — no poll. `enabled: open` keeps the
   // query idle until the modal opens.
@@ -40,6 +46,7 @@ export function MaintainCLModal({ open, onClose }: MaintainCLModalProps) {
   useEffect(() => {
     if (!open) return;
     setError(null);
+    if (initialProject) setSelected(initialProject);
     selectRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -49,7 +56,7 @@ export function MaintainCLModal({ open, onClose }: MaintainCLModalProps) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  }, [open, onClose, initialProject]);
 
   if (!open) return null;
 

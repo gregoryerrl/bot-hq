@@ -22,6 +22,9 @@ import { WorkspaceSidebar } from "./ContextLibrarySidebar";
 import { EditorArea } from "./ContextLibraryEditor";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
 import { MaintainCLModal } from "./MaintainCLModal";
+import { ContextManager, useProposalCounts } from "./ContextManager";
+import { SubTabButton } from "../components/SubTabButton";
+import { cn } from "../lib/cn";
 import {
   ActionModal,
   ContextMenu,
@@ -60,8 +63,7 @@ const SIDEBAR_MIN_PX = 180;
 const SIDEBAR_MAX_PX = 480;
 const SIDEBAR_DEFAULT_PX = 240;
 
-export function ContextLibrary() {
-  const [project, setProject] = useState<string | null>(null);
+function LibraryTree() {
   const [query, setQuery] = useState("");
   // 300ms debounce — input value updates instantly for keystroke feedback;
   // the Tauri call uses the settled value so we don't hammer the bridge.
@@ -126,7 +128,7 @@ export function ContextLibrary() {
     isLoading,
     refetch,
   } = useTauriQuery<ClIndexEntryView[]>("cl_index_search", {
-    project,
+    project: null,
     query: debouncedQuery.trim() || null,
   });
 
@@ -141,7 +143,7 @@ export function ContextLibrary() {
   const { data: folders = [], refetch: refetchFolders } = useTauriQuery<
     ClFolderView[]
   >("cl_folder_search", {
-    project,
+    project: null,
     query: debouncedQuery.trim() || null,
   });
 
@@ -453,14 +455,6 @@ export function ContextLibrary() {
       openTab({ kind: "folder", project, folderPath }),
     [openTab],
   );
-  const openProposals = useCallback(
-    (project: string) => openTab({ kind: "proposals", project }),
-    [openTab],
-  );
-  const openMeasurement = useCallback(
-    (project: string) => openTab({ kind: "measurement", project }),
-    [openTab],
-  );
 
   const closeTab = useCallback((index: number) => {
     setTabs((prev) => {
@@ -476,8 +470,8 @@ export function ContextLibrary() {
   }, []);
 
   // A project was deleted (no replacement) or renamed (replacement = new name).
-  // Drop its open tabs, refresh the tree, and retarget the filter / reopen the
-  // renamed root so the user isn't left staring at a stale view.
+  // Drop its open tabs, refresh the tree, and reopen the renamed root so the
+  // user isn't left staring at a stale view.
   const onProjectGone = useCallback(
     (name: string, replacement?: string) => {
       setTabs((prev) => {
@@ -485,63 +479,48 @@ export function ContextLibrary() {
         setActiveTabIndex((cur) => Math.min(cur, Math.max(0, next.length - 1)));
         return next;
       });
-      if (project === name) setProject(replacement ?? null);
       onProjectChanged();
       if (replacement) {
         setQuery("");
-        setProject(replacement);
         openFolder(replacement, "");
       }
     },
-    [project, onProjectChanged, openFolder],
+    [onProjectChanged, openFolder],
   );
 
+  // All-projects rescan (the per-project form lives in the Context Manager):
+  // each project's rescan is independent, so run them in parallel. Per-project
+  // failures are contained so one bad project doesn't abort the rest — but
+  // they're collected and surfaced, not swallowed into a clean aggregate.
   const handleRescan = async () => {
     if (rescanning) return;
     setRescanning(true);
     setRescanReport(null);
     setRescanFailures([]);
     try {
-      if (project) {
-        try {
-          const report = await invoke<ClRescanReportView>("cl_rescan", {
-            project,
-          });
-          setRescanReport(report);
-        } catch (e) {
-          // eslint-disable-next-line no-console
-          console.warn(`cl_rescan(${project}) failed`, e);
-          setRescanFailures([project]);
-        }
-      } else {
-        // All-projects rescan: each project's rescan is independent, so run
-        // them in parallel (was a serial for…await). Per-project failures are
-        // contained so one bad project doesn't abort the rest — but they're
-        // collected and surfaced, not swallowed into a clean aggregate.
-        const projectIds = Object.keys(byProject);
-        const failures: string[] = [];
-        const reports = await Promise.all(
-          projectIds.map((p) =>
-            invoke<ClRescanReportView>("cl_rescan", { project: p }).catch(
-              (e) => {
-                // eslint-disable-next-line no-console
-                console.warn(`cl_rescan(${p}) failed`, e);
-                failures.push(p);
-                return null;
-              },
-            ),
+      const projectIds = Object.keys(byProject);
+      const failures: string[] = [];
+      const reports = await Promise.all(
+        projectIds.map((p) =>
+          invoke<ClRescanReportView>("cl_rescan", { project: p }).catch(
+            (e) => {
+              // eslint-disable-next-line no-console
+              console.warn(`cl_rescan(${p}) failed`, e);
+              failures.push(p);
+              return null;
+            },
           ),
-        );
-        setRescanFailures(failures);
-        const agg: ClRescanReportView = { added: [], touched: [], orphaned: [] };
-        for (const r of reports) {
-          if (!r) continue;
-          agg.added.push(...r.added);
-          agg.touched.push(...r.touched);
-          agg.orphaned.push(...r.orphaned);
-        }
-        setRescanReport(agg);
+        ),
+      );
+      setRescanFailures(failures);
+      const agg: ClRescanReportView = { added: [], touched: [], orphaned: [] };
+      for (const r of reports) {
+        if (!r) continue;
+        agg.added.push(...r.added);
+        agg.touched.push(...r.touched);
+        agg.orphaned.push(...r.orphaned);
       }
+      setRescanReport(agg);
       refetch();
       refetchFolders();
     } finally {
@@ -596,8 +575,6 @@ export function ContextLibrary() {
     <div ref={containerRef} className="flex h-full bg-background">
       <WorkspaceSidebar
         width={sidebarWidth}
-        project={project}
-        setProject={setProject}
         query={query}
         setQuery={setQuery}
         projects={projects}
@@ -614,8 +591,6 @@ export function ContextLibrary() {
         activeTab={activeTab}
         onOpenFile={openFile}
         onOpenFolder={openFolder}
-        onOpenProposals={openProposals}
-        onOpenMeasurement={openMeasurement}
         onRequestRegister={() => setRegisterOpen(true)}
         onRequestMaintain={() => setMaintainOpen(true)}
         onContextMenu={handleContextMenu}
@@ -643,12 +618,12 @@ export function ContextLibrary() {
         open={registerOpen}
         onClose={() => setRegisterOpen(false)}
         onRegistered={(name) => {
-          // Make the result unmissable: clear any search and pin the tree to
-          // the new project (a fresh project was previously invisible under
-          // an active filter — the "Register does nothing" report).
+          // Make the result unmissable: clear any search (a fresh project was
+          // previously invisible under an active filter — the "Register does
+          // nothing" report) and open its root folder view.
           onProjectChanged();
           setQuery("");
-          setProject(name);
+          openFolder(name, "");
         }}
       />
       <MaintainCLModal
@@ -675,6 +650,68 @@ export function ContextLibrary() {
           }}
         />
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// ContextLibrary — subtab shell: "Library Tree" (file explorer + editor) |
+// "Context Manager" (per-project proposals + measurement). Mirrors the
+// Settings page's lazy-mount-then-keep pattern; the pill row IS the page
+// header, so neither panel repeats its label as a heading. The Context
+// Manager pill carries the cross-project open-proposal count so pending
+// reviews are visible the moment the page opens.
+// ============================================================================
+
+type ClSubTab = "tree" | "manager";
+
+const SUBTAB_STORAGE_KEY = "bot-hq.cl.subtab";
+
+export function ContextLibrary() {
+  const [tab, setTab] = useState<ClSubTab>(() => {
+    const saved = localStorage.getItem(SUBTAB_STORAGE_KEY);
+    return saved === "manager" ? "manager" : "tree";
+  });
+  const [visited, setVisited] = useState<Set<ClSubTab>>(
+    () => new Set<ClSubTab>([tab]),
+  );
+  const select = (t: ClSubTab) => {
+    setTab(t);
+    setVisited((v) => (v.has(t) ? v : new Set(v).add(t)));
+    try {
+      localStorage.setItem(SUBTAB_STORAGE_KEY, t);
+    } catch {
+      // Storage quota or disabled — silent no-op.
+    }
+  };
+
+  // Kept fresh by the `cl:proposals_changed` event (see Providers.tsx); shares
+  // its query key with the Context Manager's sidebar badges.
+  const { data: counts = [] } = useProposalCounts();
+  const totalOpen = counts.reduce((s, c) => s + c.open_count, 0);
+
+  return (
+    <div className="flex h-full flex-col bg-background">
+      <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
+        <SubTabButton active={tab === "tree"} onClick={() => select("tree")}>
+          Library Tree
+        </SubTabButton>
+        <SubTabButton
+          active={tab === "manager"}
+          onClick={() => select("manager")}
+          badge={totalOpen}
+        >
+          Context Manager
+        </SubTabButton>
+      </div>
+      <div className="min-h-0 flex-1">
+        <div className={cn("h-full", tab !== "tree" && "hidden")}>
+          {visited.has("tree") && <LibraryTree />}
+        </div>
+        <div className={cn("h-full", tab !== "manager" && "hidden")}>
+          {visited.has("manager") && <ContextManager />}
+        </div>
+      </div>
     </div>
   );
 }

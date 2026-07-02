@@ -8,25 +8,21 @@ import type { ClIndexEntryView } from "../lib/bindings";
 
 // An open editor tab is either a file (content editor) or a folder (folder
 // view). Discriminated on `kind` so the tab strip + editor area can route.
+// (Proposals + measurement are no longer tabs here — they live on the
+// Context Manager subtab.)
 export type OpenTab =
   | { kind: "file"; project: string; filePath: string }
-  | { kind: "folder"; project: string; folderPath: string }
-  | { kind: "proposals"; project: string }
-  | { kind: "measurement"; project: string };
+  | { kind: "folder"; project: string; folderPath: string };
 
 // Stable identity for dedup, React keys, and active-tab matching.
 export function tabKey(tab: OpenTab): string {
   if (tab.kind === "file") return `file:${tab.project}/${tab.filePath}`;
-  if (tab.kind === "folder") return `folder:${tab.project}/${tab.folderPath}`;
-  if (tab.kind === "measurement") return `measurement:${tab.project}`;
-  return `proposals:${tab.project}`;
+  return `folder:${tab.project}/${tab.folderPath}`;
 }
 
 // Tab strip label. A folder with an empty path is the project root, so it
 // shows the project name; everything else shows the trailing path segment.
 export function tabLabel(tab: OpenTab): string {
-  if (tab.kind === "proposals") return `${tab.project} / Proposals`;
-  if (tab.kind === "measurement") return `${tab.project} / Measurement`;
   const path = tab.kind === "file" ? tab.filePath : tab.folderPath;
   return path === "" ? tab.project : baseName(path);
 }
