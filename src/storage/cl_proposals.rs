@@ -110,6 +110,24 @@ impl Storage {
         .with_context(|| format!("resolving CL proposal {proposal_uid}"))?;
         Ok(row)
     }
+
+    /// Revert an APPROVED proposal back to `open` — the compensation step when
+    /// the approval's file write-back fails after the open→approved claim.
+    /// Scoped to `approved` rows so it can never resurrect a rejected proposal.
+    /// Returns true when a row was reverted.
+    pub async fn reopen_cl_proposal(&self, proposal_uid: &str) -> Result<bool> {
+        let now = now_utc();
+        let res = sqlx::query(
+            "UPDATE cl_proposals SET status = 'open', updated_at = ? \
+             WHERE proposal_uid = ? AND status = 'approved'",
+        )
+        .bind(&now)
+        .bind(proposal_uid)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("reopening CL proposal {proposal_uid}"))?;
+        Ok(res.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +238,27 @@ mod tests {
         assert_eq!(s.list_cl_proposals("other", None).await.unwrap().len(), 1);
 
         assert_eq!(s.get_cl_proposal("p3").await.unwrap().unwrap().session_id, None);
+    }
+
+    #[tokio::test]
+    async fn reopen_reverts_approved_but_never_rejected_or_open() {
+        let s = Storage::memory().await.unwrap();
+        seed(&s).await;
+        s.create_cl_proposal("p1", "bot-hq", "notes.md", "add", None, "b", "e", "brian", None)
+            .await
+            .unwrap();
+
+        // Open → reopen is a no-op (nothing to revert).
+        assert!(!s.reopen_cl_proposal("p1").await.unwrap());
+
+        // Approved → reopen reverts to open (the failed-write compensation).
+        s.resolve_cl_proposal("p1", "approved").await.unwrap().unwrap();
+        assert!(s.reopen_cl_proposal("p1").await.unwrap());
+        assert_eq!(s.get_cl_proposal("p1").await.unwrap().unwrap().status, "open");
+
+        // Rejected → reopen must NOT resurrect.
+        s.resolve_cl_proposal("p1", "rejected").await.unwrap().unwrap();
+        assert!(!s.reopen_cl_proposal("p1").await.unwrap());
+        assert_eq!(s.get_cl_proposal("p1").await.unwrap().unwrap().status, "rejected");
     }
 }

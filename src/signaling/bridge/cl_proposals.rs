@@ -83,21 +83,45 @@ impl SignalingBridge {
         if proposal.status != "open" {
             return Ok(format!("no-op: proposal '{proposal_uid}' is already {}", proposal.status));
         }
+        // Validate the kind BEFORE any mutation so an unsupported kind errors
+        // with the row still open (and never claims the proposal below).
+        match proposal.kind.as_str() {
+            "add" | "correct" => {}
+            "delete" => anyhow::bail!("delete proposal approval is not supported in the MVP"),
+            other => anyhow::bail!("unknown proposal kind '{other}'"),
+        }
         let project_root = self
             .cl_project_root(&proposal.project_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("bridge data_dir is not configured"))?;
-        match proposal.kind.as_str() {
-            "add" => write_new_cl_file(&project_root, &proposal.file_path, &proposal.proposed_body).await?,
-            "correct" => replace_existing_cl_file(&project_root, &proposal.file_path, &proposal.proposed_body).await?,
-            "delete" => anyhow::bail!("delete proposal approval is not supported in the MVP"),
-            other => anyhow::bail!("unknown proposal kind '{other}'"),
-        }
-        let resolved = storage
+        // Claim the proposal FIRST (open→approved CAS), then write. Writing
+        // before the claim let an approve/reject race replace the file and then
+        // report "no-op" — the disk mutation had already happened. Losing the
+        // CAS therefore guarantees no write occurred.
+        let Some(claimed) = storage
             .resolve_cl_proposal(&proposal_uid, ClProposalStatus::Approved.as_str())
-            .await?;
-        if resolved.is_none() {
+            .await?
+        else {
             return Ok(format!("no-op: proposal '{proposal_uid}' is no longer open"));
+        };
+        let write_res = if claimed.kind == "add" {
+            write_new_cl_file(&project_root, &claimed.file_path, &claimed.proposed_body).await
+        } else {
+            // "correct" — the only other kind the validation above lets through.
+            replace_existing_cl_file(&project_root, &claimed.file_path, &claimed.proposed_body).await
+        };
+        if let Err(err) = write_res {
+            // Compensate: flip the claim back to open so the queue matches the
+            // disk (nothing was written). Best-effort — reopen only touches
+            // `approved` rows, so it can't resurrect a concurrent rejection.
+            if let Err(revert_err) = storage.reopen_cl_proposal(&proposal_uid).await {
+                tracing::warn!(
+                    %revert_err,
+                    proposal_uid,
+                    "failed to reopen CL proposal after write-back failure"
+                );
+            }
+            return Err(err);
         }
         if let Err(err) = self.cl_rescan(&proposal.project_id).await {
             tracing::warn!(
