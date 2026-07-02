@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
+import { SubTabButton } from "../components/SubTabButton";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
@@ -121,31 +122,6 @@ export function Settings() {
         </div>
       </div>
     </div>
-  );
-}
-
-function SubTabButton({
-  active,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "border-b-2 px-3 py-2.5 font-code-sm text-code-sm transition-colors",
-        active
-          ? "border-primary text-primary"
-          : "border-transparent text-on-surface-variant hover:text-on-surface",
-      )}
-    >
-      {children}
-    </button>
   );
 }
 
