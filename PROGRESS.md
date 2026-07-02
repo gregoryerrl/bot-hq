@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-640 Rust tests passing (589 lib + 33 external MCP + 7 signaling + 11
+642 Rust tests passing (591 lib + 33 external MCP + 7 signaling + 11
 storage) plus 114 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,41 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-07-02 — CL v2 audit + P1/P2 remediation
+
+An audit swept the whole CL v2 arc (`f1bd3a7..HEAD`, ~20 commits) against
+the `ideas.md` brief — holes, redundancies, staleness, incomplete
+implementations. The cheap fixes (P1) + doc refreshes (P2) landed here;
+the design remainder (P3) is now tracked in PLAN.md ("Context Library
+v2").
+
+- **Proposal approval race (fix).** `approve_cl_proposal` wrote the CL
+  file BEFORE the open→approved CAS, so a lost approve/reject race
+  mutated the file and then reported "no-op". Now: validate kind → CAS
+  claim → write → best-effort `reopen_cl_proposal` revert on write
+  failure (scoped to `approved` rows so it can't resurrect a rejection).
+- **Poison-grader signal (fix).** `verified_source` used substring
+  matching (`compute_total_v2` counted as seeing `compute_total`); now
+  whole-word via `_uses`. The tool-name regex casing is documented as
+  deliberate (lowercase `read` would match ordinary prose). 9→11 grader
+  tests.
+- **Frontend hygiene.** Measurement tabs no longer report "proposals" in
+  the tooltip / close aria-label (TabStrip fallback now uses `t.kind`);
+  the local `ClProposalView` duplicate is gone (imports the generated
+  binding).
+- **Prompt/dispatch hygiene.** The GENERAL_RULES "Tools:" list now
+  enumerates `cl_retrieve` / `cl_propose` / `cl_list_proposals`
+  (prose-only since 2026-06-29); an empty `cl_retrieve` result carries a
+  "does NOT mean no constraints" advisory (brief failure-mode #5); two
+  stale comments fixed (`body_hash` purpose, `cl_register_read`
+  "fire-and-forget").
+- **Docs.** ARCHITECTURE.md caught up to CL v2 (tool list 32→35,
+  `cl_atoms` / `cl_proposals` / `retrieval_events` schema, atom+retrieval
+  CL section, propose-don't-mutate, Proposals/Measurement tabs); PLAN.md
+  now tracks the arc + its deferred remainder.
+
++2 Rust lib tests → 591; +2 grader tests → 11.
 
 ## 2026-07-02 — CL measurement (Stage 4b): CL-poison behavioral eval
 

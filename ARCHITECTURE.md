@@ -244,6 +244,12 @@ on a top-level Global folder (moves it into `projects/` + registers). Path
 inputs (working-repo, cl_path) use a native folder picker via
 `tauri-plugin-dialog`. The New-session dialog can also pick an ad-hoc working
 repo directly (no pre-registration). Substring search + project filter.
+With a project selected, the sidebar also opens two project-scoped tabs:
+**Proposals** (review docket for agent-filed `cl_proposals` — approve /
+reject with full-body preview; `correct` warns it replaces the whole file,
+`delete` approval is deferred) and **Measurement** (`cl_retrieval_stats`
+tiles over `retrieval_events`: tokens/session, tokens/retrieval,
+stale-hit + retrieval-miss rates).
 
 **Plugins tab:** Functional management UI (`PluginManager.tsx`) over
 `tauri_cmd/plugins.rs` — install from a local path, enable / disable /
@@ -308,14 +314,15 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (32)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (35)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `halt`, `advance_phase`, `request_phase_advance`,
 `request_approval`, `action_gate`, `check_commit_message`, `eyes_flag`,
 `disposition_finding`, `check_open_findings`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_search`,
-`session_doc_read`, `cl_index_search`, `cl_register_read`, `cl_rescan`,
+`session_doc_read`, `cl_index_search`, `cl_retrieve`, `cl_propose`,
+`cl_list_proposals`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`, `web_search`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
@@ -567,6 +574,20 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   tags, …) — folder-level CL descriptions (parallel to `cl_index`).
 - `cl_reads` (id PK, cl_index_id → cl_index, session_id, agent, read_at)
   — audit of which CL files an agent read (the `cl_register_read` sink).
+- `cl_atoms` (FTS5 virtual table: project_id, file_path, kind,
+  heading_path, body, mtime, body_hash, code_hash; migrations
+  0024/0026/0027) — heading-delimited CL sections, BM25-searchable,
+  backing `cl_retrieve`. DERIVED + disposable: `cl_rescan` rebuilds it
+  from disk; FTS5 column adds drop+recreate the table and the boot
+  rescan repopulates.
+- `cl_proposals` (id PK, proposal_uid UNIQUE, project_id → projects,
+  file_path, kind add|correct|delete, proposed_body, evidence, status
+  open|approved|rejected, session_id audit-only; migration 0025) —
+  durable agent-filed CL edit proposals; host approval owns write-back.
+- `retrieval_events` (id PK, session_id/agent nullable audit, project_id,
+  query, atom/token/stale counts, returned_atoms JSON; migration 0028,
+  deliberately FK-free append-only telemetry) — one row per
+  `cl_retrieve`, feeding the Measurement view.
 
 **Author enum:** `user` / `brian` / `rain`. (The `messages.author` CHECK
 still permits `'emma'` for legacy reasons, but the Rust enum no longer
@@ -588,8 +609,27 @@ app; restart = fresh sessions.
 
 Filesystem space at `<data_dir>/library/` — its own folder so it can be
 backed up / cloud-synced independently of host-local state — holding agent
-custom instructions, per-project conventions/notes. Indexed in `cl_index`
-table for fast description-aware search via `cl_index_search`.
+custom instructions, per-project conventions/notes. Markdown on disk stays
+the source of truth; SQLite carries two DERIVED, disposable layers on top:
+
+- **File index** (`cl_index`): one row per file (description, tags) for
+  description-aware discovery via `cl_index_search`. Descriptions
+  re-derive when a file's body changes on disk (rescan), so the TOC can't
+  freeze at first-index.
+- **Atom index** (`cl_atoms`, FTS5): each file split at headings into
+  ~≤200-token *atoms* (oversized sections sub-split at bullet/paragraph
+  boundaries, code fences kept whole — `util::split_into_atoms`).
+  `cl_retrieve` runs ranked BM25 retrieval over them and returns atom
+  BODIES inline under a token budget (convention/decision kinds win
+  ties), replacing the "search → eyeball → Read the whole 38K-token
+  file" loop. Atoms that cite repo paths carry a `code_hash` of the
+  cited source (`bridge/cl_refs.rs`, stamped at rescan); retrieval
+  recomputes it and prefixes `⚠ possibly stale` when the code has
+  drifted since indexing. Every `cl_retrieve` logs one row to
+  `retrieval_events` (tokens, stale/empty counts) — surfaced in the
+  Library's Measurement tab. Behavioral complement: the standalone
+  `bench/cl_poison/` eval measures whether agents OBEY a poisoned atom
+  or VERIFY against the source.
 
 **Per-agent files** (always loaded at spawn):
 - `library/agents/<name>/custom-instruction.md`
@@ -610,12 +650,16 @@ table for fast description-aware search via `cl_index_search`.
 — the single source of truth shared by the storage resolver, policy
 resolver, and policy audit (so the `library/` location can't desync them).
 
-**CL writes are user-explicit OR a bounded append-only agent delta at
-session close.** Mid-session, CL changes come from user action via the
-Context Library tab. The exception is the write-then-prune loop: HANDS
-may append ≤~5 non-obvious one-liner learnings to a project's `notes.md`
-right before `close_session`, and the user curates/prunes them later in
-the Context Library tab. No silent mid-session accumulation.
+**CL canon mutates only by user action — agents PROPOSE.** Mid-session,
+CL changes come from the user via the Context Library tab. Agents file
+durable edit proposals with `cl_propose` (`add` new file | `correct`
+full-file replacement | `delete` — approval for delete is deferred);
+rows land in `cl_proposals` and the user approves/rejects them in the
+Library's Proposals docket (approval writes the file atomically and
+rescans). The session-close learnings delta (≤~5 non-obvious one-liners)
+rides the same path: propose-don't-mutate replaced the old direct
+`notes.md` append, and filing a proposal lifts the close-out nudge. No
+silent mid-session accumulation.
 
 **First-run init:** `templates/cl/` is baked into the binary. On first
 start (no `version.txt` in the data dir), bot-hq seeds the templates

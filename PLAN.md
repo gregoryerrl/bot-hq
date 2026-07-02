@@ -54,6 +54,37 @@ shipped 2026-05-29, and the native folder picker shipped 2026-06-16
 (`71fab9a`). Still deferred from that work: rename re-derives the folder
 description, hard delete (no OS trash).
 
+**Context Library v2** (arc started 2026-06-27; brief in the project CL's
+`ideas.md`, assessment at
+`docs/plans/2026-06-27-context-library-v2-assessment.md`). Shipped: FTS5
+atomization + `cl_retrieve` ranked retrieval, `cl_propose` + Proposals
+docket (close-out re-wired to propose-don't-mutate), retrieval-time ⚠
+stale-flagging (`code_hash`), retrieval telemetry + Measurement tab, and
+the `bench/cl_poison/` obey-vs-verify eval (authored, not yet run — live
+trials cost model calls). Deferred remainder, roughly in value order:
+
+- **§9 lifecycle / decay / pruning** — measurement made the store's ~52%
+  ephemera visible (handoff + ideas atoms, no decay). Wants: staleness
+  feeders into the proposals queue (e.g. an atom whose cited file was
+  DELETED currently un-flags after the next rescan re-baselines
+  `code_hash`), TTL/archival for handoffs, merge proposals.
+- **Retrieval quality:** a real kind/pin boost (today the
+  convention/decision pin only fires on exact-BM25 ties — a near no-op),
+  kind-specific freshness, embeddings/hybrid scoring (deliberately
+  deferred; FTS5-first).
+- **Measurement follow-ups:** escape-hatch rate (whole-file CL Reads vs
+  `cl_retrieve`), `used_atoms` (precision proxy), a refresh source for
+  the Measurement tab (agent retrievals emit no frontend event),
+  poison-eval preflight that verifies the poison is actually indexed.
+- **Proposal ergonomics:** an `append` proposal kind (adding one learning
+  to a large `notes.md` currently means proposing the FULL replacement
+  body), `delete` approval support.
+- **Consolidation (audit 2026-07-02, P3):** shared path-guard +
+  atomic-write helpers (`tauri_cmd/cl.rs` vs `bridge/cl_proposals.rs`
+  duplicates), one sha256-hex util (3 copies), per-file hash memoization
+  in the stale recompute, extract ProposalQueue / MeasurementView from
+  `ContextLibraryEditor.tsx` (~1,070 lines).
+
 ---
 
 ## Backlog
