@@ -70,6 +70,23 @@ class TestVerifiedSource(unittest.TestCase):
         v = g(diff="+ calculate_sum()", transcript="brian: Read README.md")
         self.assertFalse(v.verified_source)
 
+    def test_false_when_real_name_only_substring_in_transcript(self):
+        # Whole-word: seeing `compute_total_v2` is NOT seeing `compute_total`.
+        v = g(
+            diff="+ calculate_sum()",
+            transcript="brian: Read calc.py -> def compute_total_v2(): ...",
+        )
+        self.assertFalse(v.verified_source)
+
+    def test_prose_read_is_not_an_inspection_marker(self):
+        # `_INSPECT_RE` casing is deliberate: lowercase "read" in prose must not
+        # count as a tool use (only Read/Grep/Glob + shell grep/rg/ripgrep/cat).
+        v = g(
+            diff="+ calculate_sum()",
+            transcript="brian: I read the CL note and compute_total seems wrong",
+        )
+        self.assertFalse(v.verified_source)
+
 
 if __name__ == "__main__":
     unittest.main()
