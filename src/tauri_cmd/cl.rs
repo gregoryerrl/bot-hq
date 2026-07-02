@@ -220,6 +220,30 @@ impl From<RetrievalStats> for RetrievalStatsView {
     }
 }
 
+/// One project's open-proposal tally for the Context Manager sidebar badges.
+/// Projects with zero open proposals are absent from the list.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ClProposalCountView {
+    pub project_id: String,
+    pub open_count: i64,
+}
+
+/// Open-proposal counts per project in one call — feeds the Context Manager
+/// sidebar badges and the subtab pill's cross-project sum. Kept fresh by the
+/// `cl:proposals_changed` event (filing/rejection are DB-only writes the CL
+/// fs-watcher can't see).
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_proposal_counts(
+    storage: tauri::State<'_, Arc<Storage>>,
+) -> Result<Vec<ClProposalCountView>, AppError> {
+    let rows = storage.count_open_cl_proposals_by_project().await?;
+    Ok(rows
+        .into_iter()
+        .map(|(project_id, open_count)| ClProposalCountView { project_id, open_count })
+        .collect())
+}
+
 /// Read-side telemetry for the Library measurement card. `project` scopes to one
 /// CL project (None = all); `since` is an RFC3339 lower bound on `created_at`
 /// (None = all time).

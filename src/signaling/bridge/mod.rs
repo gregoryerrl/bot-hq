@@ -132,6 +132,14 @@ pub enum SignalingEvent {
     FindingsChanged {
         session_id: String,
     },
+    /// A project's CL proposal queue changed (`cl_propose` filed, or a proposal
+    /// was approved/rejected). Filing + rejection are DB-only writes the CL
+    /// fs-watcher can't see, so the Context Manager badges need this explicit
+    /// event to stay live. (Approval also rewrites a CL file and thus fires
+    /// `cl:changed` too — the double invalidation is a harmless refetch.)
+    ClProposalsChanged {
+        project_id: String,
+    },
     /// A session finished closing (after `core.close_session`). The UI
     /// navigates away from a now-closed session and refreshes its lists.
     SessionClosed {

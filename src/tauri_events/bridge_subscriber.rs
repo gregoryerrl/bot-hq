@@ -20,9 +20,9 @@ use crate::signaling::{SignalingBridge, SignalingEvent};
 use crate::storage::Storage;
 use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
-    AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent, FindingsChangedEvent,
-    PendingChoiceEvent, PhaseChangedEvent, RouterHealthEvent, SessionActivityEvent,
-    SessionClosedEvent,
+    AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, ClProposalsChangedEvent, DocChangedEvent,
+    FindingsChangedEvent, PendingChoiceEvent, PhaseChangedEvent, RouterHealthEvent,
+    SessionActivityEvent, SessionClosedEvent,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -123,6 +123,13 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             let payload = FindingsChangedEvent { session_id };
             emit_event(
                 FindingsChangedEvent::EVENT_NAME,
+                serde_json::to_value(&payload).unwrap_or(Value::Null),
+            );
+        }
+        SignalingEvent::ClProposalsChanged { project_id } => {
+            let payload = ClProposalsChangedEvent { project_id };
+            emit_event(
+                ClProposalsChangedEvent::EVENT_NAME,
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }

@@ -119,6 +119,19 @@ impl FindingsChangedEvent {
     pub const EVENT_NAME: &'static str = "session:findings_changed";
 }
 
+/// Emitted when a project's CL proposal queue changes (`cl_propose` filed, or
+/// a proposal approved/rejected). Filing + rejection are DB-only writes the CL
+/// fs-watcher can't see, so the Context Manager badges need this explicit
+/// event to stay live.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ClProposalsChangedEvent {
+    pub project_id: String,
+}
+
+impl ClProposalsChangedEvent {
+    pub const EVENT_NAME: &'static str = "cl:proposals_changed";
+}
+
 /// Emitted when a session finished closing, so the UI can navigate away from
 /// the now-closed session and refresh its session lists.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

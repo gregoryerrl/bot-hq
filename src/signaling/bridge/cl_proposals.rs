@@ -53,6 +53,11 @@ impl SignalingBridge {
         // Proposing engages the CL — lift the close-out nudge gate so an agent
         // that files its learnings delta as a proposal isn't re-nudged at close.
         self.mark_cl_rescan(&session_id).await;
+        // Filing is a DB-only write the CL fs-watcher can't see — tell the UI
+        // so Context Manager badges update the moment a proposal lands.
+        let _ = self
+            .event_tx
+            .send(SignalingEvent::ClProposalsChanged { project_id: project });
         Ok(uid)
     }
 
@@ -131,6 +136,9 @@ impl SignalingBridge {
                 "cl_rescan failed after CL proposal approval; index may be stale"
             );
         }
+        let _ = self.event_tx.send(SignalingEvent::ClProposalsChanged {
+            project_id: proposal.project_id.clone(),
+        });
         Ok(format!("proposal '{proposal_uid}' approved"))
     }
 
@@ -139,9 +147,14 @@ impl SignalingBridge {
         let resolved = storage
             .resolve_cl_proposal(&proposal_uid, ClProposalStatus::Rejected.as_str())
             .await?;
-        if resolved.is_none() {
+        let Some(resolved) = resolved else {
             return Ok(format!("no-op: proposal '{proposal_uid}' is not open (unknown id, or already resolved)"));
-        }
+        };
+        // Rejection is DB-only (no file write, no fs-watcher event) — emit so
+        // the badge count drops immediately.
+        let _ = self.event_tx.send(SignalingEvent::ClProposalsChanged {
+            project_id: resolved.project_id,
+        });
         Ok(format!("proposal '{proposal_uid}' rejected"))
     }
 }
@@ -338,6 +351,37 @@ mod tests {
             !bridge.should_nudge_close("s1").await,
             "filing a cl_propose should mark the close gate and suppress the nudge"
         );
+    }
+
+    #[tokio::test]
+    async fn cl_propose_emits_proposals_changed_event() {
+        let (bridge, _storage) = bridge_with_storage().await;
+        // Filing is DB-only (invisible to the CL fs-watcher) — the badge
+        // freshness contract is this explicit broadcast.
+        let mut rx = bridge.subscribe();
+        bridge
+            .cl_propose(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "notes.md".to_string(),
+                "add".to_string(),
+                None,
+                "a learning".to_string(),
+                "evidence".to_string(),
+            )
+            .await
+            .unwrap();
+        loop {
+            match rx.try_recv() {
+                Ok(SignalingEvent::ClProposalsChanged { project_id }) => {
+                    assert_eq!(project_id, "bot-hq");
+                    break;
+                }
+                Ok(_) => continue, // unrelated events are fine; keep draining
+                Err(e) => panic!("expected ClProposalsChanged on the bus, got {e:?}"),
+            }
+        }
     }
 
     #[tokio::test]

@@ -83,6 +83,12 @@ const MODEL_KEYS = ["list_models"] as const;
 // EYES-sign-off findings — the session-header banner refetches when the bridge
 // fires `session:findings_changed` (eyes_flag / disposition_finding / approve_finding).
 const FINDINGS_KEYS = ["list_session_findings"] as const;
+// CL proposal queue — filing (agent cl_propose) and rejection are DB-only
+// writes the CL fs-watcher can't see, so the bridge fires
+// `cl:proposals_changed` explicitly; the Context Manager badges + docket
+// refetch on it. (Approval also rewrites the CL file → `cl:changed` fires too;
+// the overlap is a harmless double refetch.)
+const PROPOSAL_KEYS = ["cl_list_proposals", "cl_proposal_counts"] as const;
 
 /**
  * Event-driven cache invalidation: each backend `session:*` event invalidates
@@ -114,6 +120,7 @@ function GlobalEventSync() {
   );
   const onModel = useCallback(() => invalidate(MODEL_KEYS), [invalidate]);
   const onFindings = useCallback(() => invalidate(FINDINGS_KEYS), [invalidate]);
+  const onProposals = useCallback(() => invalidate(PROPOSAL_KEYS), [invalidate]);
   const setHealth = useHealthStore((s) => s.setHealth);
   const setRouterHealth = useHealthStore((s) => s.setRouterHealth);
   const clearHealth = useHealthStore((s) => s.clearSession);
@@ -169,6 +176,7 @@ function GlobalEventSync() {
         ...PROJECT_KEYS,
         ...MODEL_KEYS,
         ...FINDINGS_KEYS,
+        ...PROPOSAL_KEYS,
       ]),
     [invalidate],
   );
@@ -181,6 +189,7 @@ function GlobalEventSync() {
   useTauriEvent("session:doc_changed", onDoc, [onDoc]);
   useTauriEvent("session:findings_changed", onFindings, [onFindings]);
   useTauriEvent("cl:changed", onCl, [onCl]);
+  useTauriEvent("cl:proposals_changed", onProposals, [onProposals]);
   useTauriEvent("session:worktree_changed", onWorktree, [onWorktree]);
   useTauriEvent("project:changed", onProject, [onProject]);
   useTauriEvent("session:created", onSessionCreated, [onSessionCreated]);

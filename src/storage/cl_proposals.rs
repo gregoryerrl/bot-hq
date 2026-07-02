@@ -111,6 +111,20 @@ impl Storage {
         Ok(row)
     }
 
+    /// Open-proposal counts per project in one aggregate — feeds the Context
+    /// Manager sidebar badges + the subtab pill sum without N per-project
+    /// `list_cl_proposals` round-trips. Projects with zero open proposals are
+    /// simply absent from the result.
+    pub async fn count_open_cl_proposals_by_project(&self) -> Result<Vec<(String, i64)>> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT project_id, COUNT(*) FROM cl_proposals \
+             WHERE status = 'open' GROUP BY project_id ORDER BY project_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Revert an APPROVED proposal back to `open` — the compensation step when
     /// the approval's file write-back fails after the open→approved claim.
     /// Scoped to `approved` rows so it can never resurrect a rejected proposal.
@@ -238,6 +252,36 @@ mod tests {
         assert_eq!(s.list_cl_proposals("other", None).await.unwrap().len(), 1);
 
         assert_eq!(s.get_cl_proposal("p3").await.unwrap().unwrap().session_id, None);
+    }
+
+    #[tokio::test]
+    async fn count_open_proposals_groups_by_project_and_excludes_resolved() {
+        let s = Storage::memory().await.unwrap();
+        seed(&s).await;
+        s.upsert_project("other", "other", None, None, None).await.unwrap();
+
+        s.create_cl_proposal("p1", "bot-hq", "notes.md", "add", None, "b", "e", "brian", None)
+            .await
+            .unwrap();
+        s.create_cl_proposal("p2", "bot-hq", "decisions.md", "correct", None, "b", "e", "rain", None)
+            .await
+            .unwrap();
+        s.create_cl_proposal("p3", "other", "notes.md", "add", None, "b", "e", "brian", None)
+            .await
+            .unwrap();
+        s.create_cl_proposal("p4", "other", "ideas.md", "add", None, "b", "e", "rain", None)
+            .await
+            .unwrap();
+        // Resolved rows must not count.
+        s.resolve_cl_proposal("p4", "rejected").await.unwrap().unwrap();
+
+        let counts = s.count_open_cl_proposals_by_project().await.unwrap();
+        assert_eq!(counts, vec![("bot-hq".to_string(), 2), ("other".to_string(), 1)]);
+
+        // A project with zero open proposals disappears from the aggregate.
+        s.resolve_cl_proposal("p3", "approved").await.unwrap().unwrap();
+        let counts = s.count_open_cl_proposals_by_project().await.unwrap();
+        assert_eq!(counts, vec![("bot-hq".to_string(), 2)]);
     }
 
     #[tokio::test]
