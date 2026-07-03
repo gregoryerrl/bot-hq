@@ -64,9 +64,9 @@ bot-hq runs a global keyword gate over your Bash tool calls (configured in Setti
 
 Trivial tasks (a one-liner answer, a quick lookup, a question with no code change) don't need the index. The discipline applies to *substantive* work — the same threshold as IPAV. When in doubt, open it.
 
-The index returns lightweight `{file_path, description, tags, updated_at}` rows so you can decide what's worth reading without burning context on irrelevant files. Open `conventions.md`, `decisions.md`, and any audit-notes that look related; skip everything else. To pull relevant CL *content* on a topic without opening whole files, call `cl_retrieve(project, query)` — it returns ranked atom bodies under a token budget. Atoms are **advisory; reality wins** — verify against the live code/tests, then file a correction via `cl_propose`.
+The index returns lightweight `{file_path, description, tags, updated_at}` rows — the CL's table of contents. **To pull CL content on a topic, `cl_retrieve(project, query)` is the first move, not `Read`:** it returns the ranked atom bodies matching your query inline under a token budget, so the relevant sections of `conventions.md` / `decisions.md` / audit-notes arrive without spending context on whole files. `Read` a full CL file only as the fallback — retrieval missed, or you genuinely need the entire document. Atoms are **advisory; reality wins** — verify against the live code/tests, then file a correction via `cl_propose`.
 
-**CL is study notes, not a textbook.** It holds what the *code doesn't carry* — a where-things-live map (feature -> the 2-3 files + entry points), conventions, gotchas, and *why it's weird here*. Lean on it to jump straight to the handful of files that matter instead of digesting the tree: read the index + `cl_folder_search` map, then `Read` ONLY the files it points at. If a fact is recoverable by `grep` in seconds it doesn't belong in CL — so when you DO write to CL, keep it to high-signal one-liners. (Some projects keep this map in-repo — e.g. an `ARCHITECTURE.md` — and then the CL's job is to point you there, not duplicate it.)
+**CL is study notes, not a textbook.** It holds what the *code doesn't carry* — a where-things-live map (feature -> the 2-3 files + entry points), conventions, gotchas, and *why it's weird here*. Lean on it to jump straight to the handful of files that matter instead of digesting the tree: read the index + `cl_folder_search` map, then `cl_retrieve` the topics it surfaces (`Read` a pointed-at file whole only when you need all of it). If a fact is recoverable by `grep` in seconds it doesn't belong in CL — so when you DO write to CL, keep it to high-signal one-liners. (Some projects keep this map in-repo — e.g. an `ARCHITECTURE.md` — and then the CL's job is to point you there, not duplicate it.)
 
 Tools:
 
@@ -176,6 +176,23 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("`cl_list_proposals(project, status?)`"),
             "Tools list must mention the proposal queue read side"
+        );
+    }
+
+    #[test]
+    fn cl_content_pull_is_retrieve_first() {
+        // The workflow paragraph used to steer agents to whole-file Read
+        // ("Open conventions.md, decisions.md, and any audit-notes…"), which
+        // produced near-zero cl_retrieve telemetry (7 events / 1,701 messages
+        // in the first window, 2026-07-03). Content pulls must be framed
+        // retrieve-first with Read as the explicit fallback.
+        assert!(
+            GENERAL_RULES.contains("`cl_retrieve(project, query)` is the first move"),
+            "CL content pulls must be framed retrieve-first"
+        );
+        assert!(
+            GENERAL_RULES.contains("only as the fallback"),
+            "whole-file Read must be framed as the fallback"
         );
     }
 

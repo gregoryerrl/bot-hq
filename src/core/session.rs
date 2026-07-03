@@ -898,19 +898,23 @@ pub fn read_system_prompt(
          Your Context Library lives at `{cl}`. Single source of truth — \
          other `~/.bot-hq*` paths are archives from prior installs, ignore \
          them.\n\n\
-         **Index-first.** The CL is indexed in SQLite; each file has a \
-         description so you can decide what's worth opening without burning \
-         context on irrelevant files. Call \
+         **Index-first, retrieve-second.** The CL is indexed in SQLite; each \
+         file has a description so you can decide what's worth opening \
+         without burning context on irrelevant files. Call \
          `cl_index_search(project=<your project>)` BEFORE reaching for \
          `Read` on any CL path. Pass \
          `\"_globals\"` for system-level / cross-project notes, your \
          session's project name for project-scoped notes, or omit `project` \
-         to search everything. Folders carry their own descriptions in \
+         to search everything. To pull CONTENT on a topic, \
+         `cl_retrieve(project, query)` is the first move — it returns the \
+         ranked atom bodies inline under a token budget; whole-file `Read` \
+         is the fallback (retrieval missed, or you need the entire file), \
+         not the default. Folders carry their own descriptions in \
          `cl_folders` — `cl_folder_search(project=<your project>)` returns \
          folder-level summaries so you can scope a sweep before opening \
          individual files. Tool signatures for `cl_index_search`, \
-         `cl_folder_search`, `cl_register_read`, `cl_rescan` are in the \
-         General rules section below.\n\n\
+         `cl_retrieve`, `cl_folder_search`, `cl_register_read`, `cl_rescan` \
+         are in the General rules section below.\n\n\
          **Bare-filename heuristic.** If the user references a bare \
          filename (e.g. \"work on task 1 from tasks.md\", \"check scratch.md\") \
          and it's NOT in your working repo, do NOT keep `Glob`-searching \
@@ -1363,6 +1367,14 @@ mod tests {
         let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
         assert!(prompt.contains("cl_index_search"));
         assert!(prompt.contains("Index-first"));
+        // Regression (2026-07-03 telemetry dig): the orientation never named
+        // cl_retrieve, so agents pulled CL content via whole-file Read and
+        // retrieval telemetry stayed near-zero. Content pulls are framed
+        // retrieve-first with Read as the fallback.
+        assert!(
+            prompt.contains("`cl_retrieve(project, query)` is the first move"),
+            "orientation must frame cl_retrieve as the content-pull first move"
+        );
         // Regression: when the user mentions a bare filename (tasks.md,
         // scratch.md), agents should head to _globals before falling back to
         // ask_user_choice or broad Glob sweeps.
