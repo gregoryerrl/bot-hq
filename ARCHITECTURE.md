@@ -551,11 +551,16 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
 **Tables:**
 - `messages` (id PK, session_id, author, kind, content, created_at) —
   full chat history. Index on `(session_id, created_at)`.
-- `sessions` (id PK, title, working_repo_path, base_repo_path, project,
-  phase, created_at, closed_at, archived, rain_enabled, brian_model_id,
-  rain_model_id) — rain_enabled + the model ids drive per-session model
-  selection + the solo-Brian (disable-Rain) toggle; `base_repo_path` is
-  set for worktree-isolated sessions (see "Session worktrees").
+- `sessions` (id PK, title, working_repo_path, base_repo_path,
+  created_at, closed_at, archived, rain_enabled, brian_model_id,
+  rain_model_id, + per-agent spawn metadata: brian/rain_model_at_spawn,
+  brian/rain_claude_session_id, brian/rain_effort, brian/rain_ultracode)
+  — rain_enabled + the model ids drive per-session model selection + the
+  solo-Brian (disable-Rain) toggle; `base_repo_path` is set for
+  worktree-isolated sessions (see "Session worktrees"). There is NO
+  `project` column — the project is derived at spawn from
+  `working_repo_path.file_name()` — and no `phase` column (IPAV phase is
+  in-memory; see "IPAV state").
 - `agent_configs` (agent_name PK, provider, model_name, base_url,
   auth_token). CHECK constraint still lists `agent_name ∈
   {'emma','brian','rain'}` (migration 0001 created it permissive;
