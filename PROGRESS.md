@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-644 Rust tests passing (593 lib + 33 external MCP + 7 signaling + 11
+645 Rust tests passing (594 lib + 33 external MCP + 7 signaling + 11
 storage) plus 118 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -21,6 +21,36 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 (`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
 
 ---
+
+## 2026-07-03 — CL follow-ups: retrieve-first prompts, telemetry postmortem, polish
+
+Post-restart follow-ups to the subtab restructure (below).
+
+- **"No bcc-ad-manager telemetry" diagnosed — not a bug.** Read-only DB
+  dig: migration 0028 (`retrieval_events`) was applied 2026-07-02
+  05:24 UTC, and since that instant the only session activity in the app
+  has been bot-hq (messages-joined-to-sessions, which also catches
+  reopened sessions) — so bcc sessions have had zero opportunity to log.
+  bcc's CL is healthy (568 atoms, largest in the store); events flow the
+  moment a bcc session retrieves.
+- **The real signal: agents under-use `cl_retrieve`** (7 events against
+  1,701 messages in the telemetry window; agents index-search then
+  whole-file `Read`). Root cause was prompt steering: the GENERAL_RULES
+  workflow paragraph said "Open `conventions.md`, `decisions.md`…" and
+  the session CL orientation never mentioned `cl_retrieve`.
+  **Fix (prompt-only):** both sites now frame
+  `cl_retrieve(project, query)` as the first move for CL content with
+  whole-file `Read` as the explicit fallback ("Index-first,
+  retrieve-second"); guard tests pin the wording in both prompts.
+  Effect check later: Measurement-tab retrievals should rise, and
+  `retrieval_events` should grow non-bot-hq rows once other projects run.
+- **Polish:** Library Tree toolbar icons left-aligned (the right-float
+  lost its purpose with the header label gone); ARCHITECTURE's sessions
+  schema corrected (no `project`/`phase` columns — project derives from
+  `working_repo_path` basename at spawn; phase is in-memory) + the
+  per-agent spawn-metadata columns documented.
+
++1 lib test (retrieve-first guard) → 594.
 
 ## 2026-07-03 — Context Library subtabs: Library Tree | Context Manager
 
