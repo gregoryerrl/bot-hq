@@ -835,6 +835,19 @@ async validateModel(modelId: string) : Promise<Result<ValidateResult, AppError>>
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Fetch + validate a manifest WITHOUT installing — the consent step.
+ * The PluginManager calls this first, shows the user what the plugin
+ * requests, and only calls `install_plugin` after an explicit confirm.
+ */
+async previewPluginManifest(source: string) : Promise<Result<PluginManifestPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_plugin_manifest", { source }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async installPlugin(source: string) : Promise<Result<InstalledPluginView, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source }) };
@@ -1001,6 +1014,11 @@ export type AppError =
  * target id is already on disk; frontend can offer "reinstall" UX.
  */
 { kind: "Conflict"; message: string }
+/**
+ * One consent-screen row: a requested capability + what granting it means,
+ * in user terms (from the catalog).
+ */
+export type CapabilityDescription = { name: string; description: string }
 export type ClFileContentView = { project: string; file_path: string; content: string; 
 /**
  * Byte size of the file as it lives on disk. The `content` field is
@@ -1222,6 +1240,10 @@ export type PluginManifest = { id: string; name: string; version: string; entry:
  * plugin. Omitted in JSON = 1.
  */
 api_version?: number; requested_capabilities?: string[]; slots?: PluginSlot[] }
+/**
+ * What the install-consent dialog renders before anything lands on disk.
+ */
+export type PluginManifestPreview = { manifest: PluginManifest; capabilities: CapabilityDescription[] }
 export type PluginSlot = { 
 /**
  * React shell slot name (e.g., "sidebar.bottom"). `None` means the

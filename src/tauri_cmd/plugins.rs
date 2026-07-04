@@ -7,9 +7,7 @@
 //! per-plugin allow-list JSON files. Each command is a thin shim over an
 //! `_inner` helper so the logic is testable without a Tauri `State` wrapper.
 
-use crate::plugins::{
-    CapabilityGen, Heartbeat, LoadedPlugin, PluginManifest, PluginRegistry, PluginStatus,
-};
+use crate::plugins::{Heartbeat, PluginManifest, PluginRegistry, PluginStatus};
 use crate::storage::{Plugin, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -116,6 +114,69 @@ pub async fn uninstall_plugin(
     Ok(())
 }
 
+/// One consent-screen row: a requested capability + what granting it means,
+/// in user terms (from the catalog).
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct CapabilityDescription {
+    pub name: String,
+    pub description: String,
+}
+
+/// What the install-consent dialog renders before anything lands on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PluginManifestPreview {
+    pub manifest: PluginManifest,
+    pub capabilities: Vec<CapabilityDescription>,
+}
+
+/// Fetch + validate a manifest WITHOUT installing — the consent step.
+/// The PluginManager calls this first, shows the user what the plugin
+/// requests, and only calls `install_plugin` after an explicit confirm.
+#[tauri::command]
+#[specta::specta]
+pub async fn preview_plugin_manifest(
+    source: String,
+) -> Result<PluginManifestPreview, AppError> {
+    let (manifest, _json) = if is_url(&source) {
+        fetch_manifest_from_url(&source).await?
+    } else {
+        read_manifest_from_dir(Path::new(&source))?
+    };
+    validate_requested_capabilities(&manifest)?;
+    let capabilities = manifest
+        .requested_capabilities
+        .iter()
+        .map(|c| CapabilityDescription {
+            name: c.clone(),
+            description: crate::plugins::catalog::describe(c)
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect();
+    Ok(PluginManifestPreview {
+        manifest,
+        capabilities,
+    })
+}
+
+/// Unknown capability names are a preview/install-time error, not a
+/// dispatch-time surprise — the consent screen can't describe what the
+/// catalog doesn't know. (The LOADER stays tolerant of already-installed
+/// plugins so a catalog change can't brick an install; the proxy re-checks
+/// at dispatch.)
+fn validate_requested_capabilities(manifest: &PluginManifest) -> Result<(), AppError> {
+    if let Some(bad) = manifest
+        .requested_capabilities
+        .iter()
+        .find(|c| !crate::plugins::catalog::is_valid(c))
+    {
+        return Err(AppError::Validation(format!(
+            "manifest requests unknown capability {bad:?} (not in the api_version-1 catalog)"
+        )));
+    }
+    Ok(())
+}
+
 /// Heartbeat feed, called by the frontend PluginHost's 5s ping loop just
 /// before it postMessages `bhq:ping` into the plugin iframe. The backend
 /// sweep loop (main.rs) turns unanswered pings into Slow/Crashed.
@@ -155,19 +216,7 @@ async fn install_plugin_inner(
         read_manifest_from_dir(Path::new(source))?
     };
 
-    // Unknown capability names are an install-time error, not a dispatch-time
-    // surprise — the consent screen can't describe what the catalog doesn't
-    // know. (The LOADER stays tolerant of already-installed plugins so a
-    // catalog change can't brick an install; the proxy re-checks at dispatch.)
-    if let Some(bad) = manifest
-        .requested_capabilities
-        .iter()
-        .find(|c| !crate::plugins::catalog::is_valid(c))
-    {
-        return Err(AppError::Validation(format!(
-            "manifest requests unknown capability {bad:?} (not in the api_version-1 catalog)"
-        )));
-    }
+    validate_requested_capabilities(&manifest)?;
 
     let plugin_dir = registry.data_dir.join("plugins").join(&manifest.id);
     if plugin_dir.exists() {
@@ -208,7 +257,6 @@ async fn install_plugin_inner(
     registry.reload().map_err(anyhow_to_app)?;
     registry.heartbeat.register(&manifest.id);
     registry.set_enabled(&manifest.id, true);
-    regenerate_capabilities(storage, registry).await?;
 
     let row = storage
         .list_plugins()
@@ -255,7 +303,6 @@ async fn set_enabled_inner(
         registry.heartbeat.unregister(plugin_id);
     }
     registry.set_enabled(plugin_id, enabled);
-    regenerate_capabilities(storage, registry).await?;
     Ok(())
 }
 
@@ -287,26 +334,6 @@ async fn uninstall_plugin_inner(
     registry.heartbeat.unregister(plugin_id);
     registry.set_enabled(plugin_id, false);
     registry.reload().map_err(anyhow_to_app)?;
-    regenerate_capabilities(storage, registry).await?;
-    Ok(())
-}
-
-/// Sync the on-disk capability JSON set with the currently-enabled plugins.
-/// Idempotent — overwrites existing files; orphans from older state remain
-/// (Tauri only honors what's in the file, so an orphan is inert).
-async fn regenerate_capabilities(
-    storage: &Storage,
-    registry: &PluginRegistry,
-) -> Result<(), AppError> {
-    let rows = storage.list_plugins().await.map_err(anyhow_to_app)?;
-    let loaded: Vec<LoadedPlugin> = {
-        let g = registry.loader.lock().unwrap_or_else(|p| p.into_inner());
-        rows.iter()
-            .filter(|r| r.enabled)
-            .filter_map(|r| g.get(&r.id).cloned())
-            .collect()
-    };
-    CapabilityGen::write_all(&loaded, &registry.capabilities_dir).map_err(anyhow_to_app)?;
     Ok(())
 }
 
@@ -396,8 +423,7 @@ mod tests {
 
     async fn fresh(tmp: &TempDir) -> (Arc<Storage>, Arc<PluginRegistry>) {
         let data_dir = tmp.path().to_path_buf();
-        let caps_dir = data_dir.join("capabilities");
-        let registry = Arc::new(PluginRegistry::new(data_dir, caps_dir).unwrap());
+        let registry = Arc::new(PluginRegistry::new(data_dir).unwrap());
         let storage = Storage::memory().await.unwrap();
         (Arc::new(storage), registry)
     }
@@ -442,9 +468,9 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "notes");
 
-        // Capability JSON for the enabled plugin landed on disk.
-        let cap_file = registry.capabilities_dir.join("plugin-notes.json");
-        assert!(cap_file.exists(), "capability JSON should be generated");
+        // Install flips the runtime gates the serve/proxy layers read.
+        assert!(registry.is_enabled("notes"));
+        assert!(registry.heartbeat.status_of("notes").is_some());
     }
 
     #[tokio::test]
@@ -544,6 +570,56 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Conflict(_)));
+    }
+
+    #[tokio::test]
+    async fn preview_describes_capabilities_without_installing() {
+        let tmp = TempDir::new().unwrap();
+        let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
+
+        let preview = preview_plugin_manifest(src.display().to_string())
+            .await
+            .unwrap();
+        assert_eq!(preview.manifest.id, "notes");
+        assert_eq!(preview.capabilities.len(), 1);
+        assert_eq!(preview.capabilities[0].name, "cl_index_search");
+        assert!(
+            !preview.capabilities[0].description.is_empty(),
+            "consent copy comes from the catalog"
+        );
+        // Nothing landed anywhere — preview is read-only.
+        assert!(!tmp.path().join("plugins").exists());
+    }
+
+    #[tokio::test]
+    async fn preview_and_install_reject_unknown_capability() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("src-shady");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{
+                "id": "shady",
+                "name": "Shady",
+                "version": "0.1.0",
+                "entry": "index.html",
+                "requested_capabilities": ["broadcast_message"]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("index.html"), b"<h1>hi</h1>").unwrap();
+
+        let err = preview_plugin_manifest(dir.display().to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+
+        let (storage, registry) = fresh(&tmp).await;
+        let err = install_plugin_inner(&storage, &registry, &dir.display().to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+        assert!(storage.list_plugins().await.unwrap().is_empty());
     }
 
     #[test]

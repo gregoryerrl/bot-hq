@@ -258,14 +258,10 @@ fn main() -> Result<()> {
     }
 
     // Plugin registry — scans `<data_dir>/plugins/` and owns the heartbeat
-    // state. Constructed eagerly so we can pass it to Tauri's `.manage()` AND
-    // share the Heartbeat with the setup-time sweep loop. Capability JSONs
-    // land under `<data_dir>/capabilities/` so Tauri's compile-time glob can
-    // pick them up on subsequent builds.
-    let registry = Arc::new(PluginRegistry::new(
-        paths.data_dir.clone(),
-        paths.data_dir.join("capabilities"),
-    )?);
+    // + enabled-cache state. Constructed eagerly so we can pass it to
+    // Tauri's `.manage()` AND share it with the `bhq-plugin://` scheme
+    // handler and the setup-time sweep loop.
+    let registry = Arc::new(PluginRegistry::new(paths.data_dir.clone())?);
 
     // Seed the enabled-plugin cache + re-register enabled plugins with the
     // heartbeat. Both otherwise only happen on install/enable, so a restart

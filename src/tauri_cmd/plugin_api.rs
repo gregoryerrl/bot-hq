@@ -316,11 +316,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let reg = PluginRegistry::new(
-            tmp.path().to_path_buf(),
-            tmp.path().join("capabilities"),
-        )
-        .unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
         reg.set_enabled(id, enabled);
         reg
     }

@@ -9,6 +9,7 @@ import { cn } from "../lib/cn";
 import type {
   AppError,
   InstalledPluginView,
+  PluginManifestPreview,
   PluginStatus,
 } from "../lib/bindings";
 
@@ -26,6 +27,12 @@ export function PluginManager() {
   const [uninstallError, setUninstallError] = useState<AppError | null>(null);
   const [confirmUninstall, setConfirmUninstall] =
     useState<InstalledPluginView | null>(null);
+  // Consent gate: install is two-step — preview the manifest (nothing lands
+  // on disk), show what the plugin requests, install only on explicit confirm.
+  const [pendingInstall, setPendingInstall] = useState<{
+    source: string;
+    preview: PluginManifestPreview;
+  } | null>(null);
 
   const list = useTauriQuery<InstalledPluginView[]>(
     "list_installed_plugins",
@@ -34,6 +41,9 @@ export function PluginManager() {
   );
   const plugins = list.data ?? [];
 
+  const preview = useTauriMutation<PluginManifestPreview, { source: string }>(
+    "preview_plugin_manifest",
+  );
   const install = useTauriMutation<InstalledPluginView, { source: string }>(
     "install_plugin",
   );
@@ -63,8 +73,21 @@ export function PluginManager() {
 
   const handleInstall = () => {
     const source = installSource.trim();
-    if (!source || install.isPending) return;
+    if (!source || preview.isPending || install.isPending) return;
     setInstallError(null);
+    preview.mutate(
+      { source },
+      {
+        onSuccess: (p) => setPendingInstall({ source, preview: p }),
+        onError: (err) => setInstallError(err),
+      },
+    );
+  };
+
+  const confirmInstall = () => {
+    if (!pendingInstall) return;
+    const { source } = pendingInstall;
+    setPendingInstall(null);
     install.mutate(
       { source },
       {
@@ -188,6 +211,46 @@ export function PluginManager() {
           ))}
         </div>
       )}
+      <ConfirmDialog
+        open={pendingInstall !== null}
+        title={`Install ${pendingInstall?.preview.manifest.name ?? "plugin"}?`}
+        message={
+          pendingInstall && (
+            <div className="text-left">
+              <p className="mb-2">
+                <code className="font-code-sm">
+                  {pendingInstall.preview.manifest.id}
+                </code>{" "}
+                v{pendingInstall.preview.manifest.version} — this plugin asks
+                to:
+              </p>
+              {pendingInstall.preview.capabilities.length === 0 ? (
+                <p className="text-on-surface-variant">
+                  Nothing — it renders its own panel and accesses no bot-hq
+                  data.
+                </p>
+              ) : (
+                <ul className="space-y-1">
+                  {pendingInstall.preview.capabilities.map((c) => (
+                    <li key={c.name} className="flex gap-2">
+                      <code className="shrink-0 rounded bg-surface-container-high px-1 py-0.5 font-code-sm text-code-sm text-on-surface">
+                        {c.name}
+                      </code>
+                      <span className="text-on-surface-variant">
+                        {c.description}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )
+        }
+        confirmLabel="Install"
+        confirmVariant="primary"
+        onConfirm={confirmInstall}
+        onCancel={() => setPendingInstall(null)}
+      />
       <ConfirmDialog
         open={confirmUninstall !== null}
         title="Uninstall plugin?"

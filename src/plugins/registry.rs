@@ -8,10 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Tauri-managed plugin runtime state. Wraps the disk Loader (re-scanned
-/// after every mutation), the long-lived Heartbeat (survives reloads), the
-/// enabled-id cache (the sync source of truth for the `bhq-plugin://`
-/// scheme handler, which can't await the DB), and the on-disk paths used
-/// by install / capability generation.
+/// after every mutation), the long-lived Heartbeat (survives reloads), and
+/// the enabled-id cache (the sync source of truth for the `bhq-plugin://`
+/// scheme handler, which can't await the DB).
 ///
 /// Has no Tauri dependency itself — the command layer wraps it in
 /// `tauri::State` at registration time.
@@ -19,20 +18,18 @@ pub struct PluginRegistry {
     pub loader: Mutex<Loader>,
     pub heartbeat: Arc<Heartbeat>,
     pub data_dir: PathBuf,
-    pub capabilities_dir: PathBuf,
     /// Ids of ENABLED plugins. Seeded from storage at boot; kept in sync by
     /// the install / enable / disable / uninstall commands.
     enabled: Mutex<HashSet<String>>,
 }
 
 impl PluginRegistry {
-    pub fn new(data_dir: PathBuf, capabilities_dir: PathBuf) -> Result<Self> {
+    pub fn new(data_dir: PathBuf) -> Result<Self> {
         let loader = Loader::scan(&data_dir)?;
         Ok(Self {
             loader: Mutex::new(loader),
             heartbeat: Arc::new(Heartbeat::new()),
             data_dir,
-            capabilities_dir,
             enabled: Mutex::new(HashSet::new()),
         })
     }
@@ -82,8 +79,7 @@ mod tests {
     #[test]
     fn new_on_empty_dir_yields_empty_loader() {
         let tmp = TempDir::new().unwrap();
-        let caps = tmp.path().join("capabilities");
-        let reg = PluginRegistry::new(tmp.path().to_path_buf(), caps).unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
         let loaded = reg.loader.lock().unwrap();
         assert!(loaded.loaded().is_empty());
     }
@@ -91,8 +87,7 @@ mod tests {
     #[test]
     fn reload_picks_up_new_plugin_on_disk() {
         let tmp = TempDir::new().unwrap();
-        let caps = tmp.path().join("capabilities");
-        let reg = PluginRegistry::new(tmp.path().to_path_buf(), caps).unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
         assert!(reg.loader.lock().unwrap().loaded().is_empty());
 
         let plugin_dir = tmp.path().join("plugins").join("notes");
@@ -118,8 +113,7 @@ mod tests {
     #[test]
     fn enabled_cache_flips_and_snapshots() {
         let tmp = TempDir::new().unwrap();
-        let caps = tmp.path().join("capabilities");
-        let reg = PluginRegistry::new(tmp.path().to_path_buf(), caps).unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
         assert!(!reg.is_enabled("notes"));
 
         reg.set_enabled("notes", true);
@@ -137,8 +131,7 @@ mod tests {
     #[test]
     fn heartbeat_outlives_reload() {
         let tmp = TempDir::new().unwrap();
-        let caps = tmp.path().join("capabilities");
-        let reg = PluginRegistry::new(tmp.path().to_path_buf(), caps).unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
         reg.heartbeat.register("notes");
         reg.reload().unwrap();
         assert!(reg.heartbeat.status_of("notes").is_some());

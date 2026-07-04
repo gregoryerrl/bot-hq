@@ -113,6 +113,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         docs::summarize_session_doc,
         docs::validate_model,
         // Plugins
+        plugins::preview_plugin_manifest,
         plugins::install_plugin,
         plugins::list_installed_plugins,
         plugins::enable_plugin,
