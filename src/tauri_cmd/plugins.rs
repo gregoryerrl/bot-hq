@@ -167,6 +167,7 @@ async fn install_plugin_inner(
 
     registry.reload().map_err(anyhow_to_app)?;
     registry.heartbeat.register(&manifest.id);
+    registry.set_enabled(&manifest.id, true);
     regenerate_capabilities(storage, registry).await?;
 
     let row = storage
@@ -213,6 +214,7 @@ async fn set_enabled_inner(
     } else {
         registry.heartbeat.unregister(plugin_id);
     }
+    registry.set_enabled(plugin_id, enabled);
     regenerate_capabilities(storage, registry).await?;
     Ok(())
 }
@@ -243,6 +245,7 @@ async fn uninstall_plugin_inner(
     }
 
     registry.heartbeat.unregister(plugin_id);
+    registry.set_enabled(plugin_id, false);
     registry.reload().map_err(anyhow_to_app)?;
     regenerate_capabilities(storage, registry).await?;
     Ok(())

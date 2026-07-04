@@ -3,12 +3,15 @@
 
 use super::{Heartbeat, Loader};
 use anyhow::Result;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// Tauri-managed plugin runtime state. Wraps the disk Loader (re-scanned
-/// after every mutation), the long-lived Heartbeat (survives reloads), and
-/// the on-disk paths used by install / capability generation.
+/// after every mutation), the long-lived Heartbeat (survives reloads), the
+/// enabled-id cache (the sync source of truth for the `bhq-plugin://`
+/// scheme handler, which can't await the DB), and the on-disk paths used
+/// by install / capability generation.
 ///
 /// Has no Tauri dependency itself — the command layer wraps it in
 /// `tauri::State` at registration time.
@@ -17,6 +20,9 @@ pub struct PluginRegistry {
     pub heartbeat: Arc<Heartbeat>,
     pub data_dir: PathBuf,
     pub capabilities_dir: PathBuf,
+    /// Ids of ENABLED plugins. Seeded from storage at boot; kept in sync by
+    /// the install / enable / disable / uninstall commands.
+    enabled: Mutex<HashSet<String>>,
 }
 
 impl PluginRegistry {
@@ -27,6 +33,7 @@ impl PluginRegistry {
             heartbeat: Arc::new(Heartbeat::new()),
             data_dir,
             capabilities_dir,
+            enabled: Mutex::new(HashSet::new()),
         })
     }
 
@@ -36,6 +43,34 @@ impl PluginRegistry {
         let mut g = self.loader.lock().unwrap_or_else(|p| p.into_inner());
         *g = Loader::scan(&self.data_dir)?;
         Ok(())
+    }
+
+    /// Replace the whole enabled set (boot seed from storage).
+    pub fn set_enabled_ids(&self, ids: HashSet<String>) {
+        let mut g = self.enabled.lock().unwrap_or_else(|p| p.into_inner());
+        *g = ids;
+    }
+
+    /// Flip one plugin in the enabled cache (install/enable → true,
+    /// disable/uninstall → false).
+    pub fn set_enabled(&self, plugin_id: &str, enabled: bool) {
+        let mut g = self.enabled.lock().unwrap_or_else(|p| p.into_inner());
+        if enabled {
+            g.insert(plugin_id.to_string());
+        } else {
+            g.remove(plugin_id);
+        }
+    }
+
+    pub fn is_enabled(&self, plugin_id: &str) -> bool {
+        let g = self.enabled.lock().unwrap_or_else(|p| p.into_inner());
+        g.contains(plugin_id)
+    }
+
+    /// Snapshot of the enabled set (what the scheme handler resolves against).
+    pub fn enabled_ids(&self) -> HashSet<String> {
+        let g = self.enabled.lock().unwrap_or_else(|p| p.into_inner());
+        g.clone()
     }
 }
 
@@ -78,6 +113,25 @@ mod tests {
         let loaded = reg.loader.lock().unwrap();
         assert_eq!(loaded.loaded().len(), 1);
         assert_eq!(loaded.loaded()[0].manifest.id, "notes");
+    }
+
+    #[test]
+    fn enabled_cache_flips_and_snapshots() {
+        let tmp = TempDir::new().unwrap();
+        let caps = tmp.path().join("capabilities");
+        let reg = PluginRegistry::new(tmp.path().to_path_buf(), caps).unwrap();
+        assert!(!reg.is_enabled("notes"));
+
+        reg.set_enabled("notes", true);
+        assert!(reg.is_enabled("notes"));
+        assert!(reg.enabled_ids().contains("notes"));
+
+        reg.set_enabled("notes", false);
+        assert!(!reg.is_enabled("notes"));
+
+        reg.set_enabled_ids(["a".to_string(), "b".to_string()].into_iter().collect());
+        assert!(reg.is_enabled("a") && reg.is_enabled("b"));
+        assert_eq!(reg.enabled_ids().len(), 2);
     }
 
     #[test]

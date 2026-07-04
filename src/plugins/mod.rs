@@ -27,6 +27,7 @@ pub mod heartbeat;
 pub mod loader;
 pub mod manifest;
 pub mod registry;
+pub mod serve;
 
 #[cfg(test)]
 mod iframe_ipc_test;

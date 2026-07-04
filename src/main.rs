@@ -267,6 +267,27 @@ fn main() -> Result<()> {
         paths.data_dir.join("capabilities"),
     )?);
 
+    // Seed the enabled-plugin cache + re-register enabled plugins with the
+    // heartbeat. Both otherwise only happen on install/enable, so a restart
+    // would leave the `bhq-plugin://` handler refusing every plugin and the
+    // sweep loop watching nothing.
+    runtime.block_on(async {
+        match storage_arc.list_plugins().await {
+            Ok(rows) => {
+                let enabled: std::collections::HashSet<String> = rows
+                    .into_iter()
+                    .filter(|r| r.enabled)
+                    .map(|r| r.id)
+                    .collect();
+                for id in &enabled {
+                    registry.heartbeat.register(id);
+                }
+                registry.set_enabled_ids(enabled);
+            }
+            Err(e) => tracing::warn!(?e, "plugin enabled-cache boot seed failed"),
+        }
+    });
+
     // Hand off to Tauri. Tauri owns the OS main thread.
     let storage_for_subscriber = Arc::clone(&storage_arc);
     let bridge_for_subscriber = Arc::clone(&bridge_arc);
@@ -283,6 +304,50 @@ fn main() -> Result<()> {
         // Dialog plugin — native folder picker for the New-project / working-repo
         // path fields (replaces blind text-entry of paths).
         .plugin(tauri_plugin_dialog::init())
+        // Plugin-bundle serving: `bhq-plugin://<id>/<path>` resolves to
+        // `<data_dir>/plugins/<id>/<path>` for INSTALLED + ENABLED plugins
+        // only. Registered once at Builder time — install/enable needs no
+        // app restart because the handler re-reads the registry's enabled
+        // cache per request. Resolution + traversal guards live in
+        // `plugins::serve` (pure, unit-tested); this closure is http glue.
+        .register_uri_scheme_protocol("bhq-plugin", {
+            let registry = Arc::clone(&registry);
+            move |_ctx, request| {
+                use bot_hq::plugins::serve::{self, ServeError};
+                let uri = request.uri();
+                let outcome = serve::parse_plugin_request(uri.host(), uri.path())
+                    .and_then(|(id, rel)| {
+                        serve::resolve_plugin_asset(
+                            &registry.data_dir.join("plugins"),
+                            &registry.enabled_ids(),
+                            id,
+                            rel,
+                        )
+                    })
+                    .and_then(|(path, mime)| {
+                        std::fs::read(&path)
+                            .map(|body| (body, mime))
+                            .map_err(|_| ServeError::NotFound)
+                    });
+                match outcome {
+                    Ok((body, mime)) => tauri::http::Response::builder()
+                        .status(200)
+                        .header("Content-Type", mime)
+                        .header("Content-Security-Policy", serve::PLUGIN_CSP)
+                        .header("Cache-Control", "no-store")
+                        .body(body)
+                        .unwrap_or_else(|_| plugin_asset_error(500)),
+                    Err(err) => {
+                        tracing::debug!(?err, uri = %uri, "bhq-plugin asset refused");
+                        plugin_asset_error(match err {
+                            ServeError::Disabled => 403,
+                            ServeError::BadRequest => 400,
+                            _ => 404,
+                        })
+                    }
+                }
+            }
+        })
         .manage(Arc::clone(&storage_arc))
         .manage(Arc::clone(&bridge_arc))
         .manage(Arc::clone(&core))
@@ -441,6 +506,15 @@ fn main() -> Result<()> {
     drop(core);
     drop(runtime);
     Ok(())
+}
+
+/// Bare status-only response for refused / failed `bhq-plugin://` asset
+/// requests. No body — nothing plugin-controlled is reflected back.
+fn plugin_asset_error(status: u16) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .body(Vec::new())
+        .expect("static status-only response")
 }
 
 fn init_logging() {
