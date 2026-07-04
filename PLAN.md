@@ -37,13 +37,10 @@ extraction (`core/router.rs`), `peer_ack` / `halt`, the EYES-sign-off
 commit gate, agent-health dots, and the event-driven UI-freshness work all
 landed (see PROGRESS.md). Remaining follow-ups:
 
-- Live plugin *execution*: the per-plugin iframes at
-  `https://plugin-<id>.localhost` + their ping/pong channel. The
-  management UI (install / enable / disable / uninstall) and the
-  heartbeat-driven crash indicator already shipped in `PluginManager.tsx`;
-  what remains is rendering + driving the plugin iframes themselves
-  (the frontend `PluginSlot.tsx` component was removed as dead code and
-  needs rebuilding for this; the Rust `PluginSlot` manifest type stays).
+- ~~Live plugin *execution*~~ — SHIPPED 2026-07-04 as the **plugin
+  runtime v1** (serving + catalog proxy + PluginHost + consent +
+  hello-plugin; see PROGRESS.md and `docs/PLUGINS.md`). Follow-up tiers
+  now live under "Plugin runtime tiers" below.
 - Replace the placeholder `icons/icon.png` with the real bot-hq mark.
 - Host-mediated reroute: option (a) (centralize-only) shipped as
   `core/router.rs` (2026-06-26); the explicit-handoff (b) / hybrid (c)
@@ -130,17 +127,40 @@ phantom sessions on the dashboard?
 
 ## Deferred (separate plans)
 
-### Discord plugin
+### Plugin runtime tiers (post-v1 extension points)
 
-Bridge bot-hq sessions to/from a Discord channel. Original scope from
-the rebuild plan. Contract TBD: probably a per-channel session, with
-message-author mapping (Discord user → bot-hq user / agent author).
-Needs its own design doc before implementation.
+The v1 runtime (2026-07-04) covers panel plugins + read-first catalog
+RPC. Deferred tiers, roughly in value order (all documented as
+extension points in `docs/PLUGINS.md`):
 
-### Clive plugin
+- **Host-event relay** — push `agent.messages.batch` / session events
+  into subscribed iframes (grant-gated) so decks like Cognotify don't
+  poll.
+- **Plugin-contributed MCP tools** (agent↔plugin) — prerequisite for an
+  agent-drivable Browser tab.
+- **Manifest-declared agents** — the "add an agent to sessions" tier;
+  interim lever is the external MCP driver server (a backend-style
+  plugin is an ordinary process driving sessions over it).
+- **Child-webview surface** — real Browser tab (arbitrary sites refuse
+  iframing).
+- **Background execution** — daemon-style plugins (CL cloud sync);
+  today plugins run while mounted.
+- **Zip/signed URL installs** — URL install is manifest+entry only;
+  multi-file bundles need local-dir install.
+- **Per-plugin CSP overrides; inline `slot_name` slots** — reserved.
 
-Port of legacy bot-hq's Clive bot (Twitch/IRC integration). Needs its
-own design doc.
+### First plugins (each needs its own design doc)
+
+- **Cognotify** — the human-comprehension deck (user's flagship idea):
+  panel plugin over sessions + CL with user-tuned lenses (spatial graph
+  / spec sheet / narrative brief). Buildable on v1 today (catalog reads
+  + KV for lens prefs); wants the event-relay tier for liveness.
+- **Discord plugin** — bridge sessions to/from a Discord channel.
+  Probably a backend-style plugin on the external MCP driver.
+- **Clive plugin** — port of legacy bot-hq's Clive bot (Twitch/IRC).
+- **CL cloud sync** — `library/` is the sync boundary (see shipping.md
+  hook); wants the background-execution tier.
+- **GitHub tab** — panel plugin; OAuth via system browser.
 
 ### Cross-platform builds
 

@@ -449,6 +449,74 @@ mod tests {
         assert_eq!(out, "[]");
     }
 
+    /// End to end over the REAL example plugin (`examples/hello-plugin`,
+    /// which doubles as the fixture): install through the real install
+    /// path, then exercise the gate, the dispatch arms it was granted, and
+    /// the serve-layer resolution of its actual bundle files.
+    #[tokio::test]
+    async fn full_flow_example_plugin_install_then_proxy() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let registry = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+
+        let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello-plugin");
+        crate::tauri_cmd::plugins::install_plugin_inner(&storage, &registry, example)
+            .await
+            .unwrap();
+
+        // Granted command flows install → gate → dispatch.
+        check_plugin_grant(&registry, "hello-plugin", "list_sessions").unwrap();
+        let out = dispatch(
+            &storage,
+            &bridge,
+            None,
+            "hello-plugin",
+            "list_sessions",
+            &Value::Object(Default::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "[]");
+
+        // KV roundtrip under the real granted set.
+        let set = serde_json::json!({ "key": "opens", "value": "1" });
+        dispatch(&storage, &bridge, None, "hello-plugin", "plugin_kv_set", &set)
+            .await
+            .unwrap();
+        let get = serde_json::json!({ "key": "opens" });
+        assert_eq!(
+            dispatch(&storage, &bridge, None, "hello-plugin", "plugin_kv_get", &get)
+                .await
+                .unwrap(),
+            "\"1\""
+        );
+
+        // Catalog command the manifest did NOT request is refused.
+        assert!(check_plugin_grant(&registry, "hello-plugin", "compute_apply_diff").is_err());
+
+        // The serve layer resolves the example's real bundle files.
+        let plugins_root = registry.data_dir.join("plugins");
+        let enabled = registry.enabled_ids();
+        let (path, mime) = crate::plugins::serve::resolve_plugin_asset(
+            &plugins_root,
+            &enabled,
+            "hello-plugin",
+            "index.html",
+        )
+        .unwrap();
+        assert!(path.is_file());
+        assert_eq!(mime, "text/html; charset=utf-8");
+        let (_, sdk_mime) = crate::plugins::serve::resolve_plugin_asset(
+            &plugins_root,
+            &enabled,
+            "hello-plugin",
+            "bhq-sdk.js",
+        )
+        .unwrap();
+        assert_eq!(sdk_mime, "text/javascript; charset=utf-8");
+    }
+
     #[tokio::test]
     async fn dispatch_cl_index_search_via_bridge_returns_empty() {
         let tmp = TempDir::new().unwrap();

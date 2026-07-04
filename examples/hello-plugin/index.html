@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hello Plugin</title>
+    <style>
+      /* Rough match of the bot-hq Industrial Terminal palette so the panel
+         doesn't flash-bang inside the dark shell. */
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #0b1326;
+        color: #e2e6f0;
+        font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+        font-size: 13px;
+      }
+      h1 { color: #ffb68b; font-size: 18px; margin: 0 0 4px; }
+      h2 { color: #adc6ff; font-size: 13px; text-transform: uppercase; margin: 24px 0 8px; }
+      .muted { color: #8a93a8; }
+      ul { margin: 0; padding-left: 18px; }
+      li { margin: 2px 0; }
+      button {
+        background: #ff7a00; color: #0b1326; border: 0; border-radius: 4px;
+        padding: 6px 12px; font: inherit; font-weight: 700; cursor: pointer;
+      }
+      .error { color: #ff9a9a; white-space: pre-wrap; }
+      code { color: #ddb7ff; }
+    </style>
+  </head>
+  <body>
+    <h1>Hello Plugin</h1>
+    <p class="muted">
+      The bot-hq example plugin: reads sessions + the Context Library index
+      through granted catalog commands and persists a counter in its own
+      key/value store. Source doubles as the plugin-author template.
+    </p>
+
+    <h2>Kv counter</h2>
+    <p>
+      Opened <span id="count">…</span> time(s).
+      <button id="bump">+1</button>
+    </p>
+
+    <h2>Active sessions</h2>
+    <ul id="sessions"><li class="muted">loading…</li></ul>
+
+    <h2>Context Library files</h2>
+    <ul id="cl"><li class="muted">loading…</li></ul>
+
+    <p id="err" class="error"></p>
+
+    <script type="module">
+      import { invoke } from "./bhq-sdk.js";
+
+      const $ = (id) => document.getElementById(id);
+      const fail = (e) => ($("err").textContent = String(e));
+
+      async function refreshCount(bump) {
+        const raw = await invoke("plugin_kv_get", { key: "opens" });
+        let n = raw ? Number(raw) : 0;
+        if (bump || raw === null) {
+          n += 1;
+          await invoke("plugin_kv_set", { key: "opens", value: String(n) });
+        }
+        $("count").textContent = String(n);
+      }
+
+      async function loadSessions() {
+        const sessions = await invoke("list_sessions");
+        $("sessions").innerHTML = sessions.length
+          ? sessions
+              .map((s) => `<li><code>${s.id}</code> ${s.title ?? ""}</li>`)
+              .join("")
+          : `<li class="muted">no active sessions</li>`;
+      }
+
+      async function loadCl() {
+        const rows = await invoke("cl_index_search", {});
+        $("cl").innerHTML = rows.length
+          ? rows
+              .slice(0, 15)
+              .map((r) => `<li><code>${r.project_id}</code>/${r.file_path} <span class="muted">— ${r.description ?? ""}</span></li>`)
+              .join("")
+          : `<li class="muted">empty Context Library index</li>`;
+      }
+
+      $("bump").addEventListener("click", () => refreshCount(true).catch(fail));
+
+      refreshCount(false).catch(fail);
+      loadSessions().catch(fail);
+      loadCl().catch(fail);
+    </script>
+  </body>
+</html>

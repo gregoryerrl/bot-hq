@@ -11,14 +11,76 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-645 Rust tests passing (594 lib + 33 external MCP + 7 signaling + 11
-storage) plus 118 frontend Vitest. Release build clean. Version
+667 Rust tests passing (616 lib + 33 external MCP + 7 signaling + 11
+storage) plus 131 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
 gate**, the **interrupt redesign** (stdin `control_request` cancel +
 `SessionActivity` state machine), the **peer-forward router extraction**
-(`core/router.rs`), and the **`peer_ack` / `halt` duo-yield tools**.
+(`core/router.rs`), the **`peer_ack` / `halt` duo-yield tools**, and the
+**plugin runtime v1** (2026-07-04, below).
+
+---
+
+## 2026-07-04 — Plugin runtime v1: plugins actually run
+
+bot-hq is now modular for real: the plugin system executes plugins
+instead of just managing their rows. Five batches on main
+(`e077aab` → `9f9b4cb` → `6418a76` → `b262fd0` → this docs pass), each
+Rain-reviewed clean. Author contract: [`docs/PLUGINS.md`](docs/PLUGINS.md);
+working example + integration fixture: `examples/hello-plugin/`.
+
+- **Investigation first** (session docs hold the full audit): the
+  scaffolded design was partly DEAD wiring, not just unbuilt — per-plugin
+  capability JSONs were generated into `<data_dir>/capabilities/`, which
+  Tauri's build-time capability glob never reads; `withGlobalTauri` was
+  off so no frame ever had `window.__TAURI__`; the heartbeat state
+  machine had zero non-test callers and lost even its registrations
+  across restarts. The user ratified replacing the Tauri-ACL model with
+  a host-proxy architecture (ask_user_choice, 2026-07-04).
+- **Serving (`e077aab`):** one `bhq-plugin://` scheme registered at
+  Builder time; `plugins::serve` resolves `<id>/<path>` (id-in-host on
+  macOS/Linux, id-in-path under the Windows fold) for installed+ENABLED
+  plugins only — enabled state lives in a new sync `PluginRegistry`
+  cache seeded from storage at boot (which also re-registers enabled
+  plugins with the heartbeat). Canonicalize+prefix traversal guard incl.
+  symlink escapes; strict charset; MIME map; default plugin CSP.
+- **Enforcement + data (`9f9b4cb`):** `plugins::catalog` is the
+  versioned grantable-command contract (`api_version: 1`; 12 read-first
+  commands; consent-copy descriptions). `plugin_invoke_proxy`
+  (`tauri_cmd/plugin_api.rs`) is the single Rust dispatch point —
+  re-checks enabled ∧ granted ∧ catalog per call; JSON-string args and
+  returns; args/KV size caps. New `plugin_kv` table (migration 0029) —
+  per-plugin KV namespaced server-side, CASCADE-wiped on uninstall.
+  Manifests gained `api_version` (parse rejects ≠1); install rejects
+  unknown capability names (loader stays tolerant). `cl_read_file` /
+  `compute_apply_diff` extracted into shared `_inner`s.
+- **Frontend runtime (`6418a76`):** `pluginBridge.ts` (platform-aware
+  entry URLs via a `convertFileSrc` probe, per-mount nonce, pure message
+  triage — 13 vitest tests), `PluginHost.tsx` (sandboxed iframe, 5s ping
+  loop, `plugin:crashed` → Reload fallback card, clean-unmount pong),
+  `plugin_note_ping`/`plugin_note_pong` feeding the existing heartbeat —
+  crash detection is live end-to-end. `PluginPanel.tsx` behind
+  `/plugins/view/:pluginId` + dynamic Shell topbar tabs for enabled
+  panel plugins.
+- **Consent + retirement (`b262fd0`):** install is two-step —
+  `preview_plugin_manifest` fetches + validates WITHOUT installing and
+  the PluginManager consent dialog lists each requested capability with
+  its catalog description before an explicit confirm. `CapabilityGen` +
+  the capability-JSON write path deleted (dead since inception);
+  `PluginRegistry.capabilities_dir` dropped; plugins module doc
+  rewritten to match the shipped runtime.
+- **Example + docs (this commit):** `examples/hello-plugin/` (manifest +
+  entry + copy-in `bhq-sdk.js`; lists sessions, reads the CL index,
+  persists a KV counter) doubles as the fixture for a full-flow
+  integration test (real install → gate → dispatch arms → serve
+  resolution). `docs/PLUGINS.md` documents the author contract incl.
+  per-platform origins, the RPC shapes, the catalog table, the security
+  model, and the deferred tiers (agent surface, new agents,
+  child-webview Browser tab, background execution, zip installs, inline
+  slots — with the external MCP driver server named as the interim lever
+  for backend-style plugins).
 
 ---
 

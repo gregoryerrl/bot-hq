@@ -1,0 +1,14 @@
+{
+  "id": "hello-plugin",
+  "name": "Hello Plugin",
+  "version": "0.1.0",
+  "entry": "index.html",
+  "api_version": 1,
+  "requested_capabilities": [
+    "list_sessions",
+    "cl_index_search",
+    "plugin_kv_get",
+    "plugin_kv_set"
+  ],
+  "slots": [{ "slot_name": null, "panel_route": "/plugins/hello-plugin" }]
+}

@@ -264,15 +264,14 @@ over `retrieval_events` (tokens/session, tokens/retrieval, stale-hit +
 retrieval-miss rates). Default selection is the first project with open
 proposals.
 
-**Plugins tab:** Functional management UI (`PluginManager.tsx`) over
-`tauri_cmd/plugins.rs` — install from a local path, enable / disable /
-uninstall, and a heartbeat-driven crash indicator (subscribes to the
-`plugin:crashed` event emitted by the host-side watcher). Rust scaffold in
-`src/plugins/` ships the manifest parser, loader, capability JSON
-generator, and heartbeat watcher. What's NOT wired yet: live plugin
-*execution* — the per-plugin iframes at `https://plugin-<id>.localhost`
-and their ping/pong channel (the frontend `PluginSlot.tsx` component was
-removed as dead code; the Rust `PluginSlot` manifest type stays).
+**Plugins tab:** Management UI (`PluginManager.tsx`) over
+`tauri_cmd/plugins.rs` — install is two-step (`preview_plugin_manifest`
+shows the requested capabilities with catalog descriptions; only an
+explicit confirm installs), then enable / disable / uninstall and a
+heartbeat-driven crash indicator. Enabled plugins that declare a panel
+get a dynamic topbar tab (`/plugins/view/:pluginId` → `PluginPanel.tsx`
+→ `PluginHost.tsx`). See "Plugin runtime" below for the execution model
+and [`docs/PLUGINS.md`](docs/PLUGINS.md) for the author contract.
 
 **Settings tab:** subtabs for the saved-model registry (Models), the
 default-model + disable-Rain-by-default app settings, the global Tool
@@ -307,11 +306,27 @@ JSON + env injection — so an inherited skill/plugin/MCP/effort can be
 disabled for one agent without touching the user's own `~/.claude`.
 Design: `docs/plans/2026-06-02-claude-config-surface-design.md`.
 
-**Plugin model:** iframes at per-plugin origin
-(`https://plugin-<id>.localhost`) via Tauri custom URI scheme; each gets
-a generated capability JSON listing only the commands its manifest
-requested. Heartbeat watchers register at app-shell level (NOT
-per-PluginSlot — those remount).
+**Plugin runtime (v1, shipped 2026-07-04):** plugins are static
+frontend bundles in sandboxed iframes, served over ONE `bhq-plugin://`
+custom URI scheme (Builder-time registration; per-request enabled-check
+via the `PluginRegistry` enabled cache, so install/enable needs no
+restart; the plugin id rides the URL host on macOS/Linux and the first
+path segment under the Windows `https://bhq-plugin.localhost` fold —
+`plugins::serve` accepts both). Plugins never call Tauri: they
+postMessage the shell (per-mount nonce + source/origin checks in
+`frontend/src/lib/pluginBridge.ts`), which forwards to the single Rust
+enforcement point `plugin_invoke_proxy` (`tauri_cmd/plugin_api.rs`) —
+re-checking enabled ∧ granted ∧ catalog-listed per call and
+dispatching through an explicit match over `plugins::catalog` (12
+read-first commands + plugin-scoped KV writes; `api_version: 1`). The
+heartbeat state machine (`plugins::heartbeat`) is fed by the
+PluginHost's 5s ping loop (`plugin_note_ping`/`plugin_note_pong`); the
+sweep loop in `main.rs` emits `plugin:crashed` after 3 misses and the
+host swaps in a Reload fallback. There is NO Tauri-ACL/capability-JSON
+path (the original design's generated capability files were written
+where Tauri never reads — retired 2026-07-04). Author contract:
+[`docs/PLUGINS.md`](docs/PLUGINS.md); working example + test fixture:
+`examples/hello-plugin/`.
 
 ---
 
@@ -585,7 +600,12 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
 - `projects` (name PK, display_name, working_repo_path, description,
   created_at) — registered-project registry; FK target for `cl_index` /
   `cl_folders` / `cl_reads`.
-- `plugins` — installed-plugin registry (scaffold).
+- `plugins` (id PK, name, version, manifest_json, dir_path, enabled,
+  installed_at) — installed-plugin registry.
+- `plugin_kv` (plugin_id → plugins ON DELETE CASCADE, key, value,
+  updated_at; PK (plugin_id, key); migration 0029) — per-plugin
+  key/value store behind the `plugin_kv_get`/`plugin_kv_set` catalog
+  commands; namespaced server-side.
 - `cl_index` (file_path PK, project, description, tags, size,
   modified_at, indexed_at) — SQLite-backed CL search index.
 - `cl_folders` (id PK, project_id → projects, folder_path, description,
@@ -737,12 +757,22 @@ for the original Phase 0 research.
 
 ## Plugins
 
-Deferred to separate plans (not in current scope):
+The plugin runtime v1 is live (see "Plugin runtime" under Tauri +
+React UI): consent-gated install, `bhq-plugin://` serving, postMessage
+RPC through the Rust-side catalog proxy, heartbeat/crash recovery,
+panel tabs. The author contract is [`docs/PLUGINS.md`](docs/PLUGINS.md);
+`examples/hello-plugin/` is the template + integration-test fixture.
 
-- **Discord plugin** — bridge sessions to/from a Discord channel.
-- **Clive plugin** — port of legacy bot-hq's Clive bot.
+Deferred plugin TIERS (extension points documented in PLUGINS.md):
+plugin-contributed MCP tools (agent↔plugin), manifest-declared agents,
+child-webview surface (real Browser tab), background execution,
+zip/signed URL installs, per-plugin CSP overrides, inline `slot_name`
+slots, host-event relay.
 
-Plugin contract TBD per plugin.
+Concrete plugin ideas building on the runtime (each needs its own
+design doc): **Cognotify** (human-comprehension deck over sessions +
+CL), **Discord bridge**, **Clive** (legacy bot port), **CL cloud
+sync**, **GitHub tab**.
 
 ---
 

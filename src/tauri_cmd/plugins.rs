@@ -205,7 +205,7 @@ pub async fn plugin_note_pong(
 
 // ---- inner helpers (testable, no Tauri State wrapper) ---------------------
 
-async fn install_plugin_inner(
+pub(crate) async fn install_plugin_inner(
     storage: &Storage,
     registry: &PluginRegistry,
     source: &str,
