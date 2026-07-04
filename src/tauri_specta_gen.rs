@@ -118,6 +118,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         plugins::enable_plugin,
         plugins::disable_plugin,
         plugins::uninstall_plugin,
+        plugins::plugin_note_ping,
+        plugins::plugin_note_pong,
         plugin_api::plugin_invoke_proxy,
         // Updates (check GitHub Releases for a newer bot-hq)
         updates::check_for_update,

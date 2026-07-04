@@ -116,6 +116,32 @@ pub async fn uninstall_plugin(
     Ok(())
 }
 
+/// Heartbeat feed, called by the frontend PluginHost's 5s ping loop just
+/// before it postMessages `bhq:ping` into the plugin iframe. The backend
+/// sweep loop (main.rs) turns unanswered pings into Slow/Crashed.
+#[tauri::command]
+#[specta::specta]
+pub async fn plugin_note_ping(
+    registry: tauri::State<'_, Arc<PluginRegistry>>,
+    plugin_id: String,
+) -> Result<(), AppError> {
+    registry.heartbeat.note_ping_sent(&plugin_id);
+    Ok(())
+}
+
+/// Heartbeat feed, called when the plugin iframe answers with `bhq:pong`
+/// (and on clean PluginHost unmount, so a mid-flight ping isn't counted
+/// as a miss against a plugin that simply closed with its panel).
+#[tauri::command]
+#[specta::specta]
+pub async fn plugin_note_pong(
+    registry: tauri::State<'_, Arc<PluginRegistry>>,
+    plugin_id: String,
+) -> Result<(), AppError> {
+    registry.heartbeat.note_pong_received(&plugin_id);
+    Ok(())
+}
+
 // ---- inner helpers (testable, no Tauri State wrapper) ---------------------
 
 async fn install_plugin_inner(

@@ -4,6 +4,40 @@ import { cn } from "../lib/cn";
 import { PendingTray } from "../components/PendingTray";
 import { UpdateBanner } from "../components/UpdateBanner";
 import { useHealthStore, appHealthSummary } from "../stores/health";
+import { useTauriQuery } from "../hooks/useInvoke";
+import { useTauriEvent } from "../hooks/useTauriEvent";
+import type { InstalledPluginView } from "../lib/bindings";
+
+// Topbar tabs for enabled plugins that contribute a panel (manifest
+// `slots[].panel_route`). Shell never unmounts, so this is also the app's
+// single live watcher keeping the tab row in sync with install/enable/
+// disable/uninstall — the same query key PluginManager uses, one cache.
+function PluginNavTabs() {
+  const list = useTauriQuery<InstalledPluginView[]>("list_installed_plugins", {});
+  useTauriEvent<{ plugin_id: string }>(
+    "plugin:state-changed",
+    () => void list.refetch(),
+    [list.refetch],
+  );
+  useTauriEvent<{ plugin_id: string }>(
+    "plugin:uninstalled",
+    () => void list.refetch(),
+    [list.refetch],
+  );
+
+  const withPanel = (list.data ?? []).filter(
+    (p) => p.enabled && p.manifest.slots?.some((s) => s.panel_route),
+  );
+  return (
+    <>
+      {withPanel.map((p) => (
+        <NavLink key={p.id} to={`/plugins/view/${p.id}`} className={navLinkClass}>
+          {p.name}
+        </NavLink>
+      ))}
+    </>
+  );
+}
 
 // B3: app-wide agent-health status in the footer (replaces the hardcoded green
 // "Online"). Worst-of all sessions from the B2 health store — green when all OK,
@@ -75,6 +109,7 @@ export function Shell() {
             <NavLink to="/plugins" className={navLinkClass}>
               Plugins
             </NavLink>
+            <PluginNavTabs />
             <NavLink to="/settings" className={navLinkClass}>
               Settings
             </NavLink>

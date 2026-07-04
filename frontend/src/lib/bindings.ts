@@ -875,6 +875,40 @@ async uninstallPlugin(pluginId: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Heartbeat feed, called by the frontend PluginHost's 5s ping loop just
+ * before it postMessages `bhq:ping` into the plugin iframe. The backend
+ * sweep loop (main.rs) turns unanswered pings into Slow/Crashed.
+ */
+async pluginNotePing(pluginId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("plugin_note_ping", { pluginId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Heartbeat feed, called when the plugin iframe answers with `bhq:pong`
+ * (and on clean PluginHost unmount, so a mid-flight ping isn't counted
+ * as a miss against a plugin that simply closed with its panel).
+ */
+async pluginNotePong(pluginId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("plugin_note_pong", { pluginId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async pluginInvokeProxy(pluginId: string, command: string, argsJson: string | null) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("plugin_invoke_proxy", { pluginId, command, argsJson }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async checkForUpdate() : Promise<Result<UpdateInfo, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_for_update") };
@@ -1180,7 +1214,14 @@ export type PluginItem = {
  * `name@marketplace` key as used in `enabledPlugins`.
  */
 key: string; enabled: boolean; inheritance: Inheritance }
-export type PluginManifest = { id: string; name: string; version: string; entry: string; requested_capabilities?: string[]; slots?: PluginSlot[] }
+export type PluginManifest = { id: string; name: string; version: string; entry: string; 
+/**
+ * Plugin-API contract version (the grantable-command catalog +
+ * postMessage RPC shape). This binary supports exactly 1; parsing
+ * rejects anything else so an old bot-hq can't half-run a newer
+ * plugin. Omitted in JSON = 1.
+ */
+api_version?: number; requested_capabilities?: string[]; slots?: PluginSlot[] }
 export type PluginSlot = { 
 /**
  * React shell slot name (e.g., "sidebar.bottom"). `None` means the

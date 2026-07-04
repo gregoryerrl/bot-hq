@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { Button } from "../components/ui/Button";
@@ -297,13 +298,13 @@ function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
         >
           Uninstall
         </Button>
-        {panelSlot?.panel_route && (
-          <a
-            href={`#${panelSlot.panel_route}`}
+        {panelSlot?.panel_route && enabled && (
+          <Link
+            to={`/plugins/view/${plugin.id}`}
             className="ml-auto font-code-sm text-code-sm text-tertiary underline hover:text-tertiary"
           >
             Open panel →
-          </a>
+          </Link>
         )}
       </div>
     </Card>
