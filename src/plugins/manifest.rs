@@ -30,10 +30,20 @@ pub struct PluginManifest {
     pub name: String,
     pub version: String,
     pub entry: String,
+    /// Plugin-API contract version (the grantable-command catalog +
+    /// postMessage RPC shape). This binary supports exactly 1; parsing
+    /// rejects anything else so an old bot-hq can't half-run a newer
+    /// plugin. Omitted in JSON = 1.
+    #[serde(default = "default_api_version")]
+    pub api_version: u32,
     #[serde(default)]
     pub requested_capabilities: Vec<String>,
     #[serde(default)]
     pub slots: Vec<PluginSlot>,
+}
+
+fn default_api_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -55,6 +65,12 @@ impl PluginManifest {
     }
 
     fn validate(&self) -> Result<()> {
+        if self.api_version != 1 {
+            return Err(anyhow!(
+                "unsupported api_version {} (this bot-hq supports 1)",
+                self.api_version
+            ));
+        }
         if self.id.is_empty() {
             return Err(anyhow!("manifest.id must not be empty"));
         }
@@ -184,12 +200,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_defaults_api_version_to_1_and_rejects_others() {
+        let json = r#"{
+            "id": "x",
+            "name": "x",
+            "version": "0.1.0",
+            "entry": "i.html"
+        }"#;
+        assert_eq!(PluginManifest::parse(json).unwrap().api_version, 1);
+
+        let json_v2 = r#"{
+            "id": "x",
+            "name": "x",
+            "version": "0.1.0",
+            "entry": "i.html",
+            "api_version": 2
+        }"#;
+        let err = PluginManifest::parse(json_v2).unwrap_err();
+        assert!(err.to_string().contains("api_version"));
+    }
+
+    #[test]
     fn iframe_origin_uses_plugin_prefix() {
         let m = PluginManifest {
             id: "clive".to_string(),
             name: "Clive".to_string(),
             version: "0.1.0".to_string(),
             entry: "main.html".to_string(),
+            api_version: 1,
             requested_capabilities: vec![],
             slots: vec![],
         };

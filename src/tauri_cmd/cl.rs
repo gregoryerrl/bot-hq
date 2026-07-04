@@ -411,6 +411,16 @@ pub async fn cl_read_file(
     project: String,
     file_path: String,
 ) -> Result<ClFileContentView, AppError> {
+    cl_read_file_inner(&bridge, project, file_path).await
+}
+
+/// Shared logic behind the `cl_read_file` command and the plugin proxy's
+/// `cl_read_file` catalog arm (tauri_cmd/plugin_api.rs).
+pub(crate) async fn cl_read_file_inner(
+    bridge: &SignalingBridge,
+    project: String,
+    file_path: String,
+) -> Result<ClFileContentView, AppError> {
     const MAX_READ_BYTES: u64 = 1_048_576; // 1 MB
 
     // Resolve via the bridge helper so `_globals` maps to data_dir and

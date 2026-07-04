@@ -1,0 +1,473 @@
+//! `plugin_invoke_proxy` — the single enforcement + dispatch point for
+//! plugin-iframe RPC (plugin runtime v1).
+//!
+//! Plugin iframes postMessage the host shell (`frontend/src/lib/
+//! pluginBridge.ts`), which forwards every call HERE. The frontend's
+//! origin/nonce checks are transport hygiene only — this command re-checks
+//! (enabled ∧ granted ∧ catalog-listed) in Rust and dispatches through an
+//! explicit match, so a compromised or buggy shell listener never exposes
+//! the broader Tauri command surface.
+//!
+//! The args/return contract is JSON-in-a-String on both sides. That keeps
+//! the specta/TS surface trivially stable (`(pluginId, command, argsJson?)
+//! -> string`) while each catalog arm owns its own arg schema — versioned
+//! by `api_version` in the manifest, documented in docs/PLUGINS.md.
+
+use crate::core::AppState as CoreAppState;
+use crate::plugins::{catalog, PluginRegistry};
+use crate::signaling::SignalingBridge;
+use crate::storage::Storage;
+use crate::tauri_cmd::error::AppError;
+use serde::Serialize;
+use serde_json::Value;
+use std::sync::Arc;
+
+/// Caps: plugin args are untrusted input arriving through the shell.
+const MAX_ARGS_BYTES: usize = 65_536; // 64 KB of JSON args
+const MAX_KV_KEY_BYTES: usize = 256;
+const MAX_KV_VALUE_BYTES: usize = 262_144; // 256 KB per value
+/// `cl_retrieve` budget: same default as the MCP tool, hard-capped so a
+/// plugin can't vacuum the whole atom store in one call.
+const DEFAULT_RETRIEVE_BUDGET: i64 = 3_000;
+const MAX_RETRIEVE_BUDGET: i64 = 20_000;
+
+#[tauri::command]
+#[specta::specta]
+pub async fn plugin_invoke_proxy(
+    storage: tauri::State<'_, Arc<Storage>>,
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    registry: tauri::State<'_, Arc<PluginRegistry>>,
+    plugin_id: String,
+    command: String,
+    args_json: Option<String>,
+) -> Result<String, AppError> {
+    check_plugin_grant(&registry, &plugin_id, &command)?;
+    let args = parse_args(args_json.as_deref())?;
+    tracing::debug!(plugin_id = %plugin_id, command = %command, "plugin_invoke_proxy");
+    dispatch(&storage, &bridge, Some(&core), &plugin_id, &command, &args).await
+}
+
+/// The gate: catalog membership, enabled cache, and the manifest's granted
+/// set (read from the disk loader — the same source install/enable rescan).
+fn check_plugin_grant(
+    registry: &PluginRegistry,
+    plugin_id: &str,
+    command: &str,
+) -> Result<(), AppError> {
+    if !catalog::is_valid(command) {
+        return Err(AppError::Validation(format!(
+            "unknown plugin command {command:?} (not in the api_version-1 catalog)"
+        )));
+    }
+    if !registry.is_enabled(plugin_id) {
+        return Err(AppError::Validation(format!(
+            "plugin {plugin_id:?} is not installed+enabled"
+        )));
+    }
+    let granted = {
+        let g = registry.loader.lock().unwrap_or_else(|p| p.into_inner());
+        g.get(plugin_id)
+            .map(|p| p.manifest.requested_capabilities.clone())
+    };
+    match granted {
+        Some(caps) if caps.iter().any(|c| c == command) => Ok(()),
+        Some(_) => Err(AppError::Validation(format!(
+            "capability {command:?} was not granted to plugin {plugin_id:?}"
+        ))),
+        None => Err(AppError::Validation(format!(
+            "plugin {plugin_id:?} has no loadable bundle on disk"
+        ))),
+    }
+}
+
+/// Parse the JSON args envelope. Absent/empty = `{}`; anything else must be
+/// a JSON object within the size cap.
+fn parse_args(args_json: Option<&str>) -> Result<Value, AppError> {
+    let Some(raw) = args_json else {
+        return Ok(Value::Object(Default::default()));
+    };
+    if raw.len() > MAX_ARGS_BYTES {
+        return Err(AppError::Validation(format!(
+            "args too large ({} bytes, max {MAX_ARGS_BYTES})",
+            raw.len()
+        )));
+    }
+    let v: Value = serde_json::from_str(raw)
+        .map_err(|e| AppError::Validation(format!("args must be JSON: {e}")))?;
+    match v {
+        Value::Object(_) | Value::Null => Ok(v),
+        _ => Err(AppError::Validation("args must be a JSON object".into())),
+    }
+}
+
+fn need_str(args: &Value, key: &str) -> Result<String, AppError> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::Validation(format!("missing required string arg {key:?}")))
+}
+
+fn opt_str(args: &Value, key: &str) -> Option<String> {
+    args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+fn opt_i64(args: &Value, key: &str) -> Option<i64> {
+    args.get(key).and_then(|v| v.as_i64())
+}
+
+fn opt_str_vec(args: &Value, key: &str) -> Option<Vec<String>> {
+    args.get(key).and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect()
+    })
+}
+
+fn to_json<T: Serialize>(value: &T) -> Result<String, AppError> {
+    serde_json::to_string(value)
+        .map_err(|e| AppError::Internal(format!("serializing plugin result: {e}")))
+}
+
+/// What plugins see for a retrieved CL atom. Local (not the storage
+/// `RetrievedAtom`) so the plugin contract can't drift when storage grows
+/// fields. `stale` is reserved: the storage path always reports `false`
+/// (drift-recompute lives in the bridge MCP wrapper, deliberately not
+/// invoked here so plugin reads don't pollute agent retrieval telemetry).
+#[derive(Debug, Serialize)]
+struct PluginAtomView {
+    file_path: String,
+    heading_path: String,
+    body: String,
+    stale: bool,
+}
+
+/// Catalog dispatch. `core` is `Option` ONLY so unit tests can exercise the
+/// storage/bridge arms without booting a full `CoreAppState` (which needs a
+/// live signaling server); the production shim always passes `Some`.
+pub(crate) async fn dispatch(
+    storage: &Storage,
+    bridge: &SignalingBridge,
+    core: Option<&CoreAppState>,
+    plugin_id: &str,
+    command: &str,
+    args: &Value,
+) -> Result<String, AppError> {
+    match command {
+        "list_sessions" => {
+            let rows = storage
+                .list_active_sessions_with_preview()
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?;
+            let out: Vec<crate::tauri_cmd::sessions::SessionInfo> =
+                rows.into_iter().map(Into::into).collect();
+            to_json(&out)
+        }
+        "get_session" => {
+            let session_id = need_str(args, "session_id")?;
+            let out: Option<crate::tauri_cmd::sessions::SessionInfo> = storage
+                .get_session(&session_id)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?
+                .map(Into::into);
+            to_json(&out)
+        }
+        "list_messages" => {
+            let session_id = need_str(args, "session_id")?;
+            let since_id = opt_i64(args, "since_id");
+            let msgs = storage
+                .messages_for_session(&session_id, since_id)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?;
+            let out: Vec<crate::tauri_events::types::AgentMessage> =
+                msgs.into_iter().map(Into::into).collect();
+            to_json(&out)
+        }
+        "session_doc_search" => {
+            let session_id = need_str(args, "session_id")?;
+            let query = opt_str(args, "query");
+            let phase = opt_str(args, "phase");
+            let docs = bridge
+                .session_doc_search(&session_id, query.as_deref(), phase.as_deref())
+                .await?;
+            let out: Vec<crate::tauri_cmd::docs::SessionDocumentView> =
+                docs.into_iter().map(Into::into).collect();
+            to_json(&out)
+        }
+        "cl_index_search" => {
+            let project = opt_str(args, "project");
+            let query = opt_str(args, "query");
+            let rows = bridge
+                .cl_index_search(project.as_deref(), query.as_deref())
+                .await?;
+            let out: Vec<crate::tauri_cmd::cl::ClIndexEntryView> =
+                rows.into_iter().map(Into::into).collect();
+            to_json(&out)
+        }
+        "cl_folder_search" => {
+            let project = opt_str(args, "project");
+            let query = opt_str(args, "query");
+            let rows = bridge
+                .cl_folder_search(project.as_deref(), query.as_deref())
+                .await?;
+            let out: Vec<crate::tauri_cmd::cl::ClFolderView> =
+                rows.into_iter().map(Into::into).collect();
+            to_json(&out)
+        }
+        "cl_retrieve" => {
+            let project = need_str(args, "project")?;
+            let query = need_str(args, "query")?;
+            let paths = opt_str_vec(args, "paths");
+            let budget = opt_i64(args, "budget_tokens")
+                .unwrap_or(DEFAULT_RETRIEVE_BUDGET)
+                .clamp(1, MAX_RETRIEVE_BUDGET);
+            let atoms = storage
+                .cl_retrieve(&project, &query, paths.as_deref(), budget)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?;
+            let out: Vec<PluginAtomView> = atoms
+                .into_iter()
+                .map(|a| PluginAtomView {
+                    file_path: a.file_path,
+                    heading_path: a.heading_path,
+                    body: a.body,
+                    stale: a.stale,
+                })
+                .collect();
+            to_json(&out)
+        }
+        "cl_read_file" => {
+            let project = need_str(args, "project")?;
+            let file_path = need_str(args, "file_path")?;
+            let out = crate::tauri_cmd::cl::cl_read_file_inner(bridge, project, file_path).await?;
+            to_json(&out)
+        }
+        "list_projects" => {
+            let rows = storage.list_projects().await?;
+            let out: Vec<crate::tauri_cmd::cl::ProjectView> =
+                rows.into_iter().map(Into::into).collect();
+            to_json(&out)
+        }
+        "compute_apply_diff" => {
+            let session_id = need_str(args, "session_id")?;
+            let core = core.ok_or_else(|| {
+                AppError::Internal("core state unavailable for compute_apply_diff".into())
+            })?;
+            let out = crate::tauri_cmd::docs::compute_apply_diff_inner(core, session_id).await?;
+            to_json(&out)
+        }
+        "plugin_kv_get" => {
+            let key = need_str(args, "key")?;
+            if key.len() > MAX_KV_KEY_BYTES {
+                return Err(AppError::Validation(format!(
+                    "kv key too long (max {MAX_KV_KEY_BYTES} bytes)"
+                )));
+            }
+            let out = storage
+                .plugin_kv_get(plugin_id, &key)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?;
+            to_json(&out)
+        }
+        "plugin_kv_set" => {
+            let key = need_str(args, "key")?;
+            let value = need_str(args, "value")?;
+            if key.len() > MAX_KV_KEY_BYTES {
+                return Err(AppError::Validation(format!(
+                    "kv key too long (max {MAX_KV_KEY_BYTES} bytes)"
+                )));
+            }
+            if value.len() > MAX_KV_VALUE_BYTES {
+                return Err(AppError::Validation(format!(
+                    "kv value too large (max {MAX_KV_VALUE_BYTES} bytes)"
+                )));
+            }
+            storage
+                .plugin_kv_set(plugin_id, &key, &value)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?;
+            to_json(&true)
+        }
+        // check_plugin_grant runs first, so reaching here means the catalog
+        // lists a command this match doesn't — a bug, not plugin input.
+        other => Err(AppError::Internal(format!(
+            "catalog command {other:?} has no dispatch arm"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::PluginRegistry;
+    use tempfile::TempDir;
+
+    /// Registry with one on-disk plugin granting `caps`, enabled per flag.
+    fn registry_with(tmp: &TempDir, id: &str, caps: &[&str], enabled: bool) -> PluginRegistry {
+        let dir = tmp.path().join("plugins").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let caps_json: Vec<String> = caps.iter().map(|c| format!("\"{c}\"")).collect();
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(
+                r#"{{"id":"{id}","name":"T","version":"0.1.0","entry":"index.html",
+                    "requested_capabilities":[{}]}}"#,
+                caps_json.join(",")
+            ),
+        )
+        .unwrap();
+        let reg = PluginRegistry::new(
+            tmp.path().to_path_buf(),
+            tmp.path().join("capabilities"),
+        )
+        .unwrap();
+        reg.set_enabled(id, enabled);
+        reg
+    }
+
+    async fn test_bridge(tmp: &TempDir, storage: &Storage) -> Arc<SignalingBridge> {
+        let bridge = SignalingBridge::with_policy(
+            crate::policy::ViolationsLog::new(tmp.path()),
+            tmp.path().to_path_buf(),
+        );
+        bridge.set_storage(storage.clone()).await;
+        bridge
+    }
+
+    #[test]
+    fn grant_check_rejects_unknown_command_disabled_and_ungranted() {
+        let tmp = TempDir::new().unwrap();
+        let reg = registry_with(&tmp, "deck", &["list_sessions"], true);
+
+        // Catalog miss — even for an enabled plugin that requested it.
+        assert!(check_plugin_grant(&reg, "deck", "create_session").is_err());
+        // Granted + enabled + in catalog = ok.
+        assert!(check_plugin_grant(&reg, "deck", "list_sessions").is_ok());
+        // In catalog but not granted.
+        assert!(check_plugin_grant(&reg, "deck", "cl_index_search").is_err());
+        // Unknown plugin id.
+        assert!(check_plugin_grant(&reg, "ghost", "list_sessions").is_err());
+
+        // Disabled plugin: same manifest, cache off.
+        reg.set_enabled("deck", false);
+        assert!(check_plugin_grant(&reg, "deck", "list_sessions").is_err());
+    }
+
+    #[test]
+    fn parse_args_accepts_object_rejects_rest() {
+        assert!(parse_args(None).unwrap().is_object());
+        assert!(parse_args(Some(r#"{"a":1}"#)).unwrap().is_object());
+        assert!(parse_args(Some("null")).unwrap().is_null());
+        assert!(parse_args(Some("[1,2]")).is_err());
+        assert!(parse_args(Some("\"str\"")).is_err());
+        assert!(parse_args(Some("not json")).is_err());
+        let big = format!(r#"{{"k":"{}"}}"#, "x".repeat(MAX_ARGS_BYTES));
+        assert!(parse_args(Some(&big)).is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_list_sessions_returns_json_array() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+        let out = dispatch(
+            &storage,
+            &bridge,
+            None,
+            "deck",
+            "list_sessions",
+            &Value::Object(Default::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "[]");
+    }
+
+    #[tokio::test]
+    async fn dispatch_kv_roundtrip_is_plugin_namespaced() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        storage.insert_plugin("deck", "D", "0.1", "{}", "/x").await.unwrap();
+        storage.insert_plugin("other", "O", "0.1", "{}", "/y").await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+
+        let set_args: Value = serde_json::from_str(r#"{"key":"lens","value":"graph"}"#).unwrap();
+        dispatch(&storage, &bridge, None, "deck", "plugin_kv_set", &set_args)
+            .await
+            .unwrap();
+
+        let get_args: Value = serde_json::from_str(r#"{"key":"lens"}"#).unwrap();
+        let got = dispatch(&storage, &bridge, None, "deck", "plugin_kv_get", &get_args)
+            .await
+            .unwrap();
+        assert_eq!(got, "\"graph\"");
+        // The OTHER plugin sees nothing under the same key — plugin_id is
+        // stamped by the proxy, not passed by the plugin.
+        let other = dispatch(&storage, &bridge, None, "other", "plugin_kv_get", &get_args)
+            .await
+            .unwrap();
+        assert_eq!(other, "null");
+    }
+
+    #[tokio::test]
+    async fn dispatch_kv_set_enforces_size_caps() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        storage.insert_plugin("deck", "D", "0.1", "{}", "/x").await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+
+        let long_key = "k".repeat(MAX_KV_KEY_BYTES + 1);
+        let args = serde_json::json!({ "key": long_key, "value": "v" });
+        assert!(dispatch(&storage, &bridge, None, "deck", "plugin_kv_set", &args)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_missing_required_arg_is_validation_error() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+        let err = dispatch(
+            &storage,
+            &bridge,
+            None,
+            "deck",
+            "get_session",
+            &Value::Object(Default::default()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_cl_retrieve_empty_store_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+        let args = serde_json::json!({ "project": "p", "query": "anything" });
+        let out = dispatch(&storage, &bridge, None, "deck", "cl_retrieve", &args)
+            .await
+            .unwrap();
+        assert_eq!(out, "[]");
+    }
+
+    #[tokio::test]
+    async fn dispatch_cl_index_search_via_bridge_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+        let out = dispatch(
+            &storage,
+            &bridge,
+            None,
+            "deck",
+            "cl_index_search",
+            &Value::Object(Default::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "[]");
+    }
+}

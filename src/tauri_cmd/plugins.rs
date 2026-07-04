@@ -129,6 +129,20 @@ async fn install_plugin_inner(
         read_manifest_from_dir(Path::new(source))?
     };
 
+    // Unknown capability names are an install-time error, not a dispatch-time
+    // surprise — the consent screen can't describe what the catalog doesn't
+    // know. (The LOADER stays tolerant of already-installed plugins so a
+    // catalog change can't brick an install; the proxy re-checks at dispatch.)
+    if let Some(bad) = manifest
+        .requested_capabilities
+        .iter()
+        .find(|c| !crate::plugins::catalog::is_valid(c))
+    {
+        return Err(AppError::Validation(format!(
+            "manifest requests unknown capability {bad:?} (not in the api_version-1 catalog)"
+        )));
+    }
+
     let plugin_dir = registry.data_dir.join("plugins").join(&manifest.id);
     if plugin_dir.exists() {
         return Err(AppError::Conflict(format!(

@@ -152,6 +152,15 @@ pub async fn compute_apply_diff(
     core: tauri::State<'_, Arc<CoreAppState>>,
     session_id: String,
 ) -> Result<ComputeApplyDiffResult, AppError> {
+    compute_apply_diff_inner(&core, session_id).await
+}
+
+/// Shared logic behind the `compute_apply_diff` command and the plugin
+/// proxy's catalog arm (tauri_cmd/plugin_api.rs).
+pub(crate) async fn compute_apply_diff_inner(
+    core: &CoreAppState,
+    session_id: String,
+) -> Result<ComputeApplyDiffResult, AppError> {
     let Some(repo) = core.working_repo_path(&session_id).await else {
         return Ok(ComputeApplyDiffResult {
             lines: Vec::new(),

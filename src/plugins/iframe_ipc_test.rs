@@ -14,6 +14,7 @@ fn plugin_with(id: &str, caps: &[&str]) -> LoadedPlugin {
             name: id.to_string(),
             version: "0.1.0".to_string(),
             entry: "i.html".to_string(),
+            api_version: 1,
             requested_capabilities: caps.iter().map(|s| s.to_string()).collect(),
             slots: vec![],
         },

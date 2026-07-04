@@ -23,6 +23,7 @@ mod cl_proposals;
 mod findings;
 mod messages;
 mod models;
+mod plugin_kv;
 mod plugins;
 mod projects;
 mod retrieval_events;

@@ -23,6 +23,7 @@
 //! Rust-side surface.
 
 pub mod capabilities;
+pub mod catalog;
 pub mod heartbeat;
 pub mod loader;
 pub mod manifest;

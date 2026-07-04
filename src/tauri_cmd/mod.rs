@@ -30,6 +30,7 @@ pub mod error;
 pub mod findings;
 pub mod messages;
 pub mod models;
+pub mod plugin_api;
 pub mod plugins;
 pub mod policy;
 pub mod screenshot;
