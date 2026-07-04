@@ -1,11 +1,11 @@
 //! Plugin manager — Tauri command surface.
 //!
-//! Slice 3 of the PluginManager work: live install / list / enable / disable /
-//! uninstall logic, backed by [`Storage`] for persistence,
+//! Consent-gated install (preview → confirm) / list / enable / disable /
+//! uninstall / heartbeat feed, backed by [`Storage`] for persistence and
 //! [`PluginRegistry`] (disk [`Loader`](crate::plugins::Loader) +
-//! [`Heartbeat`] liveness), and [`CapabilityGen`] for the
-//! per-plugin allow-list JSON files. Each command is a thin shim over an
-//! `_inner` helper so the logic is testable without a Tauri `State` wrapper.
+//! [`Heartbeat`] liveness + the enabled cache the serve/proxy layers
+//! read). Each command is a thin shim over an `_inner` helper so the
+//! logic is testable without a Tauri `State` wrapper.
 
 use crate::plugins::{Heartbeat, PluginManifest, PluginRegistry, PluginStatus};
 use crate::storage::{Plugin, Storage};
