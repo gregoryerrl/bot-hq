@@ -65,6 +65,7 @@ export function CspConsentSection({ csp }: { csp: CspExtraOrigins }) {
  */
 export function PluginManager() {
   const [installSource, setInstallSource] = useState("");
+  const [linkedInstall, setLinkedInstall] = useState(false);
   const [installError, setInstallError] = useState<AppError | null>(null);
   // Enable/disable + uninstall both fire-and-forget mutate; capture their
   // rejections so a failed toggle/uninstall isn't silently swallowed.
@@ -74,9 +75,13 @@ export function PluginManager() {
     useState<InstalledPluginView | null>(null);
   // Consent gate: install is two-step — preview the manifest (nothing lands
   // on disk), show what the plugin requests, install only on explicit confirm.
+  // Re-approve (linked drift) rides the SAME dialog: `reapprove` carries the
+  // plugin id and the confirm routes to reapprove_linked_plugin instead.
   const [pendingInstall, setPendingInstall] = useState<{
     source: string;
     preview: PluginManifestPreview;
+    linked: boolean;
+    reapprove: string | null;
   } | null>(null);
 
   const list = useTauriQuery<InstalledPluginView[]>(
@@ -89,8 +94,12 @@ export function PluginManager() {
   const preview = useTauriMutation<PluginManifestPreview, { source: string }>(
     "preview_plugin_manifest",
   );
-  const install = useTauriMutation<InstalledPluginView, { source: string }>(
-    "install_plugin",
+  const install = useTauriMutation<
+    InstalledPluginView,
+    { source: string; linked: boolean }
+  >("install_plugin");
+  const reapprove = useTauriMutation<InstalledPluginView, { pluginId: string }>(
+    "reapprove_linked_plugin",
   );
   const enable = useTauriMutation<void, { pluginId: string }>("enable_plugin");
   const disable = useTauriMutation<void, { pluginId: string }>("disable_plugin");
@@ -120,10 +129,32 @@ export function PluginManager() {
     const source = installSource.trim();
     if (!source || preview.isPending || install.isPending) return;
     setInstallError(null);
+    const linked = linkedInstall && !/^https?:\/\//.test(source);
     preview.mutate(
       { source },
       {
-        onSuccess: (p) => setPendingInstall({ source, preview: p }),
+        onSuccess: (p) =>
+          setPendingInstall({ source, preview: p, linked, reapprove: null }),
+        onError: (err) => setInstallError(err),
+      },
+    );
+  };
+
+  // Drift banner path: preview the LIVE source manifest, run the same
+  // consent dialog, confirm applies via reapprove (KV survives).
+  const handleReapprove = (plugin: InstalledPluginView) => {
+    if (preview.isPending || reapprove.isPending) return;
+    setInstallError(null);
+    preview.mutate(
+      { source: plugin.dir_path },
+      {
+        onSuccess: (p) =>
+          setPendingInstall({
+            source: plugin.dir_path,
+            preview: p,
+            linked: true,
+            reapprove: plugin.id,
+          }),
         onError: (err) => setInstallError(err),
       },
     );
@@ -131,13 +162,24 @@ export function PluginManager() {
 
   const confirmInstall = () => {
     if (!pendingInstall) return;
-    const { source } = pendingInstall;
+    const { source, linked, reapprove: reapproveId } = pendingInstall;
     setPendingInstall(null);
+    if (reapproveId) {
+      reapprove.mutate(
+        { pluginId: reapproveId },
+        {
+          onSuccess: () => void list.refetch(),
+          onError: (err) => setInstallError(err),
+        },
+      );
+      return;
+    }
     install.mutate(
-      { source },
+      { source, linked },
       {
         onSuccess: () => {
           setInstallSource("");
+          setLinkedInstall(false);
           void list.refetch();
         },
         onError: (err) => setInstallError(err),
@@ -177,6 +219,23 @@ export function PluginManager() {
             {install.isPending ? "Installing…" : "Install"}
           </Button>
         </div>
+        <label
+          className={cn(
+            "mt-2 flex items-center gap-2 font-code-sm text-code-sm",
+            /^https?:\/\//.test(installSource.trim())
+              ? "text-outline-variant"
+              : "text-on-surface-variant",
+          )}
+        >
+          <input
+            type="checkbox"
+            checked={linkedInstall && !/^https?:\/\//.test(installSource.trim())}
+            disabled={/^https?:\/\//.test(installSource.trim())}
+            onChange={(e) => setLinkedInstall(e.target.checked)}
+          />
+          Linked — serve from this directory (no copy). Local paths only;
+          edits show on tab reload.
+        </label>
         {installError && (
           <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
             <div>
@@ -247,6 +306,7 @@ export function PluginManager() {
                 );
               }}
               onUninstall={() => setConfirmUninstall(p)}
+              onReapprove={() => handleReapprove(p)}
               busy={
                 (p.enabled && disable.isPending) ||
                 (!p.enabled && enable.isPending) ||
@@ -258,10 +318,20 @@ export function PluginManager() {
       )}
       <ConfirmDialog
         open={pendingInstall !== null}
-        title={`Install ${pendingInstall?.preview.manifest.name ?? "plugin"}?`}
+        title={
+          pendingInstall?.reapprove
+            ? `Re-approve ${pendingInstall.preview.manifest.name}?`
+            : `Install ${pendingInstall?.preview.manifest.name ?? "plugin"}?`
+        }
         message={
           pendingInstall && (
             <div className="text-left">
+              {pendingInstall.reapprove && (
+                <p className="mb-2 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-on-surface">
+                  The linked manifest changed since you last approved it.
+                  Review what it now requests:
+                </p>
+              )}
               <p className="mb-2">
                 <code className="font-code-sm">
                   {pendingInstall.preview.manifest.id}
@@ -293,10 +363,19 @@ export function PluginManager() {
                   csp={pendingInstall.preview.manifest.csp_extra_origins}
                 />
               )}
+              {pendingInstall.linked && (
+                <p className="mt-3 text-on-surface-variant">
+                  Linked — files are served directly from{" "}
+                  <code className="font-code-sm">{pendingInstall.source}</code>.
+                  Content changes take effect immediately; capability changes
+                  still require re-approval. Only link directories you
+                  control.
+                </p>
+              )}
             </div>
           )
         }
-        confirmLabel="Install"
+        confirmLabel={pendingInstall?.reapprove ? "Re-approve" : "Install"}
         confirmVariant="primary"
         onConfirm={confirmInstall}
         onCancel={() => setPendingInstall(null)}
@@ -305,13 +384,31 @@ export function PluginManager() {
         open={confirmUninstall !== null}
         title="Uninstall plugin?"
         message={
-          <>
-            Uninstall{" "}
-            <strong className="text-on-surface">{confirmUninstall?.name}</strong>?
-            Its files under{" "}
-            <code className="text-on-surface">~/.bot-hq/plugins/</code> are
-            removed.
-          </>
+          confirmUninstall?.linked ? (
+            <>
+              Uninstall{" "}
+              <strong className="text-on-surface">
+                {confirmUninstall?.name}
+              </strong>
+              ? Its registry entry and saved state are removed. The linked
+              source directory{" "}
+              <code className="text-on-surface">
+                {confirmUninstall?.dir_path}
+              </code>{" "}
+              is <strong className="text-on-surface">not touched</strong> —
+              it's your repo.
+            </>
+          ) : (
+            <>
+              Uninstall{" "}
+              <strong className="text-on-surface">
+                {confirmUninstall?.name}
+              </strong>
+              ? Its files under{" "}
+              <code className="text-on-surface">~/.bot-hq/plugins/</code> are
+              removed.
+            </>
+          )
         }
         confirmLabel="Uninstall"
         confirmVariant="danger"
@@ -335,10 +432,17 @@ interface PluginCardProps {
   plugin: InstalledPluginView;
   onToggle: () => void;
   onUninstall: () => void;
+  onReapprove: () => void;
   busy: boolean;
 }
 
-function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
+export function PluginCard({
+  plugin,
+  onToggle,
+  onUninstall,
+  onReapprove,
+  busy,
+}: PluginCardProps) {
   const { manifest, status, enabled } = plugin;
   const panelSlot = manifest.slots?.find((s) => s.panel_route);
   const namedSlots = (manifest.slots ?? []).filter((s) => s.slot_name);
@@ -355,10 +459,30 @@ function PluginCard({ plugin, onToggle, onUninstall, busy }: PluginCardProps) {
         <span className="rounded bg-surface-container-high px-1.5 py-0.5 font-code-sm text-code-sm text-on-surface">
           v{plugin.version}
         </span>
+        {plugin.linked && (
+          <span
+            className="rounded bg-tertiary/15 px-1.5 py-0.5 font-code-sm text-code-sm text-tertiary"
+            title={`Serving directly from ${plugin.dir_path}`}
+          >
+            linked
+          </span>
+        )}
         <span className="ml-auto font-code-sm text-code-sm text-on-surface-variant">
           {statusLabel(status, enabled)}
         </span>
       </header>
+
+      {plugin.manifest_drifted && (
+        <div className="mb-3 flex items-center justify-between gap-3 rounded border border-warning/40 bg-warning/10 px-3 py-2 font-code-sm text-code-sm text-on-surface">
+          <span>
+            Manifest changed on disk — grants stay as approved until you
+            review.
+          </span>
+          <Button variant="secondary" size="sm" onClick={onReapprove}>
+            Review &amp; re-approve
+          </Button>
+        </div>
+      )}
 
       <div className="mb-3 font-code-sm text-code-sm text-on-surface-variant">
         <code className="font-code-sm">{manifest.id}</code> · entry{" "}
