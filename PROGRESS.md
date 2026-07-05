@@ -11,16 +11,39 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-695 Rust tests passing (644 lib + 33 external MCP + 7 signaling + 11
-storage) plus 143 frontend Vitest. Release build clean. Version
+697 Rust tests passing (646 lib + 33 external MCP + 7 signaling + 11
+storage) plus 145 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
 gate**, the **interrupt redesign** (stdin `control_request` cancel +
 `SessionActivity` state machine), the **peer-forward router extraction**
-(`core/router.rs`), the **plugin runtime v1** (2026-07-04), and three
+(`core/router.rs`), the **plugin runtime v1** (2026-07-04), and four
 plugin-runtime workstreams from 2026-07-05 (below): **per-plugin CSP
-override tier**, **spawn_session capability**, and **linked installs**.
+override tier**, **spawn_session capability**, **linked installs**, and
+the **push-event + view-alignment paper-cuts**.
+
+---
+
+## 2026-07-05 — Plugin paper-cuts: bhq:event push tier + agent-aligned views
+
+Fourth and final plugin-runtime workstream. Two small surfaces:
+
+- **`bhq:event` push tier** (two hardcoded topics, no general pub/sub):
+  `plugin_assets_changed` — the existing fs-watcher (same debounce +
+  build-churn filter the A-tab uses) now watches enabled plugins' served
+  dirs and PluginHost forwards the nudge into the mounted iframe, so a
+  linked plugin's shelf UI refreshes on save without a manual reload; no
+  grant, it's the plugin's own directory. `sessions_changed` — rides the
+  `list_sessions` grant off `session:created`/`session:closed`. SDK
+  grows `onEvent(topic, cb)`; hello-plugin demos the sessions refresh.
+- **BREAKING view alignment:** plugin-side `cl_index_search` /
+  `cl_folder_search` rows now match the agent MCP shape exactly —
+  `project` (was `project_id`), internal `id`/`created_at` dropped —
+  via narrow plugin-owned views (the PluginAtomView pattern), leaving
+  the shared UI views untouched. Field names pinned by a contract test;
+  loud breaking note + per-command row schemas in docs/PLUGINS.md;
+  hello-plugin updated. Cognotify unaffected (doesn't request them).
 
 ---
 
