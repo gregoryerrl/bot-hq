@@ -62,26 +62,28 @@ pub fn parse_plugin_request<'a>(
     }
 }
 
-/// Resolve an asset request to an on-disk file + MIME type.
+/// Resolve an asset request against a PRE-RESOLVED serve root.
 ///
-/// `plugins_root` is `<data_dir>/plugins/`; `enabled_ids` is the registry's
-/// enabled-cache snapshot.
-pub fn resolve_plugin_asset(
-    plugins_root: &Path,
-    enabled_ids: &HashSet<String>,
+/// `root` is the caller's per-plugin serve-root lookup (normal installs:
+/// `<data_dir>/plugins/<id>`; linked installs: the user's source directory
+/// — the guards below treat WHATEVER root they're given as the boundary, so
+/// a linked repo gets identical traversal/symlink protection). `None` means
+/// the caller knows no such plugin. `enabled` is the registry's
+/// enabled-cache verdict.
+pub fn resolve_with_root(
+    root: Option<&Path>,
+    enabled: bool,
     plugin_id: &str,
     rel_path: &str,
 ) -> Result<(PathBuf, &'static str), ServeError> {
     if !is_safe_id(plugin_id) {
         return Err(ServeError::BadRequest);
     }
-    let plugin_dir = plugins_root.join(plugin_id);
-    if !enabled_ids.contains(plugin_id) {
-        return if plugin_dir.is_dir() {
-            Err(ServeError::Disabled)
-        } else {
-            Err(ServeError::UnknownPlugin)
-        };
+    let Some(plugin_dir) = root else {
+        return Err(ServeError::UnknownPlugin);
+    };
+    if !enabled {
+        return Err(ServeError::Disabled);
     }
     if rel_path.is_empty() {
         return Err(ServeError::BadRequest);
@@ -95,8 +97,10 @@ pub fn resolve_plugin_asset(
         .join(rel_path)
         .canonicalize()
         .map_err(|_| ServeError::NotFound)?;
-    // Symlinks inside the bundle pointing outside it resolve past `base`
-    // here and get refused — that's the point of canonicalizing both sides.
+    // Symlinks inside the root pointing outside it resolve past `base` here
+    // and get refused — that's the point of canonicalizing both sides. For
+    // linked installs this is the load-bearing boundary: the root lives in
+    // the user's filesystem, and nothing outside it is ever servable.
     if !candidate.starts_with(&base) {
         return Err(ServeError::Traversal);
     }
@@ -104,6 +108,24 @@ pub fn resolve_plugin_asset(
         return Err(ServeError::NotFound);
     }
     Ok((candidate.clone(), mime_for(&candidate)))
+}
+
+/// Normal-mode convenience used by the scheme handler until the serve-root
+/// cache lands (and by tests as the copied-bundle path): root is
+/// `<plugins_root>/<id>` when that directory exists — preserving the
+/// Disabled-vs-Unknown distinction (dir present but not enabled = Disabled).
+pub fn resolve_plugin_asset(
+    plugins_root: &Path,
+    enabled_ids: &HashSet<String>,
+    plugin_id: &str,
+    rel_path: &str,
+) -> Result<(PathBuf, &'static str), ServeError> {
+    if !is_safe_id(plugin_id) {
+        return Err(ServeError::BadRequest);
+    }
+    let plugin_dir = plugins_root.join(plugin_id);
+    let root = plugin_dir.is_dir().then_some(plugin_dir.as_path());
+    resolve_with_root(root, enabled_ids.contains(plugin_id), plugin_id, rel_path)
 }
 
 /// Same shape as manifest id validation (lowercase alnum + `-`), duplicated
@@ -328,6 +350,63 @@ mod tests {
         assert_eq!(mime_for(Path::new("x.woff2")), "font/woff2");
         assert_eq!(mime_for(Path::new("x.weird")), "application/octet-stream");
         assert_eq!(mime_for(Path::new("noext")), "application/octet-stream");
+    }
+
+    /// resolve_with_root treats an ARBITRARY root (a linked repo living
+    /// anywhere in the user's filesystem) as the serve boundary with the
+    /// exact same guards as a copied bundle.
+    #[test]
+    fn linked_root_serves_and_guards_identically() {
+        let tmp = TempDir::new().unwrap();
+        // A "repo" far away from any plugins_root tree.
+        let repo = tmp.path().join("projects").join("cognotify");
+        std::fs::create_dir_all(repo.join("materials")).unwrap();
+        std::fs::write(repo.join("index.html"), "<h1>hi</h1>").unwrap();
+        std::fs::write(repo.join("materials").join("m1.html"), "<p>m</p>").unwrap();
+
+        let (path, mime) =
+            resolve_with_root(Some(&repo), true, "cognotify", "index.html").unwrap();
+        assert!(path.ends_with("index.html"));
+        assert_eq!(mime, "text/html; charset=utf-8");
+        let (_, m) =
+            resolve_with_root(Some(&repo), true, "cognotify", "materials/m1.html").unwrap();
+        assert_eq!(m, "text/html; charset=utf-8");
+
+        // ../ escapes refused at the linked boundary.
+        for bad in ["../secret.txt", "materials/../../cognotify/index.html", "a/../../x"] {
+            assert_eq!(
+                resolve_with_root(Some(&repo), true, "cognotify", bad).unwrap_err(),
+                ServeError::Traversal,
+                "path {bad:?} must be refused at a linked root"
+            );
+        }
+
+        // Unknown vs disabled come from the caller's map/enabled verdicts.
+        assert_eq!(
+            resolve_with_root(None, true, "ghost", "index.html").unwrap_err(),
+            ServeError::UnknownPlugin
+        );
+        assert_eq!(
+            resolve_with_root(Some(&repo), false, "cognotify", "index.html").unwrap_err(),
+            ServeError::Disabled
+        );
+    }
+
+    /// A symlink INSIDE the linked repo pointing OUTSIDE it is refused —
+    /// the repo is the boundary even though it lives outside data_dir.
+    #[cfg(unix)]
+    #[test]
+    fn linked_root_refuses_outward_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let outside = tmp.path().join("host-secret.txt");
+        std::fs::write(&outside, "s3cret").unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("leak.txt")).unwrap();
+        assert_eq!(
+            resolve_with_root(Some(&repo), true, "repo", "leak.txt").unwrap_err(),
+            ServeError::Traversal
+        );
     }
 
     #[test]
