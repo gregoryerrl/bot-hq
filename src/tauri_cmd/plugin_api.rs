@@ -139,6 +139,31 @@ struct PluginAtomView {
     stale: bool,
 }
 
+/// Agent-aligned CL index row for plugins — the SAME trimmed shape the
+/// agent MCP tool returns (signaling/jsonrpc.rs `cl_index_search`), incl.
+/// the `project_id`→`project` rename, so plugin authors and agent docs
+/// describe one contract. Deliberately NOT the UI's `ClIndexEntryView`
+/// (which carries id/project_id/created_at and may grow fields freely).
+#[derive(Debug, Serialize)]
+struct PluginClIndexEntryView {
+    project: String,
+    file_path: String,
+    description: String,
+    tags: Option<String>,
+    updated_at: String,
+}
+
+/// Agent-aligned CL folder row for plugins — mirrors the agent MCP
+/// `cl_folder_search` trim, same rationale as [`PluginClIndexEntryView`].
+#[derive(Debug, Serialize)]
+struct PluginClFolderView {
+    project: String,
+    folder_path: String,
+    description: String,
+    tags: Option<String>,
+    updated_at: String,
+}
+
 /// Catalog dispatch. `core` is `Option` ONLY so unit tests can exercise the
 /// storage/bridge arms without booting a full `CoreAppState` (which needs a
 /// live signaling server); the production shim always passes `Some`.
@@ -197,8 +222,16 @@ pub(crate) async fn dispatch(
             let rows = bridge
                 .cl_index_search(project.as_deref(), query.as_deref())
                 .await?;
-            let out: Vec<crate::tauri_cmd::cl::ClIndexEntryView> =
-                rows.into_iter().map(Into::into).collect();
+            let out: Vec<PluginClIndexEntryView> = rows
+                .into_iter()
+                .map(|r| PluginClIndexEntryView {
+                    project: r.project_id,
+                    file_path: r.file_path,
+                    description: r.description,
+                    tags: r.tags,
+                    updated_at: r.updated_at,
+                })
+                .collect();
             to_json(&out)
         }
         "cl_folder_search" => {
@@ -207,8 +240,16 @@ pub(crate) async fn dispatch(
             let rows = bridge
                 .cl_folder_search(project.as_deref(), query.as_deref())
                 .await?;
-            let out: Vec<crate::tauri_cmd::cl::ClFolderView> =
-                rows.into_iter().map(Into::into).collect();
+            let out: Vec<PluginClFolderView> = rows
+                .into_iter()
+                .map(|r| PluginClFolderView {
+                    project: r.project_id,
+                    folder_path: r.folder_path,
+                    description: r.description,
+                    tags: r.tags,
+                    updated_at: r.updated_at,
+                })
+                .collect();
             to_json(&out)
         }
         "cl_retrieve" => {
@@ -610,6 +651,40 @@ mod tests {
             .granted_caps_for("hello-plugin")
             .unwrap()
             .contains(&"list_sessions".to_string()));
+    }
+
+    /// The plugin CL views must keep the AGENT field names — `project`, not
+    /// the storage/UI `project_id`, and no id/created_at. This is the
+    /// contract test for the 2026-07-05 breaking alignment (PLUGINS.md).
+    #[test]
+    fn plugin_cl_views_use_agent_aligned_field_names() {
+        let entry = serde_json::to_value(PluginClIndexEntryView {
+            project: "p".into(),
+            file_path: "notes.md".into(),
+            description: "d".into(),
+            tags: None,
+            updated_at: "t".into(),
+        })
+        .unwrap();
+        // serde_json's default Map is a BTreeMap → keys arrive sorted.
+        let keys: Vec<&str> = entry.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        assert_eq!(keys, ["description", "file_path", "project", "tags", "updated_at"]);
+        assert!(entry.get("project_id").is_none());
+        assert!(entry.get("id").is_none());
+        assert!(entry.get("created_at").is_none());
+
+        let folder = serde_json::to_value(PluginClFolderView {
+            project: "p".into(),
+            folder_path: "plans".into(),
+            description: "d".into(),
+            tags: None,
+            updated_at: "t".into(),
+        })
+        .unwrap();
+        assert!(folder.get("project").is_some());
+        assert!(folder.get("folder_path").is_some());
+        assert!(folder.get("project_id").is_none());
+        assert!(folder.get("id").is_none());
     }
 
     #[tokio::test]

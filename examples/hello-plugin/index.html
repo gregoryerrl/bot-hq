@@ -50,7 +50,7 @@
     <p id="err" class="error"></p>
 
     <script type="module">
-      import { invoke } from "./bhq-sdk.js";
+      import { invoke, onEvent } from "./bhq-sdk.js";
 
       const $ = (id) => document.getElementById(id);
       const fail = (e) => ($("err").textContent = String(e));
@@ -79,7 +79,7 @@
         $("cl").innerHTML = rows.length
           ? rows
               .slice(0, 15)
-              .map((r) => `<li><code>${r.project_id}</code>/${r.file_path} <span class="muted">— ${r.description ?? ""}</span></li>`)
+              .map((r) => `<li><code>${r.project}</code>/${r.file_path} <span class="muted">— ${r.description ?? ""}</span></li>`)
               .join("")
           : `<li class="muted">empty Context Library index</li>`;
       }
@@ -89,6 +89,10 @@
       refreshCount(false).catch(fail);
       loadSessions().catch(fail);
       loadCl().catch(fail);
+
+      // Push tier: the host tells us when the session list changed (rides
+      // our list_sessions grant) — no polling needed.
+      onEvent("sessions_changed", () => loadSessions().catch(fail));
     </script>
   </body>
 </html>
