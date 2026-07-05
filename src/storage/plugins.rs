@@ -7,6 +7,10 @@ impl Storage {
     /// over an existing id overwrites the manifest + dir_path; the `enabled`
     /// column resets to its column default (1) which matches user intent —
     /// reinstalling a plugin re-enables it.
+    ///
+    /// `csp_json` is the consent-frozen CSP grant (canonical serialization
+    /// of the approved `csp_extra_origins`, or `None` when the manifest
+    /// requested none) — the ONLY source serving reads CSP extras from.
     pub async fn insert_plugin(
         &self,
         id: &str,
@@ -14,16 +18,18 @@ impl Storage {
         version: &str,
         manifest_json: &str,
         dir_path: &str,
+        csp_json: Option<&str>,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT OR REPLACE INTO plugins (id, name, version, manifest_json, dir_path, installed_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO plugins (id, name, version, manifest_json, dir_path, csp_json, installed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(name)
         .bind(version)
         .bind(manifest_json)
         .bind(dir_path)
+        .bind(csp_json)
         .bind(now_utc())
         .execute(&self.pool)
         .await
@@ -52,7 +58,7 @@ impl Storage {
 
     pub async fn list_plugins(&self) -> Result<Vec<Plugin>> {
         let rows = sqlx::query_as::<_, Plugin>(
-            "SELECT id, name, version, enabled, manifest_json, dir_path, installed_at \
+            "SELECT id, name, version, enabled, manifest_json, dir_path, csp_json, installed_at \
              FROM plugins ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -73,7 +79,7 @@ mod plugin_tests {
     #[tokio::test]
     async fn insert_then_list_roundtrip() {
         let s = store().await;
-        s.insert_plugin("p1", "Notes", "1.0.0", "{\"id\":\"p1\"}", "/tmp/p1")
+        s.insert_plugin("p1", "Notes", "1.0.0", "{\"id\":\"p1\"}", "/tmp/p1", None)
             .await
             .unwrap();
         let rows = s.list_plugins().await.unwrap();
@@ -91,10 +97,10 @@ mod plugin_tests {
     #[tokio::test]
     async fn insert_or_replace_overwrites_existing_id() {
         let s = store().await;
-        s.insert_plugin("p1", "Notes", "1.0.0", "{}", "/tmp/old")
+        s.insert_plugin("p1", "Notes", "1.0.0", "{}", "/tmp/old", None)
             .await
             .unwrap();
-        s.insert_plugin("p1", "Notes Pro", "2.0.0", "{\"x\":1}", "/tmp/new")
+        s.insert_plugin("p1", "Notes Pro", "2.0.0", "{\"x\":1}", "/tmp/new", None)
             .await
             .unwrap();
         let rows = s.list_plugins().await.unwrap();
@@ -107,7 +113,7 @@ mod plugin_tests {
     #[tokio::test]
     async fn set_enabled_toggles_flag() {
         let s = store().await;
-        s.insert_plugin("p1", "A", "0.1", "{}", "/x").await.unwrap();
+        s.insert_plugin("p1", "A", "0.1", "{}", "/x", None).await.unwrap();
         s.set_plugin_enabled("p1", false).await.unwrap();
         let rows = s.list_plugins().await.unwrap();
         assert!(!rows[0].enabled);
@@ -119,8 +125,8 @@ mod plugin_tests {
     #[tokio::test]
     async fn delete_removes_row() {
         let s = store().await;
-        s.insert_plugin("p1", "A", "0.1", "{}", "/x").await.unwrap();
-        s.insert_plugin("p2", "B", "0.2", "{}", "/y").await.unwrap();
+        s.insert_plugin("p1", "A", "0.1", "{}", "/x", None).await.unwrap();
+        s.insert_plugin("p2", "B", "0.2", "{}", "/y", None).await.unwrap();
         s.delete_plugin("p1").await.unwrap();
         let rows = s.list_plugins().await.unwrap();
         assert_eq!(rows.len(), 1);
@@ -130,12 +136,41 @@ mod plugin_tests {
     #[tokio::test]
     async fn list_orders_by_id_asc() {
         let s = store().await;
-        s.insert_plugin("z", "z", "0", "{}", "/z").await.unwrap();
-        s.insert_plugin("a", "a", "0", "{}", "/a").await.unwrap();
-        s.insert_plugin("m", "m", "0", "{}", "/m").await.unwrap();
+        s.insert_plugin("z", "z", "0", "{}", "/z", None).await.unwrap();
+        s.insert_plugin("a", "a", "0", "{}", "/a", None).await.unwrap();
+        s.insert_plugin("m", "m", "0", "{}", "/m", None).await.unwrap();
         let rows = s.list_plugins().await.unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "m", "z"]);
+    }
+
+    #[tokio::test]
+    async fn csp_json_roundtrips_and_defaults_null() {
+        let s = store().await;
+        s.insert_plugin("plain", "P", "0.1", "{}", "/p", None).await.unwrap();
+        s.insert_plugin(
+            "cdn",
+            "C",
+            "0.1",
+            "{}",
+            "/c",
+            Some(r#"{"script-src":["https://cdn.jsdelivr.net"]}"#),
+        )
+        .await
+        .unwrap();
+        let rows = s.list_plugins().await.unwrap();
+        let plain = rows.iter().find(|r| r.id == "plain").unwrap();
+        let cdn = rows.iter().find(|r| r.id == "cdn").unwrap();
+        assert_eq!(plain.csp_json, None);
+        assert_eq!(
+            cdn.csp_json.as_deref(),
+            Some(r#"{"script-src":["https://cdn.jsdelivr.net"]}"#)
+        );
+        // Re-install WITHOUT the grant clears it (INSERT OR REPLACE).
+        s.insert_plugin("cdn", "C", "0.2", "{}", "/c", None).await.unwrap();
+        let rows = s.list_plugins().await.unwrap();
+        let cdn = rows.iter().find(|r| r.id == "cdn").unwrap();
+        assert_eq!(cdn.csp_json, None);
     }
 
     #[tokio::test]

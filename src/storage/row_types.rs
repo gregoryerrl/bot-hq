@@ -411,6 +411,10 @@ pub struct Plugin {
     pub enabled: bool,
     pub manifest_json: String,
     pub dir_path: String,
+    /// Consent-frozen CSP grant (serialized `CspExtraOrigins` approved at
+    /// install). `None` = strict default CSP — including every install made
+    /// by a pre-CSP host, which stored the manifest but never consented.
+    pub csp_json: Option<String>,
     pub installed_at: String,
 }
 

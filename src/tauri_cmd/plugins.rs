@@ -250,6 +250,7 @@ pub(crate) async fn install_plugin_inner(
             &manifest.version,
             &manifest_json,
             &plugin_dir.display().to_string(),
+            None,
         )
         .await
         .map_err(anyhow_to_app)?;

@@ -39,7 +39,7 @@ mod plugin_kv_tests {
 
     async fn store_with_plugin(id: &str) -> Storage {
         let s = Storage::memory().await.unwrap();
-        s.insert_plugin(id, "Test", "0.1.0", "{}", "/tmp/x").await.unwrap();
+        s.insert_plugin(id, "Test", "0.1.0", "{}", "/tmp/x", None).await.unwrap();
         s
     }
 
@@ -67,7 +67,7 @@ mod plugin_kv_tests {
     #[tokio::test]
     async fn keys_are_namespaced_per_plugin() {
         let s = store_with_plugin("p1").await;
-        s.insert_plugin("p2", "Other", "0.1.0", "{}", "/tmp/y").await.unwrap();
+        s.insert_plugin("p2", "Other", "0.1.0", "{}", "/tmp/y", None).await.unwrap();
         s.plugin_kv_set("p1", "k", "one").await.unwrap();
         s.plugin_kv_set("p2", "k", "two").await.unwrap();
         assert_eq!(s.plugin_kv_get("p1", "k").await.unwrap(), Some("one".into()));

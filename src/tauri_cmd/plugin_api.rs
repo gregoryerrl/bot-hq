@@ -383,8 +383,8 @@ mod tests {
     async fn dispatch_kv_roundtrip_is_plugin_namespaced() {
         let tmp = TempDir::new().unwrap();
         let storage = Storage::memory().await.unwrap();
-        storage.insert_plugin("deck", "D", "0.1", "{}", "/x").await.unwrap();
-        storage.insert_plugin("other", "O", "0.1", "{}", "/y").await.unwrap();
+        storage.insert_plugin("deck", "D", "0.1", "{}", "/x", None).await.unwrap();
+        storage.insert_plugin("other", "O", "0.1", "{}", "/y", None).await.unwrap();
         let bridge = test_bridge(&tmp, &storage).await;
 
         let set_args: Value = serde_json::from_str(r#"{"key":"lens","value":"graph"}"#).unwrap();
@@ -409,7 +409,7 @@ mod tests {
     async fn dispatch_kv_set_enforces_size_caps() {
         let tmp = TempDir::new().unwrap();
         let storage = Storage::memory().await.unwrap();
-        storage.insert_plugin("deck", "D", "0.1", "{}", "/x").await.unwrap();
+        storage.insert_plugin("deck", "D", "0.1", "{}", "/x", None).await.unwrap();
         let bridge = test_bridge(&tmp, &storage).await;
 
         let long_key = "k".repeat(MAX_KV_KEY_BYTES + 1);
