@@ -137,12 +137,13 @@ pub struct PluginManifestPreview {
 pub async fn preview_plugin_manifest(
     source: String,
 ) -> Result<PluginManifestPreview, AppError> {
-    let (manifest, _json) = if is_url(&source) {
+    let (manifest, raw_json) = if is_url(&source) {
         fetch_manifest_from_url(&source).await?
     } else {
         read_manifest_from_dir(Path::new(&source))?
     };
     validate_requested_capabilities(&manifest)?;
+    validate_csp_origins(&raw_json)?;
     let capabilities = manifest
         .requested_capabilities
         .iter()
@@ -175,6 +176,15 @@ fn validate_requested_capabilities(manifest: &PluginManifest) -> Result<(), AppE
         )));
     }
     Ok(())
+}
+
+/// CSP extra-origin content rules run against the RAW manifest JSON (the
+/// struct parse tolerates unknown directive keys so old installs keep
+/// loading; preview/install must reject them). Preview/install-time only —
+/// the same consent-screen-can't-describe-it logic as unknown capabilities.
+fn validate_csp_origins(raw_manifest_json: &str) -> Result<(), AppError> {
+    crate::plugins::manifest::validate_csp_extra_origins(raw_manifest_json)
+        .map_err(|e| AppError::Validation(e.to_string()))
 }
 
 /// Heartbeat feed, called by the frontend PluginHost's 5s ping loop just
@@ -217,6 +227,18 @@ pub(crate) async fn install_plugin_inner(
     };
 
     validate_requested_capabilities(&manifest)?;
+    validate_csp_origins(&manifest_json)?;
+
+    // The consent-frozen CSP grant: canonical serialization of the APPROVED
+    // field (None when absent or all-empty). Serving reads this column via
+    // the registry cache — never the manifest on disk.
+    let granted_csp = manifest.csp_extra_origins.as_ref().filter(|c| !c.is_empty());
+    let csp_json = granted_csp
+        .map(|c| {
+            serde_json::to_string(c)
+                .map_err(|e| AppError::Internal(format!("serializing csp grant: {e}")))
+        })
+        .transpose()?;
 
     let plugin_dir = registry.data_dir.join("plugins").join(&manifest.id);
     if plugin_dir.exists() {
@@ -250,7 +272,7 @@ pub(crate) async fn install_plugin_inner(
             &manifest.version,
             &manifest_json,
             &plugin_dir.display().to_string(),
-            None,
+            csp_json.as_deref(),
         )
         .await
         .map_err(anyhow_to_app)?;
@@ -258,6 +280,10 @@ pub(crate) async fn install_plugin_inner(
     registry.reload().map_err(anyhow_to_app)?;
     registry.heartbeat.register(&manifest.id);
     registry.set_enabled(&manifest.id, true);
+    registry.set_csp_header(
+        &manifest.id,
+        granted_csp.map(|c| crate::plugins::serve::build_plugin_csp(Some(c))),
+    );
 
     let row = storage
         .list_plugins()
@@ -334,6 +360,7 @@ async fn uninstall_plugin_inner(
 
     registry.heartbeat.unregister(plugin_id);
     registry.set_enabled(plugin_id, false);
+    registry.set_csp_header(plugin_id, None);
     registry.reload().map_err(anyhow_to_app)?;
     Ok(())
 }
@@ -621,6 +648,126 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
         assert!(storage.list_plugins().await.unwrap().is_empty());
+    }
+
+    fn write_plugin_source_with_csp(root: &Path, id: &str, csp_block: &str) -> PathBuf {
+        let dir = root.join(format!("src-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = format!(
+            r#"{{
+                "id": "{id}",
+                "name": "Plugin {id}",
+                "version": "0.1.0",
+                "entry": "index.html",
+                "requested_capabilities": [],
+                "csp_extra_origins": {csp_block}
+            }}"#
+        );
+        std::fs::write(dir.join("manifest.json"), manifest).unwrap();
+        std::fs::write(dir.join("index.html"), b"<!doctype html><h1>hi</h1>").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn install_with_csp_grant_freezes_column_and_caches_header() {
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+        let src = write_plugin_source_with_csp(
+            tmp.path(),
+            "cdn",
+            r#"{ "script-src": ["https://cdn.jsdelivr.net"], "font-src": ["https://fonts.gstatic.com"] }"#,
+        );
+
+        install_plugin_inner(&storage, &registry, &src.display().to_string())
+            .await
+            .unwrap();
+
+        // Grant frozen into the column, canonically serialized.
+        let row = storage
+            .list_plugins()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == "cdn")
+            .unwrap();
+        let stored: crate::plugins::CspExtraOrigins =
+            serde_json::from_str(row.csp_json.as_deref().unwrap()).unwrap();
+        assert_eq!(stored.script_src, vec!["https://cdn.jsdelivr.net"]);
+        assert_eq!(stored.font_src, vec!["https://fonts.gstatic.com"]);
+
+        // Header cache prebuilt: defaults intact + granted origins present.
+        let header = registry.csp_header_for("cdn").unwrap();
+        assert_eq!(
+            header,
+            crate::plugins::serve::build_plugin_csp(Some(&stored))
+        );
+        assert!(header.contains("script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net"));
+
+        // Uninstall clears the cache entry.
+        uninstall_plugin_inner(&storage, &registry, "cdn").await.unwrap();
+        assert_eq!(registry.csp_header_for("cdn"), None);
+    }
+
+    #[tokio::test]
+    async fn install_without_csp_field_leaves_default_header_path() {
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+        let src = write_plugin_source(tmp.path(), "plain", "0.1.0");
+        install_plugin_inner(&storage, &registry, &src.display().to_string())
+            .await
+            .unwrap();
+        let row = storage.list_plugins().await.unwrap().pop().unwrap();
+        assert_eq!(row.csp_json, None);
+        assert_eq!(registry.csp_header_for("plain"), None);
+    }
+
+    #[tokio::test]
+    async fn install_and_preview_reject_forbidden_csp_origins() {
+        let tmp = TempDir::new().unwrap();
+        for (name, bad_block) in [
+            ("wild", r#"{ "script-src": ["https://*.example.com"] }"#),
+            ("scheme", r#"{ "script-src": ["https:"] }"#),
+            ("keyword", r#"{ "script-src": ["'unsafe-eval'"] }"#),
+            ("datauri", r#"{ "img-src": ["data:"] }"#),
+            ("http", r#"{ "script-src": ["http://x.com"] }"#),
+            ("directive", r#"{ "connect-src": ["https://x.com"] }"#),
+        ] {
+            let src = write_plugin_source_with_csp(tmp.path(), name, bad_block);
+
+            let err = preview_plugin_manifest(src.display().to_string())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AppError::Validation(_)), "{name}: got {err:?}");
+
+            let (storage, registry) = fresh(&tmp).await;
+            let err = install_plugin_inner(&storage, &registry, &src.display().to_string())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AppError::Validation(_)), "{name}: got {err:?}");
+            assert!(storage.list_plugins().await.unwrap().is_empty());
+            assert_eq!(registry.csp_header_for(name), None);
+            assert!(!registry.data_dir.join("plugins").join(name).exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_carries_csp_origins_for_consent_screen() {
+        let tmp = TempDir::new().unwrap();
+        let src = write_plugin_source_with_csp(
+            tmp.path(),
+            "cdn",
+            r#"{ "script-src": ["https://cdn.jsdelivr.net", "https://unpkg.com"] }"#,
+        );
+        let preview = preview_plugin_manifest(src.display().to_string())
+            .await
+            .unwrap();
+        let csp = preview.manifest.csp_extra_origins.unwrap();
+        assert_eq!(
+            csp.script_src,
+            vec!["https://cdn.jsdelivr.net", "https://unpkg.com"]
+        );
+        // Preview is still read-only.
+        assert!(!tmp.path().join("plugins").exists());
     }
 
     #[test]

@@ -270,6 +270,25 @@ fn main() -> Result<()> {
     runtime.block_on(async {
         match storage_arc.list_plugins().await {
             Ok(rows) => {
+                // CSP grants: prebuild per-plugin headers from the consent-
+                // frozen csp_json column — ALL installed rows, not just
+                // enabled (enable/disable never re-reads the DB). A row
+                // without the column stays absent → default PLUGIN_CSP.
+                for row in &rows {
+                    if let Some(csp_json) = &row.csp_json {
+                        match serde_json::from_str::<bot_hq::plugins::CspExtraOrigins>(csp_json) {
+                            Ok(extra) => registry.set_csp_header(
+                                &row.id,
+                                Some(bot_hq::plugins::serve::build_plugin_csp(Some(&extra))),
+                            ),
+                            Err(e) => tracing::warn!(
+                                ?e,
+                                plugin_id = %row.id,
+                                "invalid csp_json grant; serving default CSP"
+                            ),
+                        }
+                    }
+                }
                 let enabled: std::collections::HashSet<String> = rows
                     .into_iter()
                     .filter(|r| r.enabled)
@@ -319,17 +338,25 @@ fn main() -> Result<()> {
                             id,
                             rel,
                         )
+                        .map(|resolved| (id.to_string(), resolved))
                     })
-                    .and_then(|(path, mime)| {
+                    .and_then(|(id, (path, mime))| {
                         std::fs::read(&path)
-                            .map(|body| (body, mime))
+                            .map(|body| (id, body, mime))
                             .map_err(|_| ServeError::NotFound)
                     });
                 match outcome {
-                    Ok((body, mime)) => tauri::http::Response::builder()
+                    Ok((plugin_id, body, mime)) => tauri::http::Response::builder()
                         .status(200)
                         .header("Content-Type", mime)
-                        .header("Content-Security-Policy", serve::PLUGIN_CSP)
+                        // The consent-frozen per-plugin header, or the
+                        // strict default for plugins without a grant.
+                        .header(
+                            "Content-Security-Policy",
+                            registry
+                                .csp_header_for(&plugin_id)
+                                .unwrap_or_else(|| serve::PLUGIN_CSP.to_string()),
+                        )
                         .header("Cache-Control", "no-store")
                         .body(body)
                         .unwrap_or_else(|_| plugin_asset_error(500)),

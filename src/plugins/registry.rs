@@ -3,7 +3,7 @@
 
 use super::{Heartbeat, Loader};
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +21,13 @@ pub struct PluginRegistry {
     /// Ids of ENABLED plugins. Seeded from storage at boot; kept in sync by
     /// the install / enable / disable / uninstall commands.
     enabled: Mutex<HashSet<String>>,
+    /// Prebuilt CSP headers for plugins WITH a consent-frozen extra-origins
+    /// grant (`plugins.csp_json`); absent = serve the default `PLUGIN_CSP`.
+    /// Same sync-cache pattern as `enabled` — the `bhq-plugin://` scheme
+    /// handler can't await the DB. Seeded from storage at boot, set on
+    /// install, cleared on uninstall (enable/disable doesn't touch it:
+    /// disabled plugins aren't served at all).
+    csp_headers: Mutex<HashMap<String, String>>,
 }
 
 impl PluginRegistry {
@@ -31,6 +38,7 @@ impl PluginRegistry {
             heartbeat: Arc::new(Heartbeat::new()),
             data_dir,
             enabled: Mutex::new(HashSet::new()),
+            csp_headers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -68,6 +76,27 @@ impl PluginRegistry {
     pub fn enabled_ids(&self) -> HashSet<String> {
         let g = self.enabled.lock().unwrap_or_else(|p| p.into_inner());
         g.clone()
+    }
+
+    /// Cache (install/boot seed) or clear (uninstall / no grant) one
+    /// plugin's prebuilt CSP header.
+    pub fn set_csp_header(&self, plugin_id: &str, header: Option<String>) {
+        let mut g = self.csp_headers.lock().unwrap_or_else(|p| p.into_inner());
+        match header {
+            Some(h) => {
+                g.insert(plugin_id.to_string(), h);
+            }
+            None => {
+                g.remove(plugin_id);
+            }
+        }
+    }
+
+    /// The scheme handler's per-request lookup. `None` = no extra-origins
+    /// grant — serve the default `PLUGIN_CSP`.
+    pub fn csp_header_for(&self, plugin_id: &str) -> Option<String> {
+        let g = self.csp_headers.lock().unwrap_or_else(|p| p.into_inner());
+        g.get(plugin_id).cloned()
     }
 }
 
@@ -126,6 +155,21 @@ mod tests {
         reg.set_enabled_ids(["a".to_string(), "b".to_string()].into_iter().collect());
         assert!(reg.is_enabled("a") && reg.is_enabled("b"));
         assert_eq!(reg.enabled_ids().len(), 2);
+    }
+
+    #[test]
+    fn csp_header_cache_sets_clears_and_misses() {
+        let tmp = TempDir::new().unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        assert_eq!(reg.csp_header_for("notes"), None);
+
+        reg.set_csp_header("notes", Some("default-src 'self'".to_string()));
+        assert_eq!(reg.csp_header_for("notes").as_deref(), Some("default-src 'self'"));
+        // Other plugins are unaffected.
+        assert_eq!(reg.csp_header_for("other"), None);
+
+        reg.set_csp_header("notes", None);
+        assert_eq!(reg.csp_header_for("notes"), None);
     }
 
     #[test]
