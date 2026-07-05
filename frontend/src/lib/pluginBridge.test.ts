@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   classifyPluginMessage,
   detectSchemeForm,
   expectedOrigins,
   parseSpawnRequest,
   pluginEntryUrl,
+  postPluginEvent,
   routeSpawnInvoke,
 } from "./pluginBridge";
 
@@ -146,6 +147,25 @@ describe("routeSpawnInvoke", () => {
         title: undefined,
       });
     }
+  });
+});
+
+describe("postPluginEvent", () => {
+  it("posts the exact bhq:event shape the SDK dispatches on", () => {
+    const postMessage = vi.fn();
+    const iframe = {
+      contentWindow: { postMessage },
+    } as unknown as HTMLIFrameElement;
+    postPluginEvent(iframe, "plugin_assets_changed");
+    expect(postMessage).toHaveBeenCalledWith(
+      { type: "bhq:event", topic: "plugin_assets_changed" },
+      "*",
+    );
+  });
+
+  it("tolerates a torn-down iframe (no contentWindow)", () => {
+    const iframe = { contentWindow: null } as unknown as HTMLIFrameElement;
+    expect(() => postPluginEvent(iframe, "sessions_changed")).not.toThrow();
   });
 });
 

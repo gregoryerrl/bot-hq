@@ -22,7 +22,7 @@
 use crate::paths::IGNORED_BUILD_DIRS;
 use crate::signaling::SignalingBridge;
 use crate::storage::Project;
-use crate::tauri_events::types::{ClChangedEvent, WorktreeChangedEvent};
+use crate::tauri_events::types::{ClChangedEvent, PluginAssetsChangedEvent, WorktreeChangedEvent};
 use notify_debouncer_mini::notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use serde_json::Value;
@@ -44,10 +44,13 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 // [`is_ignored_component`], so they're not in that list.)
 
 /// Command into the watcher task. Lets the session spawn/close paths register
-/// and unregister working repos for live A-tab diffs.
+/// and unregister working repos for live A-tab diffs, and the plugin
+/// lifecycle register served dirs for `plugin:assets_changed`.
 enum WatchCmd {
     AddRepo { session_id: String, path: PathBuf },
     RemoveRepo { session_id: String },
+    AddPluginDir { plugin_id: String, path: PathBuf },
+    RemovePluginDir { plugin_id: String },
 }
 
 /// Handle to the running filesystem watcher, stored on `AppState`. Sending a
@@ -69,6 +72,21 @@ impl WatcherHandle {
     pub fn remove_repo(&self, session_id: &str) {
         let _ = self.cmd_tx.send(WatchCmd::RemoveRepo {
             session_id: session_id.to_string(),
+        });
+    }
+
+    /// Start live-watching an enabled plugin's served dir (install/enable).
+    pub fn add_plugin_dir(&self, plugin_id: &str, path: PathBuf) {
+        let _ = self.cmd_tx.send(WatchCmd::AddPluginDir {
+            plugin_id: plugin_id.to_string(),
+            path,
+        });
+    }
+
+    /// Stop watching a plugin's served dir (disable/uninstall).
+    pub fn remove_plugin_dir(&self, plugin_id: &str) {
+        let _ = self.cmd_tx.send(WatchCmd::RemovePluginDir {
+            plugin_id: plugin_id.to_string(),
         });
     }
 }
@@ -107,6 +125,8 @@ where
         let mut debouncer = debouncer;
         // Watched session repos: repo root → session_id.
         let mut repos: HashMap<PathBuf, String> = HashMap::new();
+        // Watched plugin served dirs: dir root → plugin_id.
+        let mut plugin_dirs: HashMap<PathBuf, String> = HashMap::new();
         loop {
             tokio::select! {
                 Some(cmd) = cmd_rx.recv() => match cmd {
@@ -129,6 +149,27 @@ where
                         for p in gone {
                             let _ = debouncer.watcher().unwatch(&p);
                             repos.remove(&p);
+                        }
+                    }
+                    WatchCmd::AddPluginDir { plugin_id, path } => {
+                        match debouncer.watcher().watch(&path, RecursiveMode::Recursive) {
+                            Ok(()) => {
+                                plugin_dirs.insert(path, plugin_id);
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = ?e, ?path, "fs watcher: failed to watch plugin dir");
+                            }
+                        }
+                    }
+                    WatchCmd::RemovePluginDir { plugin_id } => {
+                        let gone: Vec<PathBuf> = plugin_dirs
+                            .iter()
+                            .filter(|(_, pid)| **pid == plugin_id)
+                            .map(|(p, _)| p.clone())
+                            .collect();
+                        for p in gone {
+                            let _ = debouncer.watcher().unwatch(&p);
+                            plugin_dirs.remove(&p);
                         }
                     }
                 },
@@ -160,6 +201,20 @@ where
                         emit(
                             WorktreeChangedEvent::EVENT_NAME,
                             serde_json::to_value(WorktreeChangedEvent { session_id })
+                                .unwrap_or(Value::Null),
+                        );
+                    }
+                    // Plugin served dirs → tell the mounted panel its own
+                    // content changed (same churn filter as session repos —
+                    // linked repos see cargo/npm build noise).
+                    let changed_plugins: BTreeSet<String> = batch
+                        .iter()
+                        .filter_map(|p| plugin_for_path(p, &plugin_dirs))
+                        .collect();
+                    for plugin_id in changed_plugins {
+                        emit(
+                            PluginAssetsChangedEvent::EVENT_NAME,
+                            serde_json::to_value(PluginAssetsChangedEvent { plugin_id })
                                 .unwrap_or(Value::Null),
                         );
                     }
@@ -214,6 +269,24 @@ fn session_for_path(path: &Path, repos: &HashMap<PathBuf, String>) -> Option<Str
     None
 }
 
+/// Map a changed path under a watched plugin served dir back to its
+/// plugin_id, with the same build/VCS churn filter as session repos (linked
+/// plugin dirs are user repos — `cargo build` noise must not spam reloads).
+fn plugin_for_path(path: &Path, plugin_dirs: &HashMap<PathBuf, String>) -> Option<String> {
+    for (root, plugin_id) in plugin_dirs {
+        if let Ok(rel) = path.strip_prefix(root) {
+            if rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::Normal(n) if is_ignored_component(n)))
+            {
+                return None;
+            }
+            return Some(plugin_id.clone());
+        }
+    }
+    None
+}
+
 /// A path component to ignore: any hidden (`.`-prefixed) name — covers `.git`,
 /// `.vite`, `.next`, `.idea`, `.turbo`, editor temp dirs — or a known build dir.
 fn is_ignored_component(name: &OsStr) -> bool {
@@ -262,6 +335,38 @@ mod tests {
             None
         );
         assert_eq!(scope_for_path(&cl().join(".DS_Store"), &cl()), None);
+    }
+
+    #[test]
+    fn plugin_path_maps_to_plugin_and_filters_churn() {
+        let mut dirs = HashMap::new();
+        dirs.insert(PathBuf::from("/home/me/cognotify"), "cognotify".to_string());
+        dirs.insert(PathBuf::from("/data/plugins/hello"), "hello".to_string());
+
+        // Files inside a watched dir map to their plugin.
+        assert_eq!(
+            plugin_for_path(Path::new("/home/me/cognotify/materials/m1.html"), &dirs),
+            Some("cognotify".to_string())
+        );
+        assert_eq!(
+            plugin_for_path(Path::new("/data/plugins/hello/index.html"), &dirs),
+            Some("hello".to_string())
+        );
+        // Build/VCS churn in a LINKED repo is filtered.
+        assert_eq!(
+            plugin_for_path(Path::new("/home/me/cognotify/target/debug/x"), &dirs),
+            None
+        );
+        assert_eq!(
+            plugin_for_path(Path::new("/home/me/cognotify/.git/index"), &dirs),
+            None
+        );
+        assert_eq!(
+            plugin_for_path(Path::new("/home/me/cognotify/node_modules/x/y.js"), &dirs),
+            None
+        );
+        // Unwatched paths map to nothing.
+        assert_eq!(plugin_for_path(Path::new("/somewhere/else.html"), &dirs), None);
     }
 
     #[test]

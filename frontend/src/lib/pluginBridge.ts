@@ -92,6 +92,21 @@ export function parseSpawnRequest(args: unknown): SpawnRequest {
   };
 }
 
+/** The two host→plugin push topics (v1 — hardcoded, no general pub/sub). */
+export type PluginEventTopic = "plugin_assets_changed" | "sessions_changed";
+
+/**
+ * Push a `bhq:event` into a plugin iframe. Same "*" targetOrigin rationale
+ * as replies: nothing secret rides an event, and opaque origins can't be
+ * named. The SDK's `onEvent` dispatches on this exact shape.
+ */
+export function postPluginEvent(
+  iframe: HTMLIFrameElement,
+  topic: PluginEventTopic,
+): void {
+  iframe.contentWindow?.postMessage({ type: "bhq:event", topic }, "*");
+}
+
 export type SpawnRouting =
   | { action: "forward" }
   | { action: "confirm"; req: SpawnRequest }

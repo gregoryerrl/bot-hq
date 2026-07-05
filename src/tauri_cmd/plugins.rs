@@ -7,9 +7,11 @@
 //! read). Each command is a thin shim over an `_inner` helper so the
 //! logic is testable without a Tauri `State` wrapper.
 
+use crate::core::AppState as CoreAppState;
 use crate::plugins::{Heartbeat, PluginManifest, PluginRegistry, PluginStatus};
 use crate::storage::{Plugin, Storage};
 use crate::tauri_cmd::error::AppError;
+use crate::tauri_events::WatcherHandle;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::Path;
@@ -71,10 +73,15 @@ impl InstalledPluginView {
 pub async fn install_plugin(
     storage: tauri::State<'_, Arc<Storage>>,
     registry: tauri::State<'_, Arc<PluginRegistry>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
     source: String,
     linked: bool,
 ) -> Result<InstalledPluginView, AppError> {
-    install_plugin_inner(&storage, &registry, &source, linked).await
+    let view = install_plugin_inner(&storage, &registry, &source, linked).await?;
+    if let (Some(w), Some(root)) = (core.fs_watcher.get(), registry.serve_root_for(&view.id)) {
+        w.add_plugin_dir(&view.id, root);
+    }
+    Ok(view)
 }
 
 /// Re-consent a LINKED plugin whose source manifest drifted from the stored
@@ -110,9 +117,11 @@ pub async fn enable_plugin(
     app: tauri::AppHandle,
     storage: tauri::State<'_, Arc<Storage>>,
     registry: tauri::State<'_, Arc<PluginRegistry>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
     plugin_id: String,
 ) -> Result<(), AppError> {
     set_enabled_inner(&storage, &registry, &plugin_id, true).await?;
+    watch_plugin_dir(core.fs_watcher.get(), &registry, &plugin_id, true);
     emit_state_changed(&app, &plugin_id, true);
     Ok(())
 }
@@ -123,11 +132,31 @@ pub async fn disable_plugin(
     app: tauri::AppHandle,
     storage: tauri::State<'_, Arc<Storage>>,
     registry: tauri::State<'_, Arc<PluginRegistry>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
     plugin_id: String,
 ) -> Result<(), AppError> {
     set_enabled_inner(&storage, &registry, &plugin_id, false).await?;
+    watch_plugin_dir(core.fs_watcher.get(), &registry, &plugin_id, false);
     emit_state_changed(&app, &plugin_id, false);
     Ok(())
+}
+
+/// Keep the fs-watcher's plugin watch-set in step with the enabled set —
+/// `plugin:assets_changed` only fires for dirs that are actually served.
+fn watch_plugin_dir(
+    watcher: Option<&WatcherHandle>,
+    registry: &PluginRegistry,
+    plugin_id: &str,
+    enabled: bool,
+) {
+    let Some(w) = watcher else { return };
+    if enabled {
+        if let Some(root) = registry.serve_root_for(plugin_id) {
+            w.add_plugin_dir(plugin_id, root);
+        }
+    } else {
+        w.remove_plugin_dir(plugin_id);
+    }
 }
 
 #[tauri::command]
@@ -136,9 +165,13 @@ pub async fn uninstall_plugin(
     app: tauri::AppHandle,
     storage: tauri::State<'_, Arc<Storage>>,
     registry: tauri::State<'_, Arc<PluginRegistry>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
     plugin_id: String,
 ) -> Result<(), AppError> {
     uninstall_plugin_inner(&storage, &registry, &plugin_id).await?;
+    if let Some(w) = core.fs_watcher.get() {
+        w.remove_plugin_dir(&plugin_id);
+    }
     if let Err(e) = app.emit(
         crate::tauri_events::types::PLUGIN_UNINSTALLED,
         serde_json::json!({ "plugin_id": plugin_id }),

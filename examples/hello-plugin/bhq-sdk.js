@@ -10,6 +10,11 @@
  *     manifest's requested_capabilities AND in the host catalog — the host
  *     enforces both in Rust; an ungranted call rejects.
  *
+ *   BHQ.onEvent(topic, cb) -> unsubscribe()
+ *     Subscribe to host push events. v1 topics: "plugin_assets_changed"
+ *     (a file in YOUR served directory changed — refresh your content) and
+ *     "sessions_changed" (fires only if you hold the list_sessions grant).
+ *
  *   BHQ.nonce
  *     The mount nonce the host embedded in your URL (?bhq=…). The SDK
  *     attaches it to every message automatically; exposed for debugging.
@@ -18,9 +23,10 @@
  * plugin stops ponging (crashed tab, infinite loop), the host tears the
  * iframe down and offers the user a Reload.
  *
- * Message contract (all messages carry the mount nonce):
+ * Message contract (plugin->host messages carry the mount nonce):
  *   plugin -> host: { type: "bhq:invoke", id, cmd, args?, nonce }
  *   host -> plugin: { type: "bhq:result", id, ok, data | error }
+ *   host -> plugin: { type: "bhq:event", topic }
  *   host -> plugin: { type: "bhq:ping" }
  *   plugin -> host: { type: "bhq:pong", nonce }
  *
@@ -35,6 +41,7 @@ const NONCE = new URLSearchParams(window.location.search).get("bhq") ?? "";
 
 let seq = 0;
 const pending = new Map();
+const eventSubs = new Map(); // topic -> Set<cb>
 
 window.addEventListener("message", (event) => {
   const msg = event.data;
@@ -43,6 +50,17 @@ window.addEventListener("message", (event) => {
   if (msg.type === "bhq:ping") {
     // Heartbeat: answer immediately so the host knows we're alive.
     window.parent.postMessage({ type: "bhq:pong", nonce: NONCE }, "*");
+    return;
+  }
+
+  if (msg.type === "bhq:event" && typeof msg.topic === "string") {
+    for (const cb of eventSubs.get(msg.topic) ?? []) {
+      try {
+        cb();
+      } catch (e) {
+        console.error(`bhq onEvent(${msg.topic}) handler threw`, e);
+      }
+    }
     return;
   }
 
@@ -74,7 +92,19 @@ export function invoke(cmd, args) {
   });
 }
 
+/**
+ * Subscribe to a host push event ("plugin_assets_changed" |
+ * "sessions_changed"). Returns an unsubscribe function.
+ * @param {string} topic
+ * @param {() => void} cb
+ */
+export function onEvent(topic, cb) {
+  if (!eventSubs.has(topic)) eventSubs.set(topic, new Set());
+  eventSubs.get(topic).add(cb);
+  return () => eventSubs.get(topic)?.delete(cb);
+}
+
 export const nonce = NONCE;
 
 // Global for plugins that skip modules and just <script src="bhq-sdk.js">.
-window.BHQ = { invoke, nonce: NONCE };
+window.BHQ = { invoke, onEvent, nonce: NONCE };

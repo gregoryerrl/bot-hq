@@ -6,6 +6,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
   mountPluginBridge,
   pluginEntryUrl,
+  postPluginEvent,
   schemeForm,
   type SpawnRequest,
 } from "../lib/pluginBridge";
@@ -51,6 +52,40 @@ export function PluginHost({ plugin }: { plugin: InstalledPluginView }) {
       if (payload.plugin_id === plugin.id) setCrashed(true);
     },
     [plugin.id],
+  );
+
+  // Push tier (v1, two topics). assets_changed: the plugin's OWN served dir
+  // changed on disk — no grant needed. sessions_changed: rides the
+  // list_sessions grant (a plugin that can't read the list has no use for,
+  // and no right to, the change signal).
+  useTauriEvent<{ plugin_id: string }>(
+    "plugin:assets_changed",
+    (payload) => {
+      const iframe = iframeRef.current;
+      if (iframe && payload.plugin_id === plugin.id) {
+        postPluginEvent(iframe, "plugin_assets_changed");
+      }
+    },
+    [plugin.id],
+  );
+  const sessionsGranted = (plugin.manifest.requested_capabilities ?? []).includes(
+    "list_sessions",
+  );
+  useTauriEvent<{ session_id: string }>(
+    "session:created",
+    () => {
+      const iframe = iframeRef.current;
+      if (iframe && sessionsGranted) postPluginEvent(iframe, "sessions_changed");
+    },
+    [sessionsGranted],
+  );
+  useTauriEvent<{ session_id: string }>(
+    "session:closed",
+    () => {
+      const iframe = iframeRef.current;
+      if (iframe && sessionsGranted) postPluginEvent(iframe, "sessions_changed");
+    },
+    [sessionsGranted],
   );
 
   useEffect(() => {

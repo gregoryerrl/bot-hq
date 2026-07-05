@@ -215,6 +215,21 @@ impl WorktreeChangedEvent {
     pub const EVENT_NAME: &'static str = "session:worktree_changed";
 }
 
+/// Emitted by the filesystem watcher when a file changed inside an ENABLED
+/// plugin's served directory (normal: the installed copy; linked: the user's
+/// source repo, with build/VCS churn filtered). PluginHost forwards it into
+/// the plugin's iframe as `{ type: "bhq:event", topic: "plugin_assets_changed" }`
+/// so shelf-style UIs can refresh their own content — no grant needed, it's
+/// the plugin's own directory.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct PluginAssetsChangedEvent {
+    pub plugin_id: String,
+}
+
+impl PluginAssetsChangedEvent {
+    pub const EVENT_NAME: &'static str = "plugin:assets_changed";
+}
+
 /// Emitted (direct `app.emit`) when the project registry changes — a project was
 /// registered or unregistered. That's a DB-only change the filesystem watcher
 /// can't see, so the UI needs an explicit nudge; the frontend invalidates

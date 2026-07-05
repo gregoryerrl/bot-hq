@@ -448,6 +448,14 @@ fn main() -> Result<()> {
                 // Stash the handle so the session spawn/close paths can register
                 // working repos for live A-tab diffs (Phase 3).
                 Ok(handle) => {
+                    // Seed watches for already-enabled plugins' served dirs so
+                    // `plugin:assets_changed` fires from boot (install/enable
+                    // register later ones through the lifecycle commands).
+                    for id in registry_for_setup.enabled_ids() {
+                        if let Some(root) = registry_for_setup.serve_root_for(&id) {
+                            handle.add_plugin_dir(&id, root);
+                        }
+                    }
                     let _ = core_for_setup.fs_watcher.set(handle);
                 }
                 Err(e) => {

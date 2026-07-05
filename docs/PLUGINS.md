@@ -169,9 +169,29 @@ not use the SDK:
 plugin → host:  { type: "bhq:invoke", id, cmd, args?, nonce }
 host → plugin:  { type: "bhq:result", id, ok: true,  data }
                 { type: "bhq:result", id, ok: false, error }
+host → plugin:  { type: "bhq:event", topic }          (push tier, below)
 host → plugin:  { type: "bhq:ping" }                  (every 5s)
 plugin → host:  { type: "bhq:pong", nonce }
 ```
+
+### Push events (`bhq:event`)
+
+Two topics in v1 — hardcoded, no general pub/sub (`BHQ.onEvent(topic, cb)`
+in the SDK):
+
+- `plugin_assets_changed` — a file in YOUR served directory changed on
+  disk (debounced ~500ms; build/VCS churn like `target/`,
+  `node_modules/`, `.git/` is filtered). No grant needed — it's your own
+  content. Pairs with linked installs: a shelf-style UI can re-fetch its
+  own materials the moment you save, instead of waiting for a manual
+  reload.
+- `sessions_changed` — a session was created or closed. Delivered ONLY
+  if you hold the `list_sessions` grant (a plugin that can't read the
+  list has no use for the change signal). Re-invoke `list_sessions` on
+  it; the event carries no data.
+
+Events fire while mounted (the channel only exists then) and carry no
+payload — they are refresh nudges, not data feeds.
 
 Correlate replies by `id`. Answer pings promptly: three unanswered
 pings and the host declares the plugin crashed, tears the iframe down,
@@ -209,8 +229,8 @@ host's JSON views (same shapes the bot-hq UI renders).
 | `get_session` | `session_id` | one session's details |
 | `list_messages` | `session_id`, `since_id?` | a session's chat history |
 | `session_doc_search` | `session_id`, `query?`, `phase?` | a session's I/P/A/V phase documents |
-| `cl_index_search` | `project?`, `query?` | Context Library file index (names + descriptions) |
-| `cl_folder_search` | `project?`, `query?` | Context Library folder descriptions |
+| `cl_index_search` | `project?`, `query?` | Context Library file index — rows: `{ project, file_path, description, tags, updated_at }` (same shape agents see) |
+| `cl_folder_search` | `project?`, `query?` | Context Library folder descriptions — rows: `{ project, folder_path, description, tags, updated_at }` |
 | `cl_retrieve` | `project`, `query`, `paths?`, `budget_tokens?` | best-matching CL sections (BM25; budget capped at 20k tokens; `stale` is reserved and always `false` in v1) |
 | `cl_read_file` | `project`, `file_path` | whole CL files (1 MB cap, truncation flagged) |
 | `list_projects` | — | registered projects |
@@ -218,6 +238,12 @@ host's JSON views (same shapes the bot-hq UI renders).
 | `spawn_session` | `prompt`, `project?`, `title?` | open a NEW agent session with that prompt (per-spawn confirm dialog — below; returns `{ session_id }`) |
 | `plugin_kv_get` | `key` | your plugin's own saved state |
 | `plugin_kv_set` | `key`, `value` | write your own state (key ≤256 B, value ≤256 KB; namespaced server-side; wiped on uninstall) |
+
+> **BREAKING (2026-07-05):** `cl_index_search` and `cl_folder_search`
+> rows were aligned to the agent-side shape — the field is now
+> **`project`** (was `project_id`), and the internal `id` / `created_at`
+> fields are gone. Update any plugin reading `row.project_id`. Other
+> commands' shapes are unchanged; results remain the host's JSON views.
 
 Not grantable, by design: anything that touches EXISTING sessions'
 agents or stdin (`broadcast_message`, send/drive/close), mutating the
