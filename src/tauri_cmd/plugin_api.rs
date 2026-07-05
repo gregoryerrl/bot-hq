@@ -256,6 +256,42 @@ pub(crate) async fn dispatch(
             let out = crate::tauri_cmd::docs::compute_apply_diff_inner(core, session_id).await?;
             to_json(&out)
         }
+        "spawn_session" => {
+            // Session CREATION only — double-consented (install-time grant,
+            // checked by check_plugin_grant like every command, PLUS the
+            // shell's per-spawn confirm dialog before this call is even
+            // made). The arm mints a fresh id; there is no path from here
+            // to any existing session.
+            let prompt = need_str(args, "prompt")?;
+            if prompt.trim().is_empty() {
+                return Err(AppError::Validation(
+                    "spawn_session: prompt must not be empty".into(),
+                ));
+            }
+            let project = opt_str(args, "project");
+            if let Some(p) = &project {
+                if storage.get_project(p).await?.is_none() {
+                    return Err(AppError::Validation(format!(
+                        "spawn_session: unknown project {p:?}"
+                    )));
+                }
+            }
+            let title = opt_str(args, "title")
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| format!("{plugin_id} session"));
+            let core = core.ok_or_else(|| {
+                AppError::Internal("core state unavailable for spawn_session".into())
+            })?;
+            // Same id shape the host UI mints (s-<uuid4 first 8>).
+            let id = format!("s-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            let info = crate::tauri_cmd::sessions::dispatch_session_inner(
+                core, storage, bridge, id, title, project, None, prompt,
+            )
+            .await?;
+            // Narrow contract: the id and nothing else (the session-read
+            // commands are separate grants).
+            to_json(&serde_json::json!({ "session_id": info.id }))
+        }
         "plugin_kv_get" => {
             let key = need_str(args, "key")?;
             if key.len() > MAX_KV_KEY_BYTES {
@@ -347,6 +383,66 @@ mod tests {
         // Disabled plugin: same manifest, cache off.
         reg.set_enabled("deck", false);
         assert!(check_plugin_grant(&reg, "deck", "list_sessions").is_err());
+    }
+
+    /// spawn_session sits behind the SAME Rust gate as every command: in the
+    /// catalog, grantable, and refused for plugins that didn't request it or
+    /// are disabled — all BEFORE any dialog or dispatch.
+    #[test]
+    fn grant_check_gates_spawn_session_like_any_command() {
+        let tmp = TempDir::new().unwrap();
+        let reg = registry_with(&tmp, "deck", &["spawn_session"], true);
+        assert!(check_plugin_grant(&reg, "deck", "spawn_session").is_ok());
+
+        let tmp2 = TempDir::new().unwrap();
+        let ungranted = registry_with(&tmp2, "deck", &["list_sessions"], true);
+        assert!(check_plugin_grant(&ungranted, "deck", "spawn_session").is_err());
+
+        reg.set_enabled("deck", false);
+        assert!(check_plugin_grant(&reg, "deck", "spawn_session").is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_spawn_session_validates_args_before_touching_core() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+
+        // Missing prompt.
+        let err = dispatch(
+            &storage,
+            &bridge,
+            None,
+            "deck",
+            "spawn_session",
+            &Value::Object(Default::default()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+
+        // Whitespace-only prompt.
+        let args = serde_json::json!({ "prompt": "   " });
+        let err = dispatch(&storage, &bridge, None, "deck", "spawn_session", &args)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+
+        // Unknown project.
+        let args = serde_json::json!({ "prompt": "do things", "project": "ghost" });
+        let err = dispatch(&storage, &bridge, None, "deck", "spawn_session", &args)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+
+        // Valid args but no core (unit-test path) → Internal, proving arg
+        // validation happens first and nothing was created.
+        let args = serde_json::json!({ "prompt": "do things" });
+        let err = dispatch(&storage, &bridge, None, "deck", "spawn_session", &args)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Internal(_)), "got {err:?}");
+        assert!(storage.list_active_sessions_with_preview().await.unwrap().is_empty());
     }
 
     #[test]

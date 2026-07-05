@@ -8,9 +8,12 @@
 //! Descriptions feed the install-consent UI, so write them for the user
 //! deciding whether to grant, not for developers.
 //!
-//! v1 is read-first: the only writes are the plugin's own namespaced
-//! key/value store. CL writes stay user/agent-only (propose-don't-mutate),
-//! and nothing here reaches agents, sessions' stdin, or policy.
+//! v1 is read-first with two deliberate exceptions: the plugin's own
+//! namespaced key/value store, and `spawn_session` — session CREATION,
+//! double-consented (install-time grant + a per-spawn host confirm dialog),
+//! which reaches only a NEW session's stdin with a prompt the user saw and
+//! approved. CL writes stay user/agent-only (propose-don't-mutate), and
+//! nothing here reaches EXISTING sessions, their stdin, or policy.
 
 /// One grantable command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,10 @@ pub const CATALOG: &[CatalogEntry] = &[
         description: "Read a session's code changes (git diff)",
     },
     CatalogEntry {
+        name: "spawn_session",
+        description: "Open new agent sessions with a prompt you will see and approve each time",
+    },
+    CatalogEntry {
         name: "plugin_kv_get",
         description: "Read this plugin's own saved settings/state",
     },
@@ -94,11 +101,11 @@ mod tests {
     #[test]
     fn unknown_and_hostlike_names_are_invalid() {
         for bad in [
-            "create_session",     // session mutation — never grantable
-            "broadcast_message",  // reaches agents' stdin
+            "create_session",     // raw creation — only spawn_session's double-consent door exists
+            "broadcast_message",  // reaches EXISTING agents' stdin — never grantable
             "cl_write_file",      // CL canon mutates only by user action
             "install_plugin",     // plugins must not install plugins
-            "close_session",
+            "close_session",      // existing-session control — never grantable
             "",
         ] {
             assert!(!is_valid(bad), "{bad:?} must not be grantable");
