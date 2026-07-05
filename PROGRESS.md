@@ -11,15 +11,47 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-667 Rust tests passing (616 lib + 33 external MCP + 7 signaling + 11
-storage) plus 131 frontend Vitest. Release build clean. Version
+683 Rust tests passing (632 lib + 33 external MCP + 7 signaling + 11
+storage) plus 134 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
 gate**, the **interrupt redesign** (stdin `control_request` cancel +
 `SessionActivity` state machine), the **peer-forward router extraction**
-(`core/router.rs`), the **`peer_ack` / `halt` duo-yield tools**, and the
-**plugin runtime v1** (2026-07-04, below).
+(`core/router.rs`), the **plugin runtime v1** (2026-07-04), and the
+**per-plugin CSP override tier** (2026-07-05, below).
+
+---
+
+## 2026-07-05 — Per-plugin CSP extra-origins tier (consent-frozen)
+
+First of four plugin-runtime workstreams from building Cognotify (the
+first real panel plugin) against api_version 1. Plugins can now request
+extra `script-src` / `style-src` / `font-src` / `img-src` origins via a
+`csp_extra_origins` manifest field — additive over the default CSP,
+explicit `https://host[:port]` origins only (wildcards, keywords,
+schemes, data:/blob: all rejected at install), consent screen lists the
+exact origins per directive. Six commits (`a2554c6` → `1a2ef1f`).
+
+- **Consent-frozen grant:** the approved origins are recorded in a new
+  `plugins.csp_json` column (migration 0030) at install time; serving
+  reads ONLY a prebuilt sync header cache seeded from that column
+  (mirrors the `enabled`-cache pattern — the scheme handler can't
+  await). Editing an installed manifest never changes the served CSP.
+  Closes the upgrade hole: a manifest stored by a pre-CSP host can
+  never activate origins after a host upgrade — NULL grant = strict
+  default until a re-install re-consents.
+- **Two-tier validation** (Rain's refinement): struct parse tolerates
+  unknown directive keys (old installs stay loadable + uninstallable
+  after upgrade); preview/install re-validate the RAW manifest JSON and
+  reject unknown directives + every forbidden origin form.
+- `build_plugin_csp(None)` is asserted byte-identical to the previous
+  const — non-opted plugins serve an unchanged header.
+- Contract documented in `docs/PLUGINS.md` (rules + old-host compat);
+  hello-plugin deliberately NOT given origins (least-privilege example).
+- E2E against Cognotify (jsdelivr script executing in the viewer
+  iframe, non-granted origin blocked) pending a live-app pass — needs
+  the running host.
 
 ---
 
