@@ -243,10 +243,29 @@ pub async fn dispatch_session(
     repo_path: Option<String>,
     prompt: String,
 ) -> Result<SessionInfo, AppError> {
+    dispatch_session_inner(&core, &storage, &bridge, id, title, project, repo_path, prompt)
+        .await
+}
+
+/// Testable/plugin-reachable body of [`dispatch_session`] (the command is a
+/// thin `State`-unwrapping shim, matching the plugins-command pattern). Also
+/// the target of the plugin proxy's `spawn_session` arm — which is why it
+/// takes plain refs, not `tauri::State`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn dispatch_session_inner(
+    core: &CoreAppState,
+    storage: &Storage,
+    bridge: &SignalingBridge,
+    id: String,
+    title: String,
+    project: Option<String>,
+    repo_path: Option<String>,
+    prompt: String,
+) -> Result<SessionInfo, AppError> {
     // No create dialog on this path → both placement and solo/duo come from
     // the configured defaults (worktree_default / rain_disabled_default).
     let (working, base) = resolve_session_placement(
-        &storage,
+        storage,
         &core.paths.data_dir,
         &id,
         repo_path,
