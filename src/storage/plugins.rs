@@ -42,6 +42,34 @@ impl Storage {
         Ok(())
     }
 
+    /// Refresh a plugin's CONSENTED state in place (linked re-approve).
+    /// Deliberately an UPDATE, not INSERT OR REPLACE: REPLACE is
+    /// DELETE+INSERT in SQLite, and the plugin_kv FK cascade would wipe the
+    /// plugin's KV rows — re-approving a manifest must not destroy state.
+    /// Re-approval implies wanting the plugin active → enabled resets to 1.
+    pub async fn update_plugin_consent(
+        &self,
+        id: &str,
+        name: &str,
+        version: &str,
+        manifest_json: &str,
+        csp_json: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE plugins SET name = ?, version = ?, manifest_json = ?, csp_json = ?, enabled = 1 \
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(version)
+        .bind(manifest_json)
+        .bind(csp_json)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("updating consent for plugin {id}"))?;
+        Ok(())
+    }
+
     pub async fn delete_plugin(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM plugins WHERE id = ?")
             .bind(id)

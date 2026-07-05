@@ -545,7 +545,7 @@ mod tests {
         let bridge = test_bridge(&tmp, &storage).await;
 
         let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello-plugin");
-        crate::tauri_cmd::plugins::install_plugin_inner(&storage, &registry, example)
+        crate::tauri_cmd::plugins::install_plugin_inner(&storage, &registry, example, false)
             .await
             .unwrap();
 
