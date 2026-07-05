@@ -32,5 +32,5 @@ pub mod serve;
 
 pub use heartbeat::{Heartbeat, PluginStatus};
 pub use loader::{LoadedPlugin, Loader};
-pub use manifest::{PluginManifest, PluginSlot};
+pub use manifest::{CspExtraOrigins, PluginManifest, PluginSlot};
 pub use registry::PluginRegistry;

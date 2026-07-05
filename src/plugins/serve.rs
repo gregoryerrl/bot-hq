@@ -156,11 +156,38 @@ pub fn mime_for(path: &Path) -> &'static str {
 
 /// The default Content-Security-Policy served with every plugin asset.
 /// Permissive on connect-src (plugins may call external APIs — the GitHub
-/// tab archetype) but everything else stays same-origin. Per-plugin CSP
-/// overrides are a deferred tier (docs/PLUGINS.md).
+/// tab archetype) but everything else stays same-origin. Plugins can widen
+/// four directives with consent-granted extra origins ([`build_plugin_csp`];
+/// contract in docs/PLUGINS.md) — a plugin without that grant gets exactly
+/// this header.
 pub const PLUGIN_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
      style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
      font-src 'self' data:; connect-src *";
+
+/// Build the CSP header for one plugin: the default policy with any
+/// consent-granted extra origins APPENDED to their directives' source
+/// lists. The defaults are never replaced or narrowed; `default-src` and
+/// `connect-src` are never touched. `None` — and an all-empty grant —
+/// yield [`PLUGIN_CSP`] byte-for-byte (tests assert it).
+pub fn build_plugin_csp(extra: Option<&crate::plugins::CspExtraOrigins>) -> String {
+    let empty = crate::plugins::CspExtraOrigins::default();
+    let e = extra.unwrap_or(&empty);
+    format!(
+        "default-src 'self'; script-src 'self' 'unsafe-inline'{}; \
+         style-src 'self' 'unsafe-inline'{}; img-src 'self' data: blob:{}; \
+         font-src 'self' data:{}; connect-src *",
+        join_origins(&e.script_src),
+        join_origins(&e.style_src),
+        join_origins(&e.img_src),
+        join_origins(&e.font_src),
+    )
+}
+
+/// ` https://a https://b` — leading space per origin so an empty list
+/// contributes nothing to the directive.
+fn join_origins(origins: &[String]) -> String {
+    origins.iter().map(|o| format!(" {o}")).collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -301,5 +328,54 @@ mod tests {
         assert_eq!(mime_for(Path::new("x.woff2")), "font/woff2");
         assert_eq!(mime_for(Path::new("x.weird")), "application/octet-stream");
         assert_eq!(mime_for(Path::new("noext")), "application/octet-stream");
+    }
+
+    #[test]
+    fn build_csp_without_grant_is_byte_identical_to_default() {
+        use crate::plugins::CspExtraOrigins;
+        assert_eq!(build_plugin_csp(None), PLUGIN_CSP);
+        // An all-empty grant is semantically "no grant" — same bytes.
+        assert_eq!(build_plugin_csp(Some(&CspExtraOrigins::default())), PLUGIN_CSP);
+    }
+
+    #[test]
+    fn build_csp_appends_origins_to_their_directives_keeping_defaults() {
+        use crate::plugins::CspExtraOrigins;
+        let extra = CspExtraOrigins {
+            script_src: vec![
+                "https://cdn.jsdelivr.net".into(),
+                "https://unpkg.com".into(),
+            ],
+            style_src: vec!["https://fonts.googleapis.com".into()],
+            font_src: vec!["https://fonts.gstatic.com".into()],
+            img_src: vec!["https://raw.githubusercontent.com".into()],
+        };
+        let csp = build_plugin_csp(Some(&extra));
+        assert_eq!(
+            csp,
+            "default-src 'self'; \
+             script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; \
+             style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+             img-src 'self' data: blob: https://raw.githubusercontent.com; \
+             font-src 'self' data: https://fonts.gstatic.com; \
+             connect-src *"
+        );
+    }
+
+    #[test]
+    fn build_csp_partial_grant_touches_only_named_directives() {
+        use crate::plugins::CspExtraOrigins;
+        let extra = CspExtraOrigins {
+            script_src: vec!["https://cdn.jsdelivr.net".into()],
+            ..Default::default()
+        };
+        let csp = build_plugin_csp(Some(&extra));
+        assert!(csp.contains("script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;"));
+        // Untouched directives keep their default source lists exactly.
+        assert!(csp.contains("style-src 'self' 'unsafe-inline';"));
+        assert!(csp.contains("img-src 'self' data: blob:;"));
+        assert!(csp.contains("font-src 'self' data:;"));
+        assert!(csp.starts_with("default-src 'self';"));
+        assert!(csp.ends_with("connect-src *"));
     }
 }
