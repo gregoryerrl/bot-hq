@@ -8,10 +8,55 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { cn } from "../lib/cn";
 import type {
   AppError,
+  CspExtraOrigins,
   InstalledPluginView,
   PluginManifestPreview,
   PluginStatus,
 } from "../lib/bindings";
+
+/**
+ * Consent copy per CSP directive, in user terms. Order matters: code first
+ * (the scariest grant), then styles/fonts/images. Origins are validated
+ * https-only server-side, so the scheme is stripped for display — the
+ * user sees the EXACT hosts, not a summary.
+ */
+const CSP_CONSENT_LINES: Array<{
+  directive: keyof CspExtraOrigins;
+  label: string;
+}> = [
+  { directive: "script-src", label: "Can load and run code from" },
+  { directive: "style-src", label: "Can load styles from" },
+  { directive: "font-src", label: "Can load fonts from" },
+  { directive: "img-src", label: "Can load images from" },
+];
+
+export function CspConsentSection({ csp }: { csp: CspExtraOrigins }) {
+  const lines = CSP_CONSENT_LINES.map(({ directive, label }) => ({
+    directive,
+    label,
+    // Empty directives are omitted from the wire format despite the
+    // generated type — read defensively.
+    origins: (csp[directive] ?? []).map((o) => o.replace(/^https:\/\//, "")),
+  })).filter((l) => l.origins.length > 0);
+  if (lines.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <p className="mb-1">It also asks to load remote content:</p>
+      <ul className="space-y-1">
+        {lines.map((l) => (
+          <li key={l.directive} className="flex gap-2">
+            <code className="shrink-0 rounded bg-surface-container-high px-1 py-0.5 font-code-sm text-code-sm text-on-surface">
+              {l.directive}
+            </code>
+            <span className="text-on-surface-variant">
+              {l.label}: {l.origins.join(", ")}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 /**
  * Live PluginManager: list installed plugins, install new ones (URL or
@@ -242,6 +287,11 @@ export function PluginManager() {
                     </li>
                   ))}
                 </ul>
+              )}
+              {pendingInstall.preview.manifest.csp_extra_origins && (
+                <CspConsentSection
+                  csp={pendingInstall.preview.manifest.csp_extra_origins}
+                />
               )}
             </div>
           )
