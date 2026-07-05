@@ -273,6 +273,7 @@ pub(crate) async fn install_plugin_inner(
             &manifest_json,
             &plugin_dir.display().to_string(),
             csp_json.as_deref(),
+            false,
         )
         .await
         .map_err(anyhow_to_app)?;

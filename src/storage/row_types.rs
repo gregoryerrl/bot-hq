@@ -415,6 +415,9 @@ pub struct Plugin {
     /// install). `None` = strict default CSP — including every install made
     /// by a pre-CSP host, which stored the manifest but never consented.
     pub csp_json: Option<String>,
+    /// Dev-mode install: `dir_path` is the user's SOURCE directory, served
+    /// directly (no copy) and NEVER deleted by uninstall.
+    pub linked: bool,
     pub installed_at: String,
 }
 

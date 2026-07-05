@@ -11,6 +11,9 @@ impl Storage {
     /// `csp_json` is the consent-frozen CSP grant (canonical serialization
     /// of the approved `csp_extra_origins`, or `None` when the manifest
     /// requested none) — the ONLY source serving reads CSP extras from.
+    ///
+    /// `linked` marks a dev-mode install: `dir_path` is then the user's
+    /// SOURCE directory (served directly, never copied, never deleted).
     pub async fn insert_plugin(
         &self,
         id: &str,
@@ -19,10 +22,11 @@ impl Storage {
         manifest_json: &str,
         dir_path: &str,
         csp_json: Option<&str>,
+        linked: bool,
     ) -> Result<()> {
         sqlx::query(
-            "INSERT OR REPLACE INTO plugins (id, name, version, manifest_json, dir_path, csp_json, installed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO plugins (id, name, version, manifest_json, dir_path, csp_json, linked, installed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(name)
@@ -30,6 +34,7 @@ impl Storage {
         .bind(manifest_json)
         .bind(dir_path)
         .bind(csp_json)
+        .bind(linked)
         .bind(now_utc())
         .execute(&self.pool)
         .await
@@ -58,7 +63,7 @@ impl Storage {
 
     pub async fn list_plugins(&self) -> Result<Vec<Plugin>> {
         let rows = sqlx::query_as::<_, Plugin>(
-            "SELECT id, name, version, enabled, manifest_json, dir_path, csp_json, installed_at \
+            "SELECT id, name, version, enabled, manifest_json, dir_path, csp_json, linked, installed_at \
              FROM plugins ORDER BY id",
         )
         .fetch_all(&self.pool)
@@ -79,7 +84,7 @@ mod plugin_tests {
     #[tokio::test]
     async fn insert_then_list_roundtrip() {
         let s = store().await;
-        s.insert_plugin("p1", "Notes", "1.0.0", "{\"id\":\"p1\"}", "/tmp/p1", None)
+        s.insert_plugin("p1", "Notes", "1.0.0", "{\"id\":\"p1\"}", "/tmp/p1", None, false)
             .await
             .unwrap();
         let rows = s.list_plugins().await.unwrap();
@@ -97,10 +102,10 @@ mod plugin_tests {
     #[tokio::test]
     async fn insert_or_replace_overwrites_existing_id() {
         let s = store().await;
-        s.insert_plugin("p1", "Notes", "1.0.0", "{}", "/tmp/old", None)
+        s.insert_plugin("p1", "Notes", "1.0.0", "{}", "/tmp/old", None, false)
             .await
             .unwrap();
-        s.insert_plugin("p1", "Notes Pro", "2.0.0", "{\"x\":1}", "/tmp/new", None)
+        s.insert_plugin("p1", "Notes Pro", "2.0.0", "{\"x\":1}", "/tmp/new", None, false)
             .await
             .unwrap();
         let rows = s.list_plugins().await.unwrap();
@@ -113,7 +118,7 @@ mod plugin_tests {
     #[tokio::test]
     async fn set_enabled_toggles_flag() {
         let s = store().await;
-        s.insert_plugin("p1", "A", "0.1", "{}", "/x", None).await.unwrap();
+        s.insert_plugin("p1", "A", "0.1", "{}", "/x", None, false).await.unwrap();
         s.set_plugin_enabled("p1", false).await.unwrap();
         let rows = s.list_plugins().await.unwrap();
         assert!(!rows[0].enabled);
@@ -125,8 +130,8 @@ mod plugin_tests {
     #[tokio::test]
     async fn delete_removes_row() {
         let s = store().await;
-        s.insert_plugin("p1", "A", "0.1", "{}", "/x", None).await.unwrap();
-        s.insert_plugin("p2", "B", "0.2", "{}", "/y", None).await.unwrap();
+        s.insert_plugin("p1", "A", "0.1", "{}", "/x", None, false).await.unwrap();
+        s.insert_plugin("p2", "B", "0.2", "{}", "/y", None, false).await.unwrap();
         s.delete_plugin("p1").await.unwrap();
         let rows = s.list_plugins().await.unwrap();
         assert_eq!(rows.len(), 1);
@@ -136,9 +141,9 @@ mod plugin_tests {
     #[tokio::test]
     async fn list_orders_by_id_asc() {
         let s = store().await;
-        s.insert_plugin("z", "z", "0", "{}", "/z", None).await.unwrap();
-        s.insert_plugin("a", "a", "0", "{}", "/a", None).await.unwrap();
-        s.insert_plugin("m", "m", "0", "{}", "/m", None).await.unwrap();
+        s.insert_plugin("z", "z", "0", "{}", "/z", None, false).await.unwrap();
+        s.insert_plugin("a", "a", "0", "{}", "/a", None, false).await.unwrap();
+        s.insert_plugin("m", "m", "0", "{}", "/m", None, false).await.unwrap();
         let rows = s.list_plugins().await.unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "m", "z"]);
@@ -147,7 +152,7 @@ mod plugin_tests {
     #[tokio::test]
     async fn csp_json_roundtrips_and_defaults_null() {
         let s = store().await;
-        s.insert_plugin("plain", "P", "0.1", "{}", "/p", None).await.unwrap();
+        s.insert_plugin("plain", "P", "0.1", "{}", "/p", None, false).await.unwrap();
         s.insert_plugin(
             "cdn",
             "C",
@@ -155,6 +160,7 @@ mod plugin_tests {
             "{}",
             "/c",
             Some(r#"{"script-src":["https://cdn.jsdelivr.net"]}"#),
+            false,
         )
         .await
         .unwrap();
@@ -167,10 +173,24 @@ mod plugin_tests {
             Some(r#"{"script-src":["https://cdn.jsdelivr.net"]}"#)
         );
         // Re-install WITHOUT the grant clears it (INSERT OR REPLACE).
-        s.insert_plugin("cdn", "C", "0.2", "{}", "/c", None).await.unwrap();
+        s.insert_plugin("cdn", "C", "0.2", "{}", "/c", None, false).await.unwrap();
         let rows = s.list_plugins().await.unwrap();
         let cdn = rows.iter().find(|r| r.id == "cdn").unwrap();
         assert_eq!(cdn.csp_json, None);
+    }
+
+    #[tokio::test]
+    async fn linked_flag_roundtrips_and_defaults_false() {
+        let s = store().await;
+        s.insert_plugin("copy", "C", "0.1", "{}", "/data/plugins/copy", None, false)
+            .await
+            .unwrap();
+        s.insert_plugin("dev", "D", "0.1", "{}", "/home/me/dev-plugin", None, true)
+            .await
+            .unwrap();
+        let rows = s.list_plugins().await.unwrap();
+        assert!(!rows.iter().find(|r| r.id == "copy").unwrap().linked);
+        assert!(rows.iter().find(|r| r.id == "dev").unwrap().linked);
     }
 
     #[tokio::test]
