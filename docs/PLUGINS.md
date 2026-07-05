@@ -77,8 +77,51 @@ Every asset response carries a default CSP:
 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:;
 connect-src *` — same-origin scripts/styles plus inline, and **network
 fetch to anywhere** (`connect-src *`) so integrations like a GitHub
-panel can call their APIs directly. Per-plugin CSP overrides are a
-deferred tier.
+panel can call their APIs directly.
+
+### Extra CSP origins (consent-gated)
+
+A plugin that needs assets from a CDN can request extra origins for up
+to four directives in its manifest:
+
+```json
+"csp_extra_origins": {
+  "script-src": ["https://cdn.jsdelivr.net", "https://unpkg.com"],
+  "style-src":  ["https://fonts.googleapis.com"],
+  "font-src":   ["https://fonts.gstatic.com"],
+  "img-src":    ["https://raw.githubusercontent.com"]
+}
+```
+
+The rules:
+
+- **Additive only.** Granted origins are appended to the default source
+  lists — never replacing or narrowing them. `default-src`,
+  `connect-src`, and every other directive are untouchable.
+- **Exactly these four directives.** Any other key is an install-time
+  error.
+- **Explicit https origins only** — `https://host[:port]`, lowercase.
+  Install rejects wildcards (`*`, `https://*.example.com`), bare
+  schemes (`https:`), CSP keyword sources (`'unsafe-eval'`, nonces,
+  hashes), `data:`/`blob:`, non-https schemes, and paths/queries. Max
+  16 origins per directive.
+- **Consent-gated and frozen at install.** The install screen lists the
+  exact origins per directive ("Can load and run code from:
+  cdn.jsdelivr.net, unpkg.com"). What the user approves is recorded in
+  the host's DB at install time, and serving reads ONLY that record —
+  editing an installed manifest never changes the served CSP.
+  Re-install to request different origins.
+- **Older hosts fail closed.** A bot-hq predating this field ignores it
+  entirely: the plugin installs, but assets are served under the strict
+  default CSP (CDN loads blocked — degrade gracefully). And because the
+  grant is recorded at install time, a manifest stored by an older host
+  can never activate origins later via a host upgrade — granting always
+  goes through a consent screen on (re-)install.
+
+This tier is NOT a browser surface: arbitrary sites still refuse
+framing (`X-Frame-Options`), the iframe sandbox is unchanged, and
+`connect-src` was already `*`. An agent-drivable Browser tab remains a
+child-webview tier (future work, below).
 
 The iframe sandbox is `allow-scripts allow-same-origin` — no top
 navigation, no popups, no forms submission out of the frame.
@@ -188,5 +231,7 @@ proxy enforces the grant on every call; the catalog caps what is
 grantable at all; install shows the user exactly what's requested;
 serving refuses disabled plugins, traversal, and oversized KV writes.
 A plugin compromise is contained to: its own bundle, its own KV, the
-read commands the user approved, and whatever `connect-src *` lets it
-fetch from the network under its own (non-host) origin.
+read commands the user approved, whatever `connect-src *` lets it
+fetch from the network under its own (non-host) origin, and script/
+style/font/image loads from the exact extra origins the user granted
+at install (none by default).
