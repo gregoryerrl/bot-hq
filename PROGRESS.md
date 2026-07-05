@@ -11,15 +11,45 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-683 Rust tests passing (632 lib + 33 external MCP + 7 signaling + 11
-storage) plus 134 frontend Vitest. Release build clean. Version
+685 Rust tests passing (634 lib + 33 external MCP + 7 signaling + 11
+storage) plus 140 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
 gate**, the **interrupt redesign** (stdin `control_request` cancel +
 `SessionActivity` state machine), the **peer-forward router extraction**
-(`core/router.rs`), the **plugin runtime v1** (2026-07-04), and the
-**per-plugin CSP override tier** (2026-07-05, below).
+(`core/router.rs`), the **plugin runtime v1** (2026-07-04), the
+**per-plugin CSP override tier**, and the **spawn_session plugin
+capability** (both 2026-07-05, below).
+
+---
+
+## 2026-07-05 — spawn_session: one-click session spawn for plugins
+
+Second plugin-runtime workstream (Cognotify's "Manage materials" button
+motivator: copy-prompt-and-paste becomes one click). Session CREATION
+is now grantable — a conscious, narrow revision of "session control is
+not grantable": creating with double consent yes; touching EXISTING
+sessions still never. Four commits.
+
+- **Route:** internal only. `dispatch_session` refactored to the house
+  `_inner` pattern; the plugin proxy's `spawn_session` arm calls
+  `dispatch_session_inner` directly — no HTTP hop, no token, external
+  driver fallback rejected (would add an auth surface for zero gain).
+- **Double consent:** install-time grant (catalog entry, consent
+  screen) PLUS a mandatory per-spawn confirm dialog (plugin name,
+  target project, FULL prompt; Reject → invoke rejects). Why: plugin
+  content can include user-commissioned materials rendered same-origin
+  with the panel — the grant can't distinguish material scripts from
+  panel code, so a human sits between any in-origin script and a new
+  session. Shell pre-checks the grant so ungranted plugins never raise
+  a dialog (Rust's rejection stays the single error source); the bridge
+  fails CLOSED if a mount site ever omits the confirm channel.
+- **Arm hardening:** creation-only by construction (fresh `s-<uuid8>`,
+  no path to existing sessions); empty prompt and unknown projects
+  rejected; narrow `{ session_id }` return.
+- Contract + rationale in docs/PLUGINS.md. Live spawn (real duo +
+  prompt delivery) joins the WS1 e2e in the pending live pass.
 
 ---
 

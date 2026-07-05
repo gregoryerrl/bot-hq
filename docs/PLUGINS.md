@@ -184,12 +184,51 @@ host's JSON views (same shapes the bot-hq UI renders).
 | `cl_read_file` | `project`, `file_path` | whole CL files (1 MB cap, truncation flagged) |
 | `list_projects` | — | registered projects |
 | `compute_apply_diff` | `session_id` | a session's color-classified git diff |
+| `spawn_session` | `prompt`, `project?`, `title?` | open a NEW agent session with that prompt (per-spawn confirm dialog — below; returns `{ session_id }`) |
 | `plugin_kv_get` | `key` | your plugin's own saved state |
 | `plugin_kv_set` | `key`, `value` | write your own state (key ≤256 B, value ≤256 KB; namespaced server-side; wiped on uninstall) |
 
-Not grantable, by design: anything that reaches agents (`broadcast_message`,
-session control), mutates the Context Library (canon changes are
-user/agent-proposal flows), installs plugins, or touches policy.
+Not grantable, by design: anything that touches EXISTING sessions'
+agents or stdin (`broadcast_message`, send/drive/close), mutating the
+Context Library (canon changes are user/agent-proposal flows),
+installing plugins, or policy. Session CREATION is the one deliberate
+exception:
+
+### spawn_session — double consent
+
+`spawn_session` opens a NEW session (agents spawned, your prompt
+broadcast as its first message) and returns `{ "session_id": "…" }`.
+It is the only session-mutating grant, and it is guarded twice:
+
+1. **Install-time grant** — it appears on the consent screen like any
+   capability ("Open new agent sessions with a prompt you will see and
+   approve each time").
+2. **A per-spawn confirm dialog** — EVERY call raises a host dialog
+   showing your plugin's name, the target project, and the full
+   prompt; the invoke resolves only on Approve and rejects with
+   `spawn_session: rejected by user` on Reject. Not optional in v1
+   (no "don't ask again").
+
+Why the second layer: plugin content can include user-commissioned
+HTML (the Cognotify materials model) rendered same-origin with the
+panel. The grant belongs to the PLUGIN origin — the host cannot
+distinguish panel code from a material's script. Without the per-spawn
+confirm, one malicious material on a granted plugin could silently
+spawn agent sessions with attacker-chosen prompts. The dialog puts a
+human between any in-origin script and a new session.
+
+Details: `prompt` is required and non-empty (the 64 KB args envelope
+bounds it); `project` is optional but must name an existing project;
+`title` is optional (default `<plugin-id> session`). Spawns are
+mounted-only — the RPC channel exists only while your panel is open;
+there is no background spawn. The new session runs under the same
+policy gates as any user-created session. Existing sessions stay out
+of reach: reading them is separate grants (`list_sessions`,
+`get_session`, `list_messages`); controlling them is not grantable at
+all. Older hosts: a manifest requesting `spawn_session` is REFUSED at
+install by a bot-hq predating it — unknown capability names are
+install-time errors, so this capability fails closed by rejection
+(stricter than `csp_extra_origins`' ignore-and-stay-strict).
 
 ## Lifecycle
 
@@ -210,7 +249,9 @@ State you need across mounts goes in `plugin_kv_*`.
 - **New agents** — a plugin can't add an agent to sessions. Interim
   lever: the **external MCP driver server** (port 7892, bearer-token)
   already lets any process you run create and drive sessions — a
-  "backend-style" plugin is an ordinary program using it.
+  "backend-style" plugin is an ordinary program using it. (For plain
+  session CREATION from a panel, `spawn_session` is the grantable,
+  double-consented path.)
 - **Real browser surface** — arbitrary sites refuse iframing
   (`X-Frame-Options`); an agent-drivable Browser tab needs a
   child-webview tier.
@@ -232,6 +273,7 @@ grantable at all; install shows the user exactly what's requested;
 serving refuses disabled plugins, traversal, and oversized KV writes.
 A plugin compromise is contained to: its own bundle, its own KV, the
 read commands the user approved, whatever `connect-src *` lets it
-fetch from the network under its own (non-host) origin, and script/
+fetch from the network under its own (non-host) origin, script/
 style/font/image loads from the exact extra origins the user granted
-at install (none by default).
+at install (none by default), and — if `spawn_session` was granted —
+new sessions a human explicitly approved one dialog at a time.
