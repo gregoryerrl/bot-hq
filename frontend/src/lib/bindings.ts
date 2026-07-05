@@ -1082,6 +1082,14 @@ export type ClaudeOverrides = { _all?: AgentOverride; brian?: AgentOverride; rai
  */
 export type ComputeApplyDiffResult = { lines: DiffLine[]; note: string | null }
 /**
+ * Extra origins a plugin may request per CSP directive (v1: exactly these
+ * four directives; explicit `https://host[:port]` origins only). Unknown
+ * keys inside the JSON object are IGNORED at parse (so old installs stay
+ * loadable + uninstallable after a host upgrade) and REJECTED at
+ * preview/install by [`validate_csp_extra_origins`].
+ */
+export type CspExtraOrigins = { "script-src": string[]; "style-src": string[]; "font-src": string[]; "img-src": string[] }
+/**
  * One classified line of a unified `git diff`. `kind` is one of
  * `"add" | "remove" | "hunk" | "file" | "context"` — order-sensitive
  * classification per [`parse_diff_lines`].
@@ -1239,7 +1247,17 @@ export type PluginManifest = { id: string; name: string; version: string; entry:
  * rejects anything else so an old bot-hq can't half-run a newer
  * plugin. Omitted in JSON = 1.
  */
-api_version?: number; requested_capabilities?: string[]; slots?: PluginSlot[] }
+api_version?: number; requested_capabilities?: string[]; slots?: PluginSlot[]; 
+/**
+ * Optional extra CSP origins, appended (never replacing) to the default
+ * source lists of four directives — see docs/PLUGINS.md. This field is
+ * what the user APPROVES at install; serving reads the grant frozen
+ * into `plugins.csp_json` at consent time, never this field directly.
+ * Content rules are enforced by [`validate_csp_extra_origins`] at
+ * preview/install only — parse stays tolerant so manifests stored by
+ * older hosts keep loading (their grant column is NULL → default CSP).
+ */
+csp_extra_origins?: CspExtraOrigins | null }
 /**
  * What the install-consent dialog renders before anything lands on disk.
  */
