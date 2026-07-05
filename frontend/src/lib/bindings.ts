@@ -848,9 +848,24 @@ async previewPluginManifest(source: string) : Promise<Result<PluginManifestPrevi
     else return { status: "error", error: e  as any };
 }
 },
-async installPlugin(source: string) : Promise<Result<InstalledPluginView, AppError>> {
+async installPlugin(source: string, linked: boolean) : Promise<Result<InstalledPluginView, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source }) };
+    return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source, linked }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-consent a LINKED plugin whose source manifest drifted from the stored
+ * (consented) one: re-validate the live manifest, REPLACE the row (KV rows
+ * survive — unlike uninstall+reinstall), and re-seed the consent-frozen
+ * registry caches. The frontend drives the consent dialog BEFORE calling
+ * this (preview → confirm → reapprove), same trust model as install.
+ */
+async reapproveLinkedPlugin(pluginId: string) : Promise<Result<InstalledPluginView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reapprove_linked_plugin", { pluginId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1176,9 +1191,20 @@ note: string;
 overridable: boolean }
 /**
  * What the frontend sees for each installed plugin. Combines DB row state,
- * parsed manifest, and live heartbeat status.
+ * parsed manifest, live heartbeat status, and (for linked installs) the
+ * manifest-drift verdict.
  */
-export type InstalledPluginView = { id: string; name: string; version: string; enabled: boolean; status: PluginStatus; manifest: PluginManifest; dir_path: string; installed_at: string }
+export type InstalledPluginView = { id: string; name: string; version: string; enabled: boolean; status: PluginStatus; manifest: PluginManifest; dir_path: string; 
+/**
+ * Dev-mode install serving straight from `dir_path` (the user's repo).
+ */
+linked: boolean; 
+/**
+ * Linked only: the source `manifest.json` no longer byte-matches the
+ * consented (stored) manifest — grants stay FROZEN until the user
+ * re-approves. Missing/unreadable source manifest also reports true.
+ */
+manifest_drifted: boolean; installed_at: string }
 /**
  * One MCP server visible to the user's claude-code, with the trap flagged.
  */
