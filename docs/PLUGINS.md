@@ -21,10 +21,13 @@ persists a counter — every mechanism described here, exercised for real
 3. Enable it. If the manifest declares a panel, a topbar tab with the
    plugin's name appears — that's your iframe.
 
-Iterating: bundle files are copied to `<data_dir>/plugins/<id>/` at
-install (assets are served `Cache-Control: no-store`, so a reload picks
-up edits made to the installed copy; re-install to pick up manifest
-changes).
+Iterating: a normal install copies bundle files to
+`<data_dir>/plugins/<id>/` (assets are served `Cache-Control:
+no-store`, so a reload picks up edits made to the installed copy;
+re-install to pick up manifest changes). For real development, use a
+**linked install** (below) — it serves straight from your source
+directory, so edit → tab reload is the whole loop and git stays the
+single source of truth.
 
 ## Manifest
 
@@ -125,6 +128,34 @@ child-webview tier (future work, below).
 
 The iframe sandbox is `allow-scripts allow-same-origin` — no top
 navigation, no popups, no forms submission out of the frame.
+
+## Linked installs (dev mode)
+
+Check **"Linked — serve from this directory (no copy)"** when
+installing a local path and bot-hq serves your bundle straight from the
+source directory: nothing is copied, one write location, edits are
+visible on the next tab reload. Every serving guard is identical —
+same CSP, `no-store`, disabled-plugin refusal, percent-encoding
+rejection; traversal and symlink checks treat YOUR directory as the
+boundary (a symlink inside the repo pointing outside it is refused).
+
+The consent rule, load-bearing: **assets are live; the manifest is
+not.** Capabilities and CSP origins are frozen at install-consent time
+in the host's DB — the host never re-reads a linked `manifest.json`
+into effect on mount or enable. When the source manifest drifts from
+what you approved, the Plugins tab shows "Manifest changed — review
+and re-approve"; grants change only after that consent dialog. So
+editing a repo manifest (yours, or a collaborator's in a pulled
+branch) can never silently widen a linked plugin's capabilities.
+Re-approval updates the consented manifest IN PLACE — the plugin's KV
+state survives (unlike uninstall → reinstall).
+
+Lifecycle differences: Disable stops serving, as always. **Uninstall
+never deletes or modifies a linked source directory** — it's your
+repo; only the registry entry and KV rows are removed. Migrating
+normal↔linked is uninstall → re-install (the uninstall dialog states
+exactly what's removed in each mode), which also means re-consenting.
+Linked installs are local directories only — no URLs, no zips.
 
 ## RPC protocol
 

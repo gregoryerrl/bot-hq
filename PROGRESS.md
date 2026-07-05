@@ -11,16 +11,44 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-685 Rust tests passing (634 lib + 33 external MCP + 7 signaling + 11
-storage) plus 140 frontend Vitest. Release build clean. Version
+695 Rust tests passing (644 lib + 33 external MCP + 7 signaling + 11
+storage) plus 143 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
 gate**, the **interrupt redesign** (stdin `control_request` cancel +
 `SessionActivity` state machine), the **peer-forward router extraction**
-(`core/router.rs`), the **plugin runtime v1** (2026-07-04), the
-**per-plugin CSP override tier**, and the **spawn_session plugin
-capability** (both 2026-07-05, below).
+(`core/router.rs`), the **plugin runtime v1** (2026-07-04), and three
+plugin-runtime workstreams from 2026-07-05 (below): **per-plugin CSP
+override tier**, **spawn_session capability**, and **linked installs**.
+
+---
+
+## 2026-07-05 — Linked installs: serve plugins from their source repo
+
+Third plugin-runtime workstream (kills Cognotify's dual-write tax:
+every material previously had to land in the repo AND the installed
+copy). A "Linked" toggle on install serves the bundle straight from the
+source directory — one write location, git as truth, edit → tab reload.
+Seven commits.
+
+- **Consent-freeze completed for ALL plugins:** grant enforcement moved
+  off the disk loader onto a `granted_caps` registry cache seeded from
+  the DB-stored (consented) manifest — for normal and linked installs
+  alike. Serving resolves through a `serve_roots` cache (normal →
+  data_dir copy; linked → the user's repo). Both immune to `reload()`.
+- **The consent rule, tested at dispatch level:** editing a linked
+  manifest.json changes NOTHING enforced; the Plugins tab surfaces
+  "Manifest changed — review and re-approve" (byte-compare vs stored),
+  and only the consented re-approve applies new grants. Re-approve is
+  an in-place UPDATE — found + fixed a real bug where `INSERT OR
+  REPLACE` would cascade-delete the plugin's KV rows via the plugin_kv
+  FK (re-approving would have wiped plugin state).
+- **Uninstall never touches a linked source** (guard + test); traversal
+  and symlink guards treat the linked repo as the boundary (tested with
+  roots outside data_dir).
+- Contract in docs/PLUGINS.md ("Linked installs (dev mode)"). Live pass
+  (link the Cognotify repo, edit, reload) queued with the other two.
 
 ---
 
