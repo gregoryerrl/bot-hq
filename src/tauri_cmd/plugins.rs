@@ -281,6 +281,8 @@ pub(crate) async fn install_plugin_inner(
     registry.reload().map_err(anyhow_to_app)?;
     registry.heartbeat.register(&manifest.id);
     registry.set_enabled(&manifest.id, true);
+    registry.set_serve_root(&manifest.id, Some(plugin_dir.clone()));
+    registry.set_granted_caps(&manifest.id, Some(manifest.requested_capabilities.clone()));
     registry.set_csp_header(
         &manifest.id,
         granted_csp.map(|c| crate::plugins::serve::build_plugin_csp(Some(c))),
@@ -362,6 +364,8 @@ async fn uninstall_plugin_inner(
     registry.heartbeat.unregister(plugin_id);
     registry.set_enabled(plugin_id, false);
     registry.set_csp_header(plugin_id, None);
+    registry.set_serve_root(plugin_id, None);
+    registry.set_granted_caps(plugin_id, None);
     registry.reload().map_err(anyhow_to_app)?;
     Ok(())
 }

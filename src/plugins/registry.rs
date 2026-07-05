@@ -28,6 +28,18 @@ pub struct PluginRegistry {
     /// install, cleared on uninstall (enable/disable doesn't touch it:
     /// disabled plugins aren't served at all).
     csp_headers: Mutex<HashMap<String, String>>,
+    /// Per-plugin serve root: normal installs → `<data_dir>/plugins/<id>`,
+    /// linked installs → the user's source directory (`plugins.dir_path`).
+    /// The scheme handler resolves assets against THIS map (absent id =
+    /// unknown plugin). Seeded at boot, set on install, cleared on
+    /// uninstall; never touched by `reload()`.
+    serve_roots: Mutex<HashMap<String, PathBuf>>,
+    /// CONSENT-FROZEN capability grants per plugin, parsed from the
+    /// DB-stored manifest_json (what the user approved at install) — the
+    /// grant authority for `plugin_invoke_proxy`. Never re-read from any
+    /// on-disk manifest, so editing a linked repo's manifest.json can't
+    /// widen grants without the re-approval flow.
+    granted_caps: Mutex<HashMap<String, Vec<String>>>,
 }
 
 impl PluginRegistry {
@@ -39,6 +51,8 @@ impl PluginRegistry {
             data_dir,
             enabled: Mutex::new(HashSet::new()),
             csp_headers: Mutex::new(HashMap::new()),
+            serve_roots: Mutex::new(HashMap::new()),
+            granted_caps: Mutex::new(HashMap::new()),
         })
     }
 
@@ -98,6 +112,46 @@ impl PluginRegistry {
         let g = self.csp_headers.lock().unwrap_or_else(|p| p.into_inner());
         g.get(plugin_id).cloned()
     }
+
+    /// Cache (install/boot) or clear (uninstall) one plugin's serve root.
+    pub fn set_serve_root(&self, plugin_id: &str, root: Option<PathBuf>) {
+        let mut g = self.serve_roots.lock().unwrap_or_else(|p| p.into_inner());
+        match root {
+            Some(r) => {
+                g.insert(plugin_id.to_string(), r);
+            }
+            None => {
+                g.remove(plugin_id);
+            }
+        }
+    }
+
+    /// The scheme handler's root lookup. `None` = unknown plugin.
+    pub fn serve_root_for(&self, plugin_id: &str) -> Option<PathBuf> {
+        let g = self.serve_roots.lock().unwrap_or_else(|p| p.into_inner());
+        g.get(plugin_id).cloned()
+    }
+
+    /// Cache (install/re-approve/boot) or clear (uninstall) one plugin's
+    /// consent-frozen capability grants.
+    pub fn set_granted_caps(&self, plugin_id: &str, caps: Option<Vec<String>>) {
+        let mut g = self.granted_caps.lock().unwrap_or_else(|p| p.into_inner());
+        match caps {
+            Some(c) => {
+                g.insert(plugin_id.to_string(), c);
+            }
+            None => {
+                g.remove(plugin_id);
+            }
+        }
+    }
+
+    /// The proxy's grant lookup. `None` = no recorded grants (unknown or
+    /// unparseable stored manifest → deny-all).
+    pub fn granted_caps_for(&self, plugin_id: &str) -> Option<Vec<String>> {
+        let g = self.granted_caps.lock().unwrap_or_else(|p| p.into_inner());
+        g.get(plugin_id).cloned()
+    }
 }
 
 #[cfg(test)]
@@ -155,6 +209,35 @@ mod tests {
         reg.set_enabled_ids(["a".to_string(), "b".to_string()].into_iter().collect());
         assert!(reg.is_enabled("a") && reg.is_enabled("b"));
         assert_eq!(reg.enabled_ids().len(), 2);
+    }
+
+    #[test]
+    fn serve_root_and_granted_caps_caches_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        assert_eq!(reg.serve_root_for("dev"), None);
+        assert_eq!(reg.granted_caps_for("dev"), None);
+
+        reg.set_serve_root("dev", Some(PathBuf::from("/home/me/dev-plugin")));
+        reg.set_granted_caps("dev", Some(vec!["list_projects".into()]));
+        assert_eq!(
+            reg.serve_root_for("dev"),
+            Some(PathBuf::from("/home/me/dev-plugin"))
+        );
+        assert_eq!(
+            reg.granted_caps_for("dev"),
+            Some(vec!["list_projects".to_string()])
+        );
+
+        // reload() must NOT wipe the consent-frozen caches.
+        reg.reload().unwrap();
+        assert!(reg.serve_root_for("dev").is_some());
+        assert!(reg.granted_caps_for("dev").is_some());
+
+        reg.set_serve_root("dev", None);
+        reg.set_granted_caps("dev", None);
+        assert_eq!(reg.serve_root_for("dev"), None);
+        assert_eq!(reg.granted_caps_for("dev"), None);
     }
 
     #[test]

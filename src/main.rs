@@ -270,11 +270,27 @@ fn main() -> Result<()> {
     runtime.block_on(async {
         match storage_arc.list_plugins().await {
             Ok(rows) => {
-                // CSP grants: prebuild per-plugin headers from the consent-
-                // frozen csp_json column — ALL installed rows, not just
-                // enabled (enable/disable never re-reads the DB). A row
-                // without the column stays absent → default PLUGIN_CSP.
+                // Consent-frozen per-plugin caches, seeded for ALL installed
+                // rows (enable/disable never re-reads the DB): serve root
+                // (linked installs point at the user's source dir), granted
+                // capabilities (parsed from the STORED manifest — the disk
+                // manifest is never the grant authority), and CSP headers.
                 for row in &rows {
+                    let root = if row.linked {
+                        std::path::PathBuf::from(&row.dir_path)
+                    } else {
+                        registry.data_dir.join("plugins").join(&row.id)
+                    };
+                    registry.set_serve_root(&row.id, Some(root));
+                    match bot_hq::plugins::PluginManifest::parse(&row.manifest_json) {
+                        Ok(m) => registry
+                            .set_granted_caps(&row.id, Some(m.requested_capabilities)),
+                        Err(e) => tracing::warn!(
+                            ?e,
+                            plugin_id = %row.id,
+                            "unparseable stored manifest; plugin gets no capability grants"
+                        ),
+                    }
                     if let Some(csp_json) = &row.csp_json {
                         match serde_json::from_str::<bot_hq::plugins::CspExtraOrigins>(csp_json) {
                             Ok(extra) => registry.set_csp_header(
@@ -332,9 +348,13 @@ fn main() -> Result<()> {
                 let uri = request.uri();
                 let outcome = serve::parse_plugin_request(uri.host(), uri.path())
                     .and_then(|(id, rel)| {
-                        serve::resolve_plugin_asset(
-                            &registry.data_dir.join("plugins"),
-                            &registry.enabled_ids(),
+                        // Root comes from the registry's serve-root cache —
+                        // normal installs resolve inside data_dir, linked
+                        // installs at the user's source dir, and the guards
+                        // in resolve_with_root treat either as the boundary.
+                        serve::resolve_with_root(
+                            registry.serve_root_for(id).as_deref(),
+                            registry.is_enabled(id),
                             id,
                             rel,
                         )

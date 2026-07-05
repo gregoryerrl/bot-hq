@@ -48,8 +48,10 @@ pub async fn plugin_invoke_proxy(
     dispatch(&storage, &bridge, Some(&core), &plugin_id, &command, &args).await
 }
 
-/// The gate: catalog membership, enabled cache, and the manifest's granted
-/// set (read from the disk loader — the same source install/enable rescan).
+/// The gate: catalog membership, enabled cache, and the CONSENT-FROZEN
+/// grant cache (seeded from the DB-stored manifest the user approved at
+/// install/re-approve — never a manifest on disk, so editing a linked
+/// repo's manifest.json cannot widen grants without the re-approval flow).
 fn check_plugin_grant(
     registry: &PluginRegistry,
     plugin_id: &str,
@@ -65,18 +67,13 @@ fn check_plugin_grant(
             "plugin {plugin_id:?} is not installed+enabled"
         )));
     }
-    let granted = {
-        let g = registry.loader.lock().unwrap_or_else(|p| p.into_inner());
-        g.get(plugin_id)
-            .map(|p| p.manifest.requested_capabilities.clone())
-    };
-    match granted {
+    match registry.granted_caps_for(plugin_id) {
         Some(caps) if caps.iter().any(|c| c == command) => Ok(()),
         Some(_) => Err(AppError::Validation(format!(
             "capability {command:?} was not granted to plugin {plugin_id:?}"
         ))),
         None => Err(AppError::Validation(format!(
-            "plugin {plugin_id:?} has no loadable bundle on disk"
+            "plugin {plugin_id:?} has no recorded capability grants"
         ))),
     }
 }
@@ -338,21 +335,12 @@ mod tests {
     use crate::plugins::PluginRegistry;
     use tempfile::TempDir;
 
-    /// Registry with one on-disk plugin granting `caps`, enabled per flag.
+    /// Registry with one plugin granting `caps` (seeded into the
+    /// consent-frozen grant cache, the way boot/install do), enabled per
+    /// flag.
     fn registry_with(tmp: &TempDir, id: &str, caps: &[&str], enabled: bool) -> PluginRegistry {
-        let dir = tmp.path().join("plugins").join(id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let caps_json: Vec<String> = caps.iter().map(|c| format!("\"{c}\"")).collect();
-        std::fs::write(
-            dir.join("manifest.json"),
-            format!(
-                r#"{{"id":"{id}","name":"T","version":"0.1.0","entry":"index.html",
-                    "requested_capabilities":[{}]}}"#,
-                caps_json.join(",")
-            ),
-        )
-        .unwrap();
         let reg = PluginRegistry::new(tmp.path().to_path_buf()).unwrap();
+        reg.set_granted_caps(id, Some(caps.iter().map(|c| c.to_string()).collect()));
         reg.set_enabled(id, enabled);
         reg
     }
@@ -591,26 +579,37 @@ mod tests {
         // Catalog command the manifest did NOT request is refused.
         assert!(check_plugin_grant(&registry, "hello-plugin", "compute_apply_diff").is_err());
 
-        // The serve layer resolves the example's real bundle files.
-        let plugins_root = registry.data_dir.join("plugins");
-        let enabled = registry.enabled_ids();
-        let (path, mime) = crate::plugins::serve::resolve_plugin_asset(
-            &plugins_root,
-            &enabled,
+        // The serve layer resolves the example's real bundle files through
+        // the PRODUCTION path: install seeded the serve-root cache, the
+        // handler resolves against it.
+        let root = registry.serve_root_for("hello-plugin");
+        assert_eq!(
+            root.as_deref(),
+            Some(registry.data_dir.join("plugins").join("hello-plugin").as_path())
+        );
+        let (path, mime) = crate::plugins::serve::resolve_with_root(
+            root.as_deref(),
+            registry.is_enabled("hello-plugin"),
             "hello-plugin",
             "index.html",
         )
         .unwrap();
         assert!(path.is_file());
         assert_eq!(mime, "text/html; charset=utf-8");
-        let (_, sdk_mime) = crate::plugins::serve::resolve_plugin_asset(
-            &plugins_root,
-            &enabled,
+        let (_, sdk_mime) = crate::plugins::serve::resolve_with_root(
+            root.as_deref(),
+            registry.is_enabled("hello-plugin"),
             "hello-plugin",
             "bhq-sdk.js",
         )
         .unwrap();
         assert_eq!(sdk_mime, "text/javascript; charset=utf-8");
+
+        // Install seeded the consent-frozen grant cache too.
+        assert!(registry
+            .granted_caps_for("hello-plugin")
+            .unwrap()
+            .contains(&"list_sessions".to_string()));
     }
 
     #[tokio::test]
