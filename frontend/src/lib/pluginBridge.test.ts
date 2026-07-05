@@ -3,7 +3,9 @@ import {
   classifyPluginMessage,
   detectSchemeForm,
   expectedOrigins,
+  parseSpawnRequest,
   pluginEntryUrl,
+  routeSpawnInvoke,
 } from "./pluginBridge";
 
 describe("detectSchemeForm", () => {
@@ -106,5 +108,64 @@ describe("classifyPluginMessage", () => {
         expected,
       ).kind,
     ).toBe("reject");
+  });
+});
+
+describe("routeSpawnInvoke", () => {
+  const spawnArgs = { prompt: "craft materials", project: "cognotify" };
+
+  it("forwards every non-spawn command untouched", () => {
+    expect(routeSpawnInvoke("list_sessions", {}, undefined)).toEqual({
+      action: "forward",
+    });
+    expect(
+      routeSpawnInvoke("plugin_kv_set", { key: "k", value: "v" }, { granted: true }),
+    ).toEqual({ action: "forward" });
+  });
+
+  it("fails CLOSED when the mount has no confirm channel", () => {
+    const v = routeSpawnInvoke("spawn_session", spawnArgs, undefined);
+    expect(v.action).toBe("reject");
+  });
+
+  it("forwards without a dialog when the shell view says ungranted", () => {
+    // Rust's canonical grant rejection is the single error source; an
+    // ungranted plugin never raises a confirm dialog.
+    expect(routeSpawnInvoke("spawn_session", spawnArgs, { granted: false })).toEqual({
+      action: "forward",
+    });
+  });
+
+  it("routes granted spawns to the confirm dialog with parsed args", () => {
+    const v = routeSpawnInvoke("spawn_session", spawnArgs, { granted: true });
+    expect(v.action).toBe("confirm");
+    if (v.action === "confirm") {
+      expect(v.req).toEqual({
+        prompt: "craft materials",
+        project: "cognotify",
+        title: undefined,
+      });
+    }
+  });
+});
+
+describe("parseSpawnRequest", () => {
+  it("extracts the request fields and drops non-strings", () => {
+    expect(
+      parseSpawnRequest({ prompt: "p", project: 42, title: "t", extra: true }),
+    ).toEqual({ prompt: "p", project: undefined, title: "t" });
+  });
+
+  it("tolerates junk args (Rust re-validates for real)", () => {
+    expect(parseSpawnRequest(null)).toEqual({
+      prompt: "",
+      project: undefined,
+      title: undefined,
+    });
+    expect(parseSpawnRequest("nonsense")).toEqual({
+      prompt: "",
+      project: undefined,
+      title: undefined,
+    });
   });
 });

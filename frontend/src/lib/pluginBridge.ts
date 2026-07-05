@@ -72,6 +72,58 @@ export interface BhqInvokeMsg {
   nonce: string;
 }
 
+/** What `spawn_session` asks for — shown VERBATIM in the confirm dialog. */
+export interface SpawnRequest {
+  prompt: string;
+  project?: string;
+  title?: string;
+}
+
+/** Defensive arg extraction for the dialog (Rust re-validates for real). */
+export function parseSpawnRequest(args: unknown): SpawnRequest {
+  const a = (typeof args === "object" && args !== null ? args : {}) as Record<
+    string,
+    unknown
+  >;
+  return {
+    prompt: typeof a.prompt === "string" ? a.prompt : "",
+    project: typeof a.project === "string" ? a.project : undefined,
+    title: typeof a.title === "string" ? a.title : undefined,
+  };
+}
+
+export type SpawnRouting =
+  | { action: "forward" }
+  | { action: "confirm"; req: SpawnRequest }
+  | { action: "reject"; error: string };
+
+/**
+ * Pure routing for the per-spawn confirm tier (split out for unit tests,
+ * like `classifyPluginMessage`). Only `spawn_session` is special:
+ *
+ * - mount provided no confirm channel → REJECT (fail closed — a spawn must
+ *   never silently forward just because a mount site forgot the wiring);
+ * - shell's view says ungranted/disabled → forward WITHOUT a dialog, so
+ *   Rust's canonical grant rejection is the single error source and
+ *   ungranted plugins can't raise confirm dialogs;
+ * - granted → dialog. The Rust proxy re-checks the grant either way.
+ */
+export function routeSpawnInvoke(
+  cmd: string,
+  args: unknown,
+  spawn: { granted: boolean } | undefined,
+): SpawnRouting {
+  if (cmd !== "spawn_session") return { action: "forward" };
+  if (!spawn) {
+    return {
+      action: "reject",
+      error: "spawn_session: no confirmation channel on this mount",
+    };
+  }
+  if (!spawn.granted) return { action: "forward" };
+  return { action: "confirm", req: parseSpawnRequest(args) };
+}
+
 export type Classified =
   | { kind: "invoke"; msg: BhqInvokeMsg }
   | { kind: "pong" }
@@ -114,8 +166,17 @@ export function mountPluginBridge(opts: {
   pluginId: string;
   nonce: string;
   form: SchemeForm;
+  /**
+   * Per-spawn confirm channel for `spawn_session` (mandatory tier in v1).
+   * `granted` is the shell's cached view (enabled + capability requested) —
+   * UX gating only; Rust re-checks authoritatively on forward.
+   */
+  spawn?: {
+    granted: boolean;
+    confirm: (req: SpawnRequest) => Promise<boolean>;
+  };
 }): () => void {
-  const { iframe, pluginId, nonce, form } = opts;
+  const { iframe, pluginId, nonce, form, spawn } = opts;
   const origins = expectedOrigins(form, pluginId);
 
   // Replies target the iframe's contentWindow directly; "*" is required
@@ -124,20 +185,7 @@ export function mountPluginBridge(opts: {
   // it could ask for (nonce-checked request, Rust-checked grant).
   const post = (msg: unknown) => iframe.contentWindow?.postMessage(msg, "*");
 
-  const onMessage = (event: MessageEvent) => {
-    const verdict = classifyPluginMessage(
-      event.data,
-      event.origin,
-      event.source === iframe.contentWindow,
-      { origins, nonce },
-    );
-    if (verdict.kind === "reject") return; // not ours (or forged) — ignore
-    if (verdict.kind === "pong") {
-      void commands.pluginNotePong(pluginId);
-      return;
-    }
-    const { id, cmd, args } = verdict.msg;
-    const argsJson = args === undefined ? null : JSON.stringify(args);
+  const forward = (id: string, cmd: string, argsJson: string | null) => {
     commands
       .pluginInvokeProxy(pluginId, cmd, argsJson)
       .then((result) => {
@@ -155,6 +203,44 @@ export function mountPluginBridge(opts: {
       .catch((err) => {
         post({ type: "bhq:result", id, ok: false, error: String(err) });
       });
+  };
+
+  const onMessage = (event: MessageEvent) => {
+    const verdict = classifyPluginMessage(
+      event.data,
+      event.origin,
+      event.source === iframe.contentWindow,
+      { origins, nonce },
+    );
+    if (verdict.kind === "reject") return; // not ours (or forged) — ignore
+    if (verdict.kind === "pong") {
+      void commands.pluginNotePong(pluginId);
+      return;
+    }
+    const { id, cmd, args } = verdict.msg;
+    const argsJson = args === undefined ? null : JSON.stringify(args);
+    const routing = routeSpawnInvoke(cmd, args, spawn);
+    if (routing.action === "reject") {
+      post({ type: "bhq:result", id, ok: false, error: routing.error });
+      return;
+    }
+    if (routing.action === "confirm") {
+      // spawn is defined here by routeSpawnInvoke's contract.
+      void spawn?.confirm(routing.req).then((ok) => {
+        if (ok) {
+          forward(id, cmd, argsJson);
+        } else {
+          post({
+            type: "bhq:result",
+            id,
+            ok: false,
+            error: "spawn_session: rejected by user",
+          });
+        }
+      });
+      return;
+    }
+    forward(id, cmd, argsJson);
   };
 
   window.addEventListener("message", onMessage);
