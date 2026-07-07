@@ -96,7 +96,7 @@ export function PluginManager() {
   );
   const install = useTauriMutation<
     InstalledPluginView,
-    { source: string; linked: boolean }
+    { source: string; linked: boolean; cleanupOrphan: boolean }
   >("install_plugin");
   const reapprove = useTauriMutation<InstalledPluginView, { pluginId: string }>(
     "reapprove_linked_plugin",
@@ -162,7 +162,7 @@ export function PluginManager() {
 
   const confirmInstall = () => {
     if (!pendingInstall) return;
-    const { source, linked, reapprove: reapproveId } = pendingInstall;
+    const { source, preview: p, linked, reapprove: reapproveId } = pendingInstall;
     setPendingInstall(null);
     if (reapproveId) {
       reapprove.mutate(
@@ -174,8 +174,10 @@ export function PluginManager() {
       );
       return;
     }
+    // Confirming a dialog that showed the leftover-files notice IS the
+    // cleanup consent — the flag is only ever true when the notice rendered.
     install.mutate(
-      { source, linked },
+      { source, linked, cleanupOrphan: p.orphan_dir },
       {
         onSuccess: () => {
           setInstallSource("");
@@ -372,10 +374,23 @@ export function PluginManager() {
                   control.
                 </p>
               )}
+              {pendingInstall.preview.orphan_dir && (
+                <p className="mt-3 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-on-surface">
+                  Leftover files from a previous install of this plugin were
+                  found (it's not in the registry). Approving removes them
+                  and continues the install.
+                </p>
+              )}
             </div>
           )
         }
-        confirmLabel={pendingInstall?.reapprove ? "Re-approve" : "Install"}
+        confirmLabel={
+          pendingInstall?.reapprove
+            ? "Re-approve"
+            : pendingInstall?.preview.orphan_dir
+              ? "Remove leftovers & install"
+              : "Install"
+        }
         confirmVariant="primary"
         onConfirm={confirmInstall}
         onCancel={() => setPendingInstall(null)}
