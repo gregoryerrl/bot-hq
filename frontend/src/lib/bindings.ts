@@ -887,6 +887,20 @@ async reinstallPlugin(pluginId: string, source: string, linked: boolean) : Promi
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Copy-mode asset refresh from the recorded install source — the
+ * no-consent path: allowed ONLY while the source manifest byte-matches
+ * the stored (consented) one, so grants can't move. Any manifest delta
+ * routes through Reinstall (full consent screen).
+ */
+async updatePluginFromSource(pluginId: string) : Promise<Result<InstalledPluginView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_plugin_from_source", { pluginId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listInstalledPlugins() : Promise<Result<InstalledPluginView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_installed_plugins") };
@@ -1215,6 +1229,11 @@ export type InstalledPluginView = { id: string; name: string; version: string; e
  * Dev-mode install serving straight from `dir_path` (the user's repo).
  */
 linked: boolean; 
+/**
+ * Copy-mode: where the copy came from (local dir or manifest URL),
+ * when recorded. Drives "Update from source" + Reinstall pre-fill.
+ */
+source_path: string | null; 
 /**
  * Linked only: the source `manifest.json` no longer byte-matches the
  * consented (stored) manifest — grants stay FROZEN until the user
