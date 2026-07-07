@@ -297,6 +297,12 @@ uninstall (bundle dir + your KV rows are removed).
 Plugins run **while mounted** — there is no background execution in v1.
 State you need across mounts goes in `plugin_kv_*`.
 
+The registry (not the disk) decides what's installed: if
+`~/.bot-hq/plugins/<id>/` survives or reappears after an uninstall
+(out-of-band writes, restores), the next install of that id surfaces a
+consented cleanup in the install dialog instead of hard-failing — the
+leftovers are only removed on your approval.
+
 ## What plugins can't do yet (designed extension points)
 
 - **Agent surface** — plugins can't contribute MCP tools to Brian/Rain

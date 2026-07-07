@@ -76,8 +76,9 @@ pub async fn install_plugin(
     core: tauri::State<'_, Arc<CoreAppState>>,
     source: String,
     linked: bool,
+    cleanup_orphan: bool,
 ) -> Result<InstalledPluginView, AppError> {
-    let view = install_plugin_inner(&storage, &registry, &source, linked).await?;
+    let view = install_plugin_inner(&storage, &registry, &source, linked, cleanup_orphan).await?;
     if let (Some(w), Some(root)) = (core.fs_watcher.get(), registry.serve_root_for(&view.id)) {
         w.add_plugin_dir(&view.id, root);
     }
@@ -194,6 +195,10 @@ pub struct CapabilityDescription {
 pub struct PluginManifestPreview {
     pub manifest: PluginManifest,
     pub capabilities: Vec<CapabilityDescription>,
+    /// A `<data_dir>/plugins/<id>` directory exists with NO registry row —
+    /// leftovers from a previous install. The dialog offers consented
+    /// cleanup; install re-checks before removing anything.
+    pub orphan_dir: bool,
 }
 
 /// Fetch + validate a manifest WITHOUT installing — the consent step.
@@ -202,29 +207,11 @@ pub struct PluginManifestPreview {
 #[tauri::command]
 #[specta::specta]
 pub async fn preview_plugin_manifest(
+    storage: tauri::State<'_, Arc<Storage>>,
+    registry: tauri::State<'_, Arc<PluginRegistry>>,
     source: String,
 ) -> Result<PluginManifestPreview, AppError> {
-    let (manifest, raw_json) = if is_url(&source) {
-        fetch_manifest_from_url(&source).await?
-    } else {
-        read_manifest_from_dir(Path::new(&source))?
-    };
-    validate_requested_capabilities(&manifest)?;
-    validate_csp_origins(&raw_json)?;
-    let capabilities = manifest
-        .requested_capabilities
-        .iter()
-        .map(|c| CapabilityDescription {
-            name: c.clone(),
-            description: crate::plugins::catalog::describe(c)
-                .unwrap_or_default()
-                .to_string(),
-        })
-        .collect();
-    Ok(PluginManifestPreview {
-        manifest,
-        capabilities,
-    })
+    preview_plugin_manifest_inner(&storage, &registry, &source).await
 }
 
 /// Unknown capability names are a preview/install-time error, not a
@@ -287,6 +274,7 @@ pub(crate) async fn install_plugin_inner(
     registry: &PluginRegistry,
     source: &str,
     linked: bool,
+    cleanup_orphan: bool,
 ) -> Result<InstalledPluginView, AppError> {
     if linked && is_url(source) {
         return Err(AppError::Validation(
@@ -313,25 +301,40 @@ pub(crate) async fn install_plugin_inner(
         })
         .transpose()?;
 
-    let plugin_dir = registry.data_dir.join("plugins").join(&manifest.id);
-    if plugin_dir.exists() {
-        return Err(AppError::Conflict(format!(
-            "plugin already installed: {}",
-            manifest.id
-        )));
-    }
-    if linked
-        && storage
-            .list_plugins()
-            .await
-            .map_err(anyhow_to_app)?
-            .iter()
-            .any(|r| r.id == manifest.id)
+    // The registry is the source of truth for "installed" — consult it
+    // FIRST, for every mode. This also keeps insert_plugin's REPLACE arm
+    // unreachable from here: falling through with a live row would
+    // cascade-wipe the plugin's KV (REPLACE = DELETE+INSERT, plugin_kv FK).
+    if storage
+        .list_plugins()
+        .await
+        .map_err(anyhow_to_app)?
+        .iter()
+        .any(|r| r.id == manifest.id)
     {
         return Err(AppError::Conflict(format!(
-            "plugin already installed: {} (uninstall first — that's the normal↔linked migration path)",
-            manifest.id
+            "plugin already installed: {} — registry entry exists; uninstall first{}",
+            manifest.id,
+            if linked {
+                " (that's the normal↔linked migration path)"
+            } else {
+                ""
+            }
         )));
+    }
+    // No registry row but the managed dir exists: leftovers from a previous
+    // install (out-of-band writes, restores). Removal needs the user's
+    // consent — the install dialog offers it; never delete silently.
+    let plugin_dir = registry.data_dir.join("plugins").join(&manifest.id);
+    if plugin_dir.exists() {
+        if !cleanup_orphan {
+            return Err(AppError::Conflict(format!(
+                "leftover plugin files at {} (no registry entry for {}) — approve cleanup in the install dialog or remove the directory manually",
+                plugin_dir.display(),
+                manifest.id
+            )));
+        }
+        std::fs::remove_dir_all(&plugin_dir).map_err(io_to_app)?;
     }
 
     // Resolve the serve root. Linked: the user's source directory, taken
@@ -396,6 +399,50 @@ pub(crate) async fn install_plugin_inner(
         .find(|r| r.id == manifest.id)
         .ok_or_else(|| AppError::Internal("plugin row vanished after insert".into()))?;
     Ok(InstalledPluginView::from_row(row, manifest, &registry.heartbeat))
+}
+
+/// Body of [`preview_plugin_manifest`]. Read-only: fetches + validates the
+/// manifest and reports whether an orphaned managed dir would block the
+/// install (so the dialog can ask for cleanup consent up front).
+pub(crate) async fn preview_plugin_manifest_inner(
+    storage: &Storage,
+    registry: &PluginRegistry,
+    source: &str,
+) -> Result<PluginManifestPreview, AppError> {
+    let (manifest, raw_json) = if is_url(source) {
+        fetch_manifest_from_url(source).await?
+    } else {
+        read_manifest_from_dir(Path::new(source))?
+    };
+    validate_requested_capabilities(&manifest)?;
+    validate_csp_origins(&raw_json)?;
+    let registered = storage
+        .list_plugins()
+        .await
+        .map_err(anyhow_to_app)?
+        .iter()
+        .any(|r| r.id == manifest.id);
+    let orphan_dir = !registered
+        && registry
+            .data_dir
+            .join("plugins")
+            .join(&manifest.id)
+            .exists();
+    let capabilities = manifest
+        .requested_capabilities
+        .iter()
+        .map(|c| CapabilityDescription {
+            name: c.clone(),
+            description: crate::plugins::catalog::describe(c)
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect();
+    Ok(PluginManifestPreview {
+        manifest,
+        capabilities,
+        orphan_dir,
+    })
 }
 
 /// Body of [`reapprove_linked_plugin`]. Grants change ONLY here (or at
@@ -660,7 +707,7 @@ mod tests {
         let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
 
         let view =
-            install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+            install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
                 .await
                 .unwrap();
         assert_eq!(view.id, "notes");
@@ -687,10 +734,10 @@ mod tests {
         let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
 
-        install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
-        let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Conflict(_)), "got {err:?}");
@@ -701,7 +748,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
-        install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
 
@@ -716,7 +763,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
-        install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
 
@@ -738,7 +785,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
-        install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
         let plugin_dir = registry.data_dir.join("plugins").join("notes");
@@ -763,31 +810,173 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disable_then_install_repeated_install_still_conflicts_on_disk() {
+    async fn disabled_plugin_still_conflicts_on_reinstall() {
         let tmp = TempDir::new().unwrap();
         let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
-        install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
         set_enabled_inner(&storage, &registry, "notes", false)
             .await
             .unwrap();
-        // Even when disabled, the dir is still on disk, so re-install conflicts.
-        let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        // Disabled is still installed — the registry row conflicts.
+        let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Conflict(_)));
     }
 
     #[tokio::test]
-    async fn preview_describes_capabilities_without_installing() {
+    async fn orphan_dir_blocks_install_until_consented_cleanup() {
+        // The reproduced bug: uninstall removes the row, the dir reappears
+        // out-of-band, install hard-fails with no path forward. Now: orphan
+        // Conflict without consent, cleanup + install with it.
         let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
-
-        let preview = preview_plugin_manifest(src.display().to_string())
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
+        uninstall_plugin_inner(&storage, &registry, "notes")
+            .await
+            .unwrap();
+
+        let plugin_dir = registry.data_dir.join("plugins").join("notes");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("stray.txt"), "leftover").unwrap();
+
+        let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
+            .await
+            .unwrap_err();
+        match &err {
+            AppError::Conflict(msg) => {
+                assert!(msg.contains("leftover"), "orphan copy names the cause: {msg}")
+            }
+            other => panic!("got {other:?}"),
+        }
+
+        // Preview surfaces the orphan so the dialog can ask up front.
+        let p = preview_plugin_manifest_inner(&storage, &registry, &src.display().to_string())
+            .await
+            .unwrap();
+        assert!(p.orphan_dir);
+
+        // Consented cleanup: install proceeds, dir rebuilt from source.
+        let view =
+            install_plugin_inner(&storage, &registry, &src.display().to_string(), false, true)
+                .await
+                .unwrap();
+        assert_eq!(view.id, "notes");
+        assert!(plugin_dir.join("manifest.json").exists());
+        assert!(
+            !plugin_dir.join("stray.txt").exists(),
+            "orphan contents replaced, not merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_flag_never_deletes_a_registered_install() {
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+        let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
+            .await
+            .unwrap();
+        storage.plugin_kv_set("notes", "k", "v").await.unwrap();
+
+        // Registry row present → Conflict regardless of the flag; the
+        // installed dir and KV survive untouched.
+        let err =
+            install_plugin_inner(&storage, &registry, &src.display().to_string(), false, true)
+                .await
+                .unwrap_err();
+        match &err {
+            AppError::Conflict(msg) => {
+                assert!(msg.contains("registry entry exists"), "registry copy: {msg}")
+            }
+            other => panic!("got {other:?}"),
+        }
+        assert!(registry
+            .data_dir
+            .join("plugins")
+            .join("notes")
+            .join("index.html")
+            .exists());
+        assert_eq!(
+            storage.plugin_kv_get("notes", "k").await.unwrap(),
+            Some("v".to_string())
+        );
+        // And preview reports NO orphan — the row exists, it's a real conflict.
+        let p = preview_plugin_manifest_inner(&storage, &registry, &src.display().to_string())
+            .await
+            .unwrap();
+        assert!(!p.orphan_dir);
+    }
+
+    #[tokio::test]
+    async fn registered_row_with_missing_dir_conflicts_instead_of_silent_replace() {
+        // The latent twin bug: row exists but the dir was deleted manually.
+        // The old dir-only check fell through to INSERT OR REPLACE, which
+        // cascade-wiped plugin_kv. Registry-first turns it into a Conflict.
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+        let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
+            .await
+            .unwrap();
+        storage.plugin_kv_set("notes", "k", "v").await.unwrap();
+        std::fs::remove_dir_all(registry.data_dir.join("plugins").join("notes")).unwrap();
+
+        let err =
+            install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
+                .await
+                .unwrap_err();
+        assert!(matches!(err, AppError::Conflict(_)), "got {err:?}");
+        assert_eq!(
+            storage.plugin_kv_get("notes", "k").await.unwrap(),
+            Some("v".to_string()),
+            "KV must survive — no silent REPLACE"
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_install_over_orphan_dir_cleans_up_with_consent() {
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+        let src = write_plugin_source(tmp.path(), "dev", "0.1.0");
+        let plugin_dir = registry.data_dir.join("plugins").join("dev");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("stray.txt"), "x").unwrap();
+
+        // Orphans block linked installs too (they'd shadow a later copy
+        // install and confuse the loader scan).
+        let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), true, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Conflict(_)), "got {err:?}");
+
+        let view =
+            install_plugin_inner(&storage, &registry, &src.display().to_string(), true, true)
+                .await
+                .unwrap();
+        assert!(view.linked);
+        assert!(
+            !plugin_dir.exists(),
+            "orphan removed; linked installs copy nothing into data_dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_describes_capabilities_without_installing() {
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+        let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
+
+        let preview =
+            preview_plugin_manifest_inner(&storage, &registry, &src.display().to_string())
+                .await
+                .unwrap();
         assert_eq!(preview.manifest.id, "notes");
         assert_eq!(preview.capabilities.len(), 1);
         assert_eq!(preview.capabilities[0].name, "cl_index_search");
@@ -795,6 +984,7 @@ mod tests {
             !preview.capabilities[0].description.is_empty(),
             "consent copy comes from the catalog"
         );
+        assert!(!preview.orphan_dir, "fresh source, nothing on disk");
         // Nothing landed anywhere — preview is read-only.
         assert!(!tmp.path().join("plugins").exists());
     }
@@ -817,13 +1007,13 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("index.html"), b"<h1>hi</h1>").unwrap();
 
-        let err = preview_plugin_manifest(dir.display().to_string())
+        let (storage, registry) = fresh(&tmp).await;
+        let err = preview_plugin_manifest_inner(&storage, &registry, &dir.display().to_string())
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
 
-        let (storage, registry) = fresh(&tmp).await;
-        let err = install_plugin_inner(&storage, &registry, &dir.display().to_string(), false)
+        let err = install_plugin_inner(&storage, &registry, &dir.display().to_string(), false, false)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
@@ -858,7 +1048,7 @@ mod tests {
             r#"{ "script-src": ["https://cdn.jsdelivr.net"], "font-src": ["https://fonts.gstatic.com"] }"#,
         );
 
-        install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
 
@@ -893,7 +1083,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "plain", "0.1.0");
-        install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
         let row = storage.list_plugins().await.unwrap().pop().unwrap();
@@ -914,13 +1104,13 @@ mod tests {
         ] {
             let src = write_plugin_source_with_csp(tmp.path(), name, bad_block);
 
-            let err = preview_plugin_manifest(src.display().to_string())
-                .await
-                .unwrap_err();
-            assert!(matches!(err, AppError::Validation(_)), "{name}: got {err:?}");
-
             let (storage, registry) = fresh(&tmp).await;
-            let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+            let err =
+                preview_plugin_manifest_inner(&storage, &registry, &src.display().to_string())
+                    .await
+                    .unwrap_err();
+            assert!(matches!(err, AppError::Validation(_)), "{name}: got {err:?}");
+            let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
                 .await
                 .unwrap_err();
             assert!(matches!(err, AppError::Validation(_)), "{name}: got {err:?}");
@@ -933,14 +1123,16 @@ mod tests {
     #[tokio::test]
     async fn preview_carries_csp_origins_for_consent_screen() {
         let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source_with_csp(
             tmp.path(),
             "cdn",
             r#"{ "script-src": ["https://cdn.jsdelivr.net", "https://unpkg.com"] }"#,
         );
-        let preview = preview_plugin_manifest(src.display().to_string())
-            .await
-            .unwrap();
+        let preview =
+            preview_plugin_manifest_inner(&storage, &registry, &src.display().to_string())
+                .await
+                .unwrap();
         let csp = preview.manifest.csp_extra_origins.unwrap();
         assert_eq!(
             csp.script_src,
@@ -956,7 +1148,7 @@ mod tests {
         let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "dev", "0.1.0");
 
-        let view = install_plugin_inner(&storage, &registry, &src.display().to_string(), true)
+        let view = install_plugin_inner(&storage, &registry, &src.display().to_string(), true, false)
             .await
             .unwrap();
         assert!(view.linked);
@@ -995,13 +1187,13 @@ mod tests {
         let (storage, registry) = fresh(&tmp).await;
 
         // URL sources can't be linked.
-        let err = install_plugin_inner(&storage, &registry, "https://x.com/manifest.json", true)
+        let err = install_plugin_inner(&storage, &registry, "https://x.com/manifest.json", true, false)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
 
         // Relative path refused.
-        let err = install_plugin_inner(&storage, &registry, "./relative", true)
+        let err = install_plugin_inner(&storage, &registry, "./relative", true, false)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
@@ -1012,6 +1204,7 @@ mod tests {
             &registry,
             &tmp.path().join("nope").display().to_string(),
             true,
+            false,
         )
         .await
         .unwrap_err();
@@ -1040,7 +1233,7 @@ mod tests {
         std::fs::write(dir.join("manifest.json"), manifest_v1).unwrap();
         std::fs::write(dir.join("index.html"), b"<h1>hi</h1>").unwrap();
 
-        install_plugin_inner(&storage, &registry, &dir.display().to_string(), true)
+        install_plugin_inner(&storage, &registry, &dir.display().to_string(), true, false)
             .await
             .unwrap();
         assert_eq!(
@@ -1082,7 +1275,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (storage, registry) = fresh(&tmp).await;
         let dir = write_plugin_source(tmp.path(), "dev", "0.1.0");
-        install_plugin_inner(&storage, &registry, &dir.display().to_string(), true)
+        install_plugin_inner(&storage, &registry, &dir.display().to_string(), true, false)
             .await
             .unwrap();
         storage.plugin_kv_set("dev", "state", "keepme").await.unwrap();
@@ -1106,7 +1299,7 @@ mod tests {
 
         // Non-linked plugins can't use the reapprove path.
         let src2 = write_plugin_source(tmp.path(), "copymode", "0.1.0");
-        install_plugin_inner(&storage, &registry, &src2.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src2.display().to_string(), false, false)
             .await
             .unwrap();
         let err = reapprove_linked_plugin_inner(&storage, &registry, "copymode")
@@ -1120,7 +1313,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (storage, registry) = fresh(&tmp).await;
         let dir = write_plugin_source(tmp.path(), "dev", "0.1.0");
-        install_plugin_inner(&storage, &registry, &dir.display().to_string(), true)
+        install_plugin_inner(&storage, &registry, &dir.display().to_string(), true, false)
             .await
             .unwrap();
         storage.plugin_kv_set("dev", "k", "v").await.unwrap();
@@ -1143,11 +1336,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (storage, registry) = fresh(&tmp).await;
         let src = write_plugin_source(tmp.path(), "dev", "0.1.0");
-        install_plugin_inner(&storage, &registry, &src.display().to_string(), false)
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
             .await
             .unwrap();
         // Same id as a normal install → Conflict (migration = uninstall first).
-        let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), true)
+        let err = install_plugin_inner(&storage, &registry, &src.display().to_string(), true, false)
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::Conflict(_)), "got {err:?}");
