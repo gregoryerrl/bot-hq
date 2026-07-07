@@ -207,15 +207,10 @@ where
                     // Plugin served dirs → tell the mounted panel its own
                     // content changed (same churn filter as session repos —
                     // linked repos see cargo/npm build noise).
-                    let changed_plugins: BTreeSet<String> = batch
-                        .iter()
-                        .filter_map(|p| plugin_for_path(p, &plugin_dirs))
-                        .collect();
-                    for plugin_id in changed_plugins {
+                    for ev in plugin_events_for_batch(&batch, &plugin_dirs) {
                         emit(
                             PluginAssetsChangedEvent::EVENT_NAME,
-                            serde_json::to_value(PluginAssetsChangedEvent { plugin_id })
-                                .unwrap_or(Value::Null),
+                            serde_json::to_value(ev).unwrap_or(Value::Null),
                         );
                     }
                 },
@@ -267,6 +262,26 @@ fn session_for_path(path: &Path, repos: &HashMap<PathBuf, String>) -> Option<Str
         }
     }
     None
+}
+
+/// One `plugin:assets_changed` event per plugin whose served dir the batch
+/// touched — deduped (BTreeSet, so deterministic order), churn-filtered,
+/// and scoped strictly to the owning plugin: a path under A's root can
+/// never yield B's id. This is the whole emit-mapping the watcher loop
+/// runs; extracted so the two-plugin scoping contract is testable without
+/// notify/debounce timing.
+fn plugin_events_for_batch(
+    batch: &[PathBuf],
+    plugin_dirs: &HashMap<PathBuf, String>,
+) -> Vec<PluginAssetsChangedEvent> {
+    let changed: BTreeSet<String> = batch
+        .iter()
+        .filter_map(|p| plugin_for_path(p, plugin_dirs))
+        .collect();
+    changed
+        .into_iter()
+        .map(|plugin_id| PluginAssetsChangedEvent { plugin_id })
+        .collect()
 }
 
 /// Map a changed path under a watched plugin served dir back to its
@@ -367,6 +382,62 @@ mod tests {
         );
         // Unwatched paths map to nothing.
         assert_eq!(plugin_for_path(Path::new("/somewhere/else.html"), &dirs), None);
+    }
+
+    /// The two-plugin scoping contract (PLUGINS.md: "a file in YOUR served
+    /// directory changed"): touching A's dir yields exactly A's event —
+    /// never B's, never a duplicate.
+    #[test]
+    fn assets_events_scope_to_the_owning_plugin_only() {
+        let dirs: HashMap<PathBuf, String> = [
+            (PathBuf::from("/plugins/a"), "plugin-a".to_string()),
+            (PathBuf::from("/plugins/b"), "plugin-b".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        // Batch touching only A → exactly one event, tagged A.
+        let evs =
+            plugin_events_for_batch(&[PathBuf::from("/plugins/a/index.html")], &dirs);
+        assert_eq!(
+            evs,
+            vec![PluginAssetsChangedEvent {
+                plugin_id: "plugin-a".to_string()
+            }]
+        );
+
+        // Several A-paths dedupe to ONE A event; B still silent.
+        let evs = plugin_events_for_batch(
+            &[
+                PathBuf::from("/plugins/a/x.js"),
+                PathBuf::from("/plugins/a/sub/y.css"),
+            ],
+            &dirs,
+        );
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].plugin_id, "plugin-a");
+
+        // Both touched → one each (BTreeSet order: a then b).
+        let evs = plugin_events_for_batch(
+            &[
+                PathBuf::from("/plugins/b/z.html"),
+                PathBuf::from("/plugins/a/x.js"),
+            ],
+            &dirs,
+        );
+        let ids: Vec<&str> = evs.iter().map(|e| e.plugin_id.as_str()).collect();
+        assert_eq!(ids, vec!["plugin-a", "plugin-b"]);
+
+        // Churn inside a watched dir + paths outside any dir → nothing.
+        let evs = plugin_events_for_batch(
+            &[
+                PathBuf::from("/plugins/a/node_modules/x.js"),
+                PathBuf::from("/plugins/a/.git/index"),
+                PathBuf::from("/elsewhere/f.txt"),
+            ],
+            &dirs,
+        );
+        assert!(evs.is_empty());
     }
 
     #[test]
