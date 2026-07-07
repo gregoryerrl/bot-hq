@@ -70,6 +70,38 @@ impl Storage {
         Ok(())
     }
 
+    /// Refresh a plugin's CONSENTED install state in place (Reinstall —
+    /// mode convert or same-mode refresh from a new source). Same
+    /// UPDATE-not-REPLACE rationale as [`Storage::update_plugin_consent`]:
+    /// the plugin_kv FK cascade must never fire on a row refresh.
+    /// Reinstalling implies wanting the plugin active → enabled resets to 1.
+    pub async fn update_plugin_install(
+        &self,
+        id: &str,
+        name: &str,
+        version: &str,
+        manifest_json: &str,
+        csp_json: Option<&str>,
+        dir_path: &str,
+        linked: bool,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE plugins SET name = ?, version = ?, manifest_json = ?, csp_json = ?, dir_path = ?, linked = ?, enabled = 1 \
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(version)
+        .bind(manifest_json)
+        .bind(csp_json)
+        .bind(dir_path)
+        .bind(linked)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("updating install for plugin {id}"))?;
+        Ok(())
+    }
+
     pub async fn delete_plugin(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM plugins WHERE id = ?")
             .bind(id)
@@ -219,6 +251,45 @@ mod plugin_tests {
         let rows = s.list_plugins().await.unwrap();
         assert!(!rows.iter().find(|r| r.id == "copy").unwrap().linked);
         assert!(rows.iter().find(|r| r.id == "dev").unwrap().linked);
+    }
+
+    #[tokio::test]
+    async fn update_plugin_install_switches_mode_in_place_and_keeps_kv() {
+        let s = store().await;
+        s.insert_plugin("p1", "Notes", "1.0.0", "{}", "/data/plugins/p1", None, false)
+            .await
+            .unwrap();
+        s.plugin_kv_set("p1", "state", "keepme").await.unwrap();
+        s.set_plugin_enabled("p1", false).await.unwrap();
+
+        s.update_plugin_install(
+            "p1",
+            "Notes",
+            "1.1.0",
+            "{\"v\":2}",
+            Some(r#"{"script-src":["https://cdn.example"]}"#),
+            "/home/me/notes-plugin",
+            true,
+        )
+        .await
+        .unwrap();
+
+        let rows = s.list_plugins().await.unwrap();
+        assert_eq!(rows.len(), 1, "UPDATE, not insert");
+        let p = &rows[0];
+        assert_eq!(p.version, "1.1.0");
+        assert_eq!(p.dir_path, "/home/me/notes-plugin");
+        assert!(p.linked);
+        assert!(p.enabled, "reinstall re-enables");
+        assert_eq!(
+            p.csp_json.as_deref(),
+            Some(r#"{"script-src":["https://cdn.example"]}"#)
+        );
+        // The whole point: the plugin_kv cascade never fired.
+        assert_eq!(
+            s.plugin_kv_get("p1", "state").await.unwrap(),
+            Some("keepme".to_string())
+        );
     }
 
     #[tokio::test]
