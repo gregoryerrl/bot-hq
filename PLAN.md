@@ -86,6 +86,17 @@ trials cost model calls). Deferred remainder, roughly in value order:
 
 ## Backlog
 
+### spawn_session `task` summary field (catalog extension, deferred 2026-07-07)
+
+Optional `task` string on the spawn_session args that the per-spawn
+confirm dialog would render as a highlighted summary line (empty/omitted
+→ "(no task summary provided)"). Deferred from the spawn-dialog
+hardening pass: the api_version-1 arg surface stays frozen, SDK +
+plugin changes are needed to benefit, and a plugin-authored summary can
+itself mislead — the dialog highlighting what the plugin CLAIMS while
+the real risk is the prompt tail. Revisit with api_version 2 alongside
+other catalog extensions.
+
 ### UX polish (deferred from rebuild Phase 9.2)
 
 Shipped 2026-06-11 in the v1.0.0 stabilization pass: keyboard shortcuts

@@ -271,7 +271,15 @@ It is the only session-mutating grant, and it is guarded twice:
    showing your plugin's name, the target project, and the full
    prompt; the invoke resolves only on Approve and rejects with
    `spawn_session: rejected by user` on Reject. Not optional in v1
-   (no "don't ask again").
+   (no "don't ask again"). The dialog renders the complete prompt
+   (scrollable, with a long-prompt signpost) and warns when the last
+   non-empty line ends with ":" — a heuristic for an unfilled template
+   tail; it can false-positive on legit colon-ended prompts and never
+   blocks. Gate degenerate prompts client-side; the dialog is the last
+   line of defense, not your validator. (A structured task-summary
+   field on spawn_session was considered and deferred — a
+   plugin-authored summary could itself mislead while the real risk is
+   the prompt tail.)
 
 Why the second layer: plugin content can include user-commissioned
 HTML (the Cognotify materials model) rendered same-origin with the

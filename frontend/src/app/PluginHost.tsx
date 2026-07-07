@@ -13,6 +13,22 @@ import {
 import type { InstalledPluginView } from "../lib/bindings";
 
 /**
+ * Advisory heuristic for the spawn confirm dialog: a prompt whose last
+ * non-empty line ends with ":" looks like it ends with an unfilled
+ * template section (the failure that shipped a spawn with an empty
+ * "Task:" tail). Advisory only — legitimate prompts can end with a
+ * colon, so the dialog warns and never blocks.
+ */
+export function promptEndsWithUnfilledSection(prompt: string): boolean {
+  const lines = prompt.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (line) return line.endsWith(":");
+  }
+  return false;
+}
+
+/**
  * The live plugin surface: one sandboxed iframe per mount, wired to the
  * postMessage RPC bridge + heartbeat. When the backend sweep declares the
  * plugin crashed (`plugin:crashed`), the iframe is torn down and replaced
@@ -153,9 +169,24 @@ export function PluginHost({ plugin }: { plugin: InstalledPluginView }) {
               <p className="mb-1">
                 It will start a new agent session with this prompt:
               </p>
-              <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded bg-surface-container-high p-2 font-code-sm text-code-sm text-on-surface">
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-surface-container-high p-2 font-code-sm text-code-sm text-on-surface">
                 {pendingSpawn.req.prompt}
               </pre>
+              {/* ~20 lines fit in max-h-72; past that the tail is below the
+                  fold, so signpost it — the empty-tail incident was approved
+                  because nothing hinted there was more to see. */}
+              {pendingSpawn.req.prompt.split("\n").length > 20 && (
+                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                  {pendingSpawn.req.prompt.split("\n").length}-line prompt —
+                  scroll the box to review it fully.
+                </p>
+              )}
+              {promptEndsWithUnfilledSection(pendingSpawn.req.prompt) && (
+                <p className="mt-2 rounded border border-warning/40 bg-warning/10 px-2 py-1 text-on-surface">
+                  The prompt appears to end with an unfilled section (its
+                  last line ends with ":"). Review the tail before approving.
+                </p>
+              )}
             </div>
           )
         }
