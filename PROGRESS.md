@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-697 Rust tests passing (646 lib + 33 external MCP + 7 signaling + 11
-storage) plus 145 frontend Vitest. Release build clean. Version
+711 Rust tests passing (660 lib + 33 external MCP + 7 signaling + 11
+storage) plus 153 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -22,6 +22,48 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 plugin-runtime workstreams from 2026-07-05 (below): **per-plugin CSP
 override tier**, **spawn_session capability**, **linked installs**, and
 the **push-event + view-alignment paper-cuts**.
+
+---
+
+## 2026-07-07 — Plugin-runtime hardening from Cognotify operation
+
+Seven prioritized items from building + operating the first real panel
+plugin against api_version 1 (14 commits, `b826289` → `a474006`; the
+request came in from the Cognotify session):
+
+- **Orphan install dirs unblocked (BUG, reproduced):** install
+  conflicts are now registry-first for every mode. A surviving
+  `~/.bot-hq/plugins/<id>/` with no registry row is an orphan — the
+  install dialog offers consented cleanup ("Remove leftovers &
+  install") instead of hard-failing; cleanup never touches a
+  registered install. Also closed the latent twin: registered row +
+  missing dir used to fall through to INSERT OR REPLACE and
+  cascade-wipe plugin_kv.
+- **Reinstall… in place:** the drift/re-approve machinery generalized
+  to full reinstall — copy↔linked conversion AND same-mode refreshes,
+  one consent dialog (target-mode toggle inside), registry row
+  UPDATEd, **KV survives**. Managed-copy replacement/removal is stated
+  in the dialog, never silent. `materialize_serve_root` extracted and
+  shared with install.
+- **Spawn confirm hardening:** the per-spawn dialog's prompt pane grew
+  (192→288px) with a line-count signpost, plus an advisory warning
+  when the last non-empty line ends with ":" (the empty-"Task:"-tail
+  incident). The structured task-summary field was considered and
+  FILED (PLAN.md backlog) — a plugin-authored summary can itself
+  mislead.
+- **Push-event scoping pinned by test:** `plugin_events_for_batch`
+  extracted pure; two-plugin tests at both layers (watcher emit
+  mapping + PluginHost iframe forward). No leak found — the
+  "YOUR served directory" contract holds.
+- **Consent screen states install mode:** both branches lead with
+  "Install mode:" (Linked serve-live vs Copy frozen).
+- **Update from source (copy-mode):** migration 0032 records
+  `plugins.source_path`; copy-mode cards re-copy assets in place with
+  no consent while the source manifest byte-matches the approved one
+  (drift routes through Reinstall; URL installs re-fetch via
+  Reinstall). Retires per-plugin sync scripts.
+- **KV lifecycle documented:** survives disable/re-approve/Reinstall;
+  only uninstall deletes it.
 
 ---
 
