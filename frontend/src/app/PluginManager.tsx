@@ -441,13 +441,18 @@ export function PluginManager() {
                   csp={pendingInstall.preview.manifest.csp_extra_origins}
                 />
               )}
-              {pendingInstall.linked && (
+              {pendingInstall.linked ? (
                 <p className="mt-3 text-on-surface-variant">
-                  Linked — files are served directly from{" "}
+                  Install mode: Linked — files are served directly from{" "}
                   <code className="font-code-sm">{pendingInstall.source}</code>.
                   Content changes take effect immediately; capability changes
                   still require re-approval. Only link directories you
                   control.
+                </p>
+              ) : (
+                <p className="mt-3 text-on-surface-variant">
+                  Install mode: Copy — files are copied into bot-hq's plugin
+                  data directory and only change when you reinstall.
                 </p>
               )}
               {pendingInstall.preview.orphan_dir && (
