@@ -77,11 +77,16 @@ export function PluginManager() {
   // on disk), show what the plugin requests, install only on explicit confirm.
   // Re-approve (linked drift) rides the SAME dialog: `reapprove` carries the
   // plugin id and the confirm routes to reapprove_linked_plugin instead.
+  // Reinstall (in-place refresh / mode switch) rides it too: `reinstall`
+  // carries the plugin id, `linked` becomes the TARGET mode (toggleable
+  // inside the dialog), and confirm routes to reinstall_plugin.
   const [pendingInstall, setPendingInstall] = useState<{
     source: string;
     preview: PluginManifestPreview;
     linked: boolean;
     reapprove: string | null;
+    reinstall: string | null;
+    wasLinked: boolean;
   } | null>(null);
 
   const list = useTauriQuery<InstalledPluginView[]>(
@@ -101,6 +106,10 @@ export function PluginManager() {
   const reapprove = useTauriMutation<InstalledPluginView, { pluginId: string }>(
     "reapprove_linked_plugin",
   );
+  const reinstall = useTauriMutation<
+    InstalledPluginView,
+    { pluginId: string; source: string; linked: boolean }
+  >("reinstall_plugin");
   const enable = useTauriMutation<void, { pluginId: string }>("enable_plugin");
   const disable = useTauriMutation<void, { pluginId: string }>("disable_plugin");
   const uninstall = useTauriMutation<void, { pluginId: string }>(
@@ -134,7 +143,14 @@ export function PluginManager() {
       { source },
       {
         onSuccess: (p) =>
-          setPendingInstall({ source, preview: p, linked, reapprove: null }),
+          setPendingInstall({
+            source,
+            preview: p,
+            linked,
+            reapprove: null,
+            reinstall: null,
+            wasLinked: false,
+          }),
         onError: (err) => setInstallError(err),
       },
     );
@@ -154,6 +170,43 @@ export function PluginManager() {
             preview: p,
             linked: true,
             reapprove: plugin.id,
+            reinstall: null,
+            wasLinked: true,
+          }),
+        onError: (err) => setInstallError(err),
+      },
+    );
+  };
+
+  // Reinstall path: in-place refresh / mode switch, KV survives. Source is
+  // the top input when the user typed one, else the linked source dir —
+  // copy-mode originals aren't recorded, so those need a typed path.
+  const handleReinstall = (plugin: InstalledPluginView) => {
+    if (preview.isPending || reinstall.isPending) return;
+    setInstallError(null);
+    const typed = installSource.trim();
+    const source = typed || (plugin.linked ? plugin.dir_path : "");
+    if (!source) {
+      setInstallError({
+        kind: "Validation",
+        message:
+          "Enter the plugin's source path in the field above, then press Reinstall… again.",
+      } as AppError);
+      return;
+    }
+    preview.mutate(
+      { source },
+      {
+        onSuccess: (p) =>
+          setPendingInstall({
+            source,
+            preview: p,
+            // Target mode starts at the CURRENT mode; the dialog has the
+            // toggle for converting (URLs can't be linked, as at install).
+            linked: plugin.linked && !/^https?:\/\//.test(source),
+            reapprove: null,
+            reinstall: plugin.id,
+            wasLinked: plugin.linked,
           }),
         onError: (err) => setInstallError(err),
       },
@@ -162,13 +215,32 @@ export function PluginManager() {
 
   const confirmInstall = () => {
     if (!pendingInstall) return;
-    const { source, preview: p, linked, reapprove: reapproveId } = pendingInstall;
+    const {
+      source,
+      preview: p,
+      linked,
+      reapprove: reapproveId,
+      reinstall: reinstallId,
+    } = pendingInstall;
     setPendingInstall(null);
     if (reapproveId) {
       reapprove.mutate(
         { pluginId: reapproveId },
         {
           onSuccess: () => void list.refetch(),
+          onError: (err) => setInstallError(err),
+        },
+      );
+      return;
+    }
+    if (reinstallId) {
+      reinstall.mutate(
+        { pluginId: reinstallId, source, linked },
+        {
+          onSuccess: () => {
+            setInstallSource("");
+            void list.refetch();
+          },
           onError: (err) => setInstallError(err),
         },
       );
@@ -309,10 +381,12 @@ export function PluginManager() {
               }}
               onUninstall={() => setConfirmUninstall(p)}
               onReapprove={() => handleReapprove(p)}
+              onReinstall={() => handleReinstall(p)}
               busy={
                 (p.enabled && disable.isPending) ||
                 (!p.enabled && enable.isPending) ||
-                uninstall.isPending
+                uninstall.isPending ||
+                reinstall.isPending
               }
             />
           ))}
@@ -323,7 +397,9 @@ export function PluginManager() {
         title={
           pendingInstall?.reapprove
             ? `Re-approve ${pendingInstall.preview.manifest.name}?`
-            : `Install ${pendingInstall?.preview.manifest.name ?? "plugin"}?`
+            : pendingInstall?.reinstall
+              ? `Reinstall ${pendingInstall.preview.manifest.name}?`
+              : `Install ${pendingInstall?.preview.manifest.name ?? "plugin"}?`
         }
         message={
           pendingInstall && (
@@ -381,15 +457,42 @@ export function PluginManager() {
                   and continues the install.
                 </p>
               )}
+              {pendingInstall.reinstall && (
+                <>
+                  <label className="mt-3 flex items-center gap-2 font-code-sm text-code-sm text-on-surface-variant">
+                    <input
+                      type="checkbox"
+                      checked={pendingInstall.linked}
+                      disabled={/^https?:\/\//.test(pendingInstall.source)}
+                      onChange={(e) =>
+                        setPendingInstall(
+                          (pi) => pi && { ...pi, linked: e.target.checked },
+                        )
+                      }
+                    />
+                    Linked — serve directly from the source (no copy)
+                  </label>
+                  <p className="mt-2 text-on-surface-variant">
+                    {pendingInstall.linked
+                      ? pendingInstall.wasLinked
+                        ? ""
+                        : "The managed copy under ~/.bot-hq/plugins/ is removed — serving moves to the source directory. "
+                      : "The managed copy under ~/.bot-hq/plugins/ is replaced with files from the source. "}
+                    Saved plugin state is preserved.
+                  </p>
+                </>
+              )}
             </div>
           )
         }
         confirmLabel={
           pendingInstall?.reapprove
             ? "Re-approve"
-            : pendingInstall?.preview.orphan_dir
-              ? "Remove leftovers & install"
-              : "Install"
+            : pendingInstall?.reinstall
+              ? "Reinstall"
+              : pendingInstall?.preview.orphan_dir
+                ? "Remove leftovers & install"
+                : "Install"
         }
         confirmVariant="primary"
         onConfirm={confirmInstall}
@@ -448,6 +551,7 @@ interface PluginCardProps {
   onToggle: () => void;
   onUninstall: () => void;
   onReapprove: () => void;
+  onReinstall: () => void;
   busy: boolean;
 }
 
@@ -456,6 +560,7 @@ export function PluginCard({
   onToggle,
   onUninstall,
   onReapprove,
+  onReinstall,
   busy,
 }: PluginCardProps) {
   const { manifest, status, enabled } = plugin;
@@ -541,6 +646,15 @@ export function PluginCard({
           disabled={busy}
         >
           {enabled ? "Disable" : "Enable"}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={onReinstall}
+          disabled={busy}
+          title="Refresh from a source or switch copy↔linked in place — saved state survives"
+        >
+          Reinstall…
         </Button>
         <Button
           variant="danger"
