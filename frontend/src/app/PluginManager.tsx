@@ -71,6 +71,7 @@ export function PluginManager() {
   // rejections so a failed toggle/uninstall isn't silently swallowed.
   const [toggleError, setToggleError] = useState<AppError | null>(null);
   const [uninstallError, setUninstallError] = useState<AppError | null>(null);
+  const [updateError, setUpdateError] = useState<AppError | null>(null);
   const [confirmUninstall, setConfirmUninstall] =
     useState<InstalledPluginView | null>(null);
   // Consent gate: install is two-step — preview the manifest (nothing lands
@@ -110,6 +111,10 @@ export function PluginManager() {
     InstalledPluginView,
     { pluginId: string; source: string; linked: boolean }
   >("reinstall_plugin");
+  const updateFromSource = useTauriMutation<
+    InstalledPluginView,
+    { pluginId: string }
+  >("update_plugin_from_source");
   const enable = useTauriMutation<void, { pluginId: string }>("enable_plugin");
   const disable = useTauriMutation<void, { pluginId: string }>("disable_plugin");
   const uninstall = useTauriMutation<void, { pluginId: string }>(
@@ -185,7 +190,8 @@ export function PluginManager() {
     if (preview.isPending || reinstall.isPending) return;
     setInstallError(null);
     const typed = installSource.trim();
-    const source = typed || (plugin.linked ? plugin.dir_path : "");
+    const source =
+      typed || (plugin.linked ? plugin.dir_path : (plugin.source_path ?? ""));
     if (!source) {
       setInstallError({
         kind: "Validation",
@@ -349,6 +355,17 @@ export function PluginManager() {
             </button>
           </div>
         )}
+        {updateError && (
+          <div className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+            <div>
+              <span className="font-semibold">{updateError.kind}:</span>{" "}
+              Update from source failed: {updateError.message}
+            </div>
+            <button className="underline" onClick={() => setUpdateError(null)}>
+              dismiss
+            </button>
+          </div>
+        )}
       </section>
 
       {list.isLoading ? (
@@ -382,11 +399,22 @@ export function PluginManager() {
               onUninstall={() => setConfirmUninstall(p)}
               onReapprove={() => handleReapprove(p)}
               onReinstall={() => handleReinstall(p)}
+              onUpdateFromSource={() => {
+                setUpdateError(null);
+                updateFromSource.mutate(
+                  { pluginId: p.id },
+                  {
+                    onSuccess: () => void list.refetch(),
+                    onError: (err) => setUpdateError(err),
+                  },
+                );
+              }}
               busy={
                 (p.enabled && disable.isPending) ||
                 (!p.enabled && enable.isPending) ||
                 uninstall.isPending ||
-                reinstall.isPending
+                reinstall.isPending ||
+                updateFromSource.isPending
               }
             />
           ))}
@@ -557,6 +585,7 @@ interface PluginCardProps {
   onUninstall: () => void;
   onReapprove: () => void;
   onReinstall: () => void;
+  onUpdateFromSource: () => void;
   busy: boolean;
 }
 
@@ -566,11 +595,17 @@ export function PluginCard({
   onUninstall,
   onReapprove,
   onReinstall,
+  onUpdateFromSource,
   busy,
 }: PluginCardProps) {
   const { manifest, status, enabled } = plugin;
   const panelSlot = manifest.slots?.find((s) => s.panel_route);
   const namedSlots = (manifest.slots ?? []).filter((s) => s.slot_name);
+  // URL-recorded sources re-fetch via Reinstall — no directory to copy from.
+  const updatableSource =
+    !plugin.linked &&
+    !!plugin.source_path &&
+    !/^https?:\/\//.test(plugin.source_path);
 
   return (
     <Card className="bg-surface">
@@ -612,6 +647,15 @@ export function PluginCard({
       <div className="mb-3 font-code-sm text-code-sm text-on-surface-variant">
         <code className="font-code-sm">{manifest.id}</code> · entry{" "}
         <code className="font-code-sm">{manifest.entry}</code>
+        {!plugin.linked && plugin.source_path && (
+          <>
+            {" "}
+            · source{" "}
+            <code className="font-code-sm" title={plugin.source_path}>
+              {plugin.source_path}
+            </code>
+          </>
+        )}
         {manifest.requested_capabilities &&
           manifest.requested_capabilities.length > 0 && (
             <>
@@ -661,6 +705,17 @@ export function PluginCard({
         >
           Reinstall…
         </Button>
+        {updatableSource && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={onUpdateFromSource}
+            disabled={busy}
+            title={`Re-copy assets from ${plugin.source_path} — no consent needed while the manifest is unchanged`}
+          >
+            Update from source
+          </Button>
+        )}
         <Button
           variant="danger"
           size="sm"

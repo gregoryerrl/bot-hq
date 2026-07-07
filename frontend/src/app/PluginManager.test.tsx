@@ -80,6 +80,7 @@ describe("PluginCard linked/drift surface", () => {
         onUninstall={noop}
         onReapprove={noop}
         onReinstall={noop}
+        onUpdateFromSource={noop}
         busy={false}
       />,
     );
@@ -91,6 +92,7 @@ describe("PluginCard linked/drift surface", () => {
         onUninstall={noop}
         onReapprove={noop}
         onReinstall={noop}
+        onUpdateFromSource={noop}
         busy={false}
       />,
     );
@@ -106,6 +108,7 @@ describe("PluginCard linked/drift surface", () => {
         onUninstall={noop}
         onReapprove={onReapprove}
         onReinstall={noop}
+        onUpdateFromSource={noop}
         busy={false}
       />,
     );
@@ -122,6 +125,7 @@ describe("PluginCard linked/drift surface", () => {
         onUninstall={noop}
         onReapprove={noop}
         onReinstall={noop}
+        onUpdateFromSource={noop}
         busy={false}
       />,
     );
