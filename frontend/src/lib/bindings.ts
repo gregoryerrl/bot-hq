@@ -328,9 +328,14 @@ async clProposalCounts() : Promise<Result<ClProposalCountView[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async clApproveProposal(proposalUid: string) : Promise<Result<string, AppError>> {
+/**
+ * `force` is the explicit user override for a conflicted proposal (replace an
+ * existing file / create a missing one / proceed past base drift) — the UI
+ * only sends it from a conflict-labelled button, never as a default.
+ */
+async clApproveProposal(proposalUid: string, force: boolean | null) : Promise<Result<string, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("cl_approve_proposal", { proposalUid }) };
+    return { status: "ok", data: await TAURI_INVOKE("cl_approve_proposal", { proposalUid, force }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1090,7 +1095,19 @@ export type ClIndexEntryView = { id: number; project_id: string; file_path: stri
  * Projects with zero open proposals are absent from the list.
  */
 export type ClProposalCountView = { project_id: string; open_count: number }
-export type ClProposalView = { id: number; proposal_uid: string; project: string; file_path: string; kind: string; target_excerpt: string | null; proposed_body: string; evidence: string; status: string; proposed_by: string; session_id: string | null; created_at: string; updated_at: string }
+export type ClProposalView = { id: number; proposal_uid: string; project: string; file_path: string; kind: string; target_excerpt: string | null; proposed_body: string; evidence: string; status: string; proposed_by: string; session_id: string | null; created_at: string; updated_at: string; 
+/**
+ * Live divergence between the proposal and the CL, computed at list
+ * time for OPEN rows: "exists" (add whose target appeared), "missing"
+ * (correct/delete whose target vanished), "stale_base" (target changed
+ * since filing). None = no conflict detected (or resolved row).
+ */
+conflict: string | null; 
+/**
+ * Other OPEN proposals targeting the same file — competing suggestions
+ * the user reviews together. 0 for resolved rows.
+ */
+open_siblings: number }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
 /**
  * The full resolved view of the user's Claude Code config.
