@@ -86,6 +86,9 @@ export function ProposalQueue({
       onProjectChanged();
     } catch (e) {
       setActionError(errorMessage(e));
+      // A refused approval usually means the CL diverged after this list was
+      // fetched — refetch so the card shows its fresh conflict label/button.
+      await refetch();
     } finally {
       setBusyUids((prev) => {
         const next = new Set(prev);
