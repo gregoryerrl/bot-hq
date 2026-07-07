@@ -848,9 +848,9 @@ async previewPluginManifest(source: string) : Promise<Result<PluginManifestPrevi
     else return { status: "error", error: e  as any };
 }
 },
-async installPlugin(source: string, linked: boolean) : Promise<Result<InstalledPluginView, AppError>> {
+async installPlugin(source: string, linked: boolean, cleanupOrphan: boolean) : Promise<Result<InstalledPluginView, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source, linked }) };
+    return { status: "ok", data: await TAURI_INVOKE("install_plugin", { source, linked, cleanupOrphan }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1287,7 +1287,13 @@ csp_extra_origins?: CspExtraOrigins | null }
 /**
  * What the install-consent dialog renders before anything lands on disk.
  */
-export type PluginManifestPreview = { manifest: PluginManifest; capabilities: CapabilityDescription[] }
+export type PluginManifestPreview = { manifest: PluginManifest; capabilities: CapabilityDescription[]; 
+/**
+ * A `<data_dir>/plugins/<id>` directory exists with NO registry row —
+ * leftovers from a previous install. The dialog offers consented
+ * cleanup; install re-checks before removing anything.
+ */
+orphan_dir: boolean }
 export type PluginSlot = { 
 /**
  * React shell slot name (e.g., "sidebar.bottom"). `None` means the
