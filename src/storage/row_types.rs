@@ -418,6 +418,10 @@ pub struct Plugin {
     /// Dev-mode install: `dir_path` is the user's SOURCE directory, served
     /// directly (no copy) and NEVER deleted by uninstall.
     pub linked: bool,
+    /// Copy-mode only: where the copy came from (local dir or manifest
+    /// URL), for "Update from source" + Reinstall pre-fill. `None` for
+    /// linked rows (dir_path IS the source) and pre-0032 installs.
+    pub source_path: Option<String>,
     pub installed_at: String,
 }
 
