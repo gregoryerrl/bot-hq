@@ -514,7 +514,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_propose",
-            description: "Create a durable project-scoped Context Library edit proposal without mutating CL files. Both agents may propose; human/host approval owns write-back. MVP semantics: add creates a new file, correct replaces the full existing file, delete approval is deferred.",
+            description: "Create a durable project-scoped Context Library edit proposal without mutating CL files. Both agents may propose; human/host approval owns write-back. Filing is validated against the live CL: add requires a file that does not exist yet (use correct for existing files), correct/delete require an existing one. A base content hash is snapshotted at filing so approval can flag files that changed afterward.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -529,7 +529,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     "kind": {
                         "type": "string",
                         "enum": ["add", "correct", "delete"],
-                        "description": "MVP: add = create new file, correct = replace full existing file, delete = proposal only (approval deferred)."
+                        "description": "add = create a new file (rejected at filing if it already exists — use correct), correct = replace the full existing file, delete = propose removing an existing file."
                     },
                     "target_excerpt": {
                         "type": "string",
@@ -537,7 +537,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     },
                     "proposed_body": {
                         "type": "string",
-                        "description": "Complete proposed file body for add/correct proposals. Optional and ignored for delete proposals in the MVP."
+                        "description": "Complete proposed file body for add/correct proposals. Optional and ignored for delete proposals."
                     },
                     "evidence": {
                         "type": "string",

@@ -36,6 +36,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 mod action_gate;
 mod cl_facade;
 mod cl_proposals;
+pub(crate) use cl_proposals::detect_conflict;
 mod cl_refs;
 mod findings;
 mod session_docs;

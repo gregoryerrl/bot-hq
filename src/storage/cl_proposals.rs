@@ -8,7 +8,7 @@ use super::*;
 /// can't drift.
 const CL_PROPOSAL_COLUMNS: &str = "id, proposal_uid, project_id, file_path, kind, \
      target_excerpt, proposed_body, evidence, status, proposed_by, session_id, \
-     created_at, updated_at";
+     base_hash, created_at, updated_at";
 
 impl Storage {
     /// Insert a fresh project-scoped CL proposal in `open` status. `session_id` is
@@ -24,13 +24,14 @@ impl Storage {
         evidence: &str,
         proposed_by: &str,
         session_id: Option<&str>,
+        base_hash: Option<&str>,
     ) -> Result<i64> {
         let now = now_utc();
         let row_id: i64 = sqlx::query_scalar(
             "INSERT INTO cl_proposals \
                 (proposal_uid, project_id, file_path, kind, target_excerpt, proposed_body, evidence, \
-                 status, proposed_by, session_id, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?) \
+                 status, proposed_by, session_id, base_hash, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?) \
              RETURNING id",
         )
         .bind(proposal_uid)
@@ -42,6 +43,7 @@ impl Storage {
         .bind(evidence)
         .bind(proposed_by)
         .bind(session_id)
+        .bind(base_hash)
         .bind(&now)
         .bind(&now)
         .fetch_one(&self.pool)
@@ -125,6 +127,27 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Count OTHER open proposals targeting the same file — the "competing
+    /// suggestions" signal surfaced back to the proposing agent and the review
+    /// queue. Excludes `exclude_uid` so a fresh insert doesn't count itself.
+    pub async fn count_open_cl_proposals_for_file(
+        &self,
+        project_id: &str,
+        file_path: &str,
+        exclude_uid: &str,
+    ) -> Result<i64> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cl_proposals \
+             WHERE project_id = ? AND file_path = ? AND status = 'open' AND proposal_uid != ?",
+        )
+        .bind(project_id)
+        .bind(file_path)
+        .bind(exclude_uid)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n)
+    }
+
     /// Revert an APPROVED proposal back to `open` — the compensation step when
     /// the approval's file write-back fails after the open→approved claim.
     /// Scoped to `approved` rows so it can never resurrect a rejected proposal.
@@ -171,6 +194,7 @@ mod tests {
             "Observed stale wording during review.",
             "rain",
             Some("s1"),
+            None,
         )
         .await
         .unwrap();
@@ -215,6 +239,7 @@ mod tests {
             "new note",
             "brian",
             Some("s1"),
+            None,
         )
         .await
         .unwrap();
@@ -228,6 +253,7 @@ mod tests {
             "other note",
             "rain",
             Some("s2"),
+            None,
         )
         .await
         .unwrap();
@@ -240,6 +266,7 @@ mod tests {
             "complete body",
             "audit-only session absent",
             "rain",
+            None,
             None,
         )
         .await
@@ -260,16 +287,16 @@ mod tests {
         seed(&s).await;
         s.upsert_project("other", "other", None, None, None).await.unwrap();
 
-        s.create_cl_proposal("p1", "bot-hq", "notes.md", "add", None, "b", "e", "brian", None)
+        s.create_cl_proposal("p1", "bot-hq", "notes.md", "add", None, "b", "e", "brian", None, None)
             .await
             .unwrap();
-        s.create_cl_proposal("p2", "bot-hq", "decisions.md", "correct", None, "b", "e", "rain", None)
+        s.create_cl_proposal("p2", "bot-hq", "decisions.md", "correct", None, "b", "e", "rain", None, None)
             .await
             .unwrap();
-        s.create_cl_proposal("p3", "other", "notes.md", "add", None, "b", "e", "brian", None)
+        s.create_cl_proposal("p3", "other", "notes.md", "add", None, "b", "e", "brian", None, None)
             .await
             .unwrap();
-        s.create_cl_proposal("p4", "other", "ideas.md", "add", None, "b", "e", "rain", None)
+        s.create_cl_proposal("p4", "other", "ideas.md", "add", None, "b", "e", "rain", None, None)
             .await
             .unwrap();
         // Resolved rows must not count.
@@ -288,7 +315,7 @@ mod tests {
     async fn reopen_reverts_approved_but_never_rejected_or_open() {
         let s = Storage::memory().await.unwrap();
         seed(&s).await;
-        s.create_cl_proposal("p1", "bot-hq", "notes.md", "add", None, "b", "e", "brian", None)
+        s.create_cl_proposal("p1", "bot-hq", "notes.md", "add", None, "b", "e", "brian", None, None)
             .await
             .unwrap();
 

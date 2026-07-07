@@ -128,6 +128,14 @@ pub struct ClProposalView {
     pub session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Live divergence between the proposal and the CL, computed at list
+    /// time for OPEN rows: "exists" (add whose target appeared), "missing"
+    /// (correct/delete whose target vanished), "stale_base" (target changed
+    /// since filing). None = no conflict detected (or resolved row).
+    pub conflict: Option<String>,
+    /// Other OPEN proposals targeting the same file — competing suggestions
+    /// the user reviews together. 0 for resolved rows.
+    pub open_siblings: u32,
 }
 
 impl From<ClProposal> for ClProposalView {
@@ -146,6 +154,8 @@ impl From<ClProposal> for ClProposalView {
             session_id: p.session_id,
             created_at: p.created_at,
             updated_at: p.updated_at,
+            conflict: None,
+            open_siblings: 0,
         }
     }
 }
@@ -157,18 +167,57 @@ pub async fn cl_list_proposals(
     project: String,
     status: Option<String>,
 ) -> Result<Vec<ClProposalView>, AppError> {
-    let rows = bridge.cl_list_proposals(project, status).await?;
-    Ok(rows.into_iter().map(Into::into).collect())
+    let rows = bridge.cl_list_proposals(project.clone(), status).await?;
+    // Open-proposal counts per file — the "competing suggestions" signal.
+    let mut open_counts: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    for row in rows.iter().filter(|r| r.status == "open") {
+        *open_counts.entry(row.file_path.clone()).or_default() += 1;
+    }
+    let root = bridge.cl_project_root(&project).await;
+    let mut views = Vec::with_capacity(rows.len());
+    for row in rows {
+        // Advisory in the list — a failed check must not take down the whole
+        // queue (approval recomputes authoritatively and is the hard gate).
+        let conflict = match (&root, row.status.as_str()) {
+            (Some(root), "open") => crate::signaling::detect_conflict(
+                root,
+                &row.file_path,
+                &row.kind,
+                row.base_hash.as_deref(),
+            )
+            .await
+            .unwrap_or(None)
+            .map(|c| c.as_str().to_string()),
+            _ => None,
+        };
+        let open_siblings = if row.status == "open" {
+            open_counts.get(&row.file_path).copied().unwrap_or(1).saturating_sub(1)
+        } else {
+            0
+        };
+        let mut view = ClProposalView::from(row);
+        view.conflict = conflict;
+        view.open_siblings = open_siblings;
+        views.push(view);
+    }
+    Ok(views)
 }
 
+/// `force` is the explicit user override for a conflicted proposal (replace an
+/// existing file / create a missing one / proceed past base drift) — the UI
+/// only sends it from a conflict-labelled button, never as a default.
 #[tauri::command]
 #[specta::specta]
 pub async fn cl_approve_proposal(
     bridge: tauri::State<'_, Arc<SignalingBridge>>,
     app: tauri::AppHandle,
     proposal_uid: String,
+    force: Option<bool>,
 ) -> Result<String, AppError> {
-    let result = bridge.approve_cl_proposal(proposal_uid).await?;
+    let result = bridge
+        .approve_cl_proposal(proposal_uid, force.unwrap_or(false))
+        .await?;
     emit_cl_changed(&app, None);
     Ok(result)
 }

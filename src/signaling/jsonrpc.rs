@@ -664,12 +664,12 @@ async fn call_tool(
             let target_excerpt = arg_opt_str(&args, "target_excerpt");
             let proposed_body = arg_opt_str(&args, "proposed_body").unwrap_or_default();
             let evidence = arg_required_str(&args, "evidence")?;
-            let uid = bridge
+            let outcome = bridge
                 .cl_propose(
                     caller.session_id.clone(),
                     caller.agent.clone(),
                     project,
-                    file_path,
+                    file_path.clone(),
                     kind,
                     target_excerpt,
                     proposed_body,
@@ -677,7 +677,15 @@ async fn call_tool(
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
-            Ok(ToolCallResult::text(format!("proposal filed: {uid}")))
+            let mut text = format!("proposal filed: {}", outcome.uid);
+            if outcome.open_siblings > 0 {
+                text.push_str(&format!(
+                    "\nnote: {} other open proposal(s) already target '{}' — the user reviews \
+                     them together in the queue.",
+                    outcome.open_siblings, file_path
+                ));
+            }
+            Ok(ToolCallResult::text(text))
         }
         "cl_list_proposals" => {
             let project = arg_required_str(&args, "project")?;

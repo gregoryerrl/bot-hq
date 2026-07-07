@@ -346,6 +346,9 @@ pub struct ClProposal {
     pub status: String,
     pub proposed_by: String,
     pub session_id: Option<String>,
+    /// sha256 hex of the target file at propose time (correct/delete only).
+    /// NULL = no drift detection possible (add proposals + pre-0033 rows).
+    pub base_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
