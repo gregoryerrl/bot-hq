@@ -152,10 +152,17 @@ state survives (unlike uninstall → reinstall).
 
 Lifecycle differences: Disable stops serving, as always. **Uninstall
 never deletes or modifies a linked source directory** — it's your
-repo; only the registry entry and KV rows are removed. Migrating
-normal↔linked is uninstall → re-install (the uninstall dialog states
-exactly what's removed in each mode), which also means re-consenting.
-Linked installs are local directories only — no URLs, no zips.
+repo; only the registry entry and KV rows are removed. Linked installs
+are local directories only — no URLs, no zips.
+
+**Switching copy↔linked (or refreshing from a new source) is
+"Reinstall…" on the plugin card** — an in-place operation: the same
+consent screen as install runs against the source manifest, the
+registry row is updated, and **your KV state survives** (uninstall →
+re-install still works, but it deletes KV). Converting to copy
+materializes the bundle into the managed directory; converting to
+linked removes the now-unused managed copy — the dialog states each
+consequence before you confirm.
 
 ## RPC protocol
 
@@ -295,7 +302,10 @@ crash (3 missed pings → fallback card → user reloads) → disable /
 uninstall (bundle dir + your KV rows are removed).
 
 Plugins run **while mounted** — there is no background execution in v1.
-State you need across mounts goes in `plugin_kv_*`.
+State you need across mounts goes in `plugin_kv_*`. KV survives
+disable, re-approve, and Reinstall (mode switches included); only
+uninstall deletes it — if your users may uninstall and return, offer
+your own export/import.
 
 The registry (not the disk) decides what's installed: if
 `~/.bot-hq/plugins/<id>/` survives or reappears after an uninstall
