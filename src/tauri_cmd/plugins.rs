@@ -32,6 +32,9 @@ pub struct InstalledPluginView {
     pub dir_path: String,
     /// Dev-mode install serving straight from `dir_path` (the user's repo).
     pub linked: bool,
+    /// Copy-mode: where the copy came from (local dir or manifest URL),
+    /// when recorded. Drives "Update from source" + Reinstall pre-fill.
+    pub source_path: Option<String>,
     /// Linked only: the source `manifest.json` no longer byte-matches the
     /// consented (stored) manifest — grants stay FROZEN until the user
     /// re-approves. Missing/unreadable source manifest also reports true.
@@ -60,6 +63,7 @@ impl InstalledPluginView {
             manifest,
             dir_path: row.dir_path,
             linked: row.linked,
+            source_path: row.source_path,
             manifest_drifted,
             installed_at: row.installed_at,
         }
@@ -123,6 +127,32 @@ pub async fn reinstall_plugin(
     let view = reinstall_plugin_inner(&storage, &registry, &plugin_id, &source, linked).await?;
     // Re-point the fs-watcher at the (possibly new) serve root so
     // plugin:assets_changed keeps tracking the served directory.
+    if let Some(w) = core.fs_watcher.get() {
+        w.remove_plugin_dir(&plugin_id);
+        if let Some(root) = registry.serve_root_for(&plugin_id) {
+            w.add_plugin_dir(&plugin_id, root);
+        }
+    }
+    emit_state_changed(&app, &plugin_id, true);
+    Ok(view)
+}
+
+/// Copy-mode asset refresh from the recorded install source — the
+/// no-consent path: allowed ONLY while the source manifest byte-matches
+/// the stored (consented) one, so grants can't move. Any manifest delta
+/// routes through Reinstall (full consent screen).
+#[tauri::command]
+#[specta::specta]
+pub async fn update_plugin_from_source(
+    app: tauri::AppHandle,
+    storage: tauri::State<'_, Arc<Storage>>,
+    registry: tauri::State<'_, Arc<PluginRegistry>>,
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    plugin_id: String,
+) -> Result<InstalledPluginView, AppError> {
+    let view = update_plugin_from_source_inner(&storage, &registry, &plugin_id).await?;
+    // remove_dir_all + re-copy can orphan the notify watch (it follows the
+    // inode, not the path) — re-point it at the recreated dir.
     if let Some(w) = core.fs_watcher.get() {
         w.remove_plugin_dir(&plugin_id);
         if let Some(root) = registry.serve_root_for(&plugin_id) {
@@ -369,6 +399,7 @@ pub(crate) async fn install_plugin_inner(
 
     let serve_root =
         materialize_serve_root(source, linked, &plugin_dir, &manifest, &manifest_json).await?;
+    let recorded_source = recorded_source_for(source, linked)?;
 
     storage
         .insert_plugin(
@@ -377,6 +408,7 @@ pub(crate) async fn install_plugin_inner(
             &manifest.version,
             &manifest_json,
             &serve_root.display().to_string(),
+            recorded_source.as_deref(),
             csp_json.as_deref(),
             linked,
         )
@@ -588,6 +620,7 @@ pub(crate) async fn reinstall_plugin_inner(
     }
     let serve_root =
         materialize_serve_root(source, linked, &plugin_dir, &manifest, &manifest_json).await?;
+    let recorded_source = recorded_source_for(source, linked)?;
 
     // UPDATE in place — same KV-cascade rationale as reapprove.
     storage
@@ -598,6 +631,7 @@ pub(crate) async fn reinstall_plugin_inner(
             &manifest_json,
             csp_json.as_deref(),
             &serve_root.display().to_string(),
+            recorded_source.as_deref(),
             linked,
         )
         .await
@@ -620,6 +654,76 @@ pub(crate) async fn reinstall_plugin_inner(
         .into_iter()
         .find(|r| r.id == plugin_id)
         .ok_or_else(|| AppError::Internal("plugin row vanished after reinstall".into()))?;
+    Ok(InstalledPluginView::from_row(row, manifest, &registry.heartbeat))
+}
+
+/// Body of [`update_plugin_from_source`]. Copy-mode only, recorded LOCAL
+/// sources only (URL-sourced installs re-fetch via Reinstall — a URL
+/// records manifest+entry, there's no directory to copy). Byte-identical
+/// manifest ⇒ same id and same grants, so the consent caches stay put and
+/// only the managed dir's assets refresh.
+pub(crate) async fn update_plugin_from_source_inner(
+    storage: &Storage,
+    registry: &PluginRegistry,
+    plugin_id: &str,
+) -> Result<InstalledPluginView, AppError> {
+    let row = storage
+        .list_plugins()
+        .await
+        .map_err(anyhow_to_app)?
+        .into_iter()
+        .find(|r| r.id == plugin_id)
+        .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;
+    if row.linked {
+        return Err(AppError::Validation(format!(
+            "plugin {plugin_id:?} is a linked install — its files already serve live from the source"
+        )));
+    }
+    let Some(source) = row.source_path.clone() else {
+        return Err(AppError::Validation(format!(
+            "no recorded source for {plugin_id:?} (installed before source tracking) — use Reinstall with the source path"
+        )));
+    };
+    if is_url(&source) {
+        return Err(AppError::Validation(
+            "this plugin was installed from a URL — use Reinstall to re-fetch it".into(),
+        ));
+    }
+
+    let (manifest, manifest_json) = read_manifest_from_dir(Path::new(&source))?;
+    if manifest_json != row.manifest_json {
+        return Err(AppError::Validation(
+            "source manifest changed — use Reinstall to review and re-approve the new manifest"
+                .into(),
+        ));
+    }
+
+    let plugin_dir = registry.data_dir.join("plugins").join(plugin_id);
+    if plugin_dir.exists() {
+        // Same remove-then-copy hazard as reinstall: never delete the source.
+        let src = Path::new(&source)
+            .canonicalize()
+            .map_err(|e| AppError::Validation(format!("source {source:?}: {e}")))?;
+        let managed = plugin_dir.canonicalize().map_err(|e| {
+            AppError::Internal(format!("managed dir {}: {e}", plugin_dir.display()))
+        })?;
+        if src == managed {
+            return Err(AppError::Validation(
+                "recorded source is the installed copy itself — use Reinstall with the real source directory".into(),
+            ));
+        }
+        std::fs::remove_dir_all(&plugin_dir).map_err(io_to_app)?;
+    }
+    copy_dir_all(Path::new(&source), &plugin_dir).map_err(io_to_app)?;
+    registry.reload().map_err(anyhow_to_app)?;
+
+    let row = storage
+        .list_plugins()
+        .await
+        .map_err(anyhow_to_app)?
+        .into_iter()
+        .find(|r| r.id == plugin_id)
+        .ok_or_else(|| AppError::Internal("plugin row vanished after update".into()))?;
     Ok(InstalledPluginView::from_row(row, manifest, &registry.heartbeat))
 }
 
@@ -700,6 +804,26 @@ async fn uninstall_plugin_inner(
 }
 
 // ---- small helpers --------------------------------------------------------
+
+/// What to record in `plugins.source_path`: copy-mode keeps its origin
+/// (canonicalized local dir, or the manifest URL) so "Update from source"
+/// and the Reinstall pre-fill know where the copy came from; linked rows
+/// record nothing — `dir_path` IS the source.
+fn recorded_source_for(source: &str, linked: bool) -> Result<Option<String>, AppError> {
+    if linked {
+        return Ok(None);
+    }
+    if is_url(source) {
+        return Ok(Some(source.to_string()));
+    }
+    Ok(Some(
+        Path::new(source)
+            .canonicalize()
+            .map_err(|e| AppError::Validation(format!("source {source:?}: {e}")))?
+            .display()
+            .to_string(),
+    ))
+}
 
 /// Materialize a plugin's files for the chosen mode and resolve its serve
 /// root. Linked: canonicalize the user's source dir (also proves it exists;
@@ -1655,6 +1779,127 @@ mod tests {
             managed.join("index.html").exists(),
             "managed copy untouched by the refusal"
         );
+    }
+
+    #[tokio::test]
+    async fn install_records_source_path_for_copy_not_linked() {
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+        let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
+        let view =
+            install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
+                .await
+                .unwrap();
+        assert_eq!(
+            view.source_path.as_deref(),
+            Some(src.canonicalize().unwrap().display().to_string().as_str()),
+            "copy-mode records its origin"
+        );
+
+        let src2 = write_plugin_source(tmp.path(), "dev", "0.1.0");
+        let view =
+            install_plugin_inner(&storage, &registry, &src2.display().to_string(), true, false)
+                .await
+                .unwrap();
+        assert_eq!(view.source_path, None, "linked: dir_path IS the source");
+    }
+
+    #[tokio::test]
+    async fn update_from_source_refreshes_assets_when_manifest_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+        let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
+            .await
+            .unwrap();
+        storage.plugin_kv_set("notes", "k", "v").await.unwrap();
+
+        // Assets evolve; the manifest does NOT.
+        std::fs::write(src.join("extra.js"), "export {}").unwrap();
+        std::fs::write(src.join("index.html"), b"<h1>v2</h1>").unwrap();
+
+        let view = update_plugin_from_source_inner(&storage, &registry, "notes")
+            .await
+            .unwrap();
+        assert_eq!(view.version, "0.1.0");
+        let plugin_dir = registry.data_dir.join("plugins").join("notes");
+        assert!(plugin_dir.join("extra.js").exists(), "new asset copied");
+        assert_eq!(
+            std::fs::read(plugin_dir.join("index.html")).unwrap(),
+            b"<h1>v2</h1>",
+            "changed asset refreshed"
+        );
+        assert_eq!(
+            storage.plugin_kv_get("notes", "k").await.unwrap(),
+            Some("v".to_string()),
+            "no row churn — KV survives"
+        );
+        // Same manifest ⇒ grant caches untouched.
+        assert_eq!(
+            registry.granted_caps_for("notes"),
+            Some(vec!["cl_index_search".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn update_from_source_refuses_drift_linked_url_and_unrecorded() {
+        let tmp = TempDir::new().unwrap();
+        let (storage, registry) = fresh(&tmp).await;
+
+        // Manifest drift → route through Reinstall.
+        let src = write_plugin_source(tmp.path(), "notes", "0.1.0");
+        install_plugin_inner(&storage, &registry, &src.display().to_string(), false, false)
+            .await
+            .unwrap();
+        write_plugin_source(tmp.path(), "notes", "0.2.0");
+        let err = update_plugin_from_source_inner(&storage, &registry, "notes")
+            .await
+            .unwrap_err();
+        match &err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("Reinstall"), "drift routes to Reinstall: {msg}")
+            }
+            other => panic!("got {other:?}"),
+        }
+
+        // Linked install → nothing to update, it serves live.
+        let src2 = write_plugin_source(tmp.path(), "dev", "0.1.0");
+        install_plugin_inner(&storage, &registry, &src2.display().to_string(), true, false)
+            .await
+            .unwrap();
+        let err = update_plugin_from_source_inner(&storage, &registry, "dev")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+
+        // URL-recorded source → Reinstall re-fetches; no dir to copy from.
+        storage
+            .insert_plugin(
+                "urlp",
+                "U",
+                "0.1",
+                "{}",
+                "/data/plugins/urlp",
+                Some("https://x.com/manifest.json"),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let err = update_plugin_from_source_inner(&storage, &registry, "urlp")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+
+        // Pre-0032 row (no recorded source) → Reinstall with a path.
+        storage
+            .insert_plugin("old", "O", "0.1", "{}", "/data/plugins/old", None, None, false)
+            .await
+            .unwrap();
+        let err = update_plugin_from_source_inner(&storage, &registry, "old")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
     }
 
     #[tokio::test]

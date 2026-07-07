@@ -117,6 +117,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         plugins::install_plugin,
         plugins::reapprove_linked_plugin,
         plugins::reinstall_plugin,
+        plugins::update_plugin_from_source,
         plugins::list_installed_plugins,
         plugins::enable_plugin,
         plugins::disable_plugin,

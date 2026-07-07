@@ -164,6 +164,12 @@ materializes the bundle into the managed directory; converting to
 linked removes the now-unused managed copy — the dialog states each
 consequence before you confirm.
 
+Copy-mode installs record where they came from; **"Update from
+source"** on the card re-copies assets in place with no consent screen
+while the source manifest is byte-identical to the approved one. Any
+manifest change routes through Reinstall's consent. URL installs
+re-fetch via Reinstall instead.
+
 ## RPC protocol
 
 Plugins never call Tauri. The channel is `window.postMessage` with the
