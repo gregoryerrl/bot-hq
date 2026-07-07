@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-711 Rust tests passing (660 lib + 33 external MCP + 7 signaling + 11
-storage) plus 153 frontend Vitest. Release build clean. Version
+722 Rust tests passing (671 lib + 33 external MCP + 7 signaling + 11
+storage) plus 163 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -24,6 +24,43 @@ override tier**, **spawn_session capability**, **linked installs**, and
 the **push-event + view-alignment paper-cuts**.
 
 ---
+
+## 2026-07-07 — CL proposal conflict handling + review surfacing + Maintain CL triage
+
+The recurring `Proposal action failed: 'notes.md' already exists` dead-end
+(and its silent twin — a second `correct` approval clobbering the first)
+came from proposals never being checked against the live CL until the
+approval write. Multi-session use makes that constant: session A's
+approved proposal changes the file session B's proposal assumed. Design:
+validate at propose time (the agent can fix it), surface at review time
+(the user sees it coming), resolve at approve time (the user can act).
+
+- **Propose-time validation + base snapshot (migration 0033):**
+  `cl_propose` now stats the live CL — `add` on an existing file and
+  `correct`/`delete` on a missing one are rejected at filing with the fix
+  named in the error. For `correct`/`delete` it stores a sha256
+  `base_hash` of the current content; the tool result also notes how many
+  other open proposals target the same file.
+- **Approval never dead-ends:** `approve_cl_proposal` recomputes the
+  conflict (`exists` / `missing` / `stale_base`) before the CAS claim and,
+  without `force`, refuses with the resolution path named. The UI's
+  conflict-labelled buttons send `force: true` explicitly: Replace
+  existing file / Create missing file / Approve anyway. Stale-base
+  detection closes the silent-clobber hole. `add` (and force-created
+  `correct`) now mkdir-p missing parent folders inside the root — the
+  "parent directory not found" failure is gone. `delete` approval is
+  implemented (was MVP-deferred): removes the file + rescans; approving a
+  delete whose target is already gone resolves as satisfied.
+- **Review-time surfacing:** `ClProposalView` gains computed `conflict` +
+  `open_siblings`; the ProposalQueue shows conflict badges/banners,
+  competing-proposal notices, a destructive-delete warning, and a lazy
+  line-diff ("Compare with current file", new `proposalDiff.ts` LCS util)
+  for `correct` and exists-conflicted `add` proposals.
+- **Maintain CL adapts to the queue:** the dispatched maintenance prompt
+  now starts with `cl_list_proposals` triage (fold worthy open proposals
+  into its direct edits — they'd go stale anyway), knows resolution is
+  host-only, and ends with a per-proposal approve/reject recommendation
+  list. Agent general rules document the filing-time validation.
 
 ## 2026-07-07 — Plugin-runtime hardening from Cognotify operation
 
