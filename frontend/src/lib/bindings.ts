@@ -871,6 +871,22 @@ async reapproveLinkedPlugin(pluginId: string) : Promise<Result<InstalledPluginVi
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * In-place re-install: refresh a plugin from a (possibly new) source
+ * and/or switch copy↔linked mode WITHOUT uninstalling — the registry row
+ * is UPDATEd (KV rows survive) and grants re-freeze from the newly
+ * consented manifest. The frontend drives the same consent dialog as
+ * install before calling this. Mode-agnostic: same-mode refreshes (moved
+ * linked source, updated copy source) are first-class.
+ */
+async reinstallPlugin(pluginId: string, source: string, linked: boolean) : Promise<Result<InstalledPluginView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reinstall_plugin", { pluginId, source, linked }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listInstalledPlugins() : Promise<Result<InstalledPluginView[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_installed_plugins") };
