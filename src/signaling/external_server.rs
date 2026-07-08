@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
-use hyper::header::AUTHORIZATION;
+use hyper::header::{self, HeaderValue, AUTHORIZATION};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
@@ -116,18 +116,62 @@ pub async fn start_external_server(
     })
 }
 
+/// CORS for browser-context callers — bot-hq plugin panels `fetch()`ing the
+/// driver cross-origin from their `bhq-plugin://` documents. The webview
+/// preflights any fetch carrying Authorization + a JSON body; without these
+/// headers the preflight is refused and the browser blocks the call before
+/// it ever reaches auth. `*` grants nothing by itself: every real request
+/// still needs the bearer token, and `*` is incompatible with credentialed
+/// (cookie) mode — it only lets an already-authorized caller READ the
+/// response it paid for. Applied to EVERY response, 401s included, so a
+/// browser caller can tell bad-token apart from server-gone.
+fn with_cors(mut resp: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("authorization, content-type"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+    resp
+}
+
 async fn handle_request(
     req: Request<Incoming>,
     core: Arc<CoreAppState>,
     expected_token: Arc<String>,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+    Ok(with_cors(handle_inner(req, core, expected_token).await))
+}
+
+async fn handle_inner(
+    req: Request<Incoming>,
+    core: Arc<CoreAppState>,
+    expected_token: Arc<String>,
+) -> Response<Full<Bytes>> {
+    // CORS preflight: answered for any path, BEFORE auth — browsers strip
+    // custom headers from OPTIONS, so a preflight can never carry the
+    // bearer. A 204 leaks nothing and executes nothing.
+    if req.method() == Method::OPTIONS {
+        return Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(Full::new(Bytes::new()))
+            .expect("static preflight response");
+    }
     // POST only.
     if req.method() != Method::POST {
-        return Ok(text_response(StatusCode::METHOD_NOT_ALLOWED, "POST only"));
+        return text_response(StatusCode::METHOD_NOT_ALLOWED, "POST only");
     }
     // Single endpoint at /mcp.
     if req.uri().path() != "/mcp" {
-        return Ok(text_response(StatusCode::NOT_FOUND, "expected /mcp"));
+        return text_response(StatusCode::NOT_FOUND, "expected /mcp");
     }
 
     // Authorization: Bearer <token>
@@ -139,10 +183,7 @@ async fn handle_request(
     let token = match auth_value {
         Some(t) => t.trim(),
         None => {
-            return Ok(text_response(
-                StatusCode::UNAUTHORIZED,
-                "missing bearer token",
-            ));
+            return text_response(StatusCode::UNAUTHORIZED, "missing bearer token");
         }
     };
 
@@ -150,20 +191,17 @@ async fn handle_request(
     // when lengths differ, so we don't need a length check.
     let ok = bool::from(token.as_bytes().ct_eq(expected_token.as_bytes()));
     if !ok {
-        return Ok(text_response(StatusCode::UNAUTHORIZED, "invalid token"));
+        return text_response(StatusCode::UNAUTHORIZED, "invalid token");
     }
 
     // Body → JSON-RPC.
     let rpc = match decode_jsonrpc_body(req.into_body()).await {
         Ok(r) => r,
-        Err(resp) => return Ok(resp),
+        Err(resp) => return resp,
     };
 
     debug!(method = %rpc.method, "external rpc");
     let id_for_err = rpc.id.clone().unwrap_or(json!(null));
-    Ok(dispatch_outcome_to_response(
-        dispatch_external(rpc, &core).await,
-        id_for_err,
-    ))
+    dispatch_outcome_to_response(dispatch_external(rpc, &core).await, id_for_err)
 }
 

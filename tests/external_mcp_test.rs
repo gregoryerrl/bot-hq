@@ -821,3 +821,101 @@ async fn get_session_snapshot_msg_limit_keeps_most_recent() {
     assert!(body.contains(r#"\"content\":\"m8\""#), "m8 kept: {body}");
     assert!(body.contains(r#"\"content\":\"m9\""#), "m9 kept: {body}");
 }
+
+// ---- CORS (plugin-panel browser callers) ----------------------------------
+
+/// Like `http_post` but with an arbitrary method, returning the full header
+/// block (lowercased — hyper writes lowercase names anyway, values are
+/// normalized here so asserts are case-proof) for response-header checks.
+async fn http_request(
+    method: &str,
+    addr: SocketAddr,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (String, String, String) {
+    let mut req = format!(
+        "{method} {path} HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {len}\r\n\
+         Connection: close\r\n",
+        len = body.len(),
+    );
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+
+    let mut sock = TcpStream::connect(addr).await.unwrap();
+    sock.write_all(req.as_bytes()).await.unwrap();
+    sock.flush().await.ok();
+    let mut buf = Vec::new();
+    sock.read_to_end(&mut buf).await.unwrap();
+    let text = String::from_utf8_lossy(&buf).to_string();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let status_line = head.lines().next().unwrap_or("").to_string();
+    (status_line, head.to_lowercase(), body.to_string())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn options_preflight_answers_204_with_cors_headers_no_auth() {
+    // Browsers strip custom headers from preflights — OPTIONS must succeed
+    // WITHOUT the bearer token, or panel fetches die before auth is even
+    // attempted. A 204 leaks nothing and executes nothing.
+    let env = setup().await;
+    let (status, head, _body) = http_request("OPTIONS", env.addr(), "/mcp", &[], "").await;
+    assert!(status.contains("204"), "status: {status}");
+    assert!(
+        head.contains("access-control-allow-origin: *"),
+        "head: {head}"
+    );
+    assert!(
+        head.contains("access-control-allow-headers: authorization, content-type"),
+        "head: {head}"
+    );
+    assert!(
+        head.contains("access-control-allow-methods: post, options"),
+        "head: {head}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_responses_carry_cors_headers() {
+    let env = setup().await;
+    let h = auth_header(&env.token);
+    let (status, head, _body) = http_request(
+        "POST",
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+    )
+    .await;
+    assert!(status.contains("200"), "status: {status}");
+    assert!(
+        head.contains("access-control-allow-origin: *"),
+        "head: {head}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unauthorized_response_still_carries_cors_headers() {
+    // The 401 must be READABLE cross-origin — without CORS headers on error
+    // responses a browser caller can't tell bad-token from server-gone.
+    let env = setup().await;
+    let (status, head, _body) = http_request(
+        "POST",
+        env.addr(),
+        "/mcp",
+        &[],
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
+    )
+    .await;
+    assert!(status.contains("401"), "status: {status}");
+    assert!(
+        head.contains("access-control-allow-origin: *"),
+        "head: {head}"
+    );
+}

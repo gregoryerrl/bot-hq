@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-722 Rust tests passing (671 lib + 33 external MCP + 7 signaling + 11
+725 Rust tests passing (671 lib + 36 external MCP + 7 signaling + 11
 storage) plus 163 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -22,6 +22,22 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 plugin-runtime workstreams from 2026-07-05 (below): **per-plugin CSP
 override tier**, **spawn_session capability**, **linked installs**, and
 the **push-event + view-alignment paper-cuts**.
+
+---
+
+## 2026-07-08 — External driver: CORS for plugin-panel callers
+
+Plugin panels (custom-scheme `bhq-plugin://` documents) can now `fetch()`
+the external MCP driver directly: the webview preflights any cross-origin
+request carrying `Authorization` + a JSON body, and the driver previously
+405'd the OPTIONS and sent no `Access-Control-*` headers — browser callers
+were blocked before auth. `external_server.rs` now answers `OPTIONS` with
+204 and stamps every response (401s included, so bad-token is
+distinguishable from server-gone in-page) with `Access-Control-Allow-*`
++ `Access-Control-Max-Age: 600`. ACAO `*` grants nothing by itself — the
+bearer token still gates every call, and `*` is incompatible with
+credentialed mode. First consumer: cognotify's in-viewer tutor chat.
+3 new integration tests (external MCP 33 → 36).
 
 ---
 
