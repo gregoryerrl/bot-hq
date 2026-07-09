@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-725 Rust tests passing (671 lib + 36 external MCP + 7 signaling + 11
+731 Rust tests passing (677 lib + 36 external MCP + 7 signaling + 11
 storage) plus 163 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -22,6 +22,50 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 plugin-runtime workstreams from 2026-07-05 (below): **per-plugin CSP
 override tier**, **spawn_session capability**, **linked installs**, and
 the **push-event + view-alignment paper-cuts**.
+
+---
+
+## 2026-07-09 — plugin_sessions: plugins drive their OWN agent sessions (zero-token tutor transport)
+
+`spawn_session` let a plugin CREATE a session; `plugin_sessions` lets it
+create AND drive its own — send / wait / read / close — so a panel can
+hold a full agent conversation (Cognotify's tutor chat) with NO driver
+token and NO port. The host owns the machinery; no credential ever enters
+plugin JS. Generic + multi-tenant by design (usable by any plugin); the
+safety property is an OWNERSHIP FENCE.
+
+- **Ownership fence (migration 0034, `sessions.created_by_plugin`):** the
+  create arm stamps the session with its plugin id; every other arm gates
+  on `require_owned_session` (`created_by_plugin == this plugin`) BEFORE
+  any core access. A plugin reaches ONLY sessions it created — never the
+  user's own, never another plugin's. Absent and foreign sessions fail
+  identically (no existence probe).
+- **One capability, five commands:** the manifest requests
+  `plugin_sessions`; the iframe dispatches `plugin_session_{create,send,
+  wait,messages,close}`. A small `required_capability` / `is_dispatchable`
+  map in `catalog.rs` bundles them — the five are useless individually
+  under the fence, so one honest consent decision beats five checkboxes.
+  `required_capability` is IDENTITY for every existing 1:1 command (guard
+  test over the whole catalog), so no existing grant changes behavior.
+- **Single agent by default; `duo:true` opts into a Brian+Rain pair**
+  (`dispatch_session_inner` gained `rain_override: Option<bool>`). `close`
+  archives (recoverable). Sessions are dashboard-visible.
+- **Consent = install grant, no per-call dialog** (unlike spawn_session).
+  For the chat use the user typed the first message, so a per-message
+  dialog is redundant; driving is fenced + visible. Residual risk (a
+  same-origin material calling create with a non-user prompt) is
+  documented in PLUGINS.md — use spawn_session when you need the
+  per-create human gate.
+- `wait_for_change` promoted to `pub(crate)` (the invoke tier has no
+  timeout, so the 25 s server-side await is safe). Reuses the
+  `AgentMessage` view (the `list_messages` contract) — no new
+  plugin-facing message type.
+- Files: migration 0034, `storage/{row_types,sessions}.rs`,
+  `tauri_cmd/{sessions,plugin_api}.rs`, `plugins/catalog.rs`,
+  `signaling/external_jsonrpc.rs`, `docs/PLUGINS.md`. 6 new lib tests
+  (grant mapping, ownership fence owner/foreign/absent, fence-before-core,
+  create validation, catalog identity). 731 Rust tests (677 lib + 36
+  external MCP + 7 signaling + 11 storage).
 
 ---
 

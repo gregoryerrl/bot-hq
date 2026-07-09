@@ -8,12 +8,23 @@
 //! Descriptions feed the install-consent UI, so write them for the user
 //! deciding whether to grant, not for developers.
 //!
-//! v1 is read-first with two deliberate exceptions: the plugin's own
-//! namespaced key/value store, and `spawn_session` — session CREATION,
-//! double-consented (install-time grant + a per-spawn host confirm dialog),
-//! which reaches only a NEW session's stdin with a prompt the user saw and
-//! approved. CL writes stay user/agent-only (propose-don't-mutate), and
-//! nothing here reaches EXISTING sessions, their stdin, or policy.
+//! v1 is read-first with three deliberate write exceptions, each narrowly
+//! fenced:
+//!   - the plugin's own namespaced key/value store;
+//!   - `spawn_session` — session CREATION only, double-consented (install
+//!     grant + a per-spawn host confirm dialog), reaching only a NEW
+//!     session's stdin with a prompt the user saw and approved;
+//!   - `plugin_sessions` — a plugin creating AND driving its OWN helper
+//!     sessions (send / wait / read / close). Unlike spawn_session this
+//!     reaches EXISTING sessions' stdin, so it is fenced by OWNERSHIP: every
+//!     `plugin_session_*` sub-command is gated on `created_by_plugin == this
+//!     plugin` (`require_owned_session`), so a plugin can never see, message,
+//!     or close the user's own sessions or another plugin's. Consent is the
+//!     install-time grant (no per-call dialog — the ownership fence plus
+//!     dashboard visibility are the guardrails).
+//! CL writes stay user/agent-only (propose-don't-mutate). The raw
+//! `create_session` / `broadcast_message` / `close_session` names stay
+//! non-grantable — plugins reach sessions ONLY through the fenced arms above.
 
 /// One grantable command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +80,10 @@ pub const CATALOG: &[CatalogEntry] = &[
         description: "Open new agent sessions with a prompt you will see and approve each time",
     },
     CatalogEntry {
+        name: "plugin_sessions",
+        description: "Open its own helper agent sessions and drive them — send messages, read the replies, and close them. Strictly limited to sessions this plugin creates itself: it can never see, message, or close your other sessions or another plugin's. Each runs a single agent by default and appears in your dashboard.",
+    },
+    CatalogEntry {
         name: "plugin_kv_get",
         description: "Read this plugin's own saved settings/state",
     },
@@ -84,6 +99,42 @@ pub fn is_valid(command: &str) -> bool {
 
 pub fn describe(command: &str) -> Option<&'static str> {
     CATALOG.iter().find(|e| e.name == command).map(|e| e.description)
+}
+
+/// Sub-commands dispatched under a single bundled capability: the manifest
+/// requests the CAPABILITY (a CATALOG entry, left); the iframe dispatches the
+/// SUB-COMMANDS (right). Bundling fits a cohesive power whose parts are
+/// useless individually — every `plugin_session_*` sub-command is
+/// ownership-fenced to sessions the plugin itself created, so granting them
+/// separately would be false granularity. Sub-commands are
+/// dispatchable-but-not-grantable: they never appear in a manifest (only
+/// `plugin_sessions` does), so they are absent from `CATALOG` / `is_valid`.
+const BUNDLED_COMMANDS: &[(&str, &str)] = &[
+    ("plugin_session_create", "plugin_sessions"),
+    ("plugin_session_send", "plugin_sessions"),
+    ("plugin_session_wait", "plugin_sessions"),
+    ("plugin_session_messages", "plugin_sessions"),
+    ("plugin_session_close", "plugin_sessions"),
+];
+
+/// The grantable capability a dispatch command requires. Identity for the 1:1
+/// catalog commands (an existing command still matches its own grant); the
+/// bundling capability for a sub-command. `check_plugin_grant` matches THIS
+/// against the consent-frozen grant set.
+pub fn required_capability(command: &str) -> &str {
+    BUNDLED_COMMANDS
+        .iter()
+        .find(|(sub, _)| *sub == command)
+        .map(|(_, cap)| *cap)
+        .unwrap_or(command)
+}
+
+/// Is `command` legal to DISPATCH? True for grantable catalog capabilities AND
+/// for bundled sub-commands. Grantability is stricter (`is_valid`, used by
+/// install/consent): a sub-command is dispatchable but not independently
+/// grantable.
+pub fn is_dispatchable(command: &str) -> bool {
+    is_valid(command) || BUNDLED_COMMANDS.iter().any(|(sub, _)| *sub == command)
 }
 
 #[cfg(test)]
@@ -109,7 +160,54 @@ mod tests {
             "",
         ] {
             assert!(!is_valid(bad), "{bad:?} must not be grantable");
+            assert!(!is_dispatchable(bad), "{bad:?} must not be dispatchable");
             assert_eq!(describe(bad), None);
+        }
+    }
+
+    /// The `plugin_sessions` capability is grantable; its sub-commands are
+    /// dispatchable but NOT independently grantable (they never appear in a
+    /// manifest), and each maps back to the bundling capability the gate
+    /// checks the grant against.
+    #[test]
+    fn plugin_sessions_bundle_maps_subcommands_to_the_capability() {
+        assert!(is_valid("plugin_sessions"));
+        assert!(is_dispatchable("plugin_sessions"));
+        assert!(describe("plugin_sessions").is_some());
+        assert_eq!(required_capability("plugin_sessions"), "plugin_sessions");
+
+        for sub in [
+            "plugin_session_create",
+            "plugin_session_send",
+            "plugin_session_wait",
+            "plugin_session_messages",
+            "plugin_session_close",
+        ] {
+            assert!(is_dispatchable(sub), "{sub:?} must be dispatchable");
+            assert!(!is_valid(sub), "{sub:?} must not be independently grantable");
+            assert_eq!(describe(sub), None, "{sub:?} is not a consent entry");
+            assert_eq!(
+                required_capability(sub),
+                "plugin_sessions",
+                "{sub:?} must require the plugin_sessions grant"
+            );
+        }
+    }
+
+    /// Load-bearing: `required_capability` MUST be identity for every 1:1
+    /// catalog command. If it ever returned a different name, that command's
+    /// existing grant would silently stop matching (a plugin granted
+    /// `list_sessions` could no longer call it). Guards the mapping change to
+    /// `check_plugin_grant`.
+    #[test]
+    fn required_capability_is_identity_for_catalog_commands() {
+        for entry in CATALOG {
+            assert_eq!(
+                required_capability(entry.name),
+                entry.name,
+                "catalog command {:?} must map to itself",
+                entry.name
+            );
         }
     }
 

@@ -243,7 +243,7 @@ pub async fn dispatch_session(
     repo_path: Option<String>,
     prompt: String,
 ) -> Result<SessionInfo, AppError> {
-    dispatch_session_inner(&core, &storage, &bridge, id, title, project, repo_path, prompt)
+    dispatch_session_inner(&core, &storage, &bridge, id, title, project, repo_path, prompt, None)
         .await
 }
 
@@ -261,9 +261,12 @@ pub(crate) async fn dispatch_session_inner(
     project: Option<String>,
     repo_path: Option<String>,
     prompt: String,
+    rain_override: Option<bool>,
 ) -> Result<SessionInfo, AppError> {
-    // No create dialog on this path → both placement and solo/duo come from
-    // the configured defaults (worktree_default / rain_disabled_default).
+    // No create dialog on this path → placement comes from the configured
+    // default (worktree_default). solo/duo is `rain_override` when the caller
+    // pins it (the `plugin_sessions` create arm forces solo unless the plugin
+    // asks for a duo), else the configured default (rain_disabled_default).
     let (working, base) = resolve_session_placement(
         storage,
         &core.paths.data_dir,
@@ -283,11 +286,14 @@ pub(crate) async fn dispatch_session_inner(
             .map_err(|e| AppError::DbError(e.to_string()))?;
         session.base_repo_path = base;
     }
-    // Honor the user's solo/duo default. Without this the DB default
-    // (`rain_enabled=1`) always spawned the duo regardless of
-    // `rain_disabled_default`. Models stay NULL = per-agent defaults, same as
-    // the dialog's "(agent default)" pick.
-    let rain_enabled = storage.default_rain_enabled().await;
+    // Honor `rain_override` when the caller pins solo/duo, else the user's
+    // configured default. Without this the DB default (`rain_enabled=1`)
+    // always spawned the duo regardless of `rain_disabled_default`. Models
+    // stay NULL = per-agent defaults, same as the dialog's "(agent default)".
+    let rain_enabled = match rain_override {
+        Some(v) => v,
+        None => storage.default_rain_enabled().await,
+    };
     storage
         .set_session_spawn_config(&id, rain_enabled, None, None)
         .await

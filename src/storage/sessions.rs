@@ -10,7 +10,7 @@ use super::*;
 const SESSION_COLUMNS: &str = "id, title, working_repo_path, created_at, closed_at, \
     archived, brian_model_at_spawn, rain_model_at_spawn, brian_claude_session_id, \
     rain_claude_session_id, rain_enabled, brian_model_id, rain_model_id, brian_effort, \
-    rain_effort, brian_ultracode, rain_ultracode, base_repo_path";
+    rain_effort, brian_ultracode, rain_ultracode, base_repo_path, created_by_plugin";
 
 impl Storage {
     pub async fn create_session(
@@ -226,6 +226,20 @@ impl Storage {
             .execute(&self.pool)
             .await
             .with_context(|| format!("recording base repo on session {session_id}"))?;
+        Ok(())
+    }
+
+    /// Stamp the plugin that created a session — set once by the
+    /// `plugin_sessions` capability's create arm, immediately after the row
+    /// exists and before the plugin learns the session id. Read by
+    /// `require_owned_session` so a plugin can drive only sessions it created.
+    pub async fn set_session_created_by(&self, session_id: &str, plugin_id: &str) -> Result<()> {
+        sqlx::query("UPDATE sessions SET created_by_plugin = ? WHERE id = ?")
+            .bind(plugin_id)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("recording creator plugin on session {session_id}"))?;
         Ok(())
     }
 

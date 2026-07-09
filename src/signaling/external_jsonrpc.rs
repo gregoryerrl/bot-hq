@@ -295,8 +295,8 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
 
 /// Block server-side until the session has at least one new message past
 /// `since_id`, or `timeout_ms` elapses. On timeout returns an empty Vec.
-async fn wait_for_change(
-    core: &Arc<CoreAppState>,
+pub(crate) async fn wait_for_change(
+    core: &CoreAppState,
     session_id: &str,
     since_id: Option<i64>,
     timeout_ms: u64,

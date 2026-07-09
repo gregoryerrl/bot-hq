@@ -94,6 +94,11 @@ pub struct Session {
     /// worktree (then `working_repo_path` is the worktree). NULL = session
     /// runs directly in `working_repo_path`.
     pub base_repo_path: Option<String>,
+    /// The plugin that created this session via the `plugin_sessions`
+    /// capability, or NULL for user/agent/driver-created sessions. The
+    /// ownership anchor: a plugin may drive ONLY sessions whose
+    /// `created_by_plugin` equals its own id (see `require_owned_session`).
+    pub created_by_plugin: Option<String>,
 }
 
 /// `Session` plus a cheap latest-text-message preview, for the dashboard

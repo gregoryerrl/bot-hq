@@ -249,6 +249,11 @@ host's JSON views (same shapes the bot-hq UI renders).
 | `list_projects` | — | registered projects |
 | `compute_apply_diff` | `session_id` | a session's color-classified git diff |
 | `spawn_session` | `prompt`, `project?`, `title?` | open a NEW agent session with that prompt (per-spawn confirm dialog — below; returns `{ session_id }`) |
+| `plugin_session_create` | `first_message`, `project?`, `title?`, `duo?` | (needs `plugin_sessions`) create a helper session you own; returns `{ session_id }`; single agent unless `duo:true` |
+| `plugin_session_send` | `session_id`, `text` | (needs `plugin_sessions`) send a message to a session you created |
+| `plugin_session_wait` | `session_id`, `since_id?`, `timeout_ms?` | (needs `plugin_sessions`) long-poll new messages (default 25 s, clamp 100 ms–60 s) → `[AgentMessage]` |
+| `plugin_session_messages` | `session_id`, `since_id?` | (needs `plugin_sessions`) read a created session's messages → `[AgentMessage]` |
+| `plugin_session_close` | `session_id` | (needs `plugin_sessions`) close + archive a session you created |
 | `plugin_kv_get` | `key` | your plugin's own saved state |
 | `plugin_kv_set` | `key`, `value` | write your own state (key ≤256 B, value ≤256 KB; namespaced server-side; wiped on uninstall) |
 
@@ -258,11 +263,13 @@ host's JSON views (same shapes the bot-hq UI renders).
 > fields are gone. Update any plugin reading `row.project_id`. Other
 > commands' shapes are unchanged; results remain the host's JSON views.
 
-Not grantable, by design: anything that touches EXISTING sessions'
-agents or stdin (`broadcast_message`, send/drive/close), mutating the
-Context Library (canon changes are user/agent-proposal flows),
-installing plugins, or policy. Session CREATION is the one deliberate
-exception:
+Not grantable, by design: touching sessions your plugin did NOT create
+(`broadcast_message`, and the raw send/drive/close of arbitrary
+sessions), mutating the Context Library (canon changes are
+user/agent-proposal flows), installing plugins, or policy. There are
+two deliberate session exceptions, each narrowly fenced — `spawn_session`
+(create only, guarded by a per-spawn dialog) and `plugin_sessions`
+(create AND drive your OWN sessions, guarded by an ownership fence):
 
 ### spawn_session — double consent
 
@@ -307,6 +314,56 @@ all. Older hosts: a manifest requesting `spawn_session` is REFUSED at
 install by a bot-hq predating it — unknown capability names are
 install-time errors, so this capability fails closed by rejection
 (stricter than `csp_extra_origins`' ignore-and-stay-strict).
+
+### plugin_sessions — drive your own sessions
+
+`plugin_sessions` is ONE grant that unlocks five commands for a plugin
+to run its own helper agent sessions end to end: `plugin_session_create`
+→ `plugin_session_send` / `plugin_session_wait` /
+`plugin_session_messages` → `plugin_session_close`. It exists so a panel
+can hold a conversation with an agent (a tutor, an assistant) without
+ever handling a driver token or opening a port — the host owns the
+machinery; the plugin never sees a credential.
+
+**Ownership fence — the safety property.** Every command except `create`
+requires the target session's `created_by_plugin` to equal YOUR plugin
+id (`require_owned_session`). A plugin can send to, read, or close ONLY
+the sessions it created — never the user's own sessions, never another
+plugin's. An absent session and a foreign-owned session fail identically
+(`session "…" was not created by plugin "…"`), so the fence never leaks
+which session ids exist. That bounded blast radius — exactly the
+sessions that plugin minted — is what makes the capability safe to grant
+to third-party plugins.
+
+**Single-agent by default.** `create` runs solo unless you pass
+`duo: true` (a Brian+Rain review pair — double the cost). New sessions
+appear in the user's dashboard and run under the same policy gates as
+any session; `close` archives (recoverable), never hard-deletes.
+
+**Consent model — install grant, no per-call dialog.** Unlike
+`spawn_session` (a confirm dialog on every create), `plugin_sessions` is
+gated only by the install-time grant. What makes that acceptable: for
+the intended chat use the first message is the user's own typed input —
+the human already authored the prompt, so a per-message dialog would be
+redundant friction — and all driving is ownership-fenced +
+dashboard-visible. Residual risk to weigh before granting: same-origin
+plugin content (e.g. a user-commissioned Cognotify material) could call
+`plugin_session_create` with a prompt the user did NOT type; the fence
+still limits that session to the plugin, forced-solo and dashboard-
+visible, but there is no per-create human check on the prompt as there
+is for `spawn_session`. Grant `plugin_sessions` to plugins whose
+content you trust; if you need the per-create human gate, use
+`spawn_session` instead.
+
+**Flow.** `create` broadcasts `first_message` as the session's opening
+prompt and returns `{ "session_id": "…" }` (ownership is stamped before
+the id is returned — no unowned window). `wait` blocks server-side for
+messages past `since_id` (default 25 s, clamped 100 ms–60 s), returning
+`[]` on timeout — safe over the invoke tier (no bridge timeout).
+`messages` reads history without blocking. Message reads return the
+host's `AgentMessage` shape (`{ id, session_id, author, kind, content,
+created_at }`), the same rows `list_messages` returns. Mounted-only: the
+RPC channel exists only while your panel is open.
 
 ## Lifecycle
 

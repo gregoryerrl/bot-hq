@@ -57,7 +57,7 @@ fn check_plugin_grant(
     plugin_id: &str,
     command: &str,
 ) -> Result<(), AppError> {
-    if !catalog::is_valid(command) {
+    if !catalog::is_dispatchable(command) {
         return Err(AppError::Validation(format!(
             "unknown plugin command {command:?} (not in the api_version-1 catalog)"
         )));
@@ -67,10 +67,14 @@ fn check_plugin_grant(
             "plugin {plugin_id:?} is not installed+enabled"
         )));
     }
+    // A bundled sub-command (e.g. `plugin_session_send`) is gated by its
+    // bundling capability (`plugin_sessions`); every 1:1 command maps to
+    // itself, so this is identical to matching `command` for them.
+    let required = catalog::required_capability(command);
     match registry.granted_caps_for(plugin_id) {
-        Some(caps) if caps.iter().any(|c| c == command) => Ok(()),
+        Some(caps) if caps.iter().any(|c| c == required) => Ok(()),
         Some(_) => Err(AppError::Validation(format!(
-            "capability {command:?} was not granted to plugin {plugin_id:?}"
+            "capability {required:?} was not granted to plugin {plugin_id:?}"
         ))),
         None => Err(AppError::Validation(format!(
             "plugin {plugin_id:?} has no recorded capability grants"
@@ -124,6 +128,30 @@ fn opt_str_vec(args: &Value, key: &str) -> Option<Vec<String>> {
 fn to_json<T: Serialize>(value: &T) -> Result<String, AppError> {
     serde_json::to_string(value)
         .map_err(|e| AppError::Internal(format!("serializing plugin result: {e}")))
+}
+
+/// Ownership fence for the `plugin_sessions` capability: the session must
+/// exist AND carry `created_by_plugin == plugin_id`. Called before any core
+/// access in every non-create `plugin_session_*` arm, so a plugin can never
+/// send to, read, or close a session it did not create — not the user's own
+/// sessions, not another plugin's. Fails CLOSED: an absent session and a
+/// session owned by someone else return the SAME error, so a plugin can't
+/// probe which session ids exist.
+async fn require_owned_session(
+    storage: &Storage,
+    plugin_id: &str,
+    session_id: &str,
+) -> Result<(), AppError> {
+    let row = storage
+        .get_session(session_id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    match row {
+        Some(s) if s.created_by_plugin.as_deref() == Some(plugin_id) => Ok(()),
+        _ => Err(AppError::Validation(format!(
+            "session {session_id:?} was not created by plugin {plugin_id:?}"
+        ))),
+    }
 }
 
 /// What plugins see for a retrieved CL atom. Local (not the storage
@@ -323,12 +351,119 @@ pub(crate) async fn dispatch(
             // Same id shape the host UI mints (s-<uuid4 first 8>).
             let id = format!("s-{}", &uuid::Uuid::new_v4().to_string()[..8]);
             let info = crate::tauri_cmd::sessions::dispatch_session_inner(
-                core, storage, bridge, id, title, project, None, prompt,
+                core, storage, bridge, id, title, project, None, prompt, None,
             )
             .await?;
             // Narrow contract: the id and nothing else (the session-read
             // commands are separate grants).
             to_json(&serde_json::json!({ "session_id": info.id }))
+        }
+        // ── plugin_sessions: a plugin creating AND driving its OWN sessions.
+        // The create arm stamps ownership; every other arm is gated by
+        // `require_owned_session` BEFORE any core access, so a plugin reaches
+        // only sessions it created — never the user's own or another plugin's.
+        "plugin_session_create" => {
+            let first_message = need_str(args, "first_message")?;
+            if first_message.trim().is_empty() {
+                return Err(AppError::Validation(
+                    "plugin_session_create: first_message must not be empty".into(),
+                ));
+            }
+            let project = opt_str(args, "project");
+            if let Some(p) = &project {
+                if storage.get_project(p).await?.is_none() {
+                    return Err(AppError::Validation(format!(
+                        "plugin_session_create: unknown project {p:?}"
+                    )));
+                }
+            }
+            let title = opt_str(args, "title")
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| format!("{plugin_id} session"));
+            // Solo by default (cheap, predictable, honest "single agent"
+            // consent); a plugin may opt into a Brian+Rain duo with duo:true.
+            let duo = args.get("duo").and_then(|v| v.as_bool()).unwrap_or(false);
+            let core = core.ok_or_else(|| {
+                AppError::Internal("core state unavailable for plugin_session_create".into())
+            })?;
+            // Same id shape the host UI mints (s-<uuid4 first 8>).
+            let id = format!("s-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+            let info = crate::tauri_cmd::sessions::dispatch_session_inner(
+                core, storage, bridge, id, title, project, None, first_message, Some(duo),
+            )
+            .await?;
+            // Stamp ownership immediately — before the plugin learns the id
+            // (returned below), so there is no window in which it could name a
+            // session it does not yet own.
+            storage
+                .set_session_created_by(&info.id, plugin_id)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?;
+            to_json(&serde_json::json!({ "session_id": info.id }))
+        }
+        "plugin_session_send" => {
+            let session_id = need_str(args, "session_id")?;
+            let text = need_str(args, "text")?;
+            if text.trim().is_empty() {
+                return Err(AppError::Validation(
+                    "plugin_session_send: text must not be empty".into(),
+                ));
+            }
+            require_owned_session(storage, plugin_id, &session_id).await?;
+            let core = core.ok_or_else(|| {
+                AppError::Internal("core state unavailable for plugin_session_send".into())
+            })?;
+            core.broadcast(&session_id, &text)
+                .await
+                .map_err(|e| AppError::Internal(format!("plugin_session_send: {e}")))?;
+            to_json(&true)
+        }
+        "plugin_session_wait" => {
+            let session_id = need_str(args, "session_id")?;
+            let since_id = opt_i64(args, "since_id");
+            // Long server-side await is safe over the invoke tier (no bridge
+            // timeout); default 25s, hard-clamped so a plugin can't pin a
+            // connection open indefinitely.
+            let timeout_ms = opt_i64(args, "timeout_ms").unwrap_or(25_000).clamp(100, 60_000) as u64;
+            require_owned_session(storage, plugin_id, &session_id).await?;
+            let core = core.ok_or_else(|| {
+                AppError::Internal("core state unavailable for plugin_session_wait".into())
+            })?;
+            let msgs = crate::signaling::external_jsonrpc::wait_for_change(
+                core,
+                &session_id,
+                since_id,
+                timeout_ms,
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("plugin_session_wait: {e}")))?;
+            let out: Vec<crate::tauri_events::types::AgentMessage> =
+                msgs.into_iter().map(Into::into).collect();
+            to_json(&out)
+        }
+        "plugin_session_messages" => {
+            let session_id = need_str(args, "session_id")?;
+            let since_id = opt_i64(args, "since_id");
+            require_owned_session(storage, plugin_id, &session_id).await?;
+            let msgs = storage
+                .messages_for_session(&session_id, since_id)
+                .await
+                .map_err(|e| AppError::DbError(e.to_string()))?;
+            let out: Vec<crate::tauri_events::types::AgentMessage> =
+                msgs.into_iter().map(Into::into).collect();
+            to_json(&out)
+        }
+        "plugin_session_close" => {
+            let session_id = need_str(args, "session_id")?;
+            require_owned_session(storage, plugin_id, &session_id).await?;
+            let core = core.ok_or_else(|| {
+                AppError::Internal("core state unavailable for plugin_session_close".into())
+            })?;
+            // Archive (recoverable), never hard-delete.
+            core.close_session(&session_id, true)
+                .await
+                .map_err(|e| AppError::Internal(format!("plugin_session_close: {e}")))?;
+            to_json(&true)
         }
         "plugin_kv_get" => {
             let key = need_str(args, "key")?;
@@ -703,5 +838,140 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out, "[]");
+    }
+
+    /// The bundled `plugin_sessions` grant gates all five `plugin_session_*`
+    /// sub-commands; a plugin without it can dispatch none of them; and the
+    /// raw host-like names stay non-dispatchable even for a bundle holder.
+    #[test]
+    fn grant_check_gates_plugin_sessions_bundle() {
+        let tmp = TempDir::new().unwrap();
+        let reg = registry_with(&tmp, "deck", &["plugin_sessions"], true);
+        for sub in [
+            "plugin_session_create",
+            "plugin_session_send",
+            "plugin_session_wait",
+            "plugin_session_messages",
+            "plugin_session_close",
+        ] {
+            assert!(check_plugin_grant(&reg, "deck", sub).is_ok(), "{sub} should pass");
+        }
+        // Raw host-like names never dispatch, even with the bundle granted.
+        for raw in ["close_session", "broadcast_message", "create_session"] {
+            assert!(check_plugin_grant(&reg, "deck", raw).is_err(), "{raw} must be refused");
+        }
+        // A plugin without the grant can dispatch none of the sub-commands.
+        let tmp2 = TempDir::new().unwrap();
+        let ungranted = registry_with(&tmp2, "deck", &["list_sessions"], true);
+        assert!(check_plugin_grant(&ungranted, "deck", "plugin_session_send").is_err());
+        assert!(check_plugin_grant(&ungranted, "deck", "plugin_session_create").is_err());
+    }
+
+    /// Ownership fence: a plugin may act only on sessions IT created. Foreign
+    /// and absent sessions fail identically (no existence leak).
+    #[tokio::test]
+    async fn require_owned_session_fences_by_creator_plugin() {
+        let storage = Storage::memory().await.unwrap();
+        storage.create_session("s-owned", "t", None).await.unwrap();
+        storage.set_session_created_by("s-owned", "deck").await.unwrap();
+        storage.create_session("s-user", "t", None).await.unwrap(); // no plugin owner
+
+        assert!(require_owned_session(&storage, "deck", "s-owned").await.is_ok());
+        // Another plugin cannot claim it.
+        assert!(require_owned_session(&storage, "other", "s-owned").await.is_err());
+        // The user's own session is owned by no plugin.
+        assert!(require_owned_session(&storage, "deck", "s-user").await.is_err());
+        // Absent session — same closed failure.
+        assert!(require_owned_session(&storage, "deck", "s-ghost").await.is_err());
+    }
+
+    /// Every non-create `plugin_session_*` arm checks ownership BEFORE it needs
+    /// core: a foreign session fails Validation (fence) even with core absent;
+    /// an owned session reaches the core requirement (Internal), proving the
+    /// fence ran first. `messages` needs no core, so an owned read succeeds.
+    #[tokio::test]
+    async fn plugin_session_arms_fence_ownership_before_core() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+        storage.create_session("s-owned", "t", None).await.unwrap();
+        storage.set_session_created_by("s-owned", "deck").await.unwrap();
+        storage.create_session("s-foreign", "t", None).await.unwrap();
+        storage.set_session_created_by("s-foreign", "other").await.unwrap();
+
+        // Foreign session → Validation (fence); core=None never consulted.
+        for (cmd, args) in [
+            ("plugin_session_send", serde_json::json!({"session_id":"s-foreign","text":"hi"})),
+            ("plugin_session_wait", serde_json::json!({"session_id":"s-foreign"})),
+            ("plugin_session_messages", serde_json::json!({"session_id":"s-foreign"})),
+            ("plugin_session_close", serde_json::json!({"session_id":"s-foreign"})),
+        ] {
+            let err = dispatch(&storage, &bridge, None, "deck", cmd, &args).await.unwrap_err();
+            assert!(matches!(err, AppError::Validation(_)), "{cmd} foreign: got {err:?}");
+        }
+
+        // Owned session: fence passes, arm reaches the core requirement →
+        // Internal on the unit-test path, proving ownership was checked first.
+        for (cmd, args) in [
+            ("plugin_session_send", serde_json::json!({"session_id":"s-owned","text":"hi"})),
+            ("plugin_session_wait", serde_json::json!({"session_id":"s-owned"})),
+            ("plugin_session_close", serde_json::json!({"session_id":"s-owned"})),
+        ] {
+            let err = dispatch(&storage, &bridge, None, "deck", cmd, &args).await.unwrap_err();
+            assert!(matches!(err, AppError::Internal(_)), "{cmd} owned: got {err:?}");
+        }
+        // messages() reads storage, not core — an owned read returns empty.
+        let out = dispatch(
+            &storage,
+            &bridge,
+            None,
+            "deck",
+            "plugin_session_messages",
+            &serde_json::json!({"session_id":"s-owned"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "[]");
+    }
+
+    /// create validates first_message + project before core, and mints nothing
+    /// on the unit-test (core=None) path.
+    #[tokio::test]
+    async fn plugin_session_create_validates_before_core() {
+        let tmp = TempDir::new().unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = test_bridge(&tmp, &storage).await;
+
+        // Missing first_message.
+        let err = dispatch(
+            &storage,
+            &bridge,
+            None,
+            "deck",
+            "plugin_session_create",
+            &Value::Object(Default::default()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+        // Whitespace-only first_message.
+        let args = serde_json::json!({ "first_message": "   " });
+        let err = dispatch(&storage, &bridge, None, "deck", "plugin_session_create", &args)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+        // Unknown project.
+        let args = serde_json::json!({ "first_message": "hi", "project": "ghost" });
+        let err = dispatch(&storage, &bridge, None, "deck", "plugin_session_create", &args)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)), "got {err:?}");
+        // Valid args but no core → Internal, and nothing was created.
+        let args = serde_json::json!({ "first_message": "hi" });
+        let err = dispatch(&storage, &bridge, None, "deck", "plugin_session_create", &args)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Internal(_)), "got {err:?}");
+        assert!(storage.list_active_sessions_with_preview().await.unwrap().is_empty());
     }
 }
