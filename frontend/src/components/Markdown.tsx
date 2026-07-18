@@ -21,7 +21,7 @@ export const Markdown = memo(function Markdown({
   className,
 }: MarkdownProps) {
   return (
-    <div className={cn("prose-tight text-sm text-on-surface", className)}>
+    <div className={cn("prose-tight break-words text-sm text-on-surface", className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
         {children}
       </ReactMarkdown>
@@ -62,10 +62,28 @@ const markdownComponents: Components = {
       href={href}
       target="_blank"
       rel="noreferrer"
-      className="text-tertiary underline hover:text-tertiary"
+      className="break-all text-tertiary underline hover:text-tertiary"
     >
       {children}
     </a>
+  ),
+  // GFM tables: fixed layout + wrapping cells so a wide table compresses to
+  // the container instead of overflowing (horizontal scrolling is banned
+  // app-wide).
+  table: ({ children }) => (
+    <table className="my-2 w-full table-fixed border-collapse text-[0.78rem]">
+      {children}
+    </table>
+  ),
+  th: ({ children }) => (
+    <th className="border-b border-outline-variant px-2 py-1 text-left font-semibold">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="border-b border-outline-variant/40 px-2 py-1 align-top">
+      {children}
+    </td>
   ),
   ul: ({ children }) => (
     <ul className="my-2 ml-5 list-disc space-y-1">{children}</ul>

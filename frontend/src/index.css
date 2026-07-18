@@ -52,4 +52,7 @@ body,
   height: 100%;
   background: #0b1326;
   color: #e5e5e5;
+  /* Hard backstop for the app-wide no-horizontal-scroll rule: nothing may
+     widen the page itself, whatever a descendant does. */
+  overflow-x: hidden;
 }

@@ -15,9 +15,13 @@ const selectClass =
 
 const PROVIDERS = ["anthropic", "openai", "deepseek", "local"] as const;
 
-// Shared 5-column grid for the header row + each model row.
+// Shared 5-column grid for the header row + each model row. Every track has a
+// compressible minmax floor (no fixed-width tracks): the old fixed
+// 8rem/9rem/12rem columns gave the row a ~51rem hard minimum, which clipped
+// the trailing actions column on narrow windows now that containers hide
+// horizontal overflow instead of scrolling.
 const rowGridClass =
-  "grid grid-cols-[minmax(10rem,1.4fr)_8rem_minmax(8rem,1fr)_9rem_12rem] items-center gap-3 px-4";
+  "grid grid-cols-[minmax(8rem,1.4fr)_minmax(4.5rem,8rem)_minmax(6rem,1fr)_minmax(5rem,9rem)_minmax(7.5rem,12rem)] items-center gap-3 px-4";
 
 /**
  * Settings → Models. A pure registry of saved LLM endpoints (display name +
@@ -138,7 +142,7 @@ export function ModelsPanel() {
                   <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
                     {m.updated_at ? formatTimestamp(m.updated_at) : "—"}
                   </span>
-                  <div className="flex justify-end gap-2">
+                  <div className="flex flex-wrap justify-end gap-2">
                     <Button
                       size="sm"
                       disabled={testing === m.id}
