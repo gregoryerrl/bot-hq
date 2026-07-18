@@ -218,6 +218,41 @@ async broadcastMessage(sessionId: string, text: string) : Promise<Result<null, A
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Ensure the session's shell is running (spawning it in the session's
+ * working repo on first open) and return the replay snapshot + geometry.
+ */
+async terminalOpen(sessionId: string) : Promise<Result<TerminalOpenView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("terminal_open", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Forward user keystrokes (xterm `onData` — UTF-8 text incl. escape
+ * sequences) into the PTY. No-op error if the shell isn't running.
+ */
+async terminalInput(sessionId: string, data: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("terminal_input", { sessionId, data }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Propagate the frontend fit addon's geometry to the PTY.
+ */
+async terminalResize(sessionId: string, cols: number, rows: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("terminal_resize", { sessionId, cols, rows }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getAgentConfig(agentName: string) : Promise<Result<AgentConfigView | null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_agent_config", { agentName }) };
@@ -1615,6 +1650,12 @@ export type SkillVisibility =
  * Fully disabled (no auto-invoke, not in the `/` menu).
  */
 "off"
+export type TerminalOpenView = { 
+/**
+ * Base64 of the retained scrollback — replayed into xterm on mount so a
+ * re-opened tab (or re-opened session view) shows recent history.
+ */
+snapshot_b64: string; cols: number; rows: number }
 /**
  * Update status reported to the frontend. snake_case fields (mirrors the
  * `SessionInfo` return-type convention) — the React side reads these names.
