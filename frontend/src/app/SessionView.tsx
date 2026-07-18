@@ -25,6 +25,7 @@ import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { GearIcon } from "../components/icons";
 import { SubTabButton } from "../components/SubTabButton";
+import { SessionContextTab } from "./SessionContextTab";
 import { invoke } from "@tauri-apps/api/core";
 
 const PHASE_NAMES: Phase[] = ["investigate", "plan", "apply", "verify"];
@@ -80,7 +81,10 @@ export function SessionView() {
   // Active subtab. All three panels stay MOUNTED — inactive ones are `hidden`
   // (display:none) — so chat scroll position, CL editor state, and the xterm
   // buffer survive tab switches (same keep-mounted convention as Settings).
+  // Context/Terminal content additionally mounts only on FIRST activation, so
+  // opening a session doesn't fire their queries (or spawn a PTY) unseen.
   const [tab, setTab] = useState<SessionTab>("workspace");
+  const [contextMounted, setContextMounted] = useState(false);
 
   // Resizable chat/document split. `leftPct` is the chat pane's width as a % of
   // the container; the rest goes to the DocumentPane. Seeded from localStorage
@@ -449,7 +453,10 @@ export function SessionView() {
         </SubTabButton>
         <SubTabButton
           active={tab === "context"}
-          onClick={() => setTab("context")}
+          onClick={() => {
+            setTab("context");
+            setContextMounted(true);
+          }}
         >
           Context
         </SubTabButton>
@@ -557,10 +564,7 @@ export function SessionView() {
         aria-label="Context"
         className={cn("min-h-0 flex-1", tab !== "context" && "hidden")}
       >
-        <TabPlaceholder
-          label="Context"
-          hint="Project-scoped Context Library — files and proposals for this session's project."
-        />
+        {contextMounted && <SessionContextTab sessionId={sessionId} />}
       </div>
 
       <div
