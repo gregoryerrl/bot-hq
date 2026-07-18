@@ -26,6 +26,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { GearIcon } from "../components/icons";
 import { SubTabButton } from "../components/SubTabButton";
 import { SessionContextTab } from "./SessionContextTab";
+import { SessionTerminalTab } from "./SessionTerminalTab";
 import { invoke } from "@tauri-apps/api/core";
 
 const PHASE_NAMES: Phase[] = ["investigate", "plan", "apply", "verify"];
@@ -85,6 +86,7 @@ export function SessionView() {
   // opening a session doesn't fire their queries (or spawn a PTY) unseen.
   const [tab, setTab] = useState<SessionTab>("workspace");
   const [contextMounted, setContextMounted] = useState(false);
+  const [terminalMounted, setTerminalMounted] = useState(false);
 
   // Resizable chat/document split. `leftPct` is the chat pane's width as a % of
   // the container; the rest goes to the DocumentPane. Seeded from localStorage
@@ -462,7 +464,10 @@ export function SessionView() {
         </SubTabButton>
         <SubTabButton
           active={tab === "terminal"}
-          onClick={() => setTab("terminal")}
+          onClick={() => {
+            setTab("terminal");
+            setTerminalMounted(true);
+          }}
         >
           Terminal
         </SubTabButton>
@@ -572,10 +577,12 @@ export function SessionView() {
         aria-label="Terminal"
         className={cn("min-h-0 flex-1", tab !== "terminal" && "hidden")}
       >
-        <TabPlaceholder
-          label="Terminal"
-          hint="Session terminal — agents run commands here, you watch (and type)."
-        />
+        {terminalMounted && (
+          <SessionTerminalTab
+            sessionId={sessionId}
+            active={tab === "terminal"}
+          />
+        )}
       </div>
 
       <SessionPolicyPanel
@@ -584,20 +591,6 @@ export function SessionView() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
       />
-    </div>
-  );
-}
-
-/** Interim empty-state for subtabs whose content lands later in this arc. */
-function TabPlaceholder({ label, hint }: { label: string; hint: string }) {
-  return (
-    <div className="flex h-full items-center justify-center p-6">
-      <div className="text-center">
-        <p className="font-body-md text-body-md text-on-surface">{label}</p>
-        <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-          {hint} Not wired up yet.
-        </p>
-      </div>
     </div>
   );
 }

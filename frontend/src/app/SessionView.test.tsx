@@ -4,11 +4,39 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { SessionView } from "./SessionView";
 
+// The Terminal panel mounts the real SessionTerminalTab on pill click — mock
+// xterm out (jsdom has no matchMedia/canvas); panel-switching is what's under
+// test here, not the terminal (SessionTerminalTab.test.tsx covers that).
+vi.mock("@xterm/xterm", () => ({
+  Terminal: vi.fn().mockImplementation(() => ({
+    loadAddon: vi.fn(),
+    open: vi.fn(),
+    write: vi.fn((_d: unknown, cb?: () => void) => cb?.()),
+    writeln: vi.fn(),
+    onData: vi.fn((_cb: (data: string) => void) => ({ dispose: vi.fn() })),
+    dispose: vi.fn(),
+    cols: 80,
+    rows: 24,
+  })),
+}));
+vi.mock("@xterm/addon-fit", () => ({
+  FitAddon: vi.fn().mockImplementation(() => ({ fit: vi.fn() })),
+}));
+
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+
 // Keyed invoke mock: `get_session` must return a session row or the view
 // renders its not-found state; everything else gets an empty default.
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn((cmd: string) => {
     switch (cmd) {
+      case "terminal_open":
+        return Promise.resolve({ snapshot_b64: "", cols: 80, rows: 24 });
       case "get_session":
         return Promise.resolve({
           id: "s1",
