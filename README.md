@@ -290,6 +290,8 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `session_doc_search(query?, phase?)` | List this session's scratch docs; `phase` filter for cross-phase retrieval. |
 | `session_doc_read(slug)` | Read a session doc by slug. |
 | `web_search(query, engine?)` | Search the web via a headless webview, so non-first-party models without a server-side search tool can fetch live results. |
+| `terminal_exec(command, wait_ms?, block?)` | Run one command in the session's Terminal subtab PTY (user-visible). Blocking by default: waits for output-settle and returns the captured tail; `block:false` for long-running processes. Gate-matched commands are refused (route via `action_gate`). |
+| `terminal_read(lines?)` | Tail of the session terminal's scrollback as plain text (default 100 lines, max 500) — evidence agents can paste into chat or IPAV docs. |
 | `webview_screenshot()` | Capture the bot-hq webview for agent-driven UI testing. |
 | `webview_click(selector)` | Synthesize a click on a DOM element in the webview. |
 | `webview_type(selector, text)` | Type into a webview element. |
@@ -299,6 +301,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 Role boundary (enforced server-side, both directions): Rain (EYES) is blocked from the
 HANDS-only tools — `ask_user_choice`, `mark_awaiting_user`, `halt`, `request_approval`,
 `action_gate`, `supersede_question`, `disposition_finding`, `override_reviewer_block`,
+`terminal_exec` (EYES reads the terminal via `terminal_read`, never types into it),
 and `cl_register_folder_description` (Rain converges via `peer_ack`, which is not gated).
 Brian (HANDS) is blocked from the EYES-only tools — `eyes_flag` and `approve_finding`
 (HANDS can't file or sign off on findings against its own work).

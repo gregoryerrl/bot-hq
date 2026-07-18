@@ -27,8 +27,11 @@ impl SignalingBridge {
         agent: String,
         command: String,
     ) -> Result<String> {
+        // Two-tier resolve (session snapshot → global fallback) — previously
+        // this read only the global list, so a gear-tab session override was
+        // invisible to a direct action_gate call.
         let keywords = match self.data_dir.as_ref() {
-            Some(d) => tool_gate::load(d),
+            Some(d) => tool_gate::resolve_keywords(d, Some(&session_id)),
             None => Vec::new(),
         };
         match tool_gate::match_keyword("Bash", &command, &keywords) {

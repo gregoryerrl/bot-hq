@@ -382,6 +382,12 @@ impl TerminalRegistry {
             .map(Arc::clone)
     }
 
+    /// The session's terminal live OR dead — an exited shell's retained
+    /// scrollback is still readable evidence (`terminal_read`).
+    pub async fn get_any(&self, session_id: &str) -> Option<Arc<SessionTerminal>> {
+        self.terminals.lock().await.get(session_id).map(Arc::clone)
+    }
+
     /// Kill + drop a session's terminal (no-op when absent). `close_session`
     /// calls this alongside the agent-subprocess reaping.
     pub async fn kill_and_remove(&self, session_id: &str) {

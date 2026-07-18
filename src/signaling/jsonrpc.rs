@@ -102,6 +102,9 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     // follows mark_awaiting_user's HANDS-only precedent. EYES converges via
     // peer_ack (not HANDS-only) instead of yielding to the user.
     "halt",
+    // Runs arbitrary shell commands (HANDS executes; EYES is read-only —
+    // her terminal surface is terminal_read).
+    "terminal_exec",
 ];
 
 /// The inverse of [`HANDS_ONLY_TOOLS`]: tools only EYES (rain) may call.
@@ -507,6 +510,24 @@ async fn call_tool(
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(parked))
         }
+        "terminal_exec" => {
+            let command = arg_required_str(&args, "command")?;
+            let wait_ms = args.get("wait_ms").and_then(Value::as_u64);
+            let block = args.get("block").and_then(Value::as_bool);
+            let output = bridge
+                .terminal_exec(caller.session_id.clone(), command, wait_ms, block)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(output))
+        }
+        "terminal_read" => {
+            let lines = args.get("lines").and_then(Value::as_u64);
+            let output = bridge
+                .terminal_read(caller.session_id.clone(), lines)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(output))
+        }
         "session_doc_write" => {
             let slug = arg_required_str(&args, "slug")?;
             let body = arg_required_str(&args, "body")?;
@@ -890,6 +911,8 @@ mod tests {
         assert!(names.contains(&"withdraw_question"));
         assert!(names.contains(&"cl_propose"));
         assert!(names.contains(&"cl_list_proposals"));
+        assert!(names.contains(&"terminal_exec"));
+        assert!(names.contains(&"terminal_read"));
         assert_eq!(
             tools.len(),
             names.iter().collect::<std::collections::HashSet<_>>().len(),
@@ -1010,6 +1033,7 @@ mod tests {
             "request_approval",
             "action_gate",
             "halt",
+            "terminal_exec",
         ] {
             let res = dispatch(
                 req(

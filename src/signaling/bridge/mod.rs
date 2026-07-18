@@ -40,6 +40,7 @@ pub(crate) use cl_proposals::detect_conflict;
 mod cl_refs;
 mod findings;
 mod session_docs;
+mod terminal_tools;
 mod tray;
 mod util;
 
@@ -267,6 +268,11 @@ pub struct SignalingBridge {
     /// dispatchers, which don't have CoreAppState. Set-once; `None` in tests
     /// and during the pre-setup window.
     app_handle: std::sync::OnceLock<tauri::AppHandle>,
+    /// Per-session PTY registry shared with `AppState.terminals` — the
+    /// `terminal_exec` / `terminal_read` MCP handlers reach the same PTYs the
+    /// Terminal subtab renders. Set once at setup, like `app_handle`; `None`
+    /// in tests and the pre-setup window.
+    terminals: std::sync::OnceLock<Arc<crate::core::TerminalRegistry>>,
     /// A3b: per-session close-gate state — whether the agent touched the CL
     /// (`cl_rescan`, a proxy for the write-then-prune learnings delta) and
     /// whether we've already nudged it once on close. Drives the soft two-call
@@ -316,6 +322,7 @@ impl SignalingBridge {
             session_activity: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
+            terminals: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),
             agent_health: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
@@ -594,6 +601,18 @@ impl SignalingBridge {
     /// Get the stashed AppHandle. None until `setup()` runs, or in tests.
     pub fn app_handle(&self) -> Option<&tauri::AppHandle> {
         self.app_handle.get()
+    }
+
+    /// Stash the shared per-session terminal registry (same Arc as
+    /// `AppState.terminals`). Idempotent, set once at setup.
+    pub fn set_terminal_registry(&self, registry: Arc<crate::core::TerminalRegistry>) {
+        let _ = self.terminals.set(registry);
+    }
+
+    /// The shared terminal registry. None until setup, or in tests — the
+    /// terminal_* MCP tools error cleanly in that window.
+    pub(crate) fn terminal_registry(&self) -> Option<&Arc<crate::core::TerminalRegistry>> {
+        self.terminals.get()
     }
 
     /// Subscribe to all signaling events. The UI layer uses this to paint.

@@ -642,6 +642,43 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "required": ["project", "folder_path", "description"]
             }),
         },
+        // Session terminal (Terminal subtab) — agents drive the session's PTY
+        // where the user can watch. core/terminal.rs + bridge/terminal_tools.rs.
+        ToolDescriptor {
+            name: "terminal_exec",
+            description: "HANDS-only. Run ONE shell command in this session's Terminal subtab (the PTY the user watches — visible evidence, unlike your Bash tool). BLOCKING by default: types the command, waits for output to settle (~0.7s quiet or wait_ms cap, default 10s), and returns the captured output with a timed_out note when capped. Pass block:false for long-running processes (servers, watchers) and read later with terminal_read. The shell runs in the session's working repo. Commands matching a gated Tool-Gate keyword are refused — route those through action_gate. Settle is a quiet-window heuristic, not prompt detection: interactive/TUI commands may return early.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "One shell command (single line, no trailing newline)."
+                    },
+                    "wait_ms": {
+                        "type": "integer",
+                        "description": "Max total wait for output-settle, ms. Default 10000, clamped to [700, 120000]."
+                    },
+                    "block": {
+                        "type": "boolean",
+                        "description": "Default true. false = fire-and-forget (returns immediately; use terminal_read later)."
+                    }
+                },
+                "required": ["command"]
+            }),
+        },
+        ToolDescriptor {
+            name: "terminal_read",
+            description: "Read the tail of this session's Terminal-subtab scrollback as plain text (default 100 lines, max 500) — works even after the shell exited. Paste it into chat or an IPAV session doc as fenced code when presenting terminal results as evidence.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "lines": {
+                        "type": "integer",
+                        "description": "How many trailing lines to return. Default 100, max 500."
+                    }
+                }
+            }),
+        },
         // Webview automation — agents test the bot-hq UI on their own.
         // Mirror of the external-MCP equivalents in external_jsonrpc.rs.
         ToolDescriptor {

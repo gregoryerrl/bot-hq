@@ -90,6 +90,24 @@ pub fn load(data_dir: &Path) -> Vec<GatedKeyword> {
     }
 }
 
+/// Two-tier keyword resolution shared by every in-process gate check: the
+/// session's FROZEN Tool-Gate list from its policy snapshot first (seeded at
+/// spawn, gear-tab-editable), the global `tool-gate.json` only as fallback
+/// (no session id / no snapshot / read error — fail-open like `load`). This
+/// is the same resolution order the PreToolUse hook (`run_tool_gate`) uses;
+/// keeping it here once means `action_gate`, `terminal_exec`, and the hook
+/// can't drift apart on which list they enforce.
+pub fn resolve_keywords(data_dir: &Path, session_id: Option<&str>) -> Vec<GatedKeyword> {
+    match session_id.and_then(|sid| {
+        crate::policy::session_policy::read_session_policy(data_dir, sid)
+            .ok()
+            .flatten()
+    }) {
+        Some(sp) => sp.tool_gate,
+        None => load(data_dir),
+    }
+}
+
 /// Persist the global keyword list (pretty JSON). Creates the data dir if
 /// needed. Errors are returned (the Settings command surfaces them to the UI).
 pub fn save(data_dir: &Path, keywords: &[GatedKeyword]) -> Result<()> {
@@ -334,5 +352,36 @@ mod tests {
         let out = run_in_repo("sleep 5", dir.path(), Duration::from_millis(150)).await;
         assert_eq!(out.code, 124, "stderr: {:?}", out.stderr);
         assert!(out.stderr.contains("timed out"));
+    }
+
+    #[test]
+    fn resolve_keywords_falls_back_to_global() {
+        let dir = tempdir().unwrap();
+        save(dir.path(), &[kw("push", GateMode::Gate)]).unwrap();
+        // No session id → global list.
+        let global = resolve_keywords(dir.path(), None);
+        assert_eq!(global, vec![kw("push", GateMode::Gate)]);
+        // Session id without a snapshot on disk → global list too.
+        let no_snap = resolve_keywords(dir.path(), Some("nope"));
+        assert_eq!(no_snap, vec![kw("push", GateMode::Gate)]);
+    }
+
+    #[test]
+    fn resolve_keywords_prefers_session_snapshot() {
+        let dir = tempdir().unwrap();
+        save(dir.path(), &[kw("push", GateMode::Gate)]).unwrap();
+        let sp = crate::policy::session_policy::SessionPolicy {
+            policy: crate::policy::Policy::default(),
+            tool_gate: vec![kw("deploy", GateMode::Gate)],
+        };
+        crate::policy::session_policy::write_session_policy(dir.path(), "s1", &sp).unwrap();
+        // The frozen session list wins over the global file entirely
+        // (replace, not merge — matching the gear-tab snapshot semantics).
+        let got = resolve_keywords(dir.path(), Some("s1"));
+        assert_eq!(got, vec![kw("deploy", GateMode::Gate)]);
+        assert_eq!(
+            resolve_keywords(dir.path(), None),
+            vec![kw("push", GateMode::Gate)]
+        );
     }
 }

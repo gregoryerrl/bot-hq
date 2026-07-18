@@ -411,6 +411,10 @@ fn main() -> Result<()> {
             let handle = app.handle().clone();
             let _ = core_for_setup.app_handle.set(handle.clone());
             bridge_for_subscriber.set_app_handle(handle);
+            // Share the per-session PTY registry with the bridge so the
+            // terminal_exec / terminal_read MCP tools reach the same
+            // terminals the Terminal subtab renders.
+            bridge_for_subscriber.set_terminal_registry(Arc::clone(&core_for_setup.terminals));
             // Wire the bridge subscriber: SignalingEvent stream → Tauri emit.
             let app_handle_for_msgs = app.handle().clone();
             let app_handle_for_events = app.handle().clone();

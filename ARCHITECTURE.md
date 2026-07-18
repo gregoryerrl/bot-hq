@@ -345,7 +345,7 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (35)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (37)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `halt`, `advance_phase`, `request_phase_advance`,
 `request_approval`, `action_gate`, `check_commit_message`, `eyes_flag`,
@@ -355,8 +355,22 @@ for the documented list with descriptions): `ask_user_choice`,
 `session_doc_read`, `cl_index_search`, `cl_retrieve`, `cl_propose`,
 `cl_list_proposals`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`, `web_search`,
+`terminal_exec`, `terminal_read`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
+
+**Session terminal (Terminal subtab).** Each session lazily spawns one PTY
+shell (`core/terminal.rs`) in its working repo — rendered by the session
+view's Terminal subtab (xterm.js) and shared with the agents through
+`terminal_exec` (HANDS-only; BLOCKING by default — writes the command, awaits
+output-settle via a quiet-window heuristic, returns the captured tail;
+`block:false` for long-running processes) and `terminal_read` (both agents;
+scrollback tail as evidence text). `terminal_exec` re-classifies the command
+against the same two-tier Tool-Gate keyword list the PreToolUse hook uses
+(session snapshot → global fallback, `tool_gate::resolve_keywords`) and
+refuses gate-matched commands with a route to `action_gate` — the terminal is
+not a gate bypass. The PTY is killed on `close_session`; scrollback is
+in-memory only (200 KB ring).
 
 **Review findings gate (EYES sign-off).** `eyes_flag` /
 `disposition_finding` / `check_open_findings` / `override_reviewer_block` /
