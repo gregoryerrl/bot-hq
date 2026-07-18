@@ -45,7 +45,7 @@ const markdownComponents: Components = {
       : false;
     if (isBlock) {
       return (
-        <pre className="my-2 overflow-x-auto rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.75rem] leading-relaxed text-on-surface">
+        <pre className="my-2 whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.75rem] leading-relaxed text-on-surface">
           <code className={className}>{children}</code>
         </pre>
       );

@@ -268,7 +268,7 @@ export function PluginManager() {
   };
 
   return (
-    <div className="mx-auto h-full max-w-3xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-3xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <header className="mb-6 flex items-baseline gap-3">
         <h1 className="font-headline-lg text-headline-lg">Plugins</h1>
         <span className="font-code-sm text-code-sm text-on-surface-variant">

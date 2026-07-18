@@ -78,7 +78,7 @@ export function MeasurementView({ project }: { project: string }) {
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4">
         {isFetching && !stats ? (
           <p className="font-code-sm text-code-sm text-on-surface-variant">
             Loading measurement…

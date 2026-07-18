@@ -293,7 +293,7 @@ export function ClaudeConfigPanel() {
 
       <div className="flex min-h-0 flex-1">
         {/* Left surface nav */}
-        <nav className="w-60 shrink-0 overflow-auto border-r border-outline-variant bg-surface-container-low p-2">
+        <nav className="w-60 shrink-0 overflow-y-auto overflow-x-hidden border-r border-outline-variant bg-surface-container-low p-2">
           <ConfigDirHeader config={config} />
           <ul className="mt-2 flex flex-col gap-0.5">
             {SURFACES.map((s) => {
@@ -327,7 +327,7 @@ export function ClaudeConfigPanel() {
         </nav>
 
         {/* Right detail pane */}
-        <div className="min-w-0 flex-1 overflow-auto p-6">
+        <div className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-6">
           {surface === "overview" && <OverviewPane config={config} />}
           {surface === "core" && (
             <CorePane

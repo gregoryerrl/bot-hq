@@ -179,7 +179,7 @@ function ProjectPolicyForm({ project }: { project: string }) {
   };
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto px-5 py-5">
+    <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-5 py-5">
       <div className="mb-4 flex items-start justify-between gap-4">
         <p className="max-w-prose font-body-md text-body-md text-on-surface-variant">
           Per-project overrides on top of the global policy. Empty fields
@@ -229,7 +229,7 @@ function TabStrip({
   onCloseTab: (i: number) => void;
 }) {
   return (
-    <div className="flex flex-shrink-0 items-center overflow-x-auto border-b border-outline-variant bg-surface-container">
+    <div className="flex flex-shrink-0 flex-wrap items-center border-b border-outline-variant bg-surface-container">
       {tabs.map((t, i) => {
         const active = i === activeTabIndex;
         const path = t.kind === "file" ? t.filePath : t.folderPath;
@@ -498,7 +498,10 @@ function EditorPane({
 }
 
 // ============================================================================
-// CodeView — content + line-number gutter (no syntax highlighting in v1)
+// CodeView — soft-wrapped content (no syntax highlighting in v1). No
+// line-number gutter: per-logical-line numbers can't stay aligned once long
+// lines soft-wrap, and wrapping wins — horizontal scrolling is banned
+// app-wide.
 // ============================================================================
 
 function CodeView({
@@ -510,41 +513,15 @@ function CodeView({
   onChange: (v: string) => void;
   readOnly: boolean;
 }) {
-  const lineCount = useMemo(
-    () => Math.max(1, value.split("\n").length),
-    [value],
-  );
-  const gutterWidthCh = String(lineCount).length + 1; // +1 for breathing room
-  // Keep the gutter scroll-locked to the textarea so line numbers stay aligned.
-  const gutterRef = useRef<HTMLDivElement>(null);
-
   return (
     <div className="flex h-full font-code-sm text-code-sm">
-      <div
-        ref={gutterRef}
-        className="select-none overflow-hidden border-r border-outline-variant/30 px-3 py-3 text-right text-on-surface-variant/60"
-        style={{ minWidth: `${gutterWidthCh}ch` }}
-        aria-hidden
-      >
-        {Array.from({ length: lineCount }, (_, i) => (
-          <div key={i} className="leading-relaxed">
-            {i + 1}
-          </div>
-        ))}
-      </div>
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        onScroll={(e) => {
-          if (gutterRef.current) {
-            gutterRef.current.scrollTop = e.currentTarget.scrollTop;
-          }
-        }}
         readOnly={readOnly}
-        wrap="off"
         spellCheck={false}
         aria-label="File content editor"
-        className="h-full flex-1 resize-none overflow-auto whitespace-pre border-0 bg-transparent px-4 py-3 leading-relaxed text-on-surface caret-primary outline-none focus:ring-0"
+        className="h-full flex-1 resize-none overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words border-0 bg-transparent px-4 py-3 leading-relaxed text-on-surface caret-primary outline-none focus:ring-0"
       />
     </div>
   );

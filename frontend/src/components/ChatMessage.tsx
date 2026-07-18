@@ -123,7 +123,7 @@ function ToolMessage({
         </span>
       </button>
       {expanded && (
-        <pre className="mt-1 overflow-x-auto rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.7rem] leading-relaxed text-on-surface">
+        <pre className="mt-1 whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.7rem] leading-relaxed text-on-surface">
           {(() => {
             try {
               return JSON.stringify(parsed ?? message.content, null, 2);

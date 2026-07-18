@@ -127,7 +127,7 @@ export function Settings() {
 
 function ToolGatePanel() {
   return (
-    <div className="mx-auto h-full max-w-7xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-7xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <ToolGateSection />
     </div>
   );
@@ -153,7 +153,7 @@ function GlobalPolicyPanel() {
   };
 
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <h1 className="font-headline-lg text-headline-lg text-on-surface">
@@ -230,7 +230,7 @@ function AgentsPanel() {
   const [saveAllSignal, setSaveAllSignal] = useState(0);
 
   return (
-    <div className="mx-auto h-full max-w-7xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-7xl overflow-y-auto overflow-x-hidden px-6 py-6">
       {blocker.state === "blocked" && (
         <div className="mb-4 flex items-center gap-3 rounded-lg border border-error/40 bg-error-container/20 px-4 py-3">
           <p className="flex-1 font-code-sm text-code-sm text-on-error-container">
@@ -603,7 +603,7 @@ function ArchivePanel() {
     "list_closed_sessions",
   );
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6">
         <h1 className="font-headline-lg text-headline-lg text-on-surface">
           Archived Sessions
@@ -681,7 +681,7 @@ function UpdatesPanel() {
   );
 
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <h1 className="font-headline-lg text-headline-lg text-on-surface">

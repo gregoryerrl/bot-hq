@@ -115,7 +115,7 @@ export function SessionPolicyPanel({
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto px-5 py-5">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-5 py-5">
         <p className="mb-4 rounded border border-outline-variant/40 bg-surface-container/60 px-3 py-2 font-code-sm text-code-sm text-on-surface-variant">
           This session's policy. Push / force-push enforcement
           is <span className="text-on-surface">live</span> — the git hooks and

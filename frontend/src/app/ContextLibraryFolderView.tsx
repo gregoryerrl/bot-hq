@@ -94,7 +94,7 @@ export function FolderView({
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4">
         <p className="mb-2 font-label-caps text-label-caps text-on-surface-variant/70">
           Folder metadata · cl_folders
         </p>

@@ -311,7 +311,7 @@ export function Dashboard() {
   }, [creating]);
 
   return (
-    <div className="mx-auto h-full max-w-6xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-6xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="font-headline-lg text-headline-lg text-on-surface">Sessions</h1>

@@ -132,7 +132,7 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
           }}
         />
       </div>
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
         {showTray ? (
           <TrayList sessionId={sessionId} />
         ) : (
@@ -236,7 +236,7 @@ function SummaryDialog({
         aria-modal="true"
         aria-label={`Summary of ${slug}`}
         className={cn(
-          "fixed left-1/2 top-1/2 z-50 max-h-[80vh] w-[min(560px,90vw)] -translate-x-1/2 -translate-y-1/2 overflow-auto",
+          "fixed left-1/2 top-1/2 z-50 max-h-[80vh] w-[min(560px,90vw)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto overflow-x-hidden",
           "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
         )}
       >
@@ -365,7 +365,7 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
                 )}
               </span>
             </summary>
-            <pre className="overflow-x-auto px-3 py-2 text-[0.7rem] leading-relaxed font-mono">
+            <pre className="whitespace-pre-wrap break-words px-3 py-2 text-[0.7rem] leading-relaxed font-mono">
               {g.lines.map((line, i) => (
           <div
             key={i}
@@ -510,7 +510,7 @@ function TrayList({ sessionId }: { sessionId: string }) {
             timed out. The repo state may have changed — running it now could be
             invalid or destructive.
           </p>
-          <pre className="mt-1 overflow-x-auto rounded bg-surface-container-high px-2 py-1 font-mono text-on-surface-variant">
+          <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-surface-container-high px-2 py-1 font-mono text-on-surface-variant">
             {staleConfirm.command}
           </pre>
           <div className="mt-2 flex gap-2">
@@ -583,7 +583,7 @@ function TrayChoice({
         </span>
       </div>
       {entry.command_text && (
-        <pre className="mb-1 overflow-x-auto rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
+        <pre className="mb-1 whitespace-pre-wrap break-words rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
           {entry.command_text}
         </pre>
       )}

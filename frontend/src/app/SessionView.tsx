@@ -440,7 +440,7 @@ export function SessionView() {
          */}
         <div
           ref={scrollRef}
-          className="relative min-h-0 flex-1 overflow-auto px-4 py-3"
+          className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3"
         >
           {messagesLoading && messages.length === 0 ? (
             <MessagesSkeleton />

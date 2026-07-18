@@ -55,7 +55,7 @@ export function ViolationsPanel() {
   }, [data, kind, outcome, session]);
 
   return (
-    <div className="mx-auto h-full max-w-5xl overflow-auto px-6 py-6">
+    <div className="mx-auto h-full max-w-5xl overflow-y-auto overflow-x-hidden px-6 py-6">
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <h1 className="font-headline-lg text-headline-lg text-on-surface">
@@ -133,7 +133,7 @@ export function ViolationsPanel() {
             : "No enforcement events recorded yet."}
         </p>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-outline-variant">
+        <div className="rounded-lg border border-outline-variant">
           <table className="w-full border-collapse font-code-sm text-code-sm">
             <thead>
               <tr className="border-b border-outline-variant bg-surface-container text-left text-on-surface-variant">
@@ -160,13 +160,13 @@ export function ViolationsPanel() {
                   key={i}
                   className="border-b border-outline-variant/40 align-top last:border-0"
                 >
-                  <td className="whitespace-nowrap px-3 py-2 text-on-surface-variant">
+                  <td className="break-words px-3 py-2 text-on-surface-variant">
                     {formatTimestamp(r.ts)}
                   </td>
                   <td className="px-3 py-2 capitalize text-on-surface">
                     {r.agent}
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-on-surface-variant">
+                  <td className="break-words px-3 py-2 text-on-surface-variant">
                     {KIND_LABELS[r.kind] ?? r.kind}
                   </td>
                   <td className="px-3 py-2">

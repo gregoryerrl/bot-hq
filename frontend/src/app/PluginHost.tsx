@@ -169,7 +169,7 @@ export function PluginHost({ plugin }: { plugin: InstalledPluginView }) {
               <p className="mb-1">
                 It will start a new agent session with this prompt:
               </p>
-              <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded bg-surface-container-high p-2 font-code-sm text-code-sm text-on-surface">
+              <pre className="max-h-72 overflow-y-auto overflow-x-hidden whitespace-pre-wrap rounded bg-surface-container-high p-2 font-code-sm text-code-sm text-on-surface">
                 {pendingSpawn.req.prompt}
               </pre>
               {/* ~20 lines fit in max-h-72; past that the tail is below the

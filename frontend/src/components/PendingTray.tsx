@@ -93,7 +93,7 @@ export function PendingTray() {
         <div
           role="dialog"
           aria-label="Pending notifications"
-          className="absolute right-0 top-full z-40 mt-1 max-h-[60vh] w-96 overflow-auto rounded-lg border border-outline-variant bg-surface-container shadow-2xl"
+          className="absolute right-0 top-full z-40 mt-1 max-h-[60vh] w-96 overflow-y-auto overflow-x-hidden rounded-lg border border-outline-variant bg-surface-container shadow-2xl"
         >
           <header className="border-b border-outline-variant px-3 py-2 font-label-caps text-label-caps text-on-surface-variant">
             Awaiting your input — {count} session{count === 1 ? "" : "s"}

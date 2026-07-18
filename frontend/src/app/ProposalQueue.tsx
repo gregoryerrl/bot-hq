@@ -156,7 +156,7 @@ export function ProposalQueue({
         </p>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto px-4 py-4">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4">
         {isFetching && proposals.length === 0 ? (
           <p className="font-code-sm text-code-sm text-on-surface-variant">
             Loading proposals…
@@ -251,7 +251,7 @@ export function ProposalQueue({
                         <p className="mb-1 font-label-caps text-label-caps text-on-surface-variant">
                           Proposed body
                         </p>
-                        <pre className="max-h-36 overflow-auto rounded border border-outline-variant/60 bg-surface-container-lowest px-3 py-2 font-code-sm text-code-sm text-on-surface whitespace-pre-wrap">
+                        <pre className="max-h-36 overflow-y-auto overflow-x-hidden rounded border border-outline-variant/60 bg-surface-container-lowest px-3 py-2 font-code-sm text-code-sm text-on-surface whitespace-pre-wrap">
                           {proposal.proposed_body || "(no body — delete proposal)"}
                         </pre>
                       </section>
@@ -262,7 +262,7 @@ export function ProposalQueue({
                         <p className="mb-1 font-label-caps text-label-caps text-on-surface-variant">
                           Target excerpt
                         </p>
-                        <pre className="max-h-28 overflow-auto rounded border border-outline-variant/60 bg-surface-container-lowest px-3 py-2 font-code-sm text-code-sm text-on-surface-variant whitespace-pre-wrap">
+                        <pre className="max-h-28 overflow-y-auto overflow-x-hidden rounded border border-outline-variant/60 bg-surface-container-lowest px-3 py-2 font-code-sm text-code-sm text-on-surface-variant whitespace-pre-wrap">
                           {proposal.target_excerpt}
                         </pre>
                       </section>
@@ -294,7 +294,7 @@ export function ProposalQueue({
                                 {diff.note}
                               </p>
                             )}
-                            <pre className="max-h-64 overflow-auto rounded border border-outline-variant/60 bg-surface-container-lowest font-code-sm text-code-sm">
+                            <pre className="max-h-64 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words rounded border border-outline-variant/60 bg-surface-container-lowest font-code-sm text-code-sm">
                               {diff.lines.map((line, i) => (
                                 <div
                                   key={i}
