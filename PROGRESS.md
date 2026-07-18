@@ -53,6 +53,13 @@ Three fixes from the CL `issues.md` list:
   tab bar wraps, and the CL editor textarea soft-wraps (dropping
   `wrap="off"` and the line-number gutter, which can't stay aligned with
   soft-wrapped lines). Shell `<main>` already clips as the backstop.
+  A second hardening pass caught what class-greps can't: Markdown prose /
+  inline-code / links now break long tokens (URLs), GFM tables got a
+  `table-fixed` renderer component (none existed — wide tables clipped),
+  ModelsPanel's fixed grid tracks became compressible `minmax()` floors
+  (the old ~51rem row minimum clipped the actions column on narrow
+  windows), and `html/body/#root` carry `overflow-x: hidden` as the
+  page-level backstop.
 
 ---
 
