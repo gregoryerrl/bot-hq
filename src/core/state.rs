@@ -115,6 +115,10 @@ pub struct AppState {
     /// it, prepending a wire-only directive so the resumed agent verifies the
     /// workspace (lock files / partial writes) before acting on the new message.
     pending_reconcile: Mutex<HashSet<String>>,
+    /// Per-session PTY terminals (Terminal subtab). Lazily spawned on first
+    /// `terminal_open`, killed on `close_session`. Shared as an `Arc` so the
+    /// signaling bridge's MCP handlers can reach the same PTYs.
+    pub terminals: Arc<crate::core::TerminalRegistry>,
 }
 
 impl AppState {
@@ -133,6 +137,7 @@ impl AppState {
             app_handle: std::sync::OnceLock::new(),
             fs_watcher: std::sync::OnceLock::new(),
             pending_reconcile: Mutex::new(HashSet::new()),
+            terminals: Arc::new(crate::core::TerminalRegistry::new()),
         }
     }
 
@@ -412,6 +417,8 @@ impl AppState {
         if let Some(watcher) = self.fs_watcher.get() {
             watcher.remove_repo(id);
         }
+        // Reap the session's PTY terminal alongside the agent subprocesses.
+        self.terminals.kill_and_remove(id).await;
         self.storage.close_session(id, archive).await?;
         // The session's pending tray items are moot now the agents are gone —
         // withdraw them so a closed session doesn't leave dead `pending` rows.

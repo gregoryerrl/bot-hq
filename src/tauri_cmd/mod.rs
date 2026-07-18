@@ -35,6 +35,7 @@ pub mod plugins;
 pub mod policy;
 pub mod screenshot;
 pub mod sessions;
+pub mod terminal;
 pub mod tool_gate;
 pub mod tray;
 pub mod updates;

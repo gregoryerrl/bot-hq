@@ -22,7 +22,7 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 
 use crate::tauri_cmd::{
     agent_configs, claude_config, cl, docs, findings, messages, models, plugin_api, plugins,
-    policy, sessions, tool_gate, tray, updates,
+    policy, sessions, terminal, tool_gate, tray, updates,
 };
 use tauri_specta::{collect_commands, Builder};
 
@@ -47,6 +47,10 @@ pub fn builder() -> Builder<tauri::Wry> {
         // Messages
         messages::get_session_messages,
         messages::broadcast_message,
+        // Terminal subtab (per-session PTY)
+        terminal::terminal_open,
+        terminal::terminal_input,
+        terminal::terminal_resize,
         // Agent configs
         agent_configs::get_agent_config,
         agent_configs::list_agent_configs,

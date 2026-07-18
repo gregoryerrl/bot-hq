@@ -45,6 +45,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 semver = "1"
 # Filesystem watcher for live CL freshness (re-exports `notify`).
 notify-debouncer-mini = "0.6"
+# Per-session terminal subtab: cross-platform PTY (spawn/resize/kill) for the
+# agent-drivable session terminal (core/terminal.rs).
+portable-pty = "0.9"
+# PTY output rides Tauri events as JSON — base64 keeps raw escape bytes intact.
+base64 = "0.22"
 
 # Platform-split deps for the child reaper (spawn.rs::kill_child): unix
 # SIGKILLs via libc; Windows opens a PROCESS_TERMINATE handle via windows-sys.
