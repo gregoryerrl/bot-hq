@@ -11,17 +11,66 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-731 Rust tests passing (677 lib + 36 external MCP + 7 signaling + 11
-storage) plus 163 frontend Vitest. Release build clean. Version
+742 Rust tests passing (688 lib + 36 external MCP + 7 signaling + 11
+storage) plus 173 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
 gate**, the **interrupt redesign** (stdin `control_request` cancel +
 `SessionActivity` state machine), the **peer-forward router extraction**
-(`core/router.rs`), the **plugin runtime v1** (2026-07-04), and four
-plugin-runtime workstreams from 2026-07-05 (below): **per-plugin CSP
-override tier**, **spawn_session capability**, **linked installs**, and
-the **push-event + view-alignment paper-cuts**.
+(`core/router.rs`), the **plugin runtime v1** (2026-07-04), four
+plugin-runtime workstreams from 2026-07-05 (**per-plugin CSP
+override tier**, **spawn_session capability**, **linked installs**, the
+**push-event + view-alignment paper-cuts**), and the **session subtabs
+arc** (2026-07-18, below): Workspace | Context | Terminal.
+
+---
+
+## 2026-07-18 — session subtabs: Workspace | Context | Terminal (agent-drivable PTY)
+
+The session view is now a tabbed container (from the CL `ideas.md`
+brief), five commits `08ab03d` → `db020c4`:
+
+- **Subtab scaffold** (`08ab03d`): SessionView restructured — full-width
+  header, `SubTabButton` pill row, three keep-mounted `role="tabpanel"`
+  panels (inactive = `hidden`, so chat scroll / editor state / the xterm
+  buffer survive switches). Workspace = the previous chat ⇄ splitter ⇄
+  DocumentPane view, unchanged.
+- **Context subtab** (`cef0e2c`): the Context Library scoped to this
+  session's project, in-room — Files (project tree via
+  `cl_index_search(project)` + a lean `cl_read_file`/`cl_write_file`
+  editor with the same truncated/binary lossy-save guard as the main
+  editor) and Proposals (reused `ProposalQueue` + open-count badge).
+  Mounts on first activation; repo-less sessions get an empty state.
+- **PTY terminal backend** (`35e9e19` + `eefe88c` bindings): one
+  `portable-pty` shell per session (`core/terminal.rs`), spawned lazily
+  in the session's working repo (worktree-aware), killed on
+  `close_session`. Bounded 200 KB scrollback ring with monotonic offset
+  + `Notify`; `wait_settle(offset, quiet, cap)` is the output-settle
+  completion signal. Dedicated reader thread; ≤40 ms coalesced
+  `terminal:output` events (base64). Commands: `terminal_open` (snapshot
+  replay) / `terminal_input` / `terminal_resize`.
+- **Terminal subtab UI** (`faf8c1e`): xterm.js + fit addon,
+  Industrial-Terminal theme, snapshot replay with events queued until
+  the replay completes, active-aware refit.
+- **Agent terminal tools** (`db020c4`): `terminal_exec` (HANDS-only,
+  BLOCKING by default — types the command into the user-visible PTY,
+  awaits settle, returns the captured tail; `block:false` for
+  long-running processes) + `terminal_read` (both agents; scrollback
+  tail as pasteable evidence, works after shell exit). Gate parity: the
+  command is classified against the same two-tier Tool-Gate list the
+  PreToolUse hook uses via the new shared
+  `tool_gate::resolve_keywords`; gate-matched commands are refused and
+  routed to `action_gate`. That refactor also fixed `action_gate`'s
+  pre-existing global-only keyword resolution. Internal tool count
+  35 → 37.
+
+Follow-ups deliberately not in this arc: `terminal:exec` activity dot
+on the Terminal pill (design against real usage), plugin-contributed
+session subtabs (`session_subtab` inline slot — deferred plugin tier),
+PNG terminal capture (text evidence + `webview_screenshot` on a visible
+tab cover v1), offset-based dedupe of the open-race snapshot/event
+overlap (cosmetic, ≤40 ms window).
 
 ---
 
