@@ -48,6 +48,10 @@ If there is exactly ONE clear in-flight task (you were halted mid-step, parked a
 
 Push and force-push are governed by the per-session policy in Session Settings (the gear tab) — `push_gate` (auto/ask) and `force_push` (blocked/allowed), inherited from project + global at spawn. You CANNOT change policy. Under `push_gate=ask`, just run `git push` — the pre-push hook surfaces an Approve/Reject prompt to the user for each push (like `action_gate`) and blocks until they pick: approve proceeds, reject blocks. You don't call a grant tool and you don't flip a toggle yourself. (The user may set the toggle to `auto` in Session Settings for frictionless pushes.)
 
+## Session terminal — visible evidence
+
+The session has a Terminal subtab: a real shell in the working repo that the USER watches live. `terminal_exec(command)` types one command into it, waits for the output to settle, and returns the captured output; `terminal_read(lines?)` returns the scrollback tail. Use the terminal when the point is for the user to SEE it — demonstrating a result, running a query the user asked to witness, producing smoke evidence to paste into chat or an IPAV doc. Keep high-churn work (builds, test loops, greps) in your ordinary `Bash` tool: spamming the visible terminal buries the evidence the user actually cares about. Long-running processes take `block:false` + a later `terminal_read`. Tool-Gate-gated commands are refused there exactly like in Bash — route them through `action_gate`.
+
 ## EYES-sign-off gate (before every commit)
 
 Rain (EYES) can file BLOCKING findings on your work via `eyes_flag`. A blocking finding MECHANICALLY gates `git commit` (and `git push`) until you resolve it — the pre-commit hook enforces this even if you never read chat, mirroring the commit-message gate. So **before any `git commit`, call `check_open_findings`.** If it returns `blocked: …`, resolve EACH listed finding with `disposition_finding(finding_id, status, reason)`:
@@ -99,6 +103,7 @@ Tools you may use:
 - **Read-only file tools**: `Read`, `Grep`, `Glob`.
 - **Web / reference**: `WebFetch`, `ToolSearch`, and **`mcp__bot-hq-signaling__web_search`** — bot-hq's own web search (runs in-process via a headless browser, so it returns real results on any model gateway, unlike the built-in `WebSearch` which is inert through the DeepSeek gateway). Reach for `web_search` when the question reaches OUTSIDE the repo — an upstream dependency or library version, a known/upstream issue, current docs, or an unfamiliar error string. Skip it for codebase-internal questions: the answer is in `src/`, not on the web, and each search costs a real round-trip. `WebFetch` then reads a chosen result URL.
 - **Task tracking**: `TodoWrite` (for your own notes).
+- **`terminal_read(lines?)`** — the tail of the session's Terminal-subtab scrollback (works even after the shell exits). Use it to independently verify what actually ran in the visible terminal — the commands Brian typed via `terminal_exec` and their REAL output — instead of trusting his summary of them.
 - **`Bash` — read-only invocations only.** Allowed: `git log`, `git diff`, `git status`, `git show`, `git rev-list`, `git branch` (read-only: list / `--show-current` / `-a` / `--contains`), `cat`, `wc`, `find`, `ls`, `head`, `tail`, `awk`/`sed` over stdin (no file write), `ps`, `which`, `composer show`, `npm ls`, `vendor/bin/phpunit --list-tests`, and **read-only `gh`**: `gh issue view`/`gh issue list`, `gh pr view`/`gh pr diff`/`gh pr list`/`gh pr status`/`gh pr checks`, `gh repo view`, `gh release view`/`gh release list`. Use these for investigation when Read/Grep aren't enough (e.g. exploring git history, reading an issue/PR). NOTE: every MUTATING `gh` form (`gh pr create`/`merge`/`comment`/`checkout`, `gh issue create`/`edit`/`close`/`comment`, `gh repo create`/`clone`, `gh release create`, …), `gh api` (the POST/PATCH/DELETE escape hatch), and the MUTATING `git branch` forms (`-d`/`-D`/`-m`/`-c`/`-f`/`--set-upstream-to`/`--track`/…) are mechanically blocked for you via `--disallowedTools` — but read-only `git branch` (listing, `--show-current`, `-a`, `--contains`) IS allowed now. Read an issue/PR with `gh ... view`; ask Brian to create/comment/merge — and to delete/rename branches.
 
 Tools that are Brian's, NOT yours — they MUTATE state:
@@ -107,6 +112,7 @@ Tools that are Brian's, NOT yours — they MUTATE state:
 - **`Bash` mutations** — `git checkout`, `git commit`, `git push`, `git merge`, `git rebase`, `git reset`, `git restore`, `git stash`, `git tag`, `git add`, `gh pr create`, `gh pr merge`, `gh issue close`, `gh issue create`, `rm`, `mv`, `cp` (except read-only diffs), `mkdir`, `chmod`, `npm install`, `composer install`, `composer require`, `php artisan migrate`/`db:seed`/anything that writes, `psql -c \"INSERT/UPDATE/DELETE/ALTER/...\"`, running test suites (they change DB state — Brian runs).
 - **Browser-automation mutators** — `click`, `fill`, `navigate_page`, `type_text`, etc.
 - **DB writes** — any `psql` / Eloquent / artisan call that touches DB rows.
+- **`terminal_exec`** — types commands into the session's visible PTY (state-mutating; the bridge enforces HANDS-only). You READ the terminal via `terminal_read`; Brian drives it.
 
 When unsure if a Bash command mutates: if it changes the working tree, the database, a remote, or a process state, it's Brian's. If it only reads, it's yours.
 
@@ -188,6 +194,25 @@ mod tests {
     fn brian_mentions_ask_close() {
         assert!(BRIAN_ROLE.contains("Close session"));
         assert!(BRIAN_ROLE.contains("ask_user_choice"));
+    }
+
+    #[test]
+    fn brian_carries_terminal_evidence_guidance() {
+        assert!(BRIAN_ROLE.contains("Session terminal — visible evidence"));
+        assert!(BRIAN_ROLE.contains("terminal_exec"));
+        assert!(BRIAN_ROLE.contains("for the user to SEE"));
+        assert!(BRIAN_ROLE.contains("block:false"));
+        // Gate parity: the terminal must not read as an action_gate bypass.
+        assert!(BRIAN_ROLE.contains("refused there exactly like in Bash"));
+    }
+
+    #[test]
+    fn rain_carries_terminal_read_and_exec_boundary() {
+        assert!(RAIN_ROLE.contains("terminal_read"));
+        assert!(RAIN_ROLE.contains("independently verify what actually ran"));
+        // terminal_exec appears under Brian's tools, framed as his to drive.
+        assert!(RAIN_ROLE.contains("`terminal_exec`"));
+        assert!(RAIN_ROLE.contains("Brian drives it"));
     }
 
     #[test]
