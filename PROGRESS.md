@@ -25,6 +25,37 @@ the **push-event + view-alignment paper-cuts**.
 
 ---
 
+## 2026-07-18 — issues.md fixes: prime-at-create, consolidated custom-instructions, no horizontal scroll
+
+Three fixes from the CL `issues.md` list:
+
+- **Sessions prime at create (no click needed):** `create_session` now
+  `tokio::spawn`s a background `ensure_session_started` after persisting
+  the row, so the duo spawns and the CL-opener primer nudge fires the
+  moment a session is created — previously agents only spawned when the
+  user opened the session (SessionView mount → `respawn_session`).
+  Background (not awaited) so the create dialog never blocks on worktree
+  materialization; the mount-time respawn doubles as the retry path.
+- **One `custom-instructions.md` for all agents:** the per-agent
+  `library/agents/<name>/custom-instruction.md` files are consolidated
+  into a single `library/custom-instructions.md` appended to EVERY
+  agent's prompt (layer 5). One-time migration in `Paths::init` deletes
+  untouched template seeds and folds user-modified copies in under a
+  `## Migrated from …` heading, then prunes the `agents/` dirs. The
+  protected-path guards (`assert_not_protected_globals_path` +
+  `isInternalGlobalsPath`) now cover the new root file and keep the
+  legacy `agents/` prefix protected for partially-migrated installs.
+- **Horizontal scrolling removed app-wide (wrap instead):** every
+  `overflow-auto` container is now `overflow-y-auto overflow-x-hidden`
+  (the explicit pair — `overflow-y` alone computes the other axis to
+  `auto`), all `<pre>` blocks wrap (`whitespace-pre-wrap break-words`),
+  the violations table drops `whitespace-nowrap`/x-scroll, the CL editor
+  tab bar wraps, and the CL editor textarea soft-wraps (dropping
+  `wrap="off"` and the line-number gutter, which can't stay aligned with
+  soft-wrapped lines). Shell `<main>` already clips as the backstop.
+
+---
+
 ## 2026-07-09 — plugin_sessions: plugins drive their OWN agent sessions (zero-token tutor transport)
 
 `spawn_session` let a plugin CREATE a session; `plugin_sessions` lets it

@@ -11,7 +11,7 @@
 //!   2. CL location + index-first anchor           — orientation
 //!   3. THIS constant                              — universal rules
 //!   4. <data_dir>/library/custom-general-rules.md — optional user additions
-//!   5. <data_dir>/library/agents/<name>/custom-instruction.md — per-agent overrides
+//!   5. <data_dir>/library/custom-instructions.md — user tweaks, all agents
 //!   6. policy directive block                      — project policy.yaml
 
 pub const GENERAL_RULES: &str = "\

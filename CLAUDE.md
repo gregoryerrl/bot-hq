@@ -93,7 +93,7 @@ Keep `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` in `.env`. The default
 - `.local/session-policies/<sid>.yaml` — per-session policy snapshots
 - `mcp-token` — external MCP bearer token (UUIDv4, 0600)
 - `violations.jsonl` — policy audit trail
-- `agents/<name>/custom-instruction.md`, `general-rules.md`,
+- `custom-instructions.md` (all agents), `general-rules.md`,
   `projects/<p>/{conventions,notes,policy.yaml,…}.md` — CL content
 
 ---

@@ -62,6 +62,9 @@ describe("buildTree", () => {
 describe("isInternalGlobalsPath", () => {
   it("classifies bot-hq-owned paths as internal", () => {
     expect(isInternalGlobalsPath("custom-general-rules.md")).toBe(true);
+    expect(isInternalGlobalsPath("custom-instructions.md")).toBe(true);
+    // Legacy pre-consolidation locations stay internal so stragglers on
+    // partially-migrated installs remain protected.
     expect(isInternalGlobalsPath("agents")).toBe(true);
     expect(isInternalGlobalsPath("agents/brian/custom-instruction.md")).toBe(
       true,

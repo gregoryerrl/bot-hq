@@ -848,8 +848,8 @@ pub fn user_mcp_servers_for_agent(agent_name: &str) -> serde_json::Map<String, s
 ///      drift if a user edits a CL file.
 ///   4. **`<data_dir>/library/custom-general-rules.md`** — user-editable
 ///      additions to the universal rules (optional).
-///   5. **`<data_dir>/library/agents/<name>/custom-instruction.md`** — per-agent
-///      overrides (optional).
+///   5. **`<data_dir>/library/custom-instructions.md`** — user-editable
+///      instructions appended to EVERY agent's prompt (optional).
 ///   6. **Policy directive block** — rendered from policy.yaml, project-aware.
 ///
 /// Project context BODIES (conventions / notes / decisions content) are NOT
@@ -950,13 +950,13 @@ pub fn read_system_prompt(
     // 3. Hardcoded universal rules — always present.
     push_section(&mut out, crate::agents::GENERAL_RULES);
 
-    // 4 + 5. Optional user-editable slots: custom-general-rules.md applies to
-    // all agents; agents/<name>/custom-instruction.md is per-agent.
+    // 4 + 5. Optional user-editable slots, both loaded for every agent:
+    // custom-general-rules.md extends the universal rules;
+    // custom-instructions.md carries behavior tweaks (consolidated from the
+    // old per-agent agents/<name>/custom-instruction.md files).
     let slots = [
         paths.cl_dir.join("custom-general-rules.md"),
-        paths
-            .cl_dir
-            .join(format!("agents/{agent}/custom-instruction.md")),
+        paths.cl_dir.join("custom-instructions.md"),
     ];
     for slot in slots {
         match std::fs::read_to_string(&slot) {
@@ -1202,19 +1202,20 @@ mod tests {
     }
 
     #[test]
-    fn prompt_includes_custom_instruction_when_present() {
+    fn prompt_includes_custom_instructions_for_every_agent() {
         let tmp = TempDir::new().unwrap();
         let paths = Paths::for_data_dir(tmp.path().to_path_buf());
         paths.init().unwrap();
-        let agent_dir = paths.cl_dir.join("agents/brian");
-        std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(
-            agent_dir.join("custom-instruction.md"),
-            "BRIAN_CUSTOM_PREFS_X9Q",
+            paths.cl_dir.join("custom-instructions.md"),
+            "SHARED_CUSTOM_PREFS_X9Q",
         )
         .unwrap();
-        let prompt = read_system_prompt(&paths, "brian", None, None, None).unwrap();
-        assert!(prompt.contains("BRIAN_CUSTOM_PREFS_X9Q"));
+        // The single consolidated file reaches BOTH agents' prompts.
+        let brian = read_system_prompt(&paths, "brian", None, None, None).unwrap();
+        assert!(brian.contains("SHARED_CUSTOM_PREFS_X9Q"));
+        let rain = read_system_prompt(&paths, "rain", None, None, None).unwrap();
+        assert!(rain.contains("SHARED_CUSTOM_PREFS_X9Q"));
     }
 
     #[test]

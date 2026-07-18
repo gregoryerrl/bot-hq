@@ -402,7 +402,7 @@ leftovers are only removed on your approval.
 - **Background execution** — CL cloud sync as a daemon wants host
   scheduling or a sidecar tier; today it runs while its panel is open.
 - **Prompt/personality packs** — agent character customization is CL
-  territory (`custom-instruction.md` via the proposals flow), not a
+  territory (`custom-instructions.md` via the proposals flow), not a
   plugin surface yet.
 - **Bundle installs from URL** — URL install currently fetches
   `manifest.json` + the entry file ONLY (no other assets). Use a local

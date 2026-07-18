@@ -911,13 +911,14 @@ async fn canonical_cl_root(
         .map_err(|e| AppError::NotFound(format!("project '{project}' not found: {e}")))
 }
 
-/// `_globals` paths that bot-hq itself owns: the agents/ subtree (custom
-/// instructions) and custom-general-rules.md. Session spawn resolves these
-/// exact paths, so rename/delete would silently break agent startup — they
-/// are read+update only. Mirrors `isInternalGlobalsPath` in
-/// frontend contextLibraryShared.tsx (keep in sync); the UI hides the menu
-/// items and this is the enforcement behind them. Compares CANONICALIZED
-/// paths so case-insensitive filesystems can't sidestep the check.
+/// `_globals` paths that bot-hq itself owns: custom-instructions.md,
+/// custom-general-rules.md, and the legacy agents/ subtree (pre-consolidation
+/// installs). Session spawn resolves these exact paths, so rename/delete
+/// would silently break agent startup — they are read+update only. Mirrors
+/// `isInternalGlobalsPath` in frontend contextLibraryShared.tsx (keep in
+/// sync); the UI hides the menu items and this is the enforcement behind
+/// them. Compares CANONICALIZED paths so case-insensitive filesystems can't
+/// sidestep the check.
 fn assert_not_protected_globals_path(
     project: &str,
     root_real: &std::path::Path,
@@ -928,9 +929,14 @@ fn assert_not_protected_globals_path(
     }
     let agents = root_real.join("agents");
     let rules = root_real.join("custom-general-rules.md");
-    if candidate_real == rules || candidate_real == agents || candidate_real.starts_with(&agents) {
+    let instructions = root_real.join("custom-instructions.md");
+    if candidate_real == rules
+        || candidate_real == instructions
+        || candidate_real == agents
+        || candidate_real.starts_with(&agents)
+    {
         return Err(AppError::Validation(
-            "protected bot-hq path — agent custom-instructions and \
+            "protected bot-hq path — custom-instructions.md and \
              custom-general-rules.md can be edited but not renamed, moved, or deleted"
                 .into(),
         ));
@@ -1067,6 +1073,7 @@ mod tests {
         fs::create_dir_all(base.join("agents/brian")).unwrap();
         fs::write(base.join("agents/brian/custom-instruction.md"), b"x").unwrap();
         fs::write(base.join("custom-general-rules.md"), b"x").unwrap();
+        fs::write(base.join("custom-instructions.md"), b"x").unwrap();
         fs::write(base.join("scratch.md"), b"x").unwrap();
         fs::create_dir_all(base.join("projects")).unwrap();
         fs::create_dir_all(base.join("notes")).unwrap();
@@ -1076,11 +1083,13 @@ mod tests {
             let real = resolve_within_root(&root, rel).unwrap();
             assert_not_protected_globals_path("_globals", &root, &real)
         };
-        // bot-hq-owned paths are blocked…
+        // bot-hq-owned paths are blocked… (agents/ = legacy pre-consolidation
+        // installs; still protected so stragglers can't be renamed away)
         assert!(check("agents").is_err());
         assert!(check("agents/brian").is_err());
         assert!(check("agents/brian/custom-instruction.md").is_err());
         assert!(check("custom-general-rules.md").is_err());
+        assert!(check("custom-instructions.md").is_err());
         // …loose cross-project content is not.
         assert!(check("scratch.md").is_ok());
         assert!(check("notes").is_ok());

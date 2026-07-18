@@ -115,9 +115,12 @@ System-prompt layering at session spawn (`src/core/session.rs::read_system_promp
 2b. Project CL index primer (when the session has a project) — the
    `cl_index_search` rows for the project (`file_path — description`,
    most-recently-updated first, capped). The table of contents only.
-3. `<data_dir>/general-rules.md`
-4. `<data_dir>/agents/<name>/custom-instruction.md`
-5. Resolved policy directive block (forbidden words list, push-gate
+3. Hardcoded universal rules (`agents::general_rules::GENERAL_RULES`)
+4. `<data_dir>/library/custom-general-rules.md` (optional user additions)
+5. `<data_dir>/library/custom-instructions.md` (user tweaks, loaded for
+   EVERY agent — consolidated from the old per-agent
+   `agents/<name>/custom-instruction.md` files)
+6. Resolved policy directive block (forbidden words list, push-gate
    mode, etc.)
 
 Project conventions/notes **bodies** are deliberately NOT injected —
@@ -128,7 +131,7 @@ project: filenames + descriptions, so an agent that skips
 pull. The index is fetched once in `spawn_session_handle`
 (`storage.cl_index_search`) and threaded into `read_system_prompt`;
 `policy.yaml` is omitted from the primer (it's already rendered as the
-policy block in layer 5).
+policy block in layer 6).
 
 ---
 
@@ -669,8 +672,12 @@ the source of truth; SQLite carries two DERIVED, disposable layers on top:
   `bench/cl_poison/` eval measures whether agents OBEY a poisoned atom
   or VERIFY against the source.
 
-**Per-agent files** (always loaded at spawn):
-- `library/agents/<name>/custom-instruction.md`
+**All-agents files** (always loaded at spawn, same content for every
+agent):
+- `library/custom-instructions.md` (consolidated from the old per-agent
+  `agents/<name>/custom-instruction.md` files; a one-time migration in
+  `Paths::init` folds user-modified legacy copies in and deletes
+  untouched seeds)
 - `library/custom-general-rules.md` (optional user additions; the
   universal rules are hardcoded in `agents::general_rules`)
 

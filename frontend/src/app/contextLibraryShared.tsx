@@ -84,16 +84,18 @@ export async function pickFolder(
 // `_globals` categorization — SYSTEM vs GLOBAL
 // ============================================================================
 
-// Paths in the `_globals` bucket that bot-hq itself owns: agent custom
-// instructions + custom-general-rules.md. Session spawn resolves these exact
-// paths, so they are read+update only — no rename/delete/create around them.
-// Deliberately a prefix predicate (not an exact-path set) so the `agents`
-// folder itself, its folder-description rows, and any future agent files all
-// classify as internal. Mirrored by `assert_not_protected_globals_path` in
-// src/tauri_cmd/cl.rs — keep the two in sync.
+// Paths in the `_globals` bucket that bot-hq itself owns:
+// custom-instructions.md (one file, appended to every agent's prompt) +
+// custom-general-rules.md. Session spawn resolves these exact paths, so they
+// are read+update only — no rename/delete/create around them. The `agents/`
+// prefix is the legacy pre-consolidation location — still classified internal
+// so stragglers on partially-migrated installs stay protected. Mirrored by
+// `assert_not_protected_globals_path` in src/tauri_cmd/cl.rs — keep the two
+// in sync.
 export function isInternalGlobalsPath(path: string): boolean {
   return (
     path === "custom-general-rules.md" ||
+    path === "custom-instructions.md" ||
     path === "agents" ||
     path.startsWith("agents/")
   );
