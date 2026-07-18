@@ -216,6 +216,19 @@ pub async fn create_session(
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?
         .ok_or_else(|| AppError::DbError("session vanished after create".into()))?;
+    // Spawn the duo in the background so the session primes (CL-opener nudge)
+    // without the user having to open it. Not awaited: worktree
+    // materialization can take seconds and the create dialog shouldn't block
+    // on it. `ensure_session_started` is idempotent + spawn-gate-serialized,
+    // so the SessionView mount's `respawn_session` stays a harmless no-op and
+    // doubles as the retry path if this background spawn fails.
+    let core_bg = Arc::clone(core.inner());
+    let spawn_id = id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = core_bg.ensure_session_started(&spawn_id).await {
+            tracing::warn!(session_id = %spawn_id, error = ?e, "post-create background spawn failed");
+        }
+    });
     Ok(session.into())
 }
 
