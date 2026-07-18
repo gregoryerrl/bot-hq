@@ -94,9 +94,10 @@ pub fn parse_diff_lines(diff: &str) -> Vec<DiffLine> {
 
 /// Add-only diff for each untracked, non-ignored file in `repo`, so brand-new
 /// files — invisible to plain `git diff`, which is tracked-only — still render
-/// in the Apply tab. Side-effect free: compares each file against the null
-/// device via `git diff --no-index` rather than `git add -N`, so the agent's
-/// index is never mutated.
+/// in the Apply tab. Side-effect free: the diff is synthesized in-process from
+/// the file bytes (no `git add -N`, no index mutation). One `git ls-files`
+/// subprocess total — the old shape spawned a `git diff --no-index` PER FILE,
+/// on the worktree-change hot path.
 fn untracked_diff(repo: &std::path::Path) -> String {
     // NUL-separated list of untracked paths, honoring .gitignore via
     // --exclude-standard (so target/, node_modules/, etc. stay out).
@@ -112,22 +113,72 @@ fn untracked_diff(repo: &std::path::Path) -> String {
     let mut acc = String::new();
     for raw in listing.split(|&b| b == 0).filter(|p| !p.is_empty()) {
         let path = String::from_utf8_lossy(raw);
-        // `git diff --no-index` exits 1 when the files differ — the normal case
-        // for a new file, NOT an error — so we read stdout regardless of status.
-        // Diff against the platform null device so the file renders as all-adds.
-        let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
-        if let Ok(out) = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(["diff", "--no-index", "--no-color", "--"])
-            .arg(null_device)
-            .arg(path.as_ref())
-            .output()
-        {
-            acc.push_str(&String::from_utf8_lossy(&out.stdout));
-        }
+        acc.push_str(&synthetic_new_file_diff(repo, &path));
     }
     acc
+}
+
+/// Unified add-only diff for one untracked file, mirroring the shape
+/// `git diff --no-index <null> <file>` used to produce: `new file mode`
+/// (100755 for executables), git's binary heuristic (NUL byte in the first
+/// 8 KiB), no body for an empty file, and the `\ No newline at end of file`
+/// marker. A vanished/unreadable file yields nothing, like the old skip.
+fn synthetic_new_file_diff(repo: &std::path::Path, rel: &str) -> String {
+    let abs = repo.join(rel);
+    let Ok(bytes) = std::fs::read(&abs) else {
+        return String::new();
+    };
+    let mut out = format!(
+        "diff --git a/{rel} b/{rel}\nnew file mode {}\n",
+        new_file_mode(&abs)
+    );
+    if bytes[..bytes.len().min(8000)].contains(&0) {
+        out.push_str(&format!("Binary files /dev/null and b/{rel} differ\n"));
+        return out;
+    }
+    if bytes.is_empty() {
+        // Git shows a 0-byte new file as headers only — no ---/+++, no hunk.
+        return out;
+    }
+    out.push_str(&format!("--- /dev/null\n+++ b/{rel}\n"));
+    let text = String::from_utf8_lossy(&bytes);
+    let ends_with_newline = text.ends_with('\n');
+    // split('\n') (not `lines()`) so a `\r` in CRLF files stays in the line
+    // bytes, as git emits it. A trailing newline leaves one empty tail entry.
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if ends_with_newline {
+        lines.pop();
+    }
+    if lines.len() == 1 {
+        out.push_str("@@ -0,0 +1 @@\n");
+    } else {
+        out.push_str(&format!("@@ -0,0 +1,{} @@\n", lines.len()));
+    }
+    for line in &lines {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !ends_with_newline {
+        out.push_str("\\ No newline at end of file\n");
+    }
+    out
+}
+
+/// Git file mode for a new file: `100755` when any execute bit is set (unix),
+/// else `100644`.
+#[cfg(unix)]
+fn new_file_mode(path: &std::path::Path) -> &'static str {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(m) if m.permissions().mode() & 0o111 != 0 => "100755",
+        _ => "100644",
+    }
+}
+
+#[cfg(not(unix))]
+fn new_file_mode(_path: &std::path::Path) -> &'static str {
+    "100644"
 }
 
 /// Result of `compute_apply_diff`: the classified diff lines plus an
@@ -479,5 +530,98 @@ rename to new";
             !out.contains("SHOULD_NOT_APPEAR"),
             "gitignored file leaked into the diff:\n{out}"
         );
+    }
+
+    /// Scratch dir for the synthetic-diff tests — no git repo needed, the
+    /// synthesizer reads the filesystem directly.
+    fn synth_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bothq_synth_diff_{tag}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn synthetic_diff_text_file_matches_git_shape() {
+        let dir = synth_dir("text");
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        let out = synthetic_new_file_diff(&dir, "a.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            out,
+            "diff --git a/a.txt b/a.txt\nnew file mode 100644\n\
+             --- /dev/null\n+++ b/a.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+        );
+    }
+
+    #[test]
+    fn synthetic_diff_single_line_hunk_omits_count() {
+        let dir = synth_dir("single");
+        std::fs::write(dir.join("a.txt"), "only\n").unwrap();
+        let out = synthetic_new_file_diff(&dir, "a.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.contains("@@ -0,0 +1 @@\n+only\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn synthetic_diff_marks_missing_trailing_newline() {
+        let dir = synth_dir("nonl");
+        std::fs::write(dir.join("a.txt"), "no newline").unwrap();
+        let out = synthetic_new_file_diff(&dir, "a.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.ends_with("+no newline\n\\ No newline at end of file\n"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn synthetic_diff_binary_file_has_no_content() {
+        let dir = synth_dir("bin");
+        std::fs::write(dir.join("b.bin"), b"\x00\x01\x02SECRET").unwrap();
+        let out = synthetic_new_file_diff(&dir, "b.bin");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.contains("Binary files /dev/null and b/b.bin differ"),
+            "got:\n{out}"
+        );
+        assert!(!out.contains("SECRET"), "binary bytes leaked:\n{out}");
+        assert!(!out.contains("@@"), "binary diff must have no hunk:\n{out}");
+    }
+
+    #[test]
+    fn synthetic_diff_empty_file_is_headers_only() {
+        let dir = synth_dir("empty");
+        std::fs::write(dir.join("e.txt"), "").unwrap();
+        let out = synthetic_new_file_diff(&dir, "e.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            out,
+            "diff --git a/e.txt b/e.txt\nnew file mode 100644\n"
+        );
+    }
+
+    #[test]
+    fn synthetic_diff_missing_file_yields_nothing() {
+        let dir = synth_dir("missing");
+        let out = synthetic_new_file_diff(&dir, "ghost.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn synthetic_diff_executable_gets_755_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = synth_dir("exec");
+        let p = dir.join("run.sh");
+        std::fs::write(&p, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = synthetic_new_file_diff(&dir, "run.sh");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.contains("new file mode 100755"), "got:\n{out}");
     }
 }
