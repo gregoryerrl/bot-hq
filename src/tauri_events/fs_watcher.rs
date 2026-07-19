@@ -106,10 +106,20 @@ where
     let (path_tx, mut path_rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<WatchCmd>();
 
-    // notify's callback is sync + on its own thread — just forward the paths.
+    // notify's callback is sync + on its own thread. Drop build-dir churn here
+    // (target/, node_modules/, …) BEFORE it enters the channel: a `cargo build`
+    // otherwise floods the mpsc with thousands of paths per window that only
+    // wake the task to be discarded by the downstream filter. Build-dir NAMES
+    // only, NOT the `.`-prefix rule — this sees the ABSOLUTE path and the CL dir
+    // lives under `~/.bot-hq/`, so the dot-rule would match `.bot-hq` and drop
+    // every CL event. Dot-prefixed churn (`.git`, …) stays filtered downstream,
+    // where the path is first made relative to its watched root.
     let mut debouncer = new_debouncer(DEBOUNCE, move |res: DebounceEventResult| {
         if let Ok(events) = res {
             for ev in events {
+                if has_ignored_build_dir(&ev.path) {
+                    continue;
+                }
                 let _ = path_tx.send(ev.path);
             }
         }
@@ -311,12 +321,48 @@ fn is_ignored_component(name: &OsStr) -> bool {
     }
 }
 
+/// True if any component of `path` is a known build directory (`target`,
+/// `node_modules`, …). The notify callback uses this to drop the high-volume
+/// churn a `cargo build` / `npm ci` produces on the watcher thread, before it
+/// enters the channel.
+///
+/// Deliberately NOT the full [`is_ignored_component`] dot-rule: the callback
+/// sees the ABSOLUTE path, and the CL dir lives under `~/.bot-hq/`, so a
+/// `.`-prefix check would match `.bot-hq` and silently drop every CL event.
+/// Dot-prefixed churn (`.git`, `.vite`, …) stays filtered downstream, where the
+/// path has first been made relative to its watched root.
+fn has_ignored_build_dir(path: &Path) -> bool {
+    path.components().any(|c| {
+        matches!(c, std::path::Component::Normal(n)
+            if n.to_str().is_some_and(|s| IGNORED_BUILD_DIRS.contains(&s)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn cl() -> PathBuf {
         PathBuf::from("/data/library")
+    }
+
+    #[test]
+    fn build_dir_churn_is_filtered_before_the_channel() {
+        // The dominant churn a `cargo build` / `npm ci` emits → dropped early.
+        assert!(has_ignored_build_dir(Path::new(
+            "/home/me/repo/target/debug/x.rlib"
+        )));
+        assert!(has_ignored_build_dir(Path::new(
+            "/home/me/repo/node_modules/pkg/index.js"
+        )));
+        // Real source edits → kept.
+        assert!(!has_ignored_build_dir(Path::new("/home/me/repo/src/main.rs")));
+        // CL events live under `~/.bot-hq/`; the `.bot-hq` dot-component must NOT
+        // be treated as build churn here, or the callback would drop every CL
+        // change (the dot-rule is applied downstream on the repo-relative path).
+        assert!(!has_ignored_build_dir(Path::new(
+            "/Users/me/.bot-hq/library/projects/bot-hq/notes.md"
+        )));
     }
 
     #[test]
