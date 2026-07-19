@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
@@ -43,7 +43,10 @@ interface ComputeApplyDiffResult {
   note: string | null;
 }
 
-export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
+export const DocumentPane = memo(function DocumentPane({
+  sessionId,
+  sessionPhase,
+}: DocumentPaneProps) {
   const [activePhase, setActivePhase] = useState<Phase>(
     sessionPhase ?? "investigate",
   );
@@ -199,7 +202,7 @@ export function DocumentPane({ sessionId, sessionPhase }: DocumentPaneProps) {
       />
     </div>
   );
-}
+});
 
 // One-shot TL;DR modal: a scrim + focus-trapped panel mirroring ConfirmDialog,
 // but display-only (single Close). Backdrop click and Escape both dismiss; the
@@ -292,6 +295,14 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
     setClosed(new Set());
   }, [diff]);
 
+  // Grouping is O(diff lines) — derive it once per diff, not on every render
+  // (collapse toggles and parent re-renders would otherwise re-scan a
+  // potentially thousands-of-lines diff).
+  const groups = useMemo(
+    () => (diff ? groupDiffByFile(diff.lines) : []),
+    [diff],
+  );
+
   if (!diff) {
     return (
       <p className="mb-6 text-xs text-on-surface-variant">Loading diff…</p>
@@ -304,7 +315,6 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
       </p>
     );
   }
-  const groups = groupDiffByFile(diff.lines);
   // "All closed" drives the toggle's label/action. A fresh `closed` set means
   // everything is open → button reads "Collapse all".
   const allClosed = groups.length > 0 && closed.size === groups.length;

@@ -6,21 +6,16 @@ import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useHealthStore } from "../stores/health";
 import { useActivityStore } from "../stores/activity";
 import { HealthDot, RouterHealthDot } from "../components/HealthDot";
-import { useStickyScroll } from "../hooks/useStickyScroll";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
-import { ChatMessage } from "../components/ChatMessage";
+import { ChatPane } from "../components/ChatPane";
 import { DocumentPane } from "../components/DocumentPane";
 import { type Phase } from "../components/PhasePill";
 import { SessionFindingsBanner } from "../components/SessionFindingsBanner";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
-import type {
-  AgentMessage,
-  AppError,
-  SessionInfo,
-} from "../lib/bindings";
+import type { AppError, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { GearIcon } from "../components/icons";
@@ -56,10 +51,6 @@ function normalizePhase(raw: string | null | undefined): Phase | null {
       return PHASE_NAMES.includes(lower as Phase) ? (lower as Phase) : null;
   }
 }
-
-// Stable reference so zustand selector doesn't return a fresh array per call
-// (would trigger infinite re-renders via Object.is).
-const EMPTY_MESSAGES: AgentMessage[] = [];
 
 export function SessionView() {
   const { sessionId = "" } = useParams<{ sessionId: string }>();
@@ -178,35 +169,7 @@ export function SessionView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  const { data: initialMsgs = [], isLoading: messagesLoading } = useTauriQuery<
-    AgentMessage[]
-  >(
-    "get_session_messages",
-    { sessionId, sinceId: null },
-    { enabled: !!sessionId },
-  );
-
-  const messages = useChatStore(
-    (s) => s.messages[sessionId] ?? EMPTY_MESSAGES,
-  );
-  const setMessages = useChatStore((s) => s.setMessages);
-  const applyBatch = useChatStore((s) => s.applyBatch);
   const clearChat = useChatStore((s) => s.clear);
-
-  useEffect(() => {
-    if (initialMsgs.length > 0) {
-      setMessages(sessionId, initialMsgs);
-    }
-  }, [initialMsgs, sessionId, setMessages]);
-
-  useTauriEvent<AgentMessage[]>(
-    "agent:messages:batch",
-    (batch) => {
-      const forSession = batch.filter((m) => m.session_id === sessionId);
-      if (forSession.length > 0) applyBatch(forSession);
-    },
-    [sessionId, applyBatch],
-  );
 
   // IPAV phase indicator. `get_session_phase` (in-memory on `CoreAppState`) is
   // invalidated by the global `session:phase_changed` listener in Providers, so
@@ -232,11 +195,6 @@ export function SessionView() {
     },
     [sessionId, navigate, clearChat],
   );
-
-  // Auto-scroll on new messages when user is at-bottom; show "↓ N new" jump
-  // button when they've scrolled up.
-  const { ref: scrollRef, stuck, scrollToBottom } =
-    useStickyScroll<HTMLDivElement>([messages.length]);
 
   if (!session) {
     return (
@@ -486,50 +444,10 @@ export function SessionView() {
           style={{ flexBasis: `${leftPct}%` }}
           className="flex h-full min-h-0 min-w-0 shrink-0 grow-0 flex-col border-r border-outline-variant"
         >
-          {/*
-           * Single scroll boundary: the scroll container IS the positioning
-           * context for the floating "Jump to latest" button. The button is
-           * absolutely positioned inside the scroll container itself with
-           * `position: sticky`-equivalent layout via inset offsets, kept
-           * out of the document flow so it doesn't push messages.
-           */}
-          <div
-            ref={scrollRef}
-            className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3"
-          >
-            {messagesLoading && messages.length === 0 ? (
-              <MessagesSkeleton />
-            ) : messages.length === 0 ? (
-              <p className="font-body-md text-body-md text-on-surface-variant">No messages yet…</p>
-            ) : (
-              messages.map((m, i) => (
-                <ChatMessage
-                  key={m.id}
-                  message={m}
-                  groupedWithPrev={
-                    i > 0 &&
-                    m.kind !== "phase_change" &&
-                    messages[i - 1].kind !== "phase_change" &&
-                    messages[i - 1].author === m.author
-                  }
-                />
-              ))
-            )}
-            {!stuck && messages.length > 0 && (
-              <div className="pointer-events-none sticky bottom-0 flex justify-end pr-1 pt-2">
-                <button
-                  onClick={scrollToBottom}
-                  className={cn(
-                    "pointer-events-auto inline-flex items-center gap-1 rounded-full",
-                    "border border-outline-variant bg-surface-container-highest px-3 py-1 font-code-sm text-code-sm text-on-surface shadow-lg",
-                    "hover:border-primary hover:text-on-surface transition-colors",
-                  )}
-                >
-                  ↓ Jump to latest
-                </button>
-              </div>
-            )}
-          </div>
+          {/* Chat history + live batches — virtualized, and a render boundary:
+              per-batch re-renders stop inside ChatPane instead of re-rendering
+              this whole view (header, subtabs, DocumentPane). */}
+          <ChatPane sessionId={sessionId} />
 
           <div className="border-t border-outline-variant">
             {/* key remounts the input per session so the draft seed (a lazy
@@ -591,20 +509,6 @@ export function SessionView() {
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
       />
-    </div>
-  );
-}
-
-function MessagesSkeleton() {
-  return (
-    <div className="space-y-4">
-      {[0, 1, 2].map((i) => (
-        <div key={i} className="space-y-2">
-          <div className="h-3 w-12 animate-pulse rounded bg-surface-container-high" />
-          <div className="h-3 w-3/4 animate-pulse rounded bg-surface-container-high" />
-          <div className="h-3 w-1/2 animate-pulse rounded bg-surface-container-high" />
-        </div>
-      ))}
     </div>
   );
 }

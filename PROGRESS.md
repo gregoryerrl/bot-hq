@@ -12,7 +12,7 @@ planned next see [`PLAN.md`](PLAN.md).
 ## Current state
 
 742 Rust tests passing (688 lib + 36 external MCP + 7 signaling + 11
-storage) plus 173 frontend Vitest. Release build clean. Version
+storage) plus 176 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -22,7 +22,41 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 plugin-runtime workstreams from 2026-07-05 (**per-plugin CSP
 override tier**, **spawn_session capability**, **linked installs**, the
 **push-event + view-alignment paper-cuts**), and the **session subtabs
-arc** (2026-07-18, below): Workspace | Context | Terminal.
+arc** (2026-07-18): Workspace | Context | Terminal, and the **chat-list
+virtualization** (2026-07-19, below).
+
+---
+
+## 2026-07-19 — chat history virtualized into a ChatPane render boundary
+
+Extracted the session chat list out of `SessionView` into a new
+`components/ChatPane.tsx`, virtualized with `@tanstack/react-virtual`
+(one commit, continuing session `s-5b3fe6`):
+
+- **Render boundary:** ChatPane owns the chat-store subscription and the
+  `agent:messages:batch` listener, so per-batch re-renders stop inside it
+  — the SessionView shell (header, subtabs, DocumentPane, ChatInput) no
+  longer re-renders on every batch.
+- **Virtualized list** via `useVirtualizer`: only the visible window (+
+  overscan) of a session's history lives in the DOM regardless of length.
+  Sticky-bottom auto-follow + the "↓ Jump to latest" pill are preserved;
+  the old `useStickyScroll` hook is retired (its logic inlined here
+  because the bottom-pin effect also needs the virtualizer's measured
+  `totalSize`).
+- **Lifted tool-pill expand state** (a Set keyed by message id) into
+  ChatPane — virtualized rows unmount when scrolled away, which would
+  reset `ChatMessage`-local state. `ToolMessage` is now
+  controlled-with-local-fallback.
+- **DocumentPane** memoized + its per-file diff grouping moved to
+  `useMemo` (was re-scanning a potentially thousands-of-line diff on
+  every collapse toggle / parent re-render).
+- New `ChatPane.test.tsx` (3 cases: history render, live-batch append +
+  cross-session filter, tool-pill expand/collapse).
+
+Follow-ups (advisory, non-blocking): ChatPane test-coverage gaps
+(loading / empty / sticky states); the pre-existing narrow race between
+the initial `get_session_messages` load and the first live batch (carried
+over unchanged from the old SessionView code).
 
 ---
 

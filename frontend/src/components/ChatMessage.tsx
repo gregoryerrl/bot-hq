@@ -9,6 +9,11 @@ interface ChatMessageProps {
   message: AgentMessage;
   /** Hide the author header (consecutive messages from the same author). */
   groupedWithPrev?: boolean;
+  /** Lifted tool-pill expand state, keyed by message id. Virtualized parents
+   * own it (rows unmount when scrolled away, which would reset local state);
+   * when omitted, ToolMessage falls back to its own local state. */
+  expanded?: boolean;
+  onToggleExpand?: (id: number) => void;
 }
 
 // Author + relative-timestamp header. Shared by the text and tool message rows
@@ -48,6 +53,8 @@ function MessageHeader({
 export const ChatMessage = memo(function ChatMessage({
   message,
   groupedWithPrev,
+  expanded,
+  onToggleExpand,
 }: ChatMessageProps) {
   if (message.kind === "phase_change") {
     return (
@@ -58,7 +65,14 @@ export const ChatMessage = memo(function ChatMessage({
   }
 
   if (message.kind === "tool_use" || message.kind === "tool_result") {
-    return <ToolMessage message={message} groupedWithPrev={groupedWithPrev} />;
+    return (
+      <ToolMessage
+        message={message}
+        groupedWithPrev={groupedWithPrev}
+        expanded={expanded}
+        onToggleExpand={onToggleExpand}
+      />
+    );
   }
 
   return (
@@ -80,11 +94,20 @@ export const ChatMessage = memo(function ChatMessage({
 function ToolMessage({
   message,
   groupedWithPrev,
+  expanded: controlledExpanded,
+  onToggleExpand,
 }: {
   message: AgentMessage;
   groupedWithPrev?: boolean;
+  expanded?: boolean;
+  onToggleExpand?: (id: number) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [localExpanded, setLocalExpanded] = useState(false);
+  const controlled =
+    controlledExpanded !== undefined && onToggleExpand !== undefined;
+  const expanded = controlled ? controlledExpanded : localExpanded;
+  const toggle = () =>
+    controlled ? onToggleExpand(message.id) : setLocalExpanded((v) => !v);
   const parsed = safeParse(message.content);
   const isUse = message.kind === "tool_use";
 
@@ -104,7 +127,7 @@ function ToolMessage({
       )}
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={toggle}
         aria-expanded={expanded}
         className={cn(
           "flex w-full items-center gap-2 rounded border border-outline-variant bg-surface px-2 py-1 text-left",
