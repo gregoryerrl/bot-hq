@@ -11,7 +11,7 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-742 Rust tests passing (688 lib + 36 external MCP + 7 signaling + 11
+758 Rust tests passing (704 lib + 36 external MCP + 7 signaling + 11
 storage) plus 176 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
@@ -22,41 +22,69 @@ gate**, the **interrupt redesign** (stdin `control_request` cancel +
 plugin-runtime workstreams from 2026-07-05 (**per-plugin CSP
 override tier**, **spawn_session capability**, **linked installs**, the
 **push-event + view-alignment paper-cuts**), and the **session subtabs
-arc** (2026-07-18): Workspace | Context | Terminal, and the **chat-list
-virtualization** (2026-07-19, below).
+arc** (2026-07-18): Workspace | Context | Terminal, and the
+**performance optimization sweep** (2026-07-19, below).
 
 ---
 
-## 2026-07-19 — chat history virtualized into a ChatPane render boundary
+## 2026-07-19 — performance optimization sweep (heat/lag on MBP 14)
 
-Extracted the session chat list out of `SessionView` into a new
-`components/ChatPane.tsx`, virtualized with `@tanstack/react-virtual`
-(one commit, continuing session `s-5b3fe6`):
+A whole-app perf pass (brief: "optimize for maximum performance, remove
+no features — the MacBook heats up / sometimes lags"). An audit put the
+sustained cost in the webview render path plus two Rust hot paths; five
+feature-preserving batches (A–E) landed across four commits (`f6d45ed`,
+`8d0171c`, `9ea25ee`, `5c7519d`). Continued from session `s-5b3fe603`,
+which scoped the audit and shipped A–C before running out.
 
-- **Render boundary:** ChatPane owns the chat-store subscription and the
+**A — pure-Rust untracked-file diff (`f6d45ed`).** `compute_apply_diff`
+spawned one `git diff --no-index` subprocess per untracked file on every
+Apply-tab recompute; the add-only unified diff is now built in-process
+from the file bytes (one `git ls-files` remains).
+
+**B+C — chat list virtualized into a ChatPane render boundary (`8d0171c`).**
+Extracted the chat list out of `SessionView` into `components/ChatPane.tsx`,
+virtualized with `@tanstack/react-virtual`:
+
+- **Render boundary:** ChatPane owns the chat-store subscription + the
   `agent:messages:batch` listener, so per-batch re-renders stop inside it
   — the SessionView shell (header, subtabs, DocumentPane, ChatInput) no
   longer re-renders on every batch.
-- **Virtualized list** via `useVirtualizer`: only the visible window (+
-  overscan) of a session's history lives in the DOM regardless of length.
-  Sticky-bottom auto-follow + the "↓ Jump to latest" pill are preserved;
-  the old `useStickyScroll` hook is retired (its logic inlined here
-  because the bottom-pin effect also needs the virtualizer's measured
-  `totalSize`).
-- **Lifted tool-pill expand state** (a Set keyed by message id) into
-  ChatPane — virtualized rows unmount when scrolled away, which would
-  reset `ChatMessage`-local state. `ToolMessage` is now
-  controlled-with-local-fallback.
-- **DocumentPane** memoized + its per-file diff grouping moved to
-  `useMemo` (was re-scanning a potentially thousands-of-line diff on
-  every collapse toggle / parent re-render).
-- New `ChatPane.test.tsx` (3 cases: history render, live-batch append +
-  cross-session filter, tool-pill expand/collapse).
+- **Virtualized** via `useVirtualizer`: only the visible window (+
+  overscan) is in the DOM regardless of history length. Sticky-bottom
+  auto-follow + "↓ Jump to latest" preserved; `useStickyScroll` retired
+  (inlined — the bottom-pin effect needs the virtualizer's `totalSize`).
+- **Tool-pill expand state lifted** into ChatPane (a Set keyed by message
+  id; virtualized rows unmount on scroll). **DocumentPane** memoized + its
+  diff grouping moved to `useMemo`. New `ChatPane.test.tsx` (3 cases).
 
-Follow-ups (advisory, non-blocking): ChatPane test-coverage gaps
-(loading / empty / sticky states); the pre-existing narrow race between
-the initial `get_session_messages` load and the first live batch (carried
-over unchanged from the old SessionView code).
+**E — fs-watcher build-churn pre-filter (`9ea25ee`).** The notify
+debouncer callback forwarded every changed path over the mpsc; a
+`cargo build` / `npm ci` flooded the channel with `target/` /
+`node_modules/` paths that only woke the watcher task to be dropped
+downstream. They're now dropped on the notify thread first. Build-dir
+NAMES only, **not** the `.`-prefix rule — the callback sees the absolute
+path and the CL dir lives under `~/.bot-hq/`, so a dot-rule check would
+match `.bot-hq` and drop every CL event (the dot-rule stays downstream on
+the repo-relative path). Unit test pins the `.bot-hq` case.
+
+**D — session terminal on the xterm WebGL renderer (`5c7519d`).** The
+keep-mounted terminal used xterm's DOM renderer (the slow path for
+streaming build output). Loads `@xterm/addon-webgl` after `open()`; on
+context loss the addon disposes and xterm falls back to DOM, and if WebGL2
+is unavailable the try/catch leaves the DOM renderer in place — so it can
+only speed up or no-op (no feature change).
+
+Deliberately not touched (audit-deferred): the rare `session:resync`
+key-invalidation herd, `parse_diff_lines` allocations (noise after A),
+BatchEmitter / fs-watcher debounce / plugin heartbeat (load-bearing),
+`cursorBlink` (UX). `Markdown` is already `memo`'d, so the virtualization
+alone neutralized the "markdown re-parse per batch" concern.
+
+Follow-ups (advisory, non-blocking): ChatPane test-coverage gaps (loading
+/ empty / sticky states); the pre-existing narrow race between the initial
+`get_session_messages` load and the first live batch. A live GUI eyeball
+is still worth doing for the scroll/virtualization + terminal render feel
+(not headless-provable).
 
 ---
 
