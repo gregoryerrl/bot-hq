@@ -22,6 +22,14 @@ vi.mock("@xterm/xterm", () => ({
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: vi.fn().mockImplementation(() => ({ fit: vi.fn() })),
 }));
+// jsdom has no WebGL2 — stub the WebGL addon (no-op) so clicking the Terminal
+// pill doesn't run the real renderer and log a context-creation error.
+vi.mock("@xterm/addon-webgl", () => ({
+  WebglAddon: vi.fn().mockImplementation(() => ({
+    onContextLoss: vi.fn(),
+    dispose: vi.fn(),
+  })),
+}));
 
 class ResizeObserverStub {
   observe() {}

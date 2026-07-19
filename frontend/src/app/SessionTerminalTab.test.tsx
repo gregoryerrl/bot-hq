@@ -19,6 +19,16 @@ vi.mock("@xterm/xterm", () => ({
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: vi.fn().mockImplementation(() => ({ fit: vi.fn() })),
 }));
+// jsdom has no WebGL2, so the real WebglAddon logs a context-creation error to
+// stderr before the component's try/catch swallows it. Stub it as a no-op addon
+// (the mocked Terminal.loadAddon never calls activate) so the terminal-I/O tests
+// run cleanly through the WebGL-present path.
+vi.mock("@xterm/addon-webgl", () => ({
+  WebglAddon: vi.fn().mockImplementation(() => ({
+    onContextLoss: vi.fn(),
+    dispose: vi.fn(),
+  })),
+}));
 
 const invokeMock = vi.fn((cmd: string, _args?: unknown) => {
   switch (cmd) {
