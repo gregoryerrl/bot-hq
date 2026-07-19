@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import type { TerminalOpenView } from "../lib/bindings";
@@ -46,6 +47,7 @@ export function SessionTerminalTab({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const webglRef = useRef<WebglAddon | null>(null);
   // Events that arrive before the snapshot replay finishes queue here, so
   // live chunks can't render ahead of the history they follow.
   const readyRef = useRef(false);
@@ -83,6 +85,23 @@ export function SessionTerminalTab({
     term.open(el);
     termRef.current = term;
     fitRef.current = fit;
+    // GPU-accelerated rendering for fast streaming output (agent build logs) —
+    // xterm's DOM renderer is the slow path there. Load after open() so the
+    // renderer is attached; on WebGL context loss dispose the addon and xterm
+    // transparently falls back to the DOM renderer. If WebGL2 is unavailable
+    // (older GPU, or the jsdom test env), the try/catch leaves the default DOM
+    // renderer in place — identical behavior to before.
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        webgl.dispose();
+        webglRef.current = null;
+      });
+      term.loadAddon(webgl);
+      webglRef.current = webgl;
+    } catch {
+      // WebGL unavailable → DOM renderer (the default). Nothing to do.
+    }
     readyRef.current = false;
     queueRef.current = [];
 
@@ -113,6 +132,8 @@ export function SessionTerminalTab({
     return () => {
       disposed = true;
       dataSub.dispose();
+      webglRef.current?.dispose();
+      webglRef.current = null;
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
