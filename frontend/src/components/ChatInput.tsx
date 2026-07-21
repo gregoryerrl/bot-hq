@@ -20,9 +20,16 @@ interface ChatInputProps {
   /** Per-agent busy flags, for the turn-status line. The collapsed `activity`
    *  says "someone is busy"; this says who (Brian working / Rain reviewing). */
   busy?: DuoBusy;
-  /** Hard-cancel the in-flight turn (the Stop button). Without it a locked
-   *  session shows the status line but no Stop. */
+  /** Pause the in-flight turn (the Stop button — interrupts both agents and
+   *  lands the session in `paused`). Without it a locked session shows the
+   *  status line but no Stop. */
   onCancel?: () => Promise<void> | void;
+  /** Resume a paused session (the paused bar's Resume button). The backend
+   *  releases the latch, nudges both agents, and flushes anything held. */
+  onResume?: () => Promise<void> | void;
+  /** Open the force-close flow from the paused bar (the parent owns the
+   *  confirm dialog — same flow as the header ✕). */
+  onClose?: () => void;
   /**
    * localStorage key for draft persistence. When set, the in-progress text
    * survives unmounts (navigating to another session / app restart): seeded
@@ -40,6 +47,8 @@ export function ChatInput({
   activity,
   busy,
   onCancel,
+  onResume,
+  onClose,
   draftKey,
 }: ChatInputProps) {
   const [value, setValue] = useState(() =>
@@ -48,6 +57,7 @@ export function ChatInput({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // The duo is working (busy/cancelling). While locked we hide the textarea and
@@ -68,6 +78,25 @@ export function ChatInput({
     } catch (err) {
       setError(errorMessage(err));
       setCancelling(false);
+    }
+  };
+
+  // The session is paused (Stop landed): textarea stays open for a steer, and
+  // the paused bar offers Resume / Close.
+  const paused = activity === "paused";
+  // Drop the local "Resuming…" latch once the backend leaves paused.
+  useEffect(() => {
+    if (!paused) setResuming(false);
+  }, [paused]);
+
+  const handleResume = async () => {
+    if (!onResume || resuming) return;
+    setResuming(true);
+    try {
+      await onResume();
+    } catch (err) {
+      setError(errorMessage(err));
+      setResuming(false);
     }
   };
 
@@ -120,6 +149,36 @@ export function ChatInput({
           className="mx-3 mt-2"
         />
       )}
+      {paused && (
+        <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2">
+          <span className="flex-1 text-xs text-on-surface-variant">
+            <span className="font-semibold text-on-surface">⏸ Paused</span>
+            {" — agents halted. Type below to steer, or"}
+          </span>
+          {onResume && (
+            <Button
+              type="button"
+              variant="primary"
+              onClick={handleResume}
+              disabled={resuming}
+              className="min-w-[5.5rem]"
+              title="Wake the agents and continue where they left off"
+            >
+              {resuming ? "Resuming…" : "Resume"}
+            </Button>
+          )}
+          {onClose && (
+            <Button
+              type="button"
+              variant="danger"
+              onClick={onClose}
+              title="Force-close this session (confirmation follows)"
+            >
+              Close session
+            </Button>
+          )}
+        </div>
+      )}
       <form
         onSubmit={handleSubmit}
         className={cn("flex gap-2 p-3", locked ? "items-center" : "items-end")}
@@ -136,7 +195,7 @@ export function ChatInput({
                 // latency (`cancelling`) or the backend's explicit `cancelling`.
                 disabled={cancelling || activity === "cancelling"}
                 className="min-w-[5.5rem]"
-                title="Stop the in-flight turn"
+                title="Pause the agents — the session parks until you steer, resume, or close"
               >
                 {cancelling || activity === "cancelling"
                   ? "Cancelling…"

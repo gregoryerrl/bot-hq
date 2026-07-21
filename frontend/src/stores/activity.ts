@@ -2,8 +2,15 @@ import { create } from "zustand";
 
 /** Session-level duo activity from the backend `session:activity` event
  *  (mirrors Rust `SessionActivity::as_str`). Drives the chat-input lock +
- *  Stop button (interrupt redesign, Batch 4). */
-export type SessionActivity = "idle" | "busy" | "awaiting_user" | "cancelling";
+ *  Stop button (interrupt redesign, Batch 4). `paused` = Stop landed: agents
+ *  interrupted + all auto-wakes held; the ChatInput shows the paused bar
+ *  (Resume / Close) with the textarea open for a steer. */
+export type SessionActivity =
+  | "idle"
+  | "busy"
+  | "awaiting_user"
+  | "cancelling"
+  | "paused";
 
 /** Per-agent busy flags. The session-level `SessionActivity` collapses these to
  *  a single `busy`; the chat-input turn-status line needs them split so it can
@@ -51,8 +58,9 @@ export const useActivityStore = create<ActivityStore>((set) => ({
 }));
 
 /** Should the chat input lock? `busy`/`cancelling` lock it (the duo is
- *  working); `idle` and `awaiting_user` (the user's turn) leave it open.
- *  Undefined = no event yet = assume idle (input open). */
+ *  working); `idle`, `awaiting_user`, and `paused` (the user's turn — steer,
+ *  resume, or close) leave it open. Undefined = no event yet = assume idle
+ *  (input open). */
 export function isLocked(activity: SessionActivity | undefined): boolean {
   return activity === "busy" || activity === "cancelling";
 }

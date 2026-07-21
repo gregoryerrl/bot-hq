@@ -465,6 +465,10 @@ export function SessionView() {
               onCancel={async () => {
                 await invoke("cancel_session_turn", { sessionId });
               }}
+              onResume={async () => {
+                await invoke("resume_session", { sessionId });
+              }}
+              onClose={onCloseClick}
             />
           </div>
         </section>

@@ -169,3 +169,80 @@ describe("ChatInput turn-status + Stop", () => {
     expect(stop).toBeDisabled();
   });
 });
+
+describe("ChatInput paused bar", () => {
+  it("shows the paused bar with an OPEN textarea while paused", () => {
+    render(
+      <ChatInput
+        activity="paused"
+        onSend={() => {}}
+        onCancel={() => {}}
+        onResume={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    // The steer path: textarea + Send stay available under the paused bar.
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByText(/Paused/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Close session" }),
+    ).toBeInTheDocument();
+    // The Stop button belongs to the locked states, not paused.
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  });
+
+  it("calls onResume and latches Resuming… until activity leaves paused", async () => {
+    const onResume = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <ChatInput
+        activity="paused"
+        onSend={() => {}}
+        onResume={onResume}
+        onClose={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() => expect(onResume).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("button", { name: "Resuming…" })).toBeDisabled();
+    // Backend resumes → busy event → the bar goes away.
+    rerender(
+      <ChatInput
+        activity="busy"
+        busy={{ brian: true, rain: true }}
+        onSend={() => {}}
+        onResume={onResume}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/Paused/)).toBeNull();
+  });
+
+  it("routes Close session to onClose (the parent's confirm flow)", () => {
+    const onClose = vi.fn();
+    render(
+      <ChatInput
+        activity="paused"
+        onSend={() => {}}
+        onResume={() => {}}
+        onClose={onClose}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Close session" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the paused bar (and its buttons) outside paused", () => {
+    render(
+      <ChatInput
+        activity="idle"
+        onSend={() => {}}
+        onResume={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/Paused/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Close session" })).toBeNull();
+  });
+});
