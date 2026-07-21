@@ -156,6 +156,20 @@ async cancelSessionTurn(sessionId: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * Resume a paused session (the Paused bar's Resume button). Releases the pause
+ * latch by broadcasting a host-authored resume notice; held peer-forwards and
+ * OOB answer wakes flush in behind it, and the post-Stop reconcile directive
+ * rides the same message. No-op if the session isn't live or isn't paused.
+ */
+async resumeSession(sessionId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resume_session", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Rename a session (inline edit in the SessionView header). Blank titles are
  * rejected — an empty header is indistinguishable from a render bug.
  */
