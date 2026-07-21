@@ -709,10 +709,11 @@ cap, atomic tmp+rename, mkdir-p for new subfolders, an automatic
 an agent can't rewrite its own standing rules. The session-close learnings
 delta (≤~5 non-obvious one-liners appended under `notes.md`'s
 `## Learnings` with the full replacement body) rides this path, and a
-`cl_write_file` lifts the close-out nudge exactly like `cl_rescan`. (The
-former `cl_propose` review queue — migration 0025 — was removed in 0035:
-in practice approvals were rubber-stamped, so the friction bought
-nothing. The user still edits any CL file in the Context Library tab.)
+`cl_write_file` lifts the close-out nudge exactly like `cl_rescan`. (A
+human-review-queue predecessor — migrations 0025→0035 — was removed
+2026-07-21: in practice its approvals were rubber-stamped, so the
+friction bought nothing. The user still edits any CL file in the
+Context Library tab.)
 
 **First-run init:** `templates/cl/` is baked into the binary. On first
 start (no `version.txt` in the data dir), bot-hq seeds the templates

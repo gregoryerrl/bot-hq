@@ -8,8 +8,7 @@ import type { ClIndexEntryView } from "../lib/bindings";
 
 // An open editor tab is either a file (content editor) or a folder (folder
 // view). Discriminated on `kind` so the tab strip + editor area can route.
-// (Proposals + measurement are no longer tabs here — they live on the
-// Context Manager subtab.)
+// (Measurement is not a tab here — it lives on the Context Manager subtab.)
 export type OpenTab =
   | { kind: "file"; project: string; filePath: string }
   | { kind: "folder"; project: string; folderPath: string };

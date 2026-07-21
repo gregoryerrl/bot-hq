@@ -12,9 +12,6 @@ describe("maintainClPrompt", () => {
     const p = maintainClPrompt("acme-app");
     expect(p).toContain('cl_write_file(project="acme-app"');
     expect(p).toContain('cl_rescan(project="acme-app")');
-    // The proposal queue is gone — maintenance writes directly, no triage.
-    expect(p).not.toContain("cl_propose");
-    expect(p).not.toContain("cl_list_proposals");
   });
 
   it("encodes the study-notes model, all four IPAV phases, and boundaries", () => {

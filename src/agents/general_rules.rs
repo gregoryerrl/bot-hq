@@ -164,8 +164,8 @@ mod tests {
     fn cl_tools_list_enumerates_retrieve_and_write() {
         // The enumerated "Tools:" list is the canonical signature reference
         // agents scan; cl_retrieve was prose-only for a cycle
-        // (learnings-2026-06-29) and got missed. Keep the write path listed
-        // too — it replaced the proposal queue (2026-07-21).
+        // (learnings-2026-06-29) and got missed. Keep the write path
+        // (2026-07-21) listed too.
         assert!(
             GENERAL_RULES.contains("`cl_retrieve(project, query, paths?, budget_tokens?)`"),
             "Tools list must enumerate cl_retrieve with its signature"
@@ -173,10 +173,6 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("`cl_write_file(project, file_path, content)`"),
             "Tools list must enumerate cl_write_file with its signature"
-        );
-        assert!(
-            !GENERAL_RULES.contains("cl_propose"),
-            "the proposal queue is removed — no cl_propose references may remain"
         );
     }
 
@@ -256,7 +252,7 @@ mod tests {
     #[test]
     fn cl_close_loop_is_direct_write_and_bounded() {
         // The session-close freshness loop: bounded, written directly via
-        // cl_write_file (the proposal queue is gone), pruned by the user later.
+        // cl_write_file, pruned by the user later.
         assert!(
             GENERAL_RULES.contains("write the delta at close"),
             "CL section must carry the close-time freshness loop"

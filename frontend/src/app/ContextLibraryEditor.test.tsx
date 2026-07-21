@@ -159,7 +159,6 @@ describe("Context Library editor", () => {
     ).toBeDisabled();
   });
 
-  // Proposal-docket and measurement rendering are covered by
-  // ProposalQueue.test.tsx / MeasurementView.test.tsx — those components moved
-  // to the Context Manager subtab and are no longer editor tabs.
+  // Measurement rendering is covered by MeasurementView.test.tsx — that
+  // component lives on the Context Manager subtab, not in an editor tab.
 });

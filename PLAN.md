@@ -57,9 +57,9 @@ description, hard delete (no OS trash).
 atomization + `cl_retrieve` ranked retrieval, retrieval-time ⚠
 stale-flagging (`code_hash`), retrieval telemetry + Measurement tab, and
 the `bench/cl_poison/` obey-vs-verify eval (authored, not yet run — live
-trials cost model calls). The `cl_propose` review queue shipped in this arc
-but was REMOVED 2026-07-21 (approvals were rubber-stamped in practice) in
-favor of direct agent writes via `cl_write_file`. Deferred remainder,
+trials cost model calls). The arc's human-review queue was REMOVED
+2026-07-21 (approvals were rubber-stamped in practice) in favor of
+direct agent writes via `cl_write_file`. Deferred remainder,
 roughly in value order:
 
 - **§9 lifecycle / decay / pruning** — measurement made the store's ~52%

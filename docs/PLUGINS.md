@@ -265,8 +265,8 @@ host's JSON views (same shapes the bot-hq UI renders).
 
 Not grantable, by design: touching sessions your plugin did NOT create
 (`broadcast_message`, and the raw send/drive/close of arbitrary
-sessions), mutating the Context Library (canon changes are
-user/agent-proposal flows), installing plugins, or policy. There are
+sessions), mutating the Context Library (canon changes belong to the
+user and the agents' own tools), installing plugins, or policy. There are
 two deliberate session exceptions, each narrowly fenced — `spawn_session`
 (create only, guarded by a per-spawn dialog) and `plugin_sessions`
 (create AND drive your OWN sessions, guarded by an ownership fence):
@@ -402,8 +402,8 @@ leftovers are only removed on your approval.
 - **Background execution** — CL cloud sync as a daemon wants host
   scheduling or a sidecar tier; today it runs while its panel is open.
 - **Prompt/personality packs** — agent character customization is CL
-  territory (`custom-instructions.md` via the proposals flow), not a
-  plugin surface yet.
+  territory (`custom-instructions.md`, user-edited in the Library),
+  not a plugin surface yet.
 - **Bundle installs from URL** — URL install currently fetches
   `manifest.json` + the entry file ONLY (no other assets). Use a local
   directory for multi-file bundles; zip/signed bundles are future work.

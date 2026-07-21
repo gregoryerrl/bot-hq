@@ -22,7 +22,7 @@
 //!     or close the user's own sessions or another plugin's. Consent is the
 //!     install-time grant (no per-call dialog — the ownership fence plus
 //!     dashboard visibility are the guardrails).
-//! CL writes stay user/agent-only (propose-don't-mutate). The raw
+//! CL writes stay user/agent-only — never a plugin surface. The raw
 //! `create_session` / `broadcast_message` / `close_session` names stay
 //! non-grantable — plugins reach sessions ONLY through the fenced arms above.
 
@@ -154,7 +154,7 @@ mod tests {
         for bad in [
             "create_session",     // raw creation — only spawn_session's double-consent door exists
             "broadcast_message",  // reaches EXISTING agents' stdin — never grantable
-            "cl_write_file",      // CL canon mutates only by user action
+            "cl_write_file",      // CL writes are user/agent surfaces, never plugin
             "install_plugin",     // plugins must not install plugins
             "close_session",      // existing-session control — never grantable
             "",
