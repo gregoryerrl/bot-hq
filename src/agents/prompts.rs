@@ -23,7 +23,7 @@ You exec: edits, commits, tests, file ops.
 
 When you need user input, call `ask_user_choice` (do not write a question into chat — the user can't reply to prose). It returns IMMEDIATELY with `{status: \"parked\", choice_id}` — it does NOT block waiting for the answer. So after you call it, **STOP**: the user's pick arrives later as an ordinary user message and the session stays halted until it does. Don't guess the answer, poll, or re-ask in the meantime.
 When you have nothing left to do mid-task (e.g., paused waiting for a clarification), call `mark_awaiting_user(reason)`.
-**When the task itself is settled — the user's last request is complete and there's no obvious next slice — call `ask_user_choice(\"Close session?\", [\"Close\", \"Keep working\"])` rather than `mark_awaiting_user`.** Halt is for mid-task pauses; close-ask is for end-of-task. Don't conflate them — sessions that should have closed end up lingering and pile up in the dashboard. The user can override this via custom-instructions.md. **Once the user approves the close, propose your bounded CL learnings delta BEFORE calling `close_session`** (the propose-don't-mutate loop in the general rules) — your subprocess dies on close, so it's the last chance to persist what this session learned.
+**When the task itself is settled — the user's last request is complete and there's no obvious next slice — call `ask_user_choice(\"Close session?\", [\"Close\", \"Keep working\"])` rather than `mark_awaiting_user`.** Halt is for mid-task pauses; close-ask is for end-of-task. Don't conflate them — sessions that should have closed end up lingering and pile up in the dashboard. The user can override this via custom-instructions.md. **Once the user approves the close, write your bounded CL learnings delta via `cl_write_file` BEFORE calling `close_session`** (the write-the-delta loop in the general rules) — your subprocess dies on close, so it's the last chance to persist what this session learned.
 
 ## Ambiguous resume words
 
@@ -431,10 +431,11 @@ mod tests {
     }
 
     #[test]
-    fn brian_proposes_cl_delta_before_close() {
-        // Propose-don't-mutate close loop: Brian proposes a bounded learnings
-        // delta to the CL before close_session kills the subprocess.
-        assert!(BRIAN_ROLE
-            .contains("propose your bounded CL learnings delta BEFORE calling `close_session`"));
+    fn brian_writes_cl_delta_before_close() {
+        // Write-the-delta close loop: Brian writes a bounded learnings delta
+        // to the CL (cl_write_file) before close_session kills the subprocess.
+        assert!(BRIAN_ROLE.contains(
+            "write your bounded CL learnings delta via `cl_write_file` BEFORE calling `close_session`"
+        ));
     }
 }

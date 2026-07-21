@@ -32,7 +32,6 @@ pub mod web_search;
 mod webview_js;
 
 pub use bridge::{PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent};
-pub(crate) use bridge::detect_conflict;
 pub use external_server::{start_external_server, ExternalServer};
 
 /// MCP server keys bot-hq strips from a spawned agent's forwarded

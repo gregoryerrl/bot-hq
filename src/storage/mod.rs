@@ -19,7 +19,6 @@ pub mod row_types;
 mod agent_config;
 mod cl_atoms;
 mod cl_index;
-mod cl_proposals;
 mod findings;
 mod messages;
 mod models;
@@ -36,7 +35,7 @@ pub use cl_atoms::{Atom, RetrievedAtom};
 pub(crate) use cl_atoms::estimate_tokens;
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use row_types::{
-    AgentConfig, Author, ClFolder, ClIndexEntry, ClProposal, ClProposalStatus, ClRead,
+    AgentConfig, Author, ClFolder, ClIndexEntry, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
     QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
 };

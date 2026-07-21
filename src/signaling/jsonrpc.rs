@@ -114,13 +114,13 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
 /// reviewer who raised it can clear the escalation, so HANDS can't self-approve.
 const EYES_ONLY_TOOLS: &[&str] = &["eyes_flag", "approve_finding"];
 
-/// Tools that mutate CL annotations (folder descriptions, etc.). Brian (HANDS)
-/// owns mutations; Rain (EYES) reviews via the read
+/// Tools that mutate CL content (file bodies, folder descriptions). Brian
+/// (HANDS) owns mutations; Rain (EYES) reviews via the read
 /// counterparts (`cl_folder_search`, `cl_index_search`) and should not write.
 /// `cl_register_read` is deliberately NOT gated: it writes an AUDIT row (who
 /// read what), not CL content, and Rain recording her own reads is correct —
 /// the gate is about content authorship, not any write to a CL table.
-const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description"];
+const CL_MUTATE_TOOLS: &[&str] = &["cl_register_folder_description", "cl_write_file"];
 
 /// Parse + validate the optional `phase` arg shared by session_doc_write and
 /// session_doc_search. Returns Ok(None) when absent; Err with INVALID_PARAMS
@@ -161,7 +161,7 @@ async fn call_tool(
     }
     if CL_MUTATE_TOOLS.contains(&name) && caller.agent == "rain" {
         return Ok(ToolCallResult::error(format!(
-            "tool '{name}' is reserved for HANDS (brian); rain is EYES — read folder descriptions via cl_folder_search instead",
+            "tool '{name}' is reserved for HANDS (brian); rain is EYES and does not write CL content — review via cl_index_search / cl_folder_search instead",
         )));
     }
     if EYES_ONLY_TOOLS.contains(&name) && caller.agent != "rain" {
@@ -319,16 +319,16 @@ async fn call_tool(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             // A3b (adherence): soft-gate the FIRST close with no CL learnings
-            // delta this session — nudge to run propose-don't-mutate, then close on
+            // delta this session — nudge to persist the delta, then close on
             // the retry. The UI force-close path (tauri_cmd) is separate + ungated.
             if bridge.should_nudge_close(&caller.session_id).await {
                 Ok(ToolCallResult::text(
-                    "Before closing: PROPOSE this session's bounded learnings delta via \
-                     cl_propose (read the project's notes.md, append under ## Learnings, and \
-                     propose kind=correct with the full body), so the next session doesn't \
-                     re-discover what this one learned. Then call close_session again. (If \
-                     there's genuinely nothing to persist, just call close_session again and \
-                     it will close.)",
+                    "Before closing: persist this session's bounded learnings delta via \
+                     cl_write_file (read the project's notes.md, append your ~5 one-liners \
+                     under ## Learnings, and write the FULL updated body), so the next \
+                     session doesn't re-discover what this one learned. Then call \
+                     close_session again. (If there's genuinely nothing to persist, just \
+                     call close_session again and it will close.)",
                 ))
             } else {
                 bridge.request_session_close(
@@ -678,63 +678,15 @@ async fn call_tool(
             };
             Ok(ToolCallResult::text(text))
         }
-        "cl_propose" => {
+        "cl_write_file" => {
             let project = arg_required_str(&args, "project")?;
             let file_path = arg_required_str(&args, "file_path")?;
-            let kind = arg_required_str(&args, "kind")?;
-            let target_excerpt = arg_opt_str(&args, "target_excerpt");
-            let proposed_body = arg_opt_str(&args, "proposed_body").unwrap_or_default();
-            let evidence = arg_required_str(&args, "evidence")?;
-            let outcome = bridge
-                .cl_propose(
-                    caller.session_id.clone(),
-                    caller.agent.clone(),
-                    project,
-                    file_path.clone(),
-                    kind,
-                    target_excerpt,
-                    proposed_body,
-                    evidence,
-                )
+            let content = arg_required_str(&args, "content")?;
+            let msg = bridge
+                .cl_write_file(caller.session_id.clone(), project, file_path, content)
                 .await
                 .map_err(internal_err_no_prefix)?;
-            let mut text = format!("proposal filed: {}", outcome.uid);
-            if outcome.open_siblings > 0 {
-                text.push_str(&format!(
-                    "\nnote: {} other open proposal(s) already target '{}' — the user reviews \
-                     them together in the queue.",
-                    outcome.open_siblings, file_path
-                ));
-            }
-            Ok(ToolCallResult::text(text))
-        }
-        "cl_list_proposals" => {
-            let project = arg_required_str(&args, "project")?;
-            let status = arg_opt_str(&args, "status");
-            let rows = bridge
-                .cl_list_proposals(project, status)
-                .await
-                .map_err(internal_err_no_prefix)?;
-            let trimmed: Vec<serde_json::Value> = rows
-                .into_iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "proposal_uid": p.proposal_uid,
-                        "project": p.project_id,
-                        "file_path": p.file_path,
-                        "kind": p.kind,
-                        "target_excerpt": p.target_excerpt,
-                        "proposed_body": p.proposed_body,
-                        "evidence": p.evidence,
-                        "status": p.status,
-                        "proposed_by": p.proposed_by,
-                        "session_id": p.session_id,
-                        "created_at": p.created_at,
-                        "updated_at": p.updated_at,
-                    })
-                })
-                .collect();
-            Ok(result_json(&trimmed, "[]"))
+            Ok(ToolCallResult::text(msg))
         }
         "cl_register_read" => {
             let project = arg_required_str(&args, "project")?;
@@ -909,8 +861,7 @@ mod tests {
         assert!(names.contains(&"close_session"));
         assert!(names.contains(&"list_my_pending_questions"));
         assert!(names.contains(&"withdraw_question"));
-        assert!(names.contains(&"cl_propose"));
-        assert!(names.contains(&"cl_list_proposals"));
+        assert!(names.contains(&"cl_write_file"));
         assert!(names.contains(&"terminal_exec"));
         assert!(names.contains(&"terminal_read"));
         assert_eq!(
@@ -1377,26 +1328,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cl_proposal_dispatch_allows_rain_to_create_and_list() {
-        let bridge = SignalingBridge::new();
+    async fn cl_write_file_dispatch_writes_for_brian_and_denies_rain() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("library/projects/bot-hq")).unwrap();
+        let log = crate::policy::ViolationsLog::new(tmp.path());
+        let bridge = SignalingBridge::with_policy(log, tmp.path().to_path_buf());
         let storage = crate::storage::Storage::memory().await.unwrap();
         storage
             .upsert_project("bot-hq", "bot-hq", None, None, None)
             .await
             .unwrap();
-        storage.create_session("s1", "CL proposals", None).await.unwrap();
+        storage.create_session("s1", "CL write", None).await.unwrap();
         bridge.set_storage(storage.clone()).await;
 
+        // Rain is EYES — CL content writes are denied at dispatch.
         let res = dispatch(
             req(
                 "tools/call",
-                json!({"name": "cl_propose", "arguments": {
+                json!({"name": "cl_write_file", "arguments": {
                     "project": "bot-hq",
                     "file_path": "notes.md",
-                    "kind": "correct",
-                    "target_excerpt": "old",
-                    "proposed_body": "complete corrected body",
-                    "evidence": "stale wording"
+                    "content": "rain-authored"
                 }}),
                 1,
             ),
@@ -1407,17 +1359,19 @@ mod tests {
         .unwrap()
         .unwrap();
         let v = serde_json::to_value(&res).unwrap();
+        assert_eq!(v["result"]["isError"], json!(true));
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with("proposal filed: "), "proposal response: {text}");
+        assert!(text.contains("reserved for HANDS"), "got: {text}");
+        assert!(!tmp.path().join("library/projects/bot-hq/notes.md").exists());
 
+        // Brian writes directly; the response names the outcome.
         let res = dispatch(
             req(
                 "tools/call",
-                json!({"name": "cl_propose", "arguments": {
+                json!({"name": "cl_write_file", "arguments": {
                     "project": "bot-hq",
-                    "file_path": "obsolete.md",
-                    "kind": "delete",
-                    "evidence": "obsolete note"
+                    "file_path": "notes.md",
+                    "content": "a direct learning"
                 }}),
                 2,
             ),
@@ -1429,36 +1383,11 @@ mod tests {
         .unwrap();
         let v = serde_json::to_value(&res).unwrap();
         let text = v["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.starts_with("proposal filed: "), "Brian proposal response: {text}");
-
-        let res = dispatch(
-            req(
-                "tools/call",
-                json!({"name": "cl_list_proposals", "arguments": {
-                    "project": "bot-hq",
-                    "status": "open"
-                }}),
-                3,
-            ),
-            &caller(),
-            &bridge,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let v = serde_json::to_value(&res).unwrap();
-        let text = v["result"]["content"][0]["text"].as_str().unwrap();
-        let rows: Vec<serde_json::Value> = serde_json::from_str(text).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["project"], "bot-hq");
-        assert_eq!(rows[0]["file_path"], "notes.md");
-        assert_eq!(rows[0]["kind"], "correct");
-        assert_eq!(rows[0]["status"], "open");
-        assert_eq!(rows[0]["proposed_by"], "rain");
-        assert_eq!(rows[1]["file_path"], "obsolete.md");
-        assert_eq!(rows[1]["kind"], "delete");
-        assert_eq!(rows[1]["proposed_body"], "");
-        assert_eq!(rows[1]["proposed_by"], "brian");
+        assert!(text.starts_with("created"), "got: {text}");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("library/projects/bot-hq/notes.md")).unwrap(),
+            "a direct learning"
+        );
     }
 
     #[tokio::test]

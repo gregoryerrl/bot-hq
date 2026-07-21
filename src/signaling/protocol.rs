@@ -513,57 +513,25 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
-            name: "cl_propose",
-            description: "Create a durable project-scoped Context Library edit proposal without mutating CL files. Both agents may propose; human/host approval owns write-back. Filing is validated against the live CL: add requires a file that does not exist yet (use correct for existing files), correct/delete require an existing one. A base content hash is snapshotted at filing so approval can flag files that changed afterward.",
+            name: "cl_write_file",
+            description: "Write (create or replace) a project-scoped Context Library file with the full new body. Direct write: missing parent folders are created, the write is atomic, and the index is rescanned automatically — no separate cl_rescan call needed. Replaces the ENTIRE file, so for an append read the current body first. Also lifts the session's close-out learnings gate. HANDS-only; bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md) are refused.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "project": {
                         "type": "string",
-                        "description": "Project the proposed CL edit belongs to."
+                        "description": "Project the file belongs to (e.g. 'bot-hq'). Use '_globals' for cross-project files like eod.md."
                     },
                     "file_path": {
                         "type": "string",
-                        "description": "Target CL-relative file path within the project."
+                        "description": "CL-relative path within the project (e.g. 'notes.md', 'plans/2026-07-21-handoff.md')."
                     },
-                    "kind": {
+                    "content": {
                         "type": "string",
-                        "enum": ["add", "correct", "delete"],
-                        "description": "add = create a new file (rejected at filing if it already exists — use correct), correct = replace the full existing file, delete = propose removing an existing file."
-                    },
-                    "target_excerpt": {
-                        "type": "string",
-                        "description": "Optional evidence/context excerpt. For MVP correct proposals this is advisory only, not a patch anchor. Must be omitted/empty for add."
-                    },
-                    "proposed_body": {
-                        "type": "string",
-                        "description": "Complete proposed file body for add/correct proposals. Optional and ignored for delete proposals."
-                    },
-                    "evidence": {
-                        "type": "string",
-                        "description": "Why this CL change is warranted."
+                        "description": "Full file body to write. For existing files this replaces the whole file — read the current content first when appending."
                     }
                 },
-                "required": ["project", "file_path", "kind", "evidence"]
-            }),
-        },
-        ToolDescriptor {
-            name: "cl_list_proposals",
-            description: "List durable Context Library edit proposals for a project. Read-only; use it to inspect pending/resolved proposal state after cl_propose.",
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "project": {
-                        "type": "string",
-                        "description": "Project whose proposals should be listed."
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": ["open", "approved", "rejected"],
-                        "description": "Optional proposal lifecycle filter."
-                    }
-                },
-                "required": ["project"]
+                "required": ["project", "file_path", "content"]
             }),
         },
         ToolDescriptor {

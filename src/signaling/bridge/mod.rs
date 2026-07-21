@@ -35,9 +35,8 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
 mod cl_facade;
-mod cl_proposals;
-pub(crate) use cl_proposals::detect_conflict;
 mod cl_refs;
+mod cl_write;
 mod findings;
 mod session_docs;
 mod terminal_tools;
@@ -133,14 +132,6 @@ pub enum SignalingEvent {
     /// The UI refetches the per-session findings banner so the ⚠ count is live.
     FindingsChanged {
         session_id: String,
-    },
-    /// A project's CL proposal queue changed (`cl_propose` filed, or a proposal
-    /// was approved/rejected). Filing + rejection are DB-only writes the CL
-    /// fs-watcher can't see, so the Context Manager badges need this explicit
-    /// event to stay live. (Approval also rewrites a CL file and thus fires
-    /// `cl:changed` too — the double invalidation is a harmless refetch.)
-    ClProposalsChanged {
-        project_id: String,
     },
     /// A session finished closing (after `core.close_session`). The UI
     /// navigates away from a now-closed session and refreshes its lists.
@@ -456,7 +447,7 @@ impl SignalingBridge {
             .retain(|_, p| p.choice.session_id != session_id);
     }
 
-    /// A3b: record that the agent ran `cl_rescan` OR filed a `cl_propose` this
+    /// A3b: record that the agent ran `cl_rescan` or `cl_write_file` this
     /// session — a proxy for "persisted a learnings delta", which lifts the
     /// close-delta gate.
     pub async fn mark_cl_rescan(&self, session_id: &str) {

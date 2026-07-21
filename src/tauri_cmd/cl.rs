@@ -2,7 +2,7 @@
 //! Context-Library tab + plugin manager + audit views all hit one surface.
 
 use crate::signaling::SignalingBridge;
-use crate::storage::{ClFolder, ClIndexEntry, ClProposal, Project, RetrievalStats, Storage};
+use crate::storage::{ClFolder, ClIndexEntry, Project, RetrievalStats, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -113,127 +113,6 @@ impl From<ClFolder> for ClFolderView {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct ClProposalView {
-    pub id: i64,
-    pub proposal_uid: String,
-    pub project: String,
-    pub file_path: String,
-    pub kind: String,
-    pub target_excerpt: Option<String>,
-    pub proposed_body: String,
-    pub evidence: String,
-    pub status: String,
-    pub proposed_by: String,
-    pub session_id: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    /// Live divergence between the proposal and the CL, computed at list
-    /// time for OPEN rows: "exists" (add whose target appeared), "missing"
-    /// (correct/delete whose target vanished), "stale_base" (target changed
-    /// since filing). None = no conflict detected (or resolved row).
-    pub conflict: Option<String>,
-    /// Other OPEN proposals targeting the same file — competing suggestions
-    /// the user reviews together. 0 for resolved rows.
-    pub open_siblings: u32,
-}
-
-impl From<ClProposal> for ClProposalView {
-    fn from(p: ClProposal) -> Self {
-        Self {
-            id: p.id,
-            proposal_uid: p.proposal_uid,
-            project: p.project_id,
-            file_path: p.file_path,
-            kind: p.kind,
-            target_excerpt: p.target_excerpt,
-            proposed_body: p.proposed_body,
-            evidence: p.evidence,
-            status: p.status,
-            proposed_by: p.proposed_by,
-            session_id: p.session_id,
-            created_at: p.created_at,
-            updated_at: p.updated_at,
-            conflict: None,
-            open_siblings: 0,
-        }
-    }
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn cl_list_proposals(
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
-    project: String,
-    status: Option<String>,
-) -> Result<Vec<ClProposalView>, AppError> {
-    let rows = bridge.cl_list_proposals(project.clone(), status).await?;
-    // Open-proposal counts per file — the "competing suggestions" signal.
-    let mut open_counts: std::collections::HashMap<String, u32> =
-        std::collections::HashMap::new();
-    for row in rows.iter().filter(|r| r.status == "open") {
-        *open_counts.entry(row.file_path.clone()).or_default() += 1;
-    }
-    let root = bridge.cl_project_root(&project).await;
-    let mut views = Vec::with_capacity(rows.len());
-    for row in rows {
-        // Advisory in the list — a failed check must not take down the whole
-        // queue (approval recomputes authoritatively and is the hard gate).
-        let conflict = match (&root, row.status.as_str()) {
-            (Some(root), "open") => crate::signaling::detect_conflict(
-                root,
-                &row.file_path,
-                &row.kind,
-                row.base_hash.as_deref(),
-            )
-            .await
-            .unwrap_or(None)
-            .map(|c| c.as_str().to_string()),
-            _ => None,
-        };
-        let open_siblings = if row.status == "open" {
-            open_counts.get(&row.file_path).copied().unwrap_or(1).saturating_sub(1)
-        } else {
-            0
-        };
-        let mut view = ClProposalView::from(row);
-        view.conflict = conflict;
-        view.open_siblings = open_siblings;
-        views.push(view);
-    }
-    Ok(views)
-}
-
-/// `force` is the explicit user override for a conflicted proposal (replace an
-/// existing file / create a missing one / proceed past base drift) — the UI
-/// only sends it from a conflict-labelled button, never as a default.
-#[tauri::command]
-#[specta::specta]
-pub async fn cl_approve_proposal(
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
-    app: tauri::AppHandle,
-    proposal_uid: String,
-    force: Option<bool>,
-) -> Result<String, AppError> {
-    let result = bridge
-        .approve_cl_proposal(proposal_uid, force.unwrap_or(false))
-        .await?;
-    emit_cl_changed(&app, None);
-    Ok(result)
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn cl_reject_proposal(
-    bridge: tauri::State<'_, Arc<SignalingBridge>>,
-    app: tauri::AppHandle,
-    proposal_uid: String,
-) -> Result<String, AppError> {
-    let result = bridge.reject_cl_proposal(proposal_uid).await?;
-    emit_cl_changed(&app, None);
-    Ok(result)
-}
-
 /// Aggregated `cl_retrieve` telemetry for the Context Library measurement card
 /// (Stage 4b). Mirrors [`crate::storage::RetrievalStats`]; the ratios are the
 /// "is the CL helping" signals — avg tokens/session is the tokens-per-task
@@ -267,30 +146,6 @@ impl From<RetrievalStats> for RetrievalStatsView {
             empty_return_rate: s.empty_return_rate,
         }
     }
-}
-
-/// One project's open-proposal tally for the Context Manager sidebar badges.
-/// Projects with zero open proposals are absent from the list.
-#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
-pub struct ClProposalCountView {
-    pub project_id: String,
-    pub open_count: i64,
-}
-
-/// Open-proposal counts per project in one call — feeds the Context Manager
-/// sidebar badges and the subtab pill's cross-project sum. Kept fresh by the
-/// `cl:proposals_changed` event (filing/rejection are DB-only writes the CL
-/// fs-watcher can't see).
-#[tauri::command]
-#[specta::specta]
-pub async fn cl_proposal_counts(
-    storage: tauri::State<'_, Arc<Storage>>,
-) -> Result<Vec<ClProposalCountView>, AppError> {
-    let rows = storage.count_open_cl_proposals_by_project().await?;
-    Ok(rows
-        .into_iter()
-        .map(|(project_id, open_count)| ClProposalCountView { project_id, open_count })
-        .collect())
 }
 
 /// Read-side telemetry for the Library measurement card. `project` scopes to one

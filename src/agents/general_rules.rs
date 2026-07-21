@@ -64,7 +64,7 @@ bot-hq runs a global keyword gate over your Bash tool calls (configured in Setti
 
 Trivial tasks (a one-liner answer, a quick lookup, a question with no code change) don't need the index. The discipline applies to *substantive* work — the same threshold as IPAV. When in doubt, open it.
 
-The index returns lightweight `{file_path, description, tags, updated_at}` rows — the CL's table of contents. **To pull CL content on a topic, `cl_retrieve(project, query)` is the first move, not `Read`:** it returns the ranked atom bodies matching your query inline under a token budget, so the relevant sections of `conventions.md` / `decisions.md` / audit-notes arrive without spending context on whole files. `Read` a full CL file only as the fallback — retrieval missed, or you genuinely need the entire document. Atoms are **advisory; reality wins** — verify against the live code/tests, then file a correction via `cl_propose`.
+The index returns lightweight `{file_path, description, tags, updated_at}` rows — the CL's table of contents. **To pull CL content on a topic, `cl_retrieve(project, query)` is the first move, not `Read`:** it returns the ranked atom bodies matching your query inline under a token budget, so the relevant sections of `conventions.md` / `decisions.md` / audit-notes arrive without spending context on whole files. `Read` a full CL file only as the fallback — retrieval missed, or you genuinely need the entire document. Atoms are **advisory; reality wins** — verify against the live code/tests, then correct the CL directly via `cl_write_file` (HANDS; EYES flags it in chat instead).
 
 **CL is study notes, not a textbook.** It holds what the *code doesn't carry* — a where-things-live map (feature -> the 2-3 files + entry points), conventions, gotchas, and *why it's weird here*. Lean on it to jump straight to the handful of files that matter instead of digesting the tree: read the index + `cl_folder_search` map, then `cl_retrieve` the topics it surfaces (`Read` a pointed-at file whole only when you need all of it). If a fact is recoverable by `grep` in seconds it doesn't belong in CL — so when you DO write to CL, keep it to high-signal one-liners. (Some projects keep this map in-repo — e.g. an `ARCHITECTURE.md` — and then the CL's job is to point you there, not duplicate it.)
 
@@ -73,21 +73,21 @@ Tools:
 - `cl_index_search(project, query?)` — list relevant CL files. Pass your session's working project name (e.g. `\"acme-app\"`) for project-scoped notes. Pass `\"_globals\"` for system rules + cross-project files. Omit `project` to search everything. Optional `query` does a case-insensitive substring filter across file_path/description/tags.
 - `cl_folder_search(project, query?)` — parallel to `cl_index_search` but for FOLDERS instead of files. Returns `{folder_path, description, tags, updated_at}` so you can scope a sweep before pulling individual files. `folder_path = \"\"` rows are project-root descriptions.
 - `cl_retrieve(project, query, paths?, budget_tokens?)` — ranked CL CONTENT: returns the best-matching atom bodies inline under a token budget (default 3000). The 95% path for pulling CL knowledge on a topic; atoms flagged `⚠ possibly stale` cite code that drifted — verify before trusting.
-- `cl_propose(project, file_path, kind, evidence, proposed_body, target_excerpt?)` — file a durable CL edit proposal (`add` new file | `correct` full-file replacement | `delete` remove file). Non-mutating; the user approves in the review queue. Filing is validated against the live CL: `add` is rejected when the file already exists (use `correct`), `correct`/`delete` when it doesn't (use `add`) — the error names the fix, so re-file with the right kind. A base snapshot is taken at filing; approval flags proposals whose file changed afterward. `cl_list_proposals(project, status?)` inspects the queue.
+- `cl_write_file(project, file_path, content)` — create or replace a CL file with the FULL new body (read the current body first when appending). Guarded (stays inside the project's CL root; bot-hq-owned `_globals` system files refused), atomic, creates missing parent folders, auto-rescans the index, and lifts the close-out gate — no separate `cl_rescan` needed. HANDS-only; EYES reviews instead of writing.
 - `cl_register_read(project, file_path)` — optional audit insert after reading a file. Powers a future \"what context did this agent have?\" view. Fire-and-forget.
 - `cl_register_folder_description(project, folder_path, description, tags?)` — write a folder description. HANDS (brian) can call this; Rain is denied (read folder descriptions via `cl_folder_search`).
 - `cl_rescan(project)` — re-stat the project's CL directory after you've created a file via `Bash`/`Write` so the index picks it up. Cheap, idempotent.
 
 **`_globals` is not a real working project** — it's a bucket for system-level CL (custom rules, agent custom instructions). When you see a result with `project: \"_globals\"` in `cl_index_search`, treat the file as cross-cutting, not as belonging to a specific project.
 
-## Keeping the CL fresh — propose, don't mutate
+## Keeping the CL fresh — write the delta at close
 
-So the next session doesn't re-discover what this one learned, the HANDS agent files a small learnings proposal before the session closes. **Agents PROPOSE; the user approves/rejects in the review queue — agents never mutate CL canon directly.** The CL is NOT git-tracked, so a direct write is permanent; a proposal is safe and reversible.
+So the next session doesn't re-discover what this one learned, the HANDS agent writes a small learnings delta before the session closes. **Writes are direct and immediate — there is no review queue.** That cuts both ways: the write is permanent, so be deliberate about what you persist and never drop existing content.
 
 - **Trigger:** right before calling `close_session` (after the user approves the close).
 - **What:** at most ~5 one-line, NON-OBVIOUS discoveries — a gotcha, a where-things-live pointer, a convention you had to infer. If `grep` surfaces it in seconds, leave it out.
-- **How:** call `cl_propose(project, file_path, kind, evidence, proposed_body)`. To add a learning to an existing file (e.g. `notes.md`): read its current body, append your delta under the `## Learnings` area, and propose `kind=\"correct\"` with `proposed_body` = the FULL replacement text (`correct` replaces the whole file, so keep the existing content verbatim — never drop it). For a brand-new file use `kind=\"add\"`. Filing validates against the live CL — a wrong kind is rejected with the fix named, and other sessions' edits after you file get flagged to the user as staleness, so read the CURRENT body right before proposing. Inspect the queue with `cl_list_proposals(project, status=\"open\")`.
-- **Propose, don't mutate:** the proposal lands in the review queue; the user approves it (which writes it back AND re-indexes) or prunes it in the Context Library tab. No agent-side `cl_rescan` is needed — approval owns the write-back. Keep it tight — CL must stay lighter than the codebase or it loses its purpose.
+- **How:** call `cl_write_file(project, file_path, content)`. To add a learning to an existing file (e.g. `notes.md`): read its CURRENT body right before writing (another session may have touched it), append your delta under the `## Learnings` area, and write the FULL replacement text — `cl_write_file` replaces the whole file, so keep the existing content verbatim, never drop it. For a brand-new file just pick a descriptive path and write it. The tool auto-rescans and lifts the close-out gate; no separate `cl_rescan` call.
+- **Care rules:** `decisions.md` is append-only — never rewrite history. Preserve the user's voice in files they authored. Keep it tight — CL must stay lighter than the codebase or it loses its purpose; the user prunes in the Context Library tab.
 
 ## Session-scoped documents
 
@@ -161,21 +161,22 @@ mod tests {
     }
 
     #[test]
-    fn cl_tools_list_enumerates_retrieve_and_propose() {
+    fn cl_tools_list_enumerates_retrieve_and_write() {
         // The enumerated "Tools:" list is the canonical signature reference
-        // agents scan; cl_retrieve / cl_propose were prose-only for a cycle
-        // (learnings-2026-06-29) and got missed. Keep them listed.
+        // agents scan; cl_retrieve was prose-only for a cycle
+        // (learnings-2026-06-29) and got missed. Keep the write path listed
+        // too — it replaced the proposal queue (2026-07-21).
         assert!(
             GENERAL_RULES.contains("`cl_retrieve(project, query, paths?, budget_tokens?)`"),
             "Tools list must enumerate cl_retrieve with its signature"
         );
         assert!(
-            GENERAL_RULES.contains("`cl_propose(project, file_path, kind, evidence"),
-            "Tools list must enumerate cl_propose with its signature"
+            GENERAL_RULES.contains("`cl_write_file(project, file_path, content)`"),
+            "Tools list must enumerate cl_write_file with its signature"
         );
         assert!(
-            GENERAL_RULES.contains("`cl_list_proposals(project, status?)`"),
-            "Tools list must mention the proposal queue read side"
+            !GENERAL_RULES.contains("cl_propose"),
+            "the proposal queue is removed — no cl_propose references may remain"
         );
     }
 
@@ -253,16 +254,20 @@ mod tests {
     }
 
     #[test]
-    fn cl_close_loop_is_propose_dont_mutate_and_bounded() {
-        // The session-close freshness loop: bounded, proposed (not mutated),
-        // pruned by the user later.
+    fn cl_close_loop_is_direct_write_and_bounded() {
+        // The session-close freshness loop: bounded, written directly via
+        // cl_write_file (the proposal queue is gone), pruned by the user later.
         assert!(
-            GENERAL_RULES.contains("propose, don't mutate"),
+            GENERAL_RULES.contains("write the delta at close"),
             "CL section must carry the close-time freshness loop"
         );
         assert!(
             GENERAL_RULES.contains("NON-OBVIOUS discoveries"),
             "close-loop must bound the delta to non-obvious discoveries"
+        );
+        assert!(
+            GENERAL_RULES.contains("read its CURRENT body right before writing"),
+            "close-loop must require re-reading before the full-body write"
         );
     }
 

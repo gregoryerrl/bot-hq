@@ -65,10 +65,6 @@ pub fn builder() -> Builder<tauri::Wry> {
         cl::cl_index_search,
         cl::cl_folder_search,
         cl::cl_rescan,
-        cl::cl_list_proposals,
-        cl::cl_proposal_counts,
-        cl::cl_approve_proposal,
-        cl::cl_reject_proposal,
         cl::cl_retrieval_stats,
         cl::list_projects,
         cl::cl_read_file,
@@ -153,8 +149,7 @@ mod tests {
         let body = std::fs::read_to_string(&out).expect("read generated TS");
         // Sanity: a few of the command names should appear in the bindings.
         assert!(body.contains("createSession") || body.contains("create_session"));
-        assert!(body.contains("clListProposals") || body.contains("cl_list_proposals"));
-        assert!(body.contains("clApproveProposal") || body.contains("cl_approve_proposal"));
-        assert!(body.contains("clRejectProposal") || body.contains("cl_reject_proposal"));
+        assert!(body.contains("clWriteFile") || body.contains("cl_write_file"));
+        assert!(body.contains("clRetrievalStats") || body.contains("cl_retrieval_stats"));
     }
 }

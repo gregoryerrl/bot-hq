@@ -307,57 +307,6 @@ pub struct Finding {
     pub eyes_approved: i64,
 }
 
-/// Lifecycle status of a CL proposal. Proposal creation is non-mutating; only
-/// host-mediated approval/rejection moves a row out of `Open`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClProposalStatus {
-    Open,
-    Approved,
-    Rejected,
-}
-
-impl ClProposalStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ClProposalStatus::Open => "open",
-            ClProposalStatus::Approved => "approved",
-            ClProposalStatus::Rejected => "rejected",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "open" => ClProposalStatus::Open,
-            "approved" => ClProposalStatus::Approved,
-            "rejected" => ClProposalStatus::Rejected,
-            _ => return None,
-        })
-    }
-}
-
-/// A durable project-scoped Context Library edit proposal. `session_id` is
-/// audit-only; proposal lifecycle is tied to `project_id`, not session close.
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
-pub struct ClProposal {
-    pub id: i64,
-    pub proposal_uid: String,
-    pub project_id: String,
-    pub file_path: String,
-    pub kind: String,
-    pub target_excerpt: Option<String>,
-    pub proposed_body: String,
-    pub evidence: String,
-    pub status: String,
-    pub proposed_by: String,
-    pub session_id: Option<String>,
-    /// sha256 hex of the target file at propose time (correct/delete only).
-    /// NULL = no drift detection possible (add proposals + pre-0033 rows).
-    pub base_hash: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 /// Aggregated `retrieval_events` telemetry (Stage 4b measurement). Raw counts
 /// come from SQL; the ratios are derived in Rust to dodge SQL float/NULL edge
 /// cases. See [`Storage::retrieval_stats`](crate::storage::Storage::retrieval_stats).
