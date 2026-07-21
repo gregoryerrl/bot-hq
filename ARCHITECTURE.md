@@ -228,8 +228,7 @@ parser `parse_diff_lines`), consumed by `DocumentPane.tsx`.
 
 **Context Library tab:** two Settings-style subtabs — **Library Tree** |
 **Context Manager** — whose pill row is the page header (no panel repeats
-its label; the Context Manager pill carries the cross-project open-proposal
-count badge, kept live by `cl:proposals_changed`).
+its label).
 
 *Library Tree* — 2-pane file explorer + tabbed editor. The tree renders
 nested collapsible folders (`cl_index_search` + `cl_folder_search`) with
@@ -256,16 +255,12 @@ inputs (working-repo, cl_path) use a native folder picker via
 repo directly (no pre-registration).
 
 *Context Manager* — the per-project management surface (NOT a file
-explorer): a left rail of registered projects (`_globals` pinned last) with
-open-proposal badges (`cl_proposal_counts`), and a right panel for the
-selected project — header strip (repo path, per-project Rescan, Maintain CL
-preselecting the project) over **Proposals** | **Measurement** inner pills.
-Proposals = the review docket for agent-filed `cl_proposals` (approve /
-reject with full-body preview; `correct` warns it replaces the whole file,
-`delete` approval is deferred). Measurement = `cl_retrieval_stats` tiles
-over `retrieval_events` (tokens/session, tokens/retrieval, stale-hit +
-retrieval-miss rates). Default selection is the first project with open
-proposals.
+explorer): a left rail of registered projects (`_globals` pinned last) and a
+right panel for the selected project — header strip (repo path, per-project
+Rescan, Maintain CL preselecting the project) over the **Measurement** card:
+`cl_retrieval_stats` tiles over `retrieval_events` (tokens/session,
+tokens/retrieval, stale-hit + retrieval-miss rates). Default selection is
+the first project.
 
 **Plugins tab:** Management UI (`PluginManager.tsx`) over
 `tauri_cmd/plugins.rs` — install is two-step (`preview_plugin_manifest`
@@ -345,15 +340,15 @@ submodule tree). Surface:
   knows which agent is calling.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (37)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (36)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `halt`, `advance_phase`, `request_phase_advance`,
 `request_approval`, `action_gate`, `check_commit_message`, `eyes_flag`,
 `disposition_finding`, `check_open_findings`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_search`,
-`session_doc_read`, `cl_index_search`, `cl_retrieve`, `cl_propose`,
-`cl_list_proposals`, `cl_register_read`, `cl_rescan`,
+`session_doc_read`, `cl_index_search`, `cl_retrieve`, `cl_write_file`,
+`cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`, `web_search`,
 `terminal_exec`, `terminal_read`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
@@ -635,10 +630,6 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   backing `cl_retrieve`. DERIVED + disposable: `cl_rescan` rebuilds it
   from disk; FTS5 column adds drop+recreate the table and the boot
   rescan repopulates.
-- `cl_proposals` (id PK, proposal_uid UNIQUE, project_id → projects,
-  file_path, kind add|correct|delete, proposed_body, evidence, status
-  open|approved|rejected, session_id audit-only; migration 0025) —
-  durable agent-filed CL edit proposals; host approval owns write-back.
 - `retrieval_events` (id PK, session_id/agent nullable audit, project_id,
   query, atom/token/stale counts, returned_atoms JSON; migration 0028,
   deliberately FK-free append-only telemetry) — one row per
@@ -709,16 +700,19 @@ agent):
 — the single source of truth shared by the storage resolver, policy
 resolver, and policy audit (so the `library/` location can't desync them).
 
-**CL canon mutates only by user action — agents PROPOSE.** Mid-session,
-CL changes come from the user via the Context Library tab. Agents file
-durable edit proposals with `cl_propose` (`add` new file | `correct`
-full-file replacement | `delete` — approval for delete is deferred);
-rows land in `cl_proposals` and the user approves/rejects them in the
-Library's Proposals docket (approval writes the file atomically and
-rescans). The session-close learnings delta (≤~5 non-obvious one-liners)
-rides the same path: propose-don't-mutate replaced the old direct
-`notes.md` append, and filing a proposal lifts the close-out nudge. No
-silent mid-session accumulation.
+**Agents write CL content directly via `cl_write_file`** (HANDS-only;
+EYES reviews instead of writing). The tool is a guarded create-or-replace
+inside the project's CL root: relative-path + traversal checks, a 1 MiB
+cap, atomic tmp+rename, mkdir-p for new subfolders, an automatic
+`cl_rescan`, and a refusal on bot-hq-owned `_globals` system files
+(`custom-instructions.md`, `custom-general-rules.md`, legacy `agents/`) so
+an agent can't rewrite its own standing rules. The session-close learnings
+delta (≤~5 non-obvious one-liners appended under `notes.md`'s
+`## Learnings` with the full replacement body) rides this path, and a
+`cl_write_file` lifts the close-out nudge exactly like `cl_rescan`. (The
+former `cl_propose` review queue — migration 0025 — was removed in 0035:
+in practice approvals were rubber-stamped, so the friction bought
+nothing. The user still edits any CL file in the Context Library tab.)
 
 **First-run init:** `templates/cl/` is baked into the binary. On first
 start (no `version.txt` in the data dir), bot-hq seeds the templates

@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-758 Rust tests passing (704 lib + 36 external MCP + 7 signaling + 11
-storage) plus 176 frontend Vitest. Release build clean. Version
+738 Rust tests passing (684 lib + 36 external MCP + 7 signaling + 11
+storage) plus 162 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -26,6 +26,41 @@ arc** (2026-07-18): Workspace | Context | Terminal, and the
 **performance optimization sweep** (2026-07-19, below).
 
 ---
+
+## 2026-07-21 — CL proposal queue removed; agents write the CL directly
+
+The `cl_propose` review queue (shipped in the CL v2 arc) is gone: in
+practice every proposal was approved unread, so the propose → review →
+approve loop added friction without safety. Agents now write CL content
+directly; user-side Library editing is unchanged.
+
+- **New `cl_write_file(project, file_path, content)` MCP tool**
+  (`bridge/cl_write.rs`, HANDS-only via `CL_MUTATE_TOOLS`): guarded
+  create-or-replace inside the project's CL root — relative-path +
+  traversal checks, 1 MiB cap, atomic tmp+rename, mkdir-p for new
+  subfolders, automatic `cl_rescan`, and it lifts the close-out learnings
+  nudge like `cl_rescan` does. Bot-hq-owned `_globals` system files
+  (`custom-instructions.md`, `custom-general-rules.md`, legacy `agents/`)
+  are refused so an agent can't rewrite its own standing rules.
+- **Proposal system removed end-to-end:** `storage/cl_proposals.rs` +
+  `ClProposal`/`ClProposalStatus` row types, `bridge/cl_proposals.rs`
+  (propose/list/approve/reject + conflict detection), both MCP
+  descriptors + dispatch arms, the four Tauri commands + views
+  (`cl_list_proposals`, `cl_approve_proposal`, `cl_reject_proposal`,
+  `cl_proposal_counts`), the `cl:proposals_changed` event chain, and the
+  frontend queue (ProposalQueue, proposalDiff, Context Manager
+  Proposals pill + badges, SessionContextTab docket tab). Migration
+  `0035` drops the `cl_proposals` table (historical rows discarded —
+  they were rubber-stamped approvals).
+- **Prompts re-pointed at direct writes:** the general-rules CL section
+  is now "Keeping the CL fresh — write the delta at close" (read the
+  CURRENT body, append under `## Learnings`, write the FULL replacement),
+  Brian's role close-out line, the `close_session` nudge, and the
+  Maintain-CL dispatch prompt (queue-triage step dropped) all point at
+  `cl_write_file`.
+- **Kept:** the measurement layer (`retrieval_events` + the Context
+  Manager Measurement card, `cl_reads` audit) and every user-side editor
+  surface.
 
 ## 2026-07-19 — performance optimization sweep (heat/lag on MBP 14)
 

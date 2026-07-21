@@ -283,6 +283,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `cl_folder_search(project, query?)` | Search CL folder descriptions (folder-level parallel to `cl_index_search`). |
 | `cl_register_read(project, file_path)` | Audit insert recording which CL file the agent read. |
 | `cl_register_folder_description(project, folder_path, …)` | Write a CL folder description (HANDS only). |
+| `cl_write_file(project, file_path, content)` | Create or replace a CL file directly (HANDS only; auto-rescans). |
 | `cl_rescan(project)` | Re-stat a project's CL directory after creating new files. |
 | `advance_phase(target)` | Move the IPAV phase chip yourself — no user gate. |
 | `request_phase_advance(target, reason)` | Request a user-acknowledged phase advance before an irreversible step. |
