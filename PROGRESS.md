@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-738 Rust tests passing (684 lib + 36 external MCP + 7 signaling + 11
-storage) plus 162 frontend Vitest. Release build clean. Version
+741 Rust tests passing (687 lib + 36 external MCP + 7 signaling + 11
+storage) plus 166 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -24,6 +24,50 @@ override tier**, **spawn_session capability**, **linked installs**, the
 **push-event + view-alignment paper-cuts**), and the **session subtabs
 arc** (2026-07-18): Workspace | Context | Terminal, and the
 **performance optimization sweep** (2026-07-19, below).
+
+---
+
+## 2026-07-22 — Stop is now pause-first; a stopped session can't wake itself
+
+The Stop button is multi-purpose via a **post-stop bar**, not a pre-menu:
+one instant click interrupts both agents exactly as before, but the
+session lands in a new **`Paused`** state instead of `Idle` — textarea
+open, plus "⏸ Paused — [Resume] [Close session]". Walk away (nothing
+auto-wakes a paused duo), type to steer (Send clears the latch and rides
+the existing preempt + reconcile machinery), Resume re-nudges both
+agents, Close routes to the existing force-close confirm. Origin: the
+user wanted a way to park a session before folding the laptop, plus a
+fix for "Stop sometimes doesn't fully stop."
+
+- **Root cause of "keeps working after Stop" (confirmed):** when an
+  agent didn't honor the interrupt within 2s, the SIGKILL fallback fired
+  and the pump's `Exited` handler best-effort forwarded the trailing
+  buffer — waking (respawning) the peer. The duo restarted itself after
+  the user believed it stopped.
+- **Structural fix:** the router now HOLDS all Forwards while
+  `cancelling || paused` (`ActivityTracker::holds_wakes`, read at
+  dispatch time inside the single router task; gate raised BEFORE the
+  interrupt fires). Held forwards still settle the sender idle so the
+  escalation window sees the interrupt land. `RouterCommand::FlushHeld`
+  (sent by `broadcast` after clearing the latch) releases them FIFO
+  behind the user's message.
+- **`SessionActivity::Paused`** (wire `"paused"`): priority
+  `cancelling > paused > awaiting > busy > idle`; ordering contract
+  set-cancelling-before-set-paused (latching first would flash an
+  input-enabled frame — caught by test).
+- **Answered tray questions can't restart a paused duo:**
+  `resolve_choice`'s OOB wake stashes into `pending_paused_wakes` while
+  paused; drained by the next `broadcast` behind the user's message.
+- **`resume_session`** (new tauri command): guard (live + paused) then
+  broadcast a host-authored resume notice — reuses auto-heal, preempt,
+  and the post-Stop reconcile directive wholesale.
+- Audit: every dispatch path already clears `awaiting` before waking
+  agents — the suspected AwaitingUser-masks-Busy window doesn't exist.
+- Tests: +5 Rust (derive matrix, wire lock, settle-to-Paused ordering,
+  idle-latch, router hold/flush-exactly-once), +4 Vitest (paused bar
+  render/resume-latch/close-routing/hidden-outside-paused).
+- Commits: `0d7e5c3` (Paused state), `c50cf4b` (latch + wake gating),
+  `5d718d9` (paused bar UI), `92d6249` (bindings).
 
 ---
 
