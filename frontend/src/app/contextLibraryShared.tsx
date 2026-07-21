@@ -243,26 +243,6 @@ export function RefreshIcon({ className }: { className?: string }) {
   );
 }
 
-export function ProposalsIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      className={cn("size-3.5", className)}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M5 4h14v5l-2 3H7L5 9V4z" />
-      <path d="M7 12v7h10v-7" />
-      <path d="M9 8h6" />
-      <path d="M9 16h6" />
-    </svg>
-  );
-}
-
 export function MeasurementIcon({ className }: { className?: string }) {
   return (
     <svg

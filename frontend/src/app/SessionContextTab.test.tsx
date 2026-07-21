@@ -45,14 +45,8 @@ vi.mock("@tauri-apps/api/core", () => ({
         return Promise.resolve(state.project ? files : []);
       case "cl_folder_search":
         return Promise.resolve([]);
-      case "cl_proposal_counts":
-        return Promise.resolve([
-          { project_id: "acme-app", open_count: 2 },
-        ]);
       case "cl_read_file":
         return Promise.resolve(state.fileContent);
-      case "cl_list_proposals":
-        return Promise.resolve([]);
       default:
         return Promise.resolve([]);
     }
@@ -94,9 +88,8 @@ describe("SessionContextTab", () => {
       binary: false,
     };
     renderTab();
-    // Project name chip + Proposals badge from cl_proposal_counts.
+    // Project name chip in the header strip.
     expect(await screen.findByText("acme-app")).toBeInTheDocument();
-    expect(screen.getByText("2")).toBeInTheDocument();
     // Tree: root file + nested folder file.
     fireEvent.click(await screen.findByRole("button", { name: /conventions\.md/ }));
     // findByDisplayValue waits out the cl_read_file query resolving into the
@@ -127,13 +120,5 @@ describe("SessionContextTab", () => {
       screen.getByRole("textbox", { name: "Edit conventions.md" }),
     ).toHaveAttribute("readonly");
     expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-  });
-
-  it("switches to the Proposals docket", async () => {
-    state.project = "acme-app";
-    renderTab();
-    fireEvent.click(await screen.findByRole("button", { name: /Proposals/ }));
-    // ProposalQueue renders (its empty state, since cl_list_proposals → []).
-    expect(await screen.findByText(/[Nn]o.*proposals/)).toBeInTheDocument();
   });
 });

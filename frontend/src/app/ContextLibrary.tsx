@@ -22,7 +22,7 @@ import { WorkspaceSidebar } from "./ContextLibrarySidebar";
 import { EditorArea } from "./ContextLibraryEditor";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
 import { MaintainCLModal } from "./MaintainCLModal";
-import { ContextManager, useProposalCounts } from "./ContextManager";
+import { ContextManager } from "./ContextManager";
 import { SubTabButton } from "../components/SubTabButton";
 import { cn } from "../lib/cn";
 import {
@@ -656,11 +656,9 @@ function LibraryTree() {
 
 // ============================================================================
 // ContextLibrary — subtab shell: "Library Tree" (file explorer + editor) |
-// "Context Manager" (per-project proposals + measurement). Mirrors the
-// Settings page's lazy-mount-then-keep pattern; the pill row IS the page
-// header, so neither panel repeats its label as a heading. The Context
-// Manager pill carries the cross-project open-proposal count so pending
-// reviews are visible the moment the page opens.
+// "Context Manager" (per-project retrieval measurement + maintenance).
+// Mirrors the Settings page's lazy-mount-then-keep pattern; the pill row IS
+// the page header, so neither panel repeats its label as a heading.
 // ============================================================================
 
 type ClSubTab = "tree" | "manager";
@@ -685,22 +683,13 @@ export function ContextLibrary() {
     }
   };
 
-  // Kept fresh by the `cl:proposals_changed` event (see Providers.tsx); shares
-  // its query key with the Context Manager's sidebar badges.
-  const { data: counts = [] } = useProposalCounts();
-  const totalOpen = counts.reduce((s, c) => s + c.open_count, 0);
-
   return (
     <div className="flex h-full flex-col bg-background">
       <div className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4">
         <SubTabButton active={tab === "tree"} onClick={() => select("tree")}>
           Library Tree
         </SubTabButton>
-        <SubTabButton
-          active={tab === "manager"}
-          onClick={() => select("manager")}
-          badge={totalOpen}
-        >
+        <SubTabButton active={tab === "manager"} onClick={() => select("manager")}>
           Context Manager
         </SubTabButton>
       </div>

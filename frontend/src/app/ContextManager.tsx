@@ -2,13 +2,7 @@ import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
-import type {
-  ClProposalCountView,
-  ClRescanReportView,
-  ProjectView,
-} from "../lib/bindings";
-import { SubTabButton } from "../components/SubTabButton";
-import { ProposalQueue } from "./ProposalQueue";
+import type { ClRescanReportView, ProjectView } from "../lib/bindings";
 import { MeasurementView } from "./MeasurementView";
 import { MaintainCLModal } from "./MaintainCLModal";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
@@ -17,31 +11,18 @@ import { WrenchIcon } from "../components/icons";
 
 // ============================================================================
 // ContextManager — the management half of the Context Library: a per-project
-// review surface (proposal docket + retrieval measurement), NOT a file
-// explorer. Left rail lists registered projects (including `_globals`) with
-// open-proposal badges; the right panel shows the selected project's docket
-// and measurement under inner pills. The "Context Manager" subtab pill is the
-// page header — nothing here repeats it.
+// maintenance surface (retrieval measurement + rescan + Maintain CL dispatch),
+// NOT a file explorer. Left rail lists registered projects (including
+// `_globals`); the right panel shows the selected project's measurement card.
+// The "Context Manager" subtab pill is the page header — nothing here repeats
+// it. Agents write the CL directly (cl_write_file); there is no review queue.
 // ============================================================================
-
-/** Open-proposal counts, shared with the shell's pill badge via query key. */
-export function useProposalCounts() {
-  return useTauriQuery<ClProposalCountView[]>("cl_proposal_counts", {});
-}
-
-type ManagerTab = "proposals" | "measurement";
 
 export function ContextManager() {
   const { data: projects = [] } = useTauriQuery<ProjectView[]>(
     "list_projects",
     {},
   );
-  const { data: counts = [], refetch: refetchCounts } = useProposalCounts();
-  const openByProject = useMemo(() => {
-    const m: Record<string, number> = {};
-    for (const c of counts) m[c.project_id] = c.open_count;
-    return m;
-  }, [counts]);
 
   // `_globals` last — it's the shared bucket, not a working project.
   const ordered = useMemo(() => {
@@ -51,16 +32,9 @@ export function ContextManager() {
   }, [projects]);
 
   const [selected, setSelected] = useState<string | null>(null);
-  // Default selection: the first project with open proposals (the thing the
-  // user most likely came here to handle), else the first project.
-  const active =
-    selected ??
-    ordered.find((p) => (openByProject[p.name] ?? 0) > 0)?.name ??
-    ordered[0]?.name ??
-    null;
+  const active = selected ?? ordered[0]?.name ?? null;
   const activeProject = ordered.find((p) => p.name === active) ?? null;
 
-  const [tab, setTab] = useState<ManagerTab>("proposals");
   const [registerOpen, setRegisterOpen] = useState(false);
   const [maintainOpen, setMaintainOpen] = useState(false);
 
@@ -94,7 +68,6 @@ export function ContextManager() {
             </p>
           ) : (
             ordered.map((p) => {
-              const open = openByProject[p.name] ?? 0;
               const isActive = p.name === active;
               return (
                 <button
@@ -111,14 +84,6 @@ export function ContextManager() {
                   <span className="truncate">
                     {p.display_name || p.name}
                   </span>
-                  {open > 0 && (
-                    <span
-                      title={`${open} open proposal${open === 1 ? "" : "s"}`}
-                      className="rounded-full bg-primary px-1.5 text-[10px] font-semibold leading-4 text-on-primary"
-                    >
-                      {open}
-                    </span>
-                  )}
                 </button>
               );
             })
@@ -139,7 +104,7 @@ export function ContextManager() {
         {activeProject == null ? (
           <div className="flex flex-1 items-center justify-center text-center">
             <p className="font-code-sm text-code-sm text-on-surface-variant">
-              Select a project to review its proposals and measurement.
+              Select a project to view its measurement.
             </p>
           </div>
         ) : (
@@ -185,34 +150,10 @@ export function ContextManager() {
               </div>
             </header>
 
-            <div className="flex flex-shrink-0 items-center gap-1 border-b border-outline-variant px-4">
-              <SubTabButton
-                active={tab === "proposals"}
-                onClick={() => setTab("proposals")}
-                badge={openByProject[activeProject.name] ?? 0}
-              >
-                Proposals
-              </SubTabButton>
-              <SubTabButton
-                active={tab === "measurement"}
-                onClick={() => setTab("measurement")}
-              >
-                Measurement
-              </SubTabButton>
-            </div>
-
-            {tab === "proposals" ? (
-              <ProposalQueue
-                key={activeProject.name}
-                project={activeProject.name}
-                onProjectChanged={() => refetchCounts()}
-              />
-            ) : (
-              <MeasurementView
-                key={activeProject.name}
-                project={activeProject.name}
-              />
-            )}
+            <MeasurementView
+              key={activeProject.name}
+              project={activeProject.name}
+            />
           </>
         )}
       </div>

@@ -36,9 +36,6 @@ function mockCommands(overrides: Record<string, unknown> = {}) {
   mockInvoke.mockImplementation(async (cmd: string) => {
     if (cmd in overrides) return overrides[cmd];
     if (cmd === "list_projects") return PROJECTS;
-    if (cmd === "cl_proposal_counts")
-      return [{ project_id: "beta", open_count: 3 }];
-    if (cmd === "cl_list_proposals") return [];
     if (cmd === "cl_retrieval_stats") return null;
     return [];
   });
@@ -58,55 +55,40 @@ function renderManager() {
 describe("ContextManager", () => {
   beforeEach(() => mockInvoke.mockReset());
 
-  it("lists projects with open-proposal badges, _globals last", async () => {
+  it("lists projects with _globals last and selects the first by default", async () => {
     mockCommands();
     renderManager();
 
-    const alpha = await screen.findByText("alpha");
-    // beta renders twice: its sidebar row + the auto-selected header strip.
-    expect(screen.getAllByText("beta").length).toBeGreaterThan(0);
+    // alpha renders twice: its sidebar row + the auto-selected header strip.
+    const alpha = await screen.findAllByText("alpha");
+    expect(alpha.length).toBeGreaterThan(0);
     // Named projects first; the `_globals` bucket is pinned last (its row
     // renders AFTER alpha's in document order).
     const globalsRow = screen.getByText("Global rules");
     expect(
-      alpha.compareDocumentPosition(globalsRow) &
+      alpha[0].compareDocumentPosition(globalsRow) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    // beta carries its open-proposal count.
-    expect(screen.getByTitle("3 open proposals")).toHaveTextContent("3");
+    // The first ordered project (alpha) is auto-selected — its header strip
+    // shows the bound working repo.
+    expect(await screen.findByText("/repos/alpha")).toBeInTheDocument();
   });
 
-  it("auto-selects the first project with open proposals", async () => {
+  it("renders the selected project's measurement card", async () => {
     mockCommands();
     renderManager();
 
-    // beta (3 open) wins the default selection over alpha (listed first, has
-    // a repo): the header strip shows beta's no-repo hint, not alpha's path.
-    expect(
-      await screen.findByText("no working repo bound"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("/repos/alpha")).not.toBeInTheDocument();
-  });
-
-  it("switches between Proposals and Measurement pills", async () => {
-    mockCommands();
-    renderManager();
-
-    // Proposals pill is the default — empty docket state renders.
-    expect(await screen.findByText("No open proposals")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /measurement/i }));
     expect(
       await screen.findByText("No retrievals logged yet"),
     ).toBeInTheDocument();
   });
 
-  it("selecting a project shows its docket", async () => {
+  it("switches selection to another project", async () => {
     mockCommands();
     renderManager();
 
-    fireEvent.click(await screen.findByText("alpha"));
-    expect(await screen.findByText("/repos/alpha")).toBeInTheDocument();
-    expect(await screen.findByText("No open proposals")).toBeInTheDocument();
+    fireEvent.click(await screen.findByText("beta"));
+    expect(await screen.findByText("no working repo bound")).toBeInTheDocument();
+    expect(screen.queryByText("/repos/alpha")).not.toBeInTheDocument();
   });
 });

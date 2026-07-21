@@ -8,14 +8,13 @@ describe("maintainClPrompt", () => {
     expect(p).toContain('cl_index_search(project="acme-app")');
   });
 
-  it("makes proposal-queue triage part of maintenance", () => {
+  it("applies edits via cl_write_file, with Bash+rescan only for removals", () => {
     const p = maintainClPrompt("acme-app");
-    // Triage first — direct writes stale the open queue.
-    expect(p).toContain('cl_list_proposals(project="acme-app", status="open")');
-    expect(p).toContain("stale");
-    // Resolution stays host-only; the session ends with recommendations.
-    expect(p).toContain("host-only");
-    expect(p).toContain("recommendation");
+    expect(p).toContain('cl_write_file(project="acme-app"');
+    expect(p).toContain('cl_rescan(project="acme-app")');
+    // The proposal queue is gone — maintenance writes directly, no triage.
+    expect(p).not.toContain("cl_propose");
+    expect(p).not.toContain("cl_list_proposals");
   });
 
   it("encodes the study-notes model, all four IPAV phases, and boundaries", () => {

@@ -9,9 +9,6 @@ import type {
   ClIndexEntryView,
   SessionProjectInfo,
 } from "../lib/bindings";
-import { SubTabButton } from "../components/SubTabButton";
-import { ProposalQueue } from "./ProposalQueue";
-import { useProposalCounts } from "./ContextManager";
 import {
   buildTree,
   FileIcon,
@@ -21,13 +18,10 @@ import {
 
 // ============================================================================
 // SessionContextTab — the session container's "Context" subtab: the Context
-// Library scoped to THIS session's project. Files = project tree + a lean
-// read-write editor; Proposals = the project's review docket (reuses
-// ProposalQueue). Quick access without leaving the session room — the full
+// Library scoped to THIS session's project — project tree + a lean read-write
+// editor. Quick access without leaving the session room — the full
 // cross-project surface stays in the Context Library page.
 // ============================================================================
-
-type ContextTab = "files" | "proposals";
 
 export function SessionContextTab({ sessionId }: { sessionId: string }) {
   const { data: info, isLoading } = useTauriQuery<SessionProjectInfo>(
@@ -36,13 +30,6 @@ export function SessionContextTab({ sessionId }: { sessionId: string }) {
     { enabled: !!sessionId },
   );
   const project = info?.project ?? null;
-
-  const [tab, setTab] = useState<ContextTab>("files");
-  const { data: counts = [], refetch: refetchCounts } = useProposalCounts();
-  const openCount = useMemo(
-    () => counts.find((c) => c.project_id === project)?.open_count ?? 0,
-    [counts, project],
-  );
 
   if (!project) {
     return (
@@ -58,31 +45,13 @@ export function SessionContextTab({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex flex-shrink-0 items-center gap-1 border-b border-outline-variant px-4">
-        <SubTabButton active={tab === "files"} onClick={() => setTab("files")}>
-          Files
-        </SubTabButton>
-        <SubTabButton
-          active={tab === "proposals"}
-          onClick={() => setTab("proposals")}
-          badge={openCount}
-        >
-          Proposals
-        </SubTabButton>
+      <div className="flex flex-shrink-0 items-center border-b border-outline-variant px-4 py-1.5">
         <span className="ml-auto truncate font-code-sm text-code-sm text-on-surface-variant">
           {project}
         </span>
       </div>
 
-      {tab === "files" ? (
-        <ProjectFiles project={project} />
-      ) : (
-        <ProposalQueue
-          key={project}
-          project={project}
-          onProjectChanged={() => refetchCounts()}
-        />
-      )}
+      <ProjectFiles project={project} />
     </div>
   );
 }

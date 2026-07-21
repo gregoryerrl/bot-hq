@@ -5,7 +5,7 @@ import { cn } from "../lib/cn";
  * Underline-style subtab pill shared by the Settings and Context Library
  * pages. The pill row doubles as the page/section header — panels under it
  * must NOT repeat the label as a heading. Optional `badge` renders a count
- * chip (hidden at 0) — e.g. open CL proposals on "Context Manager".
+ * chip (hidden at 0) — e.g. pending questions on a session tab.
  */
 export function SubTabButton({
   active,
