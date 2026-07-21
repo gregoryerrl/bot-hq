@@ -341,49 +341,6 @@ async clRescan(project: string) : Promise<Result<ClRescanReportView, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
-async clListProposals(project: string, status: string | null) : Promise<Result<ClProposalView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cl_list_proposals", { project, status }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Open-proposal counts per project in one call — feeds the Context Manager
- * sidebar badges and the subtab pill's cross-project sum. Kept fresh by the
- * `cl:proposals_changed` event (filing/rejection are DB-only writes the CL
- * fs-watcher can't see).
- */
-async clProposalCounts() : Promise<Result<ClProposalCountView[], AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cl_proposal_counts") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * `force` is the explicit user override for a conflicted proposal (replace an
- * existing file / create a missing one / proceed past base drift) — the UI
- * only sends it from a conflict-labelled button, never as a default.
- */
-async clApproveProposal(proposalUid: string, force: boolean | null) : Promise<Result<string, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cl_approve_proposal", { proposalUid, force }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async clRejectProposal(proposalUid: string) : Promise<Result<string, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cl_reject_proposal", { proposalUid }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 /**
  * Read-side telemetry for the Library measurement card. `project` scopes to one
  * CL project (None = all); `since` is an RFC3339 lower bound on `created_at`
@@ -1125,24 +1082,6 @@ truncated: boolean;
 binary: boolean }
 export type ClFolderView = { id: number; project_id: string; folder_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
 export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
-/**
- * One project's open-proposal tally for the Context Manager sidebar badges.
- * Projects with zero open proposals are absent from the list.
- */
-export type ClProposalCountView = { project_id: string; open_count: number }
-export type ClProposalView = { id: number; proposal_uid: string; project: string; file_path: string; kind: string; target_excerpt: string | null; proposed_body: string; evidence: string; status: string; proposed_by: string; session_id: string | null; created_at: string; updated_at: string; 
-/**
- * Live divergence between the proposal and the CL, computed at list
- * time for OPEN rows: "exists" (add whose target appeared), "missing"
- * (correct/delete whose target vanished), "stale_base" (target changed
- * since filing). None = no conflict detected (or resolved row).
- */
-conflict: string | null; 
-/**
- * Other OPEN proposals targeting the same file — competing suggestions
- * the user reviews together. 0 for resolved rows.
- */
-open_siblings: number }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
 /**
  * The full resolved view of the user's Claude Code config.
