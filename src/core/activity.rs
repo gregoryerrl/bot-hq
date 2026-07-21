@@ -23,6 +23,11 @@ pub enum SessionActivity {
     /// A cancel is in flight (kill issued, settling) — input DISABLED until it
     /// returns to `Idle`.
     Cancelling,
+    /// The user clicked Stop — agents interrupted and HELD. Input ENABLED (the
+    /// user steers by typing, resumes, or closes). Distinct from `Idle`: while
+    /// paused the router holds peer-forwards and out-of-band deliveries, so the
+    /// duo cannot wake itself; only a user action (Send / Resume) clears it.
+    Paused,
 }
 
 impl SessionActivity {
@@ -34,17 +39,28 @@ impl SessionActivity {
             SessionActivity::Busy => "busy",
             SessionActivity::AwaitingUser => "awaiting_user",
             SessionActivity::Cancelling => "cancelling",
+            SessionActivity::Paused => "paused",
         }
     }
 
-    /// Pure derivation from the four inputs. Priority (highest first):
-    /// `cancelling` > `awaiting` > `busy` (either agent) > `idle`. `cancelling`
-    /// wins so a kill-in-flight is never masked by residual busy; `awaiting`
-    /// wins over `busy` so a parked question re-opens input even though a turn
-    /// is technically still in flight.
-    pub fn derive(brian_busy: bool, rain_busy: bool, awaiting: bool, cancelling: bool) -> Self {
+    /// Pure derivation from the five inputs. Priority (highest first):
+    /// `cancelling` > `paused` > `awaiting` > `busy` (either agent) > `idle`.
+    /// `cancelling` wins so a kill-in-flight is never masked by residual busy;
+    /// `paused` wins over `awaiting`/`busy` so a Stop lands in Paused the moment
+    /// the interrupt settles (a straggler busy agent is about to be interrupted —
+    /// the commanded state is Paused); `awaiting` wins over `busy` so a parked
+    /// question re-opens input even though a turn is technically still in flight.
+    pub fn derive(
+        brian_busy: bool,
+        rain_busy: bool,
+        awaiting: bool,
+        cancelling: bool,
+        paused: bool,
+    ) -> Self {
         if cancelling {
             SessionActivity::Cancelling
+        } else if paused {
+            SessionActivity::Paused
         } else if awaiting {
             SessionActivity::AwaitingUser
         } else if brian_busy || rain_busy {
@@ -81,6 +97,11 @@ pub struct ActivityTracker {
     /// `mark_awaiting_user` / `ask_user_choice`). Read at derive time; a caller
     /// that flips it must also call [`refresh`](Self::refresh).
     awaiting: Arc<AtomicBool>,
+    /// The Stop/pause latch (interrupt lands the session in `Paused`, not
+    /// `Idle`). Unlike `awaiting` it is tracker-owned — no MCP tool flips it;
+    /// only core paths do, via [`set_paused`](Self::set_paused). The router
+    /// reads it (with `cancelling`) to gate forwards/deliveries.
+    paused: AtomicBool,
     bridge: Arc<SignalingBridge>,
     session_id: String,
 }
@@ -101,6 +122,7 @@ impl ActivityTracker {
                 last_rain_busy: false,
             }),
             awaiting,
+            paused: AtomicBool::new(false),
             bridge,
             session_id: session_id.into(),
         })
@@ -130,6 +152,28 @@ impl ActivityTracker {
         self.recompute_locked(&mut g);
     }
 
+    /// Latch (`true`) or release (`false`) the pause. Set alongside
+    /// `set_cancelling(true)` on Stop — when the interrupt settles the state
+    /// lands in `Paused` instead of `Idle`. Cleared by Resume, a user Send
+    /// (steer), or a supersede. Emits on change.
+    ///
+    /// ORDERING (Stop path): call `set_cancelling(true)` BEFORE this. Paused
+    /// outranks Busy, so latching first would emit a momentary `paused`
+    /// (input-enabled frame) before `cancelling` re-locks it. Cancelling-first
+    /// makes the latch silent until the interrupt settles. Locked by
+    /// `stop_settles_to_paused_not_idle`.
+    pub fn set_paused(&self, paused: bool) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        self.paused.store(paused, Ordering::Release);
+        self.recompute_locked(&mut g);
+    }
+
+    /// Whether the pause latch is set. The router's forward/delivery gate reads
+    /// this (alongside the cancelling flag) — see `holds_wakes` on the router.
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
     /// Re-derive + emit after the shared `awaiting` flag was flipped elsewhere
     /// (the dispatch path owns that flag; this reflects the change into activity).
     pub fn refresh(&self) {
@@ -145,6 +189,7 @@ impl ActivityTracker {
             g.rain_busy,
             self.awaiting.load(Ordering::Acquire),
             g.cancelling,
+            self.paused.load(Ordering::Acquire),
         )
     }
 
@@ -183,9 +228,10 @@ impl ActivityTracker {
     fn recompute_locked(&self, g: &mut Inner) {
         // A cancel auto-completes once BOTH agents have gone idle (the kill
         // settled) — clear `cancelling` so the state transitions
-        // Cancelling → Idle instead of sticking. Done BEFORE derive so the
-        // emitted state reflects it. (Set true by `set_cancelling` on Stop;
-        // the agents' pumps then clear their `busy` as they die.)
+        // Cancelling → Paused (Stop sets the pause latch) or → Idle, instead
+        // of sticking. Done BEFORE derive so the emitted state reflects it.
+        // (Set true by `set_cancelling` on Stop; the agents' pumps then clear
+        // their `busy` as they die.)
         if g.cancelling && !g.brian_busy && !g.rain_busy {
             g.cancelling = false;
         }
@@ -194,6 +240,7 @@ impl ActivityTracker {
             g.rain_busy,
             self.awaiting.load(Ordering::Acquire),
             g.cancelling,
+            self.paused.load(Ordering::Acquire),
         );
         // Fire on a change to the derived state OR to either per-agent flag —
         // the latter so a within-`Busy` transition (broadcast both-busy, peer
@@ -225,23 +272,46 @@ mod tests {
         assert_eq!(SessionActivity::Busy.as_str(), "busy");
         assert_eq!(SessionActivity::AwaitingUser.as_str(), "awaiting_user");
         assert_eq!(SessionActivity::Cancelling.as_str(), "cancelling");
+        assert_eq!(SessionActivity::Paused.as_str(), "paused");
     }
 
     #[test]
     fn derive_priority() {
         use SessionActivity::*;
         // idle: nothing set.
-        assert_eq!(SessionActivity::derive(false, false, false, false), Idle);
+        assert_eq!(SessionActivity::derive(false, false, false, false, false), Idle);
         // busy: either agent.
-        assert_eq!(SessionActivity::derive(true, false, false, false), Busy);
-        assert_eq!(SessionActivity::derive(false, true, false, false), Busy);
-        assert_eq!(SessionActivity::derive(true, true, false, false), Busy);
+        assert_eq!(SessionActivity::derive(true, false, false, false, false), Busy);
+        assert_eq!(SessionActivity::derive(false, true, false, false, false), Busy);
+        assert_eq!(SessionActivity::derive(true, true, false, false, false), Busy);
         // awaiting beats busy (parked question re-opens input mid-turn).
-        assert_eq!(SessionActivity::derive(true, true, true, false), AwaitingUser);
-        assert_eq!(SessionActivity::derive(false, false, true, false), AwaitingUser);
-        // cancelling beats everything.
-        assert_eq!(SessionActivity::derive(true, true, true, true), Cancelling);
-        assert_eq!(SessionActivity::derive(false, false, false, true), Cancelling);
+        assert_eq!(
+            SessionActivity::derive(true, true, true, false, false),
+            AwaitingUser
+        );
+        assert_eq!(
+            SessionActivity::derive(false, false, true, false, false),
+            AwaitingUser
+        );
+        // paused beats awaiting + busy (Stop is the commanded state, even for a
+        // straggler busy agent about to be interrupted / a parked question).
+        assert_eq!(SessionActivity::derive(false, false, false, false, true), Paused);
+        assert_eq!(SessionActivity::derive(true, true, false, false, true), Paused);
+        assert_eq!(SessionActivity::derive(true, true, true, false, true), Paused);
+        // cancelling beats everything, including paused (Stop sets both; the
+        // UI shows "Stopping…" until the interrupt settles, then Paused).
+        assert_eq!(
+            SessionActivity::derive(true, true, true, true, false),
+            Cancelling
+        );
+        assert_eq!(
+            SessionActivity::derive(false, false, false, true, false),
+            Cancelling
+        );
+        assert_eq!(
+            SessionActivity::derive(true, true, true, true, true),
+            Cancelling
+        );
     }
 
     fn activity_state(ev: &SignalingEvent) -> Option<&str> {
@@ -331,6 +401,43 @@ mod tests {
         let awaiting = Arc::new(AtomicBool::new(false));
         let t = ActivityTracker::new("s1", awaiting, bridge);
         t.set_cancelling(true);
+        assert_eq!(t.current(), SessionActivity::Idle);
+    }
+
+    #[tokio::test]
+    async fn stop_settles_to_paused_not_idle() {
+        // The Stop sequence: agents busy → Stop sets cancelling THEN paused
+        // (that order — see set_paused's ORDERING note; the latch must be
+        // silent while Cancelling holds the state) → both agents go idle →
+        // cancelling auto-clears → the session lands in "paused" (input
+        // enabled, duo held), NOT "idle".
+        let bridge = SignalingBridge::new();
+        let mut rx = bridge.subscribe();
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge.clone());
+        t.set_busy(Author::Brian, true);
+        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("busy"));
+        t.set_cancelling(true);
+        t.set_paused(true);
+        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("cancelling"));
+        t.set_busy(Author::Brian, false);
+        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("paused"));
+        assert!(t.is_paused());
+        // Resume releases the latch → Idle.
+        t.set_paused(false);
+        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("idle"));
+        assert!(!t.is_paused());
+    }
+
+    #[tokio::test]
+    async fn pause_while_idle_latches_immediately() {
+        // Stop on an already-idle duo (e.g. between turns): no cancelling to
+        // settle — the state flips straight to "paused" and holds until
+        // released. Guards the walk-away case landing before any busy flag.
+        let bridge = SignalingBridge::new();
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge);
+        t.set_paused(true);
+        assert_eq!(t.current(), SessionActivity::Paused);
+        t.set_paused(false);
         assert_eq!(t.current(), SessionActivity::Idle);
     }
 
