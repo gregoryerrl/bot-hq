@@ -169,9 +169,18 @@ impl ActivityTracker {
     }
 
     /// Whether the pause latch is set. The router's forward/delivery gate reads
-    /// this (alongside the cancelling flag) — see `holds_wakes` on the router.
+    /// this (alongside the cancelling flag) — see [`holds_wakes`](Self::holds_wakes).
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
+    }
+
+    /// The router's wake gate: while a cancel is settling OR the pause latch is
+    /// set, peer-forwards must be HELD, not delivered — a stopped session must
+    /// not wake itself (the Exited best-effort forward after a SIGKILL fallback
+    /// was exactly that bug). Read at dispatch time inside the router task.
+    pub fn holds_wakes(&self) -> bool {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.cancelling || self.paused.load(Ordering::Acquire)
     }
 
     /// Re-derive + emit after the shared `awaiting` flag was flipped elsewhere

@@ -641,8 +641,9 @@ async fn spawn_session_handle(
                 fwd_rain_to_brian: Arc::downgrade(&fwd_rain_to_brian),
             };
             (
-                Some(router_tx),
+                Some(router_tx.clone()),
                 Some(crate::core::RouterControl {
+                    tx: router_tx,
                     convergence_reset,
                     fwd_brian_to_rain,
                     fwd_rain_to_brian,

@@ -26,10 +26,10 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-/// A command from a pump to the router. One variant today (the extensible seam):
-/// a completed turn's buffered prose that MIGHT be forwarded to the peer.
+/// A command from a pump (or the session core) to the router.
 #[derive(Debug)]
 pub enum RouterCommand {
+    /// A completed turn's buffered prose that MIGHT be forwarded to the peer.
     Forward {
         /// The agent that produced the prose.
         from: Author,
@@ -38,6 +38,12 @@ pub enum RouterCommand {
         /// Whether the producing turn called `peer_ack` (suppress, don't volley).
         peer_ack: bool,
     },
+    /// Release the pause hold queue: re-run every held forward through the
+    /// normal ladder. Sent by `broadcast` after it clears the pause latch (a
+    /// user Send/Resume) — through the SAME channel as forwards, so held
+    /// entries flush in arrival order relative to each other. No-op when the
+    /// gate is still closed (a re-pause raced the flush) or nothing is held.
+    FlushHeld,
 }
 
 /// Everything the router task needs. The Arcs (`awaiting`, `user_silent_forwards`,
@@ -105,6 +111,12 @@ impl RouterDeps {
             activity.set_busy(author, false);
         }
     }
+
+    /// The Stop gate: hold (don't deliver) forwards while the session is
+    /// cancelling or paused. `None` activity (tests) never gates.
+    fn holds_wakes(&self) -> bool {
+        self.activity.as_ref().is_some_and(|a| a.holds_wakes())
+    }
 }
 
 /// Handle-side control + diagnostics for a duo session's router task. Stored as
@@ -112,6 +124,10 @@ impl RouterDeps {
 /// the Arcs/handle the SESSION side needs to touch the router; grows across the
 /// instrument+harden batches. Batch 1 carries the convergence-reset flag.
 pub struct RouterControl {
+    /// Session-side sender into the router's command channel. `broadcast` uses
+    /// it to send [`RouterCommand::FlushHeld`] after clearing the pause latch,
+    /// so held forwards release in channel order behind the user's message.
+    pub tx: mpsc::Sender<RouterCommand>,
     /// Shared with the router's [`RouterDeps`]. `broadcast` sets it true on a user
     /// message; the router consumes it to clear its convergence streak.
     pub convergence_reset: Arc<AtomicBool>,
@@ -174,6 +190,14 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
     // just to seed the next comparison (O2).
     let mut last_forward: Option<HashSet<String>> = None;
     let mut similar_streak: u32 = 0;
+    // Pause hold queue: forwards that arrived while the session was cancelling/
+    // paused (the Stop gate). Naturally bounded — each agent emits at most one
+    // trailing forward (final TurnComplete or Exited) as the interrupt settles,
+    // and a paused duo produces nothing new. Flushed FIFO by `FlushHeld`; a
+    // forward arriving AFTER the gate reopens but BEFORE the flush command can
+    // deliver ahead of held entries — accepted, the held ones are stale partials
+    // and the resume notice precedes both on each agent's stdin.
+    let mut held: Vec<(Author, String, bool)> = Vec::new();
     while let Some(cmd) = rx.recv().await {
         match cmd {
             RouterCommand::Forward {
@@ -181,6 +205,21 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                 body,
                 peer_ack,
             } => {
+                // The Stop gate, read at dispatch time inside this single task
+                // (check-then-act can't interleave with another forward). Held
+                // forwards still settle the sender idle — the pump delegated
+                // self-idle to us, and `await_both_idle` must see the interrupt
+                // land or the escalation SIGKILLs an already-stopped agent.
+                if deps.holds_wakes() {
+                    debug!(
+                        agent = ?from,
+                        held = held.len() + 1,
+                        "router: session cancelling/paused; holding forward"
+                    );
+                    deps.set_idle(from);
+                    held.push((from, body, peer_ack));
+                    continue;
+                }
                 route_forward(
                     &deps,
                     &mut last_forward,
@@ -190,6 +229,25 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                     peer_ack,
                 )
                 .await;
+            }
+            RouterCommand::FlushHeld => {
+                // Still gated (a re-pause raced this flush)? Keep holding — the
+                // next broadcast sends another FlushHeld.
+                if deps.holds_wakes() || held.is_empty() {
+                    continue;
+                }
+                debug!(count = held.len(), "router: flushing held forwards");
+                for (from, body, peer_ack) in held.drain(..) {
+                    route_forward(
+                        &deps,
+                        &mut last_forward,
+                        &mut similar_streak,
+                        from,
+                        body,
+                        peer_ack,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -626,6 +684,73 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn paused_holds_forwards_and_flush_delivers_exactly_once() {
+        // The Stop gate end-to-end. While cancelling/paused a Forward is HELD:
+        // the peer never wakes (the Exited best-effort forward after a SIGKILL
+        // arrives as this same RouterCommand::Forward — the confirmed
+        // "keeps working after Stop" bug), but the SENDER still settles idle so
+        // `await_both_idle` sees the interrupt land instead of escalating to a
+        // SIGKILL on an already-stopped agent. The session then derives Paused.
+        // After the latch clears, FlushHeld delivers the held forward EXACTLY
+        // once — regardless of how a FlushHeld sent while still gated races the
+        // unpause (it either no-ops on a closed gate or performs the one flush;
+        // the final delivered count is 1 either way, and the second FlushHeld
+        // finds the queue empty).
+        use crate::signaling::SignalingBridge;
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, mut rrx) = mpsc::channel(64);
+        let bridge = SignalingBridge::new();
+        let tracker = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge);
+        let mut d = deps(
+            btx,
+            Some(rtx),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        d.activity = Some(Arc::clone(&tracker));
+        let (tx, rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_router(d, rx));
+
+        // Brian is mid-turn when the user clicks Stop (cancelling first, then
+        // the pause latch — the ordering contract).
+        tracker.set_busy(Author::Brian, true);
+        tracker.set_cancelling(true);
+        tracker.set_paused(true);
+        // His dying turn's forward arrives at the gated router.
+        tx.send(fwd(Author::Brian, "partial work before the stop"))
+            .await
+            .unwrap();
+        // A FlushHeld racing in while (probably) still gated must not lose the
+        // held forward or double-deliver it.
+        tx.send(RouterCommand::FlushHeld).await.unwrap();
+        // The held forward must settle the sender idle → cancelling auto-clears
+        // → the session derives Paused. Poll (the router task runs async).
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1000);
+        assert!(
+            tracker.await_both_idle(deadline).await,
+            "a held forward must still settle the sender idle"
+        );
+        assert_eq!(
+            tracker.current(),
+            crate::core::activity::SessionActivity::Paused,
+            "after the interrupt settles the session derives Paused"
+        );
+        // User resumes: latch clears, flush releases the held forward.
+        tracker.set_paused(false);
+        tx.send(RouterCommand::FlushHeld).await.unwrap();
+        drop(tx);
+        task.await.unwrap();
+        let mut delivered = 0;
+        while rrx.try_recv().is_ok() {
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered, 1,
+            "the held forward reaches the peer exactly once, only after the latch clears"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn dropping_router_control_aborts_the_task() {
         // Explicit teardown: dropping the RouterControl (which happens whenever the
         // session handle is removed — close / evict / restart) must abort the
@@ -633,6 +758,7 @@ mod tests {
         let task = tokio::spawn(std::future::pending::<()>());
         let abort_handle = task.abort_handle();
         let rc = RouterControl {
+            tx: mpsc::channel(1).0,
             convergence_reset: Arc::new(AtomicBool::new(false)),
             fwd_brian_to_rain: Arc::new(AtomicU64::new(0)),
             fwd_rain_to_brian: Arc::new(AtomicU64::new(0)),

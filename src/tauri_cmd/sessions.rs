@@ -545,6 +545,20 @@ pub async fn cancel_session_turn(
     Ok(())
 }
 
+/// Resume a paused session (the Paused bar's Resume button). Releases the pause
+/// latch by broadcasting a host-authored resume notice; held peer-forwards and
+/// OOB answer wakes flush in behind it, and the post-Stop reconcile directive
+/// rides the same message. No-op if the session isn't live or isn't paused.
+#[tauri::command]
+#[specta::specta]
+pub async fn resume_session(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+) -> Result<(), AppError> {
+    core.resume_session(&session_id).await?;
+    Ok(())
+}
+
 /// Force-restart a live session's agents so they pick up a Claude-config change
 /// (overrides + inherited settings are read at spawn). Unlike `respawn_session`
 /// this is NOT a no-op on a healthy session — it evicts and re-spawns. Agents

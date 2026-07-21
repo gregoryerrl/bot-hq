@@ -25,6 +25,14 @@ const RECONCILE_DIRECTIVE: &str = "[System: your previous turn was force-interru
      stale lock files or partial writes the interrupted operation may have left (e.g. a leftover \
      .git/index.lock).]";
 
+/// The host-authored notice `resume_session` broadcasts when the user clicks
+/// Resume on a paused session. Travels the normal `broadcast` path, so the
+/// reconcile directive (if the pause came from a Stop) is prepended wire-only,
+/// and any held peer-forwards / OOB answers flush in behind it.
+const RESUME_NOTICE: &str = "▶ Resumed. Continue exactly where you left off — \
+     finish your in-flight task. Any peer messages or question answers held \
+     during the pause follow this notice; fold them in before proceeding.";
+
 /// How long to wait for an interrupted agent to honor a `control_request` and go
 /// idle before escalating to a SIGKILL. The interrupt keeps the process alive
 /// (warm cache, no respawn); the SIGKILL fallback covers a dropped interrupt or a
@@ -115,6 +123,12 @@ pub struct AppState {
     /// it, prepending a wire-only directive so the resumed agent verifies the
     /// workspace (lock files / partial writes) before acting on the new message.
     pending_reconcile: Mutex<HashSet<String>>,
+    /// Out-of-band wakes (answered tray questions) that arrived while the
+    /// session was PAUSED — an answer must not restart a paused duo, but it
+    /// must not be lost either. `resolve_choice` stashes the wire body here
+    /// instead of waking stdin; the next `broadcast` (a user Send / Resume)
+    /// drains it to both agents after the user's message.
+    pending_paused_wakes: Mutex<std::collections::HashMap<String, Vec<String>>>,
     /// Per-session PTY terminals (Terminal subtab). Lazily spawned on first
     /// `terminal_open`, killed on `close_session`. Shared as an `Arc` so the
     /// signaling bridge's MCP handlers can reach the same PTYs.
@@ -137,6 +151,7 @@ impl AppState {
             app_handle: std::sync::OnceLock::new(),
             fs_watcher: std::sync::OnceLock::new(),
             pending_reconcile: Mutex::new(HashSet::new()),
+            pending_paused_wakes: Mutex::new(std::collections::HashMap::new()),
             terminals: Arc::new(crate::core::TerminalRegistry::new()),
         }
     }
@@ -273,9 +288,13 @@ impl AppState {
                 return Ok(CancelOutcome::Done); // not live → no-op
             };
             // Mark Cancelling FIRST → the UI shows "Cancelling…" + keeps the
-            // input locked for the whole kill window (immediate or deferred). It
-            // auto-clears to Idle in the tracker once both pumps go idle.
+            // input locked for the whole kill window (immediate or deferred).
+            // Then latch the pause (that order — see set_paused's ORDERING
+            // note): once both pumps go idle the tracker auto-clears
+            // cancelling and the session lands in Paused, not Idle — input
+            // enabled, duo held until the user steers, resumes, or closes.
             handle.activity.set_cancelling(true);
+            handle.activity.set_paused(true);
             // A fresh cancel begins un-superseded; `broadcast` flips this true if a
             // user message arrives during the escalation window (then the SIGKILL
             // is skipped). Reset here so a prior supersede can't suppress THIS kill.
@@ -296,6 +315,26 @@ impl AppState {
             }
             None => Ok(CancelOutcome::Interrupting),
         }
+    }
+
+    /// Resume a paused session (the Paused bar's Resume button). Releases the
+    /// latch by broadcasting a host-authored resume notice through the normal
+    /// [`broadcast`](Self::broadcast) path — which clears `paused`, consumes
+    /// any pending post-cancel reconciliation directive, delivers OOB wakes
+    /// held during the pause, and flushes the router's held forwards behind
+    /// the notice. Auto-heals a SIGKILLed (stale) duo via broadcast's respawn
+    /// loop. No-op when the session isn't live or isn't paused (stale click).
+    pub async fn resume_session(&self, session_id: &str) -> Result<()> {
+        {
+            let sessions = self.sessions.lock().await;
+            let Some(handle) = sessions.get(session_id) else {
+                return Ok(()); // not live → nothing to resume
+            };
+            if !handle.activity.is_paused() {
+                return Ok(()); // not paused → stale click; don't nudge the duo
+            }
+        }
+        self.broadcast(session_id, RESUME_NOTICE).await
     }
 
     /// The interrupt half of a cancel: send a `control_request` interrupt to both
@@ -343,8 +382,13 @@ impl AppState {
             EscalationOutcome::SupersededByUser => {
                 // The user's message (with its own preempt interrupt in `broadcast`)
                 // already aborted the stuck turn — a SIGKILL would needlessly kill
-                // the fresh turn + warm cache. Skip it; clear any lingering Cancelling.
+                // the fresh turn + warm cache. Skip it; clear any lingering
+                // Cancelling AND the pause latch (the user already steered —
+                // landing in Paused after their message would re-halt the duo
+                // they just woke). `broadcast` also clears it; this covers the
+                // escalation racing ahead of that clear.
                 activity.set_cancelling(false);
+                activity.set_paused(false);
                 tracing::info!(
                     session_id,
                     "cancel: superseded by a user message — skipping SIGKILL fallback"
@@ -437,6 +481,8 @@ impl AppState {
         // Drop any queued post-cancel reconciliation flag (a session cancelled
         // then closed without a follow-up message would otherwise linger).
         self.pending_reconcile.lock().await.remove(id);
+        // Same for wakes held during a pause — moot once the session closes.
+        self.pending_paused_wakes.lock().await.remove(id);
         // Worktree-isolated session: remove its worktree if (and only if) it
         // is clean. Never forced — a dirty worktree outlives the session so
         // uncommitted work is recoverable; the session branch always survives.
@@ -546,6 +592,10 @@ impl AppState {
             .cancel_superseded
             .store(true, std::sync::atomic::Ordering::Release);
         handle.activity.set_cancelling(false);
+        // A user message is the steer: release the pause latch so the dispatch
+        // below runs the duo normally (a Send while Paused = clarify/steer; the
+        // Resume button routes here too, as a resume-notice broadcast).
+        handle.activity.set_paused(false);
         // Reset the L2 volley hard-cap: the user just spoke, so the consecutive
         // peer-forward counter (`router::route_forward`) starts fresh. Deliberately
         // here and not in `clear_awaiting` — `advance_phase` calls that too, and
@@ -618,6 +668,33 @@ impl AppState {
         }
         self.bridge
             .notify_message_persisted(Arc::from(session_id), id);
+        // Release everything the pause held, BEHIND the user's message (their
+        // steer preempts; the held context follows). (1) OOB answer wakes
+        // stashed by `resolve_choice` while paused → deliver to both stdins
+        // now. (2) Tell the router to flush held peer-forwards — through its
+        // command channel, so they land in order behind anything in flight.
+        let held_wakes = self
+            .pending_paused_wakes
+            .lock()
+            .await
+            .remove(session_id)
+            .unwrap_or_default();
+        for wire in held_wakes {
+            handle
+                .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
+                .await;
+        }
+        if let Some(router) = &handle.router {
+            if router
+                .tx
+                .try_send(crate::core::router::RouterCommand::FlushHeld)
+                .is_err()
+            {
+                // Channel full/closed — held forwards stay held; the next
+                // broadcast retries. Never blocks the user's send on it.
+                tracing::warn!(session_id, "router FlushHeld not sent (channel full/closed)");
+            }
+        }
         Ok(())
     }
 
@@ -737,9 +814,22 @@ impl AppState {
                 self.clear_awaiting(handle, session_id).await;
                 let phase = handle.ipav.lock().await.current_phase;
                 let wire = with_phase_envelope(phase, body);
-                handle
-                    .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
-                    .await;
+                // PAUSED gate: an answered tray question must not restart a
+                // paused duo (the user may be triaging their tray while this
+                // session stays parked). Stash the wire; the next `broadcast`
+                // (Send / Resume) delivers it behind the user's message.
+                if handle.activity.holds_wakes() {
+                    self.pending_paused_wakes
+                        .lock()
+                        .await
+                        .entry(session_id.clone())
+                        .or_default()
+                        .push(wire);
+                } else {
+                    handle
+                        .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
+                        .await;
+                }
             }
             // else: session closed in the gap between resolve and wake — the OOB
             // message persists in storage, so a future reopen still sees it.

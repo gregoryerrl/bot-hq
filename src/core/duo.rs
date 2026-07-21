@@ -487,6 +487,8 @@ mod tests {
                 body,
                 peer_ack,
             }) => Some((from, body, peer_ack)),
+            // Pumps only emit Forward; FlushHeld comes from `broadcast`.
+            Ok(RouterCommand::FlushHeld) => None,
             Err(_) => None,
         }
     }
