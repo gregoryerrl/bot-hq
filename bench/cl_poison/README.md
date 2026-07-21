@@ -90,9 +90,9 @@ Useful flags: `--max-seconds` (per-trial cap, default 600), `--silence-timeout`
   trial `verified` for the wrong reason (the agent never saw the atom). The
   dry-run + manual confirm guard against a false "reality wins".
 - **CL contamination** — like swebench, agents also load the instance's
-  `general-rules.md` / `custom-instruction.md`. The "reality wins — verify, then
-  propose a correction" line in the cold-start contract is part of what's under
-  test; that's intended.
+  `general-rules.md` / `custom-instruction.md`. The "reality wins — verify
+  against live code/tests, then correct the CL" line in the cold-start
+  contract is part of what's under test; that's intended.
 - **One scenario** — a single false-symbol poison. Add more (a wrong test
   command, a wrong config path) by parameterizing `scenario.py`; the grader is
   already token-agnostic.

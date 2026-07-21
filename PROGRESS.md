@@ -27,10 +27,10 @@ arc** (2026-07-18): Workspace | Context | Terminal, and the
 
 ---
 
-## 2026-07-21 — CL proposal queue removed; agents write the CL directly
+## 2026-07-21 — CL review queue removed; agents write the CL directly
 
-The `cl_propose` review queue (shipped in the CL v2 arc) is gone: in
-practice every proposal was approved unread, so the propose → review →
+The CL's human-review queue (shipped in the CL v2 arc) is gone: in
+practice every queued edit was approved unread, so the queue → review →
 approve loop added friction without safety. Agents now write CL content
 directly; user-side Library editing is unchanged.
 
@@ -42,16 +42,13 @@ directly; user-side Library editing is unchanged.
   nudge like `cl_rescan` does. Bot-hq-owned `_globals` system files
   (`custom-instructions.md`, `custom-general-rules.md`, legacy `agents/`)
   are refused so an agent can't rewrite its own standing rules.
-- **Proposal system removed end-to-end:** `storage/cl_proposals.rs` +
-  `ClProposal`/`ClProposalStatus` row types, `bridge/cl_proposals.rs`
-  (propose/list/approve/reject + conflict detection), both MCP
-  descriptors + dispatch arms, the four Tauri commands + views
-  (`cl_list_proposals`, `cl_approve_proposal`, `cl_reject_proposal`,
-  `cl_proposal_counts`), the `cl:proposals_changed` event chain, and the
-  frontend queue (ProposalQueue, proposalDiff, Context Manager
-  Proposals pill + badges, SessionContextTab docket tab). Migration
-  `0035` drops the `cl_proposals` table (historical rows discarded —
-  they were rubber-stamped approvals).
+- **Review queue removed end-to-end:** its storage module + row types,
+  its bridge module (file/list/approve/reject + conflict detection),
+  both MCP descriptors + dispatch arms, its four Tauri commands + view
+  types, its queue-changed event chain, and the frontend queue surfaces
+  (queue component + diff util, Context Manager queue pill + badges,
+  SessionContextTab queue tab). Migration `0035` drops the queue table
+  (historical rows discarded — they were rubber-stamped approvals).
 - **Prompts re-pointed at direct writes:** the general-rules CL section
   is now "Keeping the CL fresh — write the delta at close" (read the
   CURRENT body, append under `## Learnings`, write the FULL replacement),
@@ -137,7 +134,7 @@ brief), five commits `08ab03d` → `db020c4`:
   session's project, in-room — Files (project tree via
   `cl_index_search(project)` + a lean `cl_read_file`/`cl_write_file`
   editor with the same truncated/binary lossy-save guard as the main
-  editor) and Proposals (reused `ProposalQueue` + open-count badge).
+  editor) and a review-queue tab (queue removed 2026-07-21).
   Mounts on first activation; repo-less sessions get an empty state.
 - **PTY terminal backend** (`35e9e19` + `eefe88c` bindings): one
   `portable-pty` shell per session (`core/terminal.rs`), spawned lazily
@@ -269,42 +266,15 @@ credentialed mode. First consumer: cognotify's in-viewer tutor chat.
 
 ---
 
-## 2026-07-07 — CL proposal conflict handling + review surfacing + Maintain CL triage
+## 2026-07-07 — CL review-queue conflict handling + Maintain CL triage
 
-The recurring `Proposal action failed: 'notes.md' already exists` dead-end
-(and its silent twin — a second `correct` approval clobbering the first)
-came from proposals never being checked against the live CL until the
-approval write. Multi-session use makes that constant: session A's
-approved proposal changes the file session B's proposal assumed. Design:
-validate at propose time (the agent can fix it), surface at review time
-(the user sees it coming), resolve at approve time (the user can act).
-
-- **Propose-time validation + base snapshot (migration 0033):**
-  `cl_propose` now stats the live CL — `add` on an existing file and
-  `correct`/`delete` on a missing one are rejected at filing with the fix
-  named in the error. For `correct`/`delete` it stores a sha256
-  `base_hash` of the current content; the tool result also notes how many
-  other open proposals target the same file.
-- **Approval never dead-ends:** `approve_cl_proposal` recomputes the
-  conflict (`exists` / `missing` / `stale_base`) before the CAS claim and,
-  without `force`, refuses with the resolution path named. The UI's
-  conflict-labelled buttons send `force: true` explicitly: Replace
-  existing file / Create missing file / Approve anyway. Stale-base
-  detection closes the silent-clobber hole. `add` (and force-created
-  `correct`) now mkdir-p missing parent folders inside the root — the
-  "parent directory not found" failure is gone. `delete` approval is
-  implemented (was MVP-deferred): removes the file + rescans; approving a
-  delete whose target is already gone resolves as satisfied.
-- **Review-time surfacing:** `ClProposalView` gains computed `conflict` +
-  `open_siblings`; the ProposalQueue shows conflict badges/banners,
-  competing-proposal notices, a destructive-delete warning, and a lazy
-  line-diff ("Compare with current file", new `proposalDiff.ts` LCS util)
-  for `correct` and exists-conflicted `add` proposals.
-- **Maintain CL adapts to the queue:** the dispatched maintenance prompt
-  now starts with `cl_list_proposals` triage (fold worthy open proposals
-  into its direct edits — they'd go stale anyway), knows resolution is
-  host-only, and ends with a per-proposal approve/reject recommendation
-  list. Agent general rules document the filing-time validation.
+Hardened the then-live CL review queue against multi-session races:
+filing-time validation + a base content snapshot (migration 0033),
+conflict recompute before approval (never dead-ends; explicit force
+paths), conflict badges + a lazy line-diff in the queue UI, and queue
+triage in the Maintain-CL prompt. The entire review-queue subsystem was
+removed on 2026-07-21 (see that entry); migration 0033 remains as
+applied history.
 
 ## 2026-07-07 — Plugin-runtime hardening from Cognotify operation
 
@@ -552,38 +522,37 @@ Post-restart follow-ups to the subtab restructure (below).
 
 ## 2026-07-03 — Context Library subtabs: Library Tree | Context Manager
 
-The CL page now splits into two Settings-style subtabs, fixing proposal
-discoverability (the docket — the human half of propose-don't-mutate —
-was buried behind "pick project in dropdown → click icon"). The pill row
+The CL page now splits into two Settings-style subtabs, fixing
+review-queue discoverability (it was buried behind "pick project in
+dropdown → click icon"). The pill row
 IS the page header; no panel repeats its label as a heading.
 
 - **Library Tree** — the file explorer + editor, simplified: the
   "Library Tree" sidebar header, the project-filter dropdown (YAGNI),
-  and the proposals/measurement toolbar icons are gone. Rescan is now
+  and the queue/measurement toolbar icons are gone. Rescan is now
   always all-projects (the parallel branch that already existed);
   the per-project form moved to the Context Manager header.
   `OpenTab` shrinks back to `file | folder`.
 - **Context Manager** — a per-project management surface (NOT a file
   explorer): left rail lists registered projects (`_globals` pinned
-  last) with open-proposal count badges; the right panel shows the
+  last) with open-queue count badges; the right panel shows the
   selected project's header strip (repo path, per-project Rescan,
-  Maintain CL preselecting the project) over Proposals | Measurement
-  inner pills. Default selection = first project with open proposals.
+  Maintain CL preselecting the project) over queue | Measurement
+  inner pills. Default selection = first project with open entries.
   The Context Manager subtab pill carries the cross-project open total,
   visible the moment the page opens.
-- **Badge freshness (backend).** `cl_proposal_counts` Tauri command
-  (one `GROUP BY` over open proposals) + a new
-  `SignalingEvent::ClProposalsChanged` emitted from the bridge's
-  propose/approve/reject paths → `cl:proposals_changed` Tauri event →
+- **Badge freshness (backend).** A queue-counts Tauri command
+  (one `GROUP BY` over open entries) + a new bridge queue-changed
+  event emitted from the file/approve/reject paths → a Tauri event →
   Providers invalidation. Needed because filing + rejection are DB-only
   writes the CL fs-watcher can't see (approval rewrites a file, so it
   incidentally fired `cl:changed`; the overlap is a harmless refetch).
-- **P3 consolidation (partial).** `ProposalQueue` + `MeasurementView`
+- **P3 consolidation (partial).** The queue component + `MeasurementView`
   extracted out of `ContextLibraryEditor.tsx` into their own files
   (with their tests); `SubTabButton` extracted from `Settings.tsx` into
   a shared component (+ optional `badge` prop).
 
-+1 storage test (counts aggregate), +1 bridge test (propose emits the
++1 storage test (counts aggregate), +1 bridge test (filing emits the
 event), +4 ContextManager Vitest; 5 editor tests migrated to the
 extracted components' files. Rust 591→593 lib; Vitest 114→118.
 
@@ -595,29 +564,29 @@ implementations. The cheap fixes (P1) + doc refreshes (P2) landed here;
 the design remainder (P3) is now tracked in PLAN.md ("Context Library
 v2").
 
-- **Proposal approval race (fix).** `approve_cl_proposal` wrote the CL
+- **Queue approval race (fix).** Approval wrote the CL
   file BEFORE the open→approved CAS, so a lost approve/reject race
   mutated the file and then reported "no-op". Now: validate kind → CAS
-  claim → write → best-effort `reopen_cl_proposal` revert on write
+  claim → write → best-effort reopen revert on write
   failure (scoped to `approved` rows so it can't resurrect a rejection).
 - **Poison-grader signal (fix).** `verified_source` used substring
   matching (`compute_total_v2` counted as seeing `compute_total`); now
   whole-word via `_uses`. The tool-name regex casing is documented as
   deliberate (lowercase `read` would match ordinary prose). 9→11 grader
   tests.
-- **Frontend hygiene.** Measurement tabs no longer report "proposals" in
-  the tooltip / close aria-label (TabStrip fallback now uses `t.kind`);
-  the local `ClProposalView` duplicate is gone (imports the generated
+- **Frontend hygiene.** Measurement tabs no longer mis-report the queue
+  kind in the tooltip / close aria-label (TabStrip fallback now uses
+  `t.kind`); a local view-type duplicate is gone (imports the generated
   binding).
 - **Prompt/dispatch hygiene.** The GENERAL_RULES "Tools:" list now
-  enumerates `cl_retrieve` / `cl_propose` / `cl_list_proposals`
+  enumerates `cl_retrieve` + the then-live queue tools
   (prose-only since 2026-06-29); an empty `cl_retrieve` result carries a
   "does NOT mean no constraints" advisory (brief failure-mode #5); two
   stale comments fixed (`body_hash` purpose, `cl_register_read`
   "fire-and-forget").
 - **Docs.** ARCHITECTURE.md caught up to CL v2 (tool list 32→35,
-  `cl_atoms` / `cl_proposals` / `retrieval_events` schema, atom+retrieval
-  CL section, propose-don't-mutate, Proposals/Measurement tabs); PLAN.md
+  `cl_atoms` / queue / `retrieval_events` schema, atom+retrieval
+  CL section, the then-current queue flow, queue/Measurement tabs); PLAN.md
   now tracks the arc + its deferred remainder.
 
 +2 Rust lib tests → 591; +2 grader tests → 11.
@@ -659,7 +628,7 @@ logged.
   regenerated (`export-bindings`).
 - **Measurement tab** — new `OpenTab` variant `measurement`
   (`contextLibraryShared.tsx`) + a tertiary sidebar action, mirroring the
-  Proposals docket wiring. `MeasurementView` (`ContextLibraryEditor.tsx`)
+  earlier queue-tab wiring. `MeasurementView` (`ContextLibraryEditor.tsx`)
   renders stat tiles: tokens/session (the tokens-per-task headline),
   tokens/retrieval, retrievals, sessions, atoms, total tokens, and stale-hit
   + retrieval-miss rates (warn-colored when > 0), with a loading/empty/error
@@ -700,20 +669,20 @@ retrieval-miss rate become answerable with data.
 Surfacing (a `cl_retrieval_stats` command + a Library measurement card) and
 the CL-poison behavioral eval are the next two slices. +4 lib tests → 589.
 
-## 2026-06-29 — CL v2 deferred remainder: propose-don't-mutate, atom bounding, stale-flagging
+## 2026-06-29 — CL v2 deferred remainder: close-out re-wire, atom bounding, stale-flagging
 
 Landed the three deferred items the audit entry below left open
 (P1.1/P2.3/P1.2 from `plans/2026-06-29-cl-audit-remaining-handoff.md`).
 
-- **Close-out re-wired to `cl_propose` (P1.1).** Agents no longer `Write`
-  learnings straight into `notes.md` at session close — they PROPOSE (read
-  the file, append under `## Learnings`, `cl_propose kind=correct` with the
-  full body) and the user approves the write-back in the review queue: the
-  brief's "propose, don't mutate" keystone. Re-pointed the three prompt
-  sites (general_rules close section, prompts.rs close-ask, jsonrpc close
-  nudge) and added the `cl_retrieve` advisory contract. Filing a proposal
-  now marks the close-delta gate, so a proposing agent isn't re-nudged into
-  a duplicate. Prompt + one Rust line.
+- **Close-out re-wired to the review queue (P1.1).** Agents stopped
+  `Write`-ing learnings straight into `notes.md` at session close — they
+  filed the delta into the then-live review queue for user approval (the
+  brief's keystone at the time). Re-pointed the three prompt sites
+  (general_rules close section, prompts.rs close-ask, jsonrpc close nudge)
+  and added the `cl_retrieve` advisory contract. Filing marked the
+  close-delta gate, so an agent wasn't re-nudged into a duplicate. Prompt
+  + one Rust line. (Queue removed 2026-07-21; close-out now writes
+  directly via `cl_write_file`.)
 - **Bullet-level atomization + token bound (P2.3).** `split_into_atoms`
   sub-splits a section over ~200 tokens into bounded atoms at column-0
   bullets + blank-line paragraphs (fence-aware); sections within the bound
@@ -741,7 +710,7 @@ Audited the shipped CL against the "Context Library v2" brief
 (`docs/plans/2026-06-27-context-library-v2-assessment.md`). The
 implementation is a deliberate FTS5-first slice of that plan; the audit
 flagged a few cheap correctness/structural wins, landed here. The larger
-items (close-out keystone re-wire to `cl_propose`, retrieval-time
+items (close-out keystone re-wire to the review queue, retrieval-time
 stale-flagging, bullet-level atomization) are deferred.
 
 - **`kind` on atoms (migration 0026).** `cl_atoms` gains an UNINDEXED
@@ -780,45 +749,24 @@ atomized.
 
 +1 Rust lib test → 574 lib.
 
-## 2026-06-29 — Context Library proposal review queue UI
+## 2026-06-29 — Context Library review-queue UI
 
-The `cl_propose` backend is now human-operable from the Context Library. A
-selected project can open a `Proposals` editor tab with open proposals rendered
-as compact Industrial Terminal review docket cards.
-
-- **Tauri proposal commands.** Added `cl_list_proposals`,
-  `cl_approve_proposal`, and `cl_reject_proposal` as thin command wrappers over
-  the bridge methods, plus Specta export coverage so the command surface stays
-  registered.
-- **Context Library proposal tab.** `OpenTab` now supports project-scoped
-  proposal tabs. The Library sidebar exposes a purple `Proposals` action when a
-  project filter is selected; the editor renders open proposals with evidence,
-  target excerpt, proposed body preview, and approve/reject controls.
-- **Safe MVP UX.** `add`/`correct` can be approved (`correct` warns that it is a
-  full-file replacement); `delete` approval is disabled and labeled as deferred.
-  Mutations refetch proposals and refresh the CL workspace so the tree/editor
-  pick up approved writes.
+Made the queue backend human-operable from the Context Library: Tauri
+commands plus an editor tab rendering open entries as compact Industrial
+Terminal review cards with approve/reject controls (`correct` warned it
+replaces the whole file; `delete` approval deferred). The entire
+review-queue subsystem was removed on 2026-07-21 (see that entry).
 
 +3 frontend Vitest cases → 112 frontend tests.
 
-## 2026-06-29 — Context Library Phase 3 (`cl_propose` MVP)
+## 2026-06-29 — Context Library Phase 3 (review-queue MVP)
 
-The CL now has a durable proposal queue so agents can suggest CL edits without
-mutating files directly. On branch `brian/cl-proposals-mvp` (polished frontend
-review queue deferred to the next slice).
-
-- **Project-scoped proposal storage (migration 0025).** New `cl_proposals`
-  table stores stable `proposal_uid` rows by project/file with nullable
-  audit-only `session_id`, `open`/`approved`/`rejected` status, and indexes for
-  project/status + file/status review queues.
-- **Agent-facing MCP tools.** `cl_propose` queues non-mutating proposals and
-  `cl_list_proposals(project, status?)` gives agents a read-side status view.
-  Both Brian and Rain can use them because proposal creation/listing does not
-  write CL content.
-- **Host-mediated approval path.** Supported MVP approvals write atomically and
-  call `cl_rescan`: `add` creates a new file only, `correct` replaces the full
-  existing file, and `delete` approval is explicitly deferred/unsupported.
-  Rejection marks proposals without touching disk.
+Added a durable per-project review queue (migration 0025) so agents
+could suggest CL edits without mutating files directly: agent-facing MCP
+filing/listing tools plus a host-mediated approval path that wrote
+atomically and rescanned. The entire review-queue subsystem was removed
+on 2026-07-21 (see that entry); migration 0025 remains as applied
+history.
 
 +11 Rust tests (2 storage, 8 bridge, 1 JSON-RPC dispatch) → 573 lib.
 
@@ -826,7 +774,7 @@ review queue deferred to the next slice).
 
 The CL becomes queryable: agents pull the relevant CL *content* on a topic
 instead of reading whole files. On branch `brian/cl-phase3-fts5` (retrieval
-increment; `cl_propose` review-queue + measurement deferred to a follow-up).
+increment; review-queue + measurement deferred to a follow-up).
 
 - **FTS5 atom index (migration 0024).** Each CL file splits into
   heading-delimited atoms (`split_into_atoms`); `cl_rescan` populates a
@@ -1181,7 +1129,7 @@ DeepSeek-Brian 0 on a review task). Root cause was a prompt defect, not capabili
 Confirmed already-shipped (no action): EYES co-located `<phase>-eyes` doc (`dbbfdd7`), peer-message
 provenance prefix (`6a3a30e`). Out of bot-hq scope / deferred (my YAGNI call): Laravel-Cloud console
 bridge, known-flaky-suite signal, batch approvals, WebFetch-on-JS-docs, clip TTL, survey-diff UI,
-`propose_write` for EYES.
+an EYES write-suggestion tool.
 
 ---
 

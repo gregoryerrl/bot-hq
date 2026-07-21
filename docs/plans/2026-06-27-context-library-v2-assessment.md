@@ -35,7 +35,7 @@ modes), and §12 (what to measure) almost verbatim.
 - **§0 philosophy.** The CL is a fallible notebook *subordinate to* code-as-source-of-truth;
   reads have side effects (a stale atom biases the whole generation), so **a stale atom is worse
   than a missing one.** Put a standing **"reality wins — verify against live code/tests, then
-  propose a correction"** line into the cold-start contract.
+  correct the CL"** line into the cold-start contract.
 - **§6 store-this / re-derive-that line.** The single most useful content rule: if a fact is
   cheaply recoverable from current code/tests/git, do **not** store it.
 - **§10 failure modes.** Especially **#3** — store *evidence + conditions*, **never a bare
@@ -73,7 +73,8 @@ kind-specific freshness + pinning ≈ 80% of the retrieval win at ~20% of the co
 
 **C4 — Three "new" pieces are already scaffolded → the big build is cheaper than it looks.**
 - `review_queue` ≈ our existing `findings` table + tray + `disposition_finding` flow (the
-  EYES-sign-off propose→approve spine). Reuse it.
+  EYES-sign-off spine). Reuse it. *(Built, then removed 2026-07-21 — approvals were
+  rubber-stamped in practice; agents now write directly.)*
 - The cold-start digest drops straight into `read_system_prompt` **layer 2b** — no need for the
   speculative "write a generated CLAUDE.md into the workdir" trick.
 - A/B infra is half-built (swebench CL-off + the scoped own-repo retro benchmark).
@@ -122,8 +123,8 @@ single biggest win — and it shrinks (or moots) much of the atom engine.
 ### Phase 3 — measured retrieval engine (only if a gap remains after Phase 2)
 - **FTS5-based ranked `cl.retrieve`** (BM25 + scope-match + kind-specific freshness + pin + MMR/RRF),
   returning **atom bodies inline under a token budget**, with retrieval-time **stale-flagging via
-  `code_hash`**. Reuse `findings`/tray for `cl.propose` → review queue (agents propose, humans
-  approve — fits our HITL model).
+  `code_hash`**. A `findings`/tray-style review queue rode along here — built, then removed
+  2026-07-21 (rubber-stamped in practice; agents now write directly).
 - **Embeddings: later, and only if measurement shows the lexical version misses.** Additive
   migration for any new tables — never edit applied migrations (see notes.md).
 
