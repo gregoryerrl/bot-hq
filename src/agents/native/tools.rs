@@ -26,6 +26,18 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024;
 
 /// Anthropic `tools` entries for the built-ins, ready to concatenate with the
 /// converted MCP tool list.
+///
+/// **Empty when there is no read root.** A session with no working repo has no
+/// directory this agent is entitled to read, so the tool is not offered at all
+/// rather than pointed somewhere arbitrary — see [`exec`].
+pub fn tool_defs_for(root: Option<&Path>) -> Vec<Value> {
+    if root.is_none() {
+        return Vec::new();
+    }
+    tool_defs()
+}
+
+/// The built-in definitions, unconditionally. Prefer [`tool_defs_for`].
 pub fn tool_defs() -> Vec<Value> {
     vec![json!({
         "name": "read_file",
@@ -69,11 +81,29 @@ pub fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
 
 /// Execute a built-in. Returns an `is_error` outcome rather than failing the
 /// turn: errors are inputs to the loop, and the model recovers from them.
-pub fn exec(call: &ToolCall, root: &Path) -> ToolOutcome {
+///
+/// `root` is `None` for a session with no working repo. **There is no fallback
+/// root, deliberately.** Defaulting to the process's current directory scopes
+/// the agent to wherever bot-hq happens to have been launched from — which in
+/// practice is the bot-hq data directory, containing `.local/mcp-token` (a
+/// UUID: `0600`, but the agent runs as the same user, and it is valid UTF-8 so
+/// it reads cleanly), `.local/bot-hq.db` with every `models.auth_token` in
+/// plaintext, and the whole Context Library. A read gate aimed at the secrets
+/// is worse than no read gate, because it looks like protection.
+pub fn exec(call: &ToolCall, root: Option<&Path>) -> ToolOutcome {
     let outcome = |content: String, is_error: bool| ToolOutcome {
         tool_use_id: call.id.clone(),
         content,
         is_error,
+    };
+
+    let Some(root) = root else {
+        return outcome(
+            "this session has no working repository, so there is no directory this \
+             agent may read. Ask your peer to paste the contents you need."
+                .to_string(),
+            true,
+        );
     };
 
     match run(call, root) {
@@ -129,7 +159,7 @@ mod tests {
     #[test]
     fn reads_a_file_inside_the_root() {
         let (_d, root) = root_with_file("a.txt", "hello");
-        let out = exec(&call("read_file", "a.txt"), &root);
+        let out = exec(&call("read_file", "a.txt"), Some(&root));
         assert!(!out.is_error);
         assert_eq!(out.content, "hello");
         assert_eq!(out.tool_use_id, "tu_1");
@@ -138,7 +168,7 @@ mod tests {
     #[test]
     fn refuses_a_dotdot_escape() {
         let (_d, root) = root_with_file("a.txt", "hello");
-        let out = exec(&call("read_file", "../../etc/hosts"), &root);
+        let out = exec(&call("read_file", "../../etc/hosts"), Some(&root));
         assert!(out.is_error, "`..` must not escape the root");
     }
 
@@ -147,7 +177,7 @@ mod tests {
         // `Path::join` lets an absolute component replace the base outright —
         // the canonicalized-prefix check is what catches it.
         let (_d, root) = root_with_file("a.txt", "hello");
-        let out = exec(&call("read_file", "/etc/hosts"), &root);
+        let out = exec(&call("read_file", "/etc/hosts"), Some(&root));
         assert!(out.is_error, "an absolute path must not replace the root");
     }
 
@@ -162,7 +192,7 @@ mod tests {
         fs::write(&secret, "classified").unwrap();
         std::os::unix::fs::symlink(&secret, dir.path().join("link.txt")).unwrap();
 
-        let out = exec(&call("read_file", "link.txt"), &root);
+        let out = exec(&call("read_file", "link.txt"), Some(&root));
         assert!(out.is_error, "a symlink out of the root must be refused");
         assert!(!out.content.contains("classified"));
     }
@@ -176,10 +206,29 @@ mod tests {
                 name: "read_file".into(),
                 input: json!({}),
             },
-            &root,
+            Some(&root),
         );
         assert!(out.is_error);
         assert!(out.content.contains("path"));
+    }
+
+    #[test]
+    fn no_root_refuses_every_read_rather_than_falling_back() {
+        // The B4 defect: a repo-less session used to fall back to the process
+        // cwd, which is bot-hq's own data dir — `.local/mcp-token`,
+        // `bot-hq.db` with every auth token, and the whole Context Library.
+        let out = exec(&call("read_file", "Cargo.toml"), None);
+        assert!(out.is_error);
+        assert!(out.content.contains("no working repository"));
+    }
+
+    #[test]
+    fn no_root_means_the_tool_is_not_even_offered() {
+        // Belt and braces: refusing at exec time is the guarantee, but the model
+        // should not be told the tool exists in the first place.
+        assert!(tool_defs_for(None).is_empty());
+        let dir = TempDir::new().unwrap();
+        assert_eq!(tool_defs_for(Some(dir.path())).len(), 1);
     }
 
     #[test]
@@ -188,7 +237,7 @@ mod tests {
         fs::write(dir.path().join("big.txt"), vec![b'x'; MAX_FILE_BYTES + 1]).unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        let out = exec(&call("read_file", "big.txt"), &root);
+        let out = exec(&call("read_file", "big.txt"), Some(&root));
         assert!(out.is_error);
         // Silent truncation would hand the model a file it thinks it read whole.
         assert!(out.content.contains("capped"));
@@ -200,7 +249,7 @@ mod tests {
         fs::write(dir.path().join("bin"), [0xff, 0xfe, 0x00]).unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        let out = exec(&call("read_file", "bin"), &root);
+        let out = exec(&call("read_file", "bin"), Some(&root));
         assert!(out.is_error);
         assert!(out.content.contains("UTF-8"));
     }
@@ -208,7 +257,7 @@ mod tests {
     #[test]
     fn unknown_tool_is_an_error_outcome() {
         let (_d, root) = root_with_file("a.txt", "hello");
-        let out = exec(&call("write_file", "a.txt"), &root);
+        let out = exec(&call("write_file", "a.txt"), Some(&root));
         assert!(out.is_error);
         assert!(out.content.contains("unknown tool"));
     }

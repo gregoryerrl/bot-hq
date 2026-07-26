@@ -75,6 +75,14 @@ names; ask him to paste output you cannot obtain yourself.\n\n\
 every request, so there is nothing deferred to search for.\n\n\
 For anything outside the repository, use `mcp__bot-hq-signaling__web_search`.\n";
 
+/// Appended on top of [`NATIVE_TOOL_ADDENDUM`] when the session has no working
+/// repo, in which case `read_file` is not offered at all.
+pub const NO_READ_ROOT_ADDENDUM: &str = "\n\
+**Correction: this session has no working repository, so you do not have \
+`read_file` either.** Your entire tool surface is the \
+`mcp__bot-hq-signaling__*` set. You cannot read any file on disk — for repo \
+contents, ask your peer to paste what you need.\n";
+
 /// A `POST /v1/messages` failure.
 #[derive(Debug, Clone)]
 pub struct ApiFailure {
@@ -169,7 +177,10 @@ pub struct LoopConfig {
     pub profile: ProviderProfile,
     pub system_prompt: String,
     /// Canonicalized read root for the built-in tools.
-    pub root: PathBuf,
+    /// Canonicalized read root for the built-in tools, or `None` when the
+    /// session has no working repo. `None` disables `read_file` entirely — see
+    /// [`tools::exec`] for why there is no fallback.
+    pub root: Option<PathBuf>,
     /// Anthropic-shaped `tools` entries: bot-hq's MCP tools plus the built-ins.
     pub tools: Vec<Value>,
 }
@@ -438,7 +449,7 @@ async fn exec_calls(
     let mut out = Vec::with_capacity(calls.len());
     for call in calls {
         if tools::handles(&call.name) {
-            out.push(tools::exec(call, &cfg.root));
+            out.push(tools::exec(call, cfg.root.as_deref()));
         } else if let Some(mcp) = mcp {
             out.push(mcp.call_tool(&call.id, &call.name, call.input.clone()).await);
         } else {
@@ -575,12 +586,23 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     // The assembled prompt promises claude-code's tool surface; correct it.
     system_prompt.push_str(NATIVE_TOOL_ADDENDUM);
 
-    let root = cfg
-        .working_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-        .canonicalize()
-        .context("canonicalizing the agent's read root")?;
+    // NO fallback to `current_dir()`. bot-hq's own cwd is its data directory,
+    // so a repo-less session would silently scope the agent to `.local/`
+    // (`mcp-token`, `bot-hq.db` with every auth token) and the whole Context
+    // Library. `None` disables `read_file` instead.
+    let root = match cfg.working_dir.as_ref().filter(|p| !p.as_os_str().is_empty()) {
+        Some(dir) => Some(
+            dir.canonicalize()
+                .with_context(|| format!("canonicalizing the read root {}", dir.display()))?,
+        ),
+        None => {
+            warn!(
+                agent = %cfg.agent_name,
+                "session has no working repo; native read_file is disabled for this agent"
+            );
+            None
+        }
+    };
 
     let mcp = match cfg.mcp_config_path.as_ref() {
         Some(p) => {
@@ -594,7 +616,13 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         None => None,
     };
 
-    let mut tool_defs = tools::tool_defs();
+    // Keep the addendum honest: with no root, `read_file` isn't in `tools` at
+    // all, so promising it would send the agent chasing a tool that isn't there.
+    if root.is_none() {
+        system_prompt.push_str(NO_READ_ROOT_ADDENDUM);
+    }
+
+    let mut tool_defs = tools::tool_defs_for(root.as_deref());
     if let Some(mcp) = mcp.as_ref() {
         tool_defs.extend(mcp_tools_to_anthropic(&mcp.list_tools().await?));
     }
@@ -706,7 +734,7 @@ mod tests {
                 model: "m".into(),
                 profile,
                 system_prompt: "sys".into(),
-                root,
+                root: Some(root),
                 tools: tools::tool_defs(),
             },
             transport,
@@ -969,7 +997,7 @@ mod tests {
                 model: "m".into(),
                 profile: ProviderProfile::for_provider("anthropic"),
                 system_prompt: "sys".into(),
-                root,
+                root: Some(root),
                 tools: vec![],
             },
             Arc::new(HangingTransport { entered: entered_tx }),
