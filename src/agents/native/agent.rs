@@ -74,24 +74,32 @@ pub const MAX_TURNS_PER_INPUT: usize = 50;
 pub const NATIVE_TOOL_ADDENDUM: &str = "\n\n\
 ---\n\n\
 # Your actual tool surface (native loop — this OVERRIDES the tool list above)\n\n\
-You are running on bot-hq's own agent loop, not claude-code. The tools named \
-earlier in this prompt do NOT all exist here. What you actually have:\n\n\
-- **`read_file`** — read one UTF-8 text file, path relative to the repository \
-root. This replaces `Read`. Paths outside the repository are refused, so you \
-cannot read anything above the working repo.\n\
-- **Every `mcp__bot-hq-signaling__*` tool** — the full bot-hq surface \
-(`cl_index_search`, `cl_retrieve`, `session_doc_*`, `eyes_flag`, `peer_ack`, \
-`web_search`, `terminal_read`, …). Role enforcement is unchanged: HANDS-only \
-tools are still refused to you.\n\n\
-**Not available:** `Grep`, `Glob`, `Bash`, `WebFetch`, `WebSearch`, `Edit`, \
-`Write`, `Task`, `TodoWrite`. Do not call them — they return an error and waste \
-the turn. In particular you have **no `Bash`**, so you cannot run `git log`, \
-`git diff`, `git status` or any other shell command. To see what changed, read \
-Brian's `session_doc_search(phase=\"apply\")` doc and `read_file` the files he \
-names; ask him to paste output you cannot obtain yourself.\n\n\
+You are running on bot-hq's own agent loop, not claude-code. The tool names above \
+do not exist here; these do. Every one is scoped to the working repository — \
+absolute paths and `..` are refused, so you cannot read outside it.\n\n\
+- **`read_file(path)`** — one UTF-8 text file. Replaces `Read`.\n\
+- **`list_files(pattern)`** — glob, e.g. `src/**/*.rs`. Replaces `Glob`, `find` \
+and `ls`.\n\
+- **`search_files(pattern, glob?)`** — regex over file CONTENTS, returning \
+`path:line: text`. Replaces `Grep`.\n\
+- **`run_command(command)`** — ONE read-only command in the repo root. \
+**No shell**: no pipes, no `&&`/`;`, no redirection — one command per call. Only \
+reporting commands are allowed: `git log|diff|status|show|rev-list|rev-parse|\
+blame|ls-files|grep` and `git branch` report flags, `gh issue|pr|repo|release view/\
+list/diff/checks`, `cat`, `ls`, `wc`, `head`, `tail`, `find` (no `-delete`/\
+`-exec`), `which`, `file`, `stat`, `du`, `npm ls`, `composer show`, \
+`cargo tree`.\n\
+- **Every `mcp__bot-hq-signaling__*` tool** — `cl_index_search`, `cl_retrieve`, \
+`session_doc_*`, `eyes_flag`, `peer_ack`, `web_search`, `terminal_read`, and the \
+rest. HANDS-only tools remain refused to you.\n\n\
+**Refused, by role rather than by omission:** every write. No `write_file`, no \
+`Edit`/`Write`, no `git commit|push|add|checkout|reset|rebase|merge|stash|tag`, no \
+mutating `gh`, no `rm`/`mv`/`chmod`/`npm install`/`psql` writes. These are \
+mechanically blocked, not merely discouraged — you are the reviewer, so producing \
+the change is your peer's job. Ask them.\n\n\
 `ToolSearch` does not exist and is not needed: every tool you have is passed on \
-every request, so there is nothing deferred to search for.\n\n\
-For anything outside the repository, use `mcp__bot-hq-signaling__web_search`.\n";
+every request, so nothing is deferred. For anything outside the repository, use \
+`mcp__bot-hq-signaling__web_search`.\n";
 
 /// Appended on top of [`NATIVE_TOOL_ADDENDUM`] when the session has no working
 /// repo, in which case `read_file` is not offered at all.
@@ -199,6 +207,9 @@ pub struct LoopConfig {
     /// Where this agent's conversation is persisted, so an app restart resumes
     /// instead of silently starting blank. `None` disables persistence.
     pub history_path: Option<PathBuf>,
+    /// Which built-ins this agent may use. A ROLE decision — EYES reviews, so
+    /// EYES gets no write tools.
+    pub tool_policy: tools::ToolPolicy,
     /// Transient-API-error retry budget and backoff. The native equivalent of
     /// what `spawn_supervised_agent` gives a CLI agent — see [`run_turns`].
     pub retry: RetryPolicy,
@@ -600,7 +611,7 @@ async fn exec_calls(
     let mut out = Vec::with_capacity(calls.len());
     for call in calls {
         if tools::handles(&call.name) {
-            out.push(tools::exec(call, cfg.root.as_deref()));
+            out.push(tools::exec(call, cfg.root.as_deref(), cfg.tool_policy).await);
         } else if let Some(mcp) = mcp {
             out.push(mcp.call_tool(&call.id, &call.name, call.input.clone()).await);
         } else {
@@ -812,7 +823,8 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         system_prompt.push_str(NO_READ_ROOT_ADDENDUM);
     }
 
-    let mut tool_defs = tools::tool_defs_for(root.as_deref());
+    let tool_policy = tools::ToolPolicy::for_agent(&cfg.agent_name);
+    let mut tool_defs = tools::tool_defs_for(root.as_deref(), tool_policy);
     if let Some(mcp) = mcp.as_ref() {
         tool_defs.extend(mcp_tools_to_anthropic(&mcp.list_tools().await?));
     }
@@ -845,6 +857,7 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
             )),
             // Same policy the CLI supervisor uses, so a 529 costs the same
             // patience on either path.
+            tool_policy,
             retry: RetryPolicy::default(),
             system_prompt,
             root,
@@ -936,6 +949,7 @@ mod tests {
                 session_id: "s-test".into(),
                 accounting: None,
                 history_path: None,
+                tool_policy: tools::ToolPolicy::ReadOnly,
                 // No retry budget: this harness serves tests about everything
                 // EXCEPT retry, and a real budget would make a transient-status
                 // fixture sleep through the backoff schedule. Retry has its own
@@ -945,8 +959,8 @@ mod tests {
                     ..RetryPolicy::default()
                 },
                 system_prompt: "sys".into(),
+                tools: tools::tool_defs_for(Some(&root), tools::ToolPolicy::ReadOnly),
                 root: Some(root),
-                tools: tools::tool_defs(),
             },
             transport,
             None,
@@ -1210,6 +1224,7 @@ mod tests {
                 session_id: "s-test".into(),
                 accounting: None,
                 history_path: None,
+                tool_policy: tools::ToolPolicy::ReadOnly,
                 retry: RetryPolicy::default(),
                 system_prompt: "sys".into(),
                 root: Some(root),
@@ -1275,6 +1290,7 @@ mod tests {
                 profile: ProviderProfile::for_provider("anthropic"),
                 accounting,
                 history_path,
+                tool_policy: tools::ToolPolicy::ReadOnly,
                 retry,
                 system_prompt: "sys".into(),
                 root: Some(root),
@@ -1600,8 +1616,9 @@ mod tests {
     }
 
     #[test]
-    fn the_native_addendum_names_exactly_the_builtins_that_exist() {
-        // Drift here is what sends the agent chasing tools that do not exist.
+    fn the_native_addendum_names_every_builtin_that_exists() {
+        // Drift here is what sends the agent chasing tools that do not exist, or
+        // leaves it unaware of ones it has.
         for def in tools::tool_defs() {
             let name = def["name"].as_str().unwrap();
             assert!(
@@ -1609,12 +1626,31 @@ mod tests {
                 "built-in {name} is missing from the addendum"
             );
         }
-        for absent in ["Grep", "Glob", "Bash", "WebFetch", "TodoWrite"] {
+    }
+
+    #[test]
+    fn the_native_addendum_maps_the_claude_code_names_it_replaces() {
+        // `prompts.rs` promises these; the native surface provides equivalents
+        // under different names, so the addendum must connect the two or the agent
+        // keeps reaching for the old ones.
+        for replaced in ["Read", "Grep", "Glob"] {
             assert!(
-                NATIVE_TOOL_ADDENDUM.contains(absent),
-                "{absent} is promised by prompts.rs and must be retracted here"
+                NATIVE_TOOL_ADDENDUM.contains(replaced),
+                "{replaced} has a native equivalent but the addendum doesn't say so"
             );
         }
+    }
+
+    #[test]
+    fn the_native_addendum_states_writes_are_a_role_boundary() {
+        // EYES must understand refusal as "not your job", not "feature missing" —
+        // otherwise it retries or works around it.
+        assert!(NATIVE_TOOL_ADDENDUM.contains("write_file"));
+        assert!(NATIVE_TOOL_ADDENDUM.contains("git commit"));
+        assert!(
+            NATIVE_TOOL_ADDENDUM.contains("mechanically blocked"),
+            "the addendum should say the block is mechanical, not advisory"
+        );
     }
 
     #[test]

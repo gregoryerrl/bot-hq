@@ -38,6 +38,7 @@
 
 pub mod accounting;
 pub mod agent;
+pub mod command;
 pub mod history;
 pub mod mcp_client;
 pub mod profile;
@@ -45,6 +46,7 @@ pub mod tools;
 pub mod wire;
 
 pub use accounting::{AccountingLog, TurnRecord};
+pub use command::CommandPolicy;
 pub use agent::{spawn_native_agent, MessagesTransport, CONTEXT_CEILING};
 pub use mcp_client::McpClient;
 pub use profile::ProviderProfile;
