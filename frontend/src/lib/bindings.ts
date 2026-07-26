@@ -998,7 +998,19 @@ async checkForUpdate() : Promise<Result<UpdateInfo, AppError>> {
 
 /** user-defined types **/
 
-export type AgentConfigView = { agent_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; updated_at: string }
+export type AgentConfigView = { agent_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; updated_at: string; 
+/**
+ * Carried from the saved model the user assigned. This is the ONLY way a
+ * native agent can be reached from any path that doesn't name a model id
+ * on the session row — "Maintain CL", the plugin proxy, and a driver
+ * `create_session` without ids all resolve through here.
+ */
+native: boolean; 
+/**
+ * Likewise: the context window the user supplied for the assigned model.
+ * `None` = unknown, which keeps the meter a visible gap.
+ */
+context_window: number | null }
 /**
  * One chat message in the chronological stream. Mirrors `storage::Message`
  * with `created_at` left as a string (ISO) so the frontend can parse with
