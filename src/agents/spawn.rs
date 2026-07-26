@@ -1105,6 +1105,7 @@ mod tests {
                 auth_token: Some("sk-test".into()),
                 updated_at: String::new(),
                 native: false,
+                context_window: None,
             },
             system_prompt_path: Path::new("/tmp/bot-hq-test-prompt.txt").to_path_buf(),
             mcp_config_path: Some(Path::new("/tmp/mcp.json").to_path_buf()),

@@ -38,10 +38,12 @@ impl From<AgentConfigView> for AgentConfig {
             base_url: v.base_url,
             auth_token: v.auth_token,
             updated_at: v.updated_at,
-            // Deliberately not on the view: the native flag is a property of a
-            // saved `models` row, and `agent_configs` has no such column.
-            // Surfacing it here would offer a toggle that never persists.
+            // Deliberately not on the view: the native flag and the context
+            // window are properties of a saved `models` row, and `agent_configs`
+            // has no such columns. Surfacing them here would offer controls that
+            // never persist.
             native: false,
+            context_window: None,
         }
     }
 }
@@ -100,6 +102,7 @@ mod tests {
             auth_token: Some("secret".to_string()),
             updated_at: String::new(),
             native: false,
+            context_window: None,
         };
         storage.upsert_agent_config(&cfg).await.unwrap();
 

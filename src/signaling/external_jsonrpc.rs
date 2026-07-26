@@ -537,6 +537,7 @@ async fn call_external_tool(
                     // `agent_configs` has no native column — the flag is
                     // per-saved-model only.
                     native: false,
+                    context_window: None,
                 });
             let provider = args
                 .get("provider")
@@ -559,9 +560,10 @@ async fn call_external_tool(
                 base_url,
                 auth_token,
                 updated_at: String::new(), // upsert sets datetime('now')
-                // Not settable here: the native flag lives on saved `models`,
-                // not on the per-agent fallback config.
+                // Not settable here: the native flag and the context window
+                // live on saved `models`, not the per-agent fallback config.
                 native: false,
+                context_window: None,
             };
             core.storage
                 .upsert_agent_config(&cfg)

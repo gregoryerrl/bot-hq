@@ -10,11 +10,25 @@
 //!
 //! - **No compaction** (B6). Instead there is a hard ceiling — see
 //!   [`CONTEXT_CEILING`]. Loud beats silent.
-//! - **No conversation persistence** (B7). History lives in this task, so a
-//!   supervisor respawn starts a fresh conversation. On the CLI path `--resume`
-//!   restores it from claude-code's own store; we have no equivalent yet.
 //! - **`read_file` only** (B5 adds `Grep`/`Glob`/`Bash` + the write-verb deny
 //!   matcher `Bash` requires).
+//!
+//! ## Recovery, and why it is in here rather than the supervisor
+//!
+//! `spawn_agent_for` calls [`spawn_native_agent`] **directly**, not through
+//! `spawn_supervised_agent` — so no supervisor wraps a native agent. Wrapping one
+//! would also achieve little: `supervise` ends an incarnation on event-channel
+//! CLOSURE, and this loop deliberately survives API errors, so the incarnation
+//! never ends. Recovery therefore lives here:
+//!
+//! - **Transient API errors** retry in-loop with the same `RetryPolicy` and
+//!   `is_transient_api_error` classification the CLI supervisor uses. Better than
+//!   a respawn, because the conversation stays in memory and there is nothing to
+//!   resume.
+//! - **App restarts** are covered by [`history`]: the conversation is persisted
+//!   per (session, agent) and reloaded at spawn. Without it a native agent came
+//!   back blank while still talking as though it remembered — a CLI agent comes
+//!   back via `--resume`.
 
 use anyhow::{Context, Result};
 use futures::future::BoxFuture;
@@ -24,6 +38,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
+use super::accounting::{AccountingLog, TurnRecord};
+use super::history;
 use super::mcp_client::{mcp_tools_to_anthropic, McpClient};
 use super::profile::{AuthStyle, ProviderProfile, ANTHROPIC_VERSION};
 use super::wire::{
@@ -32,7 +48,9 @@ use super::wire::{
 };
 use super::tools;
 use crate::agents::protocol::{ControlRequest, OutgoingUserMessage};
-use crate::agents::spawn::{AgentEvent, AgentHandle, SpawnConfig};
+use crate::agents::spawn::{
+    is_transient_api_error, AgentEvent, AgentHandle, AgentHealth, RetryPolicy, SpawnConfig,
+};
 
 /// Refuse to start a turn once the window is this full.
 ///
@@ -173,8 +191,17 @@ impl MessagesTransport for HttpTransport {
 /// Everything the loop needs that isn't a channel.
 pub struct LoopConfig {
     pub agent_name: String,
+    pub session_id: String,
     pub model: String,
     pub profile: ProviderProfile,
+    /// Durable per-turn occupancy log. `None` in tests.
+    pub accounting: Option<Arc<AccountingLog>>,
+    /// Where this agent's conversation is persisted, so an app restart resumes
+    /// instead of silently starting blank. `None` disables persistence.
+    pub history_path: Option<PathBuf>,
+    /// Transient-API-error retry budget and backoff. The native equivalent of
+    /// what `spawn_supervised_agent` gives a CLI agent — see [`run_turns`].
+    pub retry: RetryPolicy,
     pub system_prompt: String,
     /// Canonicalized read root for the built-in tools.
     /// Canonicalized read root for the built-in tools, or `None` when the
@@ -218,7 +245,37 @@ pub async fn run_loop(
     }
 
     let mut state = State {
-        history: Vec::new(),
+        // Resume a persisted conversation. The consumer is an app RESTART, not a
+        // supervisor respawn — a CLI agent comes back via `--resume` off the
+        // `sessions` row, and without this a native agent would come back blank
+        // while still talking as if it remembered.
+        history: cfg
+            .history_path
+            .as_ref()
+            .and_then(|p| match history::load(p) {
+                Ok(h) => h,
+                Err(e) => {
+                    // Corrupt file: start fresh rather than refusing to spawn.
+                    warn!(agent = %cfg.agent_name, error = %e, "unreadable native conversation; starting fresh");
+                    None
+                }
+            })
+            .map(|mut h| {
+                // A persisted conversation can end on an unanswered `tool_use`:
+                // the loop writes after appending the assistant message and again
+                // after appending the tool results, so a kill between those two
+                // writes tears the pair apart. Sending that as-is 400s the first
+                // request after restart, which reads as a loop bug rather than a
+                // torn write. Repair before use.
+                repair_dangling_tool_use_in(&mut h);
+                info!(
+                    agent = %cfg.agent_name,
+                    messages = h.len(),
+                    "resumed native conversation"
+                );
+                h
+            })
+            .unwrap_or_default(),
         ceiling_reached: false,
     };
     let mut control_open = true;
@@ -242,6 +299,11 @@ pub async fn run_loop(
             },
         };
 
+        // Deliberately NOT persisted here. `history::save` serialises the WHOLE
+        // conversation, so a write per mutation is three per turn; the assistant
+        // and tool-result writes below are enough. Dying between this push and
+        // the next write loses only the message the user just typed, which they
+        // can retype — cheaper than a third full serialisation every turn.
         push_user_text(&mut state.history, &msg.message.content);
 
         if state.ceiling_reached {
@@ -277,6 +339,7 @@ pub async fn run_loop(
                 // The abandoned turn can leave a trailing assistant `tool_use`
                 // whose results never arrived, which 400s the NEXT request.
                 repair_dangling_tool_use(&mut state);
+                persist(&cfg, &state);
                 info!(agent = %cfg.agent_name, "native turn interrupted");
                 // Matches the CLI path's abort shape: an errored turn, so
                 // partial text is not peer-forwarded.
@@ -314,14 +377,22 @@ async fn run_turns(
             messages: &state.history,
         });
 
-        let resp = match transport.send(body).await {
-            Ok(v) => v,
-            Err(f) => {
-                warn!(agent = %cfg.agent_name, status = ?f.status, detail = %f.detail, "native turn failed");
-                send(event_tx, AgentEvent::Error(f.detail)).await?;
-                send(event_tx, wire::turn_complete_err(f.status, "api_error")).await?;
-                return Ok(());
-            }
+        // Transient-error retry, in-loop.
+        //
+        // A CLI agent gets this from `spawn_supervised_agent`: the child dies on
+        // a 529, the supervisor respawns it with `--resume` and backoff. The
+        // native path is NOT wrapped in that supervisor, and wrapping it would
+        // do nothing anyway — `supervise` ends an incarnation on event-channel
+        // CLOSURE, and this loop deliberately survives API errors, so the
+        // incarnation never ends. Without this block a native agent absorbed a
+        // 529 and then sat idle until something poked it, while a CLI agent
+        // recovered on its own.
+        //
+        // Retrying here is strictly better than respawning: the conversation
+        // stays in memory, so there is nothing to resume.
+        let resp = match send_with_retry(cfg, transport, body, event_tx).await? {
+            Some(v) => v,
+            None => return Ok(()), // failure already reported
         };
 
         let parsed = parse_turn(&resp, &cfg.model, cfg.profile.context_window);
@@ -340,6 +411,25 @@ async fn run_turns(
                 window = ?cfg.profile.context_window,
                 "native turn accounting"
             );
+            if let Some(log) = cfg.accounting.as_ref() {
+                let rec = TurnRecord {
+                    ts: crate::storage::now_utc(),
+                    session_id: cfg.session_id.clone(),
+                    agent: cfg.agent_name.clone(),
+                    model: cfg.model.clone(),
+                    used_tokens: used,
+                    history_messages: state.history.len(),
+                    context_window: cfg.profile.context_window,
+                    stop_reason: resp
+                        .get("stop_reason")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                };
+                // Never fail a turn over a diagnostic write.
+                if let Err(e) = log.append(&rec) {
+                    warn!(error = %e, "writing native turn accounting");
+                }
+            }
         }
 
         for ev in parsed.events {
@@ -347,6 +437,7 @@ async fn run_turns(
         }
         if let Some(m) = parsed.assistant_message {
             state.history.push(m);
+            persist(cfg, state);
         }
 
         // Checked AFTER the turn is accounted for, so the reading that trips the
@@ -371,6 +462,7 @@ async fn run_turns(
                     .await?;
                 }
                 state.history.push(tool_results_message(&outcomes));
+                persist(cfg, state);
 
                 if over_ceiling {
                     state.ceiling_reached = true;
@@ -439,6 +531,65 @@ async fn run_turns(
     Ok(())
 }
 
+/// POST the request, retrying transient upstream failures with capped backoff.
+///
+/// `Ok(Some(body))` on success. `Ok(None)` when the failure was reported to the
+/// caller as events and the turn should end. `Err(())` when the event channel
+/// closed.
+///
+/// Classification is `is_transient_api_error` — the same function the CLI
+/// supervisor uses, so both paths treat a 529 and a 400 identically. A
+/// transport-level failure (`status: None`) is NOT retried: it is usually
+/// misconfiguration (bad host, TLS), where retrying just delays the error.
+async fn send_with_retry(
+    cfg: &LoopConfig,
+    transport: &Arc<dyn MessagesTransport>,
+    body: Value,
+    event_tx: &mpsc::Sender<AgentEvent>,
+) -> Result<Option<Value>, ()> {
+    let mut attempt: u32 = 0;
+    loop {
+        match transport.send(body.clone()).await {
+            Ok(v) => {
+                if attempt > 0 {
+                    // Mirrors the supervisor's recovery signal so the UI health
+                    // dot goes back to running.
+                    send(event_tx, AgentEvent::Health(AgentHealth::Running)).await?;
+                }
+                return Ok(Some(v));
+            }
+            Err(f) => {
+                let transient = f.status.is_some_and(is_transient_api_error);
+                if transient && attempt < cfg.retry.max_retries {
+                    attempt += 1;
+                    let delay = cfg.retry.backoff(attempt);
+                    warn!(
+                        agent = %cfg.agent_name,
+                        status = ?f.status,
+                        attempt,
+                        delay_ms = delay.as_millis() as u64,
+                        "native turn hit a transient API error; retrying after backoff"
+                    );
+                    send(event_tx, AgentEvent::Health(AgentHealth::Retrying)).await?;
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+
+                warn!(
+                    agent = %cfg.agent_name,
+                    status = ?f.status,
+                    detail = %f.detail,
+                    attempts = attempt,
+                    "native turn failed"
+                );
+                send(event_tx, AgentEvent::Error(f.detail)).await?;
+                send(event_tx, wire::turn_complete_err(f.status, "api_error")).await?;
+                return Ok(None);
+            }
+        }
+    }
+}
+
 /// Run every requested tool. Built-ins are handled locally; everything else goes
 /// to bot-hq's signaling MCP server, where role enforcement lives.
 async fn exec_calls(
@@ -498,7 +649,20 @@ fn push_user_text(history: &mut Vec<Value>, text: &str) {
 /// results were appended". The API requires every `tool_use` to be answered, so
 /// leaving the gap 400s the next request. Answer them as interrupted instead.
 fn repair_dangling_tool_use(state: &mut State) {
-    let Some(last) = state.history.last() else {
+    repair_dangling_tool_use_in(&mut state.history);
+}
+
+/// The repair itself, over a bare history.
+///
+/// Split out because an interrupt is not the only way a dangling `tool_use` gets
+/// created: persistence writes after the assistant message is appended and again
+/// after the tool results are, so a kill BETWEEN those two writes leaves a
+/// persisted conversation ending in an unanswered `tool_use`. Loading that would
+/// 400 the first request after restart with "tool_use ids were found without
+/// tool_result blocks" — a failure that looks like a native-loop bug and is
+/// actually a torn write. Repairing on load makes any crash point recoverable.
+fn repair_dangling_tool_use_in(history: &mut Vec<Value>) {
+    let Some(last) = history.last() else {
         return;
     };
     if last.get("role").and_then(Value::as_str) != Some("assistant") {
@@ -523,11 +687,11 @@ fn repair_dangling_tool_use(state: &mut State) {
         .into_iter()
         .map(|id| ToolOutcome {
             tool_use_id: id,
-            content: "interrupted by the user before this tool ran".into(),
+            content: "this tool did not run — the turn was interrupted".into(),
             is_error: true,
         })
         .collect();
-    state.history.push(tool_results_message(&outcomes));
+    history.push(tool_results_message(&outcomes));
 }
 
 async fn emit_ceiling_refusal(cfg: &LoopConfig, event_tx: &mpsc::Sender<AgentEvent>) {
@@ -549,14 +713,36 @@ async fn send(tx: &mpsc::Sender<AgentEvent>, ev: AgentEvent) -> Result<(), ()> {
     tx.send(ev).await.map_err(|_| ())
 }
 
+/// Persist the conversation. Best-effort: a save failure degrades to
+/// no-persistence (today's behaviour) rather than failing the turn.
+fn persist(cfg: &LoopConfig, state: &State) {
+    let Some(path) = cfg.history_path.as_ref() else {
+        return;
+    };
+    if let Err(e) = history::save(path, &state.history) {
+        warn!(agent = %cfg.agent_name, error = %e, "persisting native conversation");
+    }
+}
+
 /// Spawn a native agent from the same [`SpawnConfig`] the CLI path uses.
 ///
 /// Signature-compatible with `spawn_agent`, which is what lets
 /// `spawn_supervised_agent`'s `FnMut(SpawnConfig) -> Fut` retry machinery drive
 /// it unchanged.
 pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
-    let profile = ProviderProfile::for_provider(&cfg.config.provider);
+    let mut profile = ProviderProfile::for_provider(&cfg.config.provider);
     let url = profile.messages_url(cfg.config.base_url.as_deref());
+
+    // The ONLY source of a context window. `ProviderProfile` declares none — a
+    // window is a per-model fact, and a provider-keyed guess would render as a
+    // precise but wrong percentage. This value comes from the user, on the saved
+    // model. Unset (or nonsensical) leaves it `None`, which keeps the meter a
+    // visible gap and the context ceiling dark.
+    profile.context_window = cfg
+        .config
+        .context_window
+        .filter(|w| *w > 0)
+        .map(|w| w as u64);
 
     // claude-code can fall back to ambient auth (a logged-in CLI, `ANTHROPIC_API_KEY`
     // in the environment); this loop cannot — it only ever sends the token on the
@@ -577,13 +763,17 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         );
     }
 
-    let mut system_prompt = std::fs::read_to_string(&cfg.system_prompt_path).with_context(|| {
+    let system_prompt = std::fs::read_to_string(&cfg.system_prompt_path).with_context(|| {
         format!(
             "reading system prompt at {}",
             cfg.system_prompt_path.display()
         )
     })?;
-    // The assembled prompt promises claude-code's tool surface; correct it.
+    // Remove claude-code's tool inventory BEFORE appending ours, so the prompt
+    // carries one inventory rather than two contradictory ones. EYES on the first
+    // live native run had to reason her way past the stale block; that is not
+    // something to rely on.
+    let mut system_prompt = crate::agents::prompts::strip_claude_code_tool_inventory(&system_prompt);
     system_prompt.push_str(NATIVE_TOOL_ADDENDUM);
 
     // NO fallback to `current_dir()`. bot-hq's own cwd is its data directory,
@@ -644,8 +834,18 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     tokio::spawn(run_loop(
         LoopConfig {
             agent_name: name.clone(),
+            session_id: cfg.session_id.clone(),
             model: cfg.config.model_name.clone(),
             profile,
+            accounting: Some(Arc::new(AccountingLog::for_data_dir(&cfg.data_dir))),
+            history_path: Some(history::history_path(
+                &cfg.data_dir,
+                &cfg.session_id,
+                &name,
+            )),
+            // Same policy the CLI supervisor uses, so a 529 costs the same
+            // patience on either path.
+            retry: RetryPolicy::default(),
             system_prompt,
             root,
             tools: tool_defs,
@@ -733,6 +933,17 @@ mod tests {
                 agent_name: "rain".into(),
                 model: "m".into(),
                 profile,
+                session_id: "s-test".into(),
+                accounting: None,
+                history_path: None,
+                // No retry budget: this harness serves tests about everything
+                // EXCEPT retry, and a real budget would make a transient-status
+                // fixture sleep through the backoff schedule. Retry has its own
+                // harness (`start_with`) and its own tests.
+                retry: RetryPolicy {
+                    max_retries: 0,
+                    ..RetryPolicy::default()
+                },
                 system_prompt: "sys".into(),
                 root: Some(root),
                 tools: tools::tool_defs(),
@@ -996,6 +1207,10 @@ mod tests {
                 agent_name: "rain".into(),
                 model: "m".into(),
                 profile: ProviderProfile::for_provider("anthropic"),
+                session_id: "s-test".into(),
+                accounting: None,
+                history_path: None,
+                retry: RetryPolicy::default(),
                 system_prompt: "sys".into(),
                 root: Some(root),
                 tools: vec![],
@@ -1036,6 +1251,252 @@ mod tests {
         // Still alive: the event channel is open, so the supervisor sees no
         // end-of-incarnation and does not respawn.
         assert!(!events.is_closed());
+    }
+
+    /// Build a harness with an explicit retry policy and history file.
+    fn start_with(
+        transport: Arc<dyn MessagesTransport>,
+        retry: RetryPolicy,
+        history_path: Option<PathBuf>,
+        accounting: Option<Arc<AccountingLog>>,
+    ) -> Harness {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (event_tx, events) = mpsc::channel(256);
+        let (input, input_rx) = mpsc::channel(16);
+        let (control, control_rx) = mpsc::channel(4);
+        let (kill, kill_rx) = oneshot::channel();
+
+        tokio::spawn(run_loop(
+            LoopConfig {
+                agent_name: "rain".into(),
+                session_id: "s-test".into(),
+                model: "m".into(),
+                profile: ProviderProfile::for_provider("anthropic"),
+                accounting,
+                history_path,
+                retry,
+                system_prompt: "sys".into(),
+                root: Some(root),
+                tools: vec![],
+            },
+            transport,
+            None,
+            event_tx,
+            input_rx,
+            control_rx,
+            kill_rx,
+        ));
+
+        Harness {
+            events,
+            input,
+            _control: control,
+            _kill: kill,
+            _dir: dir,
+        }
+    }
+
+    fn instant_retry() -> RetryPolicy {
+        RetryPolicy {
+            max_retries: 3,
+            base_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transient_error_retries_in_loop_and_recovers() {
+        // Without this, a native agent absorbed a 529 and then sat idle until
+        // something poked it, while a CLI agent auto-resumed via the supervisor.
+        let t = ScriptedTransport::new(vec![
+            Err(ApiFailure { status: Some(529), detail: "Overloaded".into() }),
+            Err(ApiFailure { status: Some(503), detail: "Unavailable".into() }),
+            Ok(end_turn("recovered on its own")),
+        ]);
+        let mut h = start_with(t.clone() as Arc<dyn MessagesTransport>, instant_retry(), None, None);
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
+
+        // Two Retrying transitions, then Running, then the answer.
+        assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Retrying)));
+        assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Retrying)));
+        assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Running)));
+        assert!(matches!(next(&mut h).await, AgentEvent::Text(t) if t == "recovered on its own"));
+        match next(&mut h).await {
+            AgentEvent::TurnComplete { is_error, .. } => assert!(!is_error),
+            other => panic!("expected a clean TurnComplete, got {other:?}"),
+        }
+        assert_eq!(t.requests().len(), 3, "the same request is re-sent");
+    }
+
+    #[tokio::test]
+    async fn a_permanent_error_is_not_retried() {
+        // A 400 is semantic — retrying just re-fails and burns tokens.
+        let t = ScriptedTransport::new(vec![Err(ApiFailure {
+            status: Some(400),
+            detail: "messages[3].role: unknown variant".into(),
+        })]);
+        let mut h = start_with(t.clone() as Arc<dyn MessagesTransport>, instant_retry(), None, None);
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
+        assert!(matches!(next(&mut h).await, AgentEvent::Error(_)));
+        match next(&mut h).await {
+            AgentEvent::TurnComplete { api_error_status, .. } => {
+                assert_eq!(api_error_status, Some(400))
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+        assert_eq!(t.requests().len(), 1, "a 400 must not be retried");
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_not_retried() {
+        // `status: None` means we never reached the API — usually a bad host or
+        // TLS, where retrying only delays the real error.
+        let t = ScriptedTransport::new(vec![Err(ApiFailure {
+            status: None,
+            detail: "dns error".into(),
+        })]);
+        let mut h = start_with(t.clone() as Arc<dyn MessagesTransport>, instant_retry(), None, None);
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
+        assert!(matches!(next(&mut h).await, AgentEvent::Error(_)));
+        assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { .. }));
+        assert_eq!(t.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_retry_budget_is_finite() {
+        let attempts = 6;
+        let t = ScriptedTransport::new(
+            (0..attempts)
+                .map(|_| Err(ApiFailure { status: Some(529), detail: "Overloaded".into() }))
+                .collect(),
+        );
+        let mut h = start_with(t.clone() as Arc<dyn MessagesTransport>, instant_retry(), None, None);
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
+
+        // 3 retries then give up — never an unbounded loop against a real outage.
+        for _ in 0..3 {
+            assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Retrying)));
+        }
+        assert!(matches!(next(&mut h).await, AgentEvent::Error(_)));
+        assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: true, .. }));
+        assert_eq!(t.requests().len(), 4, "1 initial + 3 retries");
+    }
+
+    #[tokio::test]
+    async fn the_conversation_is_persisted_and_reloaded_on_a_fresh_spawn() {
+        // The live consumer is an app RESTART: a CLI agent returns via
+        // `--resume`, and without this a native agent returns blank while still
+        // talking as though it remembered.
+        let dir = TempDir::new().unwrap();
+        let hist = dir.path().join("h.json");
+
+        let t1 = ScriptedTransport::new(vec![Ok(end_turn("first answer"))]);
+        let mut h1 = start_with(t1, RetryPolicy::default(), Some(hist.clone()), None);
+        assert!(matches!(next(&mut h1).await, AgentEvent::Init { .. }));
+        h1.input.send(OutgoingUserMessage::text("remember this")).await.unwrap();
+        assert!(matches!(next(&mut h1).await, AgentEvent::Text(_)));
+        assert!(matches!(next(&mut h1).await, AgentEvent::TurnComplete { .. }));
+        drop(h1);
+
+        // Second spawn against the same file — a restart.
+        let t2 = ScriptedTransport::new(vec![Ok(end_turn("second answer"))]);
+        let mut h2 = start_with(t2.clone() as Arc<dyn MessagesTransport>, RetryPolicy::default(), Some(hist), None);
+        assert!(matches!(next(&mut h2).await, AgentEvent::Init { .. }));
+        h2.input.send(OutgoingUserMessage::text("and this")).await.unwrap();
+        assert!(matches!(next(&mut h2).await, AgentEvent::Text(_)));
+
+        // The request must carry the FIRST exchange plus the new input.
+        let msgs = t2.requests()[0]["messages"].as_array().unwrap().clone();
+        assert!(
+            msgs.len() >= 3,
+            "expected the prior exchange to be resumed, got {} messages",
+            msgs.len()
+        );
+        let flat = serde_json::to_string(&msgs).unwrap();
+        assert!(flat.contains("remember this"), "prior user turn lost");
+        assert!(flat.contains("first answer"), "prior assistant turn lost");
+    }
+
+    #[tokio::test]
+    async fn accounting_is_appended_once_per_turn() {
+        let dir = TempDir::new().unwrap();
+        let log = Arc::new(AccountingLog::new(dir.path().join("acct.jsonl")));
+        let t = ScriptedTransport::new(vec![Ok(json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "done" }],
+            "usage": { "input_tokens": 1_234, "cache_read_input_tokens": 6 }
+        }))]);
+        let mut h = start_with(t, RetryPolicy::default(), None, Some(Arc::clone(&log)));
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
+        assert!(matches!(next(&mut h).await, AgentEvent::Text(_)));
+        assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { .. }));
+
+        let body = std::fs::read_to_string(log.path()).unwrap();
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let rec: TurnRecord = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(rec.used_tokens, 1_240);
+        assert_eq!(rec.agent, "rain");
+        assert_eq!(rec.session_id, "s-test");
+        assert_eq!(rec.stop_reason.as_deref(), Some("end_turn"));
+    }
+
+    #[tokio::test]
+    async fn a_torn_persisted_conversation_is_repaired_on_load() {
+        // The loop writes after appending the assistant message and again after
+        // appending the tool results. A kill between those two writes persists an
+        // assistant `tool_use` with no answer; replaying it would 400 the first
+        // request after restart.
+        let dir = TempDir::new().unwrap();
+        let hist = dir.path().join("h.json");
+        history::save(
+            &hist,
+            &[
+                json!({ "role": "user", "content": [{ "type": "text", "text": "read a.txt" }] }),
+                json!({ "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "tu_1", "name": "read_file", "input": { "path": "a.txt" } }
+                ]}),
+            ],
+        )
+        .unwrap();
+
+        let t = ScriptedTransport::new(vec![Ok(end_turn("carrying on"))]);
+        let mut h = start_with(
+            t.clone() as Arc<dyn MessagesTransport>,
+            RetryPolicy::default(),
+            Some(hist),
+            None,
+        );
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("continue")).await.unwrap();
+        assert!(matches!(next(&mut h).await, AgentEvent::Text(_)));
+
+        // Every tool_use must be answered before the next user turn.
+        let msgs = t.requests()[0]["messages"].as_array().unwrap().clone();
+        let flat = serde_json::to_string(&msgs).unwrap();
+        assert!(
+            flat.contains("tool_result") && flat.contains("tu_1"),
+            "the dangling tool_use was not answered: {flat}"
+        );
+        // …and the repair must sit between the assistant turn and the new input,
+        // not after it.
+        let assistant_idx = msgs.iter().position(|m| m["role"] == "assistant").unwrap();
+        let repair_idx = msgs
+            .iter()
+            .position(|m| m["content"][0]["type"] == "tool_result")
+            .unwrap();
+        assert_eq!(repair_idx, assistant_idx + 1);
     }
 
     #[test]
@@ -1106,6 +1567,7 @@ mod tests {
                 auth_token: token.map(str::to_string),
                 updated_at: String::new(),
                 native: true,
+                context_window: None,
             },
             // Deliberately nonexistent: the auth guard must fire before any IO,
             // so this path is never read on the failing case.

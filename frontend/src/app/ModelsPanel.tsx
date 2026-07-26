@@ -248,6 +248,7 @@ function emptyDraft(): ModelView {
     created_at: "",
     updated_at: "",
     native: false,
+    context_window: null,
   };
 }
 
@@ -402,6 +403,31 @@ function ModelDialog({
                 {tokenVisible ? "Hide" : "Show"}
               </button>
             </div>
+          </label>
+
+          <label className="block">
+            <FieldLabel>Context window</FieldLabel>
+            <input
+              type="number"
+              min={1}
+              value={draft.context_window ?? ""}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  context_window: e.target.value
+                    ? Number(e.target.value)
+                    : null,
+                })
+              }
+              placeholder="(unknown — meter shows a gap)"
+              className={terminalInputClass}
+            />
+            <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
+              Total tokens this specific model accepts. Only you can know this —
+              bot-hq never guesses, because a window is a per-model fact and a
+              wrong one renders as a confident percentage. Leave blank and the
+              context meter shows a visible gap instead.
+            </span>
           </label>
 
           <label className="flex items-start gap-2">

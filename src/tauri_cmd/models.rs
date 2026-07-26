@@ -29,6 +29,13 @@ pub struct ModelView {
     /// generated TS type into `boolean | undefined` and hand the checkbox an
     /// uncontrolled-input warning.
     pub native: bool,
+    /// Context window in tokens, or `null` when unknown.
+    ///
+    /// A window is a per-MODEL fact, so it comes from the user rather than from a
+    /// provider table — `ProviderProfile` deliberately declares none. Left unset,
+    /// the meter shows a visible gap and the native loop's context ceiling stays
+    /// dark, which is the documented contract: never a guessed percentage.
+    pub context_window: Option<i64>,
 }
 
 impl From<Model> for ModelView {
@@ -43,6 +50,7 @@ impl From<Model> for ModelView {
             created_at: m.created_at,
             updated_at: m.updated_at,
             native: m.native,
+            context_window: m.context_window,
         }
     }
 }
@@ -59,6 +67,7 @@ impl From<ModelView> for Model {
             created_at: v.created_at,
             updated_at: v.updated_at,
             native: v.native,
+            context_window: v.context_window,
         }
     }
 }
@@ -147,6 +156,7 @@ mod tests {
             created_at: "2026-06-03T00:00:00.000Z".into(),
             updated_at: "2026-06-03T00:00:00.000Z".into(),
             native: true,
+            context_window: Some(200_000),
         };
         let back: ModelView = Model::from(view.clone()).into();
         assert_eq!(back, view);

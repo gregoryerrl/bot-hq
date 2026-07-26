@@ -179,9 +179,117 @@ pub fn role_for(agent: &str) -> &'static str {
     }
 }
 
+/// The claude-code tool inventory inside [`RAIN_ROLE`], verbatim.
+///
+/// Exists so the native loop can REMOVE it — see
+/// [`strip_claude_code_tool_inventory`]. It promises `Read`, `Grep`, `Glob`,
+/// `WebFetch`, `ToolSearch`, `TodoWrite` and read-only `Bash`, none of which the
+/// native loop implements.
+///
+/// **Kept as an exact substring of `RAIN_ROLE` rather than composed into it.**
+/// `concat!` only takes literals, so composing would mean making the role a
+/// runtime `String` and changing every `RAIN_ROLE.contains(…)` assertion. The
+/// invariant is enforced by `tool_inventory_is_an_exact_substring_of_the_role`
+/// instead: edit one and the test fails, so the two cannot drift.
+pub const RAIN_TOOLS_CLI: &str = "Tools you may use:";
+
+/// Heading that terminates the tool-inventory span in [`RAIN_ROLE`].
+const RAIN_TOOLS_END: &str = "## Silence on transitions and holds";
+
+/// Remove the claude-code tool inventory from an assembled prompt.
+///
+/// The native loop appends its own inventory
+/// (`native::agent::NATIVE_TOOL_ADDENDUM`). Leaving the CLI one in place left the
+/// prompt carrying **two contradictory tool lists**, and EYES on the first live
+/// native run had to reason her way out of it: *"The prompt has a vestigial 'Bash
+/// — read-only invocations only' section, but the 'Not available' block is
+/// authoritative for this loop."* She resolved it correctly; depending on a model
+/// resolving a self-contradiction is not a design.
+///
+/// Returns the input unchanged when either boundary is missing, so a future
+/// prompt edit degrades to the old append-a-retraction behaviour rather than
+/// mangling the prompt. The
+/// `tool_inventory_is_an_exact_substring_of_the_role` test is what catches that
+/// drift at build time.
+pub fn strip_claude_code_tool_inventory(prompt: &str) -> String {
+    let Some(start) = prompt.find(RAIN_TOOLS_CLI) else {
+        return prompt.to_string();
+    };
+    let Some(end_rel) = prompt[start..].find(RAIN_TOOLS_END) else {
+        return prompt.to_string();
+    };
+    let mut out = String::with_capacity(prompt.len());
+    out.push_str(&prompt[..start]);
+    out.push_str(&prompt[start + end_rel..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_inventory_is_an_exact_substring_of_the_role() {
+        // The load-bearing invariant. `strip_claude_code_tool_inventory` returns
+        // the prompt UNCHANGED when a boundary is missing — a deliberate
+        // fail-safe against mangling, but it means a prompt edit that renames
+        // either boundary would silently ship a prompt with TWO contradictory
+        // tool inventories. This test is what turns that silence into a build
+        // failure. If it fails, update the constants — don't delete the test.
+        assert!(
+            RAIN_ROLE.contains(RAIN_TOOLS_CLI),
+            "RAIN_TOOLS_CLI no longer matches RAIN_ROLE"
+        );
+        assert!(
+            RAIN_ROLE.contains(RAIN_TOOLS_END),
+            "RAIN_TOOLS_END no longer matches RAIN_ROLE"
+        );
+        let start = RAIN_ROLE.find(RAIN_TOOLS_CLI).unwrap();
+        let end = RAIN_ROLE.find(RAIN_TOOLS_END).unwrap();
+        assert!(start < end, "the tool inventory must precede its terminator");
+    }
+
+    #[test]
+    fn stripping_removes_the_cli_tool_promises() {
+        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
+        // Each of these is a tool the native loop does not implement.
+        for promise in [
+            "read-only invocations only",
+            "**Read-only file tools**",
+            "**Task tracking**: `TodoWrite`",
+        ] {
+            assert!(
+                !native.contains(promise),
+                "native prompt still promises: {promise}"
+            );
+        }
+    }
+
+    #[test]
+    fn stripping_keeps_everything_that_is_not_the_tool_inventory() {
+        let native = strip_claude_code_tool_inventory(RAIN_ROLE);
+        // Identity, posture and workflow all still apply to a native agent —
+        // only the tool list changes.
+        for kept in [
+            "# Role — Rain (EYES)",
+            "## Adversarial posture",
+            "## Silence on transitions and holds",
+            "## Session opener — CL index, every time",
+        ] {
+            assert!(native.contains(kept), "native prompt lost: {kept}");
+        }
+        assert!(native.len() < RAIN_ROLE.len(), "nothing was removed");
+    }
+
+    #[test]
+    fn stripping_a_prompt_without_the_markers_is_a_no_op() {
+        // Brian's role has no such section; stripping must not corrupt it.
+        assert_eq!(
+            strip_claude_code_tool_inventory("no markers here"),
+            "no markers here"
+        );
+        assert_eq!(strip_claude_code_tool_inventory(""), "");
+    }
 
     #[test]
     fn role_for_known_agents() {

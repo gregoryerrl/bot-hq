@@ -149,6 +149,12 @@ pub struct AgentConfig {
     #[serde(default)]
     #[sqlx(default)]
     pub native: bool,
+    /// Context window in tokens, when the user has told us. `None` = unknown,
+    /// which renders as a visible gap and leaves the native loop's ceiling dark.
+    /// Carried from the chosen [`Model`]; no `agent_configs` column.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub context_window: Option<i64>,
 }
 
 /// A saved model in the user-managed registry (`models` table). Bundles the
@@ -171,6 +177,11 @@ pub struct Model {
     /// gating, an enforceable read root).
     #[serde(default)]
     pub native: bool,
+    /// Context window in tokens. `None` = unknown — never guessed. A window is a
+    /// per-model fact, which is why it lives here rather than in
+    /// `ProviderProfile`'s provider-keyed table.
+    #[serde(default)]
+    pub context_window: Option<i64>,
 }
 
 /// Surface type of a question parked for the user.

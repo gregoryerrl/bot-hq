@@ -36,12 +36,15 @@
 //! compatibility docs, the open MCP spec, and bot-hq's own `llm_proxy.rs` /
 //! `events.rs` / `spawn.rs`. No part derives from any leaked source.
 
+pub mod accounting;
 pub mod agent;
+pub mod history;
 pub mod mcp_client;
 pub mod profile;
 pub mod tools;
 pub mod wire;
 
+pub use accounting::{AccountingLog, TurnRecord};
 pub use agent::{spawn_native_agent, MessagesTransport, CONTEXT_CEILING};
 pub use mcp_client::McpClient;
 pub use profile::ProviderProfile;

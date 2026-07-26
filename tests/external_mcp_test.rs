@@ -488,6 +488,7 @@ async fn get_agent_configs_redacts_auth_token() {
             auth_token: Some("sk-ant-api03-EXAMPLE-key-with-suffix-AB12".into()),
             updated_at: String::new(),
             native: false,
+            context_window: None,
         })
         .await
         .unwrap();
@@ -569,6 +570,7 @@ async fn set_agent_config_empty_string_clears_field() {
             auth_token: Some("sk-rain-old".into()),
             updated_at: String::new(),
             native: false,
+            context_window: None,
         })
         .await
         .unwrap();

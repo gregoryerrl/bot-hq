@@ -1131,6 +1131,7 @@ fn default_agent_config(name: &str) -> AgentConfig {
         // Ambient Anthropic auth is a claude-code path; the native loop needs an
         // explicit credential this tier does not have.
         native: false,
+        context_window: None,
     }
 }
 
@@ -1154,6 +1155,7 @@ pub(crate) async fn resolve_spawn_config(
                 auth_token: m.auth_token,
                 updated_at: m.updated_at,
                 native: m.native,
+                context_window: m.context_window,
             };
         }
         tracing::warn!(
