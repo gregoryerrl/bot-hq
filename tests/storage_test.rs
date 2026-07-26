@@ -187,6 +187,57 @@ async fn upsert_agent_config_inserts_new_via_constructor() {
 }
 
 #[tokio::test]
+async fn agent_config_round_trips_the_native_flag_and_context_window() {
+    // Before 0038 `agent_configs` had no such columns, so `#[sqlx(default)]`
+    // resolved both to false/None on every read. That made the per-agent fallback
+    // — the path EVERY session without an explicit model id takes — permanently
+    // unable to express "native", so a native model assigned on the Agents tab
+    // silently spawned claude-code.
+    let s = Storage::memory().await.unwrap();
+    let cfg = AgentConfig {
+        agent_name: "rain".into(),
+        provider: "deepseek".into(),
+        model_name: "deepseek-v4-pro".into(),
+        base_url: Some("https://api.deepseek.com/anthropic".into()),
+        auth_token: Some("ds-token".into()),
+        updated_at: String::new(),
+        native: true,
+        context_window: Some(1_000_000),
+    };
+    s.upsert_agent_config(&cfg).await.unwrap();
+
+    let got = s.get_agent_config("rain").await.unwrap().unwrap();
+    assert!(got.native, "the native flag must survive the round trip");
+    assert_eq!(got.context_window, Some(1_000_000));
+
+    // And it must be un-settable too — a flag that only ever latches on is its
+    // own bug.
+    let back = AgentConfig {
+        native: false,
+        context_window: None,
+        ..got
+    };
+    s.upsert_agent_config(&back).await.unwrap();
+    let got = s.get_agent_config("rain").await.unwrap().unwrap();
+    assert!(!got.native);
+    assert_eq!(got.context_window, None);
+}
+
+#[tokio::test]
+async fn existing_agent_configs_default_to_the_cli() {
+    // The 0038 defaults must leave every pre-existing row on claude-code.
+    let s = Storage::memory().await.unwrap();
+    for cfg in s.list_agent_configs().await.unwrap() {
+        assert!(
+            !cfg.native,
+            "{} defaulted to the native loop after migration",
+            cfg.agent_name
+        );
+        assert_eq!(cfg.context_window, None);
+    }
+}
+
+#[tokio::test]
 async fn set_session_spawn_models_round_trip() {
     // Sessions remember which model their agents were spawned with so the chat
     // header reflects what's actually talking, even after a config swap.

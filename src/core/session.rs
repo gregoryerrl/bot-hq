@@ -1196,6 +1196,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_agent_default_can_carry_native_when_no_model_id_is_given() {
+        // The finding-5/6 regression. `dispatch_session` ("Maintain CL"), the
+        // plugin proxy and any driver `create_session` without model ids all leave
+        // `*_model_id` NULL ON PURPOSE, so this fallback is what decides their
+        // runtime. Before 0038 it could only ever answer `false`, which made a
+        // native model assigned on the Agents tab silently spawn claude-code.
+        let s = Storage::memory().await.unwrap();
+        let mut cfg = s.get_agent_config("rain").await.unwrap().unwrap();
+        cfg.native = true;
+        cfg.context_window = Some(1_000_000);
+        s.upsert_agent_config(&cfg).await.unwrap();
+
+        let resolved = resolve_spawn_config(&s, "rain", None).await;
+        assert!(resolved.native, "the agent default must reach the spawner");
+        assert_eq!(resolved.context_window, Some(1_000_000));
+        // …and the choice must actually reach the spawn branch.
+        assert_eq!(
+            resolve_agent_kind("rain", resolved.native),
+            AgentKind::Native
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_model_id_still_wins_over_the_agent_default() {
+        // The fallback gaining a native flag must not shadow an explicit choice:
+        // picking a CLI model in the create dialog has to beat a native default.
+        let s = Storage::memory().await.unwrap();
+        let mut cfg = s.get_agent_config("rain").await.unwrap().unwrap();
+        cfg.native = true;
+        s.upsert_agent_config(&cfg).await.unwrap();
+
+        s.upsert_model(&crate::storage::Model {
+            id: "m-cli".into(),
+            display_name: "CLI model".into(),
+            provider: "anthropic".into(),
+            model_name: "claude-opus-5".into(),
+            base_url: None,
+            auth_token: Some("tok".into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+            native: false,
+            context_window: None,
+        })
+        .await
+        .unwrap();
+
+        let resolved = resolve_spawn_config(&s, "rain", Some("m-cli")).await;
+        assert!(!resolved.native, "the explicit model must win");
+        assert_eq!(resolved.model_name, "claude-opus-5");
+    }
+
+    #[tokio::test]
     async fn resolve_project_prefers_registered_lookup_over_basename() {
         let s = Storage::memory().await.unwrap();
         s.upsert_project("acme", "acme", Some("/repos/acme-web"), None, None)

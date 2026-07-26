@@ -142,16 +142,19 @@ pub struct AgentConfig {
     pub auth_token: Option<String>,
     pub updated_at: String,
     /// Drive this agent through bot-hq's native Rust loop rather than a
-    /// claude-code subprocess. Carried here from the chosen [`Model`] — there
-    /// is no `agent_configs` column, so `#[sqlx(default)]` makes the legacy
-    /// per-agent fallback path resolve to `false` (stay on the CLI), which is
-    /// the safe direction.
+    /// claude-code subprocess. Set from the chosen [`Model`], and persisted on
+    /// `agent_configs` since 0038 — before that the per-agent fallback could
+    /// only ever resolve to `false`, so a native model assigned on the Agents
+    /// tab silently spawned claude-code anyway.
+    ///
+    /// `#[sqlx(default)]` is kept as belt-and-braces for any projection that
+    /// omits the column; it is no longer load-bearing.
     #[serde(default)]
     #[sqlx(default)]
     pub native: bool,
     /// Context window in tokens, when the user has told us. `None` = unknown,
     /// which renders as a visible gap and leaves the native loop's ceiling dark.
-    /// Carried from the chosen [`Model`]; no `agent_configs` column.
+    /// Set from the chosen [`Model`]; persisted on `agent_configs` since 0038.
     #[serde(default)]
     #[sqlx(default)]
     pub context_window: Option<i64>,

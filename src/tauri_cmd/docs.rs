@@ -401,6 +401,16 @@ pub async fn validate_model(
 /// exit or empty output ⇒ failure with the captured detail (the API error
 /// usually lands on stderr — e.g. a 401 for a bad token).
 async fn probe_model(cfg: AgentConfig) -> ValidateResult {
+    // Probe the runtime that will actually run. A native model never spawns
+    // claude-code, so checking `claude -p` tested something unrelated — and
+    // worse, `headless_claude_cmd` passes the token only when non-empty and
+    // otherwise falls back to claude's ambient auth, while `spawn_native_agent`
+    // hard-bails on a missing token and that bail fails the WHOLE duo spawn. So a
+    // token-less native model tested green and then made the session unopenable,
+    // which is the one failure a pre-flight exists to catch.
+    if cfg.native {
+        return probe_native_model(&cfg).await;
+    }
     if let Err(e) = crate::agents::spawn::ensure_claude_runnable("claude") {
         return ValidateResult {
             ok: false,
@@ -441,9 +451,129 @@ async fn probe_model(cfg: AgentConfig) -> ValidateResult {
     }
 }
 
+/// Pre-flight a model that is set to the native loop.
+///
+/// Deliberately built from the loop's OWN machinery — `ProviderProfile` for the
+/// endpoint and auth style, `HttpTransport` for the request, `build_request` for
+/// the body — rather than an approximation of it. A probe that reimplements the
+/// request can pass on a configuration the real loop rejects, which is exactly
+/// the bug this replaces.
+async fn probe_native_model(cfg: &AgentConfig) -> ValidateResult {
+    use crate::agents::native::agent::{HttpTransport, MessagesTransport};
+    use crate::agents::native::profile::ProviderProfile;
+    use crate::agents::native::wire::{build_request, RequestSpec};
+
+    // Checked first because it is the condition that used to test green: unlike
+    // claude-code, the native loop has no ambient-auth fallback, so a blank token
+    // is fatal at spawn rather than at first request.
+    let token = cfg.auth_token.as_deref().map(str::trim).unwrap_or_default();
+    if token.is_empty() {
+        return ValidateResult {
+            ok: false,
+            message: "This model is set to the native loop but has no API key. The native \
+                      loop has no ambient-auth fallback (unlike claude-code) — add the key \
+                      above, or untick \"Native loop\"."
+                .into(),
+        };
+    }
+
+    let profile = ProviderProfile::for_provider(&cfg.provider);
+    let url = profile.messages_url(cfg.base_url.as_deref());
+    let transport = match HttpTransport::new(url, profile.auth, Some(token.to_string())) {
+        Ok(t) => t,
+        Err(e) => {
+            return ValidateResult {
+                ok: false,
+                message: format!("Couldn't build the request: {e}"),
+            }
+        }
+    };
+
+    let messages = vec![serde_json::json!({ "role": "user", "content": "Reply with: ok" })];
+    let body = build_request(&RequestSpec {
+        model: &cfg.model_name,
+        // Enough to come back with something; the point is a 2xx, not the text.
+        max_tokens: 16,
+        system: None,
+        tools: &[],
+        messages: &messages,
+    });
+
+    match transport.send(body).await {
+        Ok(_) => ValidateResult {
+            ok: true,
+            message: "Connected — the model responded on the native loop.".into(),
+        },
+        Err(f) => {
+            let detail: String = f.detail.chars().take(300).collect();
+            let status = f
+                .status
+                .map(|s| format!("HTTP {s}: "))
+                .unwrap_or_else(|| "Couldn't reach the endpoint: ".into());
+            ValidateResult {
+                ok: false,
+                message: format!("Check failed: {status}{detail}"),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_cfg(token: Option<&str>) -> AgentConfig {
+        AgentConfig {
+            agent_name: "rain".into(),
+            provider: "deepseek".into(),
+            model_name: "deepseek-v4-pro".into(),
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            auth_token: token.map(str::to_string),
+            updated_at: String::new(),
+            native: true,
+            context_window: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_native_model_without_a_token_fails_the_probe_and_names_the_fix() {
+        // This is the case that used to test GREEN: `headless_claude_cmd` passes
+        // the token only when non-empty and otherwise falls back to claude's
+        // ambient auth, while `spawn_native_agent` hard-bails on a missing token —
+        // and that bail fails the whole duo spawn. So the pre-flight passed and the
+        // session then would not open.
+        //
+        // No network and no subprocess: the guard fires before either.
+        for token in [None, Some(""), Some("   ")] {
+            let res = probe_model(native_cfg(token)).await;
+            assert!(!res.ok, "a token-less native model must not pass");
+            assert!(
+                res.message.contains("no API key"),
+                "must name the cause; got: {}",
+                res.message
+            );
+            assert!(
+                res.message.contains("Native loop"),
+                "must name the fix; got: {}",
+                res.message
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_native_probe_reports_an_unreachable_endpoint_rather_than_passing() {
+        // Nothing is listening. The probe must fail closed — and it must have gone
+        // over HTTP rather than spawning claude, which is what the base_url proves.
+        let mut cfg = native_cfg(Some("tok"));
+        cfg.base_url = Some("http://127.0.0.1:1".into());
+        let res = probe_model(cfg).await;
+        assert!(!res.ok);
+        assert!(
+            res.message.contains("Check failed"),
+            "got: {}",
+            res.message
+        );
+    }
 
     #[tokio::test]
     async fn session_doc_search_empty_when_storage_absent() {

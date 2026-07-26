@@ -134,10 +134,18 @@ export function ModelsPanel() {
                     {m.provider || "—"}
                   </span>
                   <span
-                    className="truncate font-code-sm text-code-sm text-on-surface-variant"
+                    className="flex min-w-0 items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant"
                     title={m.model_name}
                   >
-                    {m.model_name || "—"}
+                    <span className="truncate">{m.model_name || "—"}</span>
+                    {/* Which runtime a model uses changes its whole tool
+                        surface, so it belongs in the list rather than only
+                        inside Edit. */}
+                    {m.native && (
+                      <span className="shrink-0 rounded border border-secondary/50 px-1 font-label-caps text-label-caps text-secondary">
+                        native
+                      </span>
+                    )}
                   </span>
                   <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
                     {m.updated_at ? formatTimestamp(m.updated_at) : "—"}

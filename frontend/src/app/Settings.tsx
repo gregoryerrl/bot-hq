@@ -379,12 +379,16 @@ function AgentCard({
 
   // Which saved model (if any) the current config corresponds to. Exact match
   // on the spawn-relevant fields so the dropdown reflects the agent's model.
+  // `native` is part of the match because two rows can otherwise differ ONLY in
+  // that flag, and the dropdown would then name a model whose runtime
+  // contradicts the one this config will actually spawn.
   const selectedModelId =
     models.find(
       (m) =>
         m.provider === draft.provider &&
         m.model_name === draft.model_name &&
-        (m.base_url ?? "") === (draft.base_url ?? ""),
+        (m.base_url ?? "") === (draft.base_url ?? "") &&
+        m.native === draft.native,
     )?.id ?? "";
 
   // Save-all fan-out: parent increments saveAllSignal; each dirty row
@@ -469,6 +473,12 @@ function AgentCard({
                   model_name: m.model_name,
                   base_url: m.base_url,
                   auth_token: m.auth_token,
+                  // Copied like the rest: without these two, assigning a
+                  // native model here silently produced a claude-code agent,
+                  // because every path that doesn't name a model id on the
+                  // session row resolves through this saved config.
+                  native: m.native,
+                  context_window: m.context_window,
                 });
               }
             }}
@@ -494,6 +504,9 @@ function AgentCard({
             <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
               {draft.provider}
               {draft.base_url ? ` · ${draft.base_url}` : ""}
+              {draft.native
+                ? " · native loop (no claude-code subprocess)"
+                : ""}
             </span>
           ) : (
             <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
