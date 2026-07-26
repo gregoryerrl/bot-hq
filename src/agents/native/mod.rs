@@ -36,8 +36,10 @@
 //! compatibility docs, the open MCP spec, and bot-hq's own `llm_proxy.rs` /
 //! `events.rs` / `spawn.rs`. No part derives from any leaked source.
 
+pub mod mcp_client;
 pub mod profile;
 pub mod wire;
 
+pub use mcp_client::McpClient;
 pub use profile::ProviderProfile;
 pub use wire::{ParsedTurn, RequestSpec, ToolCall, ToolOutcome, TurnStep};
