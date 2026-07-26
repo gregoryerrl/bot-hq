@@ -1026,7 +1026,8 @@ mod tests {
         assert!(matches!(next(&mut h).await, AgentEvent::ToolUse { .. }));
         match next(&mut h).await {
             AgentEvent::ToolResult { content, is_error, .. } => {
-                assert_eq!(content, "hello");
+                // Line-numbered now, so match on content rather than equality.
+                assert!(content.contains("hello"), "{content}");
                 assert!(!is_error);
             }
             other => panic!("expected ToolResult, got {other:?}"),

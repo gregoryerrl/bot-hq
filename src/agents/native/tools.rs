@@ -113,12 +113,16 @@ pub fn tool_defs() -> Vec<Value> {
     vec![
         json!({
             "name": "read_file",
-            "description": "Read a UTF-8 text file from the working repository. \
-                            Paths are relative to the repository root.",
+            "description": "Read a UTF-8 text file from the working repository, returned with \
+                            line numbers. Paths are relative to the repository root. Use \
+                            `offset` + `limit` on large files — reading a whole 2000-line \
+                            file to see 30 lines of it wastes most of your context window.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Path relative to the repository root, e.g. \"Cargo.toml\"." }
+                    "path": { "type": "string", "description": "Path relative to the repository root, e.g. \"Cargo.toml\"." },
+                    "offset": { "type": "integer", "description": "1-based line to start at. Defaults to the first line." },
+                    "limit": { "type": "integer", "description": "Maximum number of lines to return. Defaults to the whole file." }
                 },
                 "required": ["path"]
             }
@@ -254,6 +258,82 @@ pub async fn exec(call: &ToolCall, root: Option<&Path>, policy: ToolPolicy) -> T
     }
 }
 
+/// An optional positive integer argument. Absent, zero, or a non-number → `None`.
+///
+/// Lenient about the JSON type because models emit `"80"` as readily as `80`, and
+/// silently ignoring a windowing argument is exactly the failure this exists to
+/// fix.
+fn usize_arg(call: &ToolCall, key: &str) -> Option<usize> {
+    let v = call.input.get(key)?;
+    let n = v
+        .as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))?;
+    (n > 0).then_some(n as usize)
+}
+
+/// Render `text` with 1-based line numbers, optionally windowed.
+///
+/// Line numbers are always included: they make `search_files` hits directly
+/// referenceable, and they tell the agent where a windowed read actually landed.
+///
+/// The window exists because agents ask for one. The first live run of these tools
+/// showed EYES calling `read_file` with `offset`/`limit` on six of twelve calls —
+/// claude-code's `Read` accepts them — while this tool declared neither and
+/// silently returned the whole file: 85,381 bytes of `spawn.rs` for a request of 80
+/// lines, roughly 20K tokens spent to deliver about 1K.
+fn slice_with_line_numbers(
+    text: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<String, String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    let start = offset.unwrap_or(1).saturating_sub(1);
+
+    if start >= total && total > 0 {
+        return Err(format!(
+            "offset {} is past the end of the file ({total} lines)",
+            start + 1
+        ));
+    }
+
+    let end = match limit {
+        Some(n) => (start + n).min(total),
+        None => total,
+    };
+
+    let mut out = String::new();
+    let mut bytes = 0usize;
+    let mut last = start;
+    for (i, line) in lines[start..end].iter().enumerate() {
+        let n = start + i + 1;
+        let rendered = format!("{n:6}\t{line}\n");
+        // Byte cap still applies: a windowless read of a huge file must not blow
+        // the context window just because no limit was given.
+        if bytes + rendered.len() > MAX_FILE_BYTES {
+            out.push_str(&format!(
+                "… truncated at {MAX_FILE_BYTES} bytes (line {n} of {total}); \
+                 re-read with offset/limit\n"
+            ));
+            return Ok(out);
+        }
+        bytes += rendered.len();
+        out.push_str(&rendered);
+        last = n;
+    }
+
+    if end < total || start > 0 {
+        out.push_str(&format!(
+            "… showing lines {}-{last} of {total}\n",
+            start + 1
+        ));
+    }
+    if out.is_empty() {
+        out.push_str("(empty file)\n");
+    }
+    Ok(out)
+}
+
 fn str_arg<'a>(call: &'a ToolCall, key: &str) -> Result<&'a str, String> {
     call.input
         .get(key)
@@ -266,13 +346,11 @@ async fn run(call: &ToolCall, root: &Path, policy: ToolPolicy) -> Result<String,
         "read_file" => {
             let target = resolve_in_root(root, str_arg(call, "path")?)?;
             let bytes = std::fs::read(&target).map_err(|e| format!("read failed: {e}"))?;
-            if bytes.len() > MAX_FILE_BYTES {
-                return Err(format!(
-                    "file is {} bytes; reads are capped at {MAX_FILE_BYTES}",
-                    bytes.len()
-                ));
-            }
-            String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())
+            let text =
+                String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())?;
+            let offset = usize_arg(call, "offset");
+            let limit = usize_arg(call, "limit");
+            slice_with_line_numbers(&text, offset, limit)
         }
 
         "list_files" => list_files(root, str_arg(call, "pattern")?),
@@ -412,8 +490,98 @@ mod tests {
         let (_d, root) = root_with_file("a.txt", "hello");
         let out = exec(&call("read_file", "a.txt"), Some(&root), ToolPolicy::ReadOnly).await;
         assert!(!out.is_error);
-        assert_eq!(out.content, "hello");
+        assert!(out.content.contains("hello"));
         assert_eq!(out.tool_use_id, "tu_1");
+    }
+
+    fn windowed(path: &str, offset: Option<u64>, limit: Option<u64>) -> ToolCall {
+        let mut input = json!({ "path": path });
+        if let Some(o) = offset {
+            input["offset"] = json!(o);
+        }
+        if let Some(l) = limit {
+            input["limit"] = json!(l);
+        }
+        ToolCall { id: "tu_1".into(), name: "read_file".into(), input }
+    }
+
+    fn numbered_root() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let body: String = (1..=100).map(|n| format!("line {n}\n")).collect();
+        fs::write(dir.path().join("big.txt"), body).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        (dir, root)
+    }
+
+    #[tokio::test]
+    async fn read_file_honours_offset_and_limit() {
+        // The live-run defect: EYES sent offset/limit (claude-code's `Read` takes
+        // them) and got the WHOLE file back — 85,381 bytes of spawn.rs for an
+        // 80-line request, ~20K tokens to deliver about 1K.
+        let (_d, root) = numbered_root();
+        let out = exec(&windowed("big.txt", Some(20), Some(3)), Some(&root), ToolPolicy::ReadOnly).await;
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("line 20"), "{}", out.content);
+        assert!(out.content.contains("line 22"));
+        assert!(!out.content.contains("line 19"));
+        assert!(!out.content.contains("line 23"));
+        assert!(out.content.contains("showing lines 20-22 of 100"));
+    }
+
+    #[tokio::test]
+    async fn read_file_numbers_lines_so_search_hits_are_referenceable() {
+        let (_d, root) = numbered_root();
+        let out = exec(&windowed("big.txt", Some(7), Some(1)), Some(&root), ToolPolicy::ReadOnly).await;
+        assert!(out.content.contains("7\tline 7"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn read_file_accepts_a_stringified_number() {
+        // Models emit "20" as readily as 20; silently ignoring it is the bug.
+        let (_d, root) = numbered_root();
+        let mut c = windowed("big.txt", None, None);
+        c.input["offset"] = json!("20");
+        c.input["limit"] = json!("2");
+        let out = exec(&c, Some(&root), ToolPolicy::ReadOnly).await;
+        assert!(out.content.contains("line 20"));
+        assert!(!out.content.contains("line 22"));
+    }
+
+    #[tokio::test]
+    async fn read_file_limit_past_the_end_is_not_an_error() {
+        let (_d, root) = numbered_root();
+        let out = exec(&windowed("big.txt", Some(99), Some(500)), Some(&root), ToolPolicy::ReadOnly).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("line 100"));
+    }
+
+    #[tokio::test]
+    async fn read_file_offset_past_the_end_says_so() {
+        let (_d, root) = numbered_root();
+        let out = exec(&windowed("big.txt", Some(500), None), Some(&root), ToolPolicy::ReadOnly).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("past the end"));
+    }
+
+    #[tokio::test]
+    async fn read_file_without_a_window_still_returns_everything() {
+        let (_d, root) = numbered_root();
+        let out = exec(&windowed("big.txt", None, None), Some(&root), ToolPolicy::ReadOnly).await;
+        assert!(out.content.contains("line 1\n"));
+        assert!(out.content.contains("line 100"));
+    }
+
+    #[test]
+    fn the_read_file_schema_declares_the_window_params() {
+        // An undeclared param is what the model silently loses.
+        let def = tool_defs()
+            .into_iter()
+            .find(|d| d["name"] == "read_file")
+            .unwrap();
+        let props = &def["input_schema"]["properties"];
+        assert!(props["offset"].is_object(), "offset undeclared");
+        assert!(props["limit"].is_object(), "limit undeclared");
     }
 
     #[tokio::test]
@@ -485,15 +653,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async     fn oversized_file_is_refused_rather_than_truncated() {
+    async fn an_oversized_file_is_truncated_visibly_and_says_how_to_continue() {
+        // Behaviour changed with offset/limit. Refusing an oversized read outright
+        // used to be a dead end — there was no way to ask for less. Now it stops at
+        // the cap and names the remedy. The property that matters is unchanged:
+        // truncation must never be SILENT, or the model reasons confidently about a
+        // file it only partly saw.
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("big.txt"), vec![b'x'; MAX_FILE_BYTES + 1]).unwrap();
+        let body: String = (1..=40_000)
+            .map(|n| format!("line {n} padding padding padding\n"))
+            .collect();
+        assert!(body.len() > MAX_FILE_BYTES);
+        fs::write(dir.path().join("big.txt"), body).unwrap();
         let root = dir.path().canonicalize().unwrap();
 
         let out = exec(&call("read_file", "big.txt"), Some(&root), ToolPolicy::ReadOnly).await;
-        assert!(out.is_error);
-        // Silent truncation would hand the model a file it thinks it read whole.
-        assert!(out.content.contains("capped"));
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("truncated"), "truncation must be visible");
+        assert!(
+            out.content.contains("offset/limit"),
+            "truncation must name the way forward"
+        );
+        assert!(out.content.len() < MAX_FILE_BYTES + 4096);
     }
 
     #[tokio::test]
