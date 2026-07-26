@@ -45,6 +45,36 @@ pub const CONTEXT_CEILING: f64 = 0.85;
 /// Runaway-loop guard: tool cycles allowed for a single user input.
 pub const MAX_TURNS_PER_INPUT: usize = 50;
 
+/// Appended to the assembled system prompt for a native agent.
+///
+/// The role prompts are written for claude-code and promise a tool surface the
+/// native loop does not implement — `prompts.rs` tells EYES she has `Read`,
+/// `Grep`, `Glob`, `WebFetch`, `ToolSearch`, `TodoWrite` and read-only `Bash`.
+/// Without this correction a native agent spends its turns calling tools that
+/// come back "unknown tool". Everything upstream of this addendum still applies;
+/// only the tool inventory changes.
+pub const NATIVE_TOOL_ADDENDUM: &str = "\n\n\
+---\n\n\
+# Your actual tool surface (native loop — this OVERRIDES the tool list above)\n\n\
+You are running on bot-hq's own agent loop, not claude-code. The tools named \
+earlier in this prompt do NOT all exist here. What you actually have:\n\n\
+- **`read_file`** — read one UTF-8 text file, path relative to the repository \
+root. This replaces `Read`. Paths outside the repository are refused, so you \
+cannot read anything above the working repo.\n\
+- **Every `mcp__bot-hq-signaling__*` tool** — the full bot-hq surface \
+(`cl_index_search`, `cl_retrieve`, `session_doc_*`, `eyes_flag`, `peer_ack`, \
+`web_search`, `terminal_read`, …). Role enforcement is unchanged: HANDS-only \
+tools are still refused to you.\n\n\
+**Not available:** `Grep`, `Glob`, `Bash`, `WebFetch`, `WebSearch`, `Edit`, \
+`Write`, `Task`, `TodoWrite`. Do not call them — they return an error and waste \
+the turn. In particular you have **no `Bash`**, so you cannot run `git log`, \
+`git diff`, `git status` or any other shell command. To see what changed, read \
+Brian's `session_doc_search(phase=\"apply\")` doc and `read_file` the files he \
+names; ask him to paste output you cannot obtain yourself.\n\n\
+`ToolSearch` does not exist and is not needed: every tool you have is passed on \
+every request, so there is nothing deferred to search for.\n\n\
+For anything outside the repository, use `mcp__bot-hq-signaling__web_search`.\n";
+
 /// A `POST /v1/messages` failure.
 #[derive(Debug, Clone)]
 pub struct ApiFailure {
@@ -201,9 +231,7 @@ pub async fn run_loop(
             },
         };
 
-        state
-            .history
-            .push(json!({ "role": "user", "content": msg.message.content }));
+        push_user_text(&mut state.history, &msg.message.content);
 
         if state.ceiling_reached {
             emit_ceiling_refusal(&cfg, &event_tx).await;
@@ -407,6 +435,37 @@ async fn exec_calls(
     out
 }
 
+/// Append user text to the history, MERGING into a trailing user message rather
+/// than stacking a second one.
+///
+/// Two `role: "user"` entries in a row is a shape the Messages API is not
+/// guaranteed to accept, and the loop can produce one without this: the
+/// interrupt-repair path appends synthetic `tool_result`s (which are a user
+/// message), and the very next input would otherwise push a second user message
+/// straight after. The ceiling-refusal path can stack them too. Merging is
+/// cheap and removes the whole class.
+fn push_user_text(history: &mut Vec<Value>, text: &str) {
+    let block = json!({ "type": "text", "text": text });
+
+    if let Some(last) = history.last_mut() {
+        if last.get("role").and_then(Value::as_str) == Some("user") {
+            match last.get_mut("content") {
+                Some(Value::Array(blocks)) => {
+                    blocks.push(block);
+                    return;
+                }
+                Some(existing @ Value::String(_)) => {
+                    let prior = existing.take();
+                    *existing = json!([{ "type": "text", "text": prior }, block]);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+    history.push(json!({ "role": "user", "content": [block] }));
+}
+
 /// An interrupt can drop the turn between "assistant asked for tools" and "the
 /// results were appended". The API requires every `tool_use` to be answered, so
 /// leaving the gap 400s the next request. Answer them as interrupted instead.
@@ -471,12 +530,33 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     let profile = ProviderProfile::for_provider(&cfg.config.provider);
     let url = profile.messages_url(cfg.config.base_url.as_deref());
 
-    let system_prompt = std::fs::read_to_string(&cfg.system_prompt_path).with_context(|| {
+    // claude-code can fall back to ambient auth (a logged-in CLI, `ANTHROPIC_API_KEY`
+    // in the environment); this loop cannot — it only ever sends the token on the
+    // model row. Without this check a token-less model spawns fine and then fails
+    // every turn with a bare upstream 401 that names nothing actionable.
+    if cfg
+        .config
+        .auth_token
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(str::is_empty)
+    {
+        anyhow::bail!(
+            "model {:?} is set to the native loop but has no auth token. The native \
+             loop has no ambient-auth fallback (unlike claude-code) — add the API key \
+             to the saved model in Settings → Models, or untick \"Native loop\".",
+            cfg.config.model_name
+        );
+    }
+
+    let mut system_prompt = std::fs::read_to_string(&cfg.system_prompt_path).with_context(|| {
         format!(
             "reading system prompt at {}",
             cfg.system_prompt_path.display()
         )
     })?;
+    // The assembled prompt promises claude-code's tool surface; correct it.
+    system_prompt.push_str(NATIVE_TOOL_ADDENDUM);
 
     let root = cfg
         .working_dir
@@ -580,7 +660,9 @@ mod tests {
     struct Harness {
         events: mpsc::Receiver<AgentEvent>,
         input: mpsc::Sender<OutgoingUserMessage>,
-        control: mpsc::Sender<ControlRequest>,
+        /// Held open so the loop's control arm stays live; the interrupt test
+        /// wires its own channels rather than going through `start`.
+        _control: mpsc::Sender<ControlRequest>,
         _kill: oneshot::Sender<()>,
         _dir: TempDir,
     }
@@ -621,7 +703,7 @@ mod tests {
         Harness {
             events,
             input,
-            control,
+            _control: control,
             _kill: kill,
             _dir: dir,
         }
@@ -927,6 +1009,105 @@ mod tests {
         assert_eq!(repaired["role"], "user");
         assert_eq!(repaired["content"][0]["tool_use_id"], "tu_1");
         assert_eq!(repaired["content"][0]["is_error"], true);
+    }
+
+    #[test]
+    fn user_text_merges_into_a_trailing_tool_result_message() {
+        // The exact shape the interrupt-repair path leaves behind: synthetic
+        // tool_results (a user message) followed immediately by fresh input.
+        let mut history = vec![tool_results_message(&[ToolOutcome {
+            tool_use_id: "tu_1".into(),
+            content: "interrupted".into(),
+            is_error: true,
+        }])];
+        push_user_text(&mut history, "try again");
+
+        assert_eq!(history.len(), 1, "must not stack two user messages");
+        let blocks = history[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[1]["text"], "try again");
+    }
+
+    #[test]
+    fn user_text_after_an_assistant_message_starts_a_new_message() {
+        let mut history = vec![json!({ "role": "assistant", "content": [] })];
+        push_user_text(&mut history, "next");
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1]["role"], "user");
+        assert_eq!(history[1]["content"][0]["text"], "next");
+    }
+
+    #[test]
+    fn user_text_merges_into_a_string_content_user_message() {
+        let mut history = vec![json!({ "role": "user", "content": "first" })];
+        push_user_text(&mut history, "second");
+
+        assert_eq!(history.len(), 1);
+        let blocks = history[0]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["text"], "first");
+        assert_eq!(blocks[1]["text"], "second");
+    }
+
+    fn spawn_cfg_with_token(token: Option<&str>) -> SpawnConfig {
+        SpawnConfig {
+            agent_name: "rain".into(),
+            config: crate::storage::AgentConfig {
+                agent_name: "rain".into(),
+                provider: "anthropic".into(),
+                model_name: "claude-opus-5".into(),
+                base_url: None,
+                auth_token: token.map(str::to_string),
+                updated_at: String::new(),
+                native: true,
+            },
+            // Deliberately nonexistent: the auth guard must fire before any IO,
+            // so this path is never read on the failing case.
+            system_prompt_path: std::path::PathBuf::from("/nonexistent/prompt.txt"),
+            mcp_config_path: None,
+            working_dir: None,
+            claude_bin: None,
+            session_id: "s-test".into(),
+            resume_session_id: None,
+            project: None,
+            data_dir: std::path::PathBuf::from("/tmp"),
+            session_effort: None,
+            session_ultracode: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_native_model_without_a_token_fails_with_an_actionable_message() {
+        // claude-code would fall back to ambient auth; this loop cannot, so a
+        // bare upstream 401 on every turn would name nothing useful.
+        for token in [None, Some(""), Some("   ")] {
+            // `AgentHandle` isn't Debug, so unwrap the Result by hand.
+            let msg = match spawn_native_agent(spawn_cfg_with_token(token)).await {
+                Ok(_) => panic!("a token-less native model must not spawn"),
+                Err(e) => e.to_string(),
+            };
+            assert!(msg.contains("no auth token"), "got: {msg}");
+            assert!(msg.contains("Native loop"), "must name the fix; got: {msg}");
+        }
+    }
+
+    #[test]
+    fn the_native_addendum_names_exactly_the_builtins_that_exist() {
+        // Drift here is what sends the agent chasing tools that do not exist.
+        for def in tools::tool_defs() {
+            let name = def["name"].as_str().unwrap();
+            assert!(
+                NATIVE_TOOL_ADDENDUM.contains(name),
+                "built-in {name} is missing from the addendum"
+            );
+        }
+        for absent in ["Grep", "Glob", "Bash", "WebFetch", "TodoWrite"] {
+            assert!(
+                NATIVE_TOOL_ADDENDUM.contains(absent),
+                "{absent} is promised by prompts.rs and must be retracted here"
+            );
+        }
     }
 
     #[test]
