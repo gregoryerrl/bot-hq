@@ -156,17 +156,25 @@ impl AppState {
         }
     }
 
+    /// Open a session from the external driver.
+    ///
+    /// `brian_model_id` / `rain_model_id` are saved-model ids; `None` falls back
+    /// to the per-agent config, which is the historical behaviour. They matter
+    /// because a model's `native` flag lives on the `models` row and NOT on
+    /// `agent_configs` — so without them a driver-created session can never spawn
+    /// a native agent, whatever the agent config says. Solo/duo still comes from
+    /// the user's `rain_disabled_default` setting; there is no create dialog here.
     pub async fn open_session(
         &self,
         title: impl Into<String>,
         working_repo_path: Option<std::path::PathBuf>,
+        brian_model_id: Option<String>,
+        rain_model_id: Option<String>,
     ) -> Result<String> {
-        // External-driver entry: models from agent config, solo/duo from the
-        // user's `rain_disabled_default` setting (no create dialog on this
-        // path). The UI create path persists per-agent model + Rain toggle on
-        // the row, then spawns via spawn_existing_session.
         let mut req = OpenSessionRequest::duo(title, working_repo_path);
         req.rain_enabled = self.storage.default_rain_enabled().await;
+        req.brian_model_id = brian_model_id;
+        req.rain_model_id = rain_model_id;
         let handle = open_session(
             req,
             &self.paths,

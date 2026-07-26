@@ -101,12 +101,14 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "create_session",
-            description: "Open a new bot-hq session. Spawns Brian (HANDS) + Rain (EYES) subprocesses; returns the session id. The call blocks until both agents have spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved.",
+            description: "Open a new bot-hq session. Spawns Brian (HANDS) + Rain (EYES) subprocesses; returns the session id. The call blocks until both agents have spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved. `brian_model_id` / `rain_model_id` are saved-model ids (see the Models registry); omit them to fall back to each agent's stored config. Pass them when the model matters — notably to spawn an agent on the NATIVE loop, since the `native` flag lives on the models row and is not reachable through the per-agent config fallback.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Human-readable label shown in the session tile." },
-                    "working_repo_path": { "type": "string", "description": "Optional absolute path to a git repo. Drives project-specific policy + system-prompt context." }
+                    "working_repo_path": { "type": "string", "description": "Optional absolute path to a git repo. Drives project-specific policy + system-prompt context." },
+                    "brian_model_id": { "type": "string", "description": "Optional saved-model id for HANDS. Omit to use his stored agent config." },
+                    "rain_model_id": { "type": "string", "description": "Optional saved-model id for EYES. Omit to use her stored agent config. Required to put her on the native loop." }
                 },
                 "required": ["title"]
             }),
@@ -407,8 +409,19 @@ async fn call_external_tool(
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(std::path::PathBuf::from);
+            let model_arg = |key: &str| {
+                args.get(key)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            };
             let session_id = core
-                .open_session(title, working_repo_path)
+                .open_session(
+                    title,
+                    working_repo_path,
+                    model_arg("brian_model_id"),
+                    model_arg("rain_model_id"),
+                )
                 .await
                 .map_err(|e| internal_err("open_session", e))?;
             Ok(result_json(&json!({ "session_id": session_id }), "{}"))
@@ -718,6 +731,25 @@ fn eval_in_webview(core: &Arc<CoreAppState>, js: &str) -> Result<(), JsonRpcErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_session_accepts_per_agent_model_ids() {
+        // Without these, a driver-created session leaves brian/rain_model_id NULL
+        // and falls back to `agent_configs` — which has no `native` column, so the
+        // flag resolves false and a native agent can NEVER be spawned
+        // programmatically, whatever the agent config says.
+        let d = external_tool_descriptors()
+            .iter()
+            .find(|d| d.name == "create_session")
+            .expect("create_session descriptor");
+        let props = &d.input_schema["properties"];
+        assert!(props["brian_model_id"].is_object(), "brian_model_id undeclared");
+        assert!(props["rain_model_id"].is_object(), "rain_model_id undeclared");
+        // Still optional — omitting them must keep the historical behaviour.
+        let required = d.input_schema["required"].as_array().unwrap();
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "title");
+    }
 
     #[test]
     fn descriptors_include_all_iters() {
