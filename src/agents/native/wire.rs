@@ -311,13 +311,25 @@ pub fn turn_complete_ok(stop_reason: &str, context: Option<ContextUsage>) -> Age
 /// retry supervisor reads exactly this field through `is_transient_api_error` to
 /// decide auto-resume vs. surface. A failed turn's buffered text must never be
 /// peer-forwarded — hence `is_error: true` is non-negotiable here.
-pub fn turn_complete_err(status: Option<u16>, subtype: &str) -> AgentEvent {
+///
+/// `context` is carried rather than hardcoded to `None` because **a failed turn
+/// still consumed context**. The pump publishes occupancy BEFORE its error branch
+/// for exactly that reason (`core/duo.rs`), so dropping it here made the meter go
+/// dark on the turns where the reading matters most — above all the context
+/// ceiling, which trips at 85% and is only actionable if the user can see it.
+/// Pass `None` only when there genuinely is no reading: an API error has no
+/// `usage`, and an interrupted turn never got a response.
+pub fn turn_complete_err(
+    status: Option<u16>,
+    subtype: &str,
+    context: Option<ContextUsage>,
+) -> AgentEvent {
     AgentEvent::TurnComplete {
         stop_reason: None,
         subtype: Some(subtype.to_string()),
         is_error: true,
         api_error_status: status,
-        context: None,
+        context,
     }
 }
 
@@ -641,7 +653,7 @@ mod tests {
 
     #[test]
     fn failed_turn_carries_the_status_the_supervisor_classifies_on() {
-        match turn_complete_err(Some(529), "api_error") {
+        match turn_complete_err(Some(529), "api_error", None) {
             AgentEvent::TurnComplete {
                 is_error,
                 api_error_status,
@@ -650,6 +662,26 @@ mod tests {
                 assert!(is_error, "a failed turn must never be peer-forwarded");
                 assert_eq!(api_error_status, Some(529));
                 assert!(crate::agents::spawn::is_transient_api_error(529));
+            }
+            other => panic!("expected TurnComplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_turn_carries_the_context_it_is_handed() {
+        // A failed turn still occupied the window. Hardcoding `None` here made
+        // the meter go dark on the context-ceiling turn — the one turn where an
+        // 85%+ reading is actionable.
+        let usage = ContextUsage {
+            model: "m".into(),
+            used_tokens: 170_000,
+            context_window: 200_000,
+        };
+        match turn_complete_err(None, "context_ceiling", Some(usage)) {
+            AgentEvent::TurnComplete { context, .. } => {
+                let c = context.expect("occupancy must survive a failed turn");
+                assert_eq!(c.used_tokens, 170_000);
+                assert_eq!(c.context_window, 200_000);
             }
             other => panic!("expected TurnComplete, got {other:?}"),
         }

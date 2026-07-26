@@ -49,7 +49,8 @@ use super::wire::{
 use super::tools;
 use crate::agents::protocol::{ControlRequest, OutgoingUserMessage};
 use crate::agents::spawn::{
-    is_transient_api_error, AgentEvent, AgentHandle, AgentHealth, RetryPolicy, SpawnConfig,
+    is_transient_api_error, AgentEvent, AgentHandle, AgentHealth, ContextUsage, RetryPolicy,
+    SpawnConfig,
 };
 
 /// Refuse to start a turn once the window is this full.
@@ -318,7 +319,10 @@ pub async fn run_loop(
         push_user_text(&mut state.history, &msg.message.content);
 
         if state.ceiling_reached {
-            emit_ceiling_refusal(&cfg, &event_tx).await;
+            // `None`: no API call was made, so there is no NEW reading. The pump
+            // publishes only on `Some`, so this leaves the last known occupancy
+            // on screen rather than blanking the meter.
+            emit_ceiling_refusal(&cfg, &event_tx, None).await;
             continue;
         }
 
@@ -355,7 +359,7 @@ pub async fn run_loop(
                 // Matches the CLI path's abort shape: an errored turn, so
                 // partial text is not peer-forwarded.
                 let _ = event_tx
-                    .send(wire::turn_complete_err(None, "aborted_streaming"))
+                    .send(wire::turn_complete_err(None, "aborted_streaming", None))
                     .await;
             }
         }
@@ -379,6 +383,12 @@ async fn run_turns(
     state: &mut State,
     event_tx: &mpsc::Sender<AgentEvent>,
 ) -> Result<(), ()> {
+    // The most recent occupancy reading of this input's tool cycle. A turn that
+    // keeps calling tools emits no `TurnComplete`, so if the cycle runs out at
+    // `MAX_TURNS_PER_INPUT` its terminating event is the FIRST chance to publish
+    // a reading at all — and without this it would publish none.
+    let mut last_context: Option<ContextUsage> = None;
+
     for _turn in 1..=MAX_TURNS_PER_INPUT {
         let body = build_request(&RequestSpec {
             model: &cfg.model,
@@ -407,6 +417,11 @@ async fn run_turns(
         };
 
         let parsed = parse_turn(&resp, &cfg.model, cfg.profile.context_window);
+        // Cloned up front because `parsed.context` is moved by the `End` arm's
+        // `turn_complete_ok`, while the ceiling refusal that can follow it still
+        // needs the reading.
+        let ctx = parsed.context.clone();
+        last_context = ctx.clone();
 
         // Absolute occupancy, logged every turn whether or not a window is
         // known. No provider currently declares one (`profile.rs`), so
@@ -453,8 +468,7 @@ async fn run_turns(
 
         // Checked AFTER the turn is accounted for, so the reading that trips the
         // ceiling is itself reported.
-        let over_ceiling = parsed
-            .context
+        let over_ceiling = ctx
             .as_ref()
             .is_some_and(|c| c.fraction() >= CONTEXT_CEILING);
 
@@ -477,7 +491,12 @@ async fn run_turns(
 
                 if over_ceiling {
                     state.ceiling_reached = true;
-                    emit_ceiling_refusal(cfg, event_tx).await;
+                    // `ctx` rather than `None`: this arm fires MID-tool-cycle, so
+                    // no `TurnComplete` has been sent for this input at all and
+                    // nothing has published the reading that just tripped the
+                    // ceiling. (The `End` arm below is the only path where a
+                    // preceding `turn_complete_ok` already carried it.)
+                    emit_ceiling_refusal(cfg, event_tx, ctx).await;
                     return Ok(());
                 }
                 continue;
@@ -486,13 +505,9 @@ async fn run_turns(
                 if over_ceiling {
                     state.ceiling_reached = true;
                 }
-                send(
-                    event_tx,
-                    wire::turn_complete_ok("end_turn", parsed.context),
-                )
-                .await?;
+                send(event_tx, wire::turn_complete_ok("end_turn", parsed.context)).await?;
                 if state.ceiling_reached {
-                    emit_ceiling_refusal(cfg, event_tx).await;
+                    emit_ceiling_refusal(cfg, event_tx, ctx).await;
                 }
                 return Ok(());
             }
@@ -502,7 +517,7 @@ async fn run_turns(
                     AgentEvent::Error(format!("model declined the request ({details})")),
                 )
                 .await?;
-                send(event_tx, wire::turn_complete_err(None, "refusal")).await?;
+                send(event_tx, wire::turn_complete_err(None, "refusal", ctx)).await?;
                 return Ok(());
             }
             TurnStep::MaxTokens => {
@@ -516,7 +531,7 @@ async fn run_turns(
                     )),
                 )
                 .await?;
-                send(event_tx, wire::turn_complete_err(None, "max_tokens")).await?;
+                send(event_tx, wire::turn_complete_err(None, "max_tokens", ctx)).await?;
                 return Ok(());
             }
             TurnStep::Unhandled { stop_reason } => {
@@ -525,7 +540,7 @@ async fn run_turns(
                     AgentEvent::Error(format!("unhandled stop_reason {stop_reason:?}")),
                 )
                 .await?;
-                send(event_tx, wire::turn_complete_err(None, "unhandled_stop")).await?;
+                send(event_tx, wire::turn_complete_err(None, "unhandled_stop", ctx)).await?;
                 return Ok(());
             }
         }
@@ -538,7 +553,11 @@ async fn run_turns(
         )),
     )
     .await?;
-    send(event_tx, wire::turn_complete_err(None, "max_turns")).await?;
+    send(
+        event_tx,
+        wire::turn_complete_err(None, "max_turns", last_context),
+    )
+    .await?;
     Ok(())
 }
 
@@ -593,8 +612,21 @@ async fn send_with_retry(
                     attempts = attempt,
                     "native turn failed"
                 );
+                // Retry is over on THIS exit too, so the dot must not stay amber.
+                // The success path above already clears it; without the same
+                // clear here a burst that ends in failure pinned health at
+                // `retrying` for the rest of the session — and `stall_decision`
+                // only transitions out of `None | Some("running")`, so the stall
+                // watchdog was then permanently disabled for this agent.
+                //
+                // `Running` is the honest state: this loop deliberately survives
+                // API errors, so it is idle and ready for the next input. Only the
+                // context ceiling is terminal, and that reports `Dead` separately.
+                if attempt > 0 {
+                    send(event_tx, AgentEvent::Health(AgentHealth::Running)).await?;
+                }
                 send(event_tx, AgentEvent::Error(f.detail)).await?;
-                send(event_tx, wire::turn_complete_err(f.status, "api_error")).await?;
+                send(event_tx, wire::turn_complete_err(f.status, "api_error", None)).await?;
                 return Ok(None);
             }
         }
@@ -705,7 +737,11 @@ fn repair_dangling_tool_use_in(history: &mut Vec<Value>) {
     history.push(tool_results_message(&outcomes));
 }
 
-async fn emit_ceiling_refusal(cfg: &LoopConfig, event_tx: &mpsc::Sender<AgentEvent>) {
+async fn emit_ceiling_refusal(
+    cfg: &LoopConfig,
+    event_tx: &mpsc::Sender<AgentEvent>,
+    context: Option<ContextUsage>,
+) {
     let pct = (CONTEXT_CEILING * 100.0).round() as u32;
     let _ = event_tx
         .send(AgentEvent::Error(format!(
@@ -715,8 +751,20 @@ async fn emit_ceiling_refusal(cfg: &LoopConfig, event_tx: &mpsc::Sender<AgentEve
         )))
         .await;
     let _ = event_tx
-        .send(wire::turn_complete_err(None, "context_ceiling"))
+        .send(wire::turn_complete_err(None, "context_ceiling", context))
         .await;
+    // The loop stays alive and keeps refusing, and the event channel stays OPEN
+    // deliberately — closure is the supervisor's end-of-incarnation signal and
+    // would respawn this agent with no history. But an agent that will never
+    // review again must not read as HEALTHY: `reviewer_block_decision`
+    // (`signaling/bridge/findings.rs`) gates commits on exactly this string, and
+    // `stall_decision` can never reach `stalled` here because a latched refusal
+    // completes instantly and so is never `busy`. Without this the fail-closed
+    // reviewer gate silently went fail-open and HANDS could ship unreviewed.
+    //
+    // Safe to emit: nothing respawns or evicts on health — `is_stale()` keys on
+    // channel closure, not on this string.
+    let _ = event_tx.send(AgentEvent::Health(AgentHealth::Dead)).await;
     warn!(agent = %cfg.agent_name, "native agent hit the context ceiling");
 }
 
@@ -1125,6 +1173,9 @@ mod tests {
             other => panic!("expected ceiling Error, got {other:?}"),
         }
         assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: true, .. }));
+        // Terminal health, so the fail-closed reviewer gate can see this agent has
+        // stopped — see `the_ceiling_reports_dead_so_the_reviewer_gate_holds`.
+        assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Dead)));
 
         // Latched: the next input is refused without an API call, and the
         // channel stays open so no amnesiac respawn is triggered.
@@ -1133,6 +1184,69 @@ mod tests {
             AgentEvent::Error(m) => assert!(m.contains("context window")),
             other => panic!("expected latched refusal, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn the_ceiling_reports_dead_so_the_reviewer_gate_holds() {
+        // The latch keeps the event channel OPEN on purpose (closure would respawn
+        // this agent with no history), which meant the pump never emitted `Dead`.
+        // A latched refusal also completes instantly, so the agent is never `busy`
+        // and `stall_decision` can never reach `stalled` either — leaving
+        // `reviewer_block_decision` with nothing to match on. The fail-closed
+        // reviewer gate went fail-open and HANDS could ship unreviewed.
+        let over = json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "done" }],
+            "usage": { "input_tokens": 900 }
+        });
+        let t = ScriptedTransport::new(vec![Ok(over)]);
+        let mut h = start(t, Some(1_000));
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
+
+        let mut saw_dead = false;
+        for _ in 0..6 {
+            if let AgentEvent::Health(AgentHealth::Dead) = next(&mut h).await {
+                saw_dead = true;
+                break;
+            }
+        }
+        assert!(saw_dead, "a ceilinged agent must not keep reading as healthy");
+        // …and it must still be alive: closing the channel is what triggers an
+        // amnesiac respawn, which is the whole reason the latch exists.
+        assert!(!h.events.is_closed());
+    }
+
+    #[tokio::test]
+    async fn a_ceiling_tripped_mid_tool_cycle_still_publishes_occupancy() {
+        // The `ToolUse` arm fires BEFORE any `TurnComplete` for this input, so
+        // nothing has published the reading that just tripped the ceiling. Passing
+        // `None` there — on the reasoning that the `End` arm's `turn_complete_ok`
+        // already carried it — loses exactly the number the ceiling is about.
+        let t = ScriptedTransport::new(vec![Ok(json!({
+            "stop_reason": "tool_use",
+            "content": [{ "type": "tool_use", "id": "tu_1", "name": "read_file",
+                          "input": { "path": "a.txt" } }],
+            "usage": { "input_tokens": 900 }
+        }))]);
+        let mut h = start(t, Some(1_000));
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("read it")).await.unwrap();
+
+        let mut occupancy = None;
+        for _ in 0..8 {
+            if let AgentEvent::TurnComplete { context, is_error, .. } = next(&mut h).await {
+                if is_error {
+                    occupancy = context;
+                    break;
+                }
+            }
+        }
+        let c = occupancy.expect("the ceiling turn must report how full the window is");
+        assert_eq!(c.used_tokens, 900);
+        assert_eq!(c.context_window, 1_000);
     }
 
     #[tokio::test]
@@ -1371,6 +1485,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn health_recovers_when_a_retry_burst_ends_in_failure() {
+        // The latch: `Health(Running)` was emitted only on the SUCCESS exit of
+        // `send_with_retry`, so a burst that exhausted its budget left the dot at
+        // `retrying` for the rest of the session. `stall_decision` only transitions
+        // out of `None | Some("running")`, so the stall watchdog was then
+        // permanently disabled for this agent — a second failure mode hiding behind
+        // the first.
+        let t = ScriptedTransport::new(
+            (0..6)
+                .map(|_| Err(ApiFailure { status: Some(529), detail: "Overloaded".into() }))
+                .collect(),
+        );
+        let mut h = start_with(t, instant_retry(), None, None);
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
+
+        for _ in 0..3 {
+            assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Retrying)));
+        }
+        // Budget exhausted. Health must return to running BEFORE the failure is
+        // reported — the loop survives API errors, so it is idle and available.
+        assert!(
+            matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Running)),
+            "an exhausted retry burst must not leave the health dot latched"
+        );
+        assert!(matches!(next(&mut h).await, AgentEvent::Error(_)));
+        assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: true, .. }));
+    }
+
+    #[tokio::test]
     async fn a_permanent_error_is_not_retried() {
         // A 400 is semantic — retrying just re-fails and burns tokens.
         let t = ScriptedTransport::new(vec![Err(ApiFailure {
@@ -1425,6 +1570,9 @@ mod tests {
         for _ in 0..3 {
             assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Retrying)));
         }
+        // Giving up clears the retry state too — see
+        // `health_recovers_when_a_retry_burst_ends_in_failure`.
+        assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Running)));
         assert!(matches!(next(&mut h).await, AgentEvent::Error(_)));
         assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: true, .. }));
         assert_eq!(t.requests().len(), 4, "1 initial + 3 retries");

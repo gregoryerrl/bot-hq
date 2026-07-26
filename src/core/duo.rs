@@ -413,6 +413,28 @@ pub async fn pump_agent(
             }
             AgentEvent::Error(msg) => {
                 warn!(agent = ?cfg.author, msg = %msg, "agent error");
+                // Persist so it RENDERS. The native loop is the only emitter of
+                // this variant and routes every user-facing failure through it —
+                // API errors, model refusals, the max-tool-cycle cap and the
+                // context-ceiling stop. Logging alone meant each of those showed
+                // up in the UI as an empty turn, and `init_logging` has no file
+                // sink, so the text survived exactly as long as the launching
+                // terminal's scrollback.
+                //
+                // Deliberately NOT pushed into `buffer`. Every native error is
+                // followed by an errored `TurnComplete`, whose branch below drains
+                // the buffer without forwarding — so buffering would be a no-op
+                // today and a trap tomorrow: the first error emitted without that
+                // trailing event would peer-forward error text, which is the
+                // unbounded error-spam loop documented in that branch. The user
+                // needs to see this; the peer does not.
+                match storage
+                    .insert_message(&cfg.session_id, cfg.author, MessageKind::Text, &msg)
+                    .await
+                {
+                    Ok(id) => cfg.notify_persisted(id),
+                    Err(e) => warn!(?e, "persisting agent error"),
+                }
             }
             AgentEvent::Health(state) => {
                 // B2: relay the retry-supervisor's liveness transition to the
@@ -545,6 +567,70 @@ mod tests {
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert!(msgs[0].content.contains("API Error"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn error_event_is_persisted_so_native_failures_render() {
+        // The native loop routes EVERY user-facing failure through
+        // `AgentEvent::Error` — API errors, refusals, the max-tool-cycle cap and
+        // the context-ceiling stop. This handler used to only `warn!`, so each of
+        // those rendered in the UI as an empty turn and the text survived no
+        // longer than the launching terminal's scrollback.
+        let (storage, state) = setup().await;
+        let (cfg, _route_rx) = cfg_with_route(Author::Rain);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx
+            .send(AgentEvent::Error(
+                "context window is over 85% full — this agent has stopped".into(),
+            ))
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let msgs = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs.len(), 1, "the failure must reach the user, not just the log");
+        assert!(msgs[0].content.contains("over 85% full"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn error_event_is_not_peer_forwarded() {
+        // Pins the decision to persist WITHOUT buffering. Buffering would be a
+        // no-op today (every native error is followed by an errored TurnComplete,
+        // which drains the buffer unforwarded) — but it would make the first error
+        // emitted without that trailing event bounce to the peer, which is the
+        // unbounded error-spam loop of 2026-05-29. The user sees it; the peer
+        // must not.
+        let (storage, state) = setup().await;
+        let (cfg, mut route_rx) = cfg_with_route(Author::Rain);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx
+            .send(AgentEvent::Error("model declined the request".into()))
+            .await
+            .unwrap();
+        // A SUCCESSFUL turn-complete: the case where a buffered error WOULD be
+        // forwarded. Nothing must reach the router regardless.
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: None,
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        assert!(
+            next_forward(&mut route_rx).is_none(),
+            "error text must never be peer-forwarded, even on a clean TurnComplete"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
