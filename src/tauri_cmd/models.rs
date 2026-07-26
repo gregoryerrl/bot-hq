@@ -20,6 +20,15 @@ pub struct ModelView {
     pub auth_token: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Drive this model through bot-hq's native Rust agent loop instead of a
+    /// claude-code subprocess. EYES-only in v1 — a native-flagged model assigned
+    /// to HANDS falls back to the CLI with a warning.
+    ///
+    /// No `#[serde(default)]`: this view is built fresh on every call and never
+    /// read back from stored JSON, so making it optional would only weaken the
+    /// generated TS type into `boolean | undefined` and hand the checkbox an
+    /// uncontrolled-input warning.
+    pub native: bool,
 }
 
 impl From<Model> for ModelView {
@@ -33,6 +42,7 @@ impl From<Model> for ModelView {
             auth_token: m.auth_token,
             created_at: m.created_at,
             updated_at: m.updated_at,
+            native: m.native,
         }
     }
 }
@@ -48,6 +58,7 @@ impl From<ModelView> for Model {
             auth_token: v.auth_token,
             created_at: v.created_at,
             updated_at: v.updated_at,
+            native: v.native,
         }
     }
 }
@@ -135,6 +146,7 @@ mod tests {
             auth_token: Some("sk".into()),
             created_at: "2026-06-03T00:00:00.000Z".into(),
             updated_at: "2026-06-03T00:00:00.000Z".into(),
+            native: true,
         };
         let back: ModelView = Model::from(view.clone()).into();
         assert_eq!(back, view);

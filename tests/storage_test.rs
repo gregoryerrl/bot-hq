@@ -176,6 +176,7 @@ async fn upsert_agent_config_inserts_new_via_constructor() {
         base_url: Some("https://api.deepseek.com".into()),
         auth_token: Some("ds-token".into()),
         updated_at: String::new(), // ignored on insert/upsert
+        native: false,
     };
     s.upsert_agent_config(&cfg).await.unwrap();
     let got = s.get_agent_config("rain").await.unwrap().unwrap();

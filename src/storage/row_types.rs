@@ -141,6 +141,14 @@ pub struct AgentConfig {
     pub base_url: Option<String>,
     pub auth_token: Option<String>,
     pub updated_at: String,
+    /// Drive this agent through bot-hq's native Rust loop rather than a
+    /// claude-code subprocess. Carried here from the chosen [`Model`] — there
+    /// is no `agent_configs` column, so `#[sqlx(default)]` makes the legacy
+    /// per-agent fallback path resolve to `false` (stay on the CLI), which is
+    /// the safe direction.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub native: bool,
 }
 
 /// A saved model in the user-managed registry (`models` table). Bundles the
@@ -156,6 +164,13 @@ pub struct Model {
     pub auth_token: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Opt in to the native Rust agent loop instead of a claude-code
+    /// subprocess. Per-model, not per-provider: the same provider can back a
+    /// model you want on the CLI (skills, plugins, the full built-in tool
+    /// surface) and one you want native (own context accounting, inline tool
+    /// gating, an enforceable read root).
+    #[serde(default)]
+    pub native: bool,
 }
 
 /// Surface type of a question parked for the user.

@@ -772,6 +772,7 @@ async fn spawn_agent_for(
     session_effort: Option<String>,
     session_ultracode: Option<bool>,
 ) -> Result<AgentHandle> {
+    let native = config.native;
     let system_prompt =
         read_system_prompt(paths, agent_name, project.as_deref(), project_root, cl_index)?;
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
@@ -810,9 +811,51 @@ async fn spawn_agent_for(
         session_effort,
         session_ultracode,
     };
-    // Supervised: a transient upstream API error (e.g. 529 Overloaded) auto-
-    // resumes the agent with capped backoff instead of stranding the session.
-    spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await
+    match resolve_agent_kind(agent_name, native) {
+        AgentKind::Native => {
+            info!(agent = agent_name, "spawning via the native agent loop");
+            crate::agents::native::spawn_native_agent(spawn_cfg).await
+        }
+        AgentKind::ClaudeCode => {
+            if native {
+                warn!(
+                    agent = agent_name,
+                    "model is flagged native but HANDS requires claude-code; spawning the CLI instead"
+                );
+            }
+            // Supervised: a transient upstream API error (e.g. 529 Overloaded)
+            // auto-resumes the agent with capped backoff instead of stranding
+            // the session.
+            spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await
+        }
+    }
+}
+
+/// Which agent implementation backs a spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentKind {
+    ClaudeCode,
+    Native,
+}
+
+/// Pick the implementation for `agent_name` given its model's `native` flag.
+///
+/// `AgentHandle` is a pure channel struct, so nothing downstream — the
+/// supervisor, the duo pump, the router, the policy layer, the UI — can tell
+/// which one it got. The only thing that has to be right is this choice.
+///
+/// **v1 is EYES-only, and HANDS is hard-guarded rather than merely
+/// discouraged.** Brian's subscription binds server-side to claude-code, so a
+/// native loop would have no valid credential; he also depends on the CLI's
+/// skills, plugins and full built-in tool surface, none of which the native path
+/// implements. A `native` model assigned to Brian is therefore a
+/// misconfiguration — fall back and say so rather than fail the spawn.
+pub(crate) fn resolve_agent_kind(agent_name: &str, native: bool) -> AgentKind {
+    if native && agent_name != "brian" {
+        AgentKind::Native
+    } else {
+        AgentKind::ClaudeCode
+    }
 }
 
 /// Decide which user MCP servers to expose to an agent at spawn time.
@@ -1085,6 +1128,9 @@ fn default_agent_config(name: &str) -> AgentConfig {
         base_url: None,
         auth_token: None,
         updated_at: String::new(),
+        // Ambient Anthropic auth is a claude-code path; the native loop needs an
+        // explicit credential this tier does not have.
+        native: false,
     }
 }
 
@@ -1107,6 +1153,7 @@ pub(crate) async fn resolve_spawn_config(
                 base_url: m.base_url,
                 auth_token: m.auth_token,
                 updated_at: m.updated_at,
+                native: m.native,
             };
         }
         tracing::warn!(
@@ -1127,6 +1174,24 @@ pub(crate) async fn resolve_spawn_config(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn eyes_takes_the_native_loop_when_its_model_opts_in() {
+        assert_eq!(resolve_agent_kind("rain", true), AgentKind::Native);
+    }
+
+    #[test]
+    fn hands_never_takes_the_native_loop_even_when_flagged() {
+        // Brian's subscription binds server-side to claude-code, so a native
+        // loop has no valid credential. Fall back, don't fail the spawn.
+        assert_eq!(resolve_agent_kind("brian", true), AgentKind::ClaudeCode);
+    }
+
+    #[test]
+    fn an_unflagged_model_stays_on_claude_code() {
+        assert_eq!(resolve_agent_kind("rain", false), AgentKind::ClaudeCode);
+        assert_eq!(resolve_agent_kind("brian", false), AgentKind::ClaudeCode);
+    }
 
     #[tokio::test]
     async fn resolve_project_prefers_registered_lookup_over_basename() {

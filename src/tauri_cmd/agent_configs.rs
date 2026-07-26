@@ -38,6 +38,10 @@ impl From<AgentConfigView> for AgentConfig {
             base_url: v.base_url,
             auth_token: v.auth_token,
             updated_at: v.updated_at,
+            // Deliberately not on the view: the native flag is a property of a
+            // saved `models` row, and `agent_configs` has no such column.
+            // Surfacing it here would offer a toggle that never persists.
+            native: false,
         }
     }
 }
@@ -95,6 +99,7 @@ mod tests {
             base_url: None,
             auth_token: Some("secret".to_string()),
             updated_at: String::new(),
+            native: false,
         };
         storage.upsert_agent_config(&cfg).await.unwrap();
 

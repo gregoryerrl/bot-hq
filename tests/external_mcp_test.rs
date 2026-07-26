@@ -487,6 +487,7 @@ async fn get_agent_configs_redacts_auth_token() {
             base_url: Some("https://api.anthropic.com/v1".into()),
             auth_token: Some("sk-ant-api03-EXAMPLE-key-with-suffix-AB12".into()),
             updated_at: String::new(),
+            native: false,
         })
         .await
         .unwrap();
@@ -567,6 +568,7 @@ async fn set_agent_config_empty_string_clears_field() {
             base_url: Some("https://example.test".into()),
             auth_token: Some("sk-rain-old".into()),
             updated_at: String::new(),
+            native: false,
         })
         .await
         .unwrap();

@@ -247,6 +247,7 @@ function emptyDraft(): ModelView {
     auth_token: null,
     created_at: "",
     updated_at: "",
+    native: false,
   };
 }
 
@@ -401,6 +402,25 @@ function ModelDialog({
                 {tokenVisible ? "Hide" : "Show"}
               </button>
             </div>
+          </label>
+
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              checked={draft.native}
+              onChange={(e) => setDraft({ ...draft, native: e.target.checked })}
+              className="mt-1 accent-secondary"
+            />
+            <span className="min-w-0">
+              <FieldLabel>Native loop</FieldLabel>
+              <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
+                Run this model through bot-hq's own agent loop instead of
+                claude-code. EYES only — Rain gets exact context accounting and a
+                read root she cannot escape, but loses skills, plugins and every
+                built-in tool except file reads. Assigning it to Brian falls back
+                to claude-code.
+              </span>
+            </span>
           </label>
         </div>
 

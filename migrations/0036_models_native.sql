@@ -1,0 +1,12 @@
+-- Opt-in flag: drive this saved model through bot-hq's own native Rust agent
+-- loop instead of spawning a claude-code subprocess.
+--
+-- Per-model rather than per-provider because the choice isn't a property of the
+-- endpoint: the same provider can back a model you want on the CLI (skills,
+-- plugins, the full built-in tool surface) and one you want native (own the
+-- context accounting, inline tool gating, an enforceable read root).
+--
+-- Defaults to 0 so every existing row keeps spawning claude-code. The flag lives
+-- only on `models`; the legacy `agent_configs` fallback path has no column and
+-- resolves to false, which is the safe direction.
+ALTER TABLE models ADD COLUMN native INTEGER NOT NULL DEFAULT 0;

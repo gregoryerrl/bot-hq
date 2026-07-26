@@ -3,7 +3,7 @@
 use super::*;
 
 const MODEL_COLUMNS: &str =
-    "id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at";
+    "id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at, native";
 
 /// Key in `app_settings`: "1" = new sessions default to solo-Brian. The create
 /// dialog reads it to pre-check "Disable Rain"; backend dispatch paths with no
@@ -54,15 +54,16 @@ impl Storage {
         let now = now_utc();
         sqlx::query(
             "INSERT INTO models \
-                (id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                (id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at, native) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
                 display_name = excluded.display_name, \
                 provider = excluded.provider, \
                 model_name = excluded.model_name, \
                 base_url = excluded.base_url, \
                 auth_token = excluded.auth_token, \
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at, \
+                native = excluded.native",
         )
         .bind(&m.id)
         .bind(&m.display_name)
@@ -72,6 +73,7 @@ impl Storage {
         .bind(&m.auth_token)
         .bind(&now)
         .bind(&now)
+        .bind(m.native)
         .execute(&self.pool)
         .await
         .with_context(|| format!("upserting model {}", m.id))?;
@@ -157,6 +159,7 @@ mod tests {
             auth_token: Some("sk-test".into()),
             created_at: String::new(),
             updated_at: String::new(),
+            native: false,
         }
     }
 
