@@ -24,14 +24,21 @@ pub enum AuthStyle {
 /// What the native loop needs to know about a provider beyond its URL.
 #[derive(Debug, Clone)]
 pub struct ProviderProfile {
-    /// Total context window in tokens.
+    /// Total context window in tokens. **Always `None` here — see below.**
     ///
-    /// **`None` means unknown, and unknown must stay visible.** `ContextUsage`
-    /// is only constructed when this is `Some`, so an unknown window renders as
-    /// a gap in the UI rather than a guessed percentage — the same contract the
-    /// claude-code path already honours (`AgentEvent::TurnComplete::context`).
-    /// Seeding this with a plausible-looking number would silently turn a known
-    /// unknown into a wrong answer.
+    /// `ContextUsage` is only constructed when this is `Some`, so an unknown
+    /// window renders as a gap in the UI rather than a guessed percentage — the
+    /// same contract the claude-code path already honours
+    /// (`AgentEvent::TurnComplete::context`).
+    ///
+    /// **A context window is a property of a MODEL, not a provider**, so this
+    /// table structurally cannot know it: one provider serves several models
+    /// with different windows, and a value keyed on the provider string would be
+    /// confidently wrong for every model it didn't come from. The field stays
+    /// here because the *shape* is right — a window belongs on the profile — but
+    /// it is only ever populated from something that actually knows: a
+    /// per-model value the user supplies, or direct measurement. Never from a
+    /// figure quoted in a doc.
     pub context_window: Option<u64>,
     /// Default output-token budget when the caller doesn't override it. On
     /// Claude Opus 5 thinking and response text share this budget, so a
@@ -55,33 +62,32 @@ impl ProviderProfile {
     /// Bearer auth, unknown window.
     pub fn for_provider(provider: &str) -> Self {
         match provider.trim().to_ascii_lowercase().as_str() {
+            // The one arm grounded in something this repo actually ran:
+            // `examples/native_loop.rs` drives the first-party API with
+            // `x-api-key` + `anthropic-version`.
             "anthropic" => Self {
-                // Deliberately unknown. The Messages API reports `usage` but
-                // never the window, and Claude windows vary per model and per
-                // beta tier — the CLI knew this number, we do not. B4 measures
-                // it; until then the meter shows a gap instead of a guess.
                 context_window: None,
                 default_max_tokens: 16_000,
                 messages_path: "/v1/messages",
                 auth: AuthStyle::XApiKey,
             },
-            // DeepSeek declares 200K. It has also been observed serving a
-            // 238,155-token prompt against that declaration — either silent
-            // truncation or a wrong declaration. Recorded here as *declared*,
-            // and flagged: a native loop can measure request tokens directly,
-            // which is what settles it (handoff Q4).
-            "deepseek" => Self {
-                context_window: Some(200_000),
-                default_max_tokens: 8_000,
-                messages_path: "/v1/messages",
-                auth: AuthStyle::Bearer,
-            },
+            // Everything else, including every named gateway, falls through.
+            // A per-provider arm would only be worth adding for a fact this
+            // repo can verify — and a context window is not one of those, since
+            // it varies per model.
             _ => Self::generic_gateway(),
         }
     }
 
-    /// Conservative default for an Anthropic-compatible gateway we have no
-    /// measured facts about.
+    /// Default for an Anthropic-compatible gateway.
+    ///
+    /// `Bearer` is an **assumption**, not a verified fact: bot-hq's CLI path
+    /// hands gateways `ANTHROPIC_AUTH_TOKEN` (as against `ANTHROPIC_API_KEY`,
+    /// which is the `x-api-key` spelling) and what claude-code does with it
+    /// internally is not observable from this repo. First live contact settles
+    /// it immediately — a wrong auth header is a 401 on turn one, not a subtle
+    /// failure — so this is a cheap assumption to hold, unlike a context window
+    /// that would silently render a wrong percentage forever.
     pub fn generic_gateway() -> Self {
         Self {
             context_window: None,
@@ -110,25 +116,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn anthropic_uses_x_api_key_and_declares_no_window() {
-        let p = ProviderProfile::for_provider("anthropic");
-        assert_eq!(p.auth, AuthStyle::XApiKey);
-        // A guessed window is worse than a visible gap — see the field doc.
-        assert_eq!(p.context_window, None);
+    fn anthropic_uses_x_api_key() {
+        assert_eq!(
+            ProviderProfile::for_provider("anthropic").auth,
+            AuthStyle::XApiKey
+        );
     }
 
     #[test]
     fn provider_match_is_case_insensitive_and_trims() {
-        let p = ProviderProfile::for_provider("  DeepSeek ");
-        assert_eq!(p.auth, AuthStyle::Bearer);
-        assert_eq!(p.context_window, Some(200_000));
+        assert_eq!(
+            ProviderProfile::for_provider("  AnThRoPiC ").auth,
+            AuthStyle::XApiKey
+        );
     }
 
     #[test]
-    fn unknown_provider_falls_back_to_conservative_gateway() {
+    fn unknown_provider_falls_back_to_the_gateway_default() {
         let p = ProviderProfile::for_provider("some-new-gateway");
         assert_eq!(p.auth, AuthStyle::Bearer);
-        assert_eq!(p.context_window, None);
+    }
+
+    #[test]
+    fn no_provider_ships_a_hardcoded_context_window() {
+        // Regression guard. A window is a per-MODEL fact; a value keyed on the
+        // provider string is confidently wrong for every model it didn't come
+        // from, and the meter would render that wrongness as a precise
+        // percentage. If a window is ever populated it must come from the user
+        // or from measurement — never from a figure quoted in a doc.
+        for provider in [
+            "anthropic",
+            "deepseek",
+            "moonshot",
+            "zhipu",
+            "dashscope",
+            "minimax",
+            "",
+            "anything-else",
+        ] {
+            assert_eq!(
+                ProviderProfile::for_provider(provider).context_window,
+                None,
+                "provider {provider:?} must not declare a context window"
+            );
+        }
     }
 
     #[test]
@@ -142,10 +173,10 @@ mod tests {
 
     #[test]
     fn messages_url_tolerates_a_trailing_slash_on_base_url() {
-        let p = ProviderProfile::for_provider("deepseek");
+        let p = ProviderProfile::generic_gateway();
         assert_eq!(
-            p.messages_url(Some("https://api.deepseek.com/anthropic/")),
-            "https://api.deepseek.com/anthropic/v1/messages"
+            p.messages_url(Some("https://gateway.example/anthropic/")),
+            "https://gateway.example/anthropic/v1/messages"
         );
     }
 
