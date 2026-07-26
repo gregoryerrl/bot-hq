@@ -1293,7 +1293,18 @@ projects_with_memory: number; inheritance: Inheritance }
  * Frontend-facing shape of a saved model. `auth_token` is exposed (the desktop
  * UI is local + trusted, like the AgentCard token field).
  */
-export type ModelView = { id: string; display_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; created_at: string; updated_at: string }
+export type ModelView = { id: string; display_name: string; provider: string; model_name: string; base_url: string | null; auth_token: string | null; created_at: string; updated_at: string; 
+/**
+ * Drive this model through bot-hq's native Rust agent loop instead of a
+ * claude-code subprocess. EYES-only in v1 — a native-flagged model assigned
+ * to HANDS falls back to the CLI with a warning.
+ * 
+ * No `#[serde(default)]`: this view is built fresh on every call and never
+ * read back from stored JSON, so making it optional would only weaken the
+ * generated TS type into `boolean | undefined` and hand the checkbox an
+ * uncontrolled-input warning.
+ */
+native: boolean }
 /**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
  */
