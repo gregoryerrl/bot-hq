@@ -80,6 +80,15 @@ pub struct ParsedTurn {
     /// Context occupancy, when the window is known. `None` renders as a visible
     /// gap in the UI, never as a guessed percentage.
     pub context: Option<ContextUsage>,
+    /// Absolute tokens this turn's prompt occupied, **independent of whether the
+    /// window is known**.
+    ///
+    /// Separate from `context` because the two answer different questions and
+    /// only one of them needs a denominator. "How fast does a real session
+    /// fill?" is answerable from this number alone — which matters, since no
+    /// provider ships a context window (see `profile.rs`), so `context` is
+    /// currently always `None` and would otherwise throw the measurement away.
+    pub used_tokens: Option<u64>,
 }
 
 /// Build the request body.
@@ -114,6 +123,7 @@ pub fn parse_turn(resp: &Value, model: &str, window: Option<u64>) -> ParsedTurn 
         .and_then(Value::as_str)
         .unwrap_or_default();
     let context = usage_to_context(resp.get("usage"), model, window);
+    let used_tokens = usage_tokens(resp.get("usage"));
 
     // TRAP 3 — before `content` is touched.
     if stop_reason == "refusal" {
@@ -124,6 +134,7 @@ pub fn parse_turn(resp: &Value, model: &str, window: Option<u64>) -> ParsedTurn 
             events: Vec::new(),
             assistant_message: None,
             context,
+            used_tokens,
         };
     }
 
@@ -200,6 +211,7 @@ pub fn parse_turn(resp: &Value, model: &str, window: Option<u64>) -> ParsedTurn 
         events,
         assistant_message,
         context,
+        used_tokens,
     }
 }
 
@@ -246,32 +258,40 @@ pub fn usage_to_context(
     model: &str,
     window: Option<u64>,
 ) -> Option<ContextUsage> {
+    let window = window.filter(|w| *w > 0)?;
+    Some(ContextUsage {
+        model: model.to_string(),
+        used_tokens: usage_tokens(usage)?,
+        context_window: window,
+    })
+}
+
+/// The context numerator alone: how many tokens this turn's prompt occupied.
+///
+/// Split out from [`usage_to_context`] because it is meaningful *without* a
+/// window, and no provider currently ships one — so folding it into
+/// `ContextUsage` would discard the only occupancy measurement we have.
+///
+/// `None` when `usage` carries none of the three fields, rather than a confident
+/// `0`: a gateway that spells them differently must read as unknown, not empty.
+/// One field present is enough — a turn really can have zero cache tokens.
+pub fn usage_tokens(usage: Option<&Value>) -> Option<u64> {
     const FIELDS: [&str; 3] = [
         "input_tokens",
         "cache_read_input_tokens",
         "cache_creation_input_tokens",
     ];
 
-    let window = window.filter(|w| *w > 0)?;
     let usage = usage?;
-
     let mut seen_any = false;
-    let mut used_tokens = 0u64;
+    let mut total = 0u64;
     for key in FIELDS {
         if let Some(n) = usage.get(key).and_then(Value::as_u64) {
             seen_any = true;
-            used_tokens += n;
+            total += n;
         }
     }
-    if !seen_any {
-        return None;
-    }
-
-    Some(ContextUsage {
-        model: model.to_string(),
-        used_tokens,
-        context_window: window,
-    })
+    seen_any.then_some(total)
 }
 
 /// The `TurnComplete` that ends a SUCCESSFUL turn.
@@ -563,6 +583,31 @@ mod tests {
         let usage = json!({ "input_tokens": 100, "output_tokens": 900 });
         let ctx = usage_to_context(Some(&usage), "m", Some(1_000)).unwrap();
         assert_eq!(ctx.used_tokens, 100);
+    }
+
+    #[test]
+    fn used_tokens_survives_an_unknown_window() {
+        // The measurement B4 depends on. No provider ships a window, so if this
+        // were folded into ContextUsage the only occupancy figure we have would
+        // be discarded on every turn.
+        let resp = json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "hi" }],
+            "usage": { "input_tokens": 1_000, "cache_read_input_tokens": 40_000 }
+        });
+        let parsed = parse_turn(&resp, "m", None);
+        assert!(parsed.context.is_none(), "no window means no percentage");
+        assert_eq!(parsed.used_tokens, Some(41_000));
+    }
+
+    #[test]
+    fn used_tokens_is_none_when_usage_is_unrecognised() {
+        let resp = json!({
+            "stop_reason": "end_turn",
+            "content": [],
+            "usage": { "inputTokens": 5 }
+        });
+        assert_eq!(parse_turn(&resp, "m", None).used_tokens, None);
     }
 
     #[test]

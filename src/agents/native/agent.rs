@@ -314,6 +314,23 @@ async fn run_turns(
         };
 
         let parsed = parse_turn(&resp, &cfg.model, cfg.profile.context_window);
+
+        // Absolute occupancy, logged every turn whether or not a window is
+        // known. No provider currently declares one (`profile.rs`), so
+        // `parsed.context` is `None` and the UI meter shows a gap — this line is
+        // then the ONLY record of how fast a real session fills, which is the
+        // measurement B6's compaction design depends on.
+        if let Some(used) = parsed.used_tokens {
+            info!(
+                agent = %cfg.agent_name,
+                model = %cfg.model,
+                used_tokens = used,
+                history_messages = state.history.len(),
+                window = ?cfg.profile.context_window,
+                "native turn accounting"
+            );
+        }
+
         for ev in parsed.events {
             send(event_tx, ev).await?;
         }
