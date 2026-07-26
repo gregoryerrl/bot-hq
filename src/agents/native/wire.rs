@@ -179,6 +179,14 @@ pub fn parse_turn(resp: &Value, model: &str, window: Option<u64>) -> ParsedTurn 
     }));
 
     let step = match stop_reason {
+        // A `tool_use` stop with no `tool_use` block is a protocol violation.
+        // Reporting it as `ToolUse { calls: [] }` would have the loop post
+        // `{"role":"user","content":[]}` on the next hop, which is itself a
+        // 400 — so the real fault would surface as a confusing downstream
+        // error instead of here, where it happened.
+        "tool_use" if calls.is_empty() => TurnStep::Unhandled {
+            stop_reason: "tool_use (no tool_use block present)".into(),
+        },
         "tool_use" => TurnStep::ToolUse { calls },
         "end_turn" | "stop_sequence" => TurnStep::End { text },
         "max_tokens" => TurnStep::MaxTokens,
@@ -226,19 +234,42 @@ pub fn tool_results_message(outcomes: &[ToolOutcome]) -> Value {
 ///
 /// Returns `None` when the window is unknown or zero — no division by zero, and
 /// no guessed percentage.
+///
+/// Also returns `None` when `usage` carries **none** of the three fields, rather
+/// than reporting a confident `0`. A gateway that spells them differently would
+/// otherwise render as a flat 0% forever, which is exactly the failure the
+/// claude-code path guards against ("a known-wrong value is worse than none",
+/// `events.rs`). One field present is enough — a turn really can have zero cache
+/// tokens.
 pub fn usage_to_context(
     usage: Option<&Value>,
     model: &str,
     window: Option<u64>,
 ) -> Option<ContextUsage> {
+    const FIELDS: [&str; 3] = [
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    ];
+
     let window = window.filter(|w| *w > 0)?;
     let usage = usage?;
-    let field = |k: &str| usage.get(k).and_then(Value::as_u64).unwrap_or(0);
+
+    let mut seen_any = false;
+    let mut used_tokens = 0u64;
+    for key in FIELDS {
+        if let Some(n) = usage.get(key).and_then(Value::as_u64) {
+            seen_any = true;
+            used_tokens += n;
+        }
+    }
+    if !seen_any {
+        return None;
+    }
+
     Some(ContextUsage {
         model: model.to_string(),
-        used_tokens: field("input_tokens")
-            + field("cache_read_input_tokens")
-            + field("cache_creation_input_tokens"),
+        used_tokens,
         context_window: window,
     })
 }
@@ -435,6 +466,21 @@ mod tests {
     }
 
     #[test]
+    fn tool_use_stop_with_no_tool_use_block_is_flagged_here_not_downstream() {
+        // Letting this through as `ToolUse { calls: [] }` makes the loop post
+        // an empty tool_results message, so the 400 lands a hop away from the
+        // actual fault.
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [{ "type": "text", "text": "no tool here" }]
+        });
+        match parse_turn(&resp, "m", None).step {
+            TurnStep::Unhandled { stop_reason } => assert!(stop_reason.contains("tool_use")),
+            other => panic!("expected Unhandled, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unknown_stop_reason_is_carried_not_panicked_on() {
         let resp = json!({ "stop_reason": "pause_turn", "content": [] });
         match parse_turn(&resp, "m", None).step {
@@ -529,6 +575,21 @@ mod tests {
     #[test]
     fn absent_usage_yields_no_context() {
         assert!(usage_to_context(None, "m", Some(200_000)).is_none());
+    }
+
+    #[test]
+    fn usage_with_no_recognised_fields_yields_no_context_rather_than_zero() {
+        // A gateway spelling these differently would otherwise pin the meter at
+        // a confident 0% forever — a wrong number, not a visible gap.
+        let usage = json!({ "inputTokens": 5_000, "outputTokens": 10 });
+        assert!(usage_to_context(Some(&usage), "m", Some(200_000)).is_none());
+    }
+
+    #[test]
+    fn one_recognised_field_is_enough_since_cache_tokens_can_be_zero() {
+        let usage = json!({ "input_tokens": 42 });
+        let ctx = usage_to_context(Some(&usage), "m", Some(200_000)).unwrap();
+        assert_eq!(ctx.used_tokens, 42);
     }
 
     // ---- TurnComplete contract ------------------------------------------
