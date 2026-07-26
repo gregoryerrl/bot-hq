@@ -197,13 +197,39 @@ pub fn handles(name: &str) -> bool {
 /// check passes both. Note `Path::join` lets an absolute `rel` replace the base
 /// entirely, so `/etc/passwd` lands outside `root` and is caught here.
 pub fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    // Lexical scope check FIRST, before canonicalize.
+    //
+    // `canonicalize` fails with ENOENT when the target doesn't exist, so an
+    // escaping path used to be reported as "cannot resolve … No such file or
+    // directory" — which reads as "the file is missing" and invites the agent to
+    // retry a different path, instead of "you may not look there". Same
+    // actionability problem as the read_file windowing bug: the refusal was
+    // correct but told the model the wrong thing. Checking lexically first means
+    // the message describes the real reason whether or not the target exists.
+    if Path::new(rel).is_absolute() {
+        return Err(format!(
+            "{rel:?} is an absolute path, which resolves outside the repository root — \
+             refused. Use a path relative to the repository root."
+        ));
+    }
+    if rel.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err(format!(
+            "{rel:?} walks above the repository root — refused. This agent may only read \
+             inside the working repository."
+        ));
+    }
+
+    // Then canonicalize, which is what holds against SYMLINKS — a lexical check
+    // alone passes a link inside the root pointing out of it.
     let canonical = root
         .join(rel)
         .canonicalize()
         .map_err(|e| format!("cannot resolve {rel:?}: {e}"))?;
 
     if !canonical.starts_with(root) {
-        return Err(format!("{rel:?} resolves outside the repository root — refused"));
+        return Err(format!(
+            "{rel:?} resolves outside the repository root — refused"
+        ));
     }
     Ok(canonical)
 }
@@ -589,6 +615,39 @@ mod tests {
         let (_d, root) = root_with_file("a.txt", "hello");
         let out = exec(&call("read_file", "../../etc/hosts"), Some(&root), ToolPolicy::ReadOnly).await;
         assert!(out.is_error, "`..` must not escape the root");
+        // The message must name the SCOPE, not the filesystem. "No such file or
+        // directory" invites a retry with another path; "above the repository root"
+        // tells the agent the boundary exists.
+        assert!(
+            out.content.contains("above the repository root"),
+            "misleading refusal: {}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn joining_then_starts_with_does_not_catch_a_dotdot_escape() {
+        // Documents why the pre-check is lexical-per-component rather than the
+        // obvious `root.join(rel).starts_with(root)`. `Path::starts_with` compares
+        // COMPONENTS without normalising, so `/root/../foo` really does start with
+        // `/root` — the naive check returns true and lets the escape through.
+        let root = Path::new("/root");
+        assert!(
+            root.join("../foo").starts_with(root),
+            "if this ever becomes false, the naive pre-check would be viable"
+        );
+        // The component scan is what actually catches it.
+        assert!("../foo".split('/').any(|s| s == ".."));
+    }
+
+    #[tokio::test]
+    async fn an_existing_escaping_path_is_still_refused_with_a_scope_message() {
+        // The original bug only surfaced because `../Cargo.toml` happened not to
+        // exist. Point at something that definitely does.
+        let (_d, root) = root_with_file("a.txt", "hello");
+        let out = exec(&call("read_file", "../"), Some(&root), ToolPolicy::ReadOnly).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("above the repository root"), "{}", out.content);
     }
 
     #[tokio::test]
@@ -598,6 +657,7 @@ mod tests {
         let (_d, root) = root_with_file("a.txt", "hello");
         let out = exec(&call("read_file", "/etc/hosts"), Some(&root), ToolPolicy::ReadOnly).await;
         assert!(out.is_error, "an absolute path must not replace the root");
+        assert!(out.content.contains("outside the repository root"), "{}", out.content);
     }
 
     #[cfg(unix)]
