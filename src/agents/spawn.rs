@@ -269,6 +269,28 @@ pub struct AgentHandle {
 }
 
 impl AgentHandle {
+    /// Assemble a handle from channels an alternative agent implementation owns.
+    ///
+    /// Exists for `agents::native`, which drives a Rust loop instead of a
+    /// subprocess. Nothing downstream distinguishes the two — the handle is a
+    /// pure channel struct — so the native path plugs into `supervise` and the
+    /// duo pump unchanged. `kill_tx` stays private, hence this constructor.
+    pub fn from_parts(
+        name: String,
+        event_rx: mpsc::Receiver<AgentEvent>,
+        input_tx: mpsc::Sender<OutgoingUserMessage>,
+        control_tx: mpsc::Sender<ControlRequest>,
+        kill_tx: oneshot::Sender<()>,
+    ) -> Self {
+        Self {
+            name,
+            event_rx,
+            input_tx,
+            control_tx,
+            kill_tx: Some(kill_tx),
+        }
+    }
+
     /// Best-effort kill. Idempotent (subsequent calls no-op).
     pub fn kill(&mut self) {
         if let Some(tx) = self.kill_tx.take() {
@@ -1082,6 +1104,7 @@ mod tests {
                 base_url: None,
                 auth_token: Some("sk-test".into()),
                 updated_at: String::new(),
+                native: false,
             },
             system_prompt_path: Path::new("/tmp/bot-hq-test-prompt.txt").to_path_buf(),
             mcp_config_path: Some(Path::new("/tmp/mcp.json").to_path_buf()),
