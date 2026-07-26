@@ -155,6 +155,20 @@ pub enum SignalingEvent {
         agent: String,
         health: String,
     },
+    /// An agent finished a turn and claude-code reported how full its context
+    /// window is. Drives the per-agent context meter in the session header so
+    /// the user can decide when to wrap a session rather than discovering the
+    /// ceiling by hitting it.
+    ///
+    /// Only emitted when the *denominator* is known: claude-code reports
+    /// `contextWindow` on the `result` event's `modelUsage` map, and a gateway
+    /// provider may omit it. No event is better than a guessed percentage.
+    AgentContext {
+        session_id: String,
+        agent: String,
+        used_tokens: u64,
+        context_window: u64,
+    },
     /// A session's duo activity changed (idle / busy / awaiting-user /
     /// cancelling). Drives the chat-input lock + Cancel button: the UI disables
     /// input while `busy`/`cancelling`, re-enables on `idle`/`awaiting_user`.
@@ -663,6 +677,29 @@ impl SignalingBridge {
             session_id,
             agent,
             target,
+        });
+    }
+
+    /// Publish an agent's context-window occupancy after a completed turn.
+    /// Fire-and-forget; the UI subscriber maps it to `session:agent_context`.
+    ///
+    /// Call only with a known window — `context_window == 0` is rejected here
+    /// as a last line of defence against a divide-by-zero reaching the UI.
+    pub fn notify_agent_context(
+        &self,
+        session_id: String,
+        agent: &str,
+        used_tokens: u64,
+        context_window: u64,
+    ) {
+        if context_window == 0 {
+            return;
+        }
+        let _ = self.event_tx.send(SignalingEvent::AgentContext {
+            session_id,
+            agent: agent.to_string(),
+            used_tokens,
+            context_window,
         });
     }
 

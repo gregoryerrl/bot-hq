@@ -146,6 +146,12 @@ pub enum AgentEvent {
         /// non-API failure. The retry supervisor reads this to decide whether
         /// the failure is transient (auto-resume) or permanent (surface it).
         api_error_status: Option<u16>,
+        /// Context-window occupancy as of THIS turn, when claude-code reported
+        /// it. `None` whenever the denominator is unavailable — notably for
+        /// gateway models whose provider may not populate `contextWindow`
+        /// (Rain on the DeepSeek endpoint). A missing value must render as a
+        /// visible gap in the UI, never as a guessed percentage.
+        context: Option<ContextUsage>,
     },
     /// System/init event — agent is ready and reporting its session metadata.
     /// (The wire `SystemEvent::Init` also carries `model`/`cwd`, but no
@@ -159,6 +165,42 @@ pub enum AgentEvent {
     /// the UI as a health dot. Not produced by the stream-json translator —
     /// emitted directly by `supervise` at running/retrying/dead transitions.
     Health(AgentHealth),
+}
+
+/// How full an agent's context window is, as of its last completed turn.
+///
+/// Raw components rather than a bare percentage: the UI wants "620K / 1M" in a
+/// tooltip alongside "62%", and a pre-divided float throws that away. The
+/// division is trivial; the operands are not recoverable.
+///
+/// Two properties worth knowing before building on this:
+/// - **Stale mid-turn.** Only refreshed on a `result` event, so it describes
+///   the last *completed* turn, not the in-flight one.
+/// - **Non-monotonic.** claude-code auto-compacts, which makes `used_tokens`
+///   drop. Do not treat a decrease as a bug or design a UI that assumes the
+///   number only climbs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextUsage {
+    /// Model id the figures belong to (the `modelUsage` map key).
+    pub model: String,
+    /// `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`.
+    ///
+    /// Cached tokens are included deliberately: caching changes what a token
+    /// *costs*, not whether it *occupies the window*. Omitting them
+    /// under-reports by orders of magnitude (2 vs 23,957 on a measured turn).
+    pub used_tokens: u64,
+    /// The model's total context window, straight from `contextWindow`.
+    /// Guaranteed non-zero — a zero or absent value yields `None` upstream
+    /// rather than a division by zero.
+    pub context_window: u64,
+}
+
+impl ContextUsage {
+    /// Occupancy in the range 0.0..=1.0 (values >1.0 are possible in principle
+    /// and are the caller's problem to clamp for display).
+    pub fn fraction(&self) -> f64 {
+        self.used_tokens as f64 / self.context_window as f64
+    }
 }
 
 /// Classify an upstream API HTTP status as transient (worth an automatic
@@ -1354,6 +1396,7 @@ mod tests {
             subtype: Some("error_during_execution".into()),
             is_error: true,
             api_error_status: Some(status),
+            context: None,
         }
     }
 
@@ -1363,6 +1406,7 @@ mod tests {
             subtype: Some("success".into()),
             is_error: false,
             api_error_status: None,
+            context: None,
         }
     }
 
@@ -1549,6 +1593,7 @@ mod tests {
             AgentEvent::TurnComplete {
                 is_error: true,
                 api_error_status: Some(400),
+                context: None,
                 ..
             }
         )));

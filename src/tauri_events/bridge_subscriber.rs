@@ -20,7 +20,7 @@ use crate::signaling::{SignalingBridge, SignalingEvent};
 use crate::storage::Storage;
 use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
-    AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent,
+    AgentContextEvent, AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent,
     FindingsChangedEvent, PendingChoiceEvent, PhaseChangedEvent, RouterHealthEvent,
     SessionActivityEvent, SessionClosedEvent,
 };
@@ -151,6 +151,23 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             };
             emit_event(
                 AgentHealthEvent::EVENT_NAME,
+                serde_json::to_value(&payload).unwrap_or(Value::Null),
+            );
+        }
+        SignalingEvent::AgentContext {
+            session_id,
+            agent,
+            used_tokens,
+            context_window,
+        } => {
+            let payload = AgentContextEvent {
+                session_id,
+                agent,
+                used_tokens,
+                context_window,
+            };
+            emit_event(
+                AgentContextEvent::EVENT_NAME,
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }

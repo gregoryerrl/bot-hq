@@ -274,7 +274,22 @@ pub async fn pump_agent(
                     Err(e) => warn!(?e, "persisting tool_result"),
                 }
             }
-            AgentEvent::TurnComplete { is_error, .. } => {
+            AgentEvent::TurnComplete {
+                is_error, context, ..
+            } => {
+                // Context occupancy rides the turn-complete event because that
+                // is the only place claude-code reports `contextWindow`.
+                // Publish it BEFORE the error branch below: a failed turn still
+                // consumed context, and the meter going stale exactly when a
+                // session starts erroring would hide the most useful reading.
+                if let (Some(c), Some(bridge)) = (context, &cfg.bridge) {
+                    bridge.notify_agent_context(
+                        cfg.session_id.to_string(),
+                        cfg.author.as_str(),
+                        c.used_tokens,
+                        c.context_window,
+                    );
+                }
                 // The router owns self-idle on the forward path (it sequences
                 // peer-busy BEFORE this agent's idle → no momentary Idle flicker).
                 // The pump owns self-idle only when it does NOT hand a Forward to
@@ -515,6 +530,7 @@ mod tests {
                 subtype: Some("error_during_execution".into()),
                 is_error: true,
                 api_error_status: None,
+                context: None,
             })
             .await
             .unwrap();
@@ -553,6 +569,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
+                context: None,
             })
             .await
             .unwrap();
@@ -592,6 +609,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
+                context: None,
             })
             .await
             .unwrap();
@@ -617,6 +635,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
+                context: None,
             })
             .await
             .unwrap();
@@ -694,6 +713,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
+                context: None,
             })
             .await
             .unwrap();
@@ -736,6 +756,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
+                context: None,
             })
             .await
             .unwrap();
@@ -751,6 +772,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
+                context: None,
             })
             .await
             .unwrap();
@@ -891,6 +913,7 @@ mod tests {
                 subtype: None,
                 is_error: false,
                 api_error_status: None,
+                context: None,
             })
             .await
             .unwrap();

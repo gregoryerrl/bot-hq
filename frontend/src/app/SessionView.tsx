@@ -6,6 +6,8 @@ import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useHealthStore } from "../stores/health";
 import { useActivityStore } from "../stores/activity";
 import { HealthDot, RouterHealthDot } from "../components/HealthDot";
+import { ContextMeter } from "../components/ContextMeter";
+import { useContextStore } from "../stores/context";
 import { useDragResize } from "../hooks/useDragResize";
 import { useChatStore } from "../stores/chat";
 import { ChatInput } from "../components/ChatInput";
@@ -104,6 +106,7 @@ export function SessionView() {
   // B2: live agent health for this session (drives the header dots).
   const health = useHealthStore((s) => s.bySession[sessionId]);
   const routerAlive = useHealthStore((s) => s.routerBySession[sessionId]);
+  const agentContext = useContextStore((s) => s.bySession[sessionId]);
   const activity = useActivityStore((s) => s.bySession[sessionId]);
   // Per-agent busy flags for the chat-input turn-status line ("Brian is
   // working… / Rain is reviewing…"). Parallel to `activity`.
@@ -291,10 +294,12 @@ export function SessionView() {
                   title="Live agent health (models are in Session Settings)"
                 >
                   Brian <HealthDot health={health?.brian} name="Brian" />
+                  <ContextMeter context={agentContext?.brian} name="Brian" />
                   {session.rain_enabled && (
                     <>
                       <span className="mx-1.5 text-outline-variant">·</span>
                       Rain <HealthDot health={health?.rain} name="Rain" />
+                      <ContextMeter context={agentContext?.rain} name="Rain" />
                       {routerAlive === false && (
                         <>
                           <span className="mx-1.5 text-outline-variant">·</span>

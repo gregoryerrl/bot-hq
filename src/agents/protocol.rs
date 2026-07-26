@@ -65,6 +65,21 @@ pub struct AssistantMessage {
     pub content: Vec<ContentBlock>,
     #[serde(default)]
     pub stop_reason: Option<String>,
+    /// Per-API-call usage — the size of the prompt sent for THIS call.
+    ///
+    /// This is the only point-in-time reading in the stream, and therefore the
+    /// only correct numerator for context occupancy. The `result` event's
+    /// `usage` looks equivalent but is the **sum across every API call in the
+    /// turn**, so on a turn with three tool calls it roughly triples:
+    ///
+    /// ```text
+    /// assistant#1 usage=33,917
+    /// assistant#2 usage=33,917
+    /// assistant#3 usage=34,216   <- the real current context
+    /// result      usage=68,133   <- 33,917 + 34,216, not a prompt size
+    /// ```
+    #[serde(default)]
+    pub usage: Option<Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,6 +157,22 @@ pub struct ResultEvent {
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub usage: Option<Value>,
+    /// Per-model usage map, keyed by model id — the ONLY place claude-code
+    /// reports `contextWindow`, which is what makes a context *percentage*
+    /// possible rather than a raw token count:
+    ///
+    /// ```jsonc
+    /// "modelUsage": { "claude-opus-5": {
+    ///   "inputTokens": 2, "cacheReadInputTokens": 11631,
+    ///   "cacheCreationInputTokens": 12324, "contextWindow": 1000000,
+    ///   "canonicalModel": "claude-opus-5", "provider": "firstParty" } }
+    /// ```
+    ///
+    /// Note the on-disk `~/.claude/projects/**.jsonl` transcripts carry the
+    /// token counts but NOT `contextWindow` — so the denominator is only ever
+    /// available live, off this event. Capture it here or lose it.
+    #[serde(default, rename = "modelUsage")]
+    pub model_usage: Option<Value>,
 }
 
 // ---- outbound (stdin) -----------------------------------------------------

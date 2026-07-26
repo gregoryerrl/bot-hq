@@ -144,6 +144,28 @@ impl AgentHealthEvent {
     pub const EVENT_NAME: &'static str = "session:agent_health";
 }
 
+/// Emitted after an agent's turn completes, carrying how full its context
+/// window is, so the session header can show a per-agent meter.
+///
+/// Raw operands rather than a pre-divided percentage: the tooltip wants
+/// "620K / 1M" next to "62%", and the division is trivial to redo frontend-side
+/// while the operands are not recoverable from a float.
+///
+/// Two properties the UI must respect: the figure is **stale mid-turn** (it
+/// only refreshes on turn completion) and **non-monotonic** (claude-code
+/// auto-compacts, so it can drop — that is correct, not a bug).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct AgentContextEvent {
+    pub session_id: String,
+    pub agent: String,
+    pub used_tokens: u64,
+    pub context_window: u64,
+}
+
+impl AgentContextEvent {
+    pub const EVENT_NAME: &'static str = "session:agent_context";
+}
+
 /// Emitted when a session's duo activity changes (idle / busy / awaiting-user /
 /// cancelling), so the chat input can lock while the duo is working and re-open
 /// when it's the user's turn. `state` is the `SessionActivity::as_str` string;

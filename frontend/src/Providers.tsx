@@ -13,6 +13,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriEvent } from "./hooks/useTauriEvent";
 import { useHealthStore, type AgentHealth } from "./stores/health";
+import { useContextStore } from "./stores/context";
 import { useActivityStore, type SessionActivity } from "./stores/activity";
 import { seedRuntimeStores, type SessionRuntime } from "./stores/runtime";
 
@@ -118,13 +119,30 @@ function GlobalEventSync() {
   const clearHealth = useHealthStore((s) => s.clearSession);
   const setActivity = useActivityStore((s) => s.setActivity);
   const clearActivity = useActivityStore((s) => s.clearSession);
+  const setContext = useContextStore((s) => s.setContext);
+  const clearContext = useContextStore((s) => s.clearSession);
   const onClose = useCallback(
     (p: { session_id: string }) => {
       invalidate(CLOSE_KEYS);
       clearHealth(p.session_id);
       clearActivity(p.session_id);
+      clearContext(p.session_id);
     },
-    [invalidate, clearHealth, clearActivity],
+    [invalidate, clearHealth, clearActivity, clearContext],
+  );
+  const onAgentContext = useCallback(
+    (p: {
+      session_id: string;
+      agent: string;
+      used_tokens: number;
+      context_window: number;
+    }) => {
+      setContext(p.session_id, p.agent, {
+        usedTokens: p.used_tokens,
+        contextWindow: p.context_window,
+      });
+    },
+    [setContext],
   );
   const onHealth = useCallback(
     (p: { session_id: string; agent: string; health: string }) => {
@@ -186,6 +204,7 @@ function GlobalEventSync() {
   useTauriEvent("model:changed", onModel, [onModel]);
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
+  useTauriEvent("session:agent_context", onAgentContext, [onAgentContext]);
   useTauriEvent("session:router_health", onRouterHealth, [onRouterHealth]);
   useTauriEvent("session:activity", onActivity, [onActivity]);
   useTauriEvent("session:resync", onResync, [onResync]);
