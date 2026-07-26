@@ -1304,7 +1304,16 @@ export type ModelView = { id: string; display_name: string; provider: string; mo
  * generated TS type into `boolean | undefined` and hand the checkbox an
  * uncontrolled-input warning.
  */
-native: boolean }
+native: boolean; 
+/**
+ * Context window in tokens, or `null` when unknown.
+ * 
+ * A window is a per-MODEL fact, so it comes from the user rather than from a
+ * provider table — `ProviderProfile` deliberately declares none. Left unset,
+ * the meter shows a visible gap and the native loop's context ceiling stays
+ * dark, which is the documented contract: never a guessed percentage.
+ */
+context_window: number | null }
 /**
  * Permission posture summary (counts only; bot-hq overrides per agent anyway).
  */
