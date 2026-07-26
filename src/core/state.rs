@@ -478,6 +478,18 @@ impl AppState {
         // Drop the bridge's in-memory per-session state (project map + awaiting
         // flag) so closed sessions don't leak map entries for the process life.
         self.bridge.unregister_session(id).await;
+        // Drop any persisted native-agent conversations. These exist so a native
+        // agent survives an app restart (a CLI agent comes back via `--resume`),
+        // which is meaningless once the session is closed — and without this the
+        // directory accumulates one file per native session forever, each holding
+        // the full transcript.
+        for agent in ["brian", "rain"] {
+            crate::agents::native::history::clear(&crate::agents::native::history::history_path(
+                &self.paths.data_dir,
+                id,
+                agent,
+            ));
+        }
         // Drop any queued post-cancel reconciliation flag (a session cancelled
         // then closed without a follow-up message would otherwise linger).
         self.pending_reconcile.lock().await.remove(id);

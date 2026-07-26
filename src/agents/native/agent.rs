@@ -350,7 +350,7 @@ pub async fn run_loop(
                 // The abandoned turn can leave a trailing assistant `tool_use`
                 // whose results never arrived, which 400s the NEXT request.
                 repair_dangling_tool_use(&mut state);
-                persist(&cfg, &state);
+                persist(&cfg, &state).await;
                 info!(agent = %cfg.agent_name, "native turn interrupted");
                 // Matches the CLI path's abort shape: an errored turn, so
                 // partial text is not peer-forwarded.
@@ -448,7 +448,7 @@ async fn run_turns(
         }
         if let Some(m) = parsed.assistant_message {
             state.history.push(m);
-            persist(cfg, state);
+            persist(cfg, state).await;
         }
 
         // Checked AFTER the turn is accounted for, so the reading that trips the
@@ -473,7 +473,7 @@ async fn run_turns(
                     .await?;
                 }
                 state.history.push(tool_results_message(&outcomes));
-                persist(cfg, state);
+                persist(cfg, state).await;
 
                 if over_ceiling {
                     state.ceiling_reached = true;
@@ -726,12 +726,34 @@ async fn send(tx: &mpsc::Sender<AgentEvent>, ev: AgentEvent) -> Result<(), ()> {
 
 /// Persist the conversation. Best-effort: a save failure degrades to
 /// no-persistence (today's behaviour) rather than failing the turn.
-fn persist(cfg: &LoopConfig, state: &State) {
+///
+/// Runs on the blocking pool rather than the async worker. `history::save`
+/// serialises the WHOLE conversation and does two filesystem syscalls, and it is
+/// called twice a turn — at 161K tokens of history that is hundreds of KB of
+/// synchronous work per call, which would otherwise stall the runtime thread
+/// handling every other agent's IO.
+///
+/// **Awaited, not fire-and-forget.** Two saves happen per turn — after the
+/// assistant message, then after the tool results — and letting them race means
+/// the first can land LAST, leaving the torn intermediate state on disk as the
+/// newest write. Awaiting keeps them ordered; the turn waits only for a file
+/// write, and the worker thread is free to drive other agents meanwhile, which is
+/// the part that actually mattered.
+async fn persist(cfg: &LoopConfig, state: &State) {
     let Some(path) = cfg.history_path.as_ref() else {
         return;
     };
-    if let Err(e) = history::save(path, &state.history) {
-        warn!(agent = %cfg.agent_name, error = %e, "persisting native conversation");
+    let path = path.clone();
+    let history = state.history.clone();
+    let agent = cfg.agent_name.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        if let Err(e) = history::save(&path, &history) {
+            warn!(agent = %agent, error = %e, "persisting native conversation");
+        }
+    })
+    .await;
+    if let Err(e) = joined {
+        warn!(agent = %cfg.agent_name, error = %e, "history persistence task failed");
     }
 }
 
