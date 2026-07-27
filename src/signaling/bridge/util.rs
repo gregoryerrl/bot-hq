@@ -267,13 +267,36 @@ pub(super) fn outcome_from_picked(picked: &str) -> ViolationOutcome {
 /// session was closed + reopened and the asking subprocess was replaced.
 /// Shared by both resolve_choice fallbacks (dropped-receiver and the
 /// reopened-session `None` path) so the wording stays identical.
-pub(super) fn oob_resolution_body(agent_label: &str, question: &str, picked: &str) -> String {
+pub(super) fn oob_resolution_body(
+    agent_label: &str,
+    question: &str,
+    options: &[String],
+    picked: &str,
+) -> String {
+    // Restate the full option list: every observed resolution arrives this way
+    // (47/47 in the 2026-07-27 archive study), and without the menu the agent
+    // loses its own decision frame — it can no longer tell whether the pick was
+    // one of its options or the user reaching past the menu with free text.
+    let options_block = if options.is_empty() {
+        String::new()
+    } else {
+        let listed = options
+            .iter()
+            .enumerate()
+            .map(|(i, o)| format!("{}. {o}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("**Options were:**\n{listed}\n")
+    };
     format!(
         "(out-of-band) Your earlier `ask_user_choice` for {agent_label} resolved while \
          you were no longer waiting on the tool call.\n\n\
          **Question:** {question}\n\
+         {options_block}\
          **User picked:** {picked}\n\n\
-         Treat this as the user's reply. Continue from here."
+         Treat this as the user's reply (a pick outside the listed options is the \
+         user answering in their own words — honor the words, not the menu). \
+         Continue from here."
     )
 }
 
@@ -411,4 +434,23 @@ mod tests {
         assert!(split_into_atoms("").is_empty());
         assert!(split_into_atoms("   \n\n  ").is_empty());
     }
+
+    #[test]
+    fn oob_resolution_body_restates_the_full_menu() {
+        let body = super::oob_resolution_body(
+            "brian",
+            "Push now?",
+            &["Push 9a07930".to_string(), "Hold for review".to_string()],
+            "Hold for review",
+        );
+        assert!(body.contains("**Options were:**"));
+        assert!(body.contains("1. Push 9a07930"));
+        assert!(body.contains("2. Hold for review"));
+        assert!(body.contains("**User picked:** Hold for review"));
+
+        // No options (free-text/halt shapes): no empty menu block.
+        let bare = super::oob_resolution_body("brian", "Anything else?", &[], "done");
+        assert!(!bare.contains("Options were"));
+    }
+
 }

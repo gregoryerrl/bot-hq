@@ -468,6 +468,7 @@ impl SignalingBridge {
                                 p.choice.session_id.clone(),
                                 &p.choice.agent,
                                 &p.choice.question,
+                                &p.choice.options,
                                 picked,
                                 command,
                                 flipped,
@@ -494,12 +495,18 @@ impl SignalingBridge {
                 let Some(q) = q else {
                     return Err(anyhow::anyhow!("no pending choice with id {choice_id}"));
                 };
+                let options: Vec<String> = q
+                    .options_json
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str(j).ok())
+                    .unwrap_or_default();
                 Ok(self
                     .deliver_oob(
                         choice_id,
                         q.session_id.clone(),
                         &q.agent,
                         &q.prompt,
+                        &options,
                         picked,
                         q.command_text.as_deref(),
                         flipped,
@@ -517,17 +524,19 @@ impl SignalingBridge {
     /// `AgentReceiverDroppedFellBack` so `CoreAppState::resolve_choice` wakes the
     /// live (respawned) subprocess via stdin. The callers differ only in where
     /// `session_id` / `agent` / `question` / `command_text` come from.
+    #[allow(clippy::too_many_arguments)]
     async fn deliver_oob(
         &self,
         choice_id: &str,
         session_id: String,
         agent: &str,
         question: &str,
+        options: &[String],
         picked: String,
         command_text: Option<&str>,
         flipped: bool,
     ) -> ResolveOutcome {
-        let mut body = oob_resolution_body(agent, question, &picked);
+        let mut body = oob_resolution_body(agent, question, options, &picked);
         if flipped {
             self.maybe_run_gated(&session_id, command_text, &picked, &mut body)
                 .await;
