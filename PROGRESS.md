@@ -9,6 +9,53 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-07-28 — archive-study remediation batch (s-92f76f02)
+
+Studied 9 archived duo sessions (Jul 23–27, both build eras) with 7
+parallel deep-read auditors; synthesized 30 systemic quality limiters
+(investigate doc, session s-92f76f02), then shipped the mechanical
+batch — one commit per fix:
+
+- **Doc archive-on-supersede** (`0c1acc9`) — phase-doc rewrites archive
+  the old body as `{slug}@{n}`; a 23-finding audit had been destroyed
+  by four batch rewrites.
+- **CL write safety** (`8194ca6`) — shrink/empty-replace guard +
+  `confirm_shrink`, `mode:"append"`, lazy git-versioning of the whole
+  library (the "archived in git history" belief is now true), and
+  `abs_path` on cl_index_search rows.
+- **peer_ack substance guard** (`4b05e66`) — a >200-byte acked turn
+  forwards anyway, tagged; four reviews had been silently destroyed.
+- **OOB answer completeness** (`a3c278e`) — resolutions restate the
+  full option menu; off-menu picks flagged as the user's own words.
+- **Reviewer liveness** (`69088d5`) — bridge RPC activity within 60s
+  overrides a stale Stalled/Dead health verdict in the commit gate.
+- **mark_awaiting_user peer-reason guard** (`3282708`) — refuses
+  peer-shaped reasons (the 100-min mutual-deferral deadlock).
+- **action_gate park redesign** (`2ab07b4`) — parks with a `gate_id`
+  instead of blocking to client timeout; OOB outcome delivery; new
+  `gate_status` tool; pending-only dedupe; age-based (15 min) stale
+  confirm; bash executor (sh heredoc deaths); reject-with-reason
+  affordance in the gate card.
+- **Provider-limit classification** (`1212d4c`) — quota deaths become
+  stalled-health + tray halt + one peer notice instead of agent speech
+  (3h13m of silent downtime in the archive).
+- **Native window hygiene** (`9cfa2e8`) — spawn-time chat warning when
+  a native model row lacks `context_window`; Kimi K3 row set to 1M
+  (user-verified OpenRouter value).
+- **Prompt pack** — HANDS question discipline (no what-next polls under
+  an open mandate; options carry constraints; batch decisions), EYES
+  same-turn-evidence rules (five fabricated-assertion incidents), a
+  shared existence-claims rule, and the parked action_gate contract.
+
+Remaining findings filed as specced issues in the CL (`issues.md`
+#3–#17): read-scope gate, review↔SHA binding, EYES verify channel,
+wake-policy filtering, arc ledger for long-context EYES, scratch dirs,
+zombie-session repair, Tool Gate argv matching, outward-text gating,
+close-time sweeps, quota auto-resume, and two `needs-user-decision`
+items (disposition re-verify; EYES user-channel).
+
+---
+
 ## Current state
 
 944 Rust tests passing (881 lib + 37 external MCP + 5 native MCP + 7

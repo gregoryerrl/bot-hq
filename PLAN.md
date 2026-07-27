@@ -167,10 +167,12 @@ extension points in `docs/PLUGINS.md`):
 
 ### First plugins (each needs its own design doc)
 
-- **Cognotify** — the human-comprehension deck (user's flagship idea):
-  panel plugin over sessions + CL with user-tuned lenses (spatial graph
-  / spec sheet / narrative brief). Buildable on v1 today (catalog reads
-  + KV for lens prefs); wants the event-relay tier for liveness.
+- **Cognotify** — the human-comprehension deck (user's flagship idea).
+  ALREADY BUILT as an external app at `~/Projects/cognotify` — this
+  entry is about *integrating* it as a bot-hq plugin (panel over
+  sessions + CL), not building it. (Corrected 2026-07-28; the stale
+  "buildable on v1 today" wording misled a session into asserting it
+  was unbuilt — the user had to correct the record.)
 - **Discord plugin** — bridge sessions to/from a Discord channel.
   Probably a backend-style plugin on the external MCP driver.
 - **Clive plugin** — port of legacy bot-hq's Clive bot (Twitch/IRC).
