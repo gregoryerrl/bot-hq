@@ -139,6 +139,25 @@ impl AppState {
     pub async fn new(paths: Paths, storage: Storage, server: SignalingServer) -> Self {
         let bridge = Arc::clone(&server.bridge);
         let addr = server.local_addr;
+        // Sweep native conversations orphaned by a force-quit or a session
+        // deleted without a clean close — `close_session` clears its own, but
+        // nothing else ever did, so the directory accumulated one full
+        // transcript per unclean end. Skipped entirely (never fail-open into
+        // deleting live histories) if the session list can't be read.
+        match storage.list_active_sessions().await {
+            Ok(sessions) => {
+                let keep: std::collections::HashSet<String> =
+                    sessions.into_iter().map(|s| s.id).collect();
+                let removed =
+                    crate::agents::native::history::sweep_orphans(&paths.data_dir, &keep);
+                if removed > 0 {
+                    tracing::info!(removed, "swept orphaned native-history conversations");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(?e, "could not list sessions; skipping native-history sweep")
+            }
+        }
         Self {
             paths,
             storage,
@@ -159,11 +178,12 @@ impl AppState {
     /// Open a session from the external driver.
     ///
     /// `brian_model_id` / `rain_model_id` are saved-model ids; `None` falls back
-    /// to the per-agent config, which is the historical behaviour. They matter
-    /// because a model's `native` flag lives on the `models` row and NOT on
-    /// `agent_configs` — so without them a driver-created session can never spawn
-    /// a native agent, whatever the agent config says. Solo/duo still comes from
-    /// the user's `rain_disabled_default` setting; there is no create dialog here.
+    /// to the per-agent config, which is the historical behaviour. Pass them when
+    /// the caller wants a SPECIFIC model for this session; since 0038 the
+    /// per-agent fallback carries `native` / `context_window` itself, so omitting
+    /// them still reaches the native loop whenever the Agents tab assigned a
+    /// native model. Solo/duo still comes from the user's `rain_disabled_default`
+    /// setting; there is no create dialog here.
     pub async fn open_session(
         &self,
         title: impl Into<String>,

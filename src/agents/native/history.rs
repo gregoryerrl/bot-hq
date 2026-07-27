@@ -90,6 +90,42 @@ pub fn clear(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+/// Remove conversations whose session is gone — force-quit apps and sessions
+/// deleted without a clean close never ran the `close_session` cleanup, so the
+/// directory accumulated one full transcript per unclean end, forever.
+///
+/// `keep_session_ids` is the set of sessions still alive; anything else goes,
+/// including files whose names don't parse — only bot-hq writes this directory,
+/// so an unrecognisable file is debris, not data. Returns how many were removed.
+///
+/// The filename is `<sanitized-session>-<sanitized-agent>.json` and agent names
+/// contain no `-`, so `rsplit_once('-')` recovers the session id exactly.
+pub fn sweep_orphans(
+    data_dir: &Path,
+    keep_session_ids: &std::collections::HashSet<String>,
+) -> usize {
+    let dir = data_dir.join(".local").join("native-history");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return 0; // no directory yet — nothing has ever persisted
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue; // never touch a stray .json.tmp mid-rename, or non-ours
+        }
+        let keep = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .and_then(|stem| stem.rsplit_once('-'))
+            .is_some_and(|(session, _agent)| keep_session_ids.contains(session));
+        if !keep && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +240,54 @@ mod tests {
         clear(&p);
         assert!(!p.exists());
         clear(&p); // idempotent
+    }
+
+    #[test]
+    fn sweep_removes_orphans_and_keeps_live_sessions() {
+        // `close_session` only cleans up on a CLEAN close; force-quits and
+        // deleted sessions leaked one full transcript each, forever.
+        let dir = TempDir::new().unwrap();
+        let data = dir.path();
+        let live = history_path(data, "s-live1", "rain");
+        let dead = history_path(data, "s-gone2", "brian");
+        save(&live, &sample()).unwrap();
+        save(&dead, &sample()).unwrap();
+        // Debris with no parseable session id — only bot-hq writes here, so an
+        // unrecognisable file is trash, not data.
+        std::fs::write(
+            data.join(".local").join("native-history").join("junk.json"),
+            "[]",
+        )
+        .unwrap();
+
+        let keep: std::collections::HashSet<String> = ["s-live1".to_string()].into();
+        let removed = sweep_orphans(data, &keep);
+
+        assert_eq!(removed, 2, "the orphan and the debris go");
+        assert!(live.exists(), "a live session's conversation must survive");
+        assert!(!dead.exists());
+    }
+
+    #[test]
+    fn sweep_tolerates_a_missing_directory() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(sweep_orphans(dir.path(), &Default::default()), 0);
+    }
+
+    #[test]
+    fn sweep_leaves_non_json_files_alone() {
+        // A crash mid-`save` can leave `<name>.json.tmp`; the sweep must not
+        // race a rename in progress or touch anything that isn't a conversation.
+        let dir = TempDir::new().unwrap();
+        let data = dir.path();
+        save(&history_path(data, "s-x", "rain"), &sample()).unwrap();
+        let tmp = data
+            .join(".local")
+            .join("native-history")
+            .join("s-y-rain.json.tmp");
+        std::fs::write(&tmp, "partial").unwrap();
+
+        sweep_orphans(data, &Default::default());
+        assert!(tmp.exists(), "a .tmp file must never be swept");
     }
 }

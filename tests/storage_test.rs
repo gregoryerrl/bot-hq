@@ -224,6 +224,47 @@ async fn agent_config_round_trips_the_native_flag_and_context_window() {
 }
 
 #[tokio::test]
+async fn model_round_trips_the_native_flag_and_context_window() {
+    // `MODEL_COLUMNS` order versus the ten `bind()`s was correct by INSPECTION
+    // only — no test ever asserted `native: true` or a non-null window survived
+    // the round trip, so a reorder would have shipped a silently mis-mapped flag.
+    let s = Storage::memory().await.unwrap();
+    let m = bot_hq::storage::Model {
+        id: "m-native".into(),
+        display_name: "DeepSeek V4 Pro".into(),
+        provider: "deepseek".into(),
+        model_name: "deepseek-v4-pro".into(),
+        base_url: Some("https://api.deepseek.com/anthropic".into()),
+        auth_token: Some("ds-token".into()),
+        created_at: String::new(),
+        updated_at: String::new(),
+        native: true,
+        context_window: Some(1_000_000),
+    };
+    s.upsert_model(&m).await.unwrap();
+
+    let got = s.get_model("m-native").await.unwrap().unwrap();
+    assert!(got.native);
+    assert_eq!(got.context_window, Some(1_000_000));
+    // Every other column must land in its own slot, not a neighbour's.
+    assert_eq!(got.display_name, "DeepSeek V4 Pro");
+    assert_eq!(got.provider, "deepseek");
+    assert_eq!(got.model_name, "deepseek-v4-pro");
+    assert_eq!(got.auth_token.as_deref(), Some("ds-token"));
+
+    // And it must turn back off — a flag that only latches on is its own bug.
+    let off = bot_hq::storage::Model {
+        native: false,
+        context_window: None,
+        ..got
+    };
+    s.upsert_model(&off).await.unwrap();
+    let got = s.get_model("m-native").await.unwrap().unwrap();
+    assert!(!got.native);
+    assert_eq!(got.context_window, None);
+}
+
+#[tokio::test]
 async fn existing_agent_configs_default_to_the_cli() {
     // The 0038 defaults must leave every pre-existing row on claude-code.
     let s = Storage::memory().await.unwrap();

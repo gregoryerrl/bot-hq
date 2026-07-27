@@ -26,6 +26,24 @@ use super::wire::ToolOutcome;
 /// The server key `mcp_config_json` always writes.
 const SIGNALING_KEY: &str = "bot-hq-signaling";
 
+/// TCP connect budget. Loopback to our own server — if this fires, the server
+/// is gone, not slow.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whole-call budget for one JSON-RPC round trip.
+///
+/// Generous because signaling tools legitimately run long: `terminal_exec`
+/// blocks up to its 120s output-settle ceiling, and `web_search` drives several
+/// engines in sequence. The budget exists for a WEDGED server, which previously
+/// hung the agent's turn forever — a fired timeout becomes an `is_error` tool
+/// outcome the model reads and works around, not a failed turn.
+///
+/// Caveat for a future native HANDS: a tool that blocks on a HUMAN decision
+/// (`action_gate`, per-push approval) can legitimately out-wait any fixed
+/// number. If that agent ever exists, this needs a per-tool override or
+/// removal — do not just raise it.
+const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub struct McpClient {
     http: reqwest::Client,
     url: String,
@@ -36,6 +54,8 @@ impl McpClient {
     pub fn new(url: impl Into<String>) -> Result<Self> {
         Ok(Self {
             http: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(CALL_TIMEOUT)
                 .build()
                 .context("building MCP HTTP client")?,
             url: url.into(),

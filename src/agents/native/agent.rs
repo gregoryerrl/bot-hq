@@ -64,6 +64,19 @@ pub const CONTEXT_CEILING: f64 = 0.85;
 /// Runaway-loop guard: tool cycles allowed for a single user input.
 pub const MAX_TURNS_PER_INPUT: usize = 50;
 
+/// TCP connect budget for `POST /v1/messages`.
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whole-request budget for `POST /v1/messages`.
+///
+/// Generous ON PURPOSE: a non-streaming response generating 8–16K output tokens
+/// legitimately runs several minutes, and a timeout here surfaces as
+/// `ApiFailure { status: None }`, which is NOT retried — so a tight value turns
+/// long review turns into hard errors. This exists for the connected-but-dead
+/// upstream, which previously hung the turn forever (no `Health`, no
+/// `TurnComplete`, recoverable only by user interrupt) — not to race the model.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Appended to the assembled system prompt for a native agent.
 ///
 /// The role prompts are written for claude-code and promise a tool surface the
@@ -137,6 +150,8 @@ impl HttpTransport {
     pub fn new(url: String, auth: AuthStyle, token: Option<String>) -> Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(REQUEST_TIMEOUT)
                 .build()
                 .context("building Messages HTTP client")?,
             url,
@@ -321,8 +336,9 @@ pub async fn run_loop(
         if state.ceiling_reached {
             // `None`: no API call was made, so there is no NEW reading. The pump
             // publishes only on `Some`, so this leaves the last known occupancy
-            // on screen rather than blanking the meter.
-            emit_ceiling_refusal(&cfg, &event_tx, None).await;
+            // on screen rather than blanking the meter. This input got no other
+            // TurnComplete, so the refusal's errored one ends it.
+            emit_ceiling_refusal(&cfg, &event_tx, None, false).await;
             continue;
         }
 
@@ -496,7 +512,7 @@ async fn run_turns(
                     // nothing has published the reading that just tripped the
                     // ceiling. (The `End` arm below is the only path where a
                     // preceding `turn_complete_ok` already carried it.)
-                    emit_ceiling_refusal(cfg, event_tx, ctx).await;
+                    emit_ceiling_refusal(cfg, event_tx, ctx, false).await;
                     return Ok(());
                 }
                 continue;
@@ -505,9 +521,14 @@ async fn run_turns(
                 if over_ceiling {
                     state.ceiling_reached = true;
                 }
+                // The turn genuinely SUCCEEDED — the ok-TurnComplete stays even
+                // when the ceiling tripped, so the model's final answer is
+                // peer-forwarded rather than drained by the pump's error branch.
+                // The refusal below then adds the explanation and the terminal
+                // health, but NOT a second TurnComplete.
                 send(event_tx, wire::turn_complete_ok("end_turn", parsed.context)).await?;
                 if state.ceiling_reached {
-                    emit_ceiling_refusal(cfg, event_tx, ctx).await;
+                    emit_ceiling_refusal(cfg, event_tx, ctx, true).await;
                 }
                 return Ok(());
             }
@@ -635,26 +656,33 @@ async fn send_with_retry(
 
 /// Run every requested tool. Built-ins are handled locally; everything else goes
 /// to bot-hq's signaling MCP server, where role enforcement lives.
+///
+/// Concurrent, because the model calling several tools in one turn is the point
+/// of trap 2 (`wire.rs`) — running them serially charged n round trips for what
+/// the model asked for as one. Safe: every built-in under `ReadOnly` is
+/// side-effect-free, the role gate runs per-call inside `tools::exec`
+/// regardless, and MCP calls are independent HTTP requests to a server that
+/// already handles concurrency. `join_all` preserves input order, which trap 2
+/// also depends on — outcomes must line up with `calls`.
 async fn exec_calls(
     cfg: &LoopConfig,
     mcp: Option<&Arc<McpClient>>,
     calls: &[ToolCall],
 ) -> Vec<ToolOutcome> {
-    let mut out = Vec::with_capacity(calls.len());
-    for call in calls {
+    futures::future::join_all(calls.iter().map(|call| async move {
         if tools::handles(&call.name) {
-            out.push(tools::exec(call, cfg.root.as_deref(), cfg.tool_policy).await);
+            tools::exec(call, cfg.root.as_deref(), cfg.tool_policy).await
         } else if let Some(mcp) = mcp {
-            out.push(mcp.call_tool(&call.id, &call.name, call.input.clone()).await);
+            mcp.call_tool(&call.id, &call.name, call.input.clone()).await
         } else {
-            out.push(ToolOutcome {
+            ToolOutcome {
                 tool_use_id: call.id.clone(),
                 content: format!("tool {:?} is not available to this agent", call.name),
                 is_error: true,
-            });
+            }
         }
-    }
-    out
+    }))
+    .await
 }
 
 /// Append user text to the history, MERGING into a trailing user message rather
@@ -737,10 +765,19 @@ fn repair_dangling_tool_use_in(history: &mut Vec<Value>) {
     history.push(tool_results_message(&outcomes));
 }
 
+/// `turn_already_ended`: the `TurnStep::End` path has already sent this input's
+/// `turn_complete_ok`, and every pump consumer is written against one
+/// `TurnComplete` per input — a second one made the pump run its end-of-turn
+/// bookkeeping twice (benign today only because those steps happen to be
+/// idempotent). When it is true, only the explanation and the health signal are
+/// emitted; the paths that have NOT ended the turn (`ToolUse` mid-cycle, the
+/// latched refusal of a fresh input) still get the errored `TurnComplete` that
+/// ends it.
 async fn emit_ceiling_refusal(
     cfg: &LoopConfig,
     event_tx: &mpsc::Sender<AgentEvent>,
     context: Option<ContextUsage>,
+    turn_already_ended: bool,
 ) {
     let pct = (CONTEXT_CEILING * 100.0).round() as u32;
     let _ = event_tx
@@ -750,9 +787,11 @@ async fn emit_ceiling_refusal(
              session to continue."
         )))
         .await;
-    let _ = event_tx
-        .send(wire::turn_complete_err(None, "context_ceiling", context))
-        .await;
+    if !turn_already_ended {
+        let _ = event_tx
+            .send(wire::turn_complete_err(None, "context_ceiling", context))
+            .await;
+    }
     // The loop stays alive and keeps refusing, and the event channel stays OPEN
     // deliberately — closure is the supervisor's end-of-incarnation signal and
     // would respawn this agent with no history. But an agent that will never
@@ -919,7 +958,9 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
             session_id: cfg.session_id.clone(),
             model: cfg.config.model_name.clone(),
             profile,
-            accounting: Some(Arc::new(AccountingLog::for_data_dir(&cfg.data_dir))),
+            // The SHARED instance — a per-spawn `AccountingLog` gave every agent
+            // a private mutex over the same file, which serialized nothing.
+            accounting: Some(AccountingLog::shared_for_data_dir(&cfg.data_dir)),
             history_path: Some(history::history_path(
                 &cfg.data_dir,
                 &cfg.session_id,
@@ -1114,6 +1155,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parallel_tool_calls_all_run_and_keep_their_order() {
+        // Trap 2 exists to keep the model making parallel calls; running them
+        // serially charged n round trips for what it asked for as one. Order is
+        // load-bearing — the tool_results blocks must line up with the calls.
+        let t = ScriptedTransport::new(vec![
+            Ok(json!({
+                "stop_reason": "tool_use",
+                "content": [
+                    { "type": "tool_use", "id": "tu_1", "name": "read_file",
+                      "input": { "path": "a.txt" } },
+                    { "type": "tool_use", "id": "tu_2", "name": "read_file",
+                      "input": { "path": "missing.txt" } }
+                ]
+            })),
+            Ok(end_turn("read both")),
+        ]);
+        let mut h = start(t.clone() as Arc<dyn MessagesTransport>, None);
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("read both")).await.unwrap();
+
+        assert!(matches!(next(&mut h).await, AgentEvent::ToolUse { .. }));
+        assert!(matches!(next(&mut h).await, AgentEvent::ToolUse { .. }));
+
+        // One succeeds, one fails — both must come back, in call order.
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            match next(&mut h).await {
+                AgentEvent::ToolResult { tool_use_id, .. } => ids.push(tool_use_id),
+                other => panic!("expected ToolResult, got {other:?}"),
+            }
+        }
+        assert_eq!(ids, vec!["tu_1", "tu_2"]);
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Text(_)));
+        let reqs = t.requests();
+        let results = &reqs[1]["messages"][2]["content"];
+        assert_eq!(results[0]["tool_use_id"], "tu_1");
+        assert_eq!(results[1]["tool_use_id"], "tu_2");
+        assert_eq!(results[1]["is_error"], true, "the missing file must report an error");
+    }
+
+    #[tokio::test]
     async fn api_failure_surfaces_the_status_the_supervisor_classifies_on() {
         let t = ScriptedTransport::new(vec![Err(ApiFailure {
             status: Some(529),
@@ -1167,23 +1251,26 @@ mod tests {
         h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
 
         assert!(matches!(next(&mut h).await, AgentEvent::Text(_)));
+        // ONE TurnComplete for this input — and the successful one, so the
+        // model's final answer is forwarded rather than drained as an error.
         assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: false, .. }));
         match next(&mut h).await {
             AgentEvent::Error(m) => assert!(m.contains("context window")),
             other => panic!("expected ceiling Error, got {other:?}"),
         }
-        assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: true, .. }));
-        // Terminal health, so the fail-closed reviewer gate can see this agent has
-        // stopped — see `the_ceiling_reports_dead_so_the_reviewer_gate_holds`.
+        // Terminal health follows DIRECTLY — no second TurnComplete; every pump
+        // consumer is written against one turn-end per input.
         assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Dead)));
 
         // Latched: the next input is refused without an API call, and the
-        // channel stays open so no amnesiac respawn is triggered.
+        // channel stays open so no amnesiac respawn is triggered. THIS input has
+        // no other TurnComplete, so the refusal's errored one ends it.
         h.input.send(OutgoingUserMessage::text("again")).await.unwrap();
         match next(&mut h).await {
             AgentEvent::Error(m) => assert!(m.contains("context window")),
             other => panic!("expected latched refusal, got {other:?}"),
         }
+        assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: true, .. }));
     }
 
     #[tokio::test]

@@ -79,6 +79,22 @@ pub const MAX_SEARCH_HITS: usize = 200;
 /// Cap on `list_files` results.
 pub const MAX_GLOB_HITS: usize = 500;
 
+/// Directory names never descended during enumeration (`list_files` /
+/// `search_files`).
+///
+/// Not cosmetic — load-bearing for correctness. Enumeration is capped at
+/// [`MAX_GLOB_HITS`], and an alphabetical walk of this repo reaches 66,667
+/// entries before the first `src/` path (`.git` alone holds ~6,500 files;
+/// `node_modules` + `target` add ~470,000). Without pruning, the entire budget
+/// was spent inside junk directories and `search_files` then reported a
+/// confident "no matches" for content sitting in plain sight — the same
+/// silent-wrong-answer class `42da318` was written to eliminate.
+///
+/// Only ENUMERATION prunes. Direct-path tools still reach these trees when
+/// asked explicitly: `read_file(".git/config")` and `run_command("ls .git")`
+/// work unchanged.
+const PRUNED_DIRS: &[&str] = &[".git", "node_modules", "target"];
+
 /// Cap tool output so one read cannot blow the context window.
 pub const MAX_FILE_BYTES: usize = 256 * 1024;
 
@@ -130,7 +146,9 @@ pub fn tool_defs() -> Vec<Value> {
         json!({
             "name": "list_files",
             "description": "List repository files matching a glob. Use this instead of \
-                            shelling out to `find` or `ls`.",
+                            shelling out to `find` or `ls`. `.git`, `node_modules` and \
+                            `target` are never listed — use `read_file` or `run_command` \
+                            for those.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -143,7 +161,10 @@ pub fn tool_defs() -> Vec<Value> {
             "name": "search_files",
             "description": "Search file CONTENTS with a regular expression and return \
                             matching lines as `path:line: text`. Use this instead of \
-                            shelling out to `grep`.",
+                            shelling out to `grep`. `.git`, `node_modules` and `target` \
+                            are never searched. If the output notes the file listing was \
+                            capped, the result set is incomplete — re-run with a \
+                            narrower `glob`.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -369,23 +390,20 @@ fn str_arg<'a>(call: &'a ToolCall, key: &str) -> Result<&'a str, String> {
 
 async fn run(call: &ToolCall, root: &Path, policy: ToolPolicy) -> Result<String, String> {
     match call.name.as_str() {
-        "read_file" => {
-            let target = resolve_in_root(root, str_arg(call, "path")?)?;
-            let bytes = std::fs::read(&target).map_err(|e| format!("read failed: {e}"))?;
-            let text =
-                String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())?;
-            let offset = usize_arg(call, "offset");
-            let limit = usize_arg(call, "limit");
-            slice_with_line_numbers(&text, offset, limit)
+        // The three read tools are synchronous filesystem work — a full-tree
+        // walk plus up to MAX_GLOB_HITS whole-file reads for `search_files` —
+        // so they run on the blocking pool rather than stalling the async
+        // worker that drives every other agent's IO. Same reasoning, and same
+        // precedent, as `persist()` in `agent.rs`, which does this for the far
+        // smaller history write. `run_command` already awaits async process IO
+        // and `write_file` is a single small write; both stay inline.
+        "read_file" | "list_files" | "search_files" => {
+            let call = call.clone();
+            let root = root.to_path_buf();
+            tokio::task::spawn_blocking(move || run_read_tool(&call, &root))
+                .await
+                .map_err(|e| format!("tool task failed: {e}"))?
         }
-
-        "list_files" => list_files(root, str_arg(call, "pattern")?),
-
-        "search_files" => search_files(
-            root,
-            str_arg(call, "pattern")?,
-            call.input.get("glob").and_then(Value::as_str),
-        ),
 
         "run_command" => {
             let cmd = str_arg(call, "command")?;
@@ -409,6 +427,22 @@ async fn run(call: &ToolCall, root: &Path, policy: ToolPolicy) -> Result<String,
             if !canonical_parent.starts_with(root) {
                 return Err("target resolves outside the repository root — refused".into());
             }
+            // The parent check alone is not enough when the TARGET already
+            // exists: `fs::write` follows a symlink, so a link inside the root
+            // pointing outside it would land the write outside — the exact
+            // escape `resolve_in_root` closes on the read path by canonicalizing
+            // the target. A dangling link is refused too (`canonicalize` fails):
+            // writing through it would CREATE the outside file.
+            if target.symlink_metadata().is_ok() {
+                let resolved = target
+                    .canonicalize()
+                    .map_err(|e| format!("cannot resolve the write target: {e}"))?;
+                if !resolved.starts_with(root) {
+                    return Err(
+                        "target resolves outside the repository root — refused".into()
+                    );
+                }
+            }
             std::fs::write(&target, str_arg(call, "content")?)
                 .map_err(|e| format!("write failed: {e}"))?;
             Ok(format!("wrote {}", target.display()))
@@ -418,51 +452,165 @@ async fn run(call: &ToolCall, root: &Path, policy: ToolPolicy) -> Result<String,
     }
 }
 
-/// Glob beneath the root. Every hit is re-checked through [`resolve_in_root`]
-/// because the PATTERN is untrusted — `../../**` would otherwise walk out.
-fn list_files(root: &Path, pattern: &str) -> Result<String, String> {
+/// The synchronous bodies of the three read tools, split out so [`run`] can
+/// move them onto the blocking pool as one unit.
+fn run_read_tool(call: &ToolCall, root: &Path) -> Result<String, String> {
+    match call.name.as_str() {
+        "read_file" => {
+            let target = resolve_in_root(root, str_arg(call, "path")?)?;
+            let bytes = std::fs::read(&target).map_err(|e| format!("read failed: {e}"))?;
+            let text =
+                String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())?;
+            let offset = usize_arg(call, "offset");
+            let limit = usize_arg(call, "limit");
+            slice_with_line_numbers(&text, offset, limit)
+        }
+
+        "list_files" => list_files(root, str_arg(call, "pattern")?),
+
+        "search_files" => search_files(
+            root,
+            str_arg(call, "pattern")?,
+            call.input.get("glob").and_then(Value::as_str),
+        ),
+
+        // `run` only routes the three names above here.
+        other => Err(format!("unknown tool {other:?}")),
+    }
+}
+
+/// Structured enumeration result, so `search_files` consumes DATA rather than
+/// parsing `list_files`' rendered output. The string-parsing version treated the
+/// "… capped" sentinel line as a file path and silently dropped it — which made
+/// the cap invisible exactly where it mattered.
+struct GlobHits {
+    /// Relative paths, sorted.
+    files: Vec<String>,
+    /// True when enumeration stopped at [`MAX_GLOB_HITS`]. Every consumer must
+    /// SAY so — a capped listing that reads as complete is a wrong answer.
+    capped: bool,
+}
+
+/// Enumerate paths under `root` matching `pattern`.
+///
+/// Hand-rolled walk rather than `glob::glob` because glob's walker cannot prune:
+/// it descended `.git`/`node_modules`/`target` and spent the whole result cap
+/// there (see [`PRUNED_DIRS`]). Differences from the glob walker, all deliberate:
+///
+/// - [`PRUNED_DIRS`] are never entered;
+/// - symlinked directories are never entered (glob followed them — a link
+///   pointing back into the tree loops, one pointing out escapes; file hits are
+///   still individually canonicalize-checked);
+/// - `*` does not cross `/` (`require_literal_separator`), matching
+///   filesystem-glob expectations — `**` is the recursive form.
+fn glob_files(root: &Path, pattern: &str) -> Result<GlobHits, String> {
     if pattern.starts_with('/') || pattern.split('/').any(|s| s == "..") {
         return Err(format!(
             "{pattern:?} points outside the repository root — refused"
         ));
     }
-    let joined = root.join(pattern);
-    let entries = glob::glob(&joined.to_string_lossy())
-        .map_err(|e| format!("bad glob {pattern:?}: {e}"))?;
+    let matcher =
+        glob::Pattern::new(pattern).map_err(|e| format!("bad glob {pattern:?}: {e}"))?;
+    let opts = glob::MatchOptions {
+        require_literal_separator: true,
+        ..glob::MatchOptions::new()
+    };
 
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        if !entry.canonicalize().is_ok_and(|c| c.starts_with(root)) {
+    let mut files = Vec::new();
+    let mut capped = false;
+    walk_dir(root, root, &matcher, opts, &mut files, &mut capped);
+    files.sort();
+    Ok(GlobHits { files, capped })
+}
+
+/// Depth-first, per-directory alphabetical — deterministic, so the capped
+/// prefix is stable across runs.
+fn walk_dir(
+    root: &Path,
+    dir: &Path,
+    matcher: &glob::Pattern,
+    opts: glob::MatchOptions,
+    out: &mut Vec<String>,
+    capped: &mut bool,
+) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return; // unreadable directory: skip, like the glob walker did
+    };
+    let mut entries: Vec<_> = read.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        if *capped {
+            return;
+        }
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(root) else {
             continue;
+        };
+        let rel = rel.to_string_lossy().into_owned();
+        let is_symlink = entry
+            .file_type()
+            .is_ok_and(|t| t.is_symlink());
+
+        if matcher.matches_with(&rel, opts) {
+            // The PATTERN is untrusted and symlinked FILES can point anywhere —
+            // each hit is re-checked, exactly as the glob-based version did.
+            if path.canonicalize().is_ok_and(|c| c.starts_with(root)) {
+                out.push(rel);
+                if out.len() >= MAX_GLOB_HITS {
+                    *capped = true;
+                    return;
+                }
+            }
         }
-        if let Ok(rel) = entry.strip_prefix(root) {
-            out.push(rel.to_string_lossy().into_owned());
-        }
-        if out.len() >= MAX_GLOB_HITS {
-            out.push(format!("… capped at {MAX_GLOB_HITS} results"));
-            break;
+
+        if path.is_dir() && !is_symlink {
+            if let Some(name) = entry.file_name().to_str() {
+                if PRUNED_DIRS.contains(&name) {
+                    continue;
+                }
+            }
+            walk_dir(root, &path, matcher, opts, out, capped);
         }
     }
-    if out.is_empty() {
+}
+
+fn list_files(root: &Path, pattern: &str) -> Result<String, String> {
+    let hits = glob_files(root, pattern)?;
+    if hits.files.is_empty() {
         return Ok(format!("no files match {pattern:?}"));
     }
-    out.sort();
-    Ok(out.join("\n"))
+    let mut out = hits.files.join("\n");
+    if hits.capped {
+        out.push_str(&format!(
+            "\n… capped at {MAX_GLOB_HITS} results — pass a narrower glob"
+        ));
+    }
+    Ok(out)
 }
 
 /// Regex over file contents beneath the root.
 ///
-/// Skips `.git/` and anything that isn't valid UTF-8 — a binary "match" is noise,
-/// and decoding lossily would report line numbers that don't exist.
+/// Skips anything that isn't valid UTF-8 — a binary "match" is noise, and
+/// decoding lossily would report line numbers that don't exist. (`.git` and
+/// friends never reach here: they are pruned at enumeration, see [`PRUNED_DIRS`].)
 fn search_files(root: &Path, pattern: &str, file_glob: Option<&str>) -> Result<String, String> {
     let re = regex::Regex::new(pattern).map_err(|e| format!("bad regex {pattern:?}: {e}"))?;
-    let listing = list_files(root, file_glob.unwrap_or("**/*"))?;
+    let listing = glob_files(root, file_glob.unwrap_or("**/*"))?;
+    // The candidate list being truncated means absence of a hit proves nothing.
+    // Say so on EVERY outcome, including — especially — "no matches": that is
+    // the one the model acts on most confidently.
+    let cap_note = if listing.capped {
+        format!(
+            "\n… file listing capped at {MAX_GLOB_HITS} — results may be incomplete; \
+             pass a narrower glob"
+        )
+    } else {
+        String::new()
+    };
 
     let mut hits = Vec::new();
-    for rel in listing.lines() {
-        if rel.starts_with('.') && rel.split('/').next() == Some(".git") {
-            continue;
-        }
+    for rel in &listing.files {
         let path = root.join(rel);
         if !path.is_file() {
             continue;
@@ -479,15 +627,15 @@ fn search_files(root: &Path, pattern: &str, file_glob: Option<&str>) -> Result<S
                 hits.push(format!("{rel}:{}: {}", n + 1, trimmed));
                 if hits.len() >= MAX_SEARCH_HITS {
                     hits.push(format!("… capped at {MAX_SEARCH_HITS} matches"));
-                    return Ok(hits.join("\n"));
+                    return Ok(hits.join("\n") + &cap_note);
                 }
             }
         }
     }
     if hits.is_empty() {
-        return Ok(format!("no matches for {pattern:?}"));
+        return Ok(format!("no matches for {pattern:?}{cap_note}"));
     }
-    Ok(hits.join("\n"))
+    Ok(hits.join("\n") + &cap_note)
 }
 
 #[cfg(test)]
@@ -851,6 +999,233 @@ mod tests {
     }
 
     // ---- search_files / list_files ---------------------------------------
+
+    #[tokio::test]
+    async fn a_globless_search_is_not_defeated_by_junk_directories() {
+        // The live failure: `.git` + `node_modules` + `target` alphabetically
+        // precede `src`, so enumeration spent its whole 500-entry budget inside
+        // them and `search_files` with no glob answered "no matches" for content
+        // sitting in plain sight (measured on this repo: 66,667 entries walked
+        // before the first `src/` path). Pruning at enumeration is the fix —
+        // this tree reproduces the failure shape in miniature.
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join(".git")).unwrap();
+        for i in 0..10 {
+            fs::write(dir.path().join(".git").join(format!("g{i}")), "x").unwrap();
+        }
+        fs::create_dir_all(dir.path().join("node_modules")).unwrap();
+        for i in 0..(MAX_GLOB_HITS + 100) {
+            fs::write(
+                dir.path().join("node_modules").join(format!("m{i:04}.js")),
+                "junk",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/agent.rs"), "fn spawn_native_agent() {}\n").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "search_files".into(),
+                input: json!({ "pattern": "spawn_native_agent" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadOnly,
+        )
+        .await;
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("src/agent.rs:1:"),
+            "the match must be found despite the junk mass: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capped_listing_is_visible_from_search_files_not_a_bare_no_matches() {
+        // When the candidate list is truncated, absence of a hit proves nothing —
+        // the old version swallowed the cap sentinel as a bogus path and reported
+        // a confident "no matches".
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("aaa")).unwrap();
+        for i in 0..(MAX_GLOB_HITS + 50) {
+            fs::write(dir.path().join("aaa").join(format!("f{i:04}.txt")), "hay").unwrap();
+        }
+        let root = dir.path().canonicalize().unwrap();
+
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "search_files".into(),
+                input: json!({ "pattern": "needle-not-present" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadOnly,
+        )
+        .await;
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("no matches"), "{}", out.content);
+        assert!(
+            out.content.contains("capped") && out.content.contains("narrower glob"),
+            "a truncated candidate list must be visible, or 'no matches' is a lie: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn list_files_prunes_vcs_and_dependency_directories() {
+        let dir = TempDir::new().unwrap();
+        for junk in [".git", "node_modules", "target"] {
+            fs::create_dir_all(dir.path().join(junk)).unwrap();
+            fs::write(dir.path().join(junk).join("inside.rs"), "").unwrap();
+        }
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/a.rs"), "").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "list_files".into(),
+                input: json!({ "pattern": "**/*.rs" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadOnly,
+        )
+        .await;
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("src/a.rs"));
+        for junk in [".git", "node_modules", "target"] {
+            assert!(
+                !out.content.contains(junk),
+                "{junk} must be pruned from enumeration: {}",
+                out.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_star_does_not_cross_directory_separators() {
+        // Filesystem-glob semantics: `*` stays within one component; `**` is the
+        // recursive form. `glob::Pattern`'s default would let `*` match `/`,
+        // silently turning every shallow glob into a recursive one.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("top.rs"), "").unwrap();
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/deep.rs"), "").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "list_files".into(),
+                input: json!({ "pattern": "*.rs" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadOnly,
+        )
+        .await;
+
+        assert!(out.content.contains("top.rs"), "{}", out.content);
+        assert!(
+            !out.content.contains("deep.rs"),
+            "`*` crossed a directory separator: {}",
+            out.content
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn enumeration_does_not_descend_a_symlinked_directory() {
+        // glob's walker followed directory symlinks — a link out of the root
+        // walked OUTSIDE trees into the listing, and a link back in loops.
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret.txt"), "classified").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        fs::write(dir.path().join("here.txt"), "").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "list_files".into(),
+                input: json!({ "pattern": "**/*" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadOnly,
+        )
+        .await;
+
+        assert!(out.content.contains("here.txt"));
+        assert!(
+            !out.content.contains("secret.txt"),
+            "a symlinked directory was descended: {}",
+            out.content
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_write_through_a_symlink_cannot_escape_the_root() {
+        // `fs::write` follows symlinks. The parent-only check passed a link
+        // INSIDE the root pointing OUTSIDE it, so the write landed outside —
+        // the read path already canonicalizes the target; now the write path
+        // does too when the target exists.
+        let (dir, root) = root_with_file("a.txt", "hello");
+        let outside = TempDir::new().unwrap();
+        let victim = outside.path().join("victim.txt");
+        fs::write(&victim, "original").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("link.txt")).unwrap();
+
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "write_file".into(),
+                input: json!({ "path": "link.txt", "content": "PWNED" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadWrite,
+        )
+        .await;
+
+        assert!(out.is_error, "a symlink out of the root must refuse the write");
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "original",
+            "the outside file was modified"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_write_through_a_dangling_symlink_cannot_create_an_outside_file() {
+        // A dangling link inside the root pointing at a nonexistent OUTSIDE path:
+        // writing through it would CREATE the outside file.
+        let (dir, root) = root_with_file("a.txt", "hello");
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("created.txt");
+        std::os::unix::fs::symlink(&target, dir.path().join("dangling.txt")).unwrap();
+
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "write_file".into(),
+                input: json!({ "path": "dangling.txt", "content": "PWNED" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadWrite,
+        )
+        .await;
+
+        assert!(out.is_error);
+        assert!(!target.exists(), "the write escaped through a dangling link");
+    }
 
     #[tokio::test]
     async fn search_files_returns_path_line_and_text() {
