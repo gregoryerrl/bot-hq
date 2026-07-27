@@ -147,6 +147,26 @@ fn parse_optional_phase(args: &Value) -> Result<Option<String>, JsonRpcError> {
     }
 }
 
+/// Case-insensitive word-boundary scan for a peer/agent name in an
+/// awaiting-user reason. Returns the offending word for the error message.
+fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
+    const PEER_WORDS: &[&str] = &["rain", "brian", "peer", "eyes", "hands"];
+    let lower = reason.to_lowercase();
+    PEER_WORDS.iter().copied().find(|w| {
+        lower.match_indices(w).any(|(i, _)| {
+            let before_ok = i == 0
+                || !lower[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric());
+            let after = i + w.len();
+            let after_ok = after >= lower.len()
+                || !lower[after..].chars().next().is_some_and(|c| c.is_alphanumeric());
+            before_ok && after_ok
+        })
+    })
+}
+
 async fn call_tool(
     name: &str,
     args: Value,
@@ -203,6 +223,22 @@ async fn call_tool(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            // A peer-shaped reason is a category error that deadlocks the duo:
+            // in the archive study both agents marked themselves awaiting-user
+            // over work each thought was the OTHER's, and the session sat dead
+            // 100 minutes until the user shouted. Waiting on a peer is not
+            // waiting on the user — refuse and tell the agent what to do
+            // instead. Word-boundary match so e.g. "restrained" can't trip it.
+            if let Some(hit) = peer_shaped_reason(&reason) {
+                return Ok(ToolCallResult::error(format!(
+                    "reason names your peer ('{hit}') — mark_awaiting_user is for \
+                     waiting on the USER, and parking on a peer deadlocks the duo. \
+                     If the work needs your peer, message them (your turn output is \
+                     forwarded automatically); if they aren't responding, do the \
+                     work yourself or ask the user a concrete question via \
+                     ask_user_choice."
+                )));
+            }
             bridge
                 .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
                 .await;
@@ -2155,4 +2191,22 @@ mod tests {
         assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
         assert!(err.message.contains("unknown kind"));
     }
+
+    #[test]
+    fn peer_shaped_reasons_are_detected_with_word_boundaries() {
+        use super::peer_shaped_reason;
+        // The s-96fda118 deadlock reason shape: parking on the peer.
+        assert_eq!(
+            peer_shaped_reason("Handed the six refusal probes to Rain — they can only run natively"),
+            Some("rain")
+        );
+        assert_eq!(peer_shaped_reason("waiting for my peer to review"), Some("peer"));
+        assert_eq!(peer_shaped_reason("EYES review pending"), Some("eyes"));
+        // Word boundaries: substrings inside real words must not trip it.
+        assert_eq!(peer_shaped_reason("waiting for the rainbow deploy window"), None);
+        assert_eq!(peer_shaped_reason("user must restrain the migration"), None);
+        assert_eq!(peer_shaped_reason("need the user's Clockify token"), None);
+        assert_eq!(peer_shaped_reason(""), None);
+    }
+
 }
