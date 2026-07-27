@@ -47,7 +47,7 @@ pub mod wire;
 
 pub use accounting::{AccountingLog, TurnRecord};
 pub use command::CommandPolicy;
-pub use agent::{spawn_native_agent, MessagesTransport, CONTEXT_CEILING};
+pub use agent::{spawn_native_agent, MessagesTransport, CONTEXT_WARN_FRACTION};
 pub use mcp_client::McpClient;
 pub use profile::ProviderProfile;
 pub use wire::{ParsedTurn, RequestSpec, ToolCall, ToolOutcome, TurnStep};

@@ -33,8 +33,8 @@ pub struct ModelView {
     ///
     /// A window is a per-MODEL fact, so it comes from the user rather than from a
     /// provider table — `ProviderProfile` deliberately declares none. Left unset,
-    /// the meter shows a visible gap and the native loop's context ceiling stays
-    /// dark, which is the documented contract: never a guessed percentage.
+    /// the meter shows a visible gap and the native loop's high-context notice
+    /// never fires, which is the documented contract: never a guessed percentage.
     pub context_window: Option<i64>,
 }
 

@@ -315,10 +315,10 @@ pub fn turn_complete_ok(stop_reason: &str, context: Option<ContextUsage>) -> Age
 /// `context` is carried rather than hardcoded to `None` because **a failed turn
 /// still consumed context**. The pump publishes occupancy BEFORE its error branch
 /// for exactly that reason (`core/duo.rs`), so dropping it here made the meter go
-/// dark on the turns where the reading matters most — above all the context
-/// ceiling, which trips at 85% and is only actionable if the user can see it.
-/// Pass `None` only when there genuinely is no reading: an API error has no
-/// `usage`, and an interrupted turn never got a response.
+/// dark on the turns where the reading matters most — a long session near the
+/// end of its window, which is exactly when the user is deciding whether to
+/// close it. Pass `None` only when there genuinely is no reading: an API error
+/// has no `usage`, and an interrupted turn never got a response.
 pub fn turn_complete_err(
     status: Option<u16>,
     subtype: &str,
@@ -670,8 +670,8 @@ mod tests {
     #[test]
     fn failed_turn_carries_the_context_it_is_handed() {
         // A failed turn still occupied the window. Hardcoding `None` here made
-        // the meter go dark on the context-ceiling turn — the one turn where an
-        // 85%+ reading is actionable.
+        // the meter go dark on a nearly-full session — the point at which the
+        // reading is most actionable.
         let usage = ContextUsage {
             model: "m".into(),
             used_tokens: 170_000,

@@ -8,9 +8,14 @@
 //!
 //! ## What it does NOT do yet
 //!
-//! - **No compaction** (B6). Instead there is a hard ceiling — see
-//!   [`CONTEXT_CEILING`]: the loop stops, says so, and reports terminal health
-//!   rather than failing deep in a request. Loud beats silent.
+//! - **No compaction** (B6). The loop does not stop, either: it reports
+//!   occupancy every turn and warns once past
+//!   [`CONTEXT_WARN_FRACTION`], then keeps working. Past 100% the gateway
+//!   decides — DeepSeek truncates rather than erroring — so the agent loses
+//!   its oldest turns. That degradation is the USER's call (close the session,
+//!   or accept the amnesia), not something bot-hq pre-empts. An earlier version
+//!   hard-stopped at 85%, which on a 1M window threw away 150K tokens of
+//!   usable capacity.
 //!
 //! The tool surface is complete: `read_file`, `list_files`, `search_files`,
 //! `run_command` and `write_file` all exist (`tools.rs`), role-filtered by
@@ -56,13 +61,20 @@ use crate::agents::spawn::{
     SpawnConfig,
 };
 
-/// Refuse to start a turn once the window is this full.
+/// Occupancy at which the agent says something — **once**, and then carries on.
 ///
-/// claude-code auto-compacts and is silently rescuing long sessions today; a
-/// native loop that neither compacts nor stops would instead hard-fail deep in a
-/// request with an opaque upstream error. Stopping at a known threshold with a
-/// visible message is the honest interim behaviour until B6.
-pub const CONTEXT_CEILING: f64 = 0.85;
+/// This used to be a hard stop, and stopping was the wrong instinct: on a 1M
+/// window it halted an agent with 150,000 tokens of usable capacity left, and
+/// past 100% the gateway truncates rather than erroring (DeepSeek serves a 238K
+/// prompt against a declared 200K window), so overflow means "the oldest turns
+/// fall out", not "the request fails".
+///
+/// Losing old context is a real cost, but it is the USER's to weigh against
+/// finishing the work — close the session for a clean slate, or keep going. The
+/// meter shows occupancy every turn; this constant only decides when to say so
+/// out loud, because a percentage in a header is easy to miss in a session
+/// nobody is watching live.
+pub const CONTEXT_WARN_FRACTION: f64 = 0.85;
 
 /// Runaway-loop guard: tool cycles allowed for a single user input.
 pub const MAX_TURNS_PER_INPUT: usize = 50;
@@ -247,11 +259,10 @@ pub struct LoopConfig {
 /// Loop state that survives across inputs.
 struct State {
     history: Vec<Value>,
-    /// Latched once the context ceiling is breached. The loop stays alive and
-    /// keeps refusing — it does NOT close its event channel, because closure is
-    /// the supervisor's end-of-incarnation signal and would trigger a respawn
-    /// with an empty in-memory conversation — worse than stopping.
-    ceiling_reached: bool,
+    /// One-shot latch for the high-context notice, so a long session says it
+    /// once rather than on every turn past the threshold. It gates a MESSAGE,
+    /// not the agent — nothing here refuses work.
+    high_context_warned: bool,
 }
 
 /// Run the loop until input closes or a kill arrives.
@@ -309,7 +320,7 @@ pub async fn run_loop(
                 h
             })
             .unwrap_or_default(),
-        ceiling_reached: false,
+        high_context_warned: false,
     };
     let mut control_open = true;
 
@@ -338,15 +349,6 @@ pub async fn run_loop(
         // the next write loses only the message the user just typed, which they
         // can retype — cheaper than a third full serialisation every turn.
         push_user_text(&mut state.history, &msg.message.content);
-
-        if state.ceiling_reached {
-            // `None`: no API call was made, so there is no NEW reading. The pump
-            // publishes only on `Some`, so this leaves the last known occupancy
-            // on screen rather than blanking the meter. This input got no other
-            // TurnComplete, so the refusal's errored one ends it.
-            emit_ceiling_refusal(&cfg, &event_tx, None, false).await;
-            continue;
-        }
 
         // Inner scope so the `&mut state` borrow held by `turns` ends before the
         // interrupt repair below needs it again.
@@ -488,11 +490,18 @@ async fn run_turns(
             persist(cfg, state).await;
         }
 
-        // Checked AFTER the turn is accounted for, so the reading that trips the
-        // ceiling is itself reported.
-        let over_ceiling = ctx
-            .as_ref()
-            .is_some_and(|c| c.fraction() >= CONTEXT_CEILING);
+        // Checked AFTER the turn is accounted for, so the reading that triggers
+        // the notice is itself reported. Says it once, then never again — and
+        // never interrupts the turn: the agent keeps working past the threshold
+        // and past 100%, where the gateway starts dropping its oldest turns.
+        if !state.high_context_warned
+            && ctx
+                .as_ref()
+                .is_some_and(|c| c.fraction() >= CONTEXT_WARN_FRACTION)
+        {
+            state.high_context_warned = true;
+            emit_high_context_notice(cfg, event_tx, ctx.as_ref()).await;
+        }
 
         match parsed.step {
             TurnStep::ToolUse { calls } => {
@@ -511,31 +520,10 @@ async fn run_turns(
                 state.history.push(tool_results_message(&outcomes));
                 persist(cfg, state).await;
 
-                if over_ceiling {
-                    state.ceiling_reached = true;
-                    // `ctx` rather than `None`: this arm fires MID-tool-cycle, so
-                    // no `TurnComplete` has been sent for this input at all and
-                    // nothing has published the reading that just tripped the
-                    // ceiling. (The `End` arm below is the only path where a
-                    // preceding `turn_complete_ok` already carried it.)
-                    emit_ceiling_refusal(cfg, event_tx, ctx, false).await;
-                    return Ok(());
-                }
                 continue;
             }
             TurnStep::End { .. } => {
-                if over_ceiling {
-                    state.ceiling_reached = true;
-                }
-                // The turn genuinely SUCCEEDED — the ok-TurnComplete stays even
-                // when the ceiling tripped, so the model's final answer is
-                // peer-forwarded rather than drained by the pump's error branch.
-                // The refusal below then adds the explanation and the terminal
-                // health, but NOT a second TurnComplete.
                 send(event_tx, wire::turn_complete_ok("end_turn", parsed.context)).await?;
-                if state.ceiling_reached {
-                    emit_ceiling_refusal(cfg, event_tx, ctx, true).await;
-                }
                 return Ok(());
             }
             TurnStep::Refusal { details } => {
@@ -647,8 +635,8 @@ async fn send_with_retry(
                 // watchdog was then permanently disabled for this agent.
                 //
                 // `Running` is the honest state: this loop deliberately survives
-                // API errors, so it is idle and ready for the next input. Only the
-                // context ceiling is terminal, and that reports `Dead` separately.
+                // API errors, so it is idle and ready for the next input. Nothing
+                // in this loop reports a terminal health state at all.
                 if attempt > 0 {
                     send(event_tx, AgentEvent::Health(AgentHealth::Running)).await?;
                 }
@@ -777,46 +765,34 @@ fn repair_dangling_tool_use_in(history: &mut Vec<Value>) {
     history.push(tool_results_message(&outcomes));
 }
 
-/// `turn_already_ended`: the `TurnStep::End` path has already sent this input's
-/// `turn_complete_ok`, and every pump consumer is written against one
-/// `TurnComplete` per input — a second one made the pump run its end-of-turn
-/// bookkeeping twice (benign today only because those steps happen to be
-/// idempotent). When it is true, only the explanation and the health signal are
-/// emitted; the paths that have NOT ended the turn (`ToolUse` mid-cycle, the
-/// latched refusal of a fresh input) still get the errored `TurnComplete` that
-/// ends it.
-async fn emit_ceiling_refusal(
+/// Tell the user the window is filling up. **Informational only** — no
+/// `TurnComplete`, no health transition, nothing that stops or gates the agent.
+///
+/// Sent as [`AgentEvent::Error`] because that is the variant the duo pump
+/// persists as a visible message and deliberately does NOT peer-forward: this is
+/// for the user, not for HANDS. (There is no `Warning` variant; adding one for a
+/// single call site was not worth a new event type.)
+async fn emit_high_context_notice(
     cfg: &LoopConfig,
     event_tx: &mpsc::Sender<AgentEvent>,
-    context: Option<ContextUsage>,
-    turn_already_ended: bool,
+    context: Option<&ContextUsage>,
 ) {
-    let pct = (CONTEXT_CEILING * 100.0).round() as u32;
+    let pct = context
+        .map(|c| (c.fraction() * 100.0).round() as u32)
+        .unwrap_or_else(|| (CONTEXT_WARN_FRACTION * 100.0).round() as u32);
     let _ = event_tx
         .send(AgentEvent::Error(format!(
-            "context window is over {pct}% full — this agent has stopped rather than \
-             fail mid-request. Native agents do not auto-compact yet; start a new \
-             session to continue."
+            "context window is {pct}% full. This agent keeps working — but once it \
+             passes 100% the provider starts dropping the oldest turns, so it will \
+             gradually forget the start of this session. Close the session if you \
+             want a clean slate; otherwise carry on."
         )))
         .await;
-    if !turn_already_ended {
-        let _ = event_tx
-            .send(wire::turn_complete_err(None, "context_ceiling", context))
-            .await;
-    }
-    // The loop stays alive and keeps refusing, and the event channel stays OPEN
-    // deliberately — closure is the supervisor's end-of-incarnation signal and
-    // would respawn this agent with no history. But an agent that will never
-    // review again must not read as HEALTHY: `reviewer_block_decision`
-    // (`signaling/bridge/findings.rs`) gates commits on exactly this string, and
-    // `stall_decision` can never reach `stalled` here because a latched refusal
-    // completes instantly and so is never `busy`. Without this the fail-closed
-    // reviewer gate silently went fail-open and HANDS could ship unreviewed.
-    //
-    // Safe to emit: nothing respawns or evicts on health — `is_stale()` keys on
-    // channel closure, not on this string.
-    let _ = event_tx.send(AgentEvent::Health(AgentHealth::Dead)).await;
-    warn!(agent = %cfg.agent_name, "native agent hit the context ceiling");
+    warn!(
+        agent = %cfg.agent_name,
+        pct,
+        "native agent context is filling; continuing"
+    );
 }
 
 async fn send(tx: &mpsc::Sender<AgentEvent>, ev: AgentEvent) -> Result<(), ()> {
@@ -869,7 +845,7 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     // window is a per-model fact, and a provider-keyed guess would render as a
     // precise but wrong percentage. This value comes from the user, on the saved
     // model. Unset (or nonsensical) leaves it `None`, which keeps the meter a
-    // visible gap and the context ceiling dark.
+    // visible gap and means the high-context notice never fires.
     profile.context_window = cfg
         .config
         .context_window
@@ -1254,103 +1230,118 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn context_ceiling_stops_the_agent_loudly_without_closing_the_channel() {
-        // 900/1000 = 90% > the 85% ceiling.
-        let over = json!({
-            "stop_reason": "end_turn",
-            "content": [{ "type": "text", "text": "done" }],
-            "usage": { "input_tokens": 900 }
-        });
-        let t = ScriptedTransport::new(vec![Ok(over)]);
-        let mut h = start(t, Some(1_000));
+    async fn high_context_warns_once_and_keeps_working() {
+        // 900/1000 = 90%, past the notice threshold. The agent must SAY so and
+        // then carry on — the earlier version stopped here, which on a 1M window
+        // discarded 150K tokens of usable capacity.
+        let over = || {
+            json!({
+                "stop_reason": "end_turn",
+                "content": [{ "type": "text", "text": "done" }],
+                "usage": { "input_tokens": 900 }
+            })
+        };
+        let t = ScriptedTransport::new(vec![Ok(over()), Ok(over())]);
+        let mut h = start(t.clone() as Arc<dyn MessagesTransport>, Some(1_000));
 
         assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
         h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
 
+        // The model's answer lands first; the advisory follows it. Then the turn
+        // completes NORMALLY — not as an error, which is the whole point.
         assert!(matches!(next(&mut h).await, AgentEvent::Text(_)));
-        // ONE TurnComplete for this input — and the successful one, so the
-        // model's final answer is forwarded rather than drained as an error.
-        assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: false, .. }));
         match next(&mut h).await {
-            AgentEvent::Error(m) => assert!(m.contains("context window")),
-            other => panic!("expected ceiling Error, got {other:?}"),
-        }
-        // Terminal health follows DIRECTLY — no second TurnComplete; every pump
-        // consumer is written against one turn-end per input.
-        assert!(matches!(next(&mut h).await, AgentEvent::Health(AgentHealth::Dead)));
-
-        // Latched: the next input is refused without an API call, and the
-        // channel stays open so no amnesiac respawn is triggered. THIS input has
-        // no other TurnComplete, so the refusal's errored one ends it.
-        h.input.send(OutgoingUserMessage::text("again")).await.unwrap();
-        match next(&mut h).await {
-            AgentEvent::Error(m) => assert!(m.contains("context window")),
-            other => panic!("expected latched refusal, got {other:?}"),
-        }
-        assert!(matches!(next(&mut h).await, AgentEvent::TurnComplete { is_error: true, .. }));
-    }
-
-    #[tokio::test]
-    async fn the_ceiling_reports_dead_so_the_reviewer_gate_holds() {
-        // The latch keeps the event channel OPEN on purpose (closure would respawn
-        // this agent with no history), which meant the pump never emitted `Dead`.
-        // A latched refusal also completes instantly, so the agent is never `busy`
-        // and `stall_decision` can never reach `stalled` either — leaving
-        // `reviewer_block_decision` with nothing to match on. The fail-closed
-        // reviewer gate went fail-open and HANDS could ship unreviewed.
-        let over = json!({
-            "stop_reason": "end_turn",
-            "content": [{ "type": "text", "text": "done" }],
-            "usage": { "input_tokens": 900 }
-        });
-        let t = ScriptedTransport::new(vec![Ok(over)]);
-        let mut h = start(t, Some(1_000));
-
-        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
-        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
-
-        let mut saw_dead = false;
-        for _ in 0..6 {
-            if let AgentEvent::Health(AgentHealth::Dead) = next(&mut h).await {
-                saw_dead = true;
-                break;
+            AgentEvent::Error(m) => {
+                assert!(m.contains("90% full"), "should report the real figure: {m}");
+                assert!(
+                    m.contains("keeps working"),
+                    "must not imply the agent stopped: {m}"
+                );
             }
+            other => panic!("expected the high-context notice, got {other:?}"),
         }
-        assert!(saw_dead, "a ceilinged agent must not keep reading as healthy");
-        // …and it must still be alive: closing the channel is what triggers an
-        // amnesiac respawn, which is the whole reason the latch exists.
-        assert!(!h.events.is_closed());
+        assert!(matches!(
+            next(&mut h).await,
+            AgentEvent::TurnComplete { is_error: false, .. }
+        ));
+
+        // A second input is served normally — no latch, no refusal — and the
+        // notice does NOT repeat.
+        h.input.send(OutgoingUserMessage::text("again")).await.unwrap();
+        assert!(
+            matches!(next(&mut h).await, AgentEvent::Text(_)),
+            "the next input must be answered, not refused"
+        );
+        assert!(matches!(
+            next(&mut h).await,
+            AgentEvent::TurnComplete { is_error: false, .. }
+        ));
+        assert_eq!(t.requests().len(), 2, "the second input must reach the API");
     }
 
     #[tokio::test]
-    async fn a_ceiling_tripped_mid_tool_cycle_still_publishes_occupancy() {
-        // The `ToolUse` arm fires BEFORE any `TurnComplete` for this input, so
-        // nothing has published the reading that just tripped the ceiling. Passing
-        // `None` there — on the reasoning that the `End` arm's `turn_complete_ok`
-        // already carried it — loses exactly the number the ceiling is about.
-        let t = ScriptedTransport::new(vec![Ok(json!({
-            "stop_reason": "tool_use",
-            "content": [{ "type": "tool_use", "id": "tu_1", "name": "read_file",
-                          "input": { "path": "a.txt" } }],
-            "usage": { "input_tokens": 900 }
-        }))]);
+    async fn a_full_window_does_not_stop_the_tool_cycle() {
+        // The old ceiling aborted the turn mid-tool-cycle. It must now run to
+        // completion: the model asked for a tool, so it gets the tool, however
+        // full the window is.
+        let t = ScriptedTransport::new(vec![
+            Ok(json!({
+                "stop_reason": "tool_use",
+                "content": [{ "type": "tool_use", "id": "tu_1", "name": "read_file",
+                              "input": { "path": "a.txt" } }],
+                "usage": { "input_tokens": 999 }
+            })),
+            Ok(end_turn("read it")),
+        ]);
         let mut h = start(t, Some(1_000));
 
         assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
         h.input.send(OutgoingUserMessage::text("read it")).await.unwrap();
 
-        let mut occupancy = None;
+        // The notice fires, and then the cycle carries on regardless.
+        let mut saw_tool_result = false;
+        let mut saw_final_text = false;
         for _ in 0..8 {
-            if let AgentEvent::TurnComplete { context, is_error, .. } = next(&mut h).await {
-                if is_error {
-                    occupancy = context;
+            match next(&mut h).await {
+                AgentEvent::ToolResult { .. } => saw_tool_result = true,
+                AgentEvent::Text(t) if t == "read it" => {
+                    saw_final_text = true;
                     break;
                 }
+                _ => {}
             }
         }
-        let c = occupancy.expect("the ceiling turn must report how full the window is");
-        assert_eq!(c.used_tokens, 900);
-        assert_eq!(c.context_window, 1_000);
+        assert!(saw_tool_result, "the tool must still run at 99.9% occupancy");
+        assert!(saw_final_text, "the turn must still reach its answer");
+    }
+
+    #[tokio::test]
+    async fn a_full_window_never_reports_dead() {
+        // Deliberately removed behaviour. Stopping a reviewer at 85% threw away
+        // 150K tokens of a 1M window; the user watches the meter and decides.
+        let t = ScriptedTransport::new(vec![Ok(json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "done" }],
+            "usage": { "input_tokens": 999 }
+        }))]);
+        let mut h = start(t, Some(1_000));
+
+        assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("hi")).await.unwrap();
+
+        // Drain the turn; no Health transition may appear anywhere in it.
+        loop {
+            match next(&mut h).await {
+                AgentEvent::Health(state) => {
+                    panic!("a full window must not change health, got {state:?}")
+                }
+                AgentEvent::TurnComplete { is_error, .. } => {
+                    assert!(!is_error, "a full window must not error the turn");
+                    break;
+                }
+                _ => {}
+            }
+        }
     }
 
     #[tokio::test]
@@ -1797,7 +1788,7 @@ mod tests {
                 "role": "assistant",
                 "content": [{ "type": "tool_use", "id": "tu_1", "name": "read_file", "input": {} }]
             })],
-            ceiling_reached: false,
+            high_context_warned: false,
         };
         repair_dangling_tool_use(&mut state);
 
@@ -1935,7 +1926,7 @@ mod tests {
                 "role": "assistant",
                 "content": [{ "type": "text", "text": "no tools here" }]
             })],
-            ceiling_reached: false,
+            high_context_warned: false,
         };
         repair_dangling_tool_use(&mut state);
         assert_eq!(state.history.len(), 1);

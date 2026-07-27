@@ -583,7 +583,9 @@ mod tests {
 
         ev_tx
             .send(AgentEvent::Error(
-                "context window is over 85% full — this agent has stopped".into(),
+                "context window is 90% full. This agent keeps working — but once it \
+                 passes 100% the provider starts dropping the oldest turns."
+                    .into(),
             ))
             .await
             .unwrap();
@@ -592,7 +594,7 @@ mod tests {
 
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1, "the failure must reach the user, not just the log");
-        assert!(msgs[0].content.contains("over 85% full"));
+        assert!(msgs[0].content.contains("90% full"));
     }
 
     #[tokio::test(flavor = "current_thread")]

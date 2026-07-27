@@ -243,14 +243,20 @@ loading for the icon font.
 
 The loop shipped 2026-07-26/27 (see PROGRESS.md). What's left:
 
-- **B6 — auto-compaction.** The largest open item, and the only one with
-  a real user-visible cost. claude-code auto-compacts silently and is
-  quietly rescuing long sessions today; a native loop that neither
-  compacts nor stops would hard-fail deep in a request with an opaque
-  upstream error. The interim behaviour is a hard **context ceiling** at
-  85%: the agent stops, says so, and reports terminal health so a
-  ceilinged reviewer can't read as healthy to the commit gate. That is
-  honest but it ends the session.
+- **B6 — overflow handling (auto-compaction or otherwise).** The largest
+  open item. claude-code auto-compacts silently; the native loop does
+  nothing yet — it reports occupancy every turn, says so once past 85%,
+  and keeps working. Past 100% the gateway decides: DeepSeek truncates
+  rather than erroring, so the agent quietly loses its oldest turns.
+
+  **This is a deliberate interim, decided 2026-07-27.** An earlier
+  version hard-stopped at 85%, which on a 1M window discarded 150K
+  tokens of usable capacity and ended the session for the user rather
+  than by them. The current stance is that losing old context is a real
+  cost but the *user's* to weigh against finishing the work — so bot-hq
+  shows the number and they choose. What replaces this (compaction,
+  summarisation, selective eviction) is open and intended to be designed
+  deliberately rather than defaulted into.
 
   Design input already exists: `<data_dir>/.local/native-accounting.jsonl`
   records tokens occupied, conversation length and stop reason for every

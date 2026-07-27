@@ -110,10 +110,14 @@ Two behavioural differences worth knowing:
   (`send_with_retry`), using the same `RetryPolicy` and
   `is_transient_api_error` classifier. Better than a respawn: the
   conversation stays in memory, so there is nothing to resume.
-- **No auto-compaction yet.** claude-code compacts silently; the native
-  loop instead stops at a hard **context ceiling** (85%) with a visible
-  message and reports terminal health, so a ceilinged reviewer cannot
-  read as healthy to the commit gate. See PLAN.md ("B6").
+- **No auto-compaction yet, and no stop either.** claude-code compacts
+  silently. The native loop reports occupancy every turn, says so once
+  past 85%, and then **keeps working**. Past 100% the gateway decides —
+  DeepSeek truncates rather than erroring — so the agent gradually loses
+  its oldest turns. That trade (finish the work vs. start clean) is the
+  user's to make from the meter, not one bot-hq pre-empts. An earlier
+  version hard-stopped at 85%, which on a 1M window discarded 150K
+  tokens of usable capacity. See PLAN.md ("B6").
 
 Each agent **subprocess** is spawned with:
 
@@ -375,7 +379,7 @@ Two per-model settings drive the native loop (Settings → Models):
   tokens this specific model accepts. Read **only** by the native loop;
   on a CLI-backed model the meter comes from claude-code and this field
   is inert. Left blank, the meter renders a visible gap and the native
-  context ceiling stays dark — bot-hq never guesses a window, because a
+  loop's high-context notice never fires — bot-hq never guesses a window, because a
   wrong one renders as a confident percentage.
 
 Both columns are mirrored onto `agent_configs` (migration 0038), because
@@ -963,12 +967,13 @@ the `bot-hq` binary and does not run at app startup. See
   tool execution, context accounting and retry, and returns the same
   `AgentHandle` the subprocess path does. See "Process model → Two agent
   backends".
-- **Context ceiling:** the native loop refuses to start a turn once the
-  context window is 85% full, reporting a visible message and terminal
-  health rather than failing mid-request. It does not auto-compact yet
-  (PLAN.md "B6") — this is the honest interim behaviour, and it exists
-  because claude-code compacts silently where a native loop would
-  hard-fail deep in a request.
+- **High-context notice:** the native loop says once, at 85% occupancy,
+  that the window is filling — and then keeps working. It does not stop
+  and does not auto-compact (PLAN.md "B6"). Past 100% the gateway drops
+  the oldest turns, so the agent forgets the start of the session; the
+  user weighs that against finishing the work and closes the session or
+  carries on. Requires a known `context_window`, or there is no
+  percentage to warn about.
 - **`AgentRole`:** the single mapping from an agent name to what it may
   do (`src/agents/roles.rs`) — whether it may run native, which built-in
   tools it gets, and what it may execute. Distinct from

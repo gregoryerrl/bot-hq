@@ -83,9 +83,14 @@ async worker, concurrent tool execution, a startup sweep for orphaned
 conversations, `list_models` for the external driver, and the refusal
 probe stopped littering the repo root.
 
-**Open:** B6 auto-compaction (see PLAN.md) — the native loop stops at an
-85% ceiling rather than compacting. `native-accounting.jsonl` is the
-measurement input for designing it.
+**Open:** B6 overflow handling (see PLAN.md). The native loop neither
+compacts nor stops — it reports occupancy, says so once past 85%, and
+keeps working; past 100% the gateway drops the oldest turns and the user
+decides whether to close the session. An 85% hard stop shipped briefly
+and was removed the same day: on a 1M window it discarded 150K tokens of
+usable capacity and ended the session for the user rather than by them.
+`native-accounting.jsonl` is the measurement input for whatever replaces
+it.
 
 ---
 
