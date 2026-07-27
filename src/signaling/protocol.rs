@@ -514,7 +514,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_write_file",
-            description: "Write (create or replace) a project-scoped Context Library file with the full new body. Direct write: missing parent folders are created, the write is atomic, and the index is rescanned automatically — no separate cl_rescan call needed. Replaces the ENTIRE file, so for an append read the current body first. Also lifts the session's close-out learnings gate. HANDS-only; bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md) are refused.",
+            description: "Write a project-scoped Context Library file. Default mode replaces the ENTIRE file; mode:\"append\" adds content to the end instead (no read-modify-write needed). Direct write: missing parent folders are created, the write is atomic, the index rescans automatically, and every write is snapshotted into the library's local git history. Replacing a file with empty or >50%-smaller content is refused unless confirm_shrink:true (accidental-truncation guard — pass it when a prune is intentional). Also lifts the session's close-out learnings gate. HANDS-only; bot-hq-owned _globals system files (custom-instructions.md, custom-general-rules.md) are refused.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -528,7 +528,16 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     },
                     "content": {
                         "type": "string",
-                        "description": "Full file body to write. For existing files this replaces the whole file — read the current content first when appending."
+                        "description": "The body to write. mode \"replace\": the full new file. mode \"append\": just the addition — it lands at the end of the existing file after a blank line."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["replace", "append"],
+                        "description": "\"replace\" (default) overwrites the whole file; \"append\" adds to the end. Prefer append for learnings deltas."
+                    },
+                    "confirm_shrink": {
+                        "type": "boolean",
+                        "description": "Required true to replace an existing file with empty or >50%-smaller content. Confirms the data loss is intentional."
                     }
                 },
                 "required": ["project", "file_path", "content"]

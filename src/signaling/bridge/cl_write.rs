@@ -22,9 +22,12 @@ impl SignalingBridge {
     pub async fn cl_write_file(
         &self,
         session_id: String,
+        agent: String,
         project: String,
         file_path: String,
         content: String,
+        append: bool,
+        confirm_shrink: bool,
     ) -> Result<String> {
         if project.trim().is_empty() {
             anyhow::bail!("project is required");
@@ -43,8 +46,15 @@ impl SignalingBridge {
             .cl_project_root(&project)
             .await
             .ok_or_else(|| anyhow::anyhow!("bridge data_dir is not configured"))?;
+        // The whole library is one local git repo; every agent write snapshots
+        // it (see `git_version_library`).
+        let library_root = self
+            .data_dir
+            .as_ref()
+            .map(|d| crate::paths::Paths::for_data_dir(d.clone()).cl_dir);
         let fp = file_path.clone();
         let proj = project.clone();
+        let commit_summary = format!("cl: {project}/{file_path} ({agent})");
         let replaced = tokio::task::spawn_blocking(move || -> Result<bool> {
             let root_real = project_root.canonicalize().with_context(|| {
                 format!("canonicalizing CL project root {}", project_root.display())
@@ -55,7 +65,32 @@ impl SignalingBridge {
                 (resolve_new_path(&root_real, &fp)?, false)
             };
             assert_not_protected_globals_write(&proj, &root_real, &target)?;
-            atomic_write(&target, &content)?;
+            let final_content = if append && replaced {
+                let existing = std::fs::read_to_string(&target)
+                    .with_context(|| format!("reading '{fp}' for append"))?;
+                let joined = if existing.trim_end().is_empty() {
+                    content
+                } else {
+                    format!("{}\n\n{content}", existing.trim_end())
+                };
+                if joined.len() > MAX_WRITE_BYTES {
+                    anyhow::bail!(
+                        "appending would grow '{fp}' to {} bytes — the CL write cap \
+                         is 1 MiB. CL files are high-signal study notes; prune first",
+                        joined.len()
+                    );
+                }
+                joined
+            } else {
+                if replaced && !confirm_shrink {
+                    assert_not_suspicious_shrink(&target, &fp, &content)?;
+                }
+                content
+            };
+            atomic_write(&target, &final_content)?;
+            if let Some(lib) = library_root {
+                git_version_library(&lib, &commit_summary);
+            }
             Ok(replaced)
         })
         .await
@@ -72,8 +107,92 @@ impl SignalingBridge {
         self.mark_cl_rescan(&session_id).await;
         Ok(format!(
             "{} '{file_path}' in project '{project}'",
-            if replaced { "replaced" } else { "created" }
+            if replaced {
+                if append { "appended to" } else { "replaced" }
+            } else {
+                "created"
+            }
         ))
+    }
+}
+
+/// Refuse a replace that looks like accidental data loss: writing an empty
+/// body over a non-empty file, or shrinking it by more than half. Both real
+/// incidents from the 2026-07-27 archive study — `temp.md` truncated to 0
+/// bytes, and an approved draft replaced wholesale. `confirm_shrink: true`
+/// overrides when the shrink is intentional (pruning is legitimate CL work).
+fn assert_not_suspicious_shrink(target: &Path, rel_path: &str, new_content: &str) -> Result<()> {
+    let old_len = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);
+    if old_len == 0 {
+        return Ok(());
+    }
+    let new_len = new_content.len() as u64;
+    if new_len == 0 {
+        anyhow::bail!(
+            "refusing to replace non-empty '{rel_path}' ({old_len} bytes) with EMPTY \
+             content. If intentional, pass confirm_shrink: true; to add content \
+             instead, use mode: \"append\""
+        );
+    }
+    if new_len * 2 < old_len {
+        anyhow::bail!(
+            "refusing to shrink '{rel_path}' from {old_len} to {new_len} bytes \
+             (>50% loss) — cl_write_file replaces the WHOLE file, and this shape is \
+             usually a partial rewrite that would destroy the rest. Read the current \
+             body and write the full replacement, use mode: \"append\", or pass \
+             confirm_shrink: true if the prune is intentional"
+        );
+    }
+    Ok(())
+}
+
+/// Version the library after a successful agent write: lazily `git init` the
+/// library root, then stage-all + commit with a fixed synthetic identity (no
+/// dependence on the user's git config). Fail-open at every step — versioning
+/// must never break a CL write. This makes the history agents already assumed
+/// existed (an agent replaced a user-approved draft while recording "archived
+/// in git history"; the library was not a repo) actually exist.
+fn git_version_library(library_root: &Path, summary: &str) {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(library_root)
+            .args(args)
+            .output()
+    };
+    if !library_root.join(".git").exists() {
+        match git(&["init", "-q"]) {
+            Ok(out) if out.status.success() => {}
+            other => {
+                tracing::warn!(?other, root = %library_root.display(), "CL git init failed; library writes are unversioned");
+                return;
+            }
+        }
+    }
+    match git(&["add", "-A"]) {
+        Ok(out) if out.status.success() => {}
+        other => {
+            tracing::warn!(?other, "CL git add failed; skipping version commit");
+            return;
+        }
+    }
+    match git(&[
+        "-c",
+        "user.name=bot-hq",
+        "-c",
+        "user.email=bot-hq@local",
+        "commit",
+        "-q",
+        "-m",
+        summary,
+    ]) {
+        Ok(out) if out.status.success() => {}
+        // "nothing to commit" (identical content) is routine, not a failure.
+        Ok(out) => tracing::debug!(
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "CL git commit made no commit"
+        ),
+        Err(err) => tracing::warn!(%err, "CL git commit failed"),
     }
 }
 
@@ -192,9 +311,12 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
+                "brian".to_string(),
                 "bot-hq".to_string(),
                 "plans/2026/handoff.md".to_string(),
                 "nested body".to_string(),
+                false,
+                false,
             )
             .await
             .unwrap();
@@ -223,9 +345,12 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
+                "brian".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 "new full body".to_string(),
+                false,
+                false,
             )
             .await
             .unwrap();
@@ -241,9 +366,12 @@ mod tests {
             let err = bridge
                 .cl_write_file(
                     "s1".to_string(),
+                    "brian".to_string(),
                     "bot-hq".to_string(),
                     bad.to_string(),
                     "body".to_string(),
+                    false,
+                    false,
                 )
                 .await
                 .unwrap_err();
@@ -259,9 +387,12 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
+                "brian".to_string(),
                 "bot-hq".to_string(),
                 "big.md".to_string(),
                 "x".repeat(MAX_WRITE_BYTES + 1),
+                false,
+                false,
             )
             .await
             .unwrap_err();
@@ -278,9 +409,12 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
+                "brian".to_string(),
                 "_globals".to_string(),
                 "custom-instructions.md".to_string(),
                 "agent-authored rules".to_string(),
+                false,
+                false,
             )
             .await
             .unwrap_err();
@@ -294,9 +428,12 @@ mod tests {
         let err = bridge
             .cl_write_file(
                 "s1".to_string(),
+                "brian".to_string(),
                 "_globals".to_string(),
                 "agents/sneaky.md".to_string(),
                 "x".to_string(),
+                false,
+                false,
             )
             .await
             .unwrap_err();
@@ -306,9 +443,12 @@ mod tests {
         let msg = bridge
             .cl_write_file(
                 "s1".to_string(),
+                "brian".to_string(),
                 "_globals".to_string(),
                 "eod.md".to_string(),
                 "today: shipped cl_write_file".to_string(),
+                false,
+                false,
             )
             .await
             .unwrap();
@@ -325,9 +465,12 @@ mod tests {
         bridge
             .cl_write_file(
                 "s1".to_string(),
+                "brian".to_string(),
                 "bot-hq".to_string(),
                 "notes.md".to_string(),
                 "a learning".to_string(),
+                false,
+                false,
             )
             .await
             .unwrap();
@@ -336,4 +479,151 @@ mod tests {
             "a cl_write_file should lift the close-out nudge"
         );
     }
+
+    #[tokio::test]
+    async fn append_mode_adds_to_the_end_without_full_rewrite() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let path = tmp.path().join("library/projects/bot-hq/notes.md");
+        std::fs::write(&path, "## Learnings\n- old fact\n").unwrap();
+
+        let msg = bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "notes.md".to_string(),
+                "- new delta".to_string(),
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(msg.starts_with("appended to"), "got: {msg}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "## Learnings\n- old fact\n\n- new delta"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_and_majority_shrink_replaces_are_refused_without_confirm() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let path = tmp.path().join("library/projects/bot-hq/notes.md");
+        let original = "x".repeat(1000);
+        std::fs::write(&path, &original).unwrap();
+
+        // Empty replace: refused (the temp.md truncation incident).
+        let err = bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "notes.md".to_string(),
+                String::new(),
+                false,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("EMPTY"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        // >50% shrink: refused.
+        let err = bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "notes.md".to_string(),
+                "x".repeat(400),
+                false,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(">50% loss"), "got: {err}");
+
+        // Same shrink with confirm_shrink: allowed (intentional prune).
+        let msg = bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "notes.md".to_string(),
+                "x".repeat(400),
+                false,
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(msg.starts_with("replaced"), "got: {msg}");
+
+        // Mild shrink (<50%) never needs the flag.
+        let msg = bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "notes.md".to_string(),
+                "x".repeat(300),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(msg.starts_with("replaced"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn library_writes_are_git_versioned_and_history_recovers_old_body() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let lib = tmp.path().join("library");
+
+        bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "draft.md".to_string(),
+                "the approved draft".to_string(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "draft.md".to_string(),
+                "a whole new direction".to_string(),
+                false,
+                true,
+            )
+            .await
+            .unwrap();
+
+        // The library became a repo lazily and each write committed.
+        assert!(lib.join(".git").exists(), "library was git-initialized");
+        let log = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&lib)
+            .args(["log", "--oneline"])
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&log.stdout).to_string();
+        assert!(log.lines().count() >= 2, "one commit per write, got:\n{log}");
+        assert!(log.contains("cl: bot-hq/draft.md (brian)"), "got:\n{log}");
+
+        // The destroyed-draft scenario is now recoverable.
+        let old = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&lib)
+            .args(["show", "HEAD~1:projects/bot-hq/draft.md"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&old.stdout), "the approved draft");
+    }
+
 }

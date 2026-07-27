@@ -608,19 +608,31 @@ async fn call_tool(
                 .await
                 .map_err(internal_err_no_prefix)?;
             // Strip noisy fields; agents care about file_path, description,
-            // tags, updated_at. Return as a compact JSON array.
-            let trimmed: Vec<serde_json::Value> = rows
-                .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "project": r.project_id,
-                        "file_path": r.file_path,
-                        "description": r.description,
-                        "tags": r.tags,
-                        "updated_at": r.updated_at,
-                    })
-                })
-                .collect();
+            // tags, updated_at. `abs_path` is the RESOLVED on-disk location —
+            // agents were joining `_globals` into the path themselves and
+            // constructing `<library>/_globals/<file>`, which does not exist
+            // (root-level files live directly under the library root).
+            let mut roots: std::collections::HashMap<String, Option<std::path::PathBuf>> =
+                std::collections::HashMap::new();
+            let mut trimmed: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+            for r in rows {
+                if !roots.contains_key(&r.project_id) {
+                    let root = bridge.cl_project_root(&r.project_id).await;
+                    roots.insert(r.project_id.clone(), root);
+                }
+                let abs_path = roots
+                    .get(&r.project_id)
+                    .and_then(|root| root.as_ref())
+                    .map(|root| root.join(&r.file_path).display().to_string());
+                trimmed.push(serde_json::json!({
+                    "project": r.project_id,
+                    "file_path": r.file_path,
+                    "abs_path": abs_path,
+                    "description": r.description,
+                    "tags": r.tags,
+                    "updated_at": r.updated_at,
+                }));
+            }
             Ok(result_json(&trimmed, "[]"))
         }
         "cl_retrieve" => {
@@ -682,8 +694,29 @@ async fn call_tool(
             let project = arg_required_str(&args, "project")?;
             let file_path = arg_required_str(&args, "file_path")?;
             let content = arg_required_str(&args, "content")?;
+            let append = match args.get("mode").and_then(Value::as_str) {
+                None | Some("replace") => false,
+                Some("append") => true,
+                Some(other) => {
+                    return Ok(ToolCallResult::error(format!(
+                        "invalid mode '{other}' — use \"replace\" (default) or \"append\""
+                    )))
+                }
+            };
+            let confirm_shrink = args
+                .get("confirm_shrink")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let msg = bridge
-                .cl_write_file(caller.session_id.clone(), project, file_path, content)
+                .cl_write_file(
+                    caller.session_id.clone(),
+                    caller.agent.clone(),
+                    project,
+                    file_path,
+                    content,
+                    append,
+                    confirm_shrink,
+                )
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(msg))
