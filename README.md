@@ -170,10 +170,11 @@ For a release build: `cargo tauri build` (bundles the app under
 ## For developers
 
 bot-hq is a single Rust binary: a **Tauri v2** shell + **React 18 + TypeScript +
-Tailwind** UI, with the Rust core on a Tokio runtime. Each agent is a `claude-code`
-subprocess wired over stream-json; two in-process MCP servers handle UI signaling
-and external driver access; storage is sqlite; policy is enforced by MCP tools plus
-git hooks.
+Tailwind** UI, with the Rust core on a Tokio runtime. An agent is backed by either a
+`claude-code` subprocess wired over stream-json or bot-hq's own native Rust agent
+loop (opted into per saved model; EYES-only in v1) — both present the same interface
+to everything downstream. Two in-process MCP servers handle UI signaling and external
+driver access; storage is sqlite; policy is enforced by MCP tools plus git hooks.
 
 The canonical docs go deeper than this README:
 
@@ -198,6 +199,7 @@ bot-hq/
 │   ├── main.rs            entry point — tokio runtime, Tauri builder, CLI dispatch
 │   ├── paths.rs           data-dir resolution + first-run init + single-instance lock
 │   ├── agents/            claude-code subprocess + stream-json I/O + hardcoded role prompts
+│   │   └── native/        bot-hq's own agent loop (wire, tools, commands, MCP client, history)
 │   ├── core/              sessions, IPAV cache, duo coordination, broadcast
 │   ├── signaling/         in-process MCP HTTP servers (internal UI tools + external driver) + SignalingBridge
 │   ├── storage/           sqlite (messages, sessions, agent_configs, questions, cl_index)
@@ -238,9 +240,12 @@ collide with a running production bot-hq at `~/.bot-hq/`.
 
 - **Stack:** single Rust binary — Tauri v2 shell + React 18 UI, with the Rust core
   on a Tokio multi-thread runtime. Tauri owns the OS main thread.
-- **Per-agent subprocess:** each agent is spawned as `claude -p` in stream-json
-  mode, with bot-hq's role prompt appended and a per-agent MCP config. Model swap per
-  agent via `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL`.
+- **Two agent backends:** an agent is spawned either as `claude -p` in stream-json
+  mode — with bot-hq's role prompt appended and a per-agent MCP config, model swap via
+  `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` — or on bot-hq's
+  own in-process Rust loop, which owns the turn cycle, tool execution and context
+  accounting itself. Chosen per saved model; EYES-only in v1, since Brian's
+  subscription binds him to the CLI. Nothing downstream can tell them apart.
 - **Two MCP servers:** an **internal** one (UI-signaling tools served to the
   agents) on an ephemeral localhost port, and an **external** one on `127.0.0.1:7892`
   (driver tools for any bearer-token-authenticated MCP client).
@@ -372,7 +377,8 @@ Restart that claude-code; the bot-hq tools appear as `mcp__bot-hq__*`.
 | Tool | Purpose |
 |---|---|
 | `list_sessions` | Read active sessions (id, title, phase, models). |
-| `create_session(title, working_repo_path?)` | Spawn a Brian+Rain duo. |
+| `list_models` | Saved models with their ids, `native` flag and context window (tokens redacted). |
+| `create_session(title, working_repo_path?, brian_model_id?, rain_model_id?)` | Spawn a Brian+Rain duo. Model ids come from `list_models`; omit them to use each agent's stored config. |
 | `send_message(session_id, text)` | Broadcast to a session. |
 | `get_session_messages(session_id, since_id?)` | Read chat in order. |
 | `advance_phase(session_id, phase)` | Move through I/P/A/V. |

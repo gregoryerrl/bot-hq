@@ -1,5 +1,11 @@
 //! Spawn a `claude-code` subprocess wired up with stream-json IO + the
 //! MCP-signaling server. Returns an `AgentHandle` the core layer drives.
+//!
+//! This module also owns the types **both** agent backends speak —
+//! `AgentHandle`, `AgentEvent`, `AgentHealth`, `ContextUsage`, `RetryPolicy`,
+//! `SpawnConfig` — so `agents::native` builds against them rather than
+//! duplicating a parallel vocabulary. Nothing downstream of `AgentHandle` can
+//! tell a subprocess from the native loop.
 
 use anyhow::{Context, Result};
 use serde_json::Value;

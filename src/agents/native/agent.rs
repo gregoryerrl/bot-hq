@@ -9,9 +9,12 @@
 //! ## What it does NOT do yet
 //!
 //! - **No compaction** (B6). Instead there is a hard ceiling — see
-//!   [`CONTEXT_CEILING`]. Loud beats silent.
-//! - **`read_file` only** (B5 adds `Grep`/`Glob`/`Bash` + the write-verb deny
-//!   matcher `Bash` requires).
+//!   [`CONTEXT_CEILING`]: the loop stops, says so, and reports terminal health
+//!   rather than failing deep in a request. Loud beats silent.
+//!
+//! The tool surface is complete: `read_file`, `list_files`, `search_files`,
+//! `run_command` and `write_file` all exist (`tools.rs`), role-filtered by
+//! [`AgentRole`](crate::agents::AgentRole).
 //!
 //! ## Recovery, and why it is in here rather than the supervisor
 //!
@@ -247,7 +250,7 @@ struct State {
     /// Latched once the context ceiling is breached. The loop stays alive and
     /// keeps refusing — it does NOT close its event channel, because closure is
     /// the supervisor's end-of-incarnation signal and would trigger a respawn
-    /// with no history (worse than stopping, until B7).
+    /// with an empty in-memory conversation — worse than stopping.
     ceiling_reached: bool,
 }
 
@@ -263,8 +266,9 @@ pub async fn run_loop(
     mut kill_rx: oneshot::Receiver<()>,
 ) {
     // No claude-code session UUID exists for a native agent. `None` is honest:
-    // the supervisor simply never sets `resume_session_id`, which is correct
-    // until B7 gives us our own persistence.
+    // nothing ever sets `resume_session_id` for this path, so a later CLI
+    // fallback can't be handed a bogus uuid. Our own resume is the persisted
+    // conversation in [`history`], which is a different mechanism.
     if event_tx
         .send(AgentEvent::Init { session_id: None })
         .await

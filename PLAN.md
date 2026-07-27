@@ -30,12 +30,18 @@ drifts every commit.
 
 ## In flight
 
-Past the Tauri v2 migration and the v1.0.0 stabilization pass, the active
-arc has been duo-reliability + UX: the interrupt redesign (stdin
-`control_request` cancel + `SessionActivity`), the peer-forward router
-extraction (`core/router.rs`), `peer_ack` / `halt`, the EYES-sign-off
-commit gate, agent-health dots, and the event-driven UI-freshness work all
-landed (see PROGRESS.md). Remaining follow-ups:
+The current arc is the **native agent loop** (2026-07-26/27): an agent
+can run on bot-hq's own Rust loop instead of a claude-code subprocess,
+opted into per saved model, EYES-only in v1. It shipped along with the
+audit remediation that followed it — see PROGRESS.md for the arc and
+"Native agent loop — open items" below for what's left, chiefly **B6
+auto-compaction**.
+
+Before that, the arc was duo-reliability + UX: the interrupt redesign
+(stdin `control_request` cancel + `SessionActivity`), the peer-forward
+router extraction (`core/router.rs`), `peer_ack` / `halt`, the
+EYES-sign-off commit gate, agent-health dots, and the event-driven
+UI-freshness work all landed (see PROGRESS.md). Remaining follow-ups:
 
 - ~~Live plugin *execution*~~ — SHIPPED 2026-07-04 as the **plugin
   runtime v1** (serving + catalog proxy + PluginHost + consent +
@@ -225,7 +231,57 @@ loading for the icon font.
   reads pass. If any pure-`&&` denial independent of a denied segment remains,
   that's a separate claude-code matcher question — untested (needs a live
   non-Anthropic EYES session to confirm); not a known bot-hq gate bug. HANDS is
-  unaffected (substring Tool Gate + PreToolUse hook).
+  unaffected (substring Tool Gate + PreToolUse hook). **Moot on the native
+  loop** (2026-07-27): a native EYES has no shell at all — commands are
+  validated against an allow-list and executed as argv, and shell
+  metacharacters are refused outright. This only remains open for a
+  CLI-backed EYES.
+
+---
+
+## Native agent loop — open items
+
+The loop shipped 2026-07-26/27 (see PROGRESS.md). What's left:
+
+- **B6 — auto-compaction.** The largest open item, and the only one with
+  a real user-visible cost. claude-code auto-compacts silently and is
+  quietly rescuing long sessions today; a native loop that neither
+  compacts nor stops would hard-fail deep in a request with an opaque
+  upstream error. The interim behaviour is a hard **context ceiling** at
+  85%: the agent stops, says so, and reports terminal health so a
+  ceilinged reviewer can't read as healthy to the commit gate. That is
+  honest but it ends the session.
+
+  Design input already exists: `<data_dir>/.local/native-accounting.jsonl`
+  records tokens occupied, conversation length and stop reason for every
+  native turn, append-only and unrotated precisely so the long-horizon
+  growth curve survives. Measure before designing — the question is what
+  to drop and when, and the answer depends on how a real session actually
+  fills.
+
+- **No native HANDS.** `AgentRole::Hands.may_run_native()` is `false`:
+  Brian's subscription binds server-side to claude-code, and he depends
+  on skills, plugins and the full built-in tool surface the native path
+  doesn't implement. If that ever changes, `BRIAN_ROLE` in `prompts.rs`
+  becomes wrong (it promises `terminal_exec`, the visible PTY, ordinary
+  `Bash`) with no test failing — the dependency is only recorded here.
+
+- **`search_files` caps at 500 files.** Enumeration asks git, which is
+  the right set, but a repo with more than 500 tracked files still
+  truncates. The cap is *visible* on every outcome now, including "no
+  matches", so it reads as incomplete rather than as absence — but it is
+  not raised.
+
+- **`user_mcp_servers_for_agent` sits outside `AgentRole`.** It is a
+  capability question by the same logic as the four that were collapsed;
+  left alone because the role mapping would be behaviour-identical there
+  and it is on the CLI spawn path.
+
+- **No live-run coverage of the audit fixes.** Every remediation batch
+  was verified at unit level plus real-tree measurement; none of it has
+  been exercised by an actual native session. The project's own history
+  says live runs find what unit tests structurally cannot — three times
+  out of three during the build.
 
 ---
 

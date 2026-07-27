@@ -11,8 +11,8 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ## Current state
 
-741 Rust tests passing (687 lib + 36 external MCP + 7 signaling + 11
-storage) plus 166 frontend Vitest. Release build clean. Version
+944 Rust tests passing (881 lib + 37 external MCP + 5 native MCP + 7
+signaling + 14 storage) plus 175 frontend Vitest. Release build clean. Version
 **1.0.0-rc2** (pre-release for Windows friend-testing; `1.0.0` reserved
 for the official market launch). The codebase has moved well past the May
 Tauri v2 migration — live on main since: the **EYES-sign-off commit
@@ -23,7 +23,69 @@ plugin-runtime workstreams from 2026-07-05 (**per-plugin CSP
 override tier**, **spawn_session capability**, **linked installs**, the
 **push-event + view-alignment paper-cuts**), and the **session subtabs
 arc** (2026-07-18): Workspace | Context | Terminal, and the
-**performance optimization sweep** (2026-07-19, below).
+**performance optimization sweep** (2026-07-19, below), and the **native
+agent loop** (2026-07-26/27, below).
+
+---
+
+## 2026-07-27 — Native agent loop, then an audit that found it half-wired
+
+`b8548cc..2a17593`. Two halves: the connector itself, and six remediation
+commits from auditing it.
+
+**The connector.** An agent can now run on bot-hq's own Rust loop
+(`src/agents/native/`) instead of a `claude-code` subprocess, opted into
+per saved model. On a third-party API key the CLI buys nothing —
+subscription OAuth is bound server-side to claude-code, so a gateway-key
+agent was paying ~418 MB RSS for an opaque loop and context accounting we
+could only scrape. Owning the loop means computing occupancy from our own
+request accounting, gating tools inline instead of through the exit-2
+PreToolUse hook, and enforcing a read root that `Read`/`Grep`/`Glob`
+never had (they aren't `Bash`, so they never reached the Tool Gate).
+
+It was additive, not a rewrite: `AgentHandle` is a pure channel struct,
+so the duo pump, the router, the policy layer, the UI and the context
+meter cannot tell which backend they got. v1 is EYES-only —
+`resolve_agent_kind` hard-guards HANDS onto the CLI, since Brian's
+subscription pins him there.
+
+**Then the audit.** Twenty-three findings; nineteen fixed across five
+batches. The ones worth remembering:
+
+- **Native failures were invisible.** Every user-facing failure went
+  through `AgentEvent::Error`, which the duo pump only `warn!`ed — so API
+  errors, refusals, the tool-cycle cap and the context-ceiling stop all
+  rendered as empty turns.
+- **A ceilinged reviewer read as healthy.** The ceiling latch keeps the
+  event channel open on purpose (closure would respawn the agent with no
+  history), so `Dead` was never emitted and a latched refusal completes
+  too fast to look stalled — leaving the fail-closed commit gate with
+  nothing to match on. It now reports terminal health.
+- **The feature was unreachable from the Agents tab.** `native` lived
+  only on `models`, but every session that names no model resolves
+  through `agent_configs` — so assigning a native model there silently
+  spawned claude-code. Migration 0038 mirrors both columns across.
+- **`search_files` answered "no matches" for everything.** Enumeration is
+  capped at 500 entries and an alphabetical walk of this repo reaches
+  66,667 before the first `src/` path. The first fix pruned
+  `.git`/`node_modules`/`target` and *still* left 48,039 ahead of it — a
+  2.4 GB gitignored `bench/` no hardcoded list would name. Enumeration
+  now asks git (`ls-files -c -o --exclude-standard`), which is 354
+  entries here and exactly the set a developer means by "the repo".
+- **Four answers to "is this agent EYES?"**, two of them wrong the same
+  way: `CommandPolicy::for_agent` promised an unrecognised agent gets no
+  shell and had tests asserting it, while nothing called it and
+  production handed that agent a read-only one. Collapsed into
+  `AgentRole` (`src/agents/roles.rs`).
+
+Also: HTTP timeouts on both native clients, repo walks moved off the
+async worker, concurrent tool execution, a startup sweep for orphaned
+conversations, `list_models` for the external driver, and the refusal
+probe stopped littering the repo root.
+
+**Open:** B6 auto-compaction (see PLAN.md) — the native loop stops at an
+85% ceiling rather than compacting. `native-accounting.jsonl` is the
+measurement input for designing it.
 
 ---
 
