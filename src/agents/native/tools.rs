@@ -79,20 +79,24 @@ pub const MAX_SEARCH_HITS: usize = 200;
 /// Cap on `list_files` results.
 pub const MAX_GLOB_HITS: usize = 500;
 
-/// Directory names never descended during enumeration (`list_files` /
-/// `search_files`).
+/// Directory names never descended by the FALLBACK walk (see [`glob_files`] —
+/// a git repository is enumerated by git instead, which is both more accurate
+/// and the common case).
 ///
-/// Not cosmetic — load-bearing for correctness. Enumeration is capped at
-/// [`MAX_GLOB_HITS`], and an alphabetical walk of this repo reaches 66,667
-/// entries before the first `src/` path (`.git` alone holds ~6,500 files;
-/// `node_modules` + `target` add ~470,000). Without pruning, the entire budget
-/// was spent inside junk directories and `search_files` then reported a
-/// confident "no matches" for content sitting in plain sight — the same
-/// silent-wrong-answer class `42da318` was written to eliminate.
+/// Not cosmetic. Enumeration is capped at [`MAX_GLOB_HITS`] and these are where
+/// the budget goes: an alphabetical walk of this repo reaches 66,667 entries
+/// before the first `src/` path. Without pruning, `search_files` spent its whole
+/// budget inside them and then reported a confident "no matches" for content
+/// sitting in plain sight.
 ///
-/// Only ENUMERATION prunes. Direct-path tools still reach these trees when
-/// asked explicitly: `read_file(".git/config")` and `run_command("ls .git")`
-/// work unchanged.
+/// A fixed list can only ever be a guess about someone else's repo — measured
+/// here, pruning all three still left **48,039** entries ahead of `src/`, from a
+/// 2.4 GB `bench/` directory no universal list would name. That is precisely why
+/// the git path exists and this is the fallback.
+///
+/// Only ENUMERATION prunes. Direct-path tools still reach these trees when asked
+/// explicitly: `read_file(".git/config")` and `run_command("ls .git")` work
+/// unchanged.
 const PRUNED_DIRS: &[&str] = &[".git", "node_modules", "target"];
 
 /// Cap tool output so one read cannot blow the context window.
@@ -146,9 +150,10 @@ pub fn tool_defs() -> Vec<Value> {
         json!({
             "name": "list_files",
             "description": "List repository files matching a glob. Use this instead of \
-                            shelling out to `find` or `ls`. `.git`, `node_modules` and \
-                            `target` are never listed — use `read_file` or `run_command` \
-                            for those.",
+                            shelling out to `find` or `ls`. Lists what the repository \
+                            itself tracks — gitignored paths, build output and \
+                            dependency directories are not included; reach those with \
+                            `read_file` or `run_command` if you genuinely need them.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -161,8 +166,9 @@ pub fn tool_defs() -> Vec<Value> {
             "name": "search_files",
             "description": "Search file CONTENTS with a regular expression and return \
                             matching lines as `path:line: text`. Use this instead of \
-                            shelling out to `grep`. `.git`, `node_modules` and `target` \
-                            are never searched. If the output notes the file listing was \
+                            shelling out to `grep`. Searches what the repository tracks — \
+                            gitignored paths, build output and dependency directories are \
+                            not searched. If the output notes the file listing was \
                             capped, the result set is incomplete — re-run with a \
                             narrower `glob`.",
             "input_schema": {
@@ -493,16 +499,34 @@ struct GlobHits {
 
 /// Enumerate paths under `root` matching `pattern`.
 ///
-/// Hand-rolled walk rather than `glob::glob` because glob's walker cannot prune:
-/// it descended `.git`/`node_modules`/`target` and spent the whole result cap
-/// there (see [`PRUNED_DIRS`]). Differences from the glob walker, all deliberate:
+/// **The candidate set comes from git when `root` is a repository**, and only
+/// from a filesystem walk otherwise. That ordering is the fix for the bug this
+/// module's cap kept producing: `.git`/`node_modules`/`target` are the obvious
+/// budget sinks, but pruning them by name still left 48,039 entries ahead of
+/// `src/` in this repo — a 2.4 GB `bench/` tree that no hardcoded list would
+/// ever name. A fixed exclusion list is a guess about someone else's repo.
 ///
-/// - [`PRUNED_DIRS`] are never entered;
-/// - symlinked directories are never entered (glob followed them — a link
-///   pointing back into the tree loops, one pointing out escapes; file hits are
-///   still individually canonicalize-checked);
+/// The read root IS a working repository, and the repository already publishes
+/// which files matter: `git ls-files -c -o --exclude-standard` is tracked files
+/// plus untracked-and-not-ignored ones, honouring every `.gitignore`,
+/// `.git/info/exclude` and the global excludes file. Here that is 354 entries
+/// rather than 480,000 — comfortably inside the cap, and exactly the set a
+/// developer means by "the repo". It is also what `rg` and `fd` do.
+///
+/// Falls back to the pruned walk when `root` is not a repo, git is missing, or
+/// the command fails — the tool must not stop working just because a session
+/// points somewhere unversioned.
+///
+/// Differences from the `glob::glob` walker this replaced, all deliberate:
+///
+/// - [`PRUNED_DIRS`] are never entered (fallback path only);
+/// - symlinked directories are never entered (glob followed them — a link back
+///   into the tree loops, one pointing out escapes; file hits are still
+///   individually canonicalize-checked);
 /// - `*` does not cross `/` (`require_literal_separator`), matching
-///   filesystem-glob expectations — `**` is the recursive form.
+///   filesystem-glob expectations — `**` is the recursive form;
+/// - directories are no longer emitted as hits. The tool is `list_files`, and
+///   `search_files` skipped non-files anyway.
 fn glob_files(root: &Path, pattern: &str) -> Result<GlobHits, String> {
     if pattern.starts_with('/') || pattern.split('/').any(|s| s == "..") {
         return Err(format!(
@@ -518,9 +542,57 @@ fn glob_files(root: &Path, pattern: &str) -> Result<GlobHits, String> {
 
     let mut files = Vec::new();
     let mut capped = false;
-    walk_dir(root, root, &matcher, opts, &mut files, &mut capped);
+    match git_listed_files(root) {
+        Some(candidates) => {
+            for rel in candidates {
+                if !matcher.matches_with(&rel, opts) {
+                    continue;
+                }
+                // The PATTERN is untrusted and a tracked path can be a symlink
+                // pointing anywhere — same re-check the walk does.
+                if root.join(&rel).canonicalize().is_ok_and(|c| c.starts_with(root)) {
+                    files.push(rel);
+                    if files.len() >= MAX_GLOB_HITS {
+                        capped = true;
+                        break;
+                    }
+                }
+            }
+        }
+        None => walk_dir(root, root, &matcher, opts, &mut files, &mut capped),
+    }
     files.sort();
     Ok(GlobHits { files, capped })
+}
+
+/// The repository's own view of which files exist, or `None` when `root` is not
+/// a git repo (or git is unavailable).
+///
+/// `-c -o --exclude-standard` = tracked + untracked-not-ignored. `-z` because
+/// git quotes unusual filenames otherwise, and a quoted path would fail to
+/// resolve. Run with `-C root`, which reports paths relative to `root` — so a
+/// session scoped to a SUBDIRECTORY of a repo gets that subdirectory's files,
+/// with paths already relative to its own read root.
+fn git_listed_files(root: &Path) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "-c", "-o", "--exclude-standard", "-z"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // not a repo, or git refused — fall back to the walk
+    }
+    let listed: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    // An empty repo is a legitimate answer, but so is a git that printed
+    // nothing for a reason we did not anticipate. Only trust a non-empty list;
+    // the walk is a correct (if noisier) answer either way.
+    (!listed.is_empty()).then_some(listed)
 }
 
 /// Depth-first, per-directory alphabetical — deterministic, so the capped
@@ -999,6 +1071,70 @@ mod tests {
     }
 
     // ---- search_files / list_files ---------------------------------------
+
+    /// A real git repo with an ignored mass — the shape that defeated the
+    /// hardcoded prune list. Returns (dir, canonical root).
+    fn git_root_with_ignored_mass() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+                .expect("git must be available for this test");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.com"]);
+        run(&["config", "user.name", "t"]);
+
+        // A 2.4 GB `bench/` is what actually broke this repo — no universal
+        // prune list would name it, but the repo's own .gitignore does.
+        fs::write(dir.path().join(".gitignore"), "bench/\n").unwrap();
+        fs::create_dir_all(dir.path().join("bench")).unwrap();
+        for i in 0..(MAX_GLOB_HITS + 200) {
+            fs::write(dir.path().join("bench").join(format!("b{i:04}.rs")), "junk").unwrap();
+        }
+        fs::create_dir_all(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/agent.rs"), "fn spawn_native_agent() {}\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "init"]);
+
+        let root = dir.path().canonicalize().unwrap();
+        (dir, root)
+    }
+
+    #[tokio::test]
+    async fn enumeration_uses_the_repository_not_a_hardcoded_prune_list() {
+        // The regression that verification caught: pruning `.git`/`node_modules`/
+        // `target` by name STILL left 48,039 entries ahead of `src/` in this repo,
+        // because the mass was a gitignored `bench/` no fixed list would name.
+        // The repo already publishes which files matter — use that.
+        let (_d, root) = git_root_with_ignored_mass();
+
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "search_files".into(),
+                input: json!({ "pattern": "spawn_native_agent" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadOnly,
+        )
+        .await;
+
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("src/agent.rs:1:"),
+            "gitignored mass defeated enumeration again: {}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("capped"),
+            "the ignored files should never have been candidates: {}",
+            out.content
+        );
+    }
 
     #[tokio::test]
     async fn a_globless_search_is_not_defeated_by_junk_directories() {
