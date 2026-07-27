@@ -34,6 +34,12 @@ export function ChoicePrompt({
   const [other, setOther] = useState("");
   const isPending = pendingOption !== undefined;
   const otherIsPending = isPending && !choice.options.includes(pendingOption!);
+  // A gated-command card (Approve/Reject) — free text doubles as
+  // reject-with-reason, and the agent is told to read the reasoning.
+  const isGate =
+    choice.options.length === 2 &&
+    choice.options.includes("Approve") &&
+    choice.options.includes("Reject");
 
   const submitOther = () => {
     const text = other.trim();
@@ -76,7 +82,11 @@ export function ChoicePrompt({
               submitOther();
             }
           }}
-          placeholder="Other — type a custom answer…"
+          placeholder={
+            isGate
+              ? "Reject with a reason — type why (the agent reads it)…"
+              : "Other — type a custom answer…"
+          }
           className="min-w-0 flex-1 rounded border border-outline/40 bg-surface px-2 py-1 font-mono text-xs text-on-surface placeholder:text-on-surface-variant/70 focus:border-secondary focus:outline-none disabled:opacity-50"
         />
         <Button

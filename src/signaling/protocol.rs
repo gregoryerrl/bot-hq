@@ -258,7 +258,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "action_gate",
-            description: "Execute a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook returned a blocking error telling you to route the command here). bot-hq classifies the command against the GLOBAL gated-keyword list: an `auto_allow`/unmatched command runs immediately, while a `gate` command surfaces an Approve/Reject prompt to the user — and ON APPROVE bot-hq EXECUTES the command in this session's working repo and returns its stdout/stderr/exit code. This is an ACTION request, not a permission request: you do NOT re-run the command yourself afterward — the output you get back IS the result. On reject, the command is not run.",
+            description: "Route a Bash command that the bot-hq Tool Gate blocked (the PreToolUse hook told you to call this). An `auto_allow`/unmatched command runs immediately and you get its output back. A `gate` command PARKS for the user's approval and this call returns AT ONCE with `gate_id` — it does not block, so there is nothing to time out. On approve bot-hq executes the command in your working repo and the stdout/stderr/exit code arrives as an out-of-band message; on reject you get a rejection notice (any text beyond 'Reject' is the user's reasoning — read it). NEVER re-issue a parked command or assume it ran; call gate_status(gate_id) to check. Re-parking an identical command while one is pending returns the existing gate instead of stacking a duplicate prompt. Prefer `--body-file /tmp/x.md` over inline heredocs for long bodies.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -268,6 +268,20 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     }
                 },
                 "required": ["command"]
+            }),
+        },
+        ToolDescriptor {
+            name: "gate_status",
+            description: "Current state of a parked action_gate command by its gate_id: pending (still awaiting the user — do not re-issue), approved (executed; output was delivered as an out-of-band message), or rejected (not run; includes the user's answer text). Read-only, callable by either agent. Use this instead of guessing whether a gated command ran.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "gate_id": {
+                        "type": "string",
+                        "description": "The gate_id returned by action_gate when it parked the command."
+                    }
+                },
+                "required": ["gate_id"]
             }),
         },
         ToolDescriptor {

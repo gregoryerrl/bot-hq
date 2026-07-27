@@ -54,6 +54,22 @@ pub struct GatedKeyword {
 /// enough that a command waiting on stdin can't hang the session forever.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Whether `name` runs as a shell on PATH. Cached per process — the answer
+/// can't change mid-run in any way we care about.
+fn which_shell(name: &str) -> bool {
+    use std::sync::OnceLock;
+    static PRESENT: OnceLock<bool> = OnceLock::new();
+    *PRESENT.get_or_init(|| {
+        std::process::Command::new(name)
+            .arg("-c")
+            .arg("true")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
 /// Combined result of executing a command in the session's working repo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
@@ -157,7 +173,12 @@ pub fn match_keyword(
 /// expects input (e.g. `gh issue comment` with no `--body`) fails fast instead
 /// of hanging. On timeout the child is killed (kill-on-drop) and `code` is 124.
 pub async fn run_in_repo(command: &str, cwd: &Path, timeout: Duration) -> CommandOutput {
-    let mut cmd = tokio::process::Command::new("sh");
+    // bash, not sh: agents write bash-isms — an APPROVED `gh pr create` with a
+    // quoted heredoc inside `$(…)` died under sh with "unexpected EOF while
+    // looking for matching quote" and silently created nothing (archive study,
+    // s-06a3c60b). Fall back to sh only when bash isn't installed.
+    let shell = if which_shell("bash") { "bash" } else { "sh" };
+    let mut cmd = tokio::process::Command::new(shell);
     cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)

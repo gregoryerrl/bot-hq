@@ -347,6 +347,14 @@ async fn call_tool(
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(picked))
         }
+        "gate_status" => {
+            let gate_id = arg_required_str(&args, "gate_id")?;
+            let msg = bridge
+                .gate_status(&gate_id)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(msg))
+        }
         "action_gate" => {
             let command = arg_required_str(&args, "command")?;
             let output = bridge

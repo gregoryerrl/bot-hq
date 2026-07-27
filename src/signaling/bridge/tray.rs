@@ -11,6 +11,25 @@ use super::*;
 use crate::storage::{Author, MessageKind};
 use uuid::Uuid;
 
+/// A pending gated command older than this (seconds) gets a confirm step on
+/// approve — the repo context it was asked against has likely moved on. Sized
+/// well above the observed median answer latency (minutes) so routine
+/// approvals stay one-click.
+pub const STALE_GATE_MAX_AGE_SECS: i64 = 900;
+
+/// Age of a tray row in seconds, from its `asked_at` (now_utc RFC3339-Z;
+/// sqlite `datetime('now')` shape accepted defensively). None = unparseable.
+pub fn gate_age_secs(asked_at: &str) -> Option<i64> {
+    let asked = chrono::DateTime::parse_from_rfc3339(asked_at)
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .or_else(|_| {
+            chrono::NaiveDateTime::parse_from_str(asked_at, "%Y-%m-%d %H:%M:%S")
+                .map(|n| n.and_utc())
+        })
+        .ok()?;
+    Some((chrono::Utc::now() - asked).num_seconds())
+}
+
 impl SignalingBridge {
     async fn set_session_awaiting(&self, session_id: &str) {
         if let Some(flag) = self.session_awaiting.lock().await.get(session_id) {
@@ -187,7 +206,7 @@ impl SignalingBridge {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn ask_user_choice_inner(
+    pub(super) async fn ask_user_choice_inner(
         &self,
         session_id: String,
         agent: String,
@@ -610,59 +629,35 @@ impl SignalingBridge {
     }
 
     /// If `choice_id` is a PENDING gated command (action_gate / ToolBlocklist)
-    /// whose requesting agent is no longer live-waiting (client-side MCP timeout
-    /// / restart), return its `(command, asked_at)` — i.e. it is STALE and
-    /// approving it would execute blind. Returns None for fresh gates (agent
-    /// still waiting), non-command items, or already-resolved / unknown ids.
+    /// old enough that the repo context it was asked against has likely moved
+    /// on, return its `(command, asked_at)` — i.e. it is STALE and approving it
+    /// deserves a confirm step. Returns None for fresh gates, non-command
+    /// items, or already-resolved / unknown ids.
+    ///
+    /// Staleness is AGE-based, not receiver-based: since action_gate parks and
+    /// returns immediately, the requesting agent is NEVER live-waiting on a
+    /// oneshot — the old `tx.is_closed()` key would have marked every pending
+    /// gate stale and forced a confirm on every approve. Execute-on-approve is
+    /// now the designed path; the confirm is reserved for prompts that sat
+    /// unanswered long enough for the tree to change underneath them.
     async fn stale_gated_command(&self, choice_id: &str) -> Option<(String, Option<String>)> {
-        // Fresh iff a parked entry exists with the agent still waiting on the
-        // blocking oneshot. `tx.is_closed()` flips true the instant that
-        // receiver is dropped — exactly "the agent moved on".
-        {
-            let pending = self.pending.lock().await;
-            if let Some(p) = pending.get(choice_id) {
-                let is_gate = matches!(
-                    p.choice.approval.as_ref().map(|a| &a.kind),
-                    Some(crate::policy::ViolationKind::ToolBlocklist)
-                );
-                if !is_gate {
-                    return None; // not a gated command
-                }
-                if !p.tx.is_closed() {
-                    return None; // agent still waiting → fresh, runs in-band
-                }
-                // tx closed → stale; fall through to read command + asked_at.
-            }
-        }
-        // No live parked (post-restart) or parked-but-dropped: consult the
-        // durable row. Only a still-pending row carrying a command_text is a
-        // stale GATE — non-command asks never execute, so they're never gated.
         let storage = self.storage.lock().await.clone()?;
         let row = storage.get_tray_entry(choice_id).await.ok()??;
         if row.status != "pending" {
             return None;
         }
         let command = row.command_text?;
+        if gate_age_secs(&row.asked_at).is_some_and(|age| age <= STALE_GATE_MAX_AGE_SECS) {
+            return None; // fresh — approve executes without a confirm step
+        }
+        // Older than the window, or unparseable timestamp (treat unknown age as
+        // stale: the confirm step is cheap, executing blind is not).
         Some((command, Some(row.asked_at)))
     }
 
-    /// choice_ids of pending gated commands whose requesting agent is STILL
-    /// live-waiting (fresh). The UI marks any pending command row NOT in this
-    /// set as stale, so a one-click approve of a moved-on command can warn first.
-    pub async fn live_waiting_gates(&self) -> std::collections::HashSet<String> {
-        self.pending
-            .lock()
-            .await
-            .iter()
-            .filter(|(_, p)| {
-                matches!(
-                    p.choice.approval.as_ref().map(|a| &a.kind),
-                    Some(crate::policy::ViolationKind::ToolBlocklist)
-                ) && !p.tx.is_closed()
-            })
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
+    // (live_waiting_gates removed: with action_gate parking immediately, no
+    // gate ever has a live-waiting receiver — staleness is age-based now, via
+    // `gate_age_secs` / `STALE_GATE_MAX_AGE_SECS`.)
 
     /// Snapshot the currently-parked choices. Used by the external MCP driver
     /// so it can see what's waiting for user input + the choice_ids needed to

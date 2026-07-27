@@ -40,28 +40,91 @@ impl SignalingBridge {
             // / no-match are handled defensively so a direct call still works.)
             None | Some(GateMode::AutoAllow) => self.execute_gated(&session_id, &command).await,
             Some(GateMode::Gate) => {
-                let picked = self
-                    .request_approval(
+                // Duplicate suppression: an identical command already awaiting
+                // approval gets the existing gate back instead of stacking a
+                // second confusable prompt. PENDING rows only — a re-fire after
+                // a reject is an intentional retry and parks fresh.
+                if let Some(storage) = self.storage.lock().await.clone() {
+                    if let Ok(Some(existing)) = storage
+                        .pending_gate_for_command(&session_id, &command)
+                        .await
+                    {
+                        return Ok(parked_gate_text(&existing, &command, true));
+                    }
+                }
+                // Park and return IMMEDIATELY (same contract as
+                // ask_user_choice). The old design held this RPC open and the
+                // MCP client timed out at ~60s while the human was still
+                // deciding — the agent saw "The operation timed out" and could
+                // not tell queued from failed (six such ghosts in the archive
+                // study). Execution now always happens at resolve time via the
+                // tray's exactly-once flip; the output arrives out-of-band.
+                let parked = self
+                    .ask_user_choice_inner(
                         session_id.clone(),
                         agent,
                         format!("Run gated command in this session's repo?\n\n`{command}`"),
                         vec!["Approve".to_string(), "Reject".to_string()],
-                        ApprovalContext {
+                        Some(ApprovalContext {
                             kind: ViolationKind::ToolBlocklist,
                             action: command.clone(),
                             detail: Some("tool-gate".to_string()),
-                        },
+                        }),
+                        None,
+                        false,
                     )
                     .await?;
-                if matches!(outcome_from_picked(&picked), ViolationOutcome::Approved) {
-                    self.execute_gated(&session_id, &command).await
-                } else {
-                    Ok(format!(
-                        "action_gate: user rejected — `{command}` was not run."
-                    ))
-                }
+                let gate_id = serde_json::from_str::<serde_json::Value>(&parked)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("choice_id")
+                            .and_then(|c| c.as_str())
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_default();
+                Ok(parked_gate_text(&gate_id, &command, false))
             }
         }
+    }
+
+    /// The `gate_status` MCP tool: current state of a parked gate by id.
+    /// Read-only, either agent. Exists so an agent never has to guess whether
+    /// a parked command ran — the archive study's ghost states ("did the merge
+    /// happen?") each burned a user round-trip to resolve.
+    pub async fn gate_status(&self, gate_id: &str) -> Result<String> {
+        let storage = self
+            .storage
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+        let Some(row) = storage.get_tray_entry(gate_id).await? else {
+            return Ok(format!("gate_status: no gate with id {gate_id}"));
+        };
+        let command = row.command_text.as_deref().unwrap_or("(no command attached)");
+        Ok(match row.status.as_str() {
+            "pending" => format!(
+                "pending — `{command}` is still awaiting the user's approval. Do not \
+                 re-issue it; the outcome will arrive as an out-of-band message."
+            ),
+            "answered" => {
+                let picked = row.picked_option.as_deref().unwrap_or("");
+                if matches!(outcome_from_picked(picked), ViolationOutcome::Approved) {
+                    format!(
+                        "approved — bot-hq executed `{command}` at approval time; the \
+                         output was delivered as an out-of-band message (check your \
+                         recent messages). Do not re-run it."
+                    )
+                } else {
+                    format!(
+                        "rejected — `{command}` was NOT run. User's answer: \"{picked}\". \
+                         Anything beyond the word itself is the user's reasoning — read it \
+                         before deciding whether to retry."
+                    )
+                }
+            }
+            other => format!("{other} — `{command}` did not run (gate is no longer pending)."),
+        })
     }
 
     /// Resolve the session's working repo, then run the command and format the
@@ -90,6 +153,23 @@ impl SignalingBridge {
         let session = storage.get_session(session_id).await.ok()??;
         session.working_repo_path.map(PathBuf::from)
     }
+}
+
+/// The parked-gate response text. `existing` distinguishes a fresh park from a
+/// dedupe hit on an already-pending identical command.
+fn parked_gate_text(gate_id: &str, command: &str, existing: bool) -> String {
+    let lead = if existing {
+        "action_gate: an identical command is ALREADY parked for approval"
+    } else {
+        "action_gate: parked for the user's approval"
+    };
+    format!(
+        "{lead} (gate_id: {gate_id}).\n\
+         `{command}` runs when the user approves; its output arrives as an \
+         out-of-band message. On reject you get a rejection notice instead. Do \
+         NOT re-issue the command or assume it ran — call gate_status(\"{gate_id}\") \
+         if you need the current state before continuing."
+    )
 }
 
 /// Format combined output roughly the way the agent would have seen it from its
@@ -213,19 +293,22 @@ mod tests {
             repo.path(),
         )
         .await;
-        let mut sub = bridge.subscribe();
-        let b2 = Arc::clone(&bridge);
-        let call = tokio::spawn(async move { b2.action_gate("s1".into(), "brian".into(), cmd).await });
-        let cid = loop {
-            match sub.recv().await.unwrap() {
-                SignalingEvent::PendingChoice(p) => break p.choice_id,
-                _ => continue,
-            }
-        };
+        // Park contract: the call returns immediately with a gate_id.
+        let parked = bridge
+            .action_gate("s1".into(), "brian".into(), cmd)
+            .await
+            .unwrap();
+        assert!(parked.contains("parked"), "got: {parked}");
+        let cid = parked
+            .split("gate_id: ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .unwrap()
+            .to_string();
         bridge.resolve_choice(&cid, "Reject".into()).await.unwrap();
-        let out = call.await.unwrap().unwrap();
-        assert!(out.contains("rejected"), "out: {out}");
         assert!(!marker.exists(), "rejected command must NOT have run");
+        let status = bridge.gate_status(&cid).await.unwrap();
+        assert!(status.starts_with("rejected"), "got: {status}");
     }
 
     #[tokio::test]
@@ -241,19 +324,28 @@ mod tests {
             repo.path(),
         )
         .await;
-        let mut sub = bridge.subscribe();
-        let b2 = Arc::clone(&bridge);
-        let call = tokio::spawn(async move { b2.action_gate("s1".into(), "brian".into(), cmd).await });
-        let cid = loop {
-            match sub.recv().await.unwrap() {
-                SignalingEvent::PendingChoice(p) => break p.choice_id,
-                _ => continue,
+        // Park contract: the call returns immediately with a gate_id.
+        let parked = bridge
+            .action_gate("s1".into(), "brian".into(), cmd)
+            .await
+            .unwrap();
+        assert!(parked.contains("parked"), "got: {parked}");
+        let cid = parked
+            .split("gate_id: ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .unwrap()
+            .to_string();
+        let outcome = bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
+        match outcome {
+            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => {
+                assert!(body.contains("exit 0"), "approve delivers output OOB: {body}")
             }
-        };
-        bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
-        let out = call.await.unwrap().unwrap();
-        assert!(out.contains("exit 0"), "out: {out}");
+            other => panic!("expected OOB delivery, got {other:?}"),
+        }
         assert!(marker.exists(), "approved command should have run");
+        let status = bridge.gate_status(&cid).await.unwrap();
+        assert!(status.starts_with("approved"), "got: {status}");
     }
 
     #[tokio::test]
@@ -449,6 +541,15 @@ mod tests {
             )
             .await
             .unwrap();
+        // Age the row past the stale window (staleness is age-based now).
+        let old = (chrono::Utc::now()
+            - chrono::Duration::seconds(crate::signaling::STALE_GATE_MAX_AGE_SECS + 60))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        sqlx::query("UPDATE session_tray SET asked_at = ? WHERE choice_id = 'cid-stale'")
+            .bind(&old)
+            .execute(storage.pool())
+            .await
+            .unwrap();
 
         // Unconfirmed approve of a stale gate → NeedsConfirm, no execution.
         let outcome = bridge
@@ -506,9 +607,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_waiting_gates_tracks_receiver() {
-        // Fresh while the agent's blocking call is parked; stale the instant its
-        // receiver drops (client timeout). This is the pre-click UI signal.
+    async fn gated_command_parks_immediately_and_dedupes_pending() {
+        // The park contract: a Gate-mode command returns AT ONCE with a gate_id
+        // (no held RPC → nothing to client-timeout), and re-issuing the same
+        // command while the first is pending returns the existing gate instead
+        // of stacking a duplicate Approve/Reject card.
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
         let bridge = bridge_with(
@@ -518,26 +621,141 @@ mod tests {
             repo.path(),
         )
         .await;
-        let mut sub = bridge.subscribe();
-        let b2 = Arc::clone(&bridge);
-        let call =
-            tokio::spawn(async move { b2.action_gate("s1".into(), "brian".into(), "echo hi".into()).await });
-        let cid = loop {
-            match sub.recv().await.unwrap() {
-                SignalingEvent::PendingChoice(p) => break p.choice_id,
-                _ => continue,
+
+        let first = bridge
+            .action_gate("s1".into(), "brian".into(), "echo hi".into())
+            .await
+            .unwrap();
+        assert!(first.contains("parked for the user's approval"), "got: {first}");
+        let gate_id = first
+            .split("gate_id: ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .unwrap()
+            .to_string();
+        assert!(!gate_id.is_empty());
+
+        // gate_status while pending.
+        let status = bridge.gate_status(&gate_id).await.unwrap();
+        assert!(status.starts_with("pending"), "got: {status}");
+
+        // Identical command re-parked → the SAME gate, flagged as existing.
+        let dup = bridge
+            .action_gate("s1".into(), "brian".into(), "echo hi".into())
+            .await
+            .unwrap();
+        assert!(dup.contains("ALREADY parked"), "got: {dup}");
+        assert!(dup.contains(&gate_id), "dedupe returns the original gate id");
+
+        // Approve executes exactly once and delivers output OOB; gate_status
+        // then reports approved.
+        let outcome = bridge
+            .resolve_choice(&gate_id, "Approve".into())
+            .await
+            .unwrap();
+        match outcome {
+            ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } => {
+                assert!(body.contains("exit 0"), "approve carries output: {body}")
             }
-        };
+            other => panic!("expected OOB delivery, got {other:?}"),
+        }
+        let status = bridge.gate_status(&gate_id).await.unwrap();
+        assert!(status.starts_with("approved"), "got: {status}");
+
+        // A rejected re-fire parks FRESH (pending-only dedupe): reject the new
+        // gate and confirm its status carries the user's reasoning.
+        let refire = bridge
+            .action_gate("s1".into(), "brian".into(), "echo hi".into())
+            .await
+            .unwrap();
+        assert!(refire.contains("parked for the user's approval"), "post-resolve re-fire is a fresh gate: {refire}");
+        let refire_id = refire
+            .split("gate_id: ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .unwrap()
+            .to_string();
+        assert_ne!(refire_id, gate_id);
+        bridge
+            .resolve_choice(&refire_id, "Reject — wrong branch, retarget first".into())
+            .await
+            .unwrap();
+        let status = bridge.gate_status(&refire_id).await.unwrap();
+        assert!(status.starts_with("rejected"), "got: {status}");
+        assert!(status.contains("wrong branch"), "reject reason surfaces: {status}");
+    }
+
+    #[tokio::test]
+    async fn fresh_gates_execute_on_plain_approve_only_old_ones_need_confirm() {
+        // Age-based staleness: a just-parked gate approves one-click; a gate
+        // older than STALE_GATE_MAX_AGE_SECS needs the confirm step.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let marker = repo.path().join("fresh.txt");
+        let cmd = format!("touch {}", marker.display());
+        let bridge = bridge_with(
+            data.path(),
+            &[gk("touch", GateMode::Gate)],
+            "s1",
+            repo.path(),
+        )
+        .await;
+
+        let parked = bridge
+            .action_gate("s1".into(), "brian".into(), cmd.clone())
+            .await
+            .unwrap();
+        let gate_id = parked
+            .split("gate_id: ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .unwrap()
+            .to_string();
+
+        // Fresh (just asked): plain approve executes, no confirm round-trip.
+        let outcome = bridge
+            .resolve_choice(&gate_id, "Approve".into())
+            .await
+            .unwrap();
         assert!(
-            bridge.live_waiting_gates().await.contains(&cid),
-            "agent still waiting → fresh"
+            matches!(outcome, ResolveOutcome::AgentReceiverDroppedFellBack { .. }),
+            "fresh gate approves one-click, got {outcome:?}"
         );
-        call.abort();
-        let _ = call.await;
-        tokio::task::yield_now().await;
-        assert!(
-            !bridge.live_waiting_gates().await.contains(&cid),
-            "dropped receiver → no longer fresh (stale)"
-        );
+        assert!(marker.exists(), "fresh approve executes");
+
+        // Age a second gate past the window by rewriting its asked_at.
+        let marker2 = repo.path().join("old.txt");
+        let cmd2 = format!("touch {}", marker2.display());
+        let parked2 = bridge
+            .action_gate("s1".into(), "brian".into(), cmd2.clone())
+            .await
+            .unwrap();
+        let gate_id2 = parked2
+            .split("gate_id: ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .unwrap()
+            .to_string();
+        {
+            let storage = bridge.storage.lock().await.clone().unwrap();
+            let old = (chrono::Utc::now()
+                - chrono::Duration::seconds(crate::signaling::STALE_GATE_MAX_AGE_SECS + 60))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            sqlx::query("UPDATE session_tray SET asked_at = ? WHERE choice_id = ?")
+                .bind(&old)
+                .bind(&gate_id2)
+                .execute(storage.pool())
+                .await
+                .unwrap();
+        }
+        let outcome = bridge
+            .resolve_choice(&gate_id2, "Approve".into())
+            .await
+            .unwrap();
+        match outcome {
+            ResolveOutcome::StaleGateNeedsConfirm { command, .. } => assert_eq!(command, cmd2),
+            other => panic!("old gate needs confirm, got {other:?}"),
+        }
+        assert!(!marker2.exists(), "old gate must not run without confirm");
     }
 }

@@ -87,11 +87,15 @@ impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
 }
 
 impl SessionTrayView {
-    /// Set `stale` for a pending gated-command row: true unless its requesting
-    /// agent is still live-waiting (`live` = `bridge.live_waiting_gates()`).
-    fn with_staleness(mut self, live: &std::collections::HashSet<String>) -> Self {
-        self.stale =
-            self.status == "pending" && self.command_text.is_some() && !live.contains(&self.choice_id);
+    /// Set `stale` for a pending gated-command row: true when the prompt is
+    /// older than the stale-gate window. Age-based, not receiver-based —
+    /// action_gate parks immediately, so no gate ever has a live-waiting
+    /// receiver and the old liveness key marked every pending gate stale.
+    fn with_staleness(mut self) -> Self {
+        use crate::signaling::{gate_age_secs, STALE_GATE_MAX_AGE_SECS};
+        self.stale = self.status == "pending"
+            && self.command_text.is_some()
+            && !gate_age_secs(&self.asked_at).is_some_and(|a| a <= STALE_GATE_MAX_AGE_SECS);
         self
     }
 }
@@ -106,10 +110,9 @@ pub async fn list_session_tray(
     session_id: String,
 ) -> Result<Vec<SessionTrayView>, AppError> {
     let rows = bridge.list_questions_for_session(&session_id).await?;
-    let live = bridge.live_waiting_gates().await;
     Ok(rows
         .into_iter()
-        .map(|e| SessionTrayView::from(e).with_staleness(&live))
+        .map(|e| SessionTrayView::from(e).with_staleness())
         .collect())
 }
 
@@ -124,10 +127,9 @@ pub async fn list_pending_tray(
     bridge: tauri::State<'_, Arc<SignalingBridge>>,
 ) -> Result<Vec<SessionTrayView>, AppError> {
     let rows = bridge.list_pending_tray_open().await?;
-    let live = bridge.live_waiting_gates().await;
     Ok(rows
         .into_iter()
-        .map(|e| SessionTrayView::from(e).with_staleness(&live))
+        .map(|e| SessionTrayView::from(e).with_staleness())
         .collect())
 }
 

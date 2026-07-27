@@ -31,7 +31,7 @@ mod tool_args;
 pub mod web_search;
 mod webview_js;
 
-pub use bridge::{PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent};
+pub use bridge::{gate_age_secs, PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent, STALE_GATE_MAX_AGE_SECS};
 pub use external_server::{start_external_server, ExternalServer};
 
 /// MCP server keys bot-hq strips from a spawned agent's forwarded

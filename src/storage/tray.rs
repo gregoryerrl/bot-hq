@@ -130,6 +130,30 @@ impl Storage {
         Ok(rows)
     }
 
+    /// The choice_id of a still-PENDING gated command with this exact command
+    /// text in this session, if one exists. Backs action_gate's duplicate
+    /// suppression: re-parking an identical command while the first prompt is
+    /// still unanswered stacks confusable Approve/Reject cards (the 2026-07-23
+    /// reset story: two stacked prompts, batch-rejected as a timing accident).
+    /// Pending-only on purpose — a re-fire AFTER a reject is an intentional
+    /// retry and must get a fresh prompt.
+    pub async fn pending_gate_for_command(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT choice_id FROM session_tray \
+             WHERE session_id = ? AND status = 'pending' AND command_text = ? \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(command)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id,)| id))
+    }
+
     /// Look up a tray entry by its `choice_id`. Returns None if absent.
     pub async fn get_tray_entry(&self, choice_id: &str) -> Result<Option<SessionTrayEntry>> {
         let row = sqlx::query_as::<_, SessionTrayEntry>(&format!(

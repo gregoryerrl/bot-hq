@@ -41,6 +41,7 @@ mod findings;
 mod session_docs;
 mod terminal_tools;
 mod tray;
+pub use tray::{gate_age_secs, STALE_GATE_MAX_AGE_SECS};
 mod util;
 
 /// Summary of a single `cl_rescan` pass.

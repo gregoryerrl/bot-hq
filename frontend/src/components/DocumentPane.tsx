@@ -513,12 +513,11 @@ function TrayList({ sessionId }: { sessionId: string }) {
           className="mb-3 rounded border border-error/50 bg-error-container/30 px-3 py-2 text-xs text-on-error-container"
         >
           <p className="font-semibold">
-            ⚠ This command's requesting agent has moved on
+            ⚠ This approval prompt has been waiting a while
           </p>
           <p className="mt-1">
-            Requested {relAgo(staleConfirm.askedAt)} by an agent that has since
-            timed out. The repo state may have changed — running it now could be
-            invalid or destructive.
+            Requested {relAgo(staleConfirm.askedAt)}. The repo state may have
+            changed since — running it now could be invalid or destructive.
           </p>
           <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-surface-container-high px-2 py-1 font-mono text-on-surface-variant">
             {staleConfirm.command}
