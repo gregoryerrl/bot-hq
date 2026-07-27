@@ -14,7 +14,52 @@ fn effective_slug<'a>(slug: &'a str, phase: Option<&'a str>) -> &'a str {
     phase.unwrap_or(slug)
 }
 
+/// Cap on archived versions per phase doc. Past this the oldest slot is left
+/// alone and the newest archive is overwritten — bounded storage beats an
+/// unbounded loop on a doc rewritten hundreds of times.
+const MAX_DOC_ARCHIVES: u32 = 50;
+
 impl SignalingBridge {
+    /// Archive the current body of `slug` as an untagged scratch doc
+    /// (`{slug}@{n}`) before a phase-keyed rewrite replaces it. Phase docs are
+    /// deliberately single-slot (one rewritable doc per IPAV phase), which in
+    /// the 2026-07-27 archive study destroyed a session's primary deliverable:
+    /// a 23-finding audit lived in the `apply` doc and four later batch writes
+    /// erased it. Archives are untagged so they stay out of the IPAV tabs and
+    /// `phase=`-filtered searches, but remain reachable via plain
+    /// `session_doc_search` / `session_doc_read`. Returns the archive slug when
+    /// one was written. Only called for phase-tagged writes — untagged scratch
+    /// docs are caller-managed and rewriting them is routine, not data loss.
+    async fn archive_superseded_doc(
+        storage: &crate::storage::Storage,
+        session_id: &str,
+        slug: &str,
+        new_body: &str,
+    ) -> Option<String> {
+        let existing = storage
+            .session_document_by_slug(session_id, slug)
+            .await
+            .ok()
+            .flatten()?;
+        if existing.body == new_body {
+            return None;
+        }
+        for n in 1..=MAX_DOC_ARCHIVES {
+            let candidate = format!("{slug}@{n}");
+            let occupied = matches!(
+                storage.session_document_by_slug(session_id, &candidate).await,
+                Ok(Some(_))
+            );
+            if !occupied || n == MAX_DOC_ARCHIVES {
+                storage
+                    .upsert_session_document(session_id, &candidate, &existing.body, None)
+                    .await
+                    .ok()?;
+                return Some(candidate);
+            }
+        }
+        None
+    }
     /// Agent-callable: upsert a per-session scratch document. Phase-tagged
     /// writes are keyed by phase (one rewritable doc per IPAV phase — see
     /// `effective_slug`); untagged writes are keyed by `slug`.
@@ -30,8 +75,12 @@ impl SignalingBridge {
             let Some(storage) = storage_guard.as_ref() else {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
+            let key = effective_slug(slug, phase);
+            if phase.is_some() {
+                Self::archive_superseded_doc(storage, session_id, key, body).await;
+            }
             storage
-                .upsert_session_document(session_id, effective_slug(slug, phase), body, phase)
+                .upsert_session_document(session_id, key, body, phase)
                 .await?
         };
         // Notify the UI so the doc pane refreshes without a manual tab-switch.
@@ -62,6 +111,7 @@ impl SignalingBridge {
             let Some(storage) = storage_guard.as_ref() else {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
+            Self::archive_superseded_doc(storage, session_id, &slug, &attributed).await;
             storage
                 .upsert_session_document(session_id, &slug, &attributed, Some(phase))
                 .await?
@@ -166,5 +216,83 @@ mod tests {
         assert!(eyes.body.contains("### EYES findings (Rain)"));
         let plan = docs.iter().find(|d| d.slug == "plan").unwrap();
         assert_eq!(plan.body, "brian v2", "Brian's doc updated, not clobbered by Rain");
+    }
+
+    #[tokio::test]
+    async fn phase_doc_rewrite_archives_superseded_body() {
+        // 2026-07-27 archive study: four batch rewrites of the `apply` doc
+        // destroyed a 23-finding audit. A phase-keyed rewrite must archive the
+        // old body as an untagged `{slug}@{n}` scratch doc first.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        bridge
+            .session_doc_write("s1", "apply", "the 23-finding audit", Some("apply"))
+            .await
+            .unwrap();
+        bridge
+            .session_doc_write("s1", "apply", "batch B changelog", Some("apply"))
+            .await
+            .unwrap();
+        bridge
+            .session_doc_write("s1", "apply", "batch C changelog", Some("apply"))
+            .await
+            .unwrap();
+
+        let v1 = bridge.session_doc_read("s1", "apply@1").await.unwrap();
+        let v2 = bridge.session_doc_read("s1", "apply@2").await.unwrap();
+        let head = bridge.session_doc_read("s1", "apply").await.unwrap().unwrap();
+        assert_eq!(v1.expect("first archive").body, "the 23-finding audit");
+        assert_eq!(v2.expect("second archive").body, "batch B changelog");
+        assert_eq!(head.body, "batch C changelog");
+
+        // Archives are untagged: invisible to phase-filtered search (IPAV tabs)…
+        let phase_docs = bridge.session_doc_search("s1", None, Some("apply")).await.unwrap();
+        assert!(
+            phase_docs.iter().all(|d| !d.slug.contains('@')),
+            "archives must not surface in phase-filtered searches"
+        );
+        // …but reachable by plain search.
+        let all = bridge.session_doc_search("s1", Some("apply@"), None).await.unwrap();
+        assert_eq!(all.len(), 2, "both archives discoverable via plain search");
+    }
+
+    #[tokio::test]
+    async fn same_body_rewrite_and_untagged_docs_do_not_archive() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        // Identical-body rewrite: no archive row.
+        bridge.session_doc_write("s1", "plan", "same", Some("plan")).await.unwrap();
+        bridge.session_doc_write("s1", "plan", "same", Some("plan")).await.unwrap();
+        assert!(bridge.session_doc_read("s1", "plan@1").await.unwrap().is_none());
+
+        // Untagged scratch docs are caller-managed: rewriting is routine, not loss.
+        bridge.session_doc_write("s1", "scratch", "v1", None).await.unwrap();
+        bridge.session_doc_write("s1", "scratch", "v2", None).await.unwrap();
+        assert!(bridge.session_doc_read("s1", "scratch@1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn eyes_phase_doc_rewrite_archives_too() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        bridge.session_doc_write_eyes("s1", "verify", "verdict v1").await.unwrap();
+        bridge.session_doc_write_eyes("s1", "verify", "verdict v2").await.unwrap();
+
+        let archived = bridge
+            .session_doc_read("s1", "verify-eyes@1")
+            .await
+            .unwrap()
+            .expect("superseded eyes verdict archived");
+        assert!(archived.body.contains("verdict v1"));
+        assert!(archived.phase.is_none(), "archive is untagged");
     }
 }
