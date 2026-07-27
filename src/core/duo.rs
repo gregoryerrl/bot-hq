@@ -131,6 +131,42 @@ fn is_peer_ack_tool(name: &str) -> bool {
     name == "peer_ack" || name.ends_with("__peer_ack")
 }
 
+/// Provider quota/limit phrases, matched case-insensitively against each text
+/// chunk. Deliberately a plain substring net over ALL provider eras: the
+/// archive study found these render as ordinary agent speech — Brian sat dead
+/// 3h13m across two quota deaths while the session looked merely quiet, and
+/// the reviewer kept reviewing into the void. Native providers classify quota
+/// HTTP statuses as non-transient (is_transient_api_error), which surfaces the
+/// error body as text through this same pump — so one net covers both the CLI
+/// and native paths. Misclassification cost is a spurious tray notice.
+const PROVIDER_LIMIT_PATTERNS: &[&str] = &[
+    "out of usage credits",
+    "hit your session limit",
+    "usage limit reached",
+    "insufficient balance",
+    "payment required",
+    "quota exceeded",
+    "credit balance is too low",
+];
+
+/// The first line of `text` containing a provider-limit phrase, if any.
+fn detect_provider_limit(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    if !PROVIDER_LIMIT_PATTERNS.iter().any(|p| lower.contains(p)) {
+        return None;
+    }
+    text.lines()
+        .find(|l| {
+            let ll = l.to_lowercase();
+            PROVIDER_LIMIT_PATTERNS.iter().any(|p| ll.contains(p))
+        })
+        .map(|l| l.trim().to_string())
+}
+
+/// Re-notification window for a single limit incident: a quota death can emit
+/// its message on several consecutive nudged turns; one notice per window.
+const LIMIT_NOTICE_DEDUPE: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// Pump events from one agent. Each text chunk is persisted; the peer-forward
 /// path depends on the current IPAV phase. `TurnComplete` flushes pending
 /// buffered text immediately regardless of phase.
@@ -153,6 +189,11 @@ pub async fn pump_agent(
     // match the clearing ToolResult by id — claude-code can emit parallel tool
     // calls, so clearing on ANY result would race a still-running commit.
     let mut atomic_tool_id: Option<String> = None;
+    // Provider-limit detection: the first matching line seen this turn, and the
+    // last time a notice fired (per-incarnation dedupe — one notice per
+    // incident, not one per nudged retry).
+    let mut limit_line: Option<String> = None;
+    let mut last_limit_notice: Option<std::time::Instant> = None;
 
     loop {
         let Some(event) = event_rx.recv().await else { break };
@@ -170,6 +211,9 @@ pub async fn pump_agent(
                 {
                     Ok(id) => cfg.notify_persisted(id),
                     Err(e) => warn!(?e, "persisting text"),
+                }
+                if limit_line.is_none() {
+                    limit_line = detect_provider_limit(&text);
                 }
 
                 buffer.push_str(&text);
@@ -289,6 +333,53 @@ pub async fn pump_agent(
                         c.used_tokens,
                         c.context_window,
                     );
+                }
+                // Provider limit hit this turn: surface it as a real state
+                // instead of letting it pass as agent speech. Peer notice FIRST
+                // (the awaiting flag set below suppresses later forwards — this
+                // one wake is deliberate, so the reviewer stops reviewing into
+                // the void), then health + a tray halt so the user sees a
+                // needs-input signal instead of a merely-quiet session.
+                if let Some(line) = limit_line.take() {
+                    let deduped = last_limit_notice
+                        .is_some_and(|t| t.elapsed() < LIMIT_NOTICE_DEDUPE);
+                    if !deduped {
+                        last_limit_notice = Some(std::time::Instant::now());
+                        warn!(agent = ?cfg.author, %line, "provider limit detected; pausing session on the user");
+                        if let Some(router_tx) = &cfg.router_tx {
+                            let _ = router_tx
+                                .send(RouterCommand::Forward {
+                                    from: cfg.author,
+                                    body: format!(
+                                        "⚠ [bot-hq] {} hit a provider limit and is paused: \
+                                         \"{line}\". Do not expect replies from them, and do \
+                                         not take over their work — the session waits on the \
+                                         user to resume.",
+                                        cfg.author.as_str()
+                                    ),
+                                    peer_ack: false,
+                                })
+                                .await;
+                        }
+                        if let Some(bridge) = &cfg.bridge {
+                            bridge.notify_agent_health(
+                                cfg.session_id.to_string(),
+                                cfg.author.as_str(),
+                                "stalled",
+                            );
+                            bridge
+                                .mark_awaiting_user(
+                                    cfg.session_id.to_string(),
+                                    cfg.author.as_str().to_string(),
+                                    format!(
+                                        "⚠ Provider limit: \"{line}\" — the agent can't \
+                                         continue until it resets. Send any message (e.g. \
+                                         'proceed') once it's resumable."
+                                    ),
+                                )
+                                .await;
+                        }
+                    }
                 }
                 // The router owns self-idle on the forward path (it sequences
                 // peer-busy BEFORE this agent's idle → no momentary Idle flicker).
@@ -1072,4 +1163,92 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
     }
+
+    #[test]
+    fn provider_limit_detection_matches_known_shapes() {
+        // The two archive incidents, verbatim shapes.
+        assert_eq!(
+            detect_provider_limit(
+                "You're out of usage credits. Run /usage-credits to keep using Fable 5."
+            )
+            .as_deref(),
+            Some("You're out of usage credits. Run /usage-credits to keep using Fable 5.")
+        );
+        assert!(detect_provider_limit(
+            "You've hit your session limit \u{b7} resets 7pm (Asia/Manila)"
+        )
+        .is_some());
+        // Native-era provider bodies.
+        assert!(detect_provider_limit("Error: 402 Insufficient Balance").is_some());
+        // Ordinary prose must not trip it.
+        assert_eq!(detect_provider_limit("the rate limiter test now passes"), None);
+        assert_eq!(detect_provider_limit("credits to the reviewer for the catch"), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_limit_turn_notifies_peer_once_and_halts() {
+        // A quota death must produce: one peer notice (not one per retry), the
+        // stalled health mark, and an awaiting-user halt row — instead of
+        // rendering as ordinary speech in a merely-quiet session (3h13m dead in
+        // the archive study).
+        let (storage, state) = setup().await;
+        let (mut cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        cfg.bridge = Some(Arc::clone(&bridge));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        for _ in 0..2 {
+            ev_tx
+                .send(AgentEvent::Text(
+                    "You're out of usage credits. Run /usage-credits to continue.".into(),
+                ))
+                .await
+                .unwrap();
+            ev_tx
+                .send(AgentEvent::TurnComplete {
+                    stop_reason: None,
+                    subtype: None,
+                    is_error: false,
+                    api_error_status: None,
+                    context: None,
+                })
+                .await
+                .unwrap();
+        }
+        // Assert health BEFORE dropping the channel: the pump's exit path
+        // (channel closed = process death) legitimately overwrites health with
+        // "dead", which in this test would mask the stalled mark. Poll until
+        // the async limit handling lands.
+        for _ in 0..100 {
+            if bridge.current_agent_health("s1", "brian").as_deref() == Some("stalled") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            bridge.current_agent_health("s1", "brian").as_deref(),
+            Some("stalled")
+        );
+        drop(ev_tx);
+        task.await.unwrap();
+
+        // Exactly ONE peer notice despite two limit turns (dedupe window).
+        let mut notices = 0;
+        while let Some((from, body, _)) = next_forward(&mut route_rx) {
+            if body.contains("hit a provider limit") {
+                assert_eq!(from, Author::Brian);
+                notices += 1;
+            }
+        }
+        assert_eq!(notices, 1, "one notice per incident, not per retry");
+        let tray = storage.tray_entries_for_session("s1").await.unwrap();
+        assert!(
+            tray.iter()
+                .any(|q| q.status == "pending" && q.prompt.contains("Provider limit")),
+            "tray carries the provider-limit halt: {tray:?}"
+        );
+    }
+
 }
