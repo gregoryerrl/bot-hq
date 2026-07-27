@@ -223,9 +223,11 @@ pub struct LoopConfig {
     /// Where this agent's conversation is persisted, so an app restart resumes
     /// instead of silently starting blank. `None` disables persistence.
     pub history_path: Option<PathBuf>,
-    /// Which built-ins this agent may use. A ROLE decision — EYES reviews, so
-    /// EYES gets no write tools.
-    pub tool_policy: tools::ToolPolicy,
+    /// What this agent is FOR. The single source for both the built-in tool
+    /// filter and the command policy — they used to be answered separately and
+    /// disagreed (`CommandPolicy::for_agent` was dead while `run_command`
+    /// derived its policy from the tool policy).
+    pub role: crate::agents::AgentRole,
     /// Transient-API-error retry budget and backoff. The native equivalent of
     /// what `spawn_supervised_agent` gives a CLI agent — see [`run_turns`].
     pub retry: RetryPolicy,
@@ -671,7 +673,13 @@ async fn exec_calls(
 ) -> Vec<ToolOutcome> {
     futures::future::join_all(calls.iter().map(|call| async move {
         if tools::handles(&call.name) {
-            tools::exec(call, cfg.root.as_deref(), cfg.tool_policy).await
+            tools::exec(
+                call,
+                cfg.root.as_deref(),
+                cfg.role.tool_policy(),
+                cfg.role.command_policy(),
+            )
+            .await
         } else if let Some(mcp) = mcp {
             mcp.call_tool(&call.id, &call.name, call.input.clone()).await
         } else {
@@ -932,8 +940,13 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         system_prompt.push_str(NO_READ_ROOT_ADDENDUM);
     }
 
-    let tool_policy = tools::ToolPolicy::for_agent(&cfg.agent_name);
-    let mut tool_defs = tools::tool_defs_for(root.as_deref(), tool_policy);
+    // `resolve_agent_kind` already refused to spawn a native agent without a
+    // role, so this cannot be `None` in practice — but default to EYES rather
+    // than unwrapping, since EYES is the read-only end and the wrong direction
+    // to be wrong in is the permissive one.
+    let role = crate::agents::AgentRole::for_agent(&cfg.agent_name)
+        .unwrap_or(crate::agents::AgentRole::Eyes);
+    let mut tool_defs = tools::tool_defs_for(root.as_deref(), role.tool_policy());
     if let Some(mcp) = mcp.as_ref() {
         tool_defs.extend(mcp_tools_to_anthropic(&mcp.list_tools().await?));
     }
@@ -966,9 +979,9 @@ pub async fn spawn_native_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
                 &cfg.session_id,
                 &name,
             )),
+            role,
             // Same policy the CLI supervisor uses, so a 529 costs the same
             // patience on either path.
-            tool_policy,
             retry: RetryPolicy::default(),
             system_prompt,
             root,
@@ -1060,7 +1073,7 @@ mod tests {
                 session_id: "s-test".into(),
                 accounting: None,
                 history_path: None,
-                tool_policy: tools::ToolPolicy::ReadOnly,
+                role: crate::agents::AgentRole::Eyes,
                 // No retry budget: this harness serves tests about everything
                 // EXCEPT retry, and a real budget would make a transient-status
                 // fixture sleep through the backoff schedule. Retry has its own
@@ -1448,7 +1461,7 @@ mod tests {
                 session_id: "s-test".into(),
                 accounting: None,
                 history_path: None,
-                tool_policy: tools::ToolPolicy::ReadOnly,
+                role: crate::agents::AgentRole::Eyes,
                 retry: RetryPolicy::default(),
                 system_prompt: "sys".into(),
                 root: Some(root),
@@ -1514,7 +1527,7 @@ mod tests {
                 profile: ProviderProfile::for_provider("anthropic"),
                 accounting,
                 history_path,
-                tool_policy: tools::ToolPolicy::ReadOnly,
+                role: crate::agents::AgentRole::Eyes,
                 retry,
                 system_prompt: "sys".into(),
                 root: Some(root),

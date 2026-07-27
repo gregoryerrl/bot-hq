@@ -10,10 +10,12 @@ pub mod llm_proxy;
 pub mod native;
 pub mod prompts;
 pub mod protocol;
+pub mod roles;
 pub mod spawn;
 
 pub use general_rules::GENERAL_RULES;
 pub use prompts::role_for;
+pub use roles::AgentRole;
 pub use protocol::{OutgoingUserMessage, StreamEvent};
 pub use spawn::{
     spawn_agent, spawn_supervised_agent, AgentEvent, AgentHandle, AgentHealth, RetryPolicy,

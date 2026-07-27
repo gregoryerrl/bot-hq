@@ -34,6 +34,10 @@ bot-hq.db
 /phase-*-audit.csv
 /docs/commit-message-draft.md
 
+# Sentinel written by `cargo run --example refusal_probe`. It cleans up after
+# itself on every exit path; this is the belt-and-braces for a crash in between.
+/probe-delete-me.txt
+
 # Test-run scratch (browser snapshots, screenshots, etc.)
 /tmp/
 

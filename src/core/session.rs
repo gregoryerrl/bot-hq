@@ -850,8 +850,14 @@ pub(crate) enum AgentKind {
 /// skills, plugins and full built-in tool surface, none of which the native path
 /// implements. A `native` model assigned to Brian is therefore a
 /// misconfiguration — fall back and say so rather than fail the spawn.
+///
+/// Asks [`AgentRole`] rather than testing `!= "brian"`. The deny-list read the
+/// wrong way round: an unrecognised agent name satisfied it and was put on the
+/// native loop. An unknown name now has no role and stays on the CLI.
 pub(crate) fn resolve_agent_kind(agent_name: &str, native: bool) -> AgentKind {
-    if native && agent_name != "brian" {
+    let may_run_native = crate::agents::AgentRole::for_agent(agent_name)
+        .is_some_and(|r| r.may_run_native());
+    if native && may_run_native {
         AgentKind::Native
     } else {
         AgentKind::ClaudeCode
@@ -1193,6 +1199,22 @@ mod tests {
     fn an_unflagged_model_stays_on_claude_code() {
         assert_eq!(resolve_agent_kind("rain", false), AgentKind::ClaudeCode);
         assert_eq!(resolve_agent_kind("brian", false), AgentKind::ClaudeCode);
+    }
+
+    #[test]
+    fn an_unrecognised_agent_never_reaches_the_native_loop() {
+        // The old check was `native && agent_name != "brian"` — a deny-list, so
+        // any name that wasn't Brian's satisfied it. Asking for a ROLE fails
+        // closed instead.
+        for name in ["emma", "", "Rain", "root"] {
+            assert_eq!(
+                resolve_agent_kind(name, true),
+                AgentKind::ClaudeCode,
+                "{name} was put on the native loop"
+            );
+        }
+        // …and the agent that IS allowed still is.
+        assert_eq!(resolve_agent_kind("rain", true), AgentKind::Native);
     }
 
     #[tokio::test]

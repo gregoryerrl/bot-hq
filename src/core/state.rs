@@ -511,7 +511,7 @@ impl AppState {
         // which is meaningless once the session is closed — and without this the
         // directory accumulates one file per native session forever, each holding
         // the full transcript.
-        for agent in ["brian", "rain"] {
+        for agent in crate::agents::AgentRole::NAMES {
             crate::agents::native::history::clear(&crate::agents::native::history::history_path(
                 &self.paths.data_dir,
                 id,

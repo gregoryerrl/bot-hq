@@ -291,6 +291,50 @@ async fn list_sessions_includes_created_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_models_exposes_the_native_flag_and_redacts_the_token() {
+    // The driver could pass `brian_model_id` / `rain_model_id` but had no API to
+    // discover an id, so it had to hardcode a UUID — and a wrong one fell back
+    // silently. It also could not tell which models are native.
+    let env = setup().await;
+    env._core
+        .storage
+        .upsert_model(&bot_hq::storage::Model {
+            id: "m-ds".into(),
+            display_name: "DeepSeek V4 Pro".into(),
+            provider: "deepseek".into(),
+            model_name: "deepseek-v4-pro".into(),
+            base_url: Some("https://api.deepseek.com/anthropic".into()),
+            auth_token: Some("sk-super-secret-token".into()),
+            created_at: String::new(),
+            updated_at: String::new(),
+            native: true,
+            context_window: Some(1_000_000),
+        })
+        .await
+        .unwrap();
+
+    let h = auth_header(&env.token);
+    let (status, body) = http_post(
+        env.addr(),
+        "/mcp",
+        &[(h.0, &h.1)],
+        r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"list_models","arguments":{}}}"#,
+    )
+    .await;
+
+    assert!(status.contains("200"), "got: {status}");
+    assert!(body.contains(r#"\"id\":\"m-ds\""#), "body: {body}");
+    assert!(body.contains(r#"\"native\":true"#), "body: {body}");
+    assert!(body.contains(r#"\"context_window\":1000000"#), "body: {body}");
+    // The load-bearing assertion: a discovery tool must not hand a driver every
+    // gateway credential.
+    assert!(
+        !body.contains("sk-super-secret-token"),
+        "the auth token leaked: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_session_messages_for_session() {
     let env = setup().await;
     env._core

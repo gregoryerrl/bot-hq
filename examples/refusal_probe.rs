@@ -8,11 +8,30 @@
 //!
 //! Exits non-zero if any probe was ALLOWED, or if the sentinel file was modified.
 
+use bot_hq::agents::native::command::CommandPolicy;
 use bot_hq::agents::native::tools::{self, ToolPolicy};
 use bot_hq::agents::native::wire::ToolCall;
 use serde_json::json;
 
+/// The sentinel MUST live inside the read root: its job is to prove a refused
+/// `write_file` / `rm` did not touch a file the agent could otherwise reach.
+/// Moving it to a temp dir would make every probe fail for the wrong reason —
+/// path-escape rather than the layer under test — and the probe would pass
+/// while testing nothing.
 const SENTINEL: &str = "probe-delete-me.txt";
+
+/// Leave the tree as we found it, on EVERY exit path.
+///
+/// The probe used to create this file in the repo root and never remove it, so
+/// a run left untracked debris behind — which then shows up in the `git status`
+/// EYES uses to re-sync, as review noise. Only removes a file this run created:
+/// a pre-existing one belongs to whoever put it there.
+fn finish(code: i32, sentinel: &std::path::Path, created_here: bool) -> ! {
+    if created_here {
+        let _ = std::fs::remove_file(sentinel);
+    }
+    std::process::exit(code)
+}
 
 struct Probe {
     tool: &'static str,
@@ -25,7 +44,8 @@ async fn main() -> anyhow::Result<()> {
     let root = std::env::current_dir()?.canonicalize()?;
     let sentinel_path = root.join(SENTINEL);
     let sentinel_before = std::fs::read(&sentinel_path).ok();
-    if sentinel_before.is_none() {
+    let created_here = sentinel_before.is_none();
+    if created_here {
         std::fs::write(&sentinel_path, "sentinel for the B5 refusal probe\n")?;
     }
     let sentinel_before = std::fs::read(&sentinel_path)?;
@@ -111,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
             name: p.tool.to_string(),
             input: p.input.clone(),
         };
-        let out = tools::exec(&call, Some(&root), ToolPolicy::ReadOnly).await;
+        let out = tools::exec(&call, Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         let verdict = if out.is_error { "REFUSED" } else { "ALLOWED" };
         if !out.is_error {
             allowed.push(format!("{} {}", p.tool, p.input));
@@ -130,7 +150,13 @@ async fn main() -> anyhow::Result<()> {
         name: "run_command".into(),
         input: json!({ "command": "git log --oneline -1" }),
     };
-    let c = tools::exec(&control, Some(&root), ToolPolicy::ReadOnly).await;
+    let c = tools::exec(
+        &control,
+        Some(&root),
+        ToolPolicy::ReadOnly,
+        CommandPolicy::ReadOnly,
+    )
+    .await;
     println!(
         "[{}] control: git log --oneline -1\n          says  : {}\n",
         if c.is_error { "BROKEN" } else { "ALLOWED" },
@@ -146,16 +172,19 @@ async fn main() -> anyhow::Result<()> {
         for a in &allowed {
             eprintln!("  {a}");
         }
-        std::process::exit(1);
+        finish(1, &sentinel_path, created_here);
     }
     if !sentinel_ok {
         eprintln!("\nFAIL — sentinel was modified");
-        std::process::exit(1);
+        // Deliberately NOT cleaned up: the sentinel was written by something
+        // that should not have been able to touch it, and that evidence is the
+        // whole point of this failure.
+        finish(1, &sentinel_path, false);
     }
     if c.is_error {
         eprintln!("\nFAIL — the control command was refused; refusals may be blanket");
-        std::process::exit(1);
+        finish(1, &sentinel_path, created_here);
     }
     println!("\nAll {} probes refused; control still works.", probes.len());
-    Ok(())
+    finish(0, &sentinel_path, created_here);
 }

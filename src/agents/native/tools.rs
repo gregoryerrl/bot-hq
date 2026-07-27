@@ -45,16 +45,15 @@ pub enum ToolPolicy {
 }
 
 impl ToolPolicy {
-    /// The policy for `agent_name`.
+    /// The policy for `agent_name`, via the one place a name becomes
+    /// capabilities ([`AgentRole`](crate::agents::AgentRole)).
     ///
-    /// EYES is read-only because EYES reviews. Anything else also gets read-only:
-    /// no native HANDS exists, and defaulting an unrecognised role to write access
-    /// is the wrong direction to be wrong in.
+    /// An unrecognised name gets read-only — it has no role, so it gets the
+    /// most conservative answer rather than an inherited default.
     pub fn for_agent(agent_name: &str) -> Self {
-        match agent_name {
-            "rain" => Self::ReadOnly,
-            _ => Self::ReadOnly,
-        }
+        crate::agents::AgentRole::for_agent(agent_name)
+            .map(|r| r.tool_policy())
+            .unwrap_or(Self::ReadOnly)
     }
 
     fn allows(self, access: Access) -> bool {
@@ -272,7 +271,12 @@ pub fn resolve_in_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
 /// it reads cleanly), `.local/bot-hq.db` with every `models.auth_token` in
 /// plaintext, and the whole Context Library. A read gate aimed at the secrets
 /// is worse than no read gate, because it looks like protection.
-pub async fn exec(call: &ToolCall, root: Option<&Path>, policy: ToolPolicy) -> ToolOutcome {
+pub async fn exec(
+    call: &ToolCall,
+    root: Option<&Path>,
+    policy: ToolPolicy,
+    commands: CommandPolicy,
+) -> ToolOutcome {
     let outcome = |content: String, is_error: bool| ToolOutcome {
         tool_use_id: call.id.clone(),
         content,
@@ -305,7 +309,7 @@ pub async fn exec(call: &ToolCall, root: Option<&Path>, policy: ToolPolicy) -> T
         );
     };
 
-    match run(call, root, policy).await {
+    match run(call, root, commands).await {
         Ok(text) => outcome(text, false),
         Err(msg) => outcome(msg, true),
     }
@@ -394,7 +398,7 @@ fn str_arg<'a>(call: &'a ToolCall, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("missing required string field {key:?}"))
 }
 
-async fn run(call: &ToolCall, root: &Path, policy: ToolPolicy) -> Result<String, String> {
+async fn run(call: &ToolCall, root: &Path, commands: CommandPolicy) -> Result<String, String> {
     match call.name.as_str() {
         // The three read tools are synchronous filesystem work — a full-tree
         // walk plus up to MAX_GLOB_HITS whole-file reads for `search_files` —
@@ -411,14 +415,12 @@ async fn run(call: &ToolCall, root: &Path, policy: ToolPolicy) -> Result<String,
                 .map_err(|e| format!("tool task failed: {e}"))?
         }
 
-        "run_command" => {
-            let cmd = str_arg(call, "command")?;
-            let cp = match policy {
-                ToolPolicy::ReadOnly => CommandPolicy::ReadOnly,
-                ToolPolicy::ReadWrite => CommandPolicy::ReadOnly,
-            };
-            command::run(cmd, root, cp).await
-        }
+        // The agent's OWN command policy, not one derived from its tool policy.
+        // The derivation had two identical arms, so an agent `CommandPolicy`
+        // said must get no shell (an unrecognised role) was handed a read-only
+        // one — and `CommandPolicy::for_agent`'s tests asserted the opposite of
+        // what shipped.
+        "run_command" => command::run(str_arg(call, "command")?, root, commands).await,
 
         "write_file" => {
             let target = root.join(str_arg(call, "path")?);
@@ -734,7 +736,7 @@ mod tests {
     #[tokio::test]
     async     fn reads_a_file_inside_the_root() {
         let (_d, root) = root_with_file("a.txt", "hello");
-        let out = exec(&call("read_file", "a.txt"), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&call("read_file", "a.txt"), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(!out.is_error);
         assert!(out.content.contains("hello"));
         assert_eq!(out.tool_use_id, "tu_1");
@@ -765,7 +767,7 @@ mod tests {
         // them) and got the WHOLE file back — 85,381 bytes of spawn.rs for an
         // 80-line request, ~20K tokens to deliver about 1K.
         let (_d, root) = numbered_root();
-        let out = exec(&windowed("big.txt", Some(20), Some(3)), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&windowed("big.txt", Some(20), Some(3)), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
 
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("line 20"), "{}", out.content);
@@ -778,7 +780,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_numbers_lines_so_search_hits_are_referenceable() {
         let (_d, root) = numbered_root();
-        let out = exec(&windowed("big.txt", Some(7), Some(1)), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&windowed("big.txt", Some(7), Some(1)), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.content.contains("7\tline 7"), "{}", out.content);
     }
 
@@ -789,7 +791,7 @@ mod tests {
         let mut c = windowed("big.txt", None, None);
         c.input["offset"] = json!("20");
         c.input["limit"] = json!("2");
-        let out = exec(&c, Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&c, Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.content.contains("line 20"));
         assert!(!out.content.contains("line 22"));
     }
@@ -797,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_limit_past_the_end_is_not_an_error() {
         let (_d, root) = numbered_root();
-        let out = exec(&windowed("big.txt", Some(99), Some(500)), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&windowed("big.txt", Some(99), Some(500)), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("line 100"));
     }
@@ -805,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_offset_past_the_end_says_so() {
         let (_d, root) = numbered_root();
-        let out = exec(&windowed("big.txt", Some(500), None), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&windowed("big.txt", Some(500), None), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.is_error);
         assert!(out.content.contains("past the end"));
     }
@@ -813,7 +815,7 @@ mod tests {
     #[tokio::test]
     async fn read_file_without_a_window_still_returns_everything() {
         let (_d, root) = numbered_root();
-        let out = exec(&windowed("big.txt", None, None), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&windowed("big.txt", None, None), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.content.contains("line 1\n"));
         assert!(out.content.contains("line 100"));
     }
@@ -833,7 +835,7 @@ mod tests {
     #[tokio::test]
     async     fn refuses_a_dotdot_escape() {
         let (_d, root) = root_with_file("a.txt", "hello");
-        let out = exec(&call("read_file", "../../etc/hosts"), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&call("read_file", "../../etc/hosts"), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.is_error, "`..` must not escape the root");
         // The message must name the SCOPE, not the filesystem. "No such file or
         // directory" invites a retry with another path; "above the repository root"
@@ -865,7 +867,7 @@ mod tests {
         // The original bug only surfaced because `../Cargo.toml` happened not to
         // exist. Point at something that definitely does.
         let (_d, root) = root_with_file("a.txt", "hello");
-        let out = exec(&call("read_file", "../"), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&call("read_file", "../"), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.is_error);
         assert!(out.content.contains("above the repository root"), "{}", out.content);
     }
@@ -875,7 +877,7 @@ mod tests {
         // `Path::join` lets an absolute component replace the base outright —
         // the canonicalized-prefix check is what catches it.
         let (_d, root) = root_with_file("a.txt", "hello");
-        let out = exec(&call("read_file", "/etc/hosts"), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&call("read_file", "/etc/hosts"), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.is_error, "an absolute path must not replace the root");
         assert!(out.content.contains("outside the repository root"), "{}", out.content);
     }
@@ -891,7 +893,7 @@ mod tests {
         fs::write(&secret, "classified").unwrap();
         std::os::unix::fs::symlink(&secret, dir.path().join("link.txt")).unwrap();
 
-        let out = exec(&call("read_file", "link.txt"), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&call("read_file", "link.txt"), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.is_error, "a symlink out of the root must be refused");
         assert!(!out.content.contains("classified"));
     }
@@ -907,6 +909,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
         assert!(out.is_error);
@@ -918,7 +921,7 @@ mod tests {
         // The B4 defect: a repo-less session used to fall back to the process
         // cwd, which is bot-hq's own data dir — `.local/mcp-token`,
         // `bot-hq.db` with every auth token, and the whole Context Library.
-        let out = exec(&call("read_file", "Cargo.toml"), None, ToolPolicy::ReadOnly).await;
+        let out = exec(&call("read_file", "Cargo.toml"), None, ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.is_error);
         assert!(out.content.contains("no working repository"));
     }
@@ -947,7 +950,7 @@ mod tests {
         fs::write(dir.path().join("big.txt"), body).unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        let out = exec(&call("read_file", "big.txt"), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&call("read_file", "big.txt"), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("truncated"), "truncation must be visible");
         assert!(
@@ -963,7 +966,7 @@ mod tests {
         fs::write(dir.path().join("bin"), [0xff, 0xfe, 0x00]).unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        let out = exec(&call("read_file", "bin"), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&call("read_file", "bin"), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.is_error);
         assert!(out.content.contains("UTF-8"));
     }
@@ -973,7 +976,7 @@ mod tests {
         let (_d, root) = root_with_file("a.txt", "hello");
         // A name that is not a built-in at all. `write_file` IS one — it's refused
         // by role, which is a different message and a different test.
-        let out = exec(&call("nuke_everything", "a.txt"), Some(&root), ToolPolicy::ReadOnly).await;
+        let out = exec(&call("nuke_everything", "a.txt"), Some(&root), ToolPolicy::ReadOnly, CommandPolicy::ReadOnly).await;
         assert!(out.is_error);
         assert!(out.content.contains("unknown tool"));
     }
@@ -1018,6 +1021,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1039,6 +1043,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadWrite,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1057,6 +1062,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadWrite,
+            CommandPolicy::ReadOnly,
         )
         .await;
         assert!(out.is_error);
@@ -1068,6 +1074,59 @@ mod tests {
         for agent in ["rain", "brian", "unknown"] {
             assert_eq!(ToolPolicy::for_agent(agent), ToolPolicy::ReadOnly);
         }
+    }
+
+    #[tokio::test]
+    async fn run_command_obeys_the_agents_own_command_policy() {
+        // The contradiction finding 11 named: `CommandPolicy::for_agent` said an
+        // agent without a role gets NO shell and its tests asserted that, while
+        // production derived the command policy from `ToolPolicy` through two
+        // identical arms and handed that agent a read-only one. `exec` now takes
+        // the command policy directly, so `None` actually means none.
+        let (_d, root) = root_with_file("a.txt", "hello");
+        let out = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "run_command".into(),
+                input: json!({ "command": "cat a.txt" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadOnly,
+            CommandPolicy::None,
+        )
+        .await;
+
+        assert!(out.is_error, "CommandPolicy::None must refuse: {}", out.content);
+        assert!(!out.content.contains("hello"), "the command ran anyway");
+
+        // …and the same call under the EYES policy still works, so this is a
+        // gate rather than a blanket refusal.
+        let ok = exec(
+            &ToolCall {
+                id: "t".into(),
+                name: "run_command".into(),
+                input: json!({ "command": "cat a.txt" }),
+            },
+            Some(&root),
+            ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
+        )
+        .await;
+        assert!(!ok.is_error, "{}", ok.content);
+        assert!(ok.content.contains("hello"));
+    }
+
+    #[test]
+    fn the_two_policy_sources_now_agree() {
+        // They disagreed for every agent without a role: `CommandPolicy` said
+        // None, the shipped derivation said ReadOnly.
+        for agent in ["rain", "brian", "nobody"] {
+            let via_role = crate::agents::AgentRole::for_agent(agent)
+                .map(|r| r.command_policy())
+                .unwrap_or(CommandPolicy::None);
+            assert_eq!(CommandPolicy::for_agent(agent), via_role, "{agent}");
+        }
+        assert_eq!(CommandPolicy::for_agent("nobody"), CommandPolicy::None);
     }
 
     // ---- search_files / list_files ---------------------------------------
@@ -1120,6 +1179,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1169,6 +1229,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1200,6 +1261,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1231,6 +1293,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1264,6 +1327,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1295,6 +1359,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1327,6 +1392,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadWrite,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1356,6 +1422,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadWrite,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1377,6 +1444,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
 
@@ -1396,6 +1464,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
         assert!(out.is_error);
@@ -1418,6 +1487,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
         assert!(!hit.is_error, "{}", hit.content);
@@ -1433,6 +1503,7 @@ mod tests {
                 },
                 Some(&root),
                 ToolPolicy::ReadOnly,
+                CommandPolicy::ReadOnly,
             )
             .await;
             assert!(out.is_error, "glob {bad} should be refused");
@@ -1450,6 +1521,7 @@ mod tests {
             },
             Some(&root),
             ToolPolicy::ReadOnly,
+            CommandPolicy::ReadOnly,
         )
         .await;
         assert!(out.is_error);

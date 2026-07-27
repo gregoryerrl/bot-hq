@@ -117,14 +117,19 @@ pub enum CommandPolicy {
 }
 
 impl CommandPolicy {
-    /// The policy for `agent_name`. EYES gets read-only; anything else gets
-    /// nothing, because no native HANDS exists yet and silently granting an
-    /// unknown role a shell is the wrong default.
+    /// The policy for `agent_name`, via the one place a name becomes
+    /// capabilities ([`AgentRole`](crate::agents::AgentRole)).
+    ///
+    /// EYES gets read-only; anything else gets nothing, because no native HANDS
+    /// exists and silently granting an unknown role a shell is the wrong
+    /// default. This used to be true only in THIS function's tests: production
+    /// derived the command policy from `ToolPolicy` instead, which handed an
+    /// unrecognised agent a read-only shell. `tools::exec` now takes this
+    /// policy directly, so the promise and the behaviour are the same thing.
     pub fn for_agent(agent_name: &str) -> Self {
-        match agent_name {
-            "rain" => Self::ReadOnly,
-            _ => Self::None,
-        }
+        crate::agents::AgentRole::for_agent(agent_name)
+            .map(|r| r.command_policy())
+            .unwrap_or(Self::None)
     }
 }
 

@@ -100,15 +100,20 @@ pub fn external_tool_descriptors() -> &'static [ToolDescriptor] {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
+            name: "list_models",
+            description: "List saved models from the Models registry. Returns id, display_name, provider, model_name, base_url, native, context_window and updated_at for each. Use this to obtain the `brian_model_id` / `rain_model_id` values `create_session` accepts — they are ids from here, not model names. `native` tells you whether the model runs on bot-hq's own agent loop instead of a claude-code subprocess. Auth tokens are redacted.",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDescriptor {
             name: "create_session",
-            description: "Open a new bot-hq session. Spawns Brian (HANDS) + Rain (EYES) subprocesses; returns the session id. The call blocks until both agents have spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved. `brian_model_id` / `rain_model_id` are saved-model ids (see the Models registry); omit them to fall back to each agent's stored config. Pass them when the model matters — notably to spawn an agent on the NATIVE loop, since the `native` flag lives on the models row and is not reachable through the per-agent config fallback.",
+            description: "Open a new bot-hq session. Spawns Brian (HANDS) + Rain (EYES); returns the session id. The call blocks until both agents have spawned (typically 1-3 seconds). `working_repo_path` is optional — if set, the project name is derived from the path's last component and project-specific policy.yaml is resolved. `brian_model_id` / `rain_model_id` are saved-model ids from `list_models`; omit them to fall back to each agent's stored config, which since migration 0038 carries the `native` flag too — so an agent assigned a native model on the Agents tab reaches the native loop with or without an id here. Pass them when THIS session needs a specific model.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Human-readable label shown in the session tile." },
                     "working_repo_path": { "type": "string", "description": "Optional absolute path to a git repo. Drives project-specific policy + system-prompt context." },
-                    "brian_model_id": { "type": "string", "description": "Optional saved-model id for HANDS. Omit to use his stored agent config." },
-                    "rain_model_id": { "type": "string", "description": "Optional saved-model id for EYES. Omit to use her stored agent config. Required to put her on the native loop." }
+                    "brian_model_id": { "type": "string", "description": "Optional saved-model id (from list_models) for HANDS. Omit to use his stored agent config." },
+                    "rain_model_id": { "type": "string", "description": "Optional saved-model id (from list_models) for EYES. Omit to use her stored agent config." }
                 },
                 "required": ["title"]
             }),
@@ -505,6 +510,33 @@ async fn call_external_tool(
             });
             Ok(result_json(&payload, "{}"))
         }
+        "list_models" => {
+            let models = core
+                .storage
+                .list_models()
+                .await
+                .map_err(|e| internal_err("list_models", e))?;
+            let arr: Vec<_> = models
+                .into_iter()
+                .map(|m| {
+                    json!({
+                        "id": m.id,
+                        "display_name": m.display_name,
+                        "provider": m.provider,
+                        "model_name": m.model_name,
+                        "base_url": m.base_url,
+                        // Redacted, like `get_agent_configs`. A tool that hands a
+                        // driver every gateway credential would be a worse bug
+                        // than the discoverability gap it closes.
+                        "auth_token": redact_auth_token(&m.auth_token),
+                        "native": m.native,
+                        "context_window": m.context_window,
+                        "updated_at": m.updated_at,
+                    })
+                })
+                .collect();
+            Ok(result_json(&json!({ "models": arr }), "{}"))
+        }
         "get_agent_configs" => {
             let cfgs = core
                 .storage
@@ -520,6 +552,12 @@ async fn call_external_tool(
                         "model_name": c.model_name,
                         "base_url": c.base_url,
                         "auth_token": redact_auth_token(&c.auth_token),
+                        // Since 0038 these decide the runtime whenever a session
+                        // carries no model id — which is every session the driver
+                        // opens without naming one. Without them a driver cannot
+                        // see what it is about to get.
+                        "native": c.native,
+                        "context_window": c.context_window,
                         "updated_at": c.updated_at,
                     })
                 })
@@ -778,7 +816,10 @@ mod tests {
         assert!(names.contains(&"webview_type"));
         assert!(names.contains(&"webview_scroll"));
         assert!(names.contains(&"webview_press_key"));
-        assert_eq!(names.len(), 19);
+        // Model discovery — `create_session` accepts model ids, and until this
+        // existed a driver had no API to obtain one.
+        assert!(names.contains(&"list_models"));
+        assert_eq!(names.len(), 20);
     }
 
     #[test]

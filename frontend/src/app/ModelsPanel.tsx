@@ -400,7 +400,11 @@ function ModelDialog({
                 onChange={(e) =>
                   setDraft({ ...draft, auth_token: e.target.value || null })
                 }
-                placeholder="(unset — uses provider env vars)"
+                placeholder={
+                  draft.native
+                    ? "(required — the native loop has no ambient-auth fallback)"
+                    : "(unset — uses provider env vars)"
+                }
                 className={cn(terminalInputClass, "pr-12")}
               />
               <button
@@ -431,10 +435,12 @@ function ModelDialog({
               className={terminalInputClass}
             />
             <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
-              Total tokens this specific model accepts. Only you can know this —
-              bot-hq never guesses, because a window is a per-model fact and a
-              wrong one renders as a confident percentage. Leave blank and the
-              context meter shows a visible gap instead.
+              Total tokens this specific model accepts.{" "}
+              <strong>Used only by the native loop</strong> — on a claude-code
+              model the meter comes from the CLI and this field is ignored. Only
+              you can know it; bot-hq never guesses, because a window is a
+              per-model fact and a wrong one renders as a confident percentage.
+              Leave blank and the meter shows a visible gap instead.
             </span>
           </label>
 
