@@ -289,10 +289,22 @@ async fn route_forward(
     }
     // 2. peer_ack: explicit ack — suppress BEFORE the counters (not a volley
     //    contribution, so it must not bump the hard-cap or extend the streak).
+    //    UNLESS the same turn carried substantive text: the 2026-07-27 archive
+    //    study found four full reviews destroyed by an agent posting its
+    //    verdict and calling peer_ack in the same turn (the tool name reads as
+    //    "acknowledge my peer", the semantics were "throw my turn away"). A
+    //    substantive turn forwards anyway, tagged, and counts like any other.
     if peer_ack {
-        debug!(agent = ?from, "router: peer_ack; suppressing peer forward");
-        deps.set_idle(from);
-        return;
+        if trimmed.len() <= PEER_ACK_MAX_SUPPRESSED_LEN {
+            debug!(agent = ?from, "router: peer_ack; suppressing peer forward");
+            deps.set_idle(from);
+            return;
+        }
+        debug!(
+            agent = ?from,
+            len = trimmed.len(),
+            "router: peer_ack on a substantive turn; forwarding anyway"
+        );
     }
     // 3. L2 hard-cap: bound consecutive peer-forwards with no user message.
     let n = deps.user_silent_forwards.fetch_add(1, Ordering::AcqRel) + 1;
@@ -333,7 +345,17 @@ async fn route_forward(
     //    mid-handoff.
     let phase = deps.ipav.lock().await.current_phase;
     let open_blocking = deps.open_blocking.load(Ordering::Relaxed);
-    peer_forward_message(from, trimmed, phase, open_blocking, peer_tx).await;
+    let tagged;
+    let body_to_send = if peer_ack {
+        tagged = format!(
+            "[peer_ack overridden — this turn carried substantive text, so it was \
+             forwarded anyway]\n{trimmed}"
+        );
+        tagged.as_str()
+    } else {
+        trimmed
+    };
+    peer_forward_message(from, body_to_send, phase, open_blocking, peer_tx).await;
     // Diagnostics: count the DELIVERED forward by direction (after the send). A
     // one-sided break shows one counter flat while the other climbs. `User` can't
     // reach here (the peer-resolution early-return above handles it).
@@ -367,6 +389,13 @@ fn break_volley(deps: &RouterDeps) {
 /// (a multi-turn review) must never trip it; only a genuine runaway reaches it
 /// (`s-e4fc25`: 34 messages, 0 from the user).
 const VOLLEY_HARD_CAP: u32 = 18;
+
+/// Longest turn text (bytes, trimmed) `peer_ack` may still suppress. Above
+/// this the turn is substantive — a review verdict, a correction, a plan —
+/// and suppressing it destroys peer-visible work (four such losses in the
+/// 2026-07-27 archive study). Sized to fit a genuine ack ("Agreed — nothing
+/// to add on the last two points.") while catching anything with content.
+const PEER_ACK_MAX_SUPPRESSED_LEN: usize = 200;
 
 /// Tokenize a forward body for convergence comparison: split on whitespace, trim
 /// each token of leading/trailing non-alphanumerics, lowercase, drop empties — so
@@ -583,6 +612,47 @@ mod tests {
             counter.load(Ordering::Acquire),
             1,
             "peer_ack must not count toward the hard-cap; only the real forward does"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn peer_ack_on_substantive_turn_forwards_anyway() {
+        // Archive study 2026-07-27: an agent posted a full 3-point plan review
+        // and called peer_ack in the same turn — the review was silently
+        // destroyed. A substantive turn must forward despite the ack, tagged.
+        let (btx, mut brx) = mpsc::channel(8);
+        let (rtx, rrx) = mpsc::channel(8);
+        let counter = Arc::new(AtomicU32::new(0));
+        let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), Arc::clone(&counter));
+        let review = "Plan review: (1) the `protected` flag is missing on the three \
+                      already-incremental reports, which will re-materialize them on the \
+                      next full run; (2) the migrate script's drop list has no twitter \
+                      section; (3) the uniqueKey assertion still executes on type:table \
+                      models, so the NULL-segment fix is only half the story.";
+        assert!(review.len() > PEER_ACK_MAX_SUPPRESSED_LEN);
+        let cmds = vec![RouterCommand::Forward {
+            from: Author::Rain,
+            body: review.into(),
+            peer_ack: true,
+        }];
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_router(d, rx));
+        for c in cmds {
+            tx.send(c).await.unwrap();
+        }
+        drop(tx);
+        task.await.unwrap();
+        drop(rrx);
+        let delivered = brx.try_recv().expect("substantive ack-turn reaches the peer");
+        assert!(
+            delivered.message.content.contains("peer_ack overridden"),
+            "forward is tagged so the receiver knows the sender acked"
+        );
+        assert!(delivered.message.content.contains("uniqueKey assertion"));
+        assert_eq!(
+            counter.load(Ordering::Acquire),
+            1,
+            "an overridden ack is a real forward and counts toward the hard-cap"
         );
     }
 

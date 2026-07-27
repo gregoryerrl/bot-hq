@@ -211,7 +211,10 @@ async fn call_tool(
             // Nothing to do bridge-side — the call just needs to succeed so the
             // agent's turn proceeds. Either agent may call it.
             Ok(ToolCallResult::text(
-                "peer_ack noted — this turn won't be forwarded to your peer.",
+                "peer_ack noted — suppressed only if this turn is content-free. If \
+                 the turn carries substantive text (>200 chars) it is still \
+                 forwarded to your peer, tagged as an overridden ack: reviews and \
+                 corrections must never be silently discarded.",
             ))
         }
         "halt" => {
