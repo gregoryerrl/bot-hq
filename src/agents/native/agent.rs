@@ -288,6 +288,24 @@ pub async fn run_loop(
         return;
     }
 
+    // A model row without a context_window silently disables the occupancy
+    // meter's percentage AND the 85% warning — the session that hit 334K
+    // tokens did so with no ceiling signal at all. Say so once, in chat,
+    // where the user will actually see it (a tracing::warn is invisible).
+    if cfg.profile.context_window.is_none()
+        && event_tx
+            .send(AgentEvent::Text(format!(
+                "⚠ [bot-hq] No context_window is configured for `{}` — the context \
+                 meter can only show raw tokens and the high-occupancy warning is \
+                 disabled. Set the window in Settings → Models.",
+                cfg.model
+            )))
+            .await
+            .is_err()
+    {
+        return;
+    }
+
     let mut state = State {
         // Resume a persisted conversation. The consumer is an app RESTART, not a
         // supervisor respawn — a CLI agent comes back via `--resume` off the
@@ -1091,6 +1109,53 @@ mod tests {
     }
 
     async fn next(h: &mut Harness) -> AgentEvent {
+        loop {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(5), h.events.recv())
+                .await
+                .expect("event within 5s")
+                .expect("channel open");
+            // The harness never configures a context_window, so every spawn
+            // emits the one-time "no window configured" notice. It's orthogonal
+            // to the scenarios here — skip it so each test asserts its own
+            // sequence. The notice itself is covered by
+            // `warns_once_at_spawn_when_window_is_unknown`.
+            if let AgentEvent::Text(t) = &ev {
+                if t.contains("No context_window is configured") {
+                    continue;
+                }
+            }
+            return ev;
+        }
+    }
+
+    #[tokio::test]
+    async fn warns_once_at_spawn_when_window_is_unknown() {
+        // NULL window = the meter can't show % and the 85% warning is dead —
+        // the 334K-token session ran with no ceiling signal at all. Say so in
+        // chat at spawn; with a window configured, stay silent.
+        let t = ScriptedTransport::new(vec![Ok(end_turn("hi"))]);
+        let mut h = start(t, None);
+        assert!(matches!(next_raw(&mut h).await, AgentEvent::Init { .. }));
+        match next_raw(&mut h).await {
+            AgentEvent::Text(t) => assert!(
+                t.contains("No context_window is configured"),
+                "spawn notice expected, got: {t}"
+            ),
+            other => panic!("expected the window notice, got {other:?}"),
+        }
+
+        let t = ScriptedTransport::new(vec![Ok(end_turn("hi"))]);
+        let mut h = start(t, Some(1_000_000));
+        assert!(matches!(next_raw(&mut h).await, AgentEvent::Init { .. }));
+        h.input.send(OutgoingUserMessage::text("go")).await.unwrap();
+        match next_raw(&mut h).await {
+            AgentEvent::Text(t) => assert_eq!(t, "hi", "no notice when the window is known"),
+            other => panic!("expected turn text, got {other:?}"),
+        }
+    }
+
+    /// `next` without the window-notice skip — for asserting the notice itself.
+    async fn next_raw(h: &mut Harness) -> AgentEvent {
         tokio::time::timeout(std::time::Duration::from_secs(5), h.events.recv())
             .await
             .expect("event within 5s")
@@ -1390,7 +1455,13 @@ mod tests {
         assert!(matches!(next(&mut h).await, AgentEvent::Init { .. }));
 
         drop(h.input);
-        assert!(h.events.recv().await.is_none(), "event channel must close");
+        loop {
+            match h.events.recv().await {
+                None => break, // channel closed — the supervisor's signal
+                Some(AgentEvent::Text(t)) if t.contains("No context_window") => continue,
+                Some(other) => panic!("unexpected event before close: {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -1452,7 +1523,10 @@ mod tests {
             LoopConfig {
                 agent_name: "rain".into(),
                 model: "m".into(),
-                profile: ProviderProfile::for_provider("anthropic"),
+                profile: ProviderProfile {
+                    context_window: Some(200_000),
+                    ..ProviderProfile::for_provider("anthropic")
+                },
                 session_id: "s-test".into(),
                 accounting: None,
                 history_path: None,
