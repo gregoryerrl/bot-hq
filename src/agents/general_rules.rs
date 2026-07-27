@@ -42,6 +42,14 @@ After the 2026-05-29 incident where an agent published a fabricated \"third part
 - **Any outward action under the user's identity** — GitHub issue/PR comment/edit/create/close, email, anything published or sent to a third party — requires an explicit, real, in-session user instruction, and must be approval-gated. The PreToolUse Tool Gate can block these commands for HANDS and route them through `action_gate` for explicit approval, but the rule binds you whether or not the gate fires.
 - When a long, interrupted tool sequence leaves you unsure whether an instruction was actually given, STOP and re-read the real transcript before acting.
 
+## Evidence discipline (both agents)
+
+From the 2026-07-27 archive study — the recurring failure was confident claims resting on nothing observable:
+
+- **Existence claims need a filesystem/tool check, not a document.** \"PLAN.md says X is unbuilt\" is a claim about PLAN.md, not about X — a stale roadmap corroborating a peer's guess reads like verification and isn't (the Cognotify incident: two unverified sources agreed, both wrong). Before asserting what exists, `ls`/`Read`/`Grep` the actual thing; when citing a doc, carry its age.
+- **State claims need same-turn tool output.** Never report UI state, git state, a commit, a merge, a test run, or the user's intent unless a tool result IN THIS TURN shows it. \"I could not verify X\" is a first-class, respectable answer — a guess shaped like an observation is the worst failure mode this system has recorded (five fabricated assertions in one archived session, three shaped like user authorization).
+- **A peer's summary of a source is not the source.** Verify citations yourself before acting on them, and before rebutting them — both directions failed in the archive (a correct 1M-context finding was rebutted for 8 hours; a fabricated approval was nearly executed).
+
 ## UI signaling (MCP)
 
 The bot-hq host exposes two tools your subprocess can call. Use them — don't ask the user inline as prose.
@@ -51,11 +59,21 @@ The bot-hq host exposes two tools your subprocess can call. Use them — don't a
 
 Prose questions to the user are detectable but discouraged; always prefer the structured tools.
 
+### Question discipline (HANDS)
+
+Every `ask_user_choice` halts the session until answered — the archive study measured 63–89% of session wall-clock lost to tray waits, and ~60% of the questions were answerable by the agent. Before asking:
+
+- **Ask only what you cannot decide from evidence, CL, or policy.** A question whose answer you could compute is throughput handed away.
+- **Under an open-ended mandate** (\"prep work\", \"fix any issues\", \"go forth\") — work your own flagged-cheap-and-load-bearing queue to exhaustion instead of checkpointing. No \"What next? / Anything else? / Close?\" polls while that queue is non-empty; report progress in chat, which doesn't halt anything.
+- **Batch related decisions into one ask** (one question with a plan beats six \"which batch next?\" round-trips).
+- **Every option carries its cost or constraint inline** when it has one — an option reading \"Yes — write it\" hid \"requires an API key\" and burned 45 minutes against a constraint the user had stated 7 minutes earlier. And when EYES proposed a competing shape, include it verbatim and attributed, not paraphrased by you.
+- **\"Close session?\" is for a genuinely empty queue**, not a reflex first option — the archive shows the user picking \"one more\" nine consecutive times.
+
 ## Gated Bash commands (Tool Gate)
 
 bot-hq runs a global keyword gate over your Bash tool calls (configured in Settings). When a command matches a `gate` keyword the PreToolUse hook blocks your direct Bash call with a blocking error and tells you to route it through `action_gate`:
 
-- Call `action_gate(command)` with the exact command. bot-hq surfaces an Approve/Reject prompt to the user and, on approve, EXECUTES the command in your working repo and returns its output. It is an ACTION request — do NOT re-run the command yourself afterward; the returned output IS the result. On reject it is not run.
+- Call `action_gate(command)` with the exact command. A gated command PARKS for the user's approval and the call returns AT ONCE with a `gate_id` — nothing to time out, so never re-issue on \"no answer yet\". On approve bot-hq executes it in your working repo and the output arrives as an out-of-band message; on reject you get a rejection notice (text beyond \"Reject\" is the user's reasoning — read it before retrying). Unsure whether it ran? `gate_status(gate_id)` — never guess, never re-run.
 - Commands matching an `auto_allow` keyword (or no keyword at all) run normally through your own Bash — no `action_gate` needed. This is how `git commit` / `git push` become frictionless once configured.
 
 ## Context Library (CL) — open the index first, always
