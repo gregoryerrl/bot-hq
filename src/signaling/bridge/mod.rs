@@ -289,6 +289,12 @@ pub struct SignalingBridge {
     /// duo reviewer is Stalled/Dead. `std::sync::Mutex` (not tokio) because
     /// `notify_agent_health` is sync — mirrors ActivityTracker's pattern.
     agent_health: std::sync::Mutex<HashMap<(String, String), String>>,
+    /// (session_id, agent) → last time this agent made ANY bridge RPC call.
+    /// Ground truth for "is the reviewer actually there": the health map above
+    /// is event-derived and has reported an agent Stalled 4ms after its own
+    /// tool call (2026-07-27 archive study, s-32196a61) — an agent talking to
+    /// the bridge is alive regardless of what the health events last said.
+    agent_rpc_seen: std::sync::Mutex<HashMap<(String, String), std::time::Instant>>,
     /// Batch 7: per-session HANDS override of the reviewer-down commit block —
     /// session_id → reason. Set by `override_reviewer_block`, honored by
     /// `check_open_findings`, auto-cleared when the reviewer recovers to running.
@@ -330,6 +336,7 @@ impl SignalingBridge {
             terminals: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),
             agent_health: std::sync::Mutex::new(HashMap::new()),
+            agent_rpc_seen: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
             router_health: std::sync::Mutex::new(HashMap::new()),
             session_open_blocking: std::sync::Mutex::new(HashMap::new()),
@@ -737,6 +744,34 @@ impl SignalingBridge {
             .unwrap_or_else(|p| p.into_inner())
             .get(&(session_id.to_string(), agent.to_string()))
             .cloned()
+    }
+
+    /// Stamp "this agent just made a bridge RPC call". Called from the JSON-RPC
+    /// tool dispatch — the single choke point every agent tool call crosses.
+    pub fn note_agent_rpc(&self, session_id: &str, agent: &str) {
+        self.agent_rpc_seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                (session_id.to_string(), agent.to_string()),
+                std::time::Instant::now(),
+            );
+    }
+
+    /// Whether the agent made any bridge RPC call within `within`. Overrides an
+    /// event-derived Stalled/Dead verdict in the reviewer gate: activity on the
+    /// wire is stronger evidence of liveness than the last health event.
+    pub fn agent_rpc_recent(
+        &self,
+        session_id: &str,
+        agent: &str,
+        within: std::time::Duration,
+    ) -> bool {
+        self.agent_rpc_seen
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&(session_id.to_string(), agent.to_string()))
+            .is_some_and(|t| t.elapsed() <= within)
     }
 
     /// Publish the peer-forward router's liveness change. Fire-and-forget; the UI

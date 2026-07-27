@@ -140,6 +140,7 @@ impl SignalingBridge {
         let verdict = reviewer_block_decision(
             duo,
             self.current_agent_health(session_id, "rain").as_deref(),
+            self.agent_rpc_recent(session_id, "rain", REVIEWER_LIVENESS_WINDOW),
             self.reviewer_override_reason(session_id).as_deref(),
         );
         Ok(verdict.unwrap_or_else(|| "ok".to_string()))
@@ -191,25 +192,48 @@ fn render_open_findings(open: &[Finding]) -> String {
     )
 }
 
+/// How recent an RPC call must be to overrule an event-derived Stalled/Dead
+/// verdict in the reviewer gate. Generous on purpose: a reviewer mid-review
+/// makes a call at least this often, while a genuinely dead one never does.
+const REVIEWER_LIVENESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Pure: the reviewer-down gate verdict (Batch 7). `Some(gate_string)` when a duo
 /// reviewer is down — either `blocked: …` or, with a HANDS override,
 /// `ok (reviewer-down overridden: …)`. `None` when the gate should fall through to
 /// plain "ok" (solo session, or the reviewer is healthy).
+///
+/// `recently_active` is the wire-level liveness signal (`agent_rpc_recent`): the
+/// health map is event-derived and once reported the reviewer Stalled 4ms after
+/// her own tool call (archive study, s-32196a61), burning a tray question and
+/// nearly prompting a needless override. An agent talking to the bridge is
+/// alive, whatever the last health event said.
 fn reviewer_block_decision(
     duo: bool,
     rain_health: Option<&str>,
+    recently_active: bool,
     override_reason: Option<&str>,
 ) -> Option<String> {
     if !duo || !matches!(rain_health, Some("stalled") | Some("dead")) {
         return None;
     }
+    if recently_active {
+        tracing::debug!(
+            health = rain_health,
+            "reviewer gate: health says down but the reviewer made an RPC call \
+             within the liveness window — treating as alive"
+        );
+        return None;
+    }
     Some(match override_reason {
         Some(r) => format!("ok (reviewer-down overridden: {r})"),
         None => format!(
-            "blocked: reviewer down — review cannot be confirmed (Rain is {}). \
-             Restore the reviewer, or override with override_reviewer_block(reason) if \
-             you've confirmed the change is safe to ship unreviewed.",
-            rain_health.unwrap_or("down")
+            "blocked: reviewer down — review cannot be confirmed (Rain is {} and has \
+             made no tool call in the last {}s). This means the REVIEWER IS GONE, not \
+             that the change is unreviewed — restore the reviewer, or override with \
+             override_reviewer_block(reason) if you've confirmed the change is safe to \
+             ship unreviewed.",
+            rain_health.unwrap_or("down"),
+            REVIEWER_LIVENESS_WINDOW.as_secs()
         ),
     })
 }
@@ -222,22 +246,66 @@ mod tests {
     #[test]
     fn reviewer_block_decision_cases() {
         // Solo (no reviewer) → never blocks.
-        assert_eq!(reviewer_block_decision(false, Some("stalled"), None), None);
+        assert_eq!(reviewer_block_decision(false, Some("stalled"), false, None), None);
         // Duo + reviewer healthy (running / no transition yet) → no block.
-        assert_eq!(reviewer_block_decision(true, Some("running"), None), None);
-        assert_eq!(reviewer_block_decision(true, None, None), None);
+        assert_eq!(reviewer_block_decision(true, Some("running"), false, None), None);
+        assert_eq!(reviewer_block_decision(true, None, false, None), None);
         // Duo + reviewer down + no override → blocked.
-        assert!(reviewer_block_decision(true, Some("stalled"), None)
+        assert!(reviewer_block_decision(true, Some("stalled"), false, None)
             .unwrap()
             .starts_with("blocked: reviewer down"));
-        assert!(reviewer_block_decision(true, Some("dead"), None)
+        assert!(reviewer_block_decision(true, Some("dead"), false, None)
             .unwrap()
             .starts_with("blocked:"));
         // Duo + reviewer down + override → ok-with-reason (not blocked).
-        let ov = reviewer_block_decision(true, Some("stalled"), Some("verified safe; reviewer crashed"))
-            .unwrap();
+        let ov = reviewer_block_decision(
+            true,
+            Some("stalled"),
+            false,
+            Some("verified safe; reviewer crashed"),
+        )
+        .unwrap();
         assert!(ov.starts_with("ok (reviewer-down overridden:"));
         assert!(ov.contains("verified safe"));
+    }
+
+    #[test]
+    fn recent_rpc_activity_overrules_a_stale_stalled_verdict() {
+        // The s-32196a61 false positive: health said "stalled" 4ms after Rain's
+        // own tool call. Wire activity wins over the event-derived health map.
+        assert_eq!(reviewer_block_decision(true, Some("stalled"), true, None), None);
+        assert_eq!(reviewer_block_decision(true, Some("dead"), true, None), None);
+        // Activity doesn't matter when health is fine anyway.
+        assert_eq!(reviewer_block_decision(true, Some("running"), true, None), None);
+    }
+
+    #[tokio::test]
+    async fn gate_treats_calling_reviewer_as_alive() {
+        // End-to-end through the bridge: mark Rain stalled, then stamp an RPC
+        // call — the gate must return plain ok, not "reviewer down".
+        let bridge = bridge_with_session("s-live").await;
+        {
+            let storage = bridge.storage.lock().await.clone().unwrap();
+            sqlx::query("UPDATE sessions SET rain_enabled = 1 WHERE id = 's-live'")
+                .execute(storage.pool())
+                .await
+                .unwrap();
+        }
+        bridge.notify_agent_health("s-live".to_string(), "rain", "stalled");
+        assert!(
+            bridge
+                .check_open_findings("s-live")
+                .await
+                .unwrap()
+                .starts_with("blocked: reviewer down"),
+            "without RPC activity the stalled verdict blocks"
+        );
+        bridge.note_agent_rpc("s-live", "rain");
+        assert_eq!(
+            bridge.check_open_findings("s-live").await.unwrap(),
+            "ok",
+            "an actively-calling reviewer is alive regardless of health events"
+        );
     }
 
     async fn bridge_with_session(sid: &str) -> Arc<SignalingBridge> {

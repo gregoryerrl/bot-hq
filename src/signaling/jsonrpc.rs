@@ -153,6 +153,9 @@ async fn call_tool(
     caller: &CallerIdentity,
     bridge: &Arc<SignalingBridge>,
 ) -> Result<ToolCallResult, JsonRpcError> {
+    // Liveness ground truth: any tool call proves the agent is there. The
+    // reviewer commit gate consults this to overrule a stale Stalled verdict.
+    bridge.note_agent_rpc(&caller.session_id, &caller.agent);
     if HANDS_ONLY_TOOLS.contains(&name) && caller.agent != "brian" {
         return Ok(ToolCallResult::error(format!(
             "tool '{name}' is reserved for the HANDS agent (brian); {} is the EYES role and should not invoke user-facing tools",
