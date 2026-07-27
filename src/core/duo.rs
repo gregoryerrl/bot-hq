@@ -149,8 +149,18 @@ const PROVIDER_LIMIT_PATTERNS: &[&str] = &[
     "credit balance is too low",
 ];
 
+/// A provider error arrives as a terse, standalone chunk; agent ANALYSIS that
+/// quotes one arrives inside prose. Only chunks at or under this length are
+/// candidates — without the bound, an agent discussing a quota incident (or a
+/// reviewer quoting the detector's own patterns) self-trips the halt.
+const PROVIDER_LIMIT_MAX_CHUNK: usize = 240;
+
 /// The first line of `text` containing a provider-limit phrase, if any.
+/// Terse chunks only (see [`PROVIDER_LIMIT_MAX_CHUNK`]).
 fn detect_provider_limit(text: &str) -> Option<String> {
+    if text.trim().len() > PROVIDER_LIMIT_MAX_CHUNK {
+        return None;
+    }
     let lower = text.to_lowercase();
     if !PROVIDER_LIMIT_PATTERNS.iter().any(|p| lower.contains(p)) {
         return None;
@@ -1183,6 +1193,17 @@ mod tests {
         // Ordinary prose must not trip it.
         assert_eq!(detect_provider_limit("the rate limiter test now passes"), None);
         assert_eq!(detect_provider_limit("credits to the reviewer for the catch"), None);
+        // Analysis QUOTING a limit line inside a longer chunk must not trip it
+        // (Rain's advisory b657bf79: the detector matched agent speech, so a
+        // review discussing the incident would self-halt the session).
+        let analysis = format!(
+            "The archive study found the message \"You're out of usage credits\" \
+             rendered as ordinary agent speech, so the session looked merely \
+             quiet while the agent sat dead for hours. {}",
+            "The fix classifies it into a health state instead. ".repeat(2)
+        );
+        assert!(analysis.len() > PROVIDER_LIMIT_MAX_CHUNK);
+        assert_eq!(detect_provider_limit(&analysis), None);
     }
 
     #[tokio::test(flavor = "current_thread")]
