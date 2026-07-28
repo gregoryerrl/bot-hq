@@ -816,6 +816,28 @@ async readWorkspaceFile(sessionId: string, path: string) : Promise<Result<Worksp
 }
 },
 /**
+ * Feedback rows newest-first. `status = None` returns every row.
+ */
+async listAgentFeedback(status: string | null) : Promise<Result<AgentFeedbackView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_agent_feedback", { status }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Move one row through its lifecycle (`open` / `done` / `dismissed`).
+ */
+async setAgentFeedbackStatus(id: number, status: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_agent_feedback_status", { id, status }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * All findings for a session, oldest-first. The banner computes the open-
  * blocking count + escalation state; a future detail view can show the rest.
  */
@@ -1049,6 +1071,14 @@ native: boolean;
  * `None` = unknown, which keeps the meter a visible gap.
  */
 context_window: number | null }
+/**
+ * One feedback row, projected for the UI.
+ */
+export type AgentFeedbackView = { id: number; session_id: string; 
+/**
+ * The project the FILING session was on — provenance, not subject.
+ */
+project: string | null; agent: string; kind: string; title: string; body: string; status: string; created_at: string; updated_at: string }
 /**
  * One chat message in the chronological stream. Mirrors `storage::Message`
  * with `created_at` left as a string (ISO) so the frontend can parse with
