@@ -102,6 +102,15 @@ pub struct ActivityTracker {
     /// only core paths do, via [`set_paused`](Self::set_paused). The router
     /// reads it (with `cancelling`) to gate forwards/deliveries.
     paused: AtomicBool,
+    /// Did BOTH agents reach idle at any point since the current cancel began?
+    ///
+    /// This is the difference between "the interrupt was honored and the agent
+    /// has since started the user's new turn" and "the agent never stopped".
+    /// Both look busy at the end of the escalation window, but only the first
+    /// one may skip the SIGKILL — see `AppState::escalation_outcome`. Cleared
+    /// by `set_cancelling(true)`, set by `recompute_locked` whenever both
+    /// per-agent flags are down.
+    idled_since_cancel: AtomicBool,
     bridge: Arc<SignalingBridge>,
     session_id: String,
 }
@@ -123,6 +132,7 @@ impl ActivityTracker {
             }),
             awaiting,
             paused: AtomicBool::new(false),
+            idled_since_cancel: AtomicBool::new(false),
             bridge,
             session_id: session_id.into(),
         })
@@ -149,7 +159,20 @@ impl ActivityTracker {
     pub fn set_cancelling(&self, cancelling: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.cancelling = cancelling;
+        if cancelling {
+            // A fresh cancel starts with no evidence the agent stopped. Must be
+            // reset here, or a previous cancel's idle would let this one skip
+            // its SIGKILL.
+            self.idled_since_cancel.store(false, Ordering::Release);
+        }
         self.recompute_locked(&mut g);
+    }
+
+    /// Whether both agents have been idle at any point since the current cancel
+    /// started. `escalation_outcome` uses it to tell an honored-then-resumed
+    /// turn from one that never stopped.
+    pub fn idled_since_cancel(&self) -> bool {
+        self.idled_since_cancel.load(Ordering::Acquire)
     }
 
     /// Latch (`true`) or release (`false`) the pause. Set alongside
@@ -241,6 +264,12 @@ impl ActivityTracker {
         // of sticking. Done BEFORE derive so the emitted state reflects it.
         // (Set true by `set_cancelling` on Stop; the agents' pumps then clear
         // their `busy` as they die.)
+        if !g.brian_busy && !g.rain_busy {
+            // Record that the agents reached idle. Read after the escalation
+            // window by `escalation_outcome`, which must not skip the SIGKILL
+            // for an agent that never got here.
+            self.idled_since_cancel.store(true, Ordering::Release);
+        }
         if g.cancelling && !g.brian_busy && !g.rain_busy {
             g.cancelling = false;
         }
@@ -448,6 +477,56 @@ mod tests {
         assert_eq!(t.current(), SessionActivity::Paused);
         t.set_paused(false);
         assert_eq!(t.current(), SessionActivity::Idle);
+    }
+
+    #[test]
+    fn idled_since_cancel_is_false_while_an_agent_never_stops() {
+        // The wedged case: Stop fires while HANDS is mid-Bash and the agent
+        // never reaches idle, so there is no proof the turn stopped and the
+        // SIGKILL must not be skipped.
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        t.set_busy(Author::Brian, true);
+        t.set_cancelling(true);
+        assert!(!t.idled_since_cancel(), "agent never went idle");
+    }
+
+    #[test]
+    fn idled_since_cancel_flips_once_both_agents_stop() {
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        t.set_busy(Author::Brian, true);
+        t.set_busy(Author::Rain, true);
+        t.set_cancelling(true);
+        assert!(!t.idled_since_cancel());
+        t.set_busy(Author::Brian, false);
+        assert!(!t.idled_since_cancel(), "one agent idle is not both");
+        t.set_busy(Author::Rain, false);
+        assert!(t.idled_since_cancel(), "both idle = the interrupt landed");
+    }
+
+    #[test]
+    fn idled_since_cancel_survives_the_agent_going_busy_again() {
+        // Interrupt honored, then the user's message starts a fresh turn. Busy
+        // again at the deadline, but the earlier idle is the proof that lets
+        // the supersede branch protect that new turn.
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        t.set_busy(Author::Brian, true);
+        t.set_cancelling(true);
+        t.set_busy(Author::Brian, false);
+        t.set_busy(Author::Brian, true);
+        assert!(t.idled_since_cancel());
+    }
+
+    #[test]
+    fn a_new_cancel_clears_the_previous_cancels_proof() {
+        // Otherwise an earlier cancel's idle would let the NEXT cancel skip its
+        // SIGKILL against an agent that never stopped.
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new());
+        t.set_cancelling(true);
+        assert!(t.idled_since_cancel(), "starts idle");
+        t.set_busy(Author::Brian, true);
+        t.set_cancelling(false);
+        t.set_cancelling(true);
+        assert!(!t.idled_since_cancel(), "a fresh cancel starts with no proof");
     }
 
     #[tokio::test]

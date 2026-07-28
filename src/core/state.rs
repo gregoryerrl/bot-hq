@@ -394,7 +394,11 @@ impl AppState {
 
         let deadline = tokio::time::Instant::now() + INTERRUPT_ESCALATION;
         let both_idle = activity.await_both_idle(deadline).await;
-        match Self::escalation_outcome(both_idle, cancel_superseded.load(Ordering::Acquire)) {
+        match Self::escalation_outcome(
+            both_idle,
+            cancel_superseded.load(Ordering::Acquire),
+            activity.idled_since_cancel(),
+        ) {
             EscalationOutcome::InterruptHonored => {
                 // Process alive at a turn boundary (Cancelling auto-cleared to Idle).
                 // Queue the nudge so the next user message reconciles the workspace.
@@ -806,10 +810,30 @@ impl AppState {
     /// Decide a cancel escalation's outcome after the interrupt window. Pure for
     /// testing; precedence is honored > superseded > sigkill (a user message that
     /// arrives can't resurrect a turn that already went idle, so `both_idle` wins).
-    fn escalation_outcome(both_idle: bool, cancel_superseded: bool) -> EscalationOutcome {
+    ///
+    /// `idled_since_cancel` is what makes the superseded branch safe. A user
+    /// message alone is NOT evidence the stuck turn aborted: claude-code reads
+    /// `control_request` from stdin between turns, so while it is blocked on a
+    /// synchronous Bash result it sees neither the cancel interrupt nor the
+    /// message's preempt interrupt. Skipping the SIGKILL on the message alone
+    /// meant pressing Stop and then typing left the agent running — the whole
+    /// "Stop doesn't hold" report, and why it was mostly HANDS (the seat that
+    /// runs multi-minute builds) and intermittent (staying quiet for the ~2s
+    /// window worked fine).
+    ///
+    /// So the skip now requires proof the turn actually stopped: the agents
+    /// reached idle at some point since the cancel. That still protects the
+    /// case the skip exists for — interrupt honored, then the user's message
+    /// started a fresh turn that is busy again by the deadline — while a wedged
+    /// agent, which never reached idle, gets force-killed as the user asked.
+    fn escalation_outcome(
+        both_idle: bool,
+        cancel_superseded: bool,
+        idled_since_cancel: bool,
+    ) -> EscalationOutcome {
         if both_idle {
             EscalationOutcome::InterruptHonored
-        } else if cancel_superseded {
+        } else if cancel_superseded && idled_since_cancel {
             EscalationOutcome::SupersededByUser
         } else {
             EscalationOutcome::Sigkill
@@ -958,22 +982,37 @@ mod tests {
         // `both_idle` wins over supersede: a turn that already ended can't be
         // "saved" by a later user message, and there's nothing left to kill.
         assert_eq!(
-            AppState::escalation_outcome(true, false),
+            AppState::escalation_outcome(true, false, false),
             EscalationOutcome::InterruptHonored
         );
         assert_eq!(
-            AppState::escalation_outcome(true, true),
+            AppState::escalation_outcome(true, true, true),
             EscalationOutcome::InterruptHonored
         );
     }
 
     #[test]
-    fn escalation_superseded_skips_sigkill() {
-        // Not idle, but a user message arrived during the window → skip the kill
-        // (the message already aborted the stuck turn; killing loses the fresh one).
+    fn escalation_superseded_skips_sigkill_only_with_proof_the_turn_stopped() {
+        // Busy at the deadline, user message arrived, AND the agents reached
+        // idle in between → the interrupt WAS honored and this busy is the
+        // user's fresh turn. Skipping the kill protects that turn.
         assert_eq!(
-            AppState::escalation_outcome(false, true),
+            AppState::escalation_outcome(false, true, true),
             EscalationOutcome::SupersededByUser
+        );
+    }
+
+    #[test]
+    fn escalation_sigkills_a_wedged_agent_even_after_a_user_message() {
+        // The "Stop doesn't hold" bug. claude-code reads control_request from
+        // stdin BETWEEN turns, so an agent blocked on a synchronous Bash call
+        // never sees the cancel interrupt nor the message's preempt interrupt.
+        // It never reached idle, so the user message is not evidence the turn
+        // stopped — and skipping the kill on it alone left the agent running
+        // after Stop. Force-kill instead.
+        assert_eq!(
+            AppState::escalation_outcome(false, true, false),
+            EscalationOutcome::Sigkill
         );
     }
 
@@ -982,7 +1021,7 @@ mod tests {
         // Not idle, no user message → the interrupt was dropped/wedged → SIGKILL
         // fallback so a hung turn can't leave the working tree half-written.
         assert_eq!(
-            AppState::escalation_outcome(false, false),
+            AppState::escalation_outcome(false, false, false),
             EscalationOutcome::Sigkill
         );
     }
