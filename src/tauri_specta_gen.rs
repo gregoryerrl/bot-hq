@@ -21,7 +21,7 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 }
 
 use crate::tauri_cmd::{
-    agent_configs, claude_config, cl, docs, findings, messages, models, plugin_api, plugins,
+    agent_configs, claude_config, cl, docs, files, findings, messages, models, plugin_api, plugins,
     policy, sessions, terminal, tool_gate, tray, updates,
 };
 use tauri_specta::{collect_commands, Builder};
@@ -107,6 +107,8 @@ pub fn builder() -> Builder<tauri::Wry> {
         tray::discard_choice,
         tray::list_session_tray,
         tray::list_pending_tray,
+        // Workspace file preview (full-screen viewer)
+        files::read_workspace_file,
         // Findings (EYES-sign-off gate)
         findings::list_session_findings,
         // Session documents

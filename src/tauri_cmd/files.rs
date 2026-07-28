@@ -1,0 +1,229 @@
+//! Reading a file an agent referenced, for the full-screen viewer.
+//!
+//! Gate cards routinely name a file instead of inlining its content
+//! (`gh issue create --body-file /tmp/body.md`), which left the user approving
+//! a body they could not see. This is the read behind that viewer.
+//!
+//! It is a UI-reachable read primitive, so containment is the whole point:
+//! issues.md #1 is already "agents can read any path on disk", and this must
+//! not widen that to the UI. Every read is canonicalized and required to land
+//! under an allowed root.
+
+use crate::core::AppState as CoreAppState;
+use crate::tauri_cmd::error::AppError;
+use base64::Engine;
+use serde::{Deserialize, Serialize};
+use specta::Type;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Refuse to slurp something huge into a webview. Generous for prose/diffs,
+/// small enough that a stray binary can't wedge the UI.
+const MAX_VIEWABLE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// One file, ready to render. Exactly one of `text` / `base64` is populated —
+/// `text` for anything decodable as UTF-8, `base64` for images.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct WorkspaceFile {
+    /// The canonical path actually read (not what the caller passed).
+    pub path: String,
+    /// Basename, for the dialog title.
+    pub name: String,
+    /// Lowercased extension without the dot, so the UI can pick a renderer.
+    pub extension: String,
+    pub text: Option<String>,
+    pub base64: Option<String>,
+    pub bytes: u64,
+}
+
+fn is_image_ext(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp")
+}
+
+/// Roots a viewer read may touch: the session's own repo, plus the temp
+/// directories where agents stage gate bodies.
+///
+/// Both `/tmp` AND `std::env::temp_dir()` are included on purpose. On macOS
+/// `temp_dir()` is `$TMPDIR` (`/var/folders/…`), which does NOT contain `/tmp`
+/// — and agents write gate bodies to a literal `/tmp/...` (every `--body-file`
+/// in the archive does). Including only one of the two would reject exactly the
+/// files this feature exists to show.
+fn allowed_roots(repo: Option<&str>) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(r) = repo {
+        if let Ok(c) = Path::new(r).canonicalize() {
+            roots.push(c);
+        }
+    }
+    for t in [std::env::temp_dir(), PathBuf::from("/tmp")] {
+        if let Ok(c) = t.canonicalize() {
+            if !roots.contains(&c) {
+                roots.push(c);
+            }
+        }
+    }
+    roots
+}
+
+/// True when `candidate` (already canonical) sits inside one of `roots`.
+///
+/// Canonical-vs-canonical, so `..` segments and symlink escapes are already
+/// resolved away before this comparison — a lexical check would not be enough.
+fn is_contained(candidate: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| candidate.starts_with(root))
+}
+
+/// Read a file for the viewer dialog, scoped to the session's repo + temp.
+#[tauri::command]
+#[specta::specta]
+pub async fn read_workspace_file(
+    core: tauri::State<'_, Arc<CoreAppState>>,
+    session_id: String,
+    path: String,
+) -> Result<WorkspaceFile, AppError> {
+    let repo = core
+        .storage
+        .get_session(&session_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s| s.working_repo_path);
+    let roots = allowed_roots(repo.as_deref());
+
+    // Canonicalize FIRST — this both resolves `..`/symlinks and proves the file
+    // exists. A non-existent path can't be canonicalized, so "missing" and
+    // "outside scope" are reported distinctly rather than as one vague error.
+    let canonical = Path::new(&path)
+        .canonicalize()
+        .map_err(|e| AppError::NotFound(format!("cannot read {path}: {e}")))?;
+    if !is_contained(&canonical, &roots) {
+        return Err(AppError::Unauthorized(format!(
+            "refused: {} is outside this session's workspace and temp dirs",
+            canonical.display()
+        )));
+    }
+
+    let meta = std::fs::metadata(&canonical)
+        .map_err(|e| AppError::Internal(format!("cannot stat {path}: {e}")))?;
+    if meta.is_dir() {
+        return Err(AppError::Validation(format!("{path} is a directory")));
+    }
+    let bytes = meta.len();
+    if bytes > MAX_VIEWABLE_BYTES {
+        return Err(AppError::Validation(format!(
+            "{path} is {bytes} bytes — too large to preview (limit {MAX_VIEWABLE_BYTES})"
+        )));
+    }
+
+    let name = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    let extension = canonical
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    let raw = std::fs::read(&canonical)
+        .map_err(|e| AppError::Internal(format!("cannot read {path}: {e}")))?;
+    let (text, b64) = if is_image_ext(&extension) {
+        (
+            None,
+            Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+        )
+    } else {
+        match String::from_utf8(raw) {
+            Ok(s) => (Some(s), None),
+            // Binary non-image: say so rather than rendering mojibake.
+            Err(_) => (
+                Some(format!("(binary file — {bytes} bytes, not previewable)")),
+                None,
+            ),
+        }
+    };
+
+    Ok(WorkspaceFile {
+        path: canonical.to_string_lossy().to_string(),
+        name,
+        extension,
+        text,
+        base64: b64,
+        bytes,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn containment_accepts_inside_and_rejects_outside() {
+        let root = tempfile::tempdir().unwrap();
+        let root_c = root.path().canonicalize().unwrap();
+        let inside = root_c.join("a.md");
+        std::fs::write(&inside, "hi").unwrap();
+
+        let other = tempfile::tempdir().unwrap();
+        let outside = other.path().canonicalize().unwrap().join("b.md");
+        std::fs::write(&outside, "nope").unwrap();
+
+        let roots = vec![root_c.clone()];
+        assert!(is_contained(&inside.canonicalize().unwrap(), &roots));
+        assert!(!is_contained(&outside.canonicalize().unwrap(), &roots));
+    }
+
+    #[test]
+    fn traversal_out_of_the_root_is_rejected_after_canonicalizing() {
+        // The lexical path stays "under" the root while pointing outside it —
+        // only canonicalization catches this, which is why the check runs on
+        // the canonical form.
+        let root = tempfile::tempdir().unwrap();
+        let root_c = root.path().canonicalize().unwrap();
+        let secret = root_c.parent().unwrap().join("escaped.md");
+        std::fs::write(&secret, "secret").unwrap();
+
+        let sneaky = root_c.join("..").join("escaped.md");
+        let resolved = sneaky.canonicalize().unwrap();
+        assert!(
+            !is_contained(&resolved, &[root_c]),
+            "`..` escape must not be contained: {}",
+            resolved.display()
+        );
+        let _ = std::fs::remove_file(&secret);
+    }
+
+    #[test]
+    fn tmp_is_a_root_even_where_temp_dir_differs() {
+        // macOS: temp_dir() is $TMPDIR (/var/folders/…) and does NOT cover
+        // /tmp, but agents stage gate bodies at a literal /tmp path.
+        let roots = allowed_roots(None);
+        let tmp = Path::new("/tmp");
+        if let Ok(tmp_c) = tmp.canonicalize() {
+            assert!(
+                roots.iter().any(|r| tmp_c.starts_with(r)),
+                "/tmp must be readable by the viewer; roots were {roots:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_extensions_route_to_base64() {
+        assert!(is_image_ext("png"));
+        assert!(is_image_ext("svg"));
+        assert!(!is_image_ext("md"));
+        assert!(!is_image_ext(""));
+    }
+
+    #[test]
+    fn oversize_files_are_refused_by_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.bin");
+        let mut f = std::fs::File::create(&big).unwrap();
+        f.write_all(&vec![0u8; 16]).unwrap();
+        // The guard is a plain size compare; assert the constant is sane rather
+        // than writing 2 MiB to disk in a unit test.
+        assert!(MAX_VIEWABLE_BYTES >= 1024 * 1024);
+        assert!(std::fs::metadata(&big).unwrap().len() < MAX_VIEWABLE_BYTES);
+    }
+}

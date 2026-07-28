@@ -9,7 +9,9 @@ import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { FileViewerDialog, fileArgInCommand } from "./FileViewerDialog";
 import { TrashIcon } from "./icons";
+import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
@@ -137,7 +139,10 @@ export const DocumentPane = memo(function DocumentPane({
           }}
         />
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
+      {/* min-w-0: without it a flex item's `min-width:auto` refuses to shrink
+          below its content, so a long gated command pushes the pane wider than
+          its parent and overflow-x-hidden clips it out of reach. */}
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
         {showTray ? (
           <TrayList sessionId={sessionId} />
         ) : (
@@ -465,6 +470,16 @@ function TrayList({ sessionId }: { sessionId: string }) {
   const [discardTarget, setDiscardTarget] = useState<SessionTrayView | null>(
     null,
   );
+  // Full-screen preview: either a file the gated command references, or the
+  // command itself when it's too long to read inside the card.
+  const [viewFile, setViewFile] = useState<{
+    sessionId: string;
+    path: string;
+  } | null>(null);
+  const [viewInline, setViewInline] = useState<{
+    title: string;
+    text: string;
+  } | null>(null);
 
   const onDiscardConfirmed = (choiceId: string) => {
     setDiscardTarget(null);
@@ -589,6 +604,15 @@ function TrayList({ sessionId }: { sessionId: string }) {
         }
         onCancel={() => setDiscardTarget(null)}
       />
+      <FileViewerDialog
+        target={viewFile}
+        inlineTitle={viewInline?.title}
+        inlineText={viewInline?.text}
+        onClose={() => {
+          setViewFile(null);
+          setViewInline(null);
+        }}
+      />
       <ul className="space-y-3">
         {pending.map((e) => (
         <li key={e.id}>
@@ -598,6 +622,8 @@ function TrayList({ sessionId }: { sessionId: string }) {
             pendingOption={resolving.get(e.choice_id)}
             onResolve={onResolve}
             onDiscard={() => setDiscardTarget(e)}
+            onViewFile={(path) => setViewFile({ sessionId, path })}
+            onExpand={(title, text) => setViewInline({ title, text })}
           />
         </li>
         ))}
@@ -615,12 +641,16 @@ function TrayChoice({
   pendingOption,
   onResolve,
   onDiscard,
+  onViewFile,
+  onExpand,
 }: {
   entry: SessionTrayView;
   sessionId: string;
   pendingOption: string | undefined;
   onResolve: (choiceId: string, picked: string) => void;
   onDiscard: () => void;
+  onViewFile: (path: string) => void;
+  onExpand: (title: string, text: string) => void;
 }) {
   const choice: ChoicePromptChoice = {
     choice_id: entry.choice_id,
@@ -649,9 +679,35 @@ function TrayChoice({
         </button>
       </div>
       {entry.command_text && (
-        <pre className="mb-1 whitespace-pre-wrap break-words rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
-          {entry.command_text}
-        </pre>
+        <div className="mb-1">
+          {/* `break-words` (overflow-wrap: break-word) only breaks a token that
+              can't fit a line ALONE; a long unbroken run of a command still
+              overflowed and got clipped by the pane's overflow-x-hidden.
+              `anywhere` breaks at any point, and max-h keeps a giant issue body
+              from swallowing the card — Expand shows it in full. */}
+          <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
+            {entry.command_text}
+          </pre>
+          {/* A gate that names a file shows only the PATH — the body being
+              approved is invisible without this. */}
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {(() => {
+              const f = fileArgInCommand(entry.command_text);
+              return f ? (
+                <Button size="sm" variant="ghost" onClick={() => onViewFile(f)}>
+                  View {f.split("/").pop()}
+                </Button>
+              ) : null;
+            })()}
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => onExpand("Gated command", entry.command_text ?? "")}
+            >
+              Expand
+            </Button>
+          </div>
+        </div>
       )}
       {entry.stale && (
         <div className="mb-1 rounded border border-error/40 bg-error-container/20 px-2 py-1 text-[0.7rem] text-on-error-container">
