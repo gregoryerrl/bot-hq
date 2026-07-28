@@ -922,7 +922,10 @@ mod tests {
         bridge
             .mark_awaiting_user("s1".into(), "brian".into(), "first".into())
             .await;
-        let cleared = storage.withdraw_pending_tray_for_session("s1").await.unwrap();
+        // The real path a user reply takes (core::state::broadcast), not a
+        // stand-in — this is the mechanism the guard's "still pending means
+        // unanswered" assumption depends on.
+        let cleared = storage.clear_pending_halts("s1").await.unwrap();
         assert_eq!(cleared, 1, "the halt row should have been pending");
 
         let after = bridge
