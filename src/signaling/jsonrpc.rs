@@ -339,6 +339,22 @@ async fn call_tool(
                 "request submitted — awaiting user. They will advance the phase chip or reply.",
             ))
         }
+        "file_feedback" => {
+            // Deliberately NOT in HANDS_ONLY_TOOLS: filing is not a repo
+            // mutation and never reaches the user mid-session, and EYES hits
+            // bot-hq friction as often as HANDS does.
+            let kind = arg_required_str(&args, "kind")?;
+            let title = arg_required_str(&args, "title")?;
+            let body = arg_required_str(&args, "body")?;
+            let id = bridge
+                .file_feedback(&caller.session_id, &caller.agent, &kind, &title, &body)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(format!(
+                "filed as feedback #{id} ({kind}). It's queued for a bot-hq session to work — \
+                 nothing further is needed from you, and the user was not interrupted."
+            )))
+        }
         "request_approval" => {
             let kind_str = args
                 .get("kind")

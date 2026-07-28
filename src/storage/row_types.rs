@@ -310,6 +310,26 @@ impl FindingStatus {
     }
 }
 
+/// A row from the `agent_feedback` table — an agent's issue or idea about
+/// bot-hq ITSELF, filed from whatever project it happened to be working on.
+/// `session_id`/`project` are provenance: they say where the friction was hit,
+/// not what the feedback is about (that is always bot-hq).
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct AgentFeedback {
+    pub id: i64,
+    pub session_id: String,
+    pub project: Option<String>,
+    pub agent: String,
+    /// `issue` (something is broken/annoying) | `idea` (something could be better).
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    /// `open` | `done` | `dismissed`.
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// A row from the `findings` table — an EYES review finding on a session.
 /// `severity`/`status` are stored as text; use [`FindingSeverity`]/
 /// [`FindingStatus`] `::parse` to type them. `finding_uid` is the public

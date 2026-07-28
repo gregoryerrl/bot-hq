@@ -13,6 +13,7 @@ import { WrenchIcon, EyeIcon, GearIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { ModelsPanel } from "./ModelsPanel";
 import { ViolationsPanel } from "./ViolationsPanel";
+import { FeedbackPanel } from "./FeedbackPanel";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
 import type {
@@ -31,6 +32,7 @@ type SettingsSubTab =
   | "toolgate"
   | "policy"
   | "violations"
+  | "feedback"
   | "archive"
   | "updates";
 
@@ -83,6 +85,12 @@ export function Settings() {
           Violations
         </SubTabButton>
         <SubTabButton
+          active={tab === "feedback"}
+          onClick={() => select("feedback")}
+        >
+          Feedback
+        </SubTabButton>
+        <SubTabButton
           active={tab === "archive"}
           onClick={() => select("archive")}
         >
@@ -113,6 +121,9 @@ export function Settings() {
         </div>
         <div className={cn("h-full", tab !== "violations" && "hidden")}>
           {visited.has("violations") && <ViolationsPanel />}
+        </div>
+        <div className={cn("h-full", tab !== "feedback" && "hidden")}>
+          {visited.has("feedback") && <FeedbackPanel />}
         </div>
         <div className={cn("h-full", tab !== "archive" && "hidden")}>
           {visited.has("archive") && <ArchivePanel />}

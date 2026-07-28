@@ -27,6 +27,7 @@ pub mod claude_config;
 pub mod cl;
 pub mod docs;
 pub mod error;
+pub mod feedback;
 pub mod files;
 pub mod findings;
 pub mod messages;

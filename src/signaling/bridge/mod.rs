@@ -37,6 +37,7 @@ mod action_gate;
 mod cl_facade;
 mod cl_refs;
 mod cl_write;
+mod feedback;
 mod findings;
 mod session_docs;
 mod terminal_tools;

@@ -217,6 +217,29 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "file_feedback",
+            description: "File an issue or idea about BOT-HQ ITSELF — the tool you are running inside — not about the repo this session is working on. Use it when bot-hq gets in your way (a gate that renders unreadably, a round-trip that wasted the user's time, a tool whose contract surprised you) or when you think of something that would make the workflow better. It writes to a queue a later bot-hq session works through; it does NOT interrupt the user and does NOT surface mid-session, so it never costs the current task anything. Both agents may call it. Returns the reference you can quote back (e.g. 'filed as feedback #12'). Do NOT use it for bugs in the project you are working on — those belong in that project's tracker.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": ["issue", "idea"],
+                        "description": "'issue' = something is broken or annoying; 'idea' = something could be better."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "One line naming the problem or suggestion, specific enough to triage without opening it."
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "What happened and why it mattered. Cite concrete evidence — the tool call, the file:line, the wasted minutes — the way you would in a bug report."
+                    }
+                },
+                "required": ["kind", "title", "body"]
+            }),
+        },
+        ToolDescriptor {
             name: "request_approval",
             description: "Request user approval for a policy-gated action (push_gate, force_push, per_action). PARKS and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id — it does NOT block waiting for the answer. The user's pick arrives later as an out-of-band message, so do not re-issue on no answer yet; call `gate_status` with the choice_id if you need to know whether it resolved. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before a prod query). For a Tool-Gate-blocked Bash command, use `action_gate` instead.",
             input_schema: serde_json::json!({
