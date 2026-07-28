@@ -805,6 +805,17 @@ async listPendingTray() : Promise<Result<SessionTrayView[], AppError>> {
 }
 },
 /**
+ * Read a file for the viewer dialog, scoped to the session's repo + temp.
+ */
+async readWorkspaceFile(sessionId: string, path: string) : Promise<Result<WorkspaceFile, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_workspace_file", { sessionId, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * All findings for a session, oldest-first. The banner computes the open-
  * blocking count + escalation state; a future detail view can show the rest.
  */
@@ -1727,6 +1738,23 @@ export type ViolationOutcome = "approved" | "denied" |
  */
 "detected"
 export type ViolationRecord = { ts: string; session_id: string; agent: string; kind: ViolationKind; action: string; outcome: ViolationOutcome; detail?: string | null }
+/**
+ * One file, ready to render. Exactly one of `text` / `base64` is populated —
+ * `text` for anything decodable as UTF-8, `base64` for images.
+ */
+export type WorkspaceFile = { 
+/**
+ * The canonical path actually read (not what the caller passed).
+ */
+path: string; 
+/**
+ * Basename, for the dialog title.
+ */
+name: string; 
+/**
+ * Lowercased extension without the dot, so the UI can pick a renderer.
+ */
+extension: string; text: string | null; base64: string | null; bytes: number }
 
 /** tauri-specta globals **/
 
