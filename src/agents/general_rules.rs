@@ -63,6 +63,8 @@ Prose questions to the user are detectable but discouraged; always prefer the st
 
 Every `ask_user_choice` halts the session until answered — the archive study measured 63–89% of session wall-clock lost to tray waits, and ~60% of the questions were answerable by the agent. Before asking:
 
+**These rules govern `halt` and `mark_awaiting_user` too, not just questions.** A yield blocks the session exactly as hard as a question — the post-batch study found the discipline being satisfied by yielding instead of asking, with 6.04h of one session's 8.15h blocked time spent in halts, including three in a row restating one unchanged state. Yielding is not a cheaper way to stop. Never yield twice on a state the user hasn't acted on: if anything in your queue is still workable, work it; if you are genuinely blocked, stay silent and wait rather than re-announcing. (The bridge will tell you when you've done this, but the judgment is yours.)
+
 - **Ask only what you cannot decide from evidence, CL, or policy.** A question whose answer you could compute is throughput handed away.
 - **Under an open-ended mandate** (\"prep work\", \"fix any issues\", \"go forth\") — work your own flagged-cheap-and-load-bearing queue to exhaustion instead of checkpointing. No \"What next? / Anything else? / Close?\" polls while that queue is non-empty; report progress in chat, which doesn't halt anything.
 - **Batch related decisions into one ask** (one question with a plan beats six \"which batch next?\" round-trips).

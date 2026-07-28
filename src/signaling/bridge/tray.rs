@@ -737,11 +737,38 @@ impl SignalingBridge {
         });
     }
 
-    /// Called by the MCP `tools/call` handler for `mark_awaiting_user`. This
-    /// is async (was previously sync) because we need to set the halt flag
-    /// before the agent's next chunk can volley.
-    pub async fn mark_awaiting_user(&self, session_id: String, agent: String, reason: String) {
+    /// Called by the MCP `tools/call` handler for `mark_awaiting_user` and
+    /// `halt`. This is async (was previously sync) because we need to set the
+    /// halt flag before the agent's next chunk can volley.
+    ///
+    /// Returns the prompt of an unanswered halt this agent already had parked,
+    /// when there is one — the caller turns it into a warning on the ack. A
+    /// halt blocks the session exactly as hard as a question, but carries none
+    /// of the question discipline, so the post-batch study found agents
+    /// satisfying "don't ask delegable questions" by yielding instead: 6.04h of
+    /// one session's 8.15h blocked time was halts, including three in a row
+    /// restating one unchanged state. Checked BEFORE the new row is persisted,
+    /// or it would find itself.
+    pub async fn mark_awaiting_user(
+        &self,
+        session_id: String,
+        agent: String,
+        reason: String,
+    ) -> Option<String> {
+        let prior = self.pending_halt_prompt(&session_id, &agent).await;
         self.emit_halt_row(session_id, agent, reason).await;
+        prior
+    }
+
+    /// Storage lookup behind the repeat-halt check. Best-effort: a bridge built
+    /// without storage (tests) or a failed query simply reports "no prior".
+    async fn pending_halt_prompt(&self, session_id: &str, agent: &str) -> Option<String> {
+        let storage = self.storage.lock().await.clone()?;
+        storage
+            .pending_halt_for_agent(session_id, agent)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Agent-initiated IPAV phase advance request. Persists a chat message
@@ -855,6 +882,71 @@ mod tests {
         assert!(msgs
             .iter()
             .any(|m| m.content.contains("(out-of-band)") && m.content.contains("Yes")));
+    }
+
+    #[tokio::test]
+    async fn repeat_halt_with_no_user_reply_reports_the_prior() {
+        // The treadmill the post-batch study found: three halts in a row
+        // restating one unchanged state, blocking the session each time. A
+        // still-pending halt row means the user hasn't replied (user input
+        // clears halts), so the second yield is a repeat.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        let first = bridge
+            .mark_awaiting_user("s1".into(), "brian".into(), "temp.md ready, awaiting go".into())
+            .await;
+        assert!(first.is_none(), "the first yield has no prior halt");
+
+        let second = bridge
+            .mark_awaiting_user("s1".into(), "brian".into(), "temp.md still ready".into())
+            .await;
+        assert_eq!(
+            second.as_deref(),
+            Some("temp.md ready, awaiting go"),
+            "a second yield with no user reply must surface the earlier one"
+        );
+    }
+
+    #[tokio::test]
+    async fn halt_after_the_user_replies_is_not_a_repeat() {
+        // Answering the halt row is what the user's reply does; once it's no
+        // longer pending, the next yield is a fresh state and must stay silent.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        bridge
+            .mark_awaiting_user("s1".into(), "brian".into(), "first".into())
+            .await;
+        let cleared = storage.withdraw_pending_tray_for_session("s1").await.unwrap();
+        assert_eq!(cleared, 1, "the halt row should have been pending");
+
+        let after = bridge
+            .mark_awaiting_user("s1".into(), "brian".into(), "second".into())
+            .await;
+        assert!(after.is_none(), "a yield after the user acted is not a repeat");
+    }
+
+    #[tokio::test]
+    async fn repeat_halt_check_is_per_agent() {
+        // Rain halting doesn't make Brian's next halt a repeat — the discipline
+        // is about one agent yielding twice on its own unchanged state.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        bridge
+            .mark_awaiting_user("s1".into(), "rain".into(), "rain waits".into())
+            .await;
+        let brian = bridge
+            .mark_awaiting_user("s1".into(), "brian".into(), "brian waits".into())
+            .await;
+        assert!(brian.is_none(), "another agent's halt is not this agent's repeat");
     }
 
     #[tokio::test]

@@ -154,6 +154,28 @@ impl Storage {
         Ok(row.map(|(id,)| id))
     }
 
+    /// The prompt of the most recent still-PENDING `halt` this agent parked in
+    /// this session, if any. User input clears halts, so a pending one means
+    /// the user has not replied since it was raised — and a second halt on top
+    /// of it is a repeat yield on a state the user has not acted on. Backs the
+    /// repeat-halt warning; see `SignalingBridge::mark_awaiting_user`.
+    pub async fn pending_halt_for_agent(
+        &self,
+        session_id: &str,
+        agent: &str,
+    ) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT prompt FROM session_tray \
+             WHERE session_id = ? AND agent = ? AND status = 'pending' AND kind = 'halt' \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(agent)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(prompt,)| prompt))
+    }
+
     /// Look up a tray entry by its `choice_id`. Returns None if absent.
     pub async fn get_tray_entry(&self, choice_id: &str) -> Result<Option<SessionTrayEntry>> {
         let row = sqlx::query_as::<_, SessionTrayEntry>(&format!(

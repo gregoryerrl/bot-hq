@@ -147,6 +147,32 @@ fn parse_optional_phase(args: &Value) -> Result<Option<String>, JsonRpcError> {
     }
 }
 
+/// Append a warning when the agent yields on top of a halt the user has not
+/// answered yet. `prior` is the earlier halt's prompt.
+///
+/// Warn, never refuse. The bridge cannot tell "I made real progress and am
+/// yielding again" from "I am restating the same state", and refusing the
+/// second case would strand an agent with no way to hand control back. Putting
+/// the discipline in the ack keeps the escape hatch open while making the
+/// treadmill visible at the moment it happens.
+fn with_repeat_halt_note(base: &str, prior: Option<&str>) -> String {
+    let Some(prior) = prior else {
+        return base.to_string();
+    };
+    let mut quoted = prior.replace('\n', " ");
+    if quoted.chars().count() > 120 {
+        quoted = quoted.chars().take(117).collect::<String>() + "...";
+    }
+    format!(
+        "{base}\n\nNOTE — you already had an unanswered halt parked here: \"{quoted}\". \
+         The user has not replied since, so this second yield parks another row \
+         without moving anything. A halt blocks the session as hard as a question and \
+         is governed by the same test: if anything in your queue is still workable, \
+         work it instead of yielding; if you are genuinely blocked, stay silent and \
+         wait rather than re-announcing the same state."
+    )
+}
+
 /// Case-insensitive word-boundary scan for a peer/agent name in an
 /// awaiting-user reason. Returns the offending word for the error message.
 fn peer_shaped_reason(reason: &str) -> Option<&'static str> {
@@ -239,10 +265,13 @@ async fn call_tool(
                      ask_user_choice."
                 )));
             }
-            bridge
+            let prior = bridge
                 .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
                 .await;
-            Ok(ToolCallResult::text("ok"))
+            Ok(ToolCallResult::text(with_repeat_halt_note(
+                "ok",
+                prior.as_deref(),
+            )))
         }
         "peer_ack" => {
             // The effect is realized in the duo pump: it observes THIS ToolUse
@@ -267,12 +296,13 @@ async fn call_tool(
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or("Agent yielded — your move.")
                 .to_string();
-            bridge
+            let prior = bridge
                 .mark_awaiting_user(caller.session_id.clone(), caller.agent.clone(), reason)
                 .await;
-            Ok(ToolCallResult::text(
+            Ok(ToolCallResult::text(with_repeat_halt_note(
                 "halted — yielded to the user; input unlocked.",
-            ))
+                prior.as_deref(),
+            )))
         }
         "advance_phase" => {
             let target = arg_required_str(&args, "target")?;

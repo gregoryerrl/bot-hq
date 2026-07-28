@@ -377,7 +377,11 @@ pub async fn pump_agent(
                                 cfg.author.as_str(),
                                 "stalled",
                             );
-                            bridge
+                            // Host-initiated halt: discard the repeat-halt hint.
+                            // That warning is for an AGENT yielding twice on one
+                            // state; a provider-limit stall is the host parking
+                            // the session and there is no agent turn to advise.
+                            let _ = bridge
                                 .mark_awaiting_user(
                                     cfg.session_id.to_string(),
                                     cfg.author.as_str().to_string(),
