@@ -750,6 +750,33 @@ async resolveChoice(choiceId: string, picked: string, confirmStale: boolean) : P
 }
 },
 /**
+ * Discard a tray row from the UI without answering it — the user's bin for
+ * stale questions they no longer want to answer.
+ * 
+ * Deliberately NOT `resolve_choice` with some sentinel pick: nothing is
+ * delivered to the agent. Since `ask_user_choice` / `action_gate` /
+ * `request_approval` all PARK, the requesting agent already holds its ack and
+ * is not awaiting a value, so dropping the row tells it nothing and costs it
+ * nothing.
+ * 
+ * The one caller that genuinely does await in-band is the pre-push git hook
+ * (`signaling::server::handle_pre_push` → the BLOCKING `request_approval`).
+ * Discarding that row drops the parked oneshot, its await returns a cancel
+ * error, and `handle_pre_push` takes its `Err` branch → `approved = false`.
+ * So a discarded push gate DENIES the push; it never hangs.
+ * 
+ * Returns true if a pending row was actually discarded, false if the id was
+ * unknown or already resolved.
+ */
+async discardChoice(choiceId: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("discard_choice", { choiceId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * All tray rows for a session, oldest-first (the Tab filters/render decide
  * what to show). Reads the durable table via the bridge, so it survives
  * restarts and includes resolved history.
@@ -1322,8 +1349,8 @@ native: boolean;
  * 
  * A window is a per-MODEL fact, so it comes from the user rather than from a
  * provider table — `ProviderProfile` deliberately declares none. Left unset,
- * the meter shows a visible gap and the native loop's context ceiling stays
- * dark, which is the documented contract: never a guessed percentage.
+ * the meter shows a visible gap and the native loop's high-context notice
+ * never fires, which is the documented contract: never a guessed percentage.
  */
 context_window: number | null }
 /**
