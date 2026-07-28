@@ -8,6 +8,8 @@ import { PhasePillRow, type Phase } from "./PhasePill";
 import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
 import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { TrashIcon } from "./icons";
 import { cn } from "../lib/cn";
 import { formatRelative } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
@@ -457,6 +459,24 @@ function TrayList({ sessionId }: { sessionId: string }) {
     command: string;
     askedAt: string | null;
   } | null>(null);
+  // Discard = bin a card WITHOUT answering it (nothing is sent to the agent).
+  // Confirmed first: a mis-click on a real approval gate is destructive — a
+  // discarded push gate denies the push.
+  const [discardTarget, setDiscardTarget] = useState<SessionTrayView | null>(
+    null,
+  );
+
+  const onDiscardConfirmed = (choiceId: string) => {
+    setDiscardTarget(null);
+    setResolveError(null);
+    invoke<boolean>("discard_choice", { choiceId })
+      .catch((e) => setResolveError(errorMessage(e)))
+      .finally(() => {
+        void queryClient.invalidateQueries({
+          queryKey: ["list_session_tray", { sessionId }],
+        });
+      });
+  };
 
   const onResolve = (choiceId: string, picked: string, confirmStale = false) => {
     setResolving((m) => new Map(m).set(choiceId, picked));
@@ -544,6 +564,31 @@ function TrayList({ sessionId }: { sessionId: string }) {
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={discardTarget !== null}
+        title="Discard this card?"
+        message={
+          <>
+            <p className="mb-2">
+              It's removed from your tray and <strong>nothing is sent to the
+              agent</strong> — no answer, no rejection. It won't be asked again
+              unless the agent re-raises it.
+            </p>
+            {discardTarget?.command_text && (
+              <p className="rounded border border-error/40 bg-error-container/20 px-2 py-1">
+                This is an approval gate. Discarding it counts as{" "}
+                <strong>not approved</strong>, so the command will not run.
+              </p>
+            )}
+          </>
+        }
+        confirmLabel="Discard"
+        confirmVariant="danger"
+        onConfirm={() =>
+          discardTarget && onDiscardConfirmed(discardTarget.choice_id)
+        }
+        onCancel={() => setDiscardTarget(null)}
+      />
       <ul className="space-y-3">
         {pending.map((e) => (
         <li key={e.id}>
@@ -552,6 +597,7 @@ function TrayList({ sessionId }: { sessionId: string }) {
             sessionId={sessionId}
             pendingOption={resolving.get(e.choice_id)}
             onResolve={onResolve}
+            onDiscard={() => setDiscardTarget(e)}
           />
         </li>
         ))}
@@ -568,11 +614,13 @@ function TrayChoice({
   sessionId,
   pendingOption,
   onResolve,
+  onDiscard,
 }: {
   entry: SessionTrayView;
   sessionId: string;
   pendingOption: string | undefined;
   onResolve: (choiceId: string, picked: string) => void;
+  onDiscard: () => void;
 }) {
   const choice: ChoicePromptChoice = {
     choice_id: entry.choice_id,
@@ -590,6 +638,15 @@ function TrayChoice({
         <span className="text-[0.7rem] text-on-surface-variant">
           {entry.agent}
         </span>
+        <button
+          type="button"
+          onClick={onDiscard}
+          aria-label="Discard this card without answering"
+          title="Discard — removes it from your tray; nothing is sent to the agent"
+          className="ml-auto rounded p-1 text-on-surface-variant transition-colors hover:bg-error-container/30 hover:text-error"
+        >
+          <TrashIcon />
+        </button>
       </div>
       {entry.command_text && (
         <pre className="mb-1 whitespace-pre-wrap break-words rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">

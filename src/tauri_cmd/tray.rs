@@ -133,9 +133,84 @@ pub async fn list_pending_tray(
         .collect())
 }
 
+/// Discard a tray row from the UI without answering it — the user's bin for
+/// stale questions they no longer want to answer.
+///
+/// Deliberately NOT `resolve_choice` with some sentinel pick: nothing is
+/// delivered to the agent. Since `ask_user_choice` / `action_gate` /
+/// `request_approval` all PARK, the requesting agent already holds its ack and
+/// is not awaiting a value, so dropping the row tells it nothing and costs it
+/// nothing.
+///
+/// The one caller that genuinely does await in-band is the pre-push git hook
+/// (`signaling::server::handle_pre_push` → the BLOCKING `request_approval`).
+/// Discarding that row drops the parked oneshot, its await returns a cancel
+/// error, and `handle_pre_push` takes its `Err` branch → `approved = false`.
+/// So a discarded push gate DENIES the push; it never hangs.
+///
+/// Returns true if a pending row was actually discarded, false if the id was
+/// unknown or already resolved.
+#[tauri::command]
+#[specta::specta]
+pub async fn discard_choice(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    choice_id: String,
+) -> Result<bool, AppError> {
+    Ok(bridge.withdraw_question(&choice_id).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn discard_drops_the_row_without_answering_the_agent() {
+        // The user's trash button must not look like an answer. A parked
+        // question's agent already has its ack, so discarding delivers nothing
+        // — assert no ChoiceResolved event escapes and the row stops being
+        // pending.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+
+        let ack = bridge
+            .ask_user_choice(
+                "s1".into(),
+                "brian".into(),
+                "pick".into(),
+                vec!["Yes".into(), "No".into()],
+            )
+            .await
+            .unwrap();
+        let cid = serde_json::from_str::<serde_json::Value>(&ack).unwrap()["choice_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let mut sub = bridge.subscribe();
+        assert!(bridge.withdraw_question(&cid).await, "row was pending");
+
+        // Nothing resolution-shaped may be emitted by a discard.
+        match sub.try_recv() {
+            Err(_) => {}
+            Ok(ev) => panic!("discard must not emit a resolution event, got {ev:?}"),
+        }
+        let rows = bridge.list_questions_for_session("s1").await.unwrap();
+        let row = rows.iter().find(|r| r.choice_id == cid).expect("row exists");
+        assert_eq!(row.status, "withdrawn");
+        assert!(
+            row.picked_option.is_none(),
+            "a discard records no pick: {:?}",
+            row.picked_option
+        );
+    }
+
+    #[tokio::test]
+    async fn discard_of_an_unknown_id_is_false_not_an_error() {
+        let bridge = SignalingBridge::new();
+        assert!(!bridge.withdraw_question("nope").await);
+    }
 
     #[tokio::test]
     async fn list_pending_choices_empty_initially() {
