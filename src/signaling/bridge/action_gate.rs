@@ -101,7 +101,13 @@ impl SignalingBridge {
         let Some(row) = storage.get_tray_entry(gate_id).await? else {
             return Ok(format!("gate_status: no gate with id {gate_id}"));
         };
-        let command = row.command_text.as_deref().unwrap_or("(no command attached)");
+        // Only a ToolBlocklist (action_gate) approval carries a command —
+        // `ask_user_choice_inner` sets `command_text` for that kind alone. A
+        // parked `request_approval` (push_gate / per_action) has none, so the
+        // command-shaped wording would assert an execution that never happened.
+        let Some(command) = row.command_text.as_deref() else {
+            return Ok(Self::approval_status_text(&row));
+        };
         Ok(match row.status.as_str() {
             "pending" => format!(
                 "pending — `{command}` is still awaiting the user's approval. Do not \
@@ -125,6 +131,32 @@ impl SignalingBridge {
             }
             other => format!("{other} — `{command}` did not run (gate is no longer pending)."),
         })
+    }
+
+    /// `gate_status` wording for a command-less approval — a parked
+    /// `request_approval` (push_gate / per_action). Nothing executes on
+    /// approve here; the pick itself is the outcome, so the text must not
+    /// claim bot-hq ran anything.
+    fn approval_status_text(row: &crate::storage::SessionTrayEntry) -> String {
+        match row.status.as_str() {
+            "pending" => "pending — the approval request is still awaiting the user's \
+                 pick. Do not re-issue it; the outcome will arrive as an \
+                 out-of-band message."
+                .to_string(),
+            "answered" => {
+                let picked = row.picked_option.as_deref().unwrap_or("");
+                format!(
+                    "resolved — the user answered \"{picked}\". No command was attached \
+                     (this was a policy approval, not a gated command), so nothing ran \
+                     on bot-hq's side; acting on the answer is yours. Anything beyond \
+                     the leading word is the user's reasoning — read it."
+                )
+            }
+            other => format!(
+                "{other} — the approval request is no longer pending and was never \
+                 answered."
+            ),
+        }
     }
 
     /// Resolve the session's working repo, then run the command and format the
@@ -346,6 +378,51 @@ mod tests {
         assert!(marker.exists(), "approved command should have run");
         let status = bridge.gate_status(&cid).await.unwrap();
         assert!(status.starts_with("approved"), "got: {status}");
+    }
+
+    #[tokio::test]
+    async fn gate_status_on_a_command_less_approval_claims_no_execution() {
+        // `ask_user_choice_inner` sets command_text for ToolBlocklist rows only,
+        // so a parked `request_approval` (push_gate / per_action) has none. The
+        // command-shaped wording would then report that bot-hq "executed
+        // `(no command attached)`" — a false execution claim to the one caller
+        // that exists to avoid guessing whether something ran.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let ack = bridge
+            .request_approval_parked(
+                "s1".into(),
+                "brian".into(),
+                "Query prod?".into(),
+                vec!["Approve".into(), "Deny".into()],
+                ApprovalContext {
+                    kind: ViolationKind::PerAction,
+                    action: "bq query --project_id=prod ...".into(),
+                    detail: None,
+                },
+            )
+            .await
+            .unwrap();
+        let cid = serde_json::from_str::<serde_json::Value>(&ack).unwrap()["choice_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let pending = bridge.gate_status(&cid).await.unwrap();
+        assert!(pending.starts_with("pending"), "got: {pending}");
+        assert!(
+            !pending.contains("no command attached"),
+            "placeholder leaked into agent-facing text: {pending}"
+        );
+
+        bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
+        let done = bridge.gate_status(&cid).await.unwrap();
+        assert!(done.starts_with("resolved"), "got: {done}");
+        assert!(
+            !done.contains("executed"),
+            "must not claim bot-hq ran anything: {done}"
+        );
     }
 
     #[tokio::test]

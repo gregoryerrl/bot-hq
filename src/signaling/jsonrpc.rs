@@ -335,8 +335,12 @@ async fn call_tool(
                 action,
                 detail,
             };
-            let picked = bridge
-                .request_approval(
+            // PARKED, not blocking: the blocking twin is reserved for the
+            // pre-push hook, which needs a synchronous bool for its exit code.
+            // An agent that blocks here times out at ~60s mid-decision and
+            // can't tell queued from failed.
+            let parked = bridge
+                .request_approval_parked(
                     caller.session_id.clone(),
                     caller.agent.clone(),
                     question,
@@ -345,7 +349,7 @@ async fn call_tool(
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
-            Ok(ToolCallResult::text(picked))
+            Ok(ToolCallResult::text(parked))
         }
         "gate_status" => {
             let gate_id = arg_required_str(&args, "gate_id")?;
@@ -2131,28 +2135,36 @@ mod tests {
         let log = crate::policy::ViolationsLog::new(tmp.path());
         let bridge = SignalingBridge::with_violations_log(log.clone());
         let mut sub = bridge.subscribe();
-        let bridge_clone = Arc::clone(&bridge);
-        let call = tokio::spawn(async move {
-            dispatch(
-                req(
-                    "tools/call",
-                    json!({
-                        "name": "request_approval",
-                        "arguments": {
-                            "kind": "push_gate",
-                            "action": "git push origin main",
-                            "question": "Approve push to main?",
-                            "options": ["Approve once", "Deny"],
-                            "detail": "first push to this branch"
-                        }
-                    }),
-                    1,
-                ),
-                &caller(),
-                &bridge_clone,
-            )
-            .await
-        });
+        // The AGENT path parks: dispatch returns before the user has picked, so
+        // there is nothing to await and nothing to time out. (The blocking twin
+        // is the pre-push hook's, covered in bridge::tray's tests.)
+        let res = dispatch(
+            req(
+                "tools/call",
+                json!({
+                    "name": "request_approval",
+                    "arguments": {
+                        "kind": "push_gate",
+                        "action": "git push origin main",
+                        "question": "Approve push to main?",
+                        "options": ["Approve once", "Deny"],
+                        "detail": "first push to this branch"
+                    }
+                }),
+                1,
+            ),
+            &caller(),
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let v = serde_json::to_value(&res).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        let ack: serde_json::Value =
+            serde_json::from_str(text).expect("parked ack is JSON, not a bare pick");
+        assert_eq!(ack["status"], "parked", "agent path must not block: {text}");
+
         let ev = sub.recv().await.unwrap();
         let pending = match ev {
             SignalingEvent::PendingChoice(p) => {
@@ -2161,13 +2173,16 @@ mod tests {
             }
             other => panic!("expected PendingChoice, got {other:?}"),
         };
+        assert_eq!(
+            ack["choice_id"].as_str().unwrap(),
+            pending.choice_id,
+            "the parked ack must name the row the user will answer"
+        );
         bridge
             .resolve_choice(&pending.choice_id, "Approve once".into())
             .await
             .unwrap();
-        let res = call.await.unwrap().unwrap().unwrap();
-        let v = serde_json::to_value(&res).unwrap();
-        assert_eq!(v["result"]["content"][0]["text"], "Approve once");
+        // Parking must not cost the violation record — it is written at resolve.
         let recs = log.read_all().unwrap();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].kind, crate::policy::ViolationKind::PushGate);

@@ -218,7 +218,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "request_approval",
-            description: "Request user approval for a policy-gated action (push_gate, force_push, per_action). Blocks until the user approves or denies in the bot-hq UI. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before `git push`). For a Tool-Gate-blocked Bash command, use `action_gate` instead.",
+            description: "Request user approval for a policy-gated action (push_gate, force_push, per_action). PARKS and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id — it does NOT block waiting for the answer. The user's pick arrives later as an out-of-band message, so do not re-issue on no answer yet; call `gate_status` with the choice_id if you need to know whether it resolved. The outcome is written to violations.jsonl. Call this BEFORE running the action (e.g., before a prod query). For a Tool-Gate-blocked Bash command, use `action_gate` instead.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

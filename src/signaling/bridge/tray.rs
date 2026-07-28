@@ -77,10 +77,17 @@ impl SignalingBridge {
         .await
     }
 
-    /// Policy-initiated approval request. Same machinery as `ask_user_choice`
-    /// (including auto-supersede of the latest pending from this agent) but
-    /// carries an [`ApprovalContext`] so the resolve path can write a
-    /// violation record.
+    /// Policy-initiated approval request, BLOCKING — holds the call open until
+    /// the user picks, so the caller gets the answer in-band.
+    ///
+    /// **Host-internal callers only**, specifically the pre-push git hook
+    /// (`server.rs::handle_pre_push`), which maps the pick onto a process exit
+    /// code and so needs a synchronous bool. Agent-facing MCP calls must use
+    /// [`Self::request_approval_parked`] — an agent blocking here hits its
+    /// client's ~60s timeout while the human is still deciding and cannot tell
+    /// "queued" from "failed". That is the ghost state `action_gate` was moved
+    /// off in `2ab07b4`; this sibling kept the old contract and it fired live
+    /// on a production query (2026-07-28T15:55Z).
     pub async fn request_approval(
         &self,
         session_id: String,
@@ -88,6 +95,39 @@ impl SignalingBridge {
         question: String,
         options: Vec<String>,
         ctx: ApprovalContext,
+    ) -> Result<String> {
+        self.request_approval_inner(session_id, agent, question, options, ctx, true)
+            .await
+    }
+
+    /// Policy-initiated approval request, PARKED — the agent-facing path.
+    ///
+    /// Same violation-recording machinery as [`Self::request_approval`], but
+    /// returns the `{"status":"parked","choice_id":…}` acknowledgment at once
+    /// and delivers the pick out-of-band: the contract `ask_user_choice` and
+    /// `action_gate` already use.
+    pub async fn request_approval_parked(
+        &self,
+        session_id: String,
+        agent: String,
+        question: String,
+        options: Vec<String>,
+        ctx: ApprovalContext,
+    ) -> Result<String> {
+        self.request_approval_inner(session_id, agent, question, options, ctx, false)
+            .await
+    }
+
+    /// Shared body of the two entry points above. `blocking` is the ONLY
+    /// difference between them — see their docs for which caller gets which.
+    async fn request_approval_inner(
+        &self,
+        session_id: String,
+        agent: String,
+        question: String,
+        options: Vec<String>,
+        ctx: ApprovalContext,
+        blocking: bool,
     ) -> Result<String> {
         let supersedes_id = self
             .auto_supersede_prior_pending(&session_id, &agent, &question)
@@ -99,8 +139,7 @@ impl SignalingBridge {
             options,
             Some(ctx),
             supersedes_id,
-            // Approvals BLOCK: the pre-push git hook awaits a synchronous bool.
-            true,
+            blocking,
         )
         .await
     }
@@ -1112,6 +1151,40 @@ mod tests {
         let picked = ask.await.unwrap();
         assert_eq!(picked, "Approve", "blocking call returns the pick in-band");
         assert!(matches!(outcome, ResolveOutcome::Delivered));
+    }
+
+    #[tokio::test]
+    async fn request_approval_parked_returns_immediately() {
+        // The agent-facing twin must NOT hold the call open. Before this split
+        // both callers blocked, so an agent's MCP client timed out at ~60s while
+        // the human was still deciding and could not tell queued from failed —
+        // it fired live on a production query (2026-07-28T15:55Z). No resolve
+        // happens here: the await alone has to come back.
+        let bridge = SignalingBridge::new();
+        let ack = bridge
+            .request_approval_parked(
+                "s1".into(),
+                "brian".into(),
+                "Query prod?".into(),
+                vec!["Approve".into(), "Deny".into()],
+                ApprovalContext {
+                    kind: ViolationKind::PerAction,
+                    action: "bq query ...".into(),
+                    detail: None,
+                },
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&ack).expect("parked ack is JSON");
+        assert_eq!(
+            v.get("status").and_then(|s| s.as_str()),
+            Some("parked"),
+            "agent path parks instead of blocking"
+        );
+        assert!(
+            v.get("choice_id").and_then(|s| s.as_str()).is_some(),
+            "parked ack carries the choice_id so gate_status can find it"
+        );
     }
 
     #[tokio::test]
