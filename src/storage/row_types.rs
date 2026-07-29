@@ -310,6 +310,24 @@ impl FindingStatus {
     }
 }
 
+/// A row from the `forward_events` table — one peer forward that was DISCARDED.
+/// Only drops are recorded, so every row means a message was lost; `reason`
+/// names which breaker did it. See the migration for why delivered/held/peer_ack
+/// forwards are deliberately absent.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ForwardEvent {
+    pub id: i64,
+    pub session_id: String,
+    pub occurred_at: String,
+    pub from_agent: String,
+    pub to_agent: String,
+    /// `hard_cap` | `convergence` | `no_peer`.
+    pub reason: String,
+    /// FULL body length, so a truncated preview is never read as a short message.
+    pub body_len: i64,
+    pub body_preview: String,
+}
+
 /// A row from the `cancel_events` table — one Stop, with everything needed to
 /// tell the candidate failure paths apart after the fact. See the migration for
 /// why each field is here.

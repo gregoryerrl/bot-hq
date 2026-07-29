@@ -620,6 +620,8 @@ async fn spawn_session_handle(
             let open_blocking = bridge.register_open_blocking(session.id.clone()).await;
             let deps = crate::core::RouterDeps {
                 awaiting: Arc::clone(&awaiting),
+                session_id: session.id.as_str().into(),
+                storage: Some(storage.clone()),
                 user_silent_forwards: Arc::clone(&user_silent_forwards),
                 convergence_reset: Arc::clone(&convergence_reset),
                 fwd_brian_to_rain: Arc::clone(&fwd_brian_to_rain),

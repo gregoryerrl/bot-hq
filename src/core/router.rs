@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// A command from a pump (or the session core) to the router.
 #[derive(Debug)]
@@ -92,6 +92,18 @@ pub struct RouterDeps {
     pub open_blocking: Arc<AtomicUsize>,
     /// Current IPAV phase, read at forward time for the wire envelope.
     pub ipav: Arc<Mutex<IpavState>>,
+    /// Which session this router serves — only used to attribute a dropped-
+    /// forward row. The router is per-session, so this is fixed at spawn.
+    pub session_id: Arc<str>,
+    /// Storage handle used ONLY to record a DISCARDED forward.
+    ///
+    /// Deliberately not touched on the delivery path: this struct is
+    /// intentionally lock-free (see `open_blocking` above, which exists to keep
+    /// a storage-mutex acquire off every forward). Drops are rare, so a write
+    /// there costs nothing in the common case — and a lost message with no trace
+    /// is precisely the failure this exists to end. `None` in tests that don't
+    /// assert telemetry.
+    pub storage: Option<crate::storage::Storage>,
     /// Brian's stdin sender (peer target when Rain speaks).
     pub brian_input: mpsc::Sender<OutgoingUserMessage>,
     /// Rain's stdin sender (peer target when Brian speaks). `None` = solo; the
@@ -212,12 +224,27 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                 peer_ack,
                 peer_ack_final,
             } => {
-                // The Stop gate, read at dispatch time inside this single task
-                // (check-then-act can't interleave with another forward). Held
-                // forwards still settle the sender idle — the pump delegated
-                // self-idle to us, and `await_both_idle` must see the interrupt
-                // land or the escalation SIGKILLs an already-stopped agent.
-                if deps.holds_wakes() {
+                // HOLD, don't drop, whenever the peer must not be woken right
+                // now. Two conditions qualify, and they used to disagree:
+                //
+                //   - cancelling/paused (`holds_wakes`) → always held here.
+                //   - awaiting-user → used to `return` inside `route_forward`,
+                //     SILENTLY DISCARDING the turn.
+                //
+                // Both are transient states that end when the user speaks, so
+                // both deserve the same treatment. The old asymmetry lost real
+                // work: `awaiting` is set by ask_user_choice / mark_awaiting_user
+                // / halt DURING a turn, while the Forward is emitted at
+                // turn-END — so every turn that finished by asking the user a
+                // question or yielding had its entire body dropped instead of
+                // reaching the peer. That is a duo silently half-deaf exactly
+                // when one side is summarising for the other.
+                //
+                // Held forwards still settle the sender idle — the pump
+                // delegated self-idle to us, and `await_both_idle` must see the
+                // interrupt land or the escalation SIGKILLs an already-stopped
+                // agent.
+                if deps.holds_wakes() || deps.awaiting.load(Ordering::Acquire) {
                     debug!(
                         agent = ?from,
                         held = held.len() + 1,
@@ -239,9 +266,11 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                 .await;
             }
             RouterCommand::FlushHeld => {
-                // Still gated (a re-pause raced this flush)? Keep holding — the
-                // next broadcast sends another FlushHeld.
-                if deps.holds_wakes() || held.is_empty() {
+                // Still gated (a re-pause raced this flush, or a fresh question
+                // was parked)? Keep holding — the next broadcast sends another
+                // FlushHeld. Mirrors the hold condition above, so a forward can
+                // never be released into a state that would have held it.
+                if deps.holds_wakes() || deps.awaiting.load(Ordering::Acquire) || held.is_empty() {
                     continue;
                 }
                 debug!(count = held.len(), "router: flushing held forwards");
@@ -287,16 +316,16 @@ async fn route_forward(
         // this is reachable only via the impossible `from == User`. Log the
         // invariant breach (review advisory) and never strand `from` busy.
         debug!(agent = ?from, "router: no peer sender (unexpected non-duo author); dropping forward");
+        record_drop(deps, from, "no_peer", trimmed).await;
         deps.set_idle(from);
         return;
     };
 
-    // 1. Await-halt: the user is being asked — suppress, settle the sender idle.
-    if deps.awaiting.load(Ordering::Acquire) {
-        debug!(agent = ?from, "router: awaiting user; suppressing peer forward");
-        deps.set_idle(from);
-        return;
-    }
+    // 1. Await-halt is NO LONGER handled here. It used to `return`, discarding
+    //    the turn; it is now a HOLD at the dispatch site (see `run_router`), so
+    //    the message is replayed once the user replies instead of being lost.
+    //    Deliberately not re-checked here: a replay runs through this function,
+    //    and re-testing the flag would drop the very forward the hold preserved.
     // 2. peer_ack: explicit ack — suppress BEFORE the counters (not a volley
     //    contribution, so it must not bump the hard-cap or extend the streak).
     //    UNLESS the same turn carried substantive text: the 2026-07-27 archive
@@ -331,6 +360,9 @@ async fn route_forward(
     let n = deps.user_silent_forwards.fetch_add(1, Ordering::AcqRel) + 1;
     if n > VOLLEY_HARD_CAP {
         debug!(agent = ?from, count = n, "router: hard-cap reached; breaking volley + unlocking input");
+        // Stays lossy on purpose — this is the runaway breaker, and a duplicated
+        // message is far cheaper than a 34-turn loop. It just stops being SILENT.
+        record_drop(deps, from, "hard_cap", trimmed).await;
         break_volley(deps);
         return;
     }
@@ -358,6 +390,10 @@ async fn route_forward(
     *last_forward = Some(cur_tokens);
     if *similar_streak >= VOLLEY_SIMILAR_BREAK {
         debug!(agent = ?from, streak = *similar_streak, "router: convergence breaker tripped; breaking volley + unlocking input");
+        // Also deliberately lossy, also no longer silent. This is the breaker
+        // most likely to swallow a genuine turn, because "I agree, because X"
+        // resembles the previous turn far more than a new finding does.
+        record_drop(deps, from, "convergence", trimmed).await;
         break_volley(deps);
         return;
     }
@@ -398,6 +434,27 @@ async fn route_forward(
 /// Break a volley: set BOTH agents idle so `ActivityTracker::derive` returns Idle
 /// and the chat input unlocks. Shared by the L2 hard-cap and the convergence
 /// breaker. (2-agent named: Brian + Rain.)
+/// Record a forward that was DISCARDED, so a half-deaf duo is diagnosable
+/// instead of arguable. Best-effort: telemetry must never break routing, so a
+/// storage failure warns and the router carries on.
+async fn record_drop(deps: &RouterDeps, from: Author, reason: &str, body: &str) {
+    let Some(storage) = deps.storage.as_ref() else {
+        return;
+    };
+    if let Err(e) = storage
+        .insert_forward_drop(
+            &deps.session_id,
+            from.as_str(),
+            peer_of(from).as_str(),
+            reason,
+            body,
+        )
+        .await
+    {
+        warn!(?e, agent = ?from, reason, "router: could not record dropped forward");
+    }
+}
+
 fn break_volley(deps: &RouterDeps) {
     if let Some(activity) = &deps.activity {
         activity.set_busy(Author::Brian, false);
@@ -486,6 +543,10 @@ mod tests {
             activity: None,
             open_blocking: Arc::new(AtomicUsize::new(0)),
             ipav: Arc::new(Mutex::new(IpavState::default())),
+            session_id: "s1".into(),
+            // Most router tests assert routing, not telemetry; the drop-recording
+            // test below builds its own deps with a real Storage.
+            storage: None,
             brian_input,
             rain_input,
         }
@@ -609,6 +670,116 @@ mod tests {
             counter.load(Ordering::Acquire),
             0,
             "a suppressed-by-awaiting forward must not bump the hard-cap counter"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_broken_volley_records_which_message_it_dropped() {
+        // The breakers stay lossy on purpose, but they must stop being SILENT:
+        // for a whole session nobody could tell whether a reviewer was careless
+        // or the transport had eaten the message, because a drop left no trace
+        // anywhere — not for the sender, the receiver, or the user.
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, _rrx) = mpsc::channel(64);
+        let mut d = deps(
+            btx,
+            Some(rtx),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        d.storage = Some(storage.clone());
+        let (mut last, mut streak) = (None, 0u32);
+
+        // Two near-identical turns trip the convergence breaker on the second.
+        let body = "Agreed, and the reason I am confident is the drift-check output.";
+        route_forward(&d, &mut last, &mut streak, Author::Brian, body.into(), false, false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, body.into(), false, false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, body.into(), false, false).await;
+
+        let drops = storage.list_forward_drops(Some("s1")).await.unwrap();
+        assert!(!drops.is_empty(), "a broken volley must leave a trace");
+        assert_eq!(drops[0].reason, "convergence");
+        assert_eq!(drops[0].from_agent, "brian");
+        assert_eq!(drops[0].to_agent, "rain", "records the peer that never heard it");
+        assert!(
+            drops[0].body_preview.contains("drift-check output"),
+            "the preview must identify WHICH message was lost: {}",
+            drops[0].body_preview
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_delivered_forward_records_nothing() {
+        // Only losses are recorded — the delivery path must not acquire storage
+        // at all, which is why `open_blocking` exists as a lock-free cache.
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, _rrx) = mpsc::channel(64);
+        let mut d = deps(
+            btx,
+            Some(rtx),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU32::new(0)),
+        );
+        d.storage = Some(storage.clone());
+        let (mut last, mut streak) = (None, 0u32);
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "alpha".into(), false, false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Rain, "beta".into(), false, false).await;
+        assert!(
+            storage.list_forward_drops(None).await.unwrap().is_empty(),
+            "delivered forwards are not drops"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn awaiting_holds_the_forward_and_delivers_it_after_the_user_replies() {
+        // The regression pin for the half-deaf duo. `awaiting` is set by
+        // ask_user_choice / mark_awaiting_user / halt DURING a turn, while the
+        // Forward is emitted at turn-END — so a turn that finished by asking the
+        // user a question used to have its ENTIRE body discarded rather than
+        // forwarded. The peer then genuinely never saw the plan/finding/review
+        // it was being asked to act on, while the user could read it on screen.
+        //
+        // It must now be HELD and replayed, exactly like the pause path.
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, mut rrx) = mpsc::channel(64);
+        let awaiting = Arc::new(AtomicBool::new(true));
+        let d = deps(
+            btx,
+            Some(rtx),
+            Arc::clone(&awaiting),
+            Arc::new(AtomicU32::new(0)),
+        );
+        let (tx, rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_router(d, rx));
+
+        // Brian's turn ends with a parked question; his summary must not vanish.
+        tx.send(fwd(Author::Brian, "here is the plan you should review"))
+            .await
+            .unwrap();
+        // Nothing reaches Rain while the user is being asked.
+        tokio::task::yield_now().await;
+        assert!(
+            rrx.try_recv().is_err(),
+            "the peer must not be woken while the user is being asked"
+        );
+
+        // The user answers: broadcast clears `awaiting`, then sends FlushHeld.
+        awaiting.store(false, Ordering::Release);
+        tx.send(RouterCommand::FlushHeld).await.unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        let delivered = rrx.try_recv().expect("the held forward must be delivered, not lost");
+        assert!(
+            delivered.message.content.contains("here is the plan you should review"),
+            "the ORIGINAL body must survive the hold: {}",
+            delivered.message.content
+        );
+        assert!(
+            rrx.try_recv().is_err(),
+            "delivered exactly once — a hold must not duplicate"
         );
     }
 
@@ -795,26 +966,31 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn convergence_reset_survives_a_suppressed_forward() {
-        // The reset is consumed at the CONVERGENCE stage, so a forward suppressed
-        // earlier (here: awaiting) must NOT burn it — it stays set for the next
-        // forward that actually reaches convergence. (Closes Rain's review edge:
-        // a reset consumed by a not-actually-delivered forward.)
+        // The reset is consumed at the CONVERGENCE stage, so a forward that
+        // early-returns BEFORE that stage must NOT burn it — it stays set for
+        // the next forward that actually reaches convergence. (Closes Rain's
+        // review edge: a reset consumed by a not-actually-delivered forward.)
+        //
+        // The suppression used here is `peer_ack`, not awaiting: awaiting is no
+        // longer a `route_forward` early-return at all — it HOLDS at the
+        // dispatch site so the turn is replayed rather than lost. peer_ack still
+        // returns before the convergence stage, so it exercises the same
+        // invariant on a path that still exists.
         // Brian-origin forwards land on RAIN's channel (peer = Rain).
         let (btx, _brx) = mpsc::channel(64);
         let (rtx, mut rrx) = mpsc::channel(64);
         let reset = Arc::new(AtomicBool::new(true));
-        let awaiting = Arc::new(AtomicBool::new(true));
+        let awaiting = Arc::new(AtomicBool::new(false));
         let mut d = deps(btx, Some(rtx), Arc::clone(&awaiting), Arc::new(AtomicU32::new(0)));
         d.convergence_reset = Arc::clone(&reset);
         let (mut last, mut streak) = (Some(HashSet::from(["stale".to_string()])), 5u32);
-        // Awaiting suppresses this forward — and must leave the reset intact.
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false, false).await;
+        // A short peer_ack suppresses this forward — and must leave reset intact.
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "ok".into(), true, false).await;
         assert!(
             reset.load(Ordering::Acquire),
-            "an awaiting-suppressed forward must NOT consume the reset"
+            "a forward suppressed before the convergence stage must NOT consume the reset"
         );
-        // User replies → awaiting clears; the next forward consumes the reset.
-        awaiting.store(false, Ordering::Release);
+        // The next real forward consumes it.
         route_forward(&d, &mut last, &mut streak, Author::Brian, "fresh line".into(), false, false).await;
         assert!(
             !reset.load(Ordering::Acquire),
@@ -825,7 +1001,7 @@ mod tests {
         while rrx.try_recv().is_ok() {
             delivered += 1;
         }
-        assert_eq!(delivered, 1, "only the post-await forward was delivered");
+        assert_eq!(delivered, 1, "only the un-suppressed forward was delivered");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -845,9 +1021,10 @@ mod tests {
         route_forward(&d, &mut last, &mut streak, Author::Brian, "alpha".into(), false, false).await;
         route_forward(&d, &mut last, &mut streak, Author::Brian, "beta".into(), false, false).await;
         route_forward(&d, &mut last, &mut streak, Author::Rain, "gamma".into(), false, false).await;
-        // An awaiting-suppressed forward must NOT count.
-        awaiting.store(true, Ordering::Release);
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false, false).await;
+        // A suppressed forward must NOT count. peer_ack rather than awaiting:
+        // awaiting no longer suppresses here, it holds at the dispatch site.
+        let _ = &awaiting;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "ok".into(), true, false).await;
         assert_eq!(b2r.load(Ordering::Acquire), 2, "two delivered Brian→Rain forwards");
         assert_eq!(r2b.load(Ordering::Acquire), 1, "one delivered Rain→Brian forward");
     }

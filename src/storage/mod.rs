@@ -21,6 +21,7 @@ mod cancel_events;
 mod cl_atoms;
 mod cl_index;
 mod feedback;
+mod forward_events;
 mod findings;
 mod messages;
 mod models;
@@ -39,7 +40,7 @@ pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use cancel_events::CancelEventRecord;
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use row_types::{
-    AgentConfig, AgentFeedback, Author, CancelEvent, ClFolder, ClIndexEntry, ClRead,
+    AgentConfig, AgentFeedback, Author, CancelEvent, ClFolder, ForwardEvent, ClIndexEntry, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
     QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
 };
