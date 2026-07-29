@@ -372,8 +372,14 @@ impl AppState {
     /// they don't honor it in time. Queues the post-cancel reconciliation nudge in
     /// EITHER outcome. Driven by a detached task from the Tauri command — the
     /// non-atomic path immediately, the atomic-deferred path once the op completes.
-    pub async fn interrupt_then_escalate(&self, session_id: &str) {
-        let (activity, cancel_superseded) = {
+    pub async fn interrupt_then_escalate(
+        &self,
+        session_id: &str,
+        pressed_at: &str,
+        deferred_ms: u64,
+        deferral_capped: bool,
+    ) {
+        let (activity, cancel_superseded, brian_queued, rain_queued) = {
             let sessions = self.sessions.lock().await;
             let Some(handle) = sessions.get(session_id) else {
                 return; // session gone → nothing to cancel
@@ -382,23 +388,59 @@ impl AppState {
             // mirrors cancel_kill_now. `interrupt` is best-effort (&self try_send);
             // a full/closed control channel returns false and the idle-watch below
             // times out into the SIGKILL fallback.
-            if let Some(rain) = handle.rain.as_ref() {
-                rain.interrupt("cancel");
+            //
+            // KEEP the booleans. They used to be discarded, which made a DROPPED
+            // interrupt indistinguishable from one the agent received and ignored
+            // — two different bugs with the same symptom, and no way to tell them
+            // apart after the fact.
+            let rain_queued = handle.rain.as_ref().map(|rain| rain.interrupt("cancel"));
+            let brian_queued = handle.brian.interrupt("cancel");
+            if !brian_queued {
+                tracing::warn!(session_id, "cancel: HANDS interrupt was NOT queued");
             }
-            handle.brian.interrupt("cancel");
+            if rain_queued == Some(false) {
+                tracing::warn!(session_id, "cancel: EYES interrupt was NOT queued");
+            }
             (
                 Arc::clone(&handle.activity),
                 Arc::clone(&handle.cancel_superseded),
+                brian_queued,
+                rain_queued,
             )
         };
 
         let deadline = tokio::time::Instant::now() + INTERRUPT_ESCALATION;
         let both_idle = activity.await_both_idle(deadline).await;
-        match Self::escalation_outcome(
+        let superseded = cancel_superseded.load(Ordering::Acquire);
+        let idled = activity.idled_since_cancel();
+        let outcome = Self::escalation_outcome(both_idle, superseded, idled);
+
+        // Record BEFORE acting: a SIGKILL tears the session down, and telemetry
+        // written after that is telemetry you don't get for the case you most
+        // need it. Best-effort — losing a row must never block a cancel.
+        let record = crate::storage::CancelEventRecord {
+            session_id: session_id.to_string(),
+            pressed_at: pressed_at.to_string(),
+            settled_at: crate::storage::now_utc(),
+            deferred_ms: deferred_ms as i64,
+            deferral_capped,
+            brian_interrupt_queued: Some(brian_queued),
+            rain_interrupt_queued: rain_queued,
             both_idle,
-            cancel_superseded.load(Ordering::Acquire),
-            activity.idled_since_cancel(),
-        ) {
+            cancel_superseded: superseded,
+            idled_since_cancel: idled,
+            outcome: match outcome {
+                EscalationOutcome::InterruptHonored => "honored",
+                EscalationOutcome::SupersededByUser => "superseded",
+                EscalationOutcome::Sigkill => "sigkill",
+            }
+            .to_string(),
+        };
+        if let Err(e) = self.storage.insert_cancel_event(&record).await {
+            tracing::warn!(?e, session_id, "cancel: could not record cancel event");
+        }
+
+        match outcome {
             EscalationOutcome::InterruptHonored => {
                 // Process alive at a turn boundary (Cancelling auto-cleared to Idle).
                 // Queue the nudge so the next user message reconciles the workspace.
@@ -812,20 +854,25 @@ impl AppState {
     /// arrives can't resurrect a turn that already went idle, so `both_idle` wins).
     ///
     /// `idled_since_cancel` is what makes the superseded branch safe. A user
-    /// message alone is NOT evidence the stuck turn aborted: claude-code reads
-    /// `control_request` from stdin between turns, so while it is blocked on a
-    /// synchronous Bash result it sees neither the cancel interrupt nor the
-    /// message's preempt interrupt. Skipping the SIGKILL on the message alone
-    /// meant pressing Stop and then typing left the agent running — the whole
-    /// "Stop doesn't hold" report, and why it was mostly HANDS (the seat that
-    /// runs multi-minute builds) and intermittent (staying quiet for the ~2s
-    /// window worked fine).
+    /// message alone is NOT evidence the stuck turn aborted — it only proves the
+    /// USER did something. If the agent never honored the interrupt, skipping
+    /// the SIGKILL on that basis leaves it running after Stop.
     ///
-    /// So the skip now requires proof the turn actually stopped: the agents
-    /// reached idle at some point since the cancel. That still protects the
-    /// case the skip exists for — interrupt honored, then the user's message
-    /// started a fresh turn that is busy again by the deadline — while a wedged
-    /// agent, which never reached idle, gets force-killed as the user asked.
+    /// So the skip requires proof the turn actually stopped: the agents reached
+    /// idle at some point since the cancel. That still protects the case the
+    /// skip exists for — interrupt honored, then the user's message started a
+    /// fresh turn that is busy again by the deadline — while an agent that never
+    /// reached idle gets force-killed as the user asked.
+    ///
+    /// This is a SAFETY NET against any agent that doesn't honor a
+    /// `control_request` in time (a native-loop model, a future tool that blocks
+    /// on stdin, a dropped interrupt), NOT a fix for a confirmed claude-code
+    /// behavior. An earlier version of this comment asserted that claude-code
+    /// cannot see interrupts while blocked on a synchronous Bash call; a live
+    /// test on 2026-07-29 disproved that — it aborted a running `cargo build`
+    /// ~2s after Stop and the process survived (PID unchanged), i.e.
+    /// `InterruptHonored`. Which path actually causes a Stop not to hold is
+    /// still unknown; `cancel_events` exists to answer that from data next time.
     fn escalation_outcome(
         both_idle: bool,
         cancel_superseded: bool,

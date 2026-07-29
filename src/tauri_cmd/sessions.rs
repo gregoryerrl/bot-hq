@@ -506,6 +506,10 @@ pub async fn cancel_session_turn(
     session_id: String,
 ) -> Result<(), AppError> {
     use crate::core::state::CancelOutcome;
+    // Stamped at the top so `cancel_events.pressed_at` is when the USER acted,
+    // not when the escalation finished. The gap between the two is precisely
+    // what a user experiences as "Stop didn't do anything".
+    let pressed_at = crate::storage::now_utc();
     match core.cancel_session_turn(&session_id).await? {
         CancelOutcome::Done => {}
         CancelOutcome::Interrupting => {
@@ -516,7 +520,8 @@ pub async fn cancel_session_turn(
             // re-acquire `sessions` without holding it across the wait.
             let core = core.inner().clone();
             tokio::spawn(async move {
-                core.interrupt_then_escalate(&session_id).await;
+                core.interrupt_then_escalate(&session_id, &pressed_at, 0, false)
+                    .await;
             });
         }
         CancelOutcome::Deferred(flag) => {
@@ -526,19 +531,27 @@ pub async fn cancel_session_turn(
             // command returns immediately and the UI keeps showing "Cancelling…".
             let core = core.inner().clone();
             tokio::spawn(async move {
-                let deadline =
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+                let started = tokio::time::Instant::now();
+                let deadline = started + std::time::Duration::from_secs(8);
+                let mut capped = false;
                 while flag.load(std::sync::atomic::Ordering::Acquire) {
                     if tokio::time::Instant::now() >= deadline {
                         tracing::warn!(
                             %session_id,
                             "cancel: atomic-op deferral hit ~8s cap — interrupting now"
                         );
+                        capped = true;
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                core.interrupt_then_escalate(&session_id).await;
+                // Recorded because this window is the leading candidate for
+                // "Stop kept working": it is HANDS-only (the flag is set for
+                // git commit/push/migrate) and delays the interrupt by up to 8s
+                // before anything is even sent.
+                let deferred_ms = started.elapsed().as_millis() as u64;
+                core.interrupt_then_escalate(&session_id, &pressed_at, deferred_ms, capped)
+                    .await;
             });
         }
     }

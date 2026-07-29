@@ -310,6 +310,27 @@ impl FindingStatus {
     }
 }
 
+/// A row from the `cancel_events` table — one Stop, with everything needed to
+/// tell the candidate failure paths apart after the fact. See the migration for
+/// why each field is here.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct CancelEvent {
+    pub id: i64,
+    pub session_id: String,
+    pub pressed_at: String,
+    pub settled_at: String,
+    pub deferred_ms: i64,
+    pub deferral_capped: i64,
+    /// 1 = queued, 0 = dropped (full/closed channel), None = no such agent.
+    pub brian_interrupt_queued: Option<i64>,
+    pub rain_interrupt_queued: Option<i64>,
+    pub both_idle: i64,
+    pub cancel_superseded: i64,
+    pub idled_since_cancel: i64,
+    /// `honored` | `superseded` | `sigkill`.
+    pub outcome: String,
+}
+
 /// A row from the `agent_feedback` table — an agent's issue or idea about
 /// bot-hq ITSELF, filed from whatever project it happened to be working on.
 /// `session_id`/`project` are provenance: they say where the friction was hit,
