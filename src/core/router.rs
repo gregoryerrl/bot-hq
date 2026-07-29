@@ -37,6 +37,10 @@ pub enum RouterCommand {
         body: String,
         /// Whether the producing turn called `peer_ack` (suppress, don't volley).
         peer_ack: bool,
+        /// Whether that `peer_ack` passed `final: true` — the agent ASSERTING
+        /// this is its closing turn, so suppression no longer depends on the
+        /// length proxy. See the guard in `route_forward`.
+        peer_ack_final: bool,
     },
     /// Release the pause hold queue: re-run every held forward through the
     /// normal ladder. Sent by `broadcast` after it clears the pause latch (a
@@ -197,13 +201,16 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
     // forward arriving AFTER the gate reopens but BEFORE the flush command can
     // deliver ahead of held entries — accepted, the held ones are stale partials
     // and the resume notice precedes both on each agent's stdin.
-    let mut held: Vec<(Author, String, bool)> = Vec::new();
+    // (from, body, peer_ack, peer_ack_final) — the ack flags ride along so a
+    // held forward replays through the SAME ladder it would have taken live.
+    let mut held: Vec<(Author, String, bool, bool)> = Vec::new();
     while let Some(cmd) = rx.recv().await {
         match cmd {
             RouterCommand::Forward {
                 from,
                 body,
                 peer_ack,
+                peer_ack_final,
             } => {
                 // The Stop gate, read at dispatch time inside this single task
                 // (check-then-act can't interleave with another forward). Held
@@ -217,7 +224,7 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                         "router: session cancelling/paused; holding forward"
                     );
                     deps.set_idle(from);
-                    held.push((from, body, peer_ack));
+                    held.push((from, body, peer_ack, peer_ack_final));
                     continue;
                 }
                 route_forward(
@@ -227,6 +234,7 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                     from,
                     body,
                     peer_ack,
+                    peer_ack_final,
                 )
                 .await;
             }
@@ -237,7 +245,7 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                     continue;
                 }
                 debug!(count = held.len(), "router: flushing held forwards");
-                for (from, body, peer_ack) in held.drain(..) {
+                for (from, body, peer_ack, peer_ack_final) in held.drain(..) {
                     route_forward(
                         &deps,
                         &mut last_forward,
@@ -245,6 +253,7 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                         from,
                         body,
                         peer_ack,
+                        peer_ack_final,
                     )
                     .await;
                 }
@@ -264,6 +273,7 @@ async fn route_forward(
     from: Author,
     body: String,
     peer_ack: bool,
+    peer_ack_final: bool,
 ) {
     let trimmed = body.trim_end();
     if trimmed.is_empty() {
@@ -294,9 +304,20 @@ async fn route_forward(
     //    verdict and calling peer_ack in the same turn (the tool name reads as
     //    "acknowledge my peer", the semantics were "throw my turn away"). A
     //    substantive turn forwards anyway, tagged, and counts like any other.
+    //    `final: true` overrides the length proxy — the agent has ASSERTED this
+    //    is its closing turn. Safe to honour because suppression skips the WAKE,
+    //    never the record: the turn's text is persisted by the pump's
+    //    `AgentEvent::Text` arm as it arrives, whether or not a Forward is sent.
+    //    Without this, "I agree, and here is the one reason why" exceeds 200
+    //    bytes, forwards, wakes the peer, and continues the volley the ack
+    //    existed to end (filed from a live session as feedback #6).
     if peer_ack {
-        if trimmed.len() <= PEER_ACK_MAX_SUPPRESSED_LEN {
-            debug!(agent = ?from, "router: peer_ack; suppressing peer forward");
+        if peer_ack_final || trimmed.len() <= PEER_ACK_MAX_SUPPRESSED_LEN {
+            debug!(
+                agent = ?from,
+                final_asserted = peer_ack_final,
+                "router: peer_ack; suppressing peer forward"
+            );
             deps.set_idle(from);
             return;
         }
@@ -501,6 +522,7 @@ mod tests {
             from,
             body: body.into(),
             peer_ack: false,
+            peer_ack_final: false,
         }
     }
 
@@ -603,6 +625,7 @@ mod tests {
                 from: Author::Brian,
                 body: "Agreed — nothing to add.".into(),
                 peer_ack: true,
+                peer_ack_final: false,
             },
             fwd(Author::Rain, "Here's the actual next step."),
         ];
@@ -634,6 +657,7 @@ mod tests {
             from: Author::Rain,
             body: review.into(),
             peer_ack: true,
+            peer_ack_final: false,
         }];
         let (tx, rx) = mpsc::channel(8);
         let task = tokio::spawn(run_router(d, rx));
@@ -657,6 +681,81 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn peer_ack_final_suppresses_a_substantive_turn() {
+        // The turn shape that ENDS a volley: agreement plus the single reason
+        // for it. Well over the length proxy, but the agent has asserted this is
+        // its closing statement — so it must NOT wake the peer. Feedback #6.
+        let (btx, mut brx) = mpsc::channel(8);
+        let (rtx, rrx) = mpsc::channel(8);
+        let counter = Arc::new(AtomicU32::new(0));
+        let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), Arc::clone(&counter));
+        let closing = "Agreed — and the reason I'm confident is that the drift-check \
+                       output already disproves the generate_models.py concern, so there \
+                       is nothing further for either of us to chase on that thread. No \
+                       new finding here, no correction, and nothing you need to act on: \
+                       this is simply where I stop.";
+        assert!(
+            closing.len() > PEER_ACK_MAX_SUPPRESSED_LEN,
+            "the point of this test is a turn the LENGTH rule would have forwarded"
+        );
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_router(d, rx));
+        tx.send(RouterCommand::Forward {
+            from: Author::Rain,
+            body: closing.into(),
+            peer_ack: true,
+            peer_ack_final: true,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        task.await.unwrap();
+        drop(rrx);
+        assert!(
+            brx.try_recv().is_err(),
+            "final:true must suppress the wake regardless of length"
+        );
+        assert_eq!(
+            counter.load(Ordering::Acquire),
+            0,
+            "a suppressed ack is not a forward and must not count toward the hard-cap"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn substantive_turn_without_final_still_forwards() {
+        // Regression pin for the 2026-07-27 bug (four reviews destroyed): adding
+        // `final` must not weaken the DEFAULT. Same body as the test above, with
+        // the flag omitted — this one has to reach the peer.
+        let (btx, mut brx) = mpsc::channel(8);
+        let (rtx, rrx) = mpsc::channel(8);
+        let counter = Arc::new(AtomicU32::new(0));
+        let d = deps(btx, Some(rtx), Arc::new(AtomicBool::new(false)), Arc::clone(&counter));
+        let closing = "Agreed — and the reason I'm confident is that the drift-check \
+                       output already disproves the generate_models.py concern, so there \
+                       is nothing further for either of us to chase on that thread. No \
+                       new finding here, no correction, and nothing you need to act on: \
+                       this is simply where I stop.";
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_router(d, rx));
+        tx.send(RouterCommand::Forward {
+            from: Author::Rain,
+            body: closing.into(),
+            peer_ack: true,
+            peer_ack_final: false,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        task.await.unwrap();
+        drop(rrx);
+        let delivered = brx
+            .try_recv()
+            .expect("without final:true the length rule still governs");
+        assert!(delivered.message.content.contains("peer_ack overridden"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn convergence_reset_clears_stale_streak() {
         // A user message (broadcast sets `convergence_reset`) is a hard boundary:
         // the pre-message convergence streak must NOT carry over to suppress the
@@ -677,12 +776,12 @@ mod tests {
         );
         d.convergence_reset = Arc::clone(&reset);
         let (mut last, mut streak) = (None, 0u32);
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false).await;
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false, false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false, false).await;
         assert_eq!(streak, 1, "two identical forwards build a streak of 1");
         // Simulate the user speaking → broadcast sets the flag.
         reset.store(true, Ordering::Release);
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "🤝".into(), false, false).await;
         assert_eq!(streak, 0, "the reset cleared the streak before the third forward");
         let mut delivered = 0;
         while rrx.try_recv().is_ok() {
@@ -709,14 +808,14 @@ mod tests {
         d.convergence_reset = Arc::clone(&reset);
         let (mut last, mut streak) = (Some(HashSet::from(["stale".to_string()])), 5u32);
         // Awaiting suppresses this forward — and must leave the reset intact.
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false, false).await;
         assert!(
             reset.load(Ordering::Acquire),
             "an awaiting-suppressed forward must NOT consume the reset"
         );
         // User replies → awaiting clears; the next forward consumes the reset.
         awaiting.store(false, Ordering::Release);
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "fresh line".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "fresh line".into(), false, false).await;
         assert!(
             !reset.load(Ordering::Acquire),
             "the forward that reached convergence consumed the reset"
@@ -743,12 +842,12 @@ mod tests {
         d.fwd_rain_to_brian = Arc::clone(&r2b);
         let (mut last, mut streak) = (None, 0u32);
         // Distinct bodies → no convergence break; all delivered.
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "alpha".into(), false).await;
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "beta".into(), false).await;
-        route_forward(&d, &mut last, &mut streak, Author::Rain, "gamma".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "alpha".into(), false, false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "beta".into(), false, false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Rain, "gamma".into(), false, false).await;
         // An awaiting-suppressed forward must NOT count.
         awaiting.store(true, Ordering::Release);
-        route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false).await;
+        route_forward(&d, &mut last, &mut streak, Author::Brian, "held".into(), false, false).await;
         assert_eq!(b2r.load(Ordering::Acquire), 2, "two delivered Brian→Rain forwards");
         assert_eq!(r2b.load(Ordering::Acquire), 1, "one delivered Rain→Brian forward");
     }

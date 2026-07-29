@@ -632,6 +632,19 @@ async fn call_tool(
             let slug = arg_required_str(&args, "slug")?;
             let body = arg_required_str(&args, "body")?;
             let phase = parse_optional_phase(&args)?;
+            // Default "replace" keeps every existing caller unchanged; an
+            // unrecognised mode is refused rather than silently replacing, since
+            // a caller that meant to append would otherwise destroy the doc.
+            let append = match args.get("mode").and_then(Value::as_str) {
+                None | Some("replace") => false,
+                Some("append") => true,
+                Some(other) => {
+                    return Err(JsonRpcError::new(
+                        JsonRpcError::INVALID_PARAMS,
+                        format!("unknown mode '{other}' — expected 'replace' or 'append'"),
+                    ))
+                }
+            };
             // EYES (rain) contributing to a phase doc must not overwrite Brian's
             // single per-phase doc. Route a phase-tagged rain write to a
             // co-located, attributed `<phase>-eyes` doc (same phase tag → same
@@ -649,7 +662,13 @@ async fn call_tool(
                 }
                 _ => {
                     let id = bridge
-                        .session_doc_write(&caller.session_id, &slug, &body, phase.as_deref())
+                        .session_doc_write(
+                            &caller.session_id,
+                            &slug,
+                            &body,
+                            phase.as_deref(),
+                            append,
+                        )
                         .await
                         .map_err(internal_err_no_prefix)?;
                     Ok(ToolCallResult::text(

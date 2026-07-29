@@ -131,6 +131,23 @@ fn is_peer_ack_tool(name: &str) -> bool {
     name == "peer_ack" || name.ends_with("__peer_ack")
 }
 
+/// True for a `peer_ack` call that passed `final: true` — the agent asserting
+/// "this turn is my closing statement; record it, don't wake my peer".
+///
+/// Without it the router can only INFER substance from length
+/// (`PEER_ACK_MAX_SUPPRESSED_LEN`), and that proxy misfires on the exact turn
+/// shape that ENDS a volley: "I agree, and here is the one reason why" runs past
+/// 200 chars, so it forwards, so the peer wakes and replies. Filed from a live
+/// session as feedback #6 with worked examples.
+///
+/// Suppression is safe to make explicit because it has never destroyed content —
+/// the turn's text is persisted by the `AgentEvent::Text` arm as it arrives,
+/// independent of whether a Forward is later emitted. `final` skips the WAKE,
+/// not the record.
+fn peer_ack_is_final(name: &str, input: &serde_json::Value) -> bool {
+    is_peer_ack_tool(name) && input.get("final").and_then(|v| v.as_bool()) == Some(true)
+}
+
 /// Provider quota/limit phrases, matched case-insensitively against each text
 /// chunk. Deliberately a plain substring net over ALL provider eras: the
 /// archive study found these render as ordinary agent speech — Brian sat dead
@@ -191,6 +208,7 @@ pub async fn pump_agent(
     // during this turn; consumed at the turn's flush to suppress that turn's
     // peer-forward. Per-turn — reset after every TurnComplete (success OR error).
     let mut peer_ack_pending = false;
+    let mut peer_ack_final_pending = false;
     // A3a: one-shot guard so Brian gets at most one "you're mutating before
     // Apply" nudge per session (delivered to his own stdin via self_input_tx).
     let mut mutate_nudged = false;
@@ -234,6 +252,12 @@ pub async fn pump_agent(
                 // so this turn's Forward tells the router to suppress the wake.
                 if is_peer_ack_tool(&name) {
                     peer_ack_pending = true;
+                    // `final: true` = the agent ASSERTS this is its closing turn,
+                    // so the router suppresses regardless of length instead of
+                    // inferring substance from a byte count.
+                    if peer_ack_is_final(&name, &input) {
+                        peer_ack_final_pending = true;
+                    }
                 }
                 // Batch 7: a tool call started — suppress stall detection until
                 // its ToolResult (a long build/install emits no events meanwhile).
@@ -359,6 +383,9 @@ pub async fn pump_agent(
                         if let Some(router_tx) = &cfg.router_tx {
                             let _ = router_tx
                                 .send(RouterCommand::Forward {
+                                    // A host-authored notice, not an agent ack.
+                                    peer_ack: false,
+                                    peer_ack_final: false,
                                     from: cfg.author,
                                     body: format!(
                                         "⚠ [bot-hq] {} hit a provider limit and is paused: \
@@ -367,7 +394,6 @@ pub async fn pump_agent(
                                          user to resume.",
                                         cfg.author.as_str()
                                     ),
-                                    peer_ack: false,
                                 })
                                 .await;
                         }
@@ -426,6 +452,7 @@ pub async fn pump_agent(
                                     from: cfg.author,
                                     body,
                                     peer_ack: peer_ack_pending,
+                                    peer_ack_final: peer_ack_final_pending,
                                 })
                                 .await
                             {
@@ -445,6 +472,7 @@ pub async fn pump_agent(
                 // peer_ack is per-turn — reset after BOTH branches so an errored
                 // turn (which skips the router) can't leak the flag into the next.
                 peer_ack_pending = false;
+                peer_ack_final_pending = false;
                 // Turn ended → this agent is idle, UNLESS we handed off to the
                 // router (which clears it after setting the peer busy, avoiding the
                 // momentary `Idle` flicker that would unlock the input mid-handoff).
@@ -498,6 +526,7 @@ pub async fn pump_agent(
                                 from: cfg.author,
                                 body,
                                 peer_ack: peer_ack_pending,
+                                peer_ack_final: peer_ack_final_pending,
                             })
                             .await
                             .is_err()
@@ -621,14 +650,18 @@ mod tests {
         (cfg, route_rx)
     }
 
-    /// Pull one `RouterCommand::Forward` from `rx` → (from, body, peer_ack).
-    fn next_forward(rx: &mut mpsc::Receiver<RouterCommand>) -> Option<(Author, String, bool)> {
+    /// Pull one `RouterCommand::Forward` from `rx` →
+    /// (from, body, peer_ack, peer_ack_final).
+    fn next_forward(
+        rx: &mut mpsc::Receiver<RouterCommand>,
+    ) -> Option<(Author, String, bool, bool)> {
         match rx.try_recv() {
             Ok(RouterCommand::Forward {
                 from,
                 body,
                 peer_ack,
-            }) => Some((from, body, peer_ack)),
+                peer_ack_final,
+            }) => Some((from, body, peer_ack, peer_ack_final)),
             // Pumps only emit Forward; FlushHeld comes from `broadcast`.
             Ok(RouterCommand::FlushHeld) => None,
             Err(_) => None,
@@ -769,7 +802,7 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (from, body, peer_ack) =
+        let (from, body, peer_ack, _) =
             next_forward(&mut route_rx).expect("Forward on turn complete");
         assert_eq!(from, Author::Brian);
         assert!(body.contains("hello"));
@@ -809,7 +842,7 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (_, body, _) = next_forward(&mut route_rx).expect("Forward on turn complete");
+        let (_, body, _, _) = next_forward(&mut route_rx).expect("Forward on turn complete");
         assert!(body.contains("step 1"));
         assert!(body.contains("step 2"));
     }
@@ -835,7 +868,7 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (_, body, _) = next_forward(&mut route_rx).expect("flushed to router");
+        let (_, body, _, _) = next_forward(&mut route_rx).expect("flushed to router");
         assert!(body.contains("quick"));
     }
 
@@ -864,6 +897,25 @@ mod tests {
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].kind, "tool_use");
+    }
+
+    #[test]
+    fn peer_ack_is_final_matrix() {
+        use serde_json::json;
+        // Only a peer_ack call with an explicit `final: true` counts.
+        assert!(peer_ack_is_final("peer_ack", &json!({"final": true})));
+        assert!(peer_ack_is_final(
+            "mcp__bot-hq-signaling__peer_ack",
+            &json!({"final": true})
+        ));
+        // Default / absent / false → the length proxy still governs.
+        assert!(!peer_ack_is_final("peer_ack", &json!({})));
+        assert!(!peer_ack_is_final("peer_ack", &json!({"final": false})));
+        // A non-peer_ack tool can't assert finality no matter what it passes.
+        assert!(!peer_ack_is_final("Bash", &json!({"final": true})));
+        // Non-boolean `final` is not a truthy opt-in — don't coerce.
+        assert!(!peer_ack_is_final("peer_ack", &json!({"final": "yes"})));
+        assert!(!peer_ack_is_final("peer_ack", &json!({"final": 1})));
     }
 
     #[test]
@@ -913,7 +965,7 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (_, _, peer_ack) = next_forward(&mut route_rx).expect("Forward emitted");
+        let (_, _, peer_ack, _) = next_forward(&mut route_rx).expect("Forward emitted");
         assert!(peer_ack, "peer_ack tool must set peer_ack=true in the Forward");
         // The agent's text is still persisted for the user.
         let msgs = storage.messages_for_session("s1", None).await.unwrap();
@@ -972,9 +1024,9 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let (_, b1, ack1) = next_forward(&mut route_rx).expect("turn 1 Forward");
+        let (_, b1, ack1, _) = next_forward(&mut route_rx).expect("turn 1 Forward");
         assert!(ack1 && b1.contains("acked"));
-        let (_, b2, ack2) = next_forward(&mut route_rx).expect("turn 2 Forward");
+        let (_, b2, ack2, _) = next_forward(&mut route_rx).expect("turn 2 Forward");
         assert!(!ack2 && b2.contains("real follow-up"));
     }
 
@@ -1261,7 +1313,7 @@ mod tests {
 
         // Exactly ONE peer notice despite two limit turns (dedupe window).
         let mut notices = 0;
-        while let Some((from, body, _)) = next_forward(&mut route_rx) {
+        while let Some((from, body, _, _)) = next_forward(&mut route_rx) {
             if body.contains("hit a provider limit") {
                 assert_eq!(from, Author::Brian);
                 notices += 1;

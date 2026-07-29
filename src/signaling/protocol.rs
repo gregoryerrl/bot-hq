@@ -156,8 +156,16 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "peer_ack",
-            description: "Acknowledge your peer WITHOUT waking them — suppresses THIS turn's peer-forward. Use when you and your peer have converged (you agree, or have nothing substantive to add) and want to stop the back-and-forth instead of bouncing another ack that wakes the peer for a full turn. Your text is still saved to the chat (the user sees it); it is simply not forwarded to the peer, so the duo settles back to Idle. This is happy-path politeness layered ON TOP of the mechanical volley-breaker — it does not replace it. Either agent may call it; it takes no arguments.",
-            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            description: "Acknowledge your peer WITHOUT waking them — suppresses THIS turn's peer-forward. Use when you and your peer have converged (you agree, or have nothing substantive to add) and want to stop the back-and-forth instead of bouncing another ack that wakes the peer for a full turn. Your text is still saved to the chat (the user sees it); it is simply not forwarded to the peer, so the duo settles back to Idle. This is happy-path politeness layered ON TOP of the mechanical volley-breaker — it does not replace it. Either agent may call it.\n\nBy default a LONG turn (over ~200 characters) forwards anyway, tagged, because a long turn is usually a review or correction that must not be silently dropped. That length rule is only a proxy, and it misfires on the most common way a volley actually ends: \"I agree, and here is the one reason why\" runs past the limit, so it forwards and wakes your peer. When your turn IS your closing statement, pass `final: true` to say so explicitly — suppression then does not depend on length. Nothing is lost either way: `final` skips the WAKE, not the record.\n\nDo NOT pass `final: true` on a turn that carries a new finding, a correction, or anything your peer still needs to act on.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "final": {
+                        "type": "boolean",
+                        "description": "True when this turn is your closing statement — suppress the peer-forward regardless of length. Omit (or false) for the default length-based behaviour."
+                    }
+                }
+            }),
         },
         ToolDescriptor {
             name: "halt",
@@ -450,7 +458,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "session_doc_write",
-            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) and the doc is keyed BY PHASE — exactly ONE rewritable doc per phase. Writing that phase again (even under a different slug) overwrites the single doc; if you found new info, rewrite the whole doc, never create a `-v2`.** Phase-tagged docs surface in the matching IPAV document tab and are retrievable via `session_doc_search(phase=...)`. Untagged docs are keyed by `slug` (many allowed) — session-scoped scratch, invisible to tabs and phase searches. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.",
+            description: "Upsert a per-session scratch document (plan, investigation findings, notes — any free-form text). Isolated to THIS session; does NOT appear in cl_index_search and won't pollute the CL. **Tag with `phase` (one of `investigate`/`plan`/`apply`/`verify`) and the doc is keyed BY PHASE — exactly ONE rewritable doc per phase. Writing that phase again (even under a different slug) overwrites the single doc; if you found new info, rewrite the whole doc, never create a `-v2`.** Phase-tagged docs surface in the matching IPAV document tab and are retrievable via `session_doc_search(phase=...)`. Untagged docs are keyed by `slug` (many allowed) — session-scoped scratch, invisible to tabs and phase searches. Promote to CL by writing the body to a CL path with Write/Bash + cl_rescan(project) ONLY when the user asks.\n\n`mode: \"append\"` adds to the existing body under a timestamped separator instead of replacing it. Use it when a phase ships in SLICES: rewriting the whole doc per slice is what leaves it stale, and the phase key means you cannot open a second one. An append supersedes nothing, so nothing is archived. Default is `replace`.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -466,6 +474,11 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                         "type": "string",
                         "enum": ["investigate", "plan", "apply", "verify"],
                         "description": "Optional. Tags the doc AND keys it: exactly one rewritable doc per phase. Surfaces in the matching IPAV tab and is retrievable via session_doc_search(phase=...)."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["replace", "append"],
+                        "description": "'replace' (default) overwrites the whole body. 'append' adds to it under a timestamped separator — use it when a phase ships in several slices, so the doc stays current instead of going stale between rewrites."
                     }
                 },
                 "required": ["slug", "body"]

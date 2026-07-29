@@ -63,12 +63,23 @@ impl SignalingBridge {
     /// Agent-callable: upsert a per-session scratch document. Phase-tagged
     /// writes are keyed by phase (one rewritable doc per IPAV phase — see
     /// `effective_slug`); untagged writes are keyed by `slug`.
+    ///
+    /// `append` adds to the existing body instead of replacing it, under a
+    /// timestamped separator. One rewritable doc per phase is right for linear
+    /// work, but a phase that ships several slices had only two options: rewrite
+    /// the whole doc each time (so it silently went stale when nobody did) or
+    /// spawn a second doc (which the phase key forbids). Appending makes a
+    /// multi-slice phase additive. Nothing is archived on an append — nothing is
+    /// superseded. Filed from a live session as feedback #3, where an apply doc
+    /// still cited figures three slices out of date and was the first artifact
+    /// the reviewer pulled.
     pub async fn session_doc_write(
         &self,
         session_id: &str,
         slug: &str,
         body: &str,
         phase: Option<&str>,
+        append: bool,
     ) -> Result<i64> {
         let id = {
             let storage_guard = self.storage.lock().await;
@@ -76,7 +87,33 @@ impl SignalingBridge {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
             let key = effective_slug(slug, phase);
-            if phase.is_some() {
+            // Append only has meaning against an existing doc; appending to a
+            // missing one is just a write.
+            let existing = if append {
+                storage
+                    .session_document_by_slug(session_id, key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|d| d.body)
+            } else {
+                None
+            };
+            let composed;
+            let body = match existing {
+                Some(prev) => {
+                    composed = format!(
+                        "{prev}\n\n---\n_appended {}_\n\n{body}",
+                        crate::storage::now_utc()
+                    );
+                    composed.as_str()
+                }
+                None => body,
+            };
+            // Archiving exists to preserve a body about to be REPLACED. An
+            // append replaces nothing, so archiving it would just duplicate the
+            // prefix into the archive on every slice.
+            if phase.is_some() && !append {
                 Self::archive_superseded_doc(storage, session_id, key, body).await;
             }
             storage
@@ -185,7 +222,7 @@ mod tests {
         storage.create_session("s1", "test", None).await.unwrap();
 
         bridge
-            .session_doc_write("s1", "plan", "brian v1", Some("plan"))
+            .session_doc_write("s1", "plan", "brian v1", Some("plan"), false)
             .await
             .unwrap();
         let (_, eyes_slug) = bridge
@@ -196,7 +233,7 @@ mod tests {
 
         // Brian rewrites his plan doc — Rain's findings must survive.
         bridge
-            .session_doc_write("s1", "plan", "brian v2", Some("plan"))
+            .session_doc_write("s1", "plan", "brian v2", Some("plan"), false)
             .await
             .unwrap();
 
@@ -229,15 +266,15 @@ mod tests {
         storage.create_session("s1", "test", None).await.unwrap();
 
         bridge
-            .session_doc_write("s1", "apply", "the 23-finding audit", Some("apply"))
+            .session_doc_write("s1", "apply", "the 23-finding audit", Some("apply"), false)
             .await
             .unwrap();
         bridge
-            .session_doc_write("s1", "apply", "batch B changelog", Some("apply"))
+            .session_doc_write("s1", "apply", "batch B changelog", Some("apply"), false)
             .await
             .unwrap();
         bridge
-            .session_doc_write("s1", "apply", "batch C changelog", Some("apply"))
+            .session_doc_write("s1", "apply", "batch C changelog", Some("apply"), false)
             .await
             .unwrap();
 
@@ -260,6 +297,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_accumulates_slices_instead_of_replacing() {
+        // Feedback #3: a phase that ships several slices had only bad options —
+        // rewrite the whole doc each time (so it goes stale when nobody does) or
+        // open a second doc (which the phase key forbids). Append makes the
+        // multi-slice case additive.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        bridge
+            .session_doc_write("s1", "apply", "slice 1: canaries", Some("apply"), false)
+            .await
+            .unwrap();
+        bridge
+            .session_doc_write("s1", "apply", "slice 2: url_clicks fix", Some("apply"), true)
+            .await
+            .unwrap();
+        bridge
+            .session_doc_write("s1", "apply", "slice 3: segment rename", Some("apply"), true)
+            .await
+            .unwrap();
+
+        let head = bridge.session_doc_read("s1", "apply").await.unwrap().unwrap();
+        // Every slice survives — the staleness in the report came from earlier
+        // slices being replaced by later ones.
+        assert!(head.body.contains("slice 1: canaries"));
+        assert!(head.body.contains("slice 2: url_clicks fix"));
+        assert!(head.body.contains("slice 3: segment rename"));
+        assert_eq!(head.body.matches("_appended ").count(), 2, "one marker per append");
+
+        // An append supersedes nothing, so it must not archive — otherwise each
+        // slice would duplicate the whole accumulated prefix into an archive.
+        let archives = bridge.session_doc_search("s1", Some("apply@"), None).await.unwrap();
+        assert!(archives.is_empty(), "append must not archive; got {archives:?}");
+    }
+
+    #[tokio::test]
+    async fn append_to_a_missing_doc_is_just_a_write() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        bridge
+            .session_doc_write("s1", "verify", "first ever", Some("verify"), true)
+            .await
+            .unwrap();
+        let head = bridge.session_doc_read("s1", "verify").await.unwrap().unwrap();
+        assert_eq!(head.body, "first ever", "no separator with nothing to separate");
+    }
+
+    #[tokio::test]
+    async fn replace_still_archives_after_an_append() {
+        // Append and replace have to coexist: a slice-appended doc that is then
+        // deliberately rewritten must still preserve the accumulated body.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+
+        bridge
+            .session_doc_write("s1", "apply", "slice 1", Some("apply"), false)
+            .await
+            .unwrap();
+        bridge
+            .session_doc_write("s1", "apply", "slice 2", Some("apply"), true)
+            .await
+            .unwrap();
+        bridge
+            .session_doc_write("s1", "apply", "full rewrite", Some("apply"), false)
+            .await
+            .unwrap();
+
+        let archived = bridge.session_doc_read("s1", "apply@1").await.unwrap();
+        let body = archived.expect("the rewrite archives the accumulated body").body;
+        assert!(body.contains("slice 1") && body.contains("slice 2"));
+        let head = bridge.session_doc_read("s1", "apply").await.unwrap().unwrap();
+        assert_eq!(head.body, "full rewrite");
+    }
+
+    #[tokio::test]
     async fn same_body_rewrite_and_untagged_docs_do_not_archive() {
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
@@ -267,13 +386,13 @@ mod tests {
         storage.create_session("s1", "test", None).await.unwrap();
 
         // Identical-body rewrite: no archive row.
-        bridge.session_doc_write("s1", "plan", "same", Some("plan")).await.unwrap();
-        bridge.session_doc_write("s1", "plan", "same", Some("plan")).await.unwrap();
+        bridge.session_doc_write("s1", "plan", "same", Some("plan"), false).await.unwrap();
+        bridge.session_doc_write("s1", "plan", "same", Some("plan"), false).await.unwrap();
         assert!(bridge.session_doc_read("s1", "plan@1").await.unwrap().is_none());
 
         // Untagged scratch docs are caller-managed: rewriting is routine, not loss.
-        bridge.session_doc_write("s1", "scratch", "v1", None).await.unwrap();
-        bridge.session_doc_write("s1", "scratch", "v2", None).await.unwrap();
+        bridge.session_doc_write("s1", "scratch", "v1", None, false).await.unwrap();
+        bridge.session_doc_write("s1", "scratch", "v2", None, false).await.unwrap();
         assert!(bridge.session_doc_read("s1", "scratch@1").await.unwrap().is_none());
     }
 
