@@ -9,6 +9,24 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — misinformation archive study → three evidence rules (s-11b73814)
+
+Searched all sessions (May 20 → Aug 4) for the user's misinformation
+frustration moments: 15 genuine, 9 real incidents, each root-caused with
+message-id evidence (session docs, s-11b73814). Verdict: model supplies
+the false claim (present in all 9 delivery paths), CL/reports carry it,
+app gaps enable it (never primary). Shipped the prompt-rule halves into
+`general_rules.rs` (+3 pinning tests):
+
+- **Status words need same-turn evidence** — no PENDING→RESOLVED by
+  inference at CL close (the 2026-07-24 inversion of Tom's decision).
+- **Re-verify state claims before an outbound report ships** — EOD
+  snapshots decay same-day (2026-08-04, caught by a stakeholder).
+- **Third-party signals are dated claims** — stale assignee/status doc
+  vs verbal handoff → ask, don't infer (the 2026-07-10 P1/P2 mixup).
+
+R1–R6 recommendations filed in CL issues.md (#18–#23).
+
 ## 2026-07-28 — archive-study remediation batch (s-92f76f02)
 
 Studied 9 archived duo sessions (Jul 23–27, both build eras) with 7

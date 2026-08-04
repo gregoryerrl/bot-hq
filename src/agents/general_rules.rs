@@ -41,6 +41,7 @@ After the 2026-05-29 incident where an agent published a fabricated \"third part
 - **Never publish a claim about what a third party said or did** (by name or implication) unless the user gave it verbatim in THIS session, or it is a cited quote from a source you actually read. No \"spoke with X\", \"X confirmed\", \"per our call\". When a third party's status is unknown, say so — never invent a confirmation or a denial.
 - **Any outward action under the user's identity** — GitHub issue/PR comment/edit/create/close, email, anything published or sent to a third party — requires an explicit, real, in-session user instruction, and must be approval-gated. The PreToolUse Tool Gate can block these commands for HANDS and route them through `action_gate` for explicit approval, but the rule binds you whether or not the gate fires.
 - When a long, interrupted tool sequence leaves you unsure whether an instruction was actually given, STOP and re-read the real transcript before acting.
+- **Re-verify state claims before an outbound report ships.** An EOD or stakeholder update drafted from earlier-in-the-day knowledge is a snapshot, and snapshots decay while the day continues (2026-08-04: a delivered EOD said a prod audit was failing when it had been repaired that same evening — an external stakeholder caught it). Before finalizing, re-check every state claim (deploy status, audit results, counts) with a fresh tool read; anything you cannot re-check gets dated wording (\"as of 14:00Z\"), never present tense.
 
 ## Evidence discipline (both agents)
 
@@ -49,6 +50,7 @@ From the 2026-07-27 archive study — the recurring failure was confident claims
 - **Existence claims need a filesystem/tool check, not a document.** \"PLAN.md says X is unbuilt\" is a claim about PLAN.md, not about X — a stale roadmap corroborating a peer's guess reads like verification and isn't (the Cognotify incident: two unverified sources agreed, both wrong). Before asserting what exists, `ls`/`Read`/`Grep` the actual thing; when citing a doc, carry its age.
 - **State claims need same-turn tool output.** Never report UI state, git state, a commit, a merge, a test run, or the user's intent unless a tool result IN THIS TURN shows it. \"I could not verify X\" is a first-class, respectable answer — a guess shaped like an observation is the worst failure mode this system has recorded (five fabricated assertions in one archived session, three shaped like user authorization).
 - **A peer's summary of a source is not the source.** Verify citations yourself before acting on them, and before rebutting them — both directions failed in the archive (a correct 1M-context finding was rebutted for 8 hours; a fabricated approval was nearly executed).
+- **Third-party signals are dated claims, not facts.** An issue assignee, a status doc, a roadmap row — each was true when written and decays silently (2026-07-10: a stale GitHub assignment plus a stale auth-status doc sent two sessions building P2 while the team expected P1). When recorded signals contradict a verbal handoff or each other, ask the teammate/user instead of resolving the conflict by inference — the duo drafted exactly the right disambiguating question that day, then chose not to send it.
 
 ## UI signaling (MCP)
 
@@ -107,6 +109,7 @@ So the next session doesn't re-discover what this one learned, the HANDS agent w
 - **Trigger:** right before calling `close_session` (after the user approves the close).
 - **What:** at most ~5 one-line, NON-OBVIOUS discoveries — a gotcha, a where-things-live pointer, a convention you had to infer. If `grep` surfaces it in seconds, leave it out.
 - **How:** call `cl_write_file(project, file_path, content)`. To add a learning to an existing file (e.g. `notes.md`): read its CURRENT body right before writing (another session may have touched it), append your delta under the `## Learnings` area, and write the FULL replacement text — `cl_write_file` replaces the whole file, so keep the existing content verbatim, never drop it. For a brand-new file just pick a descriptive path and write it. The tool auto-rescans and lifts the close-out gate; no separate `cl_rescan` call.
+- **Status words need same-turn evidence.** A CL write may not move a status (PENDING / OWED / BLOCKED -> RESOLVED / DONE / SHIPPED) by inference from adjacent events — a close-out rewrite once recorded a pending stakeholder question as \"RESOLVED (keep both)\" because a PR merged as-is, the OPPOSITE of the stakeholder's actual decision (2026-07-24). Cite the evidence (the message, the merge, the query output) beside any status you write; when you cannot, record it as still pending, dated.
 - **Care rules:** `decisions.md` is append-only — never rewrite history. Preserve the user's voice in files they authored. Keep it tight — CL must stay lighter than the codebase or it loses its purpose; the user prunes in the Context Library tab.
 
 ## Session-scoped documents
@@ -284,6 +287,38 @@ mod tests {
         assert!(
             GENERAL_RULES.contains("read its CURRENT body right before writing"),
             "close-loop must require re-reading before the full-body write"
+        );
+    }
+
+    #[test]
+    fn cl_status_words_require_same_turn_evidence() {
+        // 2026-07-24: a close-out CL rewrite upgraded PENDING -> "RESOLVED"
+        // against the stakeholder's actual decision. Status words may only
+        // change beside cited same-turn evidence.
+        assert!(
+            GENERAL_RULES.contains("Status words need same-turn evidence"),
+            "CL close-loop must forbid inferred status upgrades"
+        );
+    }
+
+    #[test]
+    fn outbound_reports_get_a_pre_send_freshness_recheck() {
+        // 2026-08-04: a delivered EOD carried a stale prod-audit claim; an
+        // external stakeholder caught it — the first miss to escape past
+        // both the user and the duo.
+        assert!(
+            GENERAL_RULES.contains("Re-verify state claims before an outbound report ships"),
+            "outward-truthfulness section must require the pre-send re-check"
+        );
+    }
+
+    #[test]
+    fn third_party_signals_carry_dates_not_truth() {
+        // 2026-07-10: stale assignee + stale status doc beat a verbal
+        // handoff; the disambiguating question was drafted and never sent.
+        assert!(
+            GENERAL_RULES.contains("Third-party signals are dated claims"),
+            "evidence discipline must date third-party signals and prefer asking"
         );
     }
 
