@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -123,6 +124,28 @@ export function ChatPane({ sessionId }: { sessionId: string }) {
 
   const items = virtualizer.getVirtualItems();
 
+  // Which tool calls have already come back. A `tool_use` whose id isn't in
+  // here is STILL RUNNING — without this a five-minute `cargo build --release`
+  // and a 20ms `Read` render identically and nothing on screen moves while the
+  // build runs. Computed over the whole list (not just the virtual window) so
+  // scrolling can't turn a finished call back into a running one, and memoized
+  // so it isn't re-parsed on every scroll frame.
+  const resolvedToolIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const m of messages) {
+      if (m.kind !== "tool_result") continue;
+      try {
+        const id = (JSON.parse(m.content) as { tool_use_id?: unknown })
+          .tool_use_id;
+        if (typeof id === "string") ids.add(id);
+      } catch {
+        // Unparseable result row — skip it; the worst case is a call that
+        // keeps showing as running, never a finished one showing as done.
+      }
+    }
+    return ids;
+  }, [messages]);
+
   return (
     <div
       ref={scrollRef}
@@ -160,6 +183,7 @@ export function ChatPane({ sessionId }: { sessionId: string }) {
                   }
                   expanded={expandedIds.has(m.id)}
                   onToggleExpand={onToggleExpand}
+                  resolvedToolIds={resolvedToolIds}
                 />
               </div>
             );

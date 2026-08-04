@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, act } from "@testing-library/react";
+import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ChatPane } from "./ChatPane";
@@ -115,6 +115,86 @@ describe("ChatPane", () => {
     });
     expect(await screen.findByText("late message")).toBeInTheDocument();
     expect(screen.queryByText("foreign message")).not.toBeInTheDocument();
+  });
+
+  it("marks a tool call running until its result lands", async () => {
+    // A five-minute `cargo build --release` and a 20ms `Read` used to render
+    // identically, with nothing on screen changing while the build ran.
+    renderPane();
+    await screen.findByText("hello one");
+    act(() => {
+      eventHandlers["agent:messages:batch"]?.({
+        payload: [
+          {
+            ...msg(
+              10,
+              JSON.stringify({
+                name: "Bash",
+                input: { command: "cargo build --release" },
+                tool_use_id: "t-run",
+              }),
+              "tool_use",
+            ),
+            // Elapsed is derived from created_at, so a just-started call needs a
+            // current stamp (the shared fixture's is weeks old on purpose).
+            created_at: new Date().toISOString(),
+          },
+        ],
+      });
+    });
+    // Running: the ⟳ glyph replaces →, and an elapsed counter appears.
+    expect(await screen.findByText(/⟳ Bash/)).toBeInTheDocument();
+    expect(screen.getByText(/^\d+s$/)).toBeInTheDocument();
+
+    act(() => {
+      eventHandlers["agent:messages:batch"]?.({
+        payload: [
+          msg(
+            11,
+            JSON.stringify({ tool_use_id: "t-run", output: "Finished" }),
+            "tool_result",
+          ),
+        ],
+      });
+    });
+    // Resolved: the running marker is gone and the row joins the seeded Bash
+    // call in the plain → form (hence findAll — two Bash rows by now).
+    await waitFor(() =>
+      expect(screen.queryByText(/⟳ Bash/)).not.toBeInTheDocument(),
+    );
+    expect(screen.getAllByText(/→ Bash/).length).toBe(2);
+  });
+
+  it("does not claim a tool is running when it carries no tool_use_id", async () => {
+    // The seeded row has no `tool_use_id`, so nothing can match it to a result.
+    // Guessing "running" there would be a fresh lie, not a fix.
+    renderPane();
+    await screen.findByText("hello one");
+    expect(await screen.findByText(/→ Bash/)).toBeInTheDocument();
+    expect(screen.queryByText(/⟳/)).not.toBeInTheDocument();
+  });
+
+  it("shows the full command in the collapsed pill, not an 80-char clip", async () => {
+    renderPane();
+    await screen.findByText("hello one");
+    const long =
+      "cargo test > /tmp/gate1.log 2>&1; echo \"cargo test exit=$?\"; tail -25 /tmp/gate1.log";
+    act(() => {
+      eventHandlers["agent:messages:batch"]?.({
+        payload: [
+          msg(
+            12,
+            JSON.stringify({
+              name: "Bash",
+              input: { command: long },
+              tool_use_id: "t-long",
+            }),
+            "tool_use",
+          ),
+        ],
+      });
+    });
+    expect(await screen.findByText(long)).toBeInTheDocument();
   });
 
   it("expands and collapses a tool pill via the lifted state", async () => {

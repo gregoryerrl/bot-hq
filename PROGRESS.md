@@ -9,6 +9,44 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — stop the chat stream hiding what the agents are doing
+
+User report: "agents don't fully surface on the chat stream what's happening
+under the hood. The input sometimes unlocks (I thought they are not working
+anymore), then after a few seconds Brian surfaces something." Demonstrated live
+— they were typing while HANDS was mid-investigation.
+
+Two causes, both in the frontend; no backend change was needed.
+
+**The unlocked input implied "they stopped".** `SessionActivity::derive`
+(`core/activity.rs`) ranks `awaiting` above `busy` deliberately: parking a
+question must re-open the textarea or the user couldn't answer it. But
+`TurnStatus` rendered only inside `ChatInput`'s locked branch, so the per-agent
+busy flags — which `recompute_locked` emits on EVERY activity event regardless
+of derived state — had nowhere to land. Added `StillWorkingNotice`: when the
+input is open and an agent is mid-turn it reads "Waiting on your answer · Brian
+is working — the turn hasn't ended yet" (or "Stopping · … — finishing the
+current tool" when paused). The textarea stays enabled throughout; this is a
+labelling fix, not a locking one. `isLocked` and the derive priority are
+unchanged.
+
+**Tool calls were captured but not legible.** `duo.rs` already persists every
+`ToolUse` with its full input and every `ToolResult`, live. The losses were in
+rendering: the collapsed pill clipped its preview to 80 characters on a single
+`truncate`d line — enough to hide the tail of any real command — and a
+`tool_use` still executing looked exactly like a finished one, so a five-minute
+`cargo build --release` and a 20 ms `Read` were indistinguishable with nothing
+moving on screen meanwhile. Previews now hold 200 characters and wrap to two
+lines (`break-all`, no horizontal scroll), and `ChatPane` derives the set of
+resolved `tool_use_id`s so an unresolved call renders with a `⟳` marker and a
+live elapsed counter. Elapsed is computed from the message's `created_at`, not
+mount time — the pane is virtualized, and a mount-anchored timer would restart
+at zero on every scroll.
+
+Deliberately not done: holding a "still working" label across turn boundaries.
+The pump cannot distinguish "about to auto-continue" from "done", so a sticky
+label would trade one wrong impression for the opposite one.
+
 ## 2026-08-04 — name the gates that overtook a question in its replay (#18)
 
 Second half of issues.md #18. `40e876e` age-stamped out-of-band replays; this
