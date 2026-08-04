@@ -9,6 +9,46 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — stop waking the reviewer to say "holding" (#8, first half)
+
+`advance_phase` fed its transition notice to BOTH agents' stdin. For EYES that is
+a wake with nothing attached: no new content to review, so the turn it produces
+is an acknowledgment — "Old plan — holding for Brian's plan", 40 chars — and each
+one burns a slot of the `VOLLEY_HARD_CAP` budget that #24 showed was being
+exhausted before substantive reviews could get through.
+
+Measured in the session that made the change, rather than assumed. Rain's filler
+turns land 7–45 s after each phase change:
+
+```
+15:16:53 phase → 15:17:00 (7s)  "Old plan — holding for #24 apply output."   40 chars
+14:52:37 phase → 14:52:45 (8s)  "Old plan — waiting for the new plan…"       64 chars
+15:03:00 phase → 15:03:35       "Clean verify. Brian's triage was correct…" 112 chars
+```
+
+Exactly the sub-200-char shape #24 found burning the budget in `s-d16364ee`. One
+more arrived, unprompted, while this fix was being written.
+
+The notice now goes to HANDS only. EYES loses no information: every peer forward
+carries the current phase in its envelope
+(`peer_forward_message(from, body, phase, …)`), so she reads the new phase on the
+next message that actually contains something. Provider-limit peer notices still
+wake her deliberately — different path, unchanged.
+
+**Not shipped: the second half.** EYES proposed also auto-suppressing turns whose
+tool calls include `session_doc_write` / `advance_phase`, leaving the router's
+length proxy to forward substantive ones anyway. That is a sound design — but
+there is measurement that phase notices drive the filler and none that doc-write
+turns do. Shipping an evidenced change and an inferred one together would make
+the next measurement unreadable. Filed as #8's remaining half; the telemetry that
+can settle it landed today.
+
+**No unit test, stated plainly.** This is a call-site routing change with no pure
+logic to isolate, and `state.rs`'s test module covers only static pieces (live
+session tests need `RUN_LIVE_TESTS=1`). The real verification is the same query
+that motivated it, re-run after a restart: no EYES turn should follow a
+`phase_change` row.
+
 ## 2026-08-04 — the volley breaker stops the loop without eating the message (#24)
 
 Found by the observability shipped hours earlier, in a session we weren't even

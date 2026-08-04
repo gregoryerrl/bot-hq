@@ -807,8 +807,26 @@ impl AppState {
             .await?;
         self.bridge
             .notify_message_persisted(Arc::from(session_id), id);
-        // And fed to both agents' stdin so they pick it up as a natural prompt.
-        handle.send_to_both(OutgoingUserMessage::text(notice)).await;
+        // Fed to HANDS's stdin so it lands as a natural prompt.
+        //
+        // NOT to EYES (issues.md #8). Waking the reviewer on a phase transition
+        // buys nothing and costs a turn: she has no new content to review, so
+        // the turn is a "holding for Brian's plan" acknowledgment — and each one
+        // burns a slot of the `VOLLEY_HARD_CAP` budget that #24 showed was being
+        // exhausted before substantive reviews could get through. Measured in
+        // this very session: filler turns landing 7-45 s after each phase
+        // change, 40-116 chars apiece.
+        //
+        // She loses no information. Every peer forward carries the current phase
+        // in its envelope (`peer_forward_message(from, body, phase, …)`), so she
+        // reads the new phase on the next message that actually has something in
+        // it. Provider-limit peer notices still wake her deliberately — that is a
+        // different path and stays.
+        let _ = handle
+            .brian
+            .input_tx
+            .send(OutgoingUserMessage::text(notice))
+            .await;
 
         // A2 (adherence): the peer-ack the prompts don't mechanically enforce.
         // On the Plan→Apply boundary in a duo session, remind Brian (HANDS) to
