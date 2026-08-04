@@ -267,11 +267,39 @@ pub(super) fn outcome_from_picked(picked: &str) -> ViolationOutcome {
 /// session was closed + reopened and the asking subprocess was replaced.
 /// Shared by both resolve_choice fallbacks (dropped-receiver and the
 /// reopened-session `None` path) so the wording stays identical.
+/// A resolution older than this gets an explicit re-verify warning in the OOB
+/// body: a mooted question answered hours later once read as CURRENT repo
+/// state and produced three fabricated "not pushed yet" assertions
+/// (2026-06-23, s-bb938f62 — issues.md #18).
+const STALE_ANSWER_WARN_MINS: i64 = 10;
+
+/// Parse a tray `asked_at` timestamp: RFC3339 (app-written rows) or sqlite's
+/// `datetime('now')` format (schema default). Returns None on anything else —
+/// the OOB body then simply omits the age line.
+fn parse_asked_at(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|n| n.and_utc())
+}
+
+/// "3m" / "2h 24m" / "3d 1h" — coarse, for the OOB age line.
+fn render_age(mins: i64) -> String {
+    match (mins / 1440, (mins % 1440) / 60, mins % 60) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
 pub(super) fn oob_resolution_body(
     agent_label: &str,
     question: &str,
     options: &[String],
     picked: &str,
+    asked_at: Option<&str>,
 ) -> String {
     // Restate the full option list: every observed resolution arrives this way
     // (47/47 in the 2026-07-27 archive study), and without the menu the agent
@@ -288,12 +316,34 @@ pub(super) fn oob_resolution_body(
             .join("\n");
         format!("**Options were:**\n{listed}\n")
     };
+    // Age-stamp the replay (issues.md #18): a resolution can arrive hours after
+    // the ask, and an unstamped replay reads as CURRENT state — an agent once
+    // adopted a 2.5h-dead premise and asserted un-pushed work three times
+    // without a single verification command. Old answers carry an explicit
+    // re-verify instruction.
+    let asked_block = match asked_at.and_then(parse_asked_at) {
+        Some(ts) => {
+            let mins = (chrono::Utc::now() - ts).num_minutes().max(0);
+            let age = render_age(mins);
+            if mins >= STALE_ANSWER_WARN_MINS {
+                format!(
+                    "**Asked:** {age} ago. State may have moved since — re-verify \
+                     anything this question describes (pushes, merges, deploys, file \
+                     state) before treating its premise as current.\n"
+                )
+            } else {
+                format!("**Asked:** {age} ago.\n")
+            }
+        }
+        None => String::new(),
+    };
     format!(
         "(out-of-band) Your earlier `ask_user_choice` for {agent_label} resolved while \
          you were no longer waiting on the tool call.\n\n\
          **Question:** {question}\n\
          {options_block}\
-         **User picked:** {picked}\n\n\
+         **User picked:** {picked}\n\
+         {asked_block}\n\
          Treat this as the user's reply (a pick outside the listed options is the \
          user answering in their own words — honor the words, not the menu). \
          Continue from here."
@@ -442,15 +492,45 @@ mod tests {
             "Push now?",
             &["Push 9a07930".to_string(), "Hold for review".to_string()],
             "Hold for review",
+            None,
         );
         assert!(body.contains("**Options were:**"));
         assert!(body.contains("1. Push 9a07930"));
         assert!(body.contains("2. Hold for review"));
         assert!(body.contains("**User picked:** Hold for review"));
+        // No asked_at → no age line.
+        assert!(!body.contains("**Asked:**"));
 
         // No options (free-text/halt shapes): no empty menu block.
-        let bare = super::oob_resolution_body("brian", "Anything else?", &[], "done");
+        let bare = super::oob_resolution_body("brian", "Anything else?", &[], "done", None);
         assert!(!bare.contains("Options were"));
     }
 
+    #[test]
+    fn oob_resolution_body_age_stamps_late_answers_with_reverify_warning() {
+        // 2.5h-old ask (the s-bb938f62 shape): age line + re-verify warning.
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(150)).to_rfc3339();
+        let body =
+            super::oob_resolution_body("brian", "Re-push to staging?", &[], "discard", Some(&old));
+        assert!(body.contains("**Asked:** 2h 30m ago"));
+        assert!(body.contains("re-verify"));
+
+        // Fresh ask: age line, no warning.
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let quick = super::oob_resolution_body("brian", "Close?", &[], "yes", Some(&fresh));
+        assert!(quick.contains("**Asked:** 0m ago"));
+        assert!(!quick.contains("re-verify"));
+
+        // Sqlite datetime('now') format parses too.
+        let sqlite_ts = (chrono::Utc::now() - chrono::Duration::minutes(75))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let s = super::oob_resolution_body("rain", "Q?", &[], "ok", Some(&sqlite_ts));
+        assert!(s.contains("**Asked:** 1h 15m ago"));
+
+        // Garbage timestamp: line omitted, body still well-formed.
+        let g = super::oob_resolution_body("brian", "Q?", &[], "ok", Some("not-a-time"));
+        assert!(!g.contains("**Asked:**"));
+        assert!(g.contains("**User picked:** ok"));
+    }
 }

@@ -520,6 +520,20 @@ impl SignalingBridge {
                             matches!(c.kind, crate::policy::ViolationKind::ToolBlocklist)
                                 .then_some(c.action.as_str())
                         });
+                        // Age-stamp from the durable row (the in-memory park
+                        // carries no ask-time); a miss just omits the line.
+                        let asked_at = {
+                            let storage_guard = self.storage.lock().await;
+                            match storage_guard.as_ref() {
+                                Some(storage) => storage
+                                    .get_tray_entry(choice_id)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|row| row.asked_at),
+                                None => None,
+                            }
+                        };
                         Ok(self
                             .deliver_oob(
                                 choice_id,
@@ -530,6 +544,7 @@ impl SignalingBridge {
                                 picked,
                                 command,
                                 flipped,
+                                asked_at,
                             )
                             .await)
                     }
@@ -568,6 +583,7 @@ impl SignalingBridge {
                         picked,
                         q.command_text.as_deref(),
                         flipped,
+                        Some(q.asked_at.clone()),
                     )
                     .await)
             }
@@ -593,8 +609,9 @@ impl SignalingBridge {
         picked: String,
         command_text: Option<&str>,
         flipped: bool,
+        asked_at: Option<String>,
     ) -> ResolveOutcome {
-        let mut body = oob_resolution_body(agent, question, options, &picked);
+        let mut body = oob_resolution_body(agent, question, options, &picked, asked_at.as_deref());
         if flipped {
             self.maybe_run_gated(&session_id, command_text, &picked, &mut body)
                 .await;
