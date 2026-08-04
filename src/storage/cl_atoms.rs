@@ -42,6 +42,13 @@ pub struct RetrievedAtom {
     /// drifted since indexing, so the atom may be out of date. Storage always
     /// returns `false`; the MCP layer renders a ⚠ prefix when true.
     pub stale: bool,
+    /// Source file's indexed mtime (RFC3339), for the repo-less age fallback.
+    pub mtime: Option<String>,
+    /// Set by the bridge wrapper alongside `stale` for REPO-LESS projects only
+    /// (issues.md #23): the atom's file age in days when age (not code drift) is
+    /// why it was flagged. `None` for code-drift flags and unflagged atoms; the
+    /// MCP layer words the ⚠ prefix differently for the two causes.
+    pub stale_age_days: Option<i64>,
 }
 
 impl Storage {
@@ -142,7 +149,7 @@ impl Storage {
         // can emit multiple sub-atoms sharing one heading_path, so document order
         // keeps the budget trim deterministic.
         let mut sql = String::from(
-            "SELECT file_path, heading_path, body, code_hash FROM cl_atoms \
+            "SELECT file_path, heading_path, body, code_hash, mtime FROM cl_atoms \
              WHERE project_id = ? AND cl_atoms MATCH ?",
         );
         if let Some(paths) = path_filter {
@@ -161,9 +168,10 @@ impl Storage {
              mtime DESC, file_path, heading_path, rowid LIMIT 128",
         );
 
-        let mut q = sqlx::query_as::<_, (String, String, String, Option<String>)>(&sql)
-            .bind(project_id)
-            .bind(&match_expr);
+        let mut q =
+            sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>)>(&sql)
+                .bind(project_id)
+                .bind(&match_expr);
         if let Some(paths) = path_filter {
             for p in paths {
                 q = q.bind(p);
@@ -175,13 +183,21 @@ impl Storage {
         // oversized atom can't make the whole retrieval return empty.
         let mut out = Vec::new();
         let mut used = 0i64;
-        for (file_path, heading_path, body, code_hash) in rows {
+        for (file_path, heading_path, body, code_hash, mtime) in rows {
             let cost = estimate_tokens(&body);
             if !out.is_empty() && used + cost > budget_tokens {
                 break;
             }
             used += cost;
-            out.push(RetrievedAtom { file_path, heading_path, body, code_hash, stale: false });
+            out.push(RetrievedAtom {
+                file_path,
+                heading_path,
+                body,
+                code_hash,
+                stale: false,
+                mtime,
+                stale_age_days: None,
+            });
         }
         Ok(out)
     }

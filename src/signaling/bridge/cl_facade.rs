@@ -8,6 +8,36 @@ use crate::storage::{ClIndexEntry, Project};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Age threshold for the repo-less staleness fallback (issues.md #23). With no
+/// repo to hash-check against, an atom this old gets an age-worded ⚠ flag —
+/// the CL's own drift record (handoffs going wrong within days, a followups
+/// doc inverting reality inside a week) says a month-old unverifiable claim
+/// deserves a date-check before it's trusted.
+const AGE_STALE_FALLBACK_DAYS: i64 = 30;
+
+/// Days since an atom's indexed mtime (RFC3339). None on missing/unparseable
+/// mtime — the fallback then simply doesn't flag that atom.
+fn atom_age_days(mtime: Option<&str>) -> Option<i64> {
+    let raw = mtime?;
+    let ts = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    Some((chrono::Utc::now() - ts.with_timezone(&chrono::Utc)).num_days().max(0))
+}
+
+/// The repo-less staleness fallback: flag atoms whose file hasn't been touched
+/// in [`AGE_STALE_FALLBACK_DAYS`], carrying the age so the ⚠ wording says
+/// "old and unverifiable", not "drift detected". Never touches atoms the
+/// code-hash path owns (callers pick one branch per project).
+fn apply_age_stale_fallback(atoms: &mut [crate::storage::RetrievedAtom]) {
+    for atom in atoms {
+        if let Some(days) = atom_age_days(atom.mtime.as_deref()) {
+            if days >= AGE_STALE_FALLBACK_DAYS {
+                atom.stale = true;
+                atom.stale_age_days = Some(days);
+            }
+        }
+    }
+}
+
 /// Build the atoms for a CL file, stamping each with a hash of the repo source it
 /// cites (`None` when there's no repo or no valid ref) so retrieval can flag
 /// drift. Storage stays pure — the repo coupling is computed here in the bridge.
@@ -90,6 +120,11 @@ impl SignalingBridge {
                     atom.stale = current.as_deref() != Some(stored);
                 }
             }
+        } else {
+            // Repo-less project / `_globals` (issues.md #23): there is no code
+            // to verify against, so exactly the projects that CAN'T be
+            // hash-checked previously got no staleness signal at all.
+            apply_age_stale_fallback(&mut atoms);
         }
         Ok(atoms)
     }
@@ -514,5 +549,42 @@ mod tests {
         assert_eq!(n.0, 0, "orphaned file's atoms purged");
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    /// issues.md #23: repo-less projects get the age fallback — old atoms are
+    /// flagged with their age; fresh or mtime-less atoms are left alone.
+    #[test]
+    fn age_fallback_flags_old_atoms_in_repoless_projects() {
+        use super::{apply_age_stale_fallback, AGE_STALE_FALLBACK_DAYS};
+        let atom = |mtime: Option<String>| crate::storage::RetrievedAtom {
+            file_path: "notes.md".into(),
+            heading_path: "Notes".into(),
+            body: "b".into(),
+            code_hash: None,
+            stale: false,
+            mtime,
+            stale_age_days: None,
+        };
+        let old = (chrono::Utc::now()
+            - chrono::Duration::days(AGE_STALE_FALLBACK_DAYS + 15))
+        .to_rfc3339();
+        let fresh = chrono::Utc::now().to_rfc3339();
+        let mut atoms = vec![
+            atom(Some(old)),
+            atom(Some(fresh)),
+            atom(None),
+            atom(Some("garbage".into())),
+        ];
+        apply_age_stale_fallback(&mut atoms);
+
+        assert!(atoms[0].stale, "old atom flagged");
+        assert_eq!(atoms[0].stale_age_days, Some(AGE_STALE_FALLBACK_DAYS + 15));
+        assert!(!atoms[1].stale, "fresh atom untouched");
+        assert!(!atoms[2].stale, "mtime-less atom untouched");
+        assert!(!atoms[3].stale, "unparseable mtime untouched");
+        assert!(
+            atoms[1..].iter().all(|a| a.stale_age_days.is_none()),
+            "age recorded only on flagged atoms"
+        );
     }
 }

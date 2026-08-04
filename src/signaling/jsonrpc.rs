@@ -795,10 +795,19 @@ async fn call_tool(
             } else {
                 let mut out = String::new();
                 for atom in &atoms {
+                    // Two flag flavors (issues.md #23): code-drift (repo-backed,
+                    // hash mismatch) vs age (repo-less fallback) — worded
+                    // differently so the reader knows whether drift was DETECTED
+                    // or the claim is merely old and unverifiable.
                     let flag = if atom.stale {
-                        "⚠ possibly stale (cited code changed since indexed) — verify against the source.\n"
+                        match atom.stale_age_days {
+                            Some(d) => format!(
+                                "⚠ possibly stale (no repo to verify against; last updated {d}d ago) — date-check before trusting.\n"
+                            ),
+                            None => "⚠ possibly stale (cited code changed since indexed) — verify against the source.\n".to_string(),
+                        }
                     } else {
-                        ""
+                        String::new()
                     };
                     out.push_str(&format!(
                         "## {} > {}\n{}{}\n\n",
