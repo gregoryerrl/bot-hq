@@ -16,6 +16,7 @@ use std::str::FromStr;
 
 pub mod row_types;
 
+mod activity_events;
 mod agent_config;
 mod cancel_events;
 mod cl_atoms;

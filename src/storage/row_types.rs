@@ -328,6 +328,22 @@ pub struct ForwardEvent {
     pub body_preview: String,
 }
 
+/// A row from the `activity_events` table — one duo-activity transition.
+///
+/// `state` is the DERIVED session activity, which collapses both agents and is
+/// outranked by `awaiting`/`paused`; the per-agent flags are what answer "was
+/// anyone actually working at that moment?". See the migration.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ActivityEvent {
+    pub id: i64,
+    pub session_id: String,
+    pub recorded_at: String,
+    /// `idle` | `busy` | `awaiting_user` | `cancelling` | `paused`.
+    pub state: String,
+    pub brian_busy: i64,
+    pub rain_busy: i64,
+}
+
 /// A row from the `cancel_events` table — one Stop, with everything needed to
 /// tell the candidate failure paths apart after the fact. See the migration for
 /// why each field is here.

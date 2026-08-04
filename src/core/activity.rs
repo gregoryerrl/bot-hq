@@ -431,6 +431,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transitions_are_persisted_including_flag_only_changes() {
+        // The reported-bug sequence, and the reason this table records per-agent
+        // flag changes and not just derived-state changes: while `awaiting_user`
+        // holds, Brian stopping produces NO state change. If that weren't
+        // recorded, the newest row would still assert brian_busy = 1 long after
+        // he finished, and every query would inherit that stale claim.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "One", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+
+        let awaiting = Arc::new(AtomicBool::new(false));
+        let t = ActivityTracker::new("s1", awaiting.clone(), bridge.clone());
+
+        t.set_busy(Author::Brian, true); // idle -> busy
+        awaiting.store(true, Ordering::Release);
+        t.refresh(); // busy -> awaiting_user, Brian STILL working
+        t.set_busy(Author::Brian, false); // stays awaiting_user; flags change only
+
+        // The writes are detached (recompute_locked is sync), so let them land.
+        for _ in 0..50 {
+            if storage.list_activity_events(Some("s1")).await.unwrap().len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let rows = storage.list_activity_events(Some("s1")).await.unwrap();
+        let seq: Vec<(String, i64)> = rows
+            .iter()
+            .rev() // list is newest-first; read it forwards
+            .map(|r| (r.state.clone(), r.brian_busy))
+            .collect();
+        assert_eq!(
+            seq,
+            vec![
+                ("busy".to_string(), 1),
+                ("awaiting_user".to_string(), 1),
+                ("awaiting_user".to_string(), 0),
+            ],
+            "the flag-only transition inside a stable awaiting_user must be recorded"
+        );
+    }
+
+    #[tokio::test]
     async fn cancelling_set_while_idle_auto_clears() {
         // Defensive: if a cancel is somehow set when no agent is busy, it
         // auto-clears immediately (the kill has nothing to settle) — never a

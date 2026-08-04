@@ -839,11 +839,58 @@ impl SignalingBridge {
         brian_busy: bool,
         rain_busy: bool,
     ) {
+        self.persist_activity_event(&session_id, state, brian_busy, rain_busy);
         let _ = self.event_tx.send(SignalingEvent::SessionActivity {
             session_id,
             state: state.to_string(),
             brian_busy,
             rain_busy,
+        });
+    }
+
+    /// Mirror an activity transition into `activity_events` so the state side of
+    /// the timeline outlives the UI that consumed it (migration 0042).
+    ///
+    /// Called from `ActivityTracker::recompute_locked`, which is SYNCHRONOUS and
+    /// holds its state mutex — so the write is detached rather than awaited. Two
+    /// consequences, both deliberate:
+    ///
+    /// * `Handle::try_current()` rather than a bare `tokio::spawn`. The tracker's
+    ///   mutators (`set_busy`, `set_paused`, `refresh`) are plain `&self` methods
+    ///   and nothing guarantees a runtime is entered at every call site; a bare
+    ///   spawn would panic there. No runtime → no row, never a panic.
+    /// * Ordering between detached writes is not guaranteed, which is why the
+    ///   row carries its own `recorded_at` and queries sort by `id`.
+    ///
+    /// Fail-open throughout: this decorates a signal that gates the chat input,
+    /// and losing telemetry must never disturb it.
+    fn persist_activity_event(
+        &self,
+        session_id: &str,
+        state: &str,
+        brian_busy: bool,
+        rain_busy: bool,
+    ) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        // `try_lock`, not `lock().await`: this fn is sync. Every holder of this
+        // mutex does clone-and-drop, so the window is nanoseconds and a miss is
+        // vanishingly rare — but when it happens the row is dropped rather than
+        // blocking the activity signal on it. `Storage` is a cheap handle clone
+        // (connection pool), so what crosses into the task is not the mutex.
+        let Some(storage) = self.storage.try_lock().ok().and_then(|g| g.clone()) else {
+            return;
+        };
+        let session_id = session_id.to_string();
+        let state = state.to_string();
+        handle.spawn(async move {
+            if let Err(e) = storage
+                .insert_activity_event(&session_id, &state, brian_busy, rain_busy)
+                .await
+            {
+                tracing::warn!(?e, %session_id, %state, "persisting activity event failed");
+            }
         });
     }
 }

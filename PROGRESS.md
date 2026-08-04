@@ -9,6 +9,40 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — record the activity timeline so the input-lock question is answerable
+
+Second half of the observability work. The file sink (below) rescues what the
+host SAYS; this records what state the session was IN, which is the half the
+reported bug needed.
+
+`messages` already persists every agent text / tool_use / tool_result with a
+timestamp. `SessionActivity` — the derived per-session state that gates the chat
+input — was broadcast-only: `notify_session_activity` is a fire-and-forget
+`event_tx.send`, so the state side evaporated the moment the UI consumed it.
+"Brian emitted while the input was unlocked" was therefore reportable by a user
+and reconstructable by nobody. It is a join, and half the join wasn't written
+down.
+
+`0042_activity_events` writes one row per transition: state, both per-agent busy
+flags, timestamp.
+
+**The per-agent flags are the point, not decoration.** The derived state
+collapses both agents into a single `busy`, and `awaiting`/`paused` outrank it
+entirely — so `state` alone cannot answer "was anyone actually working then?".
+A row is written on a change to EITHER the derived state or a per-agent flag,
+mirroring exactly what the frontend already receives. Recording only state
+changes would leave a flag flip inside a stable `awaiting_user` unrecorded, so
+the newest row would keep asserting `brian_busy = 1` after Brian stopped — a
+stale claim, which is the failure mode this whole day's work was about. A test
+drives that exact sequence.
+
+Written detached: `recompute_locked` is synchronous and holds its state mutex.
+`Handle::try_current()` rather than a bare `tokio::spawn`, because the tracker's
+mutators are plain `&self` methods with no guaranteed runtime at every call
+site — no runtime means no row, never a panic. The `Storage` handle is taken
+with `try_lock` (every holder does clone-and-drop, so the window is nanoseconds)
+and a miss drops the row rather than blocking the signal that gates the input.
+
 ## 2026-08-04 — give tracing somewhere to go
 
 bot-hq had no log sink. `init_logging` was `tracing_subscriber::fmt()`, which
