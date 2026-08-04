@@ -770,17 +770,7 @@ impl AppState {
                 .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
                 .await;
         }
-        if let Some(router) = &handle.router {
-            if router
-                .tx
-                .try_send(crate::core::router::RouterCommand::FlushHeld)
-                .is_err()
-            {
-                // Channel full/closed — held forwards stay held; the next
-                // broadcast retries. Never blocks the user's send on it.
-                tracing::warn!(session_id, "router FlushHeld not sent (channel full/closed)");
-            }
-        }
+        flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
         Ok(())
     }
 
@@ -830,17 +820,33 @@ impl AppState {
             let _ = handle
                 .brian
                 .input_tx
-                .send(OutgoingUserMessage::text(
-                    "🔔 Entering Apply. Before you mutate: confirm Rain reviewed the plan — \
-                     pull session_doc_search(phase=\"plan\") and check her pushback landed. If \
-                     she hasn't reviewed yet, wait for it (mark_awaiting_user) rather than \
-                     applying unreviewed."
-                        .to_string(),
-                ))
+                .send(OutgoingUserMessage::text(Self::APPLY_ENTRY_NUDGE.to_string()))
                 .await;
         }
+        // A phase advance clears `awaiting` (above), so it must also release what
+        // the router held during that halt — otherwise the held forward waits for
+        // the user to type, which a phase click is not.
+        flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
         Ok(())
     }
+
+    /// The Plan→Apply nudge to HANDS.
+    ///
+    /// It must NOT tell the agent to `mark_awaiting_user` while it waits on its
+    /// peer — that call is hard-REFUSED for a peer-shaped reason
+    /// (`jsonrpc.rs::peer_shaped_reason`, shipped `3282708` to end a 100-minute
+    /// mutual-deferral deadlock), so the old wording ordered something the tool
+    /// rejects, and the rejection text then told the agent to do the opposite.
+    /// Observed live three times in one session before it was reconciled.
+    ///
+    /// Waiting on a peer is not waiting on the user: a turn's output forwards to
+    /// the peer automatically, so SAYING SO is the wake mechanism. Pinned by
+    /// `apply_nudge_never_tells_hands_to_park_on_the_user`.
+    const APPLY_ENTRY_NUDGE: &'static str =
+        "🔔 Entering Apply. Before you mutate: confirm Rain reviewed the plan — pull \
+         session_doc_search(phase=\"plan\") and check her pushback landed. If it hasn't, \
+         say so in chat (your turn output is forwarded to her automatically, which wakes \
+         her) and do non-mutating prep meanwhile. Don't park on the USER for a peer wait.";
 
     /// A2 (adherence): whether the Plan→Apply boundary in a duo session warrants
     /// the peer-ack nudge to Brian. Pure for testing; the caller additionally
@@ -940,6 +946,13 @@ impl AppState {
                     handle
                         .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
                         .await;
+                    // Answering a tray card ends the halt just as a typed message
+                    // does, so release what the router held behind it — AFTER the
+                    // answer itself, so the peer's held chatter lands behind it.
+                    // Not in the paused arm above: there the wire is deliberately
+                    // stashed for the next broadcast, and flushing would defeat
+                    // the pause latch.
+                    flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
                 }
             }
             // else: session closed in the gap between resolve and wake — the OOB
@@ -982,12 +995,83 @@ impl AppState {
     }
 }
 
+/// Release any peer-forwards the router is holding.
+///
+/// The router holds forwards while the duo is halted on the user. Something has
+/// to tell it the halt is over, and for a long time only `broadcast` did — so a
+/// forward parked behind a question stayed parked when the user ANSWERED that
+/// question from the tray, or when the phase advanced. It surfaced only on the
+/// next typed message, leaving the peer half-deaf in between (observed live,
+/// 2026-08-04). Every path that clears `awaiting` now ends here.
+///
+/// **Call it at the END of the path, never inside `clear_awaiting`.** Clearing
+/// happens BEFORE the user's own message is delivered; flushing there would
+/// release held peer chatter AHEAD of what the user just said. `broadcast`'s
+/// ordering — message, then held paused-wakes, then this — is the contract.
+///
+/// Never blocks and never fails a caller: a full/closed channel just means the
+/// forwards stay held until the next flush. `None` (solo session) is a no-op.
+fn flush_held(
+    router_tx: Option<&tokio::sync::mpsc::Sender<crate::core::router::RouterCommand>>,
+    session_id: &str,
+) {
+    let Some(tx) = router_tx else { return };
+    if tx
+        .try_send(crate::core::router::RouterCommand::FlushHeld)
+        .is_err()
+    {
+        tracing::warn!(session_id, "router FlushHeld not sent (channel full/closed)");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // Live session tests require RUN_LIVE_TESTS=1 (subprocesses spawn).
     // We unit-test the static pieces here.
+
+    #[test]
+    fn apply_nudge_never_tells_hands_to_park_on_the_user() {
+        // The old wording said "wait for it (mark_awaiting_user)" — a call the
+        // tool HARD-REFUSES for a peer-shaped reason
+        // (jsonrpc.rs::peer_shaped_reason, shipped 3282708). A compliant agent
+        // got refused and told to do the opposite of the nudge; it fired three
+        // times in one session before this was reconciled.
+        let nudge = AppState::APPLY_ENTRY_NUDGE;
+        assert!(
+            !nudge.contains("mark_awaiting_user"),
+            "the Apply nudge must not order a call that mark_awaiting_user refuses"
+        );
+        // The refusal keys on these words anywhere in the reason, so the nudge
+        // must not push HANDS toward parking at all.
+        assert!(
+            !nudge.contains("ask_user_choice"),
+            "a peer wait is not a user decision — don't route it to the tray either"
+        );
+        // …while still carrying its actual job.
+        assert!(nudge.contains("session_doc_search(phase=\"plan\")"));
+        assert!(
+            nudge.contains("forwarded"),
+            "must name the real wake mechanism: turn output forwards to the peer"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_held_sends_on_a_live_router_and_no_ops_without_one() {
+        use crate::core::router::RouterCommand;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        super::flush_held(Some(&tx), "s1");
+        assert!(
+            matches!(rx.try_recv(), Ok(RouterCommand::FlushHeld)),
+            "a live router must receive FlushHeld"
+        );
+
+        // Solo session: no router, no panic, nothing sent.
+        super::flush_held(None, "s1");
+        assert!(rx.try_recv().is_err(), "None router must be a silent no-op");
+    }
 
     #[test]
     fn smoke() {

@@ -9,6 +9,37 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — two self-audit fixes found by running the system
+
+Both surfaced during an ordinary session, not by code reading.
+
+**The Apply-entry nudge ordered a call the tool refuses.** It told HANDS that if
+Rain hadn't reviewed the plan yet, "wait for it (`mark_awaiting_user`)". But
+`mark_awaiting_user` hard-refuses any reason naming a peer
+(`jsonrpc.rs::peer_shaped_reason`, shipped `3282708` to end a 100-minute
+mutual-deferral deadlock) — and its refusal text then tells the agent to do the
+opposite of what the nudge just ordered. The nudge fired three times in one
+session; it was declined each time, and a compliant agent would have stalled.
+Reworded to name the real mechanism (a turn's output forwards to the peer
+automatically, so saying it in chat IS the wake) and extracted to
+`AppState::APPLY_ENTRY_NUDGE` with a guard test asserting it never mentions
+`mark_awaiting_user` or `ask_user_choice` again.
+
+**Held peer-forwards only flushed when the user TYPED.**
+`RouterCommand::FlushHeld` had exactly one sender — `broadcast`. But
+`clear_awaiting` has three callers: `broadcast`, `advance_phase`, and
+`resolve_choice`. So a forward the router held during a parked question stayed
+held when the user ANSWERED that question from the tray, or when the phase
+advanced; it surfaced only on the next typed message, leaving the peer half-deaf
+in between. Extracted `flush_held` and called it from all three paths.
+
+Two details that shape the fix: it must run at the END of each path, never inside
+`clear_awaiting` — clearing happens before the user's own message is delivered, so
+flushing there would release held peer chatter ahead of what the user just said.
+And it is deliberately NOT called in `resolve_choice`'s paused arm, where the wire
+is stashed for the next broadcast on purpose. The helper takes the bare channel
+rather than `RouterControl` so it can be tested without standing up a session.
+
 ## 2026-08-04 — stop the chat stream hiding what the agents are doing
 
 User report: "agents don't fully surface on the chat stream what's happening
