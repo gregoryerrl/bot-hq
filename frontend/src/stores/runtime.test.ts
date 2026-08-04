@@ -15,6 +15,7 @@ describe("seedRuntimeStores", () => {
         brian_health: "running",
         rain_health: "retrying",
         router_alive: false,
+        attention: "idle_unflagged",
       },
       {
         session_id: "s2",
@@ -24,6 +25,7 @@ describe("seedRuntimeStores", () => {
         brian_health: "dead",
         rain_health: null,
         router_alive: null,
+        attention: null,
       },
     ];
 

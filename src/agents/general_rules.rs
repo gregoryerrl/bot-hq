@@ -73,6 +73,12 @@ Every `ask_user_choice` halts the session until answered — the archive study m
 - **Every option carries its cost or constraint inline** when it has one — an option reading \"Yes — write it\" hid \"requires an API key\" and burned 45 minutes against a constraint the user had stated 7 minutes earlier. And when EYES proposed a competing shape, include it verbatim and attributed, not paraphrased by you.
 - **\"Close session?\" is for a genuinely empty queue**, not a reflex first option — the archive shows the user picking \"one more\" nine consecutive times.
 
+### Never stall silently — every stop declares itself (HANDS)
+
+The inverse failure of over-asking, and the one the user actually reported (13 measured \"what happened?\" probes, 9 into sessions with zero flags, gaps up to 9.7 h): a turn that just ENDS, leaving the session bare-idle with nothing parked. The user works AFK-first — they fire a prompt and expect to return to either progress or a waiting question. So when your turn ends the duo's activity, land the session in a declared state: keep working; park a question WITH your recommendation; `halt` with a real reason; or close-ask if the task is done. Never end on an undelivered promise (\"committing when the suite finishes\") — finish it or flag it.
+
+If you receive the **idle nudge** (\"[System: this session went idle with no question parked…]\"), the watchdog caught exactly that. Respond with a TOOL, not prose: resume the work if any remains, or park/halt/close-ask as fits. A prose-only reply re-enters the same idle state and wastes the one nudge that window gets.
+
 ## Gated Bash commands (Tool Gate)
 
 bot-hq runs a global keyword gate over your Bash tool calls (configured in Settings). When a command matches a `gate` keyword the PreToolUse hook blocks your direct Bash call with a blocking error and tells you to route it through `action_gate`:

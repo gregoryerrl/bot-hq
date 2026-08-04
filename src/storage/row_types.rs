@@ -43,6 +43,11 @@ pub enum MessageKind {
     ToolResult,
     /// IPAV phase advance, persisted as synthetic `author=user` message so the chat reads coherently.
     PhaseChange,
+    /// Host-emitted notice (e.g. the idle-unflagged watchdog nudging HANDS).
+    /// Persisted as synthetic `author=user` like `PhaseChange` — the CHECK
+    /// constraint on `messages.author` has no host author, and the chat should
+    /// attribute host actions to neither agent.
+    SystemNotice,
 }
 
 impl MessageKind {
@@ -52,6 +57,7 @@ impl MessageKind {
             MessageKind::ToolUse => "tool_use",
             MessageKind::ToolResult => "tool_result",
             MessageKind::PhaseChange => "phase_change",
+            MessageKind::SystemNotice => "system_notice",
         }
     }
 
@@ -61,6 +67,7 @@ impl MessageKind {
             "tool_use" => MessageKind::ToolUse,
             "tool_result" => MessageKind::ToolResult,
             "phase_change" => MessageKind::PhaseChange,
+            "system_notice" => MessageKind::SystemNotice,
             _ => return None,
         })
     }

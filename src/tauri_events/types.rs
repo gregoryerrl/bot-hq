@@ -196,6 +196,19 @@ impl RouterHealthEvent {
     pub const EVENT_NAME: &'static str = "session:router_health";
 }
 
+/// Emitted when the idle-unflagged watchdog flips a session's attention state.
+/// `state=Some("idle_unflagged")` → show the "needs direction" chip;
+/// `state=None` → clear it (activity resumed or the user spoke).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct SessionAttentionEvent {
+    pub session_id: String,
+    pub state: Option<String>,
+}
+
+impl SessionAttentionEvent {
+    pub const EVENT_NAME: &'static str = "session:attention";
+}
+
 /// Emitted by the filesystem watcher when a Context Library file changed on disk
 /// (after the index was re-synced for the affected scope). `project` is the CL
 /// scope: a named project, or `None` for `_globals`/root files (`scratch.md`,

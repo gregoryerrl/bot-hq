@@ -69,6 +69,17 @@ export const ChatMessage = memo(function ChatMessage({
     );
   }
 
+  if (message.kind === "system_notice") {
+    // Host-emitted notice (e.g. the idle-unflagged watchdog). Centered like a
+    // phase change — it is persisted with synthetic author=user, so it must
+    // NOT fall through to the prose render and read as the user's words.
+    return (
+      <div className="my-4 text-center text-[0.7rem] italic text-warning">
+        ⚠ {message.content}
+      </div>
+    );
+  }
+
   if (message.kind === "tool_use" || message.kind === "tool_result") {
     return (
       <ToolMessage

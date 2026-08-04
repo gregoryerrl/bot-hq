@@ -30,6 +30,9 @@ function SessionTileImpl({
   // B2: session-level health dot (problem-only on the tile). Worst-of Brian+Rain.
   const health = useHealthStore((s) => s.bySession[session.id]);
   const routerAlive = useHealthStore((s) => s.routerBySession[session.id]);
+  // Idle-unflagged watchdog: the session sat idle past grace with no question
+  // or halt parked — it probably needs direction.
+  const attention = useHealthStore((s) => s.attentionBySession[session.id]);
   // Slot 8 Quickview: first line of the latest text message (null until one exists).
   const quickview = firstLine(session.last_message);
 
@@ -85,6 +88,14 @@ function SessionTileImpl({
               />
             )}
             {!closed && <RouterHealthDot alive={routerAlive} />}
+            {!closed && attention === "idle_unflagged" && (
+              <span
+                className="shrink-0 rounded border border-warning/50 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning"
+                title="Idle with no question or halt parked — the duo was nudged to declare state"
+              >
+                NEEDS DIRECTION
+              </span>
+            )}
             {!session.rain_enabled && (
               <span
                 className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"

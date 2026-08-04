@@ -75,6 +75,12 @@ pub struct SessionHandle {
     /// user's next message; past the router's hard cap the volley breaks. Unlike
     /// `awaiting` it is NOT bridge-registered — no MCP tool touches it.
     pub user_silent_forwards: Arc<std::sync::atomic::AtomicU32>,
+    /// Count of user prompts broadcast to this session, bumped by
+    /// `AppState::broadcast`. The idle-unflagged watchdog reads it: 0 =
+    /// pre-first-task (never nudge), and each new prompt re-arms the
+    /// once-per-window nudge. In-memory on purpose — a storage count races
+    /// the watchdog's first poll at session start.
+    pub user_broadcasts: Arc<std::sync::atomic::AtomicU64>,
     /// Per-session duo-activity tracker (interrupt redesign, Batch 2) — drives
     /// the chat-input lock. Shared with both pumps (which clear `busy` on
     /// `TurnComplete`) and the dispatch paths in `AppState` (set `busy` on send,
@@ -694,12 +700,21 @@ async fn spawn_session_handle(
 
     // Batch 7: spawn the per-session stall watchdog (solo + duo). It holds Weak
     // liveness refs, so it self-terminates once the pumps drop their Arcs.
+    // Also carries the idle-unflagged watch (chip + HANDS nudge when the
+    // session sits bare-Idle past grace with no tray flag).
+    let user_broadcasts = Arc::new(std::sync::atomic::AtomicU64::new(0));
     tokio::spawn(crate::core::watchdog::run_stall_watchdog(
         session.id.clone(),
         watchdog_agents,
         Arc::clone(&activity),
         Arc::clone(&bridge),
         router_watch,
+        crate::core::watchdog::IdleWatch {
+            storage: storage.clone(),
+            brian_input_tx: brian_handle.input_tx.clone(),
+            ipav: Arc::clone(&ipav),
+            user_broadcasts: Arc::clone(&user_broadcasts),
+        },
     ));
 
     // A1 (adherence): one-shot session-start CL-opener nudge. Mechanically pages
@@ -734,6 +749,7 @@ async fn spawn_session_handle(
         rain: rain_handle,
         awaiting,
         user_silent_forwards,
+        user_broadcasts,
         activity,
         in_atomic_tool,
         cancel_superseded,

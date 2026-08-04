@@ -206,6 +206,22 @@ impl Storage {
         Ok(row.map(|(prompt,)| prompt))
     }
 
+    /// Whether ANY tray row is pending for this session — question, halt, or
+    /// gate. The idle-unflagged watchdog reads this each poll: a pending row
+    /// means the session is legitimately waiting on the user, so bare-Idle
+    /// detection must stay quiet. Hits the `idx_session_tray_pending` partial
+    /// index; effectively free.
+    pub async fn has_pending_tray(&self, session_id: &str) -> Result<bool> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM session_tray \
+             WHERE session_id = ? AND status = 'pending')",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 != 0)
+    }
+
     /// Look up a tray entry by its `choice_id`. Returns None if absent.
     pub async fn get_tray_entry(&self, choice_id: &str) -> Result<Option<SessionTrayEntry>> {
         let row = sqlx::query_as::<_, SessionTrayEntry>(&format!(

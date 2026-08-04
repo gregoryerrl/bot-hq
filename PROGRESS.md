@@ -9,6 +9,45 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-05 — never stall silently: the idle-unflagged watchdog (issue #25)
+
+The user's own words defined the invariant: "work should be continuous after
+the first prompt. User should be asked when halts/paused… I go AFK when I
+ask/instruct, hoping to get back to a question or halt flag." The archive says
+the invariant was broken routinely — **24 "what happened?" messages across 22
+sessions**; of 13 bare stall-probes analyzed, **9 interrupted a session with
+zero open tray flags**, after silent gaps of 2 min to 9.7 h. Four shapes: turns
+that die mid-tool; duos that settle without parking anything (Rain's last words
+before a 3-hour silence: "*(Holding.)*"); dangling promises ("committing when
+the gate suite completes" — nothing followed); and waits on a peer the user
+cannot see.
+
+The mechanical hole: every proper yield (`ask_user_choice` / `halt` /
+`mark_awaiting_user`) lands the session in a visible `AwaitingUser`, but a turn
+that simply ends lands in bare `Idle` — and the Batch-7 stall watchdog only
+monitors *busy* agents, so `Idle` conflated "settled, your move" with "stalled
+mid-task" forever.
+
+The fix extends the per-session watchdog (`core/watchdog.rs`): a session
+continuously `Idle` past `IDLE_GRACE` (90 s), with ≥1 user prompt broadcast and
+zero pending `session_tray` rows, now (a) flips a deduped `session:attention`
+event → an amber **NEEDS DIRECTION** chip on the dashboard tile + session
+header, (b) persists a chat-visible `system_notice` row, and (c) nudges HANDS —
+once per user-silence window — to declare state with a tool: continue / park a
+question with a recommendation / halt / close-ask. The nudge is skipped (chip
+stays) while HANDS health is dead/retrying/stalled; a new user prompt re-arms
+the window via a race-free in-memory `user_broadcasts` counter bumped in
+`AppState::broadcast`. Detection is host-side by design — a claude-code Stop
+hook fires before the final text is routed and cannot know whether the peer is
+about to wake, so it would false-block ordinary turns.
+
+Pure decision fn + 6 new unit tests (once-per-window, pre-first-prompt quiet,
+pending-tray suppression, hands-down chip-only); full suite green (968 lib).
+`get_session_runtime` seeds the chip on mount; `system_notice` renders as a
+centered warning line, never as user prose. Prompt half: a "Never stall
+silently" section in the HANDS general rules, including the nudge contract.
+User-picked variant (2026-08-05): chip + one-time nudge at 90 s.
+
 ## 2026-08-04 — stop waking the reviewer to say "holding" (#8, first half)
 
 `advance_phase` fed its transition notice to BOTH agents' stdin. For EYES that is

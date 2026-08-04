@@ -194,6 +194,16 @@ pub enum SignalingEvent {
         session_id: String,
         alive: bool,
     },
+    /// Session-level attention flag from the idle-unflagged watchdog.
+    /// `state=Some("idle_unflagged")` when the session sat Idle past grace with
+    /// no tray flag parked after the first user prompt; `state=None` when the
+    /// condition cleared (activity resumed or the user spoke). The UI shows a
+    /// "needs direction" chip. String-typed so future attention kinds don't
+    /// need a wire change.
+    SessionAttention {
+        session_id: String,
+        state: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -306,6 +316,12 @@ pub struct SignalingBridge {
     /// router-health dot on mount (the event fires only on change, like
     /// `agent_health`). Sync `Mutex` — `notify_router_health` is sync.
     router_health: std::sync::Mutex<HashMap<String, bool>>,
+    /// Latest idle-unflagged attention state per session_id (value = the
+    /// attention kind, e.g. "idle_unflagged"; absent = clear). Written by
+    /// `notify_session_attention`; read by `get_session_runtime` to seed the
+    /// UI chip on mount (the event fires only on change, mirroring
+    /// `router_health`). Sync `Mutex` — the notify path is sync.
+    session_attention: std::sync::Mutex<HashMap<String, String>>,
     /// session_id → shared open-blocking-findings count. The router reads the
     /// `Arc<AtomicUsize>` LOCK-FREE per peer-forward (for the wire banner) instead
     /// of a per-forward `SELECT COUNT(*)` + storage-`Mutex` acquire; the findings
@@ -341,6 +357,7 @@ impl SignalingBridge {
             agent_rpc_seen: std::sync::Mutex::new(HashMap::new()),
             reviewer_override: std::sync::Mutex::new(HashMap::new()),
             router_health: std::sync::Mutex::new(HashMap::new()),
+            session_attention: std::sync::Mutex::new(HashMap::new()),
             session_open_blocking: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -797,6 +814,39 @@ impl SignalingBridge {
             .unwrap_or_else(|p| p.into_inner())
             .get(session_id)
             .copied()
+    }
+
+    /// Publish an idle-unflagged attention change. Deduped here (not at the
+    /// caller): the watchdog re-evaluates every poll, so it calls this every
+    /// 10s while the condition holds — only an actual transition reaches the
+    /// wire. `state=None` clears. Mirrors `notify_router_health`.
+    pub fn notify_session_attention(&self, session_id: String, state: Option<&str>) {
+        {
+            let mut map = self
+                .session_attention
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let changed = match state {
+                Some(s) => map.insert(session_id.clone(), s.to_string()).as_deref() != Some(s),
+                None => map.remove(&session_id).is_some(),
+            };
+            if !changed {
+                return;
+            }
+        }
+        let _ = self.event_tx.send(SignalingEvent::SessionAttention {
+            session_id,
+            state: state.map(str::to_string),
+        });
+    }
+
+    /// Latest cached attention state for a session (`None` = clear / never set).
+    pub fn current_session_attention(&self, session_id: &str) -> Option<String> {
+        self.session_attention
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session_id)
+            .cloned()
     }
 
     /// Batch 7: HANDS records an explicit override of the reviewer-down commit

@@ -15,14 +15,21 @@ interface HealthStore {
    *  from the `session:router_health` event; a session with no entry is assumed
    *  alive (the event fires only on transitions). In-memory only. */
   routerBySession: Record<string, boolean>;
+  /** session_id -> attention state from the idle-unflagged watchdog
+   *  ("idle_unflagged"). No entry = clear. Populated live from
+   *  `session:attention` (null state deletes) and seeded on mount from
+   *  `get_session_runtime`. Drives the "needs direction" chip. */
+  attentionBySession: Record<string, string>;
   setHealth: (sessionId: string, agent: string, health: AgentHealth) => void;
   setRouterHealth: (sessionId: string, alive: boolean) => void;
+  setAttention: (sessionId: string, state: string | null) => void;
   clearSession: (sessionId: string) => void;
 }
 
 export const useHealthStore = create<HealthStore>((set) => ({
   bySession: {},
   routerBySession: {},
+  attentionBySession: {},
   setHealth: (sessionId, agent, health) =>
     set((s) => ({
       bySession: {
@@ -34,16 +41,31 @@ export const useHealthStore = create<HealthStore>((set) => ({
     set((s) => ({
       routerBySession: { ...s.routerBySession, [sessionId]: alive },
     })),
+  setAttention: (sessionId, state) =>
+    set((s) => {
+      if (state === null) {
+        if (!(sessionId in s.attentionBySession)) return s;
+        const attentionBySession = { ...s.attentionBySession };
+        delete attentionBySession[sessionId];
+        return { attentionBySession };
+      }
+      return {
+        attentionBySession: { ...s.attentionBySession, [sessionId]: state },
+      };
+    }),
   clearSession: (sessionId) =>
     set((s) => {
       const hadAgent = !!s.bySession[sessionId];
       const hadRouter = sessionId in s.routerBySession;
-      if (!hadAgent && !hadRouter) return s;
+      const hadAttention = sessionId in s.attentionBySession;
+      if (!hadAgent && !hadRouter && !hadAttention) return s;
       const bySession = { ...s.bySession };
       delete bySession[sessionId];
       const routerBySession = { ...s.routerBySession };
       delete routerBySession[sessionId];
-      return { bySession, routerBySession };
+      const attentionBySession = { ...s.attentionBySession };
+      delete attentionBySession[sessionId];
+      return { bySession, routerBySession, attentionBySession };
     }),
 }));
 

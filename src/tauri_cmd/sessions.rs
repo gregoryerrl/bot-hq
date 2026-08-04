@@ -351,6 +351,10 @@ pub struct SessionRuntime {
     pub rain_busy: bool,
     pub brian_health: Option<String>,
     pub rain_health: Option<String>,
+    /// Idle-unflagged attention state ("idle_unflagged" or None = clear).
+    /// Seeds the "needs direction" chip on mount; live updates arrive via
+    /// `session:attention`.
+    pub attention: Option<String>,
     /// Peer-forward router liveness (duo only). `None` = solo, or never reported
     /// (assume alive — the event fires only on change). Seeds the UI router dot.
     pub router_alive: Option<bool>,
@@ -371,6 +375,7 @@ pub async fn get_session_runtime(
             rain_busy: handle.activity.is_busy(Author::Rain),
             brian_health: core.bridge.current_agent_health(id, "brian"),
             rain_health: core.bridge.current_agent_health(id, "rain"),
+            attention: core.bridge.current_session_attention(id),
             router_alive: core.bridge.current_router_health(id),
         });
     }

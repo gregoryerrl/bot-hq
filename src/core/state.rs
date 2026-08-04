@@ -748,6 +748,12 @@ impl AppState {
         // The user's message was dispatched to both agents → they're now busy
         // (the duo's turn-start). The awaiting flag was cleared just above, so
         // this recompute moves the session AwaitingUser/Idle → Busy.
+        // A user prompt also re-arms the idle-unflagged watchdog's
+        // once-per-window nudge (and its >0 count marks the session as
+        // having a task at all).
+        handle
+            .user_broadcasts
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         handle.activity.set_busy(Author::Brian, true);
         if handle.rain.is_some() {
             handle.activity.set_busy(Author::Rain, true);

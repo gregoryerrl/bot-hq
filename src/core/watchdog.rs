@@ -7,9 +7,10 @@
 //! resumes it returns to `Running`. It only manages Running↔Stalled — the
 //! supervisor owns Retrying/Dead. Runs in solo too (catches a hung Brian).
 
-use crate::core::activity::ActivityTracker;
+use crate::core::activity::{ActivityTracker, SessionActivity};
+use crate::core::ipav::IpavState;
 use crate::signaling::SignalingBridge;
-use crate::storage::Author;
+use crate::storage::{Author, MessageKind, Storage};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -21,6 +22,12 @@ use tracing::warn;
 pub const STALL_THRESHOLD: Duration = Duration::from_secs(90);
 /// How often the watchdog re-checks each agent.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
+/// How long a session may sit `Idle` after the first user prompt, with no tray
+/// flag pending, before it's flagged idle-unflagged (chip + one HANDS nudge).
+/// The measured stalls this exists for (13 "what happened?" probes, 9 with zero
+/// flags) had silent gaps of 2 min–9.7 h; 90 s converts them into a parked
+/// question ~2 min after the settle. User-picked 2026-08-05 (variant 1).
+pub const IDLE_GRACE: Duration = Duration::from_secs(90);
 
 /// Per-agent liveness, shared between the agent's pump (updates it) and the
 /// session watchdog task (reads it). `std`-sync — the pump touches it from a
@@ -98,6 +105,57 @@ fn stall_decision(
     }
 }
 
+/// What the idle-unflagged check decided for one poll tick.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) struct IdleDecision {
+    /// Show / keep the "needs direction" attention chip.
+    pub chip: bool,
+    /// Additionally nudge HANDS to declare state (once per user-silence window).
+    pub nudge: bool,
+}
+
+/// Pure decision for the idle-unflagged watchdog (the "What happened?" fix —
+/// a session must always be working or visibly asking; bare `Idle` past grace
+/// with no tray flag after the first prompt is the anomaly).
+///
+/// - `idle_for` — how long the session has been continuously `Idle`; `None`
+///   when it isn't idle.
+/// - `user_broadcasts` — count of user prompts broadcast this session. 0 =
+///   pre-first-task (the duo legitimately waits; never fire).
+/// - `pending_tray` — a question/halt/gate is parked: legitimately waiting on
+///   the user; never fire.
+/// - `nudged_at` — the broadcast count when the last nudge was sent. A nudge
+///   fires at most once per user-silence window; a new user prompt moves the
+///   count and re-arms it.
+/// - `hands_down` — HANDS health is dead/retrying/stalled: a nudge can't be
+///   answered, so chip only (and the nudge stays un-consumed for recovery).
+pub(crate) fn idle_unflagged_decision(
+    idle_for: Option<Duration>,
+    user_broadcasts: u64,
+    pending_tray: bool,
+    nudged_at: Option<u64>,
+    hands_down: bool,
+    grace: Duration,
+) -> IdleDecision {
+    let chip = idle_for.is_some_and(|d| d >= grace) && user_broadcasts > 0 && !pending_tray;
+    let nudge = chip && nudged_at != Some(user_broadcasts) && !hands_down;
+    IdleDecision { chip, nudge }
+}
+
+/// The idle-unflagged watchdog's handles into one session, threaded from the
+/// spawn site. Separate struct so `run_stall_watchdog`'s signature stays
+/// readable.
+pub struct IdleWatch {
+    pub storage: Storage,
+    /// HANDS' stdin — the nudge goes to Brian only (EYES has no state-declaring
+    /// verbs; her settles resolve to whatever Brian flags).
+    pub brian_input_tx: tokio::sync::mpsc::Sender<crate::agents::OutgoingUserMessage>,
+    pub ipav: Arc<tokio::sync::Mutex<IpavState>>,
+    /// Bumped by `AppState::broadcast` on every user prompt. In-memory on
+    /// purpose: a storage count races the first poll at session start.
+    pub user_broadcasts: Arc<AtomicU64>,
+}
+
 /// Weak refs to a duo session's router liveness + per-direction counters, so the
 /// watchdog can surface a router that died while agents are still live (the
 /// peer-forward subsystem going down without taking the agents with it). `Weak`
@@ -120,7 +178,11 @@ pub async fn run_stall_watchdog(
     activity: Arc<ActivityTracker>,
     bridge: Arc<SignalingBridge>,
     router: Option<RouterWatch>,
+    idle_watch: IdleWatch,
 ) {
+    // Idle-unflagged tracking (loop-local; see `idle_unflagged_decision`).
+    let mut idle_since: Option<Instant> = None;
+    let mut nudged_at: Option<u64> = None;
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         let mut any_alive = false;
@@ -163,9 +225,115 @@ pub async fn run_stall_watchdog(
                 }
             }
         }
+        // ── Idle-unflagged watchdog (the "What happened?" fix) ──────────────
+        // A session must always be either working or visibly asking. Bare
+        // `Idle` past IDLE_GRACE with no pending tray row, after the first
+        // user prompt, gets an attention chip + one HANDS nudge per
+        // user-silence window. Detection is host-side because only the host
+        // has post-settlement truth (a Stop hook fires before the final text
+        // is routed and would false-block turns whose text wakes the peer).
+        {
+            let state = activity.current();
+            if state == SessionActivity::Idle {
+                let since = *idle_since.get_or_insert_with(Instant::now);
+                let broadcasts = idle_watch.user_broadcasts.load(Ordering::Acquire);
+                // Only pay the (indexed) tray query once the cheap gates pass.
+                let candidate = since.elapsed() >= IDLE_GRACE && broadcasts > 0;
+                let pending_tray = if candidate {
+                    match idle_watch.storage.has_pending_tray(&session_id).await {
+                        Ok(p) => p,
+                        // Fail closed-to-quiet: a storage error must not spam
+                        // chips/nudges off a guess.
+                        Err(e) => {
+                            warn!(session_id = %session_id, error = %e,
+                                  "idle watchdog: pending-tray query failed; skipping tick");
+                            true
+                        }
+                    }
+                } else {
+                    true // not a candidate yet — value unused beyond suppressing
+                };
+                let hands_down = matches!(
+                    bridge
+                        .current_agent_health(&session_id, Author::Brian.as_str())
+                        .as_deref(),
+                    Some("dead") | Some("retrying") | Some("stalled")
+                );
+                let decision = idle_unflagged_decision(
+                    candidate.then(|| since.elapsed()),
+                    broadcasts,
+                    pending_tray,
+                    nudged_at,
+                    hands_down,
+                    IDLE_GRACE,
+                );
+                // One call covers both directions: sets the chip while the
+                // anomaly holds, clears it if a tray flag appears mid-idle
+                // (legitimately waiting again). The bridge dedupes.
+                bridge.notify_session_attention(
+                    session_id.clone(),
+                    decision.chip.then_some("idle_unflagged"),
+                );
+                if decision.nudge {
+                    // Re-verify at the send boundary: the user may have paused
+                    // or spoken between the poll read and here.
+                    if activity.current() == SessionActivity::Idle
+                        && !activity.holds_wakes()
+                    {
+                        nudged_at = Some(broadcasts);
+                        deliver_idle_nudge(&session_id, &idle_watch, &activity, &bridge)
+                            .await;
+                    }
+                }
+            } else {
+                idle_since = None;
+                // Transition out of Idle clears the chip (bridge dedupes, so
+                // calling this every non-idle poll is a cheap no-op).
+                bridge.notify_session_attention(session_id.clone(), None);
+            }
+        }
         if !any_alive {
             break; // all pumps gone → session ended
         }
+    }
+}
+
+/// Persist the chat-visible notice and push the declare-state nudge into
+/// HANDS' stdin. Best-effort on every edge: a dead input channel or a failed
+/// insert degrades to the chip alone (already emitted by the caller).
+async fn deliver_idle_nudge(
+    session_id: &str,
+    idle_watch: &IdleWatch,
+    activity: &ActivityTracker,
+    bridge: &SignalingBridge,
+) {
+    const NOTICE: &str =
+        "Session idled with no question or halt parked — nudged Brian to declare state.";
+    const NUDGE: &str = "[System: this session went idle with no question parked and no \
+        halt flag — the user cannot tell settled from stalled. Declare state now, with a \
+        tool rather than bare prose: continue the work if any remains; park a question \
+        with your recommendation (ask_user_choice); yield with a reason (halt / \
+        mark_awaiting_user); or ask to close if the task is done.]";
+    match idle_watch
+        .storage
+        .insert_message(session_id, Author::User, MessageKind::SystemNotice, NOTICE)
+        .await
+    {
+        Ok(id) => bridge.notify_message_persisted(Arc::from(session_id), id),
+        Err(e) => warn!(session_id = %session_id, error = %e,
+                        "idle watchdog: failed to persist system notice"),
+    }
+    let phase = idle_watch.ipav.lock().await.current_phase;
+    let wire = crate::core::broadcast::with_phase_envelope(phase, NUDGE);
+    if idle_watch
+        .brian_input_tx
+        .send(crate::agents::OutgoingUserMessage::text(wire))
+        .await
+        .is_ok()
+    {
+        // Mirror the dispatch sites: input sent → HANDS is mid-turn, so the
+        // session reads Busy (and the chip clears) while he declares state.
+        activity.set_busy(Author::Brian, true);
     }
 }
 
@@ -223,6 +391,55 @@ mod tests {
         assert_eq!(stall_decision(true, 1, PAST, Some("stalled"), T), Some("running"));
         // Still stalled → no re-emit (only on change).
         assert_eq!(stall_decision(true, 0, PAST, Some("stalled"), T), None);
+    }
+
+    const GRACE: Duration = Duration::from_secs(90);
+    const OVER: Option<Duration> = Some(Duration::from_secs(120));
+    const UNDER: Option<Duration> = Some(Duration::from_secs(30));
+
+    #[test]
+    fn idle_decision_fires_after_grace_with_task_and_no_flag() {
+        let d = idle_unflagged_decision(OVER, 3, false, None, false, GRACE);
+        assert_eq!(d, IdleDecision { chip: true, nudge: true });
+    }
+
+    #[test]
+    fn idle_decision_quiet_before_first_prompt() {
+        // The pre-first-task wait is legitimate — never chip, never nudge.
+        let d = idle_unflagged_decision(OVER, 0, false, None, false, GRACE);
+        assert_eq!(d, IdleDecision { chip: false, nudge: false });
+    }
+
+    #[test]
+    fn idle_decision_quiet_under_grace_or_not_idle() {
+        assert!(!idle_unflagged_decision(UNDER, 3, false, None, false, GRACE).chip);
+        assert!(!idle_unflagged_decision(None, 3, false, None, false, GRACE).chip);
+    }
+
+    #[test]
+    fn idle_decision_suppressed_by_pending_tray() {
+        // A parked question/halt/gate = legitimately waiting on the user.
+        let d = idle_unflagged_decision(OVER, 3, true, None, false, GRACE);
+        assert_eq!(d, IdleDecision { chip: false, nudge: false });
+    }
+
+    #[test]
+    fn idle_decision_nudges_once_per_user_silence_window() {
+        // Already nudged at broadcast #3 → chip stays, nudge doesn't repeat.
+        let d = idle_unflagged_decision(OVER, 3, false, Some(3), false, GRACE);
+        assert_eq!(d, IdleDecision { chip: true, nudge: false });
+        // A new user prompt (count moved to 4) re-arms the nudge.
+        let d = idle_unflagged_decision(OVER, 4, false, Some(3), false, GRACE);
+        assert_eq!(d, IdleDecision { chip: true, nudge: true });
+    }
+
+    #[test]
+    fn idle_decision_chip_only_when_hands_down() {
+        // A dead/retrying/stalled HANDS can't answer — chip without nudge,
+        // and the nudge stays un-consumed (nudged_at untouched by caller) so
+        // recovery gets exactly one.
+        let d = idle_unflagged_decision(OVER, 3, false, None, true, GRACE);
+        assert_eq!(d, IdleDecision { chip: true, nudge: false });
     }
 
     #[test]

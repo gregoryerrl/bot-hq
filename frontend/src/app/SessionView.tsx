@@ -106,6 +106,7 @@ export function SessionView() {
   // B2: live agent health for this session (drives the header dots).
   const health = useHealthStore((s) => s.bySession[sessionId]);
   const routerAlive = useHealthStore((s) => s.routerBySession[sessionId]);
+  const attention = useHealthStore((s) => s.attentionBySession[sessionId]);
   const agentContext = useContextStore((s) => s.bySession[sessionId]);
   const activity = useActivityStore((s) => s.bySession[sessionId]);
   // Per-agent busy flags for the chat-input turn-status line ("Brian is
@@ -310,6 +311,17 @@ export function SessionView() {
                       )}
                     </>
                   )}
+                </span>
+              </>
+            )}
+            {attention === "idle_unflagged" && (
+              <>
+                <span className="mx-2 text-outline-variant">·</span>
+                <span
+                  className="rounded border border-warning/50 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning"
+                  title="Idle with no question or halt parked — the duo was nudged to declare state"
+                >
+                  NEEDS DIRECTION
                 </span>
               </>
             )}
