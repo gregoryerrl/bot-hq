@@ -891,8 +891,8 @@ AppImage on Linux; `Program Files` on Windows), NOT under `<data_dir>`.
 Pre-`library/` and pre-`config/` installs are migrated once on launch (the
 `config/` split landed in v1.1, 2026-06-09).
 
-**Dev:** `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` keeps dev data separate from a
-production install.
+**Dev** runs against the same default `~/.bot-hq/`. `BOT_HQ_DATA_DIR` keeps a
+source build separate from an installed release when you run both.
 
 ---
 

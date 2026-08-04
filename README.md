@@ -153,7 +153,7 @@ and authenticated — bot-hq drives it under the hood, one process per agent.
 ```bash
 git clone https://github.com/gregoryerrl/bot-hq.git
 cd bot-hq
-cp .env.example .env                    # sets BOT_HQ_DATA_DIR=~/.bot-hq-dev/
+cp .env.example .env                    # defaults are fine; see the table below
 (cd frontend && npm install)            # React frontend deps (Vite + Tauri CLI)
 cargo install tauri-cli --version '^2'  # one-time, if `cargo tauri` is missing
 cargo tauri dev                         # builds the UI + opens the desktop window
@@ -231,8 +231,9 @@ Env vars read at startup:
 | `RUN_LIVE_TESTS`               | unset               | Set to `1` to include subprocess tests         |
 | `RUST_LOG`                     | `info,bot_hq=debug` | tracing-subscriber EnvFilter                   |
 
-**During development** keep `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` in `.env` so you don't
-collide with a running production bot-hq at `~/.bot-hq/`.
+A source build uses the same `~/.bot-hq/` as an installed release. Set
+`BOT_HQ_DATA_DIR` (e.g. `~/.bot-hq-dev/`) only if you run both and want them kept
+apart — otherwise they share one Context Library, sqlite DB, and instance lock.
 
 </details>
 

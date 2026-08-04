@@ -9,6 +9,25 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — correct the dev data-dir guidance in the shipped docs
+
+Surfaced during a Context Library audit: four committed docs still told a
+developer to run against `~/.bot-hq-dev/`, a split the repo retired
+2026-05-15. `.env` has the override commented out and the app runs on
+`~/.bot-hq/` for dev and prod alike, so `.env.example` — which set
+`BOT_HQ_DATA_DIR=~/.bot-hq-dev/` uncommented — made `cp .env.example .env`
+contradict the checked-out setup on step one of the README.
+
+`BOT_HQ_DATA_DIR` is unchanged and still read by `paths.rs`; only the
+guidance moved. It's now documented as an opt-in for the one case that
+still needs it: running an installed release beside a source build, where
+both would otherwise share a Context Library, sqlite DB, and instance lock.
+`.env.example` ships commented out (its header also still said "Rust +
+Slint rebuild" — Slint went in May), and `CLAUDE.md` / `README.md` /
+`ARCHITECTURE.md` now agree with it. `README.md`'s env-var table was
+already correct. `PROGRESS.md` history and `docs/rebuild-archive/` are
+left as written.
+
 ## 2026-08-04 — misinformation archive study → three evidence rules (s-11b73814)
 
 Searched all sessions (May 20 → Aug 4) for the user's misinformation

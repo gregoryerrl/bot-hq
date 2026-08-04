@@ -84,8 +84,10 @@ done; work is now incremental.
 
 ## Data paths during dev
 
-Keep `BOT_HQ_DATA_DIR=~/.bot-hq-dev/` in `.env`. The default
-`~/.bot-hq/` collides with any running production bot-hq.
+Dev runs against the default `~/.bot-hq/` — the `BOT_HQ_DATA_DIR=~/.bot-hq-dev/`
+split was retired 2026-05-15 and the line is commented out in `.env`. Set it only
+if you also run an installed bot-hq release, which would otherwise share this
+data dir.
 
 `<data_dir>` layout (see ARCHITECTURE.md for the full list):
 - `.local/bot-hq.db` — sqlite
