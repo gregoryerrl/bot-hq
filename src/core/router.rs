@@ -219,6 +219,13 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
     // hold is only supposed to be brief — so an old one IS a loss, just a
     // recoverable-looking kind. See HELD_LATE.
     let mut held: Vec<(Author, String, bool, bool, std::time::Instant)> = Vec::new();
+    // Forwards the L2 hard-cap stopped (issues.md #24). Keyed by author, so a
+    // genuine runaway overwrites rather than accumulates — at most one entry per
+    // agent, which is what makes holding a runaway safe. Released by the same
+    // FlushHeld the pause queue uses, but only once the budget has room again;
+    // otherwise the release would trip the cap and re-hold on the spot.
+    let mut capped: std::collections::HashMap<Author, (String, bool, bool, std::time::Instant)> =
+        std::collections::HashMap::new();
     while let Some(cmd) = rx.recv().await {
         match cmd {
             RouterCommand::Forward {
@@ -257,7 +264,7 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                     held.push((from, body, peer_ack, peer_ack_final, std::time::Instant::now()));
                     continue;
                 }
-                route_forward(
+                if let Some((body, peer_ack, peer_ack_final)) = route_forward(
                     &deps,
                     &mut last_forward,
                     &mut similar_streak,
@@ -266,14 +273,25 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                     peer_ack,
                     peer_ack_final,
                 )
-                .await;
+                .await
+                {
+                    // Hard-capped: hold the newest from this agent instead of
+                    // destroying it.
+                    capped.insert(from, (body, peer_ack, peer_ack_final, std::time::Instant::now()));
+                }
             }
             RouterCommand::FlushHeld => {
                 // Still gated (a re-pause raced this flush, or a fresh question
                 // was parked)? Keep holding — the next broadcast sends another
                 // FlushHeld. Mirrors the hold condition above, so a forward can
                 // never be released into a state that would have held it.
-                if deps.holds_wakes() || deps.awaiting.load(Ordering::Acquire) || held.is_empty() {
+                // `capped` counts here too — guarding on `held` alone would skip
+                // the hard-cap release entirely whenever the pause queue happened
+                // to be empty, which is the common case.
+                if deps.holds_wakes()
+                    || deps.awaiting.load(Ordering::Acquire)
+                    || (held.is_empty() && capped.is_empty())
+                {
                     continue;
                 }
                 debug!(count = held.len(), "router: flushing held forwards");
@@ -294,7 +312,7 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                         );
                         record_drop(&deps, from, "held_late", &body).await;
                     }
-                    route_forward(
+                    if let Some((body, pa, paf)) = route_forward(
                         &deps,
                         &mut last_forward,
                         &mut similar_streak,
@@ -303,7 +321,42 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                         peer_ack,
                         peer_ack_final,
                     )
-                    .await;
+                    .await
+                    {
+                        capped.insert(from, (body, pa, paf, std::time::Instant::now()));
+                    }
+                }
+                // Release hard-capped forwards too, but ONLY with budget to spare
+                // — `broadcast` resets the counter, a phase advance does not, and
+                // releasing into a still-full budget would re-trip the cap and
+                // re-hold on the spot. Re-capped entries go straight back.
+                if !capped.is_empty()
+                    && deps.user_silent_forwards.load(Ordering::Acquire) <= VOLLEY_HARD_CAP
+                {
+                    debug!(count = capped.len(), "router: releasing hard-capped forwards");
+                    for (from, (body, pa, paf, held_at)) in std::mem::take(&mut capped) {
+                        if held_at.elapsed() >= HELD_LATE {
+                            warn!(
+                                agent = ?from,
+                                waited_secs = held_at.elapsed().as_secs(),
+                                "router: hard-capped forward released far later than it should have been"
+                            );
+                            record_drop(&deps, from, "held_late", &body).await;
+                        }
+                        if let Some((body, pa, paf)) = route_forward(
+                            &deps,
+                            &mut last_forward,
+                            &mut similar_streak,
+                            from,
+                            body,
+                            pa,
+                            paf,
+                        )
+                        .await
+                        {
+                            capped.insert(from, (body, pa, paf, held_at));
+                        }
+                    }
                 }
             }
         }
@@ -317,6 +370,17 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
             agent = ?from,
             waited_secs = held_at.elapsed().as_secs(),
             "router: session ended with a forward still held — it never reached the peer"
+        );
+        record_drop(&deps, from, "held_stranded", &body).await;
+    }
+    // Hard-capped forwards share the same fate and the same accounting: held is
+    // only better than dropped if the hold eventually resolves, so one that
+    // never does is still a loss and still says so.
+    for (from, (body, _, _, held_at)) in std::mem::take(&mut capped) {
+        warn!(
+            agent = ?from,
+            waited_secs = held_at.elapsed().as_secs(),
+            "router: session ended with a hard-capped forward still held — it never reached the peer"
         );
         record_drop(&deps, from, "held_stranded", &body).await;
     }
@@ -334,6 +398,9 @@ const HELD_LATE: std::time::Duration = std::time::Duration::from_secs(900);
 /// now in ONE place. Each suppression path still clears the sender's `busy` (the
 /// pump delegated self-idle to us on the forward path), so the session settles
 /// correctly. On a real forward we set the peer busy BEFORE the sender idle.
+/// Returns `Some(body, peer_ack, peer_ack_final)` when the L2 hard-cap fired —
+/// the caller must HOLD that forward rather than let it die. Every other path
+/// (delivered, peer_ack-suppressed, convergence-broken, no-peer) returns `None`.
 async fn route_forward(
     deps: &RouterDeps,
     last_forward: &mut Option<HashSet<String>>,
@@ -342,11 +409,11 @@ async fn route_forward(
     body: String,
     peer_ack: bool,
     peer_ack_final: bool,
-) {
+) -> Option<(String, bool, bool)> {
     let trimmed = body.trim_end();
     if trimmed.is_empty() {
         deps.set_idle(from);
-        return;
+        return None;
     }
     let peer = peer_of(from);
     let Some(peer_tx) = deps.input_for(peer) else {
@@ -357,7 +424,7 @@ async fn route_forward(
         debug!(agent = ?from, "router: no peer sender (unexpected non-duo author); dropping forward");
         record_drop(deps, from, "no_peer", trimmed).await;
         deps.set_idle(from);
-        return;
+        return None;
     };
 
     // 1. Await-halt is NO LONGER handled here. It used to `return`, discarding
@@ -387,7 +454,7 @@ async fn route_forward(
                 "router: peer_ack; suppressing peer forward"
             );
             deps.set_idle(from);
-            return;
+            return None;
         }
         debug!(
             agent = ?from,
@@ -398,12 +465,28 @@ async fn route_forward(
     // 3. L2 hard-cap: bound consecutive peer-forwards with no user message.
     let n = deps.user_silent_forwards.fetch_add(1, Ordering::AcqRel) + 1;
     if n > VOLLEY_HARD_CAP {
-        debug!(agent = ?from, count = n, "router: hard-cap reached; breaking volley + unlocking input");
-        // Stays lossy on purpose — this is the runaway breaker, and a duplicated
-        // message is far cheaper than a 34-turn loop. It just stops being SILENT.
-        record_drop(deps, from, "hard_cap", trimmed).await;
+        warn!(
+            agent = ?from,
+            count = n,
+            "router: hard-cap reached; breaking volley + holding this forward"
+        );
+        // NO LONGER LOSSY (issues.md #24). It used to `record_drop` and discard.
+        // Measured on 2026-08-01 session s-d16364ee: 40 of Rain's forwards
+        // destroyed here, including "`58fae66` is the risky one — rejection
+        // without repair". The budget had been burned by filler turns (54 of her
+        // 61 text turns under 200 chars — issue #8), so what the breaker actually
+        // ate was the substantive minority.
+        //
+        // The cap exists to stop a runaway LOOP; it never needed to lose the
+        // MESSAGE. Same move already made for `awaiting`, which used to discard
+        // and now holds and replays. The caller keeps the most recent per agent,
+        // so a genuine runaway still can't grow the queue.
+        //
+        // Convergence (below) stays lossy on purpose — that one suppresses
+        // REPETITION, where the held copy would be a duplicate of what already
+        // landed.
         break_volley(deps);
-        return;
+        return Some((body, peer_ack, peer_ack_final));
     }
     // 3.5 Convergence reset across the user boundary: `broadcast` sets this on a
     //     user message. Consumed HERE (not at the top) so the awaiting/peer_ack/
@@ -434,7 +517,7 @@ async fn route_forward(
         // resembles the previous turn far more than a new finding does.
         record_drop(deps, from, "convergence", trimmed).await;
         break_volley(deps);
-        return;
+        return None;
     }
     // 5. Forward, then hand off busy IN ORDER (peer busy BEFORE sender idle) so
     //    `derive()` never sees both-idle → no momentary Idle that unlocks input
@@ -468,6 +551,7 @@ async fn route_forward(
         activity.set_busy(peer, true);
         activity.set_busy(from, false);
     }
+    None // delivered — nothing for the caller to hold
 }
 
 /// Break a volley: set BOTH agents idle so `ActivityTracker::derive` returns Idle
@@ -1066,6 +1150,114 @@ mod tests {
         route_forward(&d, &mut last, &mut streak, Author::Brian, "ok".into(), true, false).await;
         assert_eq!(b2r.load(Ordering::Acquire), 2, "two delivered Brian→Rain forwards");
         assert_eq!(r2b.load(Ordering::Acquire), 1, "one delivered Rain→Brian forward");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_hard_cap_holds_the_forward_and_delivers_it_after_the_user_speaks() {
+        // issues.md #24. The hard-cap used to DESTROY the forward that tripped
+        // it; on 2026-08-01 that cost session s-d16364ee 40 of Rain's messages,
+        // including a warning that a commit was risky. The cap must still break
+        // the loop — but the message has to survive it.
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "One", None).await.unwrap();
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, mut rrx) = mpsc::channel(64);
+        let counter = Arc::new(AtomicU32::new(0));
+        let mut d = deps(
+            btx,
+            Some(rtx),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&counter),
+        );
+        d.storage = Some(storage.clone());
+        let (tx, rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_router(d, rx));
+
+        // Park the budget one under the cap, then send the forward that trips it.
+        counter.store(VOLLEY_HARD_CAP, Ordering::Release);
+        tx.send(fwd(Author::Brian, "`58fae66` is the risky one — rejection without repair"))
+            .await
+            .unwrap();
+        // Give the router a turn to process before asserting the negative.
+        tokio::task::yield_now().await;
+        assert!(
+            rrx.try_recv().is_err(),
+            "the capped forward must NOT reach the peer yet — the volley is broken"
+        );
+        assert!(
+            storage
+                .list_forward_drops(Some("s1"))
+                .await
+                .unwrap()
+                .is_empty(),
+            "a held forward is not a loss and must not be recorded as one"
+        );
+
+        // The user speaks: `broadcast` resets the counter and sends FlushHeld.
+        counter.store(0, Ordering::Release);
+        tx.send(RouterCommand::FlushHeld).await.unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        let delivered = rrx
+            .try_recv()
+            .expect("the capped forward must be delivered once the budget resets");
+        assert!(
+            format!("{delivered:?}").contains("58fae66"),
+            "the surviving message must be the one the cap stopped"
+        );
+        assert!(
+            storage
+                .list_forward_drops(Some("s1"))
+                .await
+                .unwrap()
+                .is_empty(),
+            "delivered late is not lost — nothing to record"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_runaway_keeps_only_the_newest_capped_forward_per_agent() {
+        // Holding a runaway is only safe because the queue cannot grow: each
+        // agent has exactly one slot and a newer forward overwrites it.
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, mut rrx) = mpsc::channel(64);
+        let counter = Arc::new(AtomicU32::new(VOLLEY_HARD_CAP));
+        let d = deps(
+            btx,
+            Some(rtx),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&counter),
+        );
+        let (tx, rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_router(d, rx));
+
+        for i in 0..5 {
+            tx.send(fwd(Author::Brian, &format!("runaway turn {i}")))
+                .await
+                .unwrap();
+        }
+        // Let the router actually consume all five BEFORE the budget reopens —
+        // otherwise the reset races the drain and the later forwards deliver
+        // straight through, which is a test artefact rather than the behaviour
+        // under test.
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        counter.store(0, Ordering::Release);
+        tx.send(RouterCommand::FlushHeld).await.unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        let first = rrx.try_recv().expect("the newest capped forward survives");
+        assert!(
+            format!("{first:?}").contains("runaway turn 4"),
+            "the NEWEST forward should be the one kept"
+        );
+        assert!(
+            rrx.try_recv().is_err(),
+            "only one forward per agent may be held, however long the runaway"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

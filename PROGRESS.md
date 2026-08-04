@@ -9,6 +9,39 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — the volley breaker stops the loop without eating the message (#24)
+
+Found by the observability shipped hours earlier, in a session we weren't even
+working in. `forward_events` showed **40 of Rain's forwards destroyed** in
+`s-d16364ee` (2026-08-01) with `reason='hard_cap'` — among them
+*"`58fae66` is the risky one — rejection without repair"*.
+
+The chain, all four links previously invisible and now measurable: Rain is woken
+on every HANDS event (issue #8) → 54 of her 61 text turns in that window were
+under 200 chars → those filler turns burn the 18-slot `VOLLEY_HARD_CAP` budget in
+minutes → the breaker fires → and what it discards is the substantive minority.
+The user was NOT quiet: 19 typed messages in the window, one every ~5 minutes,
+each resetting the counter. The duo simply exceeded 18 peer-forwards between
+them, repeatedly.
+
+The cap exists to stop a runaway LOOP. It never needed to lose the MESSAGE — the
+same realisation already applied to `awaiting`, which used to silently discard
+turns and now holds and replays them. `route_forward` now RETURNS the capped
+forward instead of dropping it; the router keeps the newest per agent (so a
+genuine runaway still cannot grow the queue — one slot each, newer overwrites)
+and releases it on the next `FlushHeld` once the budget has room. The volley is
+still broken, the input still unlocks, the message still arrives.
+
+Convergence stays lossy on purpose: that breaker suppresses REPETITION, where a
+held copy would duplicate what already landed.
+
+Two things this cost. `record_drop(reason='hard_cap')` is gone — the message is
+no longer lost, and a table whose contract is "a row means a message was lost"
+must not log successes; the breaker firing is now a `warn!`, which survives
+because the log sink shipped the same day. And the `FlushHeld` guard had to stop
+short-circuiting on `held.is_empty()`, which would have skipped the new release
+path in the common case — caught by the test, not by review.
+
 ## 2026-08-04 — close the two loose ends the same day's work opened
 
 Both items are debt created earlier today, cleared before closing the session.
