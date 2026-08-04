@@ -154,6 +154,36 @@ impl Storage {
         Ok(row.map(|(id,)| id))
     }
 
+    /// Every ANSWERED gated command in this session (rows carrying
+    /// `command_text`), oldest-first. Backs the OOB replay's "approved since
+    /// you asked" block: a question parked before one of these was approved may
+    /// have been overtaken by it (issues.md #18 — a staging-push choice sat
+    /// through the push it asked about and replayed as live state).
+    ///
+    /// Deliberately unfiltered on time and outcome. `answered_at` has two
+    /// historical shapes in this table (RFC3339 and sqlite's
+    /// `datetime('now')` — see migrations 0012/0015), which sort differently
+    /// as strings for the same instant, so a SQL `answered_at > ?` would
+    /// mis-order across them. The caller parses both sides and compares
+    /// instants.
+    pub async fn answered_gates_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionTrayEntry>> {
+        let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {TRAY_COLUMNS} FROM session_tray \
+             WHERE session_id = ? \
+               AND command_text IS NOT NULL \
+               AND status = 'answered' \
+               AND answered_at IS NOT NULL \
+             ORDER BY id ASC"
+        ))
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// The prompt of the most recent still-PENDING `halt` this agent parked in
     /// this session, if any. User input clears halts, so a pending one means
     /// the user has not replied since it was raised — and a second halt on top
@@ -279,6 +309,49 @@ mod tests {
             .into_iter()
             .filter(|q| q.status == "pending")
             .count()
+    }
+
+    #[tokio::test]
+    async fn answered_gates_returns_only_answered_command_rows() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-1", "S", None).await.unwrap();
+        s.create_session("s-2", "Other", None).await.unwrap();
+        async fn insert(s: &Storage, sid: &str, cid: &str, cmd: Option<&str>) {
+            let opts = vec!["Approve".to_string(), "Reject".to_string()];
+            s.insert_tray_entry(
+                sid,
+                cid,
+                "brian",
+                QuestionKind::Choice,
+                "Run gated command?",
+                Some(&opts),
+                None,
+                cmd,
+            )
+            .await
+            .unwrap();
+        }
+        insert(&s, "s-1", "g-answered", Some("git push origin staging")).await;
+        insert(&s, "s-1", "g-pending", Some("git commit -F /tmp/msg")).await;
+        insert(&s, "s-1", "c-plain", None).await;
+        insert(&s, "s-2", "g-other-session", Some("git push")).await;
+        s.answer_tray_entry("g-answered", "Approve").await.unwrap();
+        s.answer_tray_entry("c-plain", "yes").await.unwrap();
+        s.answer_tray_entry("g-other-session", "Approve")
+            .await
+            .unwrap();
+
+        let rows = s.answered_gates_for_session("s-1").await.unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.choice_id.as_str()).collect();
+        // Answered + command-bearing + this session only. `g-pending` is still
+        // awaiting a pick, `c-plain` carries no command, `g-other-session` is a
+        // different session.
+        assert_eq!(ids, vec!["g-answered"]);
+        assert!(rows[0].answered_at.is_some());
+        assert_eq!(
+            rows[0].command_text.as_deref(),
+            Some("git push origin staging")
+        );
     }
 
     #[tokio::test]

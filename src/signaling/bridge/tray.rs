@@ -6,7 +6,7 @@
 //! biggest slice of the bridge — everything that parks a oneshot, mirrors a
 //! tray row, or sets the duo's awaiting-halt flag.
 
-use super::util::{oob_resolution_body, outcome_from_picked};
+use super::util::{oob_resolution_body, outcome_from_picked, parse_tray_ts};
 use super::*;
 use crate::storage::{Author, MessageKind};
 use uuid::Uuid;
@@ -611,7 +611,17 @@ impl SignalingBridge {
         flipped: bool,
         asked_at: Option<String>,
     ) -> ResolveOutcome {
-        let mut body = oob_resolution_body(agent, question, options, &picked, asked_at.as_deref());
+        let mooting = self
+            .gates_approved_since(&session_id, choice_id, asked_at.as_deref())
+            .await;
+        let mut body = oob_resolution_body(
+            agent,
+            question,
+            options,
+            &picked,
+            asked_at.as_deref(),
+            &mooting,
+        );
         if flipped {
             self.maybe_run_gated(&session_id, command_text, &picked, &mut body)
                 .await;
@@ -653,6 +663,52 @@ impl SignalingBridge {
             picked,
         });
         ResolveOutcome::AgentReceiverDroppedFellBack { session_id, body }
+    }
+
+    /// `(command, answered_at)` for gated commands in this session APPROVED
+    /// AFTER `asked_at` — the events that may have overtaken the question now
+    /// being replayed (issues.md #18). Oldest-first; the row being resolved is
+    /// excluded, and a rejected gate never ran so it is not an overtaking event.
+    ///
+    /// Fail-open in every direction (no `asked_at`, no storage, query error,
+    /// unparseable timestamp → empty): this decorates a replay the agent needs
+    /// either way, so it must never be able to fail the delivery. Same posture
+    /// as the age-stamp it sits beside.
+    ///
+    /// Scope is this session on purpose. A push from ANOTHER session can moot a
+    /// question here too, but nothing in `session_tray` observes that — it would
+    /// need a repo-state watcher, which is a different mechanism (filed, not
+    /// built).
+    async fn gates_approved_since(
+        &self,
+        session_id: &str,
+        resolving_choice_id: &str,
+        asked_at: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let Some(asked) = asked_at.and_then(parse_tray_ts) else {
+            return Vec::new();
+        };
+        let Some(storage) = self.storage.lock().await.clone() else {
+            return Vec::new();
+        };
+        let Ok(rows) = storage.answered_gates_for_session(session_id).await else {
+            return Vec::new();
+        };
+        rows.into_iter()
+            .filter(|row| row.choice_id != resolving_choice_id)
+            .filter(|row| {
+                matches!(
+                    outcome_from_picked(row.picked_option.as_deref().unwrap_or("")),
+                    crate::policy::ViolationOutcome::Approved
+                )
+            })
+            .filter_map(|row| {
+                let answered_at = row.answered_at?;
+                let command = row.command_text?;
+                let ts = parse_tray_ts(&answered_at)?;
+                (ts > asked).then_some((command, answered_at))
+            })
+            .collect()
     }
 
     /// Run an approved action_gate (ToolBlocklist) command at resolve time and
@@ -1223,6 +1279,127 @@ mod tests {
             saw_persisted,
             "OOB resolve must fire MessagePersisted so the chat live-updates"
         );
+    }
+
+    #[tokio::test]
+    async fn oob_replay_names_gates_approved_after_the_question_was_parked() {
+        // The s-bb938f62 shape (issues.md #18): a question sits parked while the
+        // action it asks about is approved through a SEPARATE gate, then the
+        // stale answer replays. The replay must name that gate so the agent
+        // doesn't adopt the dead premise as current state.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s-moot", "title", None).await.unwrap();
+        let opts = vec!["Push".to_string(), "discard".to_string()];
+
+        // Question parked FIRST — no in-memory oneshot, so resolve takes the
+        // reconstruct-from-storage path into deliver_oob.
+        storage
+            .insert_tray_entry(
+                "s-moot",
+                "cid-q",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Re-push to staging?",
+                Some(&opts),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        // now_utc() is millisecond-precision; nudge past it so the gate's
+        // answered_at is strictly after the question's asked_at even when the
+        // in-memory DB answers both writes inside one millisecond.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        for (cid, command, pick) in [
+            ("cid-gate-ok", "git push origin staging", "Approve"),
+            ("cid-gate-no", "git reset --hard origin/main", "Reject"),
+        ] {
+            storage
+                .insert_tray_entry(
+                    "s-moot",
+                    cid,
+                    "brian",
+                    crate::storage::QuestionKind::Choice,
+                    "Run gated command?",
+                    Some(&opts),
+                    None,
+                    Some(command),
+                )
+                .await
+                .unwrap();
+            storage.answer_tray_entry(cid, pick).await.unwrap();
+        }
+
+        let outcome = bridge
+            .resolve_choice("cid-q", "discard".into())
+            .await
+            .expect("stale question resolves through the storage path");
+        let ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } = outcome else {
+            panic!("expected the OOB fallback path");
+        };
+        assert!(body.contains("**Approved in this session after you asked:**"));
+        assert!(body.contains("git push origin staging"));
+        // A REJECTED gate never ran — naming it would invent an event.
+        assert!(!body.contains("git reset --hard"));
+        // And the block must not claim success, only approval: an
+        // approved-but-FAILED command leaves an identical tray row.
+        assert!(body.contains("whether it succeeded is not recorded"));
+    }
+
+    #[tokio::test]
+    async fn oob_replay_omits_the_block_when_nothing_was_approved_after_the_ask() {
+        // Guard against the inverse failure: decorating an ordinary replay with
+        // an overtaking-event warning that has no event behind it.
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s-clean", "title", None).await.unwrap();
+        let opts = vec!["A".to_string(), "B".to_string()];
+
+        // Gate approved BEFORE the question was parked — it cannot have
+        // overtaken a question that did not exist yet.
+        storage
+            .insert_tray_entry(
+                "s-clean",
+                "cid-gate-early",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Run gated command?",
+                Some(&opts),
+                None,
+                Some("git push origin main"),
+            )
+            .await
+            .unwrap();
+        storage
+            .answer_tray_entry("cid-gate-early", "Approve")
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        storage
+            .insert_tray_entry(
+                "s-clean",
+                "cid-q",
+                "brian",
+                crate::storage::QuestionKind::Choice,
+                "Pick something?",
+                Some(&opts),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let outcome = bridge.resolve_choice("cid-q", "A".into()).await.unwrap();
+        let ResolveOutcome::AgentReceiverDroppedFellBack { body, .. } = outcome else {
+            panic!("expected the OOB fallback path");
+        };
+        assert!(!body.contains("Approved in this session after you asked"));
+        assert!(!body.contains("git push origin main"));
+        assert!(body.contains("**User picked:** A"));
     }
 
     #[tokio::test]

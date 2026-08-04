@@ -9,6 +9,34 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — name the gates that overtook a question in its replay (#18)
+
+Second half of issues.md #18. `40e876e` age-stamped out-of-band replays; this
+makes the warning specific — the replay now names the gated commands the user
+approved *after* the question was parked, which is the event that actually
+mooted the premise in the 2026-06-23 incident (a staging-push choice sat
+through the push it asked about, then replayed as live state).
+
+Deliberately NOT auto-withdraw, which is what the issue originally asked for.
+Two facts from the code closed that door: `action_gate` already dedupes
+identical pending gates at park time (`pending_gate_for_command`), so
+"withdraw the gate whose command later ran" is unreachable; and the row that
+was actually mooted in the incident was a plain `choice` with no
+`command_text`, so linking it to the command needs question-text matching —
+a heuristic whose failure mode is silently binning a live question. Evidence
+on the replay kills the same failure with no guessing.
+
+The wording is load-bearing: a tray row proves the user APPROVED a command,
+not that it SUCCEEDED (`maybe_run_gated` writes failures into the message
+body, not back onto the row), so the block says approved and tells the agent
+to check the outcome rather than asserting either way.
+
+`Storage::answered_gates_for_session` + `SignalingBridge::gates_approved_since`
+(fail-open everywhere — this decorates a delivery that must never fail) +
+a `mooting` param on `oob_resolution_body`. Session-scoped: a push from
+another session can moot a question here too, but nothing in `session_tray`
+observes that. 6 new tests.
+
 ## 2026-08-04 — correct the dev data-dir guidance in the shipped docs
 
 Surfaced during a Context Library audit: four committed docs still told a

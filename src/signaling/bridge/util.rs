@@ -273,10 +273,10 @@ pub(super) fn outcome_from_picked(picked: &str) -> ViolationOutcome {
 /// (2026-06-23, s-bb938f62 — issues.md #18).
 const STALE_ANSWER_WARN_MINS: i64 = 10;
 
-/// Parse a tray `asked_at` timestamp: RFC3339 (app-written rows) or sqlite's
-/// `datetime('now')` format (schema default). Returns None on anything else —
-/// the OOB body then simply omits the age line.
-fn parse_asked_at(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+/// Parse a tray timestamp (`asked_at` / `answered_at`): RFC3339 (app-written
+/// rows) or sqlite's `datetime('now')` format (schema default). Returns None on
+/// anything else — the OOB body then simply omits the line that needed it.
+pub(super) fn parse_tray_ts(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Some(dt.with_timezone(&chrono::Utc));
     }
@@ -294,12 +294,57 @@ fn render_age(mins: i64) -> String {
     }
 }
 
+/// At most this many overtaking commands are listed in the OOB body — enough to
+/// show the premise moved without burying the answer itself.
+const MAX_MOOTING_LISTED: usize = 5;
+
+/// Render the "approved since you asked" block (issues.md #18). `mooting` is
+/// `(command, answered_at)` for gated commands APPROVED after this question was
+/// parked, oldest-first; `asked` anchors the "N later" deltas.
+///
+/// Wording is load-bearing. A tray row proves the user APPROVED the command —
+/// it does not prove the command SUCCEEDED: `maybe_run_gated` writes the
+/// failure into the out-of-band message body, not back onto the row, so an
+/// approved-but-failed gate is indistinguishable here from an approved-and-run
+/// one. Claiming "ran" would assert an outcome this data cannot support, which
+/// is the same class of error the block exists to prevent.
+fn mooting_block(mooting: &[(String, String)], asked: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    if mooting.is_empty() {
+        return String::new();
+    }
+    let lines = mooting
+        .iter()
+        .take(MAX_MOOTING_LISTED)
+        .map(|(command, answered_at)| {
+            let delta = asked
+                .zip(parse_tray_ts(answered_at))
+                .map(|(a, b)| format!(" ({} later)", render_age((b - a).num_minutes().max(0))))
+                .unwrap_or_default();
+            format!("- `{command}`{delta}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let more = mooting
+        .len()
+        .checked_sub(MAX_MOOTING_LISTED)
+        .filter(|n| *n > 0)
+        .map(|n| format!("\n- …and {n} more"))
+        .unwrap_or_default();
+    format!(
+        "**Approved in this session after you asked:**\n{lines}{more}\n\
+         bot-hq ran each at approval time; whether it succeeded is not recorded \
+         on the tray row, so check the outcome rather than assuming either way. \
+         This question's premise may already be settled.\n"
+    )
+}
+
 pub(super) fn oob_resolution_body(
     agent_label: &str,
     question: &str,
     options: &[String],
     picked: &str,
     asked_at: Option<&str>,
+    mooting: &[(String, String)],
 ) -> String {
     // Restate the full option list: every observed resolution arrives this way
     // (47/47 in the 2026-07-27 archive study), and without the menu the agent
@@ -321,7 +366,8 @@ pub(super) fn oob_resolution_body(
     // adopted a 2.5h-dead premise and asserted un-pushed work three times
     // without a single verification command. Old answers carry an explicit
     // re-verify instruction.
-    let asked_block = match asked_at.and_then(parse_asked_at) {
+    let asked_ts = asked_at.and_then(parse_tray_ts);
+    let asked_block = match asked_ts {
         Some(ts) => {
             let mins = (chrono::Utc::now() - ts).num_minutes().max(0);
             let age = render_age(mins);
@@ -343,10 +389,12 @@ pub(super) fn oob_resolution_body(
          **Question:** {question}\n\
          {options_block}\
          **User picked:** {picked}\n\
-         {asked_block}\n\
+         {asked_block}\
+         {mooting_block}\n\
          Treat this as the user's reply (a pick outside the listed options is the \
          user answering in their own words — honor the words, not the menu). \
-         Continue from here."
+         Continue from here.",
+        mooting_block = mooting_block(mooting, asked_ts)
     )
 }
 
@@ -493,6 +541,7 @@ mod tests {
             &["Push 9a07930".to_string(), "Hold for review".to_string()],
             "Hold for review",
             None,
+            &[],
         );
         assert!(body.contains("**Options were:**"));
         assert!(body.contains("1. Push 9a07930"));
@@ -502,7 +551,7 @@ mod tests {
         assert!(!body.contains("**Asked:**"));
 
         // No options (free-text/halt shapes): no empty menu block.
-        let bare = super::oob_resolution_body("brian", "Anything else?", &[], "done", None);
+        let bare = super::oob_resolution_body("brian", "Anything else?", &[], "done", None, &[]);
         assert!(!bare.contains("Options were"));
     }
 
@@ -510,14 +559,20 @@ mod tests {
     fn oob_resolution_body_age_stamps_late_answers_with_reverify_warning() {
         // 2.5h-old ask (the s-bb938f62 shape): age line + re-verify warning.
         let old = (chrono::Utc::now() - chrono::Duration::minutes(150)).to_rfc3339();
-        let body =
-            super::oob_resolution_body("brian", "Re-push to staging?", &[], "discard", Some(&old));
+        let body = super::oob_resolution_body(
+            "brian",
+            "Re-push to staging?",
+            &[],
+            "discard",
+            Some(&old),
+            &[],
+        );
         assert!(body.contains("**Asked:** 2h 30m ago"));
         assert!(body.contains("re-verify"));
 
         // Fresh ask: age line, no warning.
         let fresh = chrono::Utc::now().to_rfc3339();
-        let quick = super::oob_resolution_body("brian", "Close?", &[], "yes", Some(&fresh));
+        let quick = super::oob_resolution_body("brian", "Close?", &[], "yes", Some(&fresh), &[]);
         assert!(quick.contains("**Asked:** 0m ago"));
         assert!(!quick.contains("re-verify"));
 
@@ -525,12 +580,87 @@ mod tests {
         let sqlite_ts = (chrono::Utc::now() - chrono::Duration::minutes(75))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
-        let s = super::oob_resolution_body("rain", "Q?", &[], "ok", Some(&sqlite_ts));
+        let s = super::oob_resolution_body("rain", "Q?", &[], "ok", Some(&sqlite_ts), &[]);
         assert!(s.contains("**Asked:** 1h 15m ago"));
 
         // Garbage timestamp: line omitted, body still well-formed.
-        let g = super::oob_resolution_body("brian", "Q?", &[], "ok", Some("not-a-time"));
+        let g = super::oob_resolution_body("brian", "Q?", &[], "ok", Some("not-a-time"), &[]);
         assert!(!g.contains("**Asked:**"));
         assert!(g.contains("**User picked:** ok"));
+    }
+
+    #[test]
+    fn oob_resolution_body_lists_commands_approved_after_the_ask() {
+        // The s-bb938f62 shape: question parked 2h30m ago, the command it was
+        // about approved 2h1m later, answer arrives now.
+        let asked = chrono::Utc::now() - chrono::Duration::minutes(150);
+        let approved = asked + chrono::Duration::minutes(121);
+        let body = super::oob_resolution_body(
+            "brian",
+            "Re-push to staging?",
+            &[],
+            "discard",
+            Some(&asked.to_rfc3339()),
+            &[(
+                "git push origin staging".to_string(),
+                approved.to_rfc3339(),
+            )],
+        );
+        assert!(body.contains("**Approved in this session after you asked:**"));
+        assert!(body.contains("`git push origin staging` (2h 1m later)"));
+        // Must NOT claim the command succeeded — the tray row only proves the
+        // user approved it (an approved-but-failed gate looks identical here).
+        assert!(body.contains("whether it succeeded is not recorded"));
+        assert!(!body.contains("Ran in this session"));
+        // The age-stamp block still renders alongside it.
+        assert!(body.contains("**Asked:** 2h 30m ago"));
+
+        // No overtaking commands → no block at all.
+        let clean = super::oob_resolution_body(
+            "brian",
+            "Re-push?",
+            &[],
+            "discard",
+            Some(&asked.to_rfc3339()),
+            &[],
+        );
+        assert!(!clean.contains("**Approved in this session"));
+    }
+
+    #[test]
+    fn mooting_block_caps_the_list_and_survives_bad_timestamps() {
+        let asked = chrono::Utc::now() - chrono::Duration::minutes(60);
+        let many: Vec<(String, String)> = (0..7)
+            .map(|i| {
+                (
+                    format!("cmd-{i}"),
+                    (asked + chrono::Duration::minutes(i + 1)).to_rfc3339(),
+                )
+            })
+            .collect();
+        let body = super::oob_resolution_body(
+            "brian",
+            "Q?",
+            &[],
+            "ok",
+            Some(&asked.to_rfc3339()),
+            &many,
+        );
+        assert!(body.contains("`cmd-4` (5m later)"));
+        assert!(!body.contains("`cmd-5`"));
+        assert!(body.contains("…and 2 more"));
+
+        // Unparseable answered_at: the command is still named, the delta is
+        // simply omitted — never a wrong "(0m later)".
+        let junk = super::oob_resolution_body(
+            "brian",
+            "Q?",
+            &[],
+            "ok",
+            Some(&asked.to_rfc3339()),
+            &[("git push".to_string(), "not-a-time".to_string())],
+        );
+        assert!(junk.contains("- `git push`\n"));
+        assert!(!junk.contains("later)"));
     }
 }
