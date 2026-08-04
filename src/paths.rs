@@ -115,6 +115,14 @@ pub struct Paths {
     pub policy_hashes_path: PathBuf,
     /// Webview screenshot output dir: `<data_dir>/.local/screenshots/`.
     pub screenshots_dir: PathBuf,
+    /// Rolling `tracing` output: `<data_dir>/.local/logs/`.
+    ///
+    /// Until this existed there was no log sink at all — `tracing_subscriber::fmt()`
+    /// wrote to a stdout nobody captured when the app launches from Finder. Two
+    /// migrations (`0040_cancel_events`, `0041_forward_events`) exist *because* of
+    /// that: each records to sqlite what a `warn!` already said, only to have it
+    /// survive. See `init_logging`.
+    pub logs_dir: PathBuf,
     /// The internal signaling server's bound address (e.g. `127.0.0.1:54321`),
     /// written at startup so the git pre-push hook — a separate subprocess that
     /// can't reach the running app's bridge directly — can POST `/hooks/pre-push`
@@ -146,6 +154,7 @@ impl Paths {
         let violations_path = local_dir.join("violations.jsonl");
         let policy_hashes_path = local_dir.join(".policy-hashes.json");
         let screenshots_dir = local_dir.join("screenshots");
+        let logs_dir = local_dir.join("logs");
         let signaling_addr_path = local_dir.join("signaling-addr");
         Self {
             data_dir,
@@ -160,6 +169,7 @@ impl Paths {
             violations_path,
             policy_hashes_path,
             screenshots_dir,
+            logs_dir,
             signaling_addr_path,
         }
     }
@@ -251,6 +261,10 @@ impl Paths {
             .with_context(|| format!("creating plugins dir at {}", self.plugins_dir.display()))?;
         fs::create_dir_all(&self.local_dir)
             .with_context(|| format!("creating local dir at {}", self.local_dir.display()))?;
+        // Created eagerly (unlike screenshots/, which is lazy) because the
+        // tracing file appender is built immediately after `init` returns.
+        fs::create_dir_all(&self.logs_dir)
+            .with_context(|| format!("creating logs dir at {}", self.logs_dir.display()))?;
 
         let mut repaired_slots = Vec::new();
 
@@ -754,6 +768,13 @@ mod tests {
         assert!(paths.cl_dir.exists());
         assert!(paths.plugins_dir.exists());
         assert!(paths.local_dir.exists());
+        // The tracing file appender is built right after `init` returns and
+        // panics on a missing directory, so this is a boot precondition, not a
+        // nicety. Before the sink existed there was nowhere for a `warn!` to go.
+        assert!(
+            paths.logs_dir.exists(),
+            "init must create the logs dir — the log appender is built immediately after"
+        );
         assert!(
             paths.cl_dir.join("custom-general-rules.md").exists(),
             "first run should seed custom-general-rules.md stub under library/"

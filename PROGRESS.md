@@ -9,6 +9,37 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — give tracing somewhere to go
+
+bot-hq had no log sink. `init_logging` was `tracing_subscriber::fmt()`, which
+writes to stdout — and a `.app` launched from Finder has no terminal attached,
+so every `warn!` the host emitted was discarded.
+
+That is not a small gap, and the repo already documents the cost twice in its own
+migrations. `0040_cancel_events`: *"there is no log sink configured, so they went
+to a stdout nobody captured. 21 Stops across 13 sessions left zero forensic
+trace."* `0041_forward_events`: dropped peer-forwards were *"a bare `debug!`"*.
+Both tables exist to persist what a log line already said. Two of today's own
+fixes were also invisible for the same reason — `"router FlushHeld not sent"` and
+`"peer-forward DROPPED"` have been firing into nothing since they were written.
+
+Now: a rolling daily file under `<data_dir>/.local/logs/`, 14 files kept, ANSI
+off, alongside the unchanged stdout layer.
+
+The reason it never existed is an ordering problem rather than an oversight —
+`init_logging()` ran at `main.rs:63`, before `.env` loaded and before
+`Paths::from_env()`, so the data dir wasn't known yet. Logging now comes up right
+after `paths.init()`; everything before that propagates through `?` and is printed
+by main, so no diagnostic is lost by the wait. Side effect: a `RUST_LOG` set in
+`.env` now actually applies, where before the filter was built first.
+
+Two failure modes are pinned by tests: `Paths::init` must create `logs_dir` (the
+appender panics without it), and the appender config must really produce a
+written file — no other test could catch a bad prefix or a builder error, because
+every CLI subcommand returns before `init_logging` and a full launch needs the
+single-instance lock. `main` holds the non-blocking `WorkerGuard` for the
+process's lifetime; dropping it silently discards buffered lines.
+
 ## 2026-08-04 — two self-audit fixes found by running the system
 
 Both surfaced during an ordinary session, not by code reading.

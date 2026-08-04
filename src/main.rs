@@ -60,16 +60,20 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    init_logging();
-    tracing::info!("bot-hq starting");
-
-    // Load .env if present (best-effort; ignored if missing).
+    // Load .env if present (best-effort; ignored if missing). Runs BEFORE
+    // logging is initialised so a `RUST_LOG` set there reaches `EnvFilter`.
     if let Ok(env_path) = std::env::current_dir().map(|p| p.join(".env")) {
         let _ = load_env_file(&env_path);
     }
 
     let paths = Paths::from_env()?;
     let init_outcome = paths.init()?;
+    // Logging comes up only now: the file sink needs `<data_dir>/.local/logs/`
+    // to exist. Anything that fails above propagates via `?` and is printed by
+    // main, so nothing diagnostic is lost by the wait. `_log_guard` must live
+    // until the process exits — see `init_logging`.
+    let _log_guard = init_logging(&paths);
+    tracing::info!("bot-hq starting");
     tracing::info!(data_dir = %paths.data_dir.display(), outcome = ?init_outcome, "data dir ready");
 
     let _lock = LockGuard::acquire(&paths.lock_path)?;
@@ -572,10 +576,56 @@ fn plugin_asset_error(status: u16) -> tauri::http::Response<Vec<u8>> {
         .expect("static status-only response")
 }
 
-fn init_logging() {
+/// How many daily log files to keep. Bounded from the start: this data home
+/// already carries one append-only, unrotated sink (`native-accounting.jsonl`)
+/// and a second unbounded one is not worth the diagnostics.
+const LOG_FILES_KEPT: usize = 14;
+
+/// Install the tracing subscriber: stdout (unchanged) PLUS a rolling daily file
+/// under `<data_dir>/.local/logs/`.
+///
+/// There was no file sink at all before this. `tracing_subscriber::fmt()` writes
+/// to stdout, and a `.app` launched from Finder has no terminal attached — so
+/// every `warn!` the host emitted was discarded. That is not a small gap: two
+/// migrations exist purely to work around it. `0040_cancel_events` records what
+/// three `info!`/`warn!` lines already said, because "21 Stops across 13 sessions
+/// left zero forensic trace"; `0041_forward_events` does the same for dropped
+/// peer-forwards, whose early-returns were "a bare `debug!`".
+///
+/// **Returns a guard that must stay alive for the process's lifetime.** The
+/// non-blocking writer flushes on a worker thread; dropping the guard stops it,
+/// which silently discards buffered lines — the standard way this gets shipped
+/// looking fine and logging nothing.
+///
+/// Called AFTER `Paths::init` (the directory has to exist), which also means a
+/// `RUST_LOG` set in `.env` now takes effect — the `.env` load used to happen
+/// after the filter was already built.
+fn init_logging(paths: &Paths) -> tracing_appender::non_blocking::WorkerGuard {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,bot_hq=debug"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("bot-hq")
+        .filename_suffix("log")
+        .max_log_files(LOG_FILES_KEPT)
+        .build(&paths.logs_dir)
+        .expect("building the rolling log appender");
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                // No colour codes in a file, and absolute timestamps so a line
+                // can be lined up against a message row or a git commit.
+                .with_ansi(false)
+                .with_writer(file_writer),
+        )
+        .init();
+    guard
 }
 
 /// `bot-hq policy-check <subcommand>` — used by git hooks installed in
@@ -691,4 +741,49 @@ fn load_env_file(path: &std::path::Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LOG_FILES_KEPT;
+
+    /// The rolling-appender CONFIG is ours even though the machinery isn't: a
+    /// wrong prefix/suffix or a builder error would leave the app logging to
+    /// nowhere exactly as it did before the sink existed, and no other test
+    /// would notice — every CLI subcommand returns before `init_logging`, and a
+    /// full launch needs the single-instance lock.
+    #[test]
+    fn the_rolling_appender_actually_writes_a_file() {
+        use std::io::Write;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let appender = tracing_appender::rolling::Builder::new()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("bot-hq")
+            .filename_suffix("log")
+            .max_log_files(LOG_FILES_KEPT)
+            .build(tmp.path())
+            .expect("appender builds");
+        let (writer, guard) = tracing_appender::non_blocking(appender);
+        {
+            let mut w = writer;
+            writeln!(w, "hello from the sink").unwrap();
+        }
+        // Dropping the guard flushes the worker thread — the same reason main
+        // must hold it for the process's lifetime.
+        drop(guard);
+
+        let written: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(written.len(), 1, "expected one log file, got {written:?}");
+        assert!(
+            written[0].starts_with("bot-hq") && written[0].ends_with("log"),
+            "unexpected log filename: {}",
+            written[0]
+        );
+        let body = std::fs::read_to_string(tmp.path().join(&written[0])).unwrap();
+        assert!(body.contains("hello from the sink"), "log file was empty");
+    }
 }
