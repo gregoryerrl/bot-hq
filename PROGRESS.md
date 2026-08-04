@@ -9,6 +9,36 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-04 — close the two loose ends the same day's work opened
+
+Both items are debt created earlier today, cleared before closing the session.
+
+**A held forward that never flushes is no longer invisible.** `forward_events`
+is drops-only by design — and a HOLD is not a drop, so the forward fixed in
+`b87f97a` (held while a question was parked, never flushed because
+`resolve_choice` / `advance_phase` didn't send `FlushHeld`) left no trace
+anywhere. Fixing the bug did not close the blind spot that hid it.
+
+Held entries now carry the instant they were held. Two rows can result, and both
+mean what the table says it means — a message was lost:
+
+- `held_late` — released, but after ≥15 minutes. A hold ends at the user's next
+  action, so an old one means some path cleared `awaiting` without flushing and
+  the peer sat half-deaf until an unrelated message shook it loose. That is bug
+  B's exact signature.
+- `held_stranded` — still held when the router's command channel closed. The
+  session went away; it was never delivered at all. Previously these vanished
+  with the router's local queue.
+
+A prompt hold→flush records nothing, so every row keeps meaning a loss — pinned
+by a test in both directions.
+
+**`activity_events` gets a retention sweep.** `purge_activity_events(90)` runs
+from the same boot sweep as `purge_resolved_tray(90)`. Volume is small by
+construction, but "small per session, forever" is unbounded, and this data home
+already carries one unrotated append-only sink — a second would have been a
+choice rather than an oversight.
+
 ## 2026-08-04 — record the activity timeline so the input-lock question is answerable
 
 Second half of the observability work. The file sink (below) rescues what the

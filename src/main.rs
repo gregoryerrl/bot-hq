@@ -110,6 +110,15 @@ fn main() -> Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(?e, "startup tray GC failed"),
             }
+            // Same GC posture for the activity timeline: small per session, but
+            // unbounded over time without this.
+            match storage.purge_activity_events(90).await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(purged = n, "purged old activity events at startup")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(?e, "startup activity-event GC failed"),
+            }
             let violations = ViolationsLog::new(&paths.data_dir);
             // Wipe any stale per-session policy snapshots — a leftover file would
             // leak a prior session's resolved policy into a fresh session that

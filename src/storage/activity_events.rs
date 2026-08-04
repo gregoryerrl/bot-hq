@@ -65,6 +65,25 @@ impl Storage {
         .context("listing activity events")?;
         Ok(rows)
     }
+
+    /// Drop transitions older than `retention_days`. Mirrors
+    /// `purge_resolved_tray(90)` and runs from the same boot sweep.
+    ///
+    /// Volume here is small by construction — the tracker emits only on an
+    /// actual change — but "small per session, forever" is still unbounded, and
+    /// this data home already carries one append-only unrotated sink
+    /// (`native-accounting.jsonl`). A second one would be a choice, not an
+    /// oversight.
+    pub async fn purge_activity_events(&self, retention_days: i64) -> Result<u64> {
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(retention_days))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let res = sqlx::query("DELETE FROM activity_events WHERE recorded_at < ?")
+            .bind(cutoff)
+            .execute(&self.pool)
+            .await
+            .context("purging old activity events")?;
+        Ok(res.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +126,31 @@ mod tests {
 
         let all = s.list_activity_events(None).await.unwrap();
         assert_eq!(all.len(), 4, "None must span every session");
+    }
+
+    #[tokio::test]
+    async fn purge_drops_old_rows_and_keeps_recent_ones() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "One", None).await.unwrap();
+        s.insert_activity_event("s1", "busy", true, false)
+            .await
+            .unwrap();
+        // Backdate one row past the retention window. Written directly because
+        // `recorded_at` is stamped by the insert — the point is the cutoff, not
+        // the stamping.
+        sqlx::query(
+            "INSERT INTO activity_events (session_id, recorded_at, state, brian_busy, rain_busy) \
+             VALUES ('s1', '2026-01-01T00:00:00.000Z', 'idle', 0, 0)",
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(s.list_activity_events(Some("s1")).await.unwrap().len(), 2);
+
+        let purged = s.purge_activity_events(90).await.unwrap();
+        assert_eq!(purged, 1, "only the backdated row should go");
+        let left = s.list_activity_events(Some("s1")).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].state, "busy", "the recent row must survive");
     }
 }

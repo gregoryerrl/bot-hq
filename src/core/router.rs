@@ -215,7 +215,10 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
     // and the resume notice precedes both on each agent's stdin.
     // (from, body, peer_ack, peer_ack_final) — the ack flags ride along so a
     // held forward replays through the SAME ladder it would have taken live.
-    let mut held: Vec<(Author, String, bool, bool)> = Vec::new();
+    // The `Instant` is when it was held. `forward_events` records losses, and a
+    // hold is only supposed to be brief — so an old one IS a loss, just a
+    // recoverable-looking kind. See HELD_LATE.
+    let mut held: Vec<(Author, String, bool, bool, std::time::Instant)> = Vec::new();
     while let Some(cmd) = rx.recv().await {
         match cmd {
             RouterCommand::Forward {
@@ -251,7 +254,7 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                         "router: session cancelling/paused; holding forward"
                     );
                     deps.set_idle(from);
-                    held.push((from, body, peer_ack, peer_ack_final));
+                    held.push((from, body, peer_ack, peer_ack_final, std::time::Instant::now()));
                     continue;
                 }
                 route_forward(
@@ -274,7 +277,23 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
                     continue;
                 }
                 debug!(count = held.len(), "router: flushing held forwards");
-                for (from, body, peer_ack, peer_ack_final) in held.drain(..) {
+                for (from, body, peer_ack, peer_ack_final, held_at) in held.drain(..) {
+                    // A hold ends at the next user action, so minutes-old holds
+                    // mean a wake path cleared `awaiting` WITHOUT sending
+                    // FlushHeld and nobody noticed until the next typed message.
+                    // That is exactly the bug fixed in `b87f97a` — and it left
+                    // no trace, because `forward_events` only ever recorded
+                    // drops and a late hold is not a drop. Now it is queryable.
+                    let waited = held_at.elapsed();
+                    if waited >= HELD_LATE {
+                        warn!(
+                            agent = ?from,
+                            waited_secs = waited.as_secs(),
+                            "router: held forward released far later than a hold should last — \
+                             a wake path likely cleared `awaiting` without flushing"
+                        );
+                        record_drop(&deps, from, "held_late", &body).await;
+                    }
                     route_forward(
                         &deps,
                         &mut last_forward,
@@ -289,7 +308,27 @@ pub async fn run_router(deps: RouterDeps, mut rx: mpsc::Receiver<RouterCommand>)
             }
         }
     }
+    // The command channel closed — the session is going away and nothing will
+    // ever flush what is still held. Those forwards are lost outright, which is
+    // precisely what `forward_events` is for; without this they were dropped on
+    // the floor with the local `held` vec and left no trace at all.
+    for (from, body, _, _, held_at) in held.drain(..) {
+        warn!(
+            agent = ?from,
+            waited_secs = held_at.elapsed().as_secs(),
+            "router: session ended with a forward still held — it never reached the peer"
+        );
+        record_drop(&deps, from, "held_stranded", &body).await;
+    }
 }
+
+/// A hold is meant to last until the user's next action. Past this, the hold
+/// itself is the failure — some path cleared `awaiting` without sending
+/// `FlushHeld`, and the peer sat half-deaf until an unrelated message shook it
+/// loose. Sized like `STALE_GATE_MAX_AGE_SECS`: comfortably longer than a human
+/// answering a question, far shorter than "the user went to lunch and came back
+/// to a duo that had silently stopped talking to itself".
+const HELD_LATE: std::time::Duration = std::time::Duration::from_secs(900);
 
 /// The forward ladder — same order/semantics as the pre-router `flush_buffer`,
 /// now in ONE place. Each suppression path still clears the sender's `busy` (the
@@ -1027,6 +1066,81 @@ mod tests {
         route_forward(&d, &mut last, &mut streak, Author::Brian, "ok".into(), true, false).await;
         assert_eq!(b2r.load(Ordering::Acquire), 2, "two delivered Brian→Rain forwards");
         assert_eq!(r2b.load(Ordering::Acquire), 1, "one delivered Rain→Brian forward");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_forward_still_held_when_the_session_ends_is_recorded_as_lost() {
+        // The blind spot behind bug B (`b87f97a`). `forward_events` was
+        // drops-only, and a HOLD is not a drop — so a forward that was held and
+        // then never flushed vanished with the router's local queue, leaving no
+        // trace anywhere. Anything still held when the command channel closes
+        // was definitively never delivered, which is exactly what this table
+        // means.
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "One", None).await.unwrap();
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, _rrx) = mpsc::channel(64);
+        let awaiting = Arc::new(AtomicBool::new(true)); // parked question → hold
+        let mut d = deps(btx, Some(rtx), awaiting, Arc::new(AtomicU32::new(0)));
+        d.storage = Some(storage.clone());
+        let (tx, rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_router(d, rx));
+
+        tx.send(fwd(Author::Brian, "a summary the peer never received"))
+            .await
+            .unwrap();
+        // Session goes away with the forward still held.
+        drop(tx);
+        task.await.unwrap();
+
+        let drops = storage.list_forward_drops(Some("s1")).await.unwrap();
+        assert_eq!(drops.len(), 1, "the stranded forward must be recorded");
+        assert_eq!(drops[0].reason, "held_stranded");
+        assert_eq!(drops[0].from_agent, "brian");
+        assert!(
+            drops[0].body_preview.contains("never received"),
+            "the row must identify WHICH message was lost"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_promptly_flushed_hold_is_not_recorded_as_a_loss() {
+        // The inverse guard: a normal hold→flush cycle is not a loss, and
+        // logging it as one would drown the table in noise and make every row
+        // stop meaning "a message was lost".
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "One", None).await.unwrap();
+        let (btx, _brx) = mpsc::channel(64);
+        let (rtx, mut rrx) = mpsc::channel(64);
+        let awaiting = Arc::new(AtomicBool::new(true));
+        let mut d = deps(
+            btx,
+            Some(rtx),
+            Arc::clone(&awaiting),
+            Arc::new(AtomicU32::new(0)),
+        );
+        d.storage = Some(storage.clone());
+        let (tx, rx) = mpsc::channel(64);
+        let task = tokio::spawn(run_router(d, rx));
+
+        tx.send(fwd(Author::Brian, "held briefly")).await.unwrap();
+        awaiting.store(false, Ordering::Release); // user answered
+        tx.send(RouterCommand::FlushHeld).await.unwrap();
+        drop(tx);
+        task.await.unwrap();
+
+        assert!(
+            rrx.try_recv().is_ok(),
+            "the held forward should have been delivered on flush"
+        );
+        assert!(
+            storage
+                .list_forward_drops(Some("s1"))
+                .await
+                .unwrap()
+                .is_empty(),
+            "a prompt hold→flush is not a loss and must not be recorded"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
