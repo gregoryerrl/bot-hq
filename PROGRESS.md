@@ -27,6 +27,17 @@ app gaps enable it (never primary). Shipped the prompt-rule halves into
 
 R1–R6 recommendations filed in CL issues.md (#18–#23).
 
+Second slice (same session): three mechanical halves shipped —
+- **#18** OOB question replays carry "**Asked:** Xh Ym ago" + a re-verify
+  warning when ≥10 min old (a mooted 2.5h-old premise was once adopted
+  as current repo state).
+- **#23** repo-less projects (incl. `_globals`) get an age-based
+  `⚠ possibly stale` fallback (≥30 d), worded as age, not code drift.
+- **#19** `cl_write_file` advisory status-lint: a pending→resolved flip
+  with no evidence marker (sha/URL/date) beside it warns in the result;
+  the write still lands. Auto-withdraw (#18) and a blocking lint (#19)
+  remain open as design work.
+
 ## 2026-07-28 — archive-study remediation batch (s-92f76f02)
 
 Studied 9 archived duo sessions (Jul 23–27, both build eras) with 7

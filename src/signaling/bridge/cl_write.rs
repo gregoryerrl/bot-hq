@@ -55,7 +55,7 @@ impl SignalingBridge {
         let fp = file_path.clone();
         let proj = project.clone();
         let commit_summary = format!("cl: {project}/{file_path} ({agent})");
-        let replaced = tokio::task::spawn_blocking(move || -> Result<bool> {
+        let replaced = tokio::task::spawn_blocking(move || -> Result<(bool, Option<String>)> {
             let root_real = project_root.canonicalize().with_context(|| {
                 format!("canonicalizing CL project root {}", project_root.display())
             })?;
@@ -87,14 +87,24 @@ impl SignalingBridge {
                 }
                 content
             };
+            // Advisory status-flip lint (issues.md #19) — computed against the
+            // pre-write body, never blocks the write. Fail-open on read errors.
+            let lint = if replaced {
+                std::fs::read_to_string(&target)
+                    .ok()
+                    .and_then(|old| status_flip_warning(&old, &final_content))
+            } else {
+                None
+            };
             atomic_write(&target, &final_content)?;
             if let Some(lib) = library_root {
                 git_version_library(&lib, &commit_summary);
             }
-            Ok(replaced)
+            Ok((replaced, lint))
         })
         .await
         .context("cl_write_file task panicked")??;
+        let (replaced, lint) = replaced;
         if let Err(err) = self.cl_rescan(&project).await {
             tracing::warn!(
                 %err,
@@ -105,15 +115,129 @@ impl SignalingBridge {
         }
         // Writing a CL delta lifts the close-out nudge, same as cl_rescan.
         self.mark_cl_rescan(&session_id).await;
-        Ok(format!(
+        let mut msg = format!(
             "{} '{file_path}' in project '{project}'",
             if replaced {
                 if append { "appended to" } else { "replaced" }
             } else {
                 "created"
             }
-        ))
+        );
+        if let Some(lint) = lint {
+            msg.push_str(&lint);
+        }
+        Ok(msg)
     }
+}
+
+/// Uppercase status vocabulary for the flip lint (issues.md #19). Uppercase
+/// only: that is how tracked statuses are written in practice, and lowercase
+/// prose ("pending review", "work is done") would drown the lint in noise.
+const PENDING_WORDS: [&str; 7] =
+    ["PENDING", "STILL OWED", "OWED", "BLOCKED", "WAITING", "UNCONFIRMED", "IN PROGRESS"];
+const RESOLVED_WORDS: [&str; 8] =
+    ["RESOLVED", "DONE", "SHIPPED", "MERGED", "CLOSED", "FIXED", "COMPLETED", "COMPLETE"];
+
+/// Advisory status-flip lint (issues.md #19, warn-not-block): a CL rewrite once
+/// upgraded a PENDING-stakeholder question to "RESOLVED (keep both)" by
+/// inference — the OPPOSITE of the stakeholder's actual decision (2026-07-24).
+/// Detects lines whose pending-family status word disappeared while a matching
+/// line gained a resolved-family word, and warns when no evidence marker (commit
+/// sha, URL, or date) sits beside the upgrade. Returns None when clean.
+fn status_flip_warning(old_body: &str, new_body: &str) -> Option<String> {
+    // A line's identity anchor: its first `#123` issue-ref when present, else
+    // its normalized leading text (markdown decoration stripped, lowercased).
+    fn anchor(line: &str) -> Option<String> {
+        if let Some(pos) = line.find('#') {
+            let digits: String =
+                line[pos + 1..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !digits.is_empty() {
+                return Some(format!("#{digits}"));
+            }
+        }
+        let norm: String = line
+            .trim_start_matches(['-', '*', '>', ' ', '\t', '.', ')'])
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start_matches(['.', ')', ' '])
+            .trim()
+            .trim_start_matches("**")
+            .to_lowercase();
+        // The anchor is the item's identity, so cut BEFORE the first status
+        // word — otherwise "…refresh: BLOCKED" and "…refresh: DONE" normalize
+        // to different anchors and the flip is never matched.
+        let cut = PENDING_WORDS
+            .iter()
+            .chain(RESOLVED_WORDS.iter())
+            .filter_map(|w| norm.find(&w.to_lowercase()))
+            .min()
+            .unwrap_or(norm.len());
+        let ident = norm[..cut].trim_end();
+        let head: String = if ident.len() >= 8 {
+            ident.chars().take(24).collect()
+        } else {
+            norm.chars().take(24).collect()
+        };
+        (head.len() >= 8).then_some(head)
+    }
+    fn has_evidence(line: &str) -> bool {
+        // Commit sha: 7+ hex chars containing at least one digit (filters
+        // ordinary words like "deadbee"-free prose). URL or ISO date also count.
+        let sha = line.split(|c: char| !c.is_ascii_hexdigit()).any(|tok| {
+            tok.len() >= 7 && tok.chars().any(|c| c.is_ascii_digit())
+        });
+        sha || line.contains("http")
+            || regex_lite_date(line)
+    }
+    // `20YY-MM-DD` without pulling a regex crate.
+    fn regex_lite_date(line: &str) -> bool {
+        line.as_bytes().windows(10).any(|w| {
+            w[0] == b'2'
+                && w[1] == b'0'
+                && w[2].is_ascii_digit()
+                && w[3].is_ascii_digit()
+                && w[4] == b'-'
+                && w[5].is_ascii_digit()
+                && w[6].is_ascii_digit()
+                && w[7] == b'-'
+                && w[8].is_ascii_digit()
+                && w[9].is_ascii_digit()
+        })
+    }
+
+    let new_lines: Vec<&str> = new_body.lines().collect();
+    let mut flags = Vec::new();
+    for old_line in old_body.lines() {
+        if !PENDING_WORDS.iter().any(|w| old_line.contains(w)) {
+            continue;
+        }
+        // Still present verbatim (append path, untouched section): no flip.
+        if new_body.contains(old_line.trim()) {
+            continue;
+        }
+        let Some(key) = anchor(old_line) else { continue };
+        for (i, new_line) in new_lines.iter().enumerate() {
+            let same_item = anchor(new_line).is_some_and(|k| k == key);
+            let resolved = RESOLVED_WORDS.iter().any(|w| new_line.contains(w));
+            if same_item && resolved {
+                let next = new_lines.get(i + 1).copied().unwrap_or("");
+                if !has_evidence(new_line) && !has_evidence(next) {
+                    flags.push(key.clone());
+                }
+                break;
+            }
+        }
+    }
+    if flags.is_empty() {
+        return None;
+    }
+    flags.truncate(3);
+    Some(format!(
+        "\n⚠ status-lint: pending→resolved upgrade on {} with no evidence marker \
+         (commit sha / URL / date) beside it. Status words need same-turn evidence \
+         — cite the merge/message/query output next to the new status, or revert \
+         the flip if it was inferred.",
+        flags.join(", ")
+    ))
 }
 
 /// Refuse a replace that looks like accidental data loss: writing an empty
@@ -572,6 +696,66 @@ mod tests {
             .await
             .unwrap();
         assert!(msg.starts_with("replaced"), "got: {msg}");
+    }
+
+    #[test]
+    fn status_flip_lint_flags_evidence_free_upgrades_only() {
+        use super::status_flip_warning;
+        // The 2026-07-24 shape: #435 flips PENDING→RESOLVED with no evidence.
+        let old = "- **#435 delta loop** — PENDING Tom's reply\n- other note\n";
+        let new = "- **#435 delta loop** — RESOLVED (keep both)\n- other note\n";
+        let warn = status_flip_warning(old, new).expect("evidence-free flip warns");
+        assert!(warn.contains("#435"), "got: {warn}");
+        assert!(warn.contains("status-lint"), "got: {warn}");
+
+        // Same flip WITH a commit sha beside it: clean.
+        let cited = "- **#435 delta loop** — RESOLVED via 43fa153a (register fixed)\n";
+        assert!(status_flip_warning(old, cited).is_none());
+
+        // Evidence on the FOLLOWING line also counts.
+        let next_line = "- **#435 delta loop** — RESOLVED\n  per Tom, 2026-07-23 Discord\n";
+        assert!(status_flip_warning(old, next_line).is_none());
+
+        // Anchor-by-prefix (no issue ref) flips are caught too.
+        let old_p = "- Promote table refresh: BLOCKED on staging audit\n";
+        let new_p = "- Promote table refresh: DONE\n";
+        assert!(status_flip_warning(old_p, new_p).is_some());
+
+        // Pending line untouched (the append shape): clean.
+        let appended = format!("{old}- new unrelated learning\n");
+        assert!(status_flip_warning(old, &appended).is_none());
+
+        // Brand-new resolved line with no pending counterpart: clean (ordinary
+        // note-taking must not trip the lint).
+        assert!(status_flip_warning("- some note\n", "- some note\n- X SHIPPED 2x\n").is_none());
+
+        // Lowercase prose is not status vocabulary.
+        assert!(status_flip_warning("- work is pending review\n", "- work is done now\n").is_none());
+    }
+
+    #[tokio::test]
+    async fn replace_with_status_flip_still_writes_but_warns_in_the_result() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let path = tmp.path().join("library/projects/bot-hq/followups.md");
+        std::fs::write(&path, "## Items\n- **#94 rollout** — STILL OWED to the team\n").unwrap();
+
+        let msg = bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "followups.md".to_string(),
+                "## Items\n- **#94 rollout** — DONE, everything landed\n".to_string(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(msg.starts_with("replaced"), "write is advisory-linted, not blocked: {msg}");
+        assert!(msg.contains("status-lint"), "got: {msg}");
+        assert!(msg.contains("#94"), "got: {msg}");
+        // The write itself landed.
+        assert!(std::fs::read_to_string(&path).unwrap().contains("DONE"));
     }
 
     #[tokio::test]
