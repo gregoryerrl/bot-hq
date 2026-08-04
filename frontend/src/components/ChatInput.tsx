@@ -179,6 +179,8 @@ export function ChatInput({
           )}
         </div>
       )}
+      {/* Unlocked but still working — the locked branch has its own TurnStatus. */}
+      {!locked && <StillWorkingNotice activity={activity} busy={busy} />}
       <form
         onSubmit={handleSubmit}
         className={cn("flex gap-2 p-3", locked ? "items-center" : "items-end")}
@@ -254,10 +256,78 @@ export function ChatInput({
   );
 }
 
+/** Is either agent mid-turn? Separate from the collapsed `activity`, which can
+ *  read `awaiting_user` / `paused` while an agent is still running. */
+function anyBusy(busy?: DuoBusy): boolean {
+  return Boolean(busy?.brian || busy?.rain);
+}
+
+// Which agents are mid-turn, as a labelled list. Brian (HANDS) = orange/primary
+// "working"; Rain (EYES) = purple/secondary "reviewing"; a broadcast can have
+// both busy at once. Shared by the locked turn-status line and the unlocked
+// still-working notice so the two labels can never drift apart.
+function WorkerLine({ busy }: { busy?: DuoBusy }) {
+  const workers: { name: string; verb: string; color: string }[] = [];
+  if (busy?.brian)
+    workers.push({ name: "Brian", verb: "working", color: "text-primary" });
+  if (busy?.rain)
+    workers.push({ name: "Rain", verb: "reviewing", color: "text-secondary" });
+  return (
+    <>
+      {workers.map((w, i) => (
+        <span key={w.name} className="flex items-center gap-1.5">
+          {i > 0 && <span className="text-on-surface-variant/40">·</span>}
+          <span className={cn("font-semibold", w.color)}>{w.name}</span>
+          <span>is {w.verb}</span>
+        </span>
+      ))}
+    </>
+  );
+}
+
+/**
+ * The input is UNLOCKED but an agent is still mid-turn — the state that reads as
+ * "they stopped" and isn't.
+ *
+ * `SessionActivity::derive` (src/core/activity.rs) ranks `awaiting` ABOVE `busy`
+ * on purpose: parking a question must re-open the textarea even though the turn
+ * is still in flight, or the user couldn't answer it. But `TurnStatus` only ever
+ * rendered inside the locked branch, so the per-agent flags — which the backend
+ * emits on EVERY activity event, whatever the derived state — had nowhere to go.
+ * The user saw an open input, assumed the duo was done, and then watched more
+ * output arrive seconds later.
+ *
+ * The textarea stays enabled here. This line only says the work hasn't stopped.
+ */
+function StillWorkingNotice({
+  activity,
+  busy,
+}: {
+  activity?: SessionActivity;
+  busy?: DuoBusy;
+}) {
+  if (!anyBusy(busy)) return null;
+  const paused = activity === "paused";
+  return (
+    <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-1.5 text-xs text-on-surface-variant">
+      <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+        {activity === "awaiting_user" && <span>Waiting on your answer ·</span>}
+        {paused && <span>Stopping ·</span>}
+        <WorkerLine busy={busy} />
+        <span>
+          {paused
+            ? "— finishing the current tool."
+            : "— the turn hasn't ended yet."}
+        </span>
+      </span>
+      <BouncingDots />
+    </div>
+  );
+}
+
 // Shown in place of the textarea while the duo is working: which agent is doing
 // what, with a little animated spice. The user Stops the turn to reclaim the
-// input. Brian (HANDS) = orange/primary "working"; Rain (EYES) = purple/
-// secondary "reviewing"; a broadcast can have both busy at once.
+// input.
 function TurnStatus({
   activity,
   busy,
@@ -273,25 +343,14 @@ function TurnStatus({
       </div>
     );
   }
-  const workers: { name: string; verb: string; color: string }[] = [];
-  if (busy?.brian)
-    workers.push({ name: "Brian", verb: "working", color: "text-primary" });
-  if (busy?.rain)
-    workers.push({ name: "Rain", verb: "reviewing", color: "text-secondary" });
   return (
     <div className="flex flex-1 items-center gap-2 px-1 text-xs text-on-surface-variant">
       <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-        {workers.length === 0 ? (
+        {anyBusy(busy) ? (
+          <WorkerLine busy={busy} />
+        ) : (
           // Locked but no per-agent flag yet (e.g. a stale snapshot): stay generic.
           <span>The duo is working</span>
-        ) : (
-          workers.map((w, i) => (
-            <span key={w.name} className="flex items-center gap-1.5">
-              {i > 0 && <span className="text-on-surface-variant/40">·</span>}
-              <span className={cn("font-semibold", w.color)}>{w.name}</span>
-              <span>is {w.verb}</span>
-            </span>
-          ))
         )}
       </span>
       <BouncingDots />

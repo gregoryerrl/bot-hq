@@ -126,6 +126,60 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
   });
 
+  it("says an agent is still working while awaiting_user leaves the input open", () => {
+    // The reported bug: `awaiting` outranks `busy` in the backend derive, so
+    // parking a question unlocks the textarea while the agent keeps running
+    // tools — and the per-agent status used to render only in the LOCKED
+    // branch, so the user saw an open input and assumed the duo had stopped.
+    render(
+      <ChatInput
+        activity="awaiting_user"
+        busy={{ brian: true, rain: false }}
+        onSend={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    // Input stays usable — answering the parked question is the whole point.
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByText("Waiting on your answer ·")).toBeInTheDocument();
+    expect(screen.getByText("Brian")).toBeInTheDocument();
+    expect(screen.getByText("— the turn hasn't ended yet.")).toBeInTheDocument();
+  });
+
+  it("shows no still-working notice when nobody is busy", () => {
+    const { rerender } = render(
+      <ChatInput
+        activity="awaiting_user"
+        busy={{ brian: false, rain: false }}
+        onSend={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/still|turn hasn't ended/)).toBeNull();
+    expect(screen.queryByText("Brian")).toBeNull();
+
+    // …and none on a plain idle session either.
+    rerender(<ChatInput activity="idle" onSend={() => {}} />);
+    expect(screen.queryByText("Brian")).toBeNull();
+  });
+
+  it("labels a paused session that is still finishing a tool", () => {
+    render(
+      <ChatInput
+        activity="paused"
+        busy={{ brian: true, rain: false }}
+        onSend={() => {}}
+        onResume={() => {}}
+      />,
+    );
+    expect(screen.getByText("Stopping ·")).toBeInTheDocument();
+    expect(
+      screen.getByText("— finishing the current tool."),
+    ).toBeInTheDocument();
+    // Paused keeps its own bar + an open textarea for a steer.
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Resume" })).toBeInTheDocument();
+  });
+
   it("calls onCancel and shows Cancelling… when Stop is pressed", async () => {
     const onCancel = vi.fn().mockResolvedValue(undefined);
     render(
