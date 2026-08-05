@@ -9,6 +9,36 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-05 — _globals always agent-retrievable + per-file user-only toggle
+
+User report: agents repeatedly couldn't find `_globals` CL files (eod.md) and
+invented their own inside repos. Root cause was structural invisibility, not a
+gate: `cl_retrieve` hard-scoped to one project and every prompt trains agents
+to pass their session project. Three commits:
+
+- **`26c1548`** — agent-facing CL surfaces always union `_globals` in:
+  `cl_retrieve(include_globals)` runs ONE query over `project_id IN
+  (?, '_globals')` so BM25 relevance decides across scopes; cross-scope atoms
+  render as `## [_globals] file > heading`; project-scoped
+  `cl_index_search`/`cl_folder_search` concat `_globals` rows; plugins get the
+  same contract. Staleness is now per-atom (a `_globals` row inside a project
+  query takes the age fallback). The Library UI tree stays strictly
+  per-project.
+- **`67a85cc`** — per-file agent visibility: migration 0043 adds
+  `cl_index.agent_visible` (default visible; rescan upserts can't clobber it).
+  Agent/plugin search + retrieval + the spawn primer filter hidden files;
+  agent `cl_write_file` refuses them (no blind diary overwrites); new
+  `cl_set_agent_visibility` command emits `cl:changed` itself (DB-only flip,
+  invisible to the fs watcher); eye/eye-off toggle on the Library tree row.
+  Known limit, stated in the tooltip: raw path reads are NOT blocked — that's
+  the read-scope gate (issues.md #1).
+- **`50e673e`** — bindings regen.
+
+Gates: cargo 1038 tests green; frontend tsc/vitest/build green. Live smoke
+pending an app relaunch (the running app predates the commits).
+
+---
+
 ## 2026-08-05 — vision consolidated in the CL; duo→plugin direction recorded
 
 The project CL's `vision.md` became the single home for vision material:
