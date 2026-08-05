@@ -750,10 +750,22 @@ async fn call_tool(
         "cl_index_search" => {
             let project = args.get("project").and_then(Value::as_str);
             let query = args.get("query").and_then(Value::as_str);
-            let rows = bridge
+            let mut rows = bridge
                 .cl_index_search(project, query)
                 .await
                 .map_err(internal_err_no_prefix)?;
+            // Project-scoped searches also list `_globals` rows (the `project`
+            // field distinguishes them) — same always-reachable contract as
+            // cl_retrieve. `None` already spans every project.
+            if let Some(p) = project {
+                if p != crate::storage::Project::GLOBALS {
+                    let globals = bridge
+                        .cl_index_search(Some(crate::storage::Project::GLOBALS), query)
+                        .await
+                        .map_err(internal_err_no_prefix)?;
+                    rows.extend(globals);
+                }
+            }
             // Strip noisy fields; agents care about file_path, description,
             // tags, updated_at. `abs_path` is the RESOLVED on-disk location —
             // agents were joining `_globals` into the path themselves and
@@ -793,8 +805,12 @@ async fn call_tool(
                 .get("budget_tokens")
                 .and_then(Value::as_i64)
                 .unwrap_or(3000);
+            // `_globals` always rides along (2026-08-05): cross-project files
+            // like eod.md must be reachable from a project-scoped query —
+            // agents were inventing their own eod.md in repos when the real
+            // one couldn't rank in.
             let atoms = bridge
-                .cl_retrieve(&project, &query, paths.as_deref(), budget)
+                .cl_retrieve(&project, &query, paths.as_deref(), budget, true)
                 .await
                 .map_err(internal_err_no_prefix)?;
             // Stage-4b measurement: log this retrieval (best-effort; never fails
@@ -837,9 +853,17 @@ async fn call_tool(
                     } else {
                         String::new()
                     };
+                    // Cross-scope rows announce their origin so `[_globals]
+                    // eod.md` can't be mistaken for a project file (display
+                    // only — nothing parses rendered headings).
+                    let scope = if atom.project_id != project {
+                        format!("[{}] ", atom.project_id)
+                    } else {
+                        String::new()
+                    };
                     out.push_str(&format!(
-                        "## {} > {}\n{}{}\n\n",
-                        atom.file_path, atom.heading_path, flag, atom.body
+                        "## {}{} > {}\n{}{}\n\n",
+                        scope, atom.file_path, atom.heading_path, flag, atom.body
                     ));
                 }
                 out.trim_end().to_string()
@@ -896,10 +920,20 @@ async fn call_tool(
         "cl_folder_search" => {
             let project = args.get("project").and_then(Value::as_str);
             let query = args.get("query").and_then(Value::as_str);
-            let rows = bridge
+            let mut rows = bridge
                 .cl_folder_search(project, query)
                 .await
                 .map_err(internal_err_no_prefix)?;
+            // Same `_globals` union as cl_index_search, folder flavor.
+            if let Some(p) = project {
+                if p != crate::storage::Project::GLOBALS {
+                    let globals = bridge
+                        .cl_folder_search(Some(crate::storage::Project::GLOBALS), query)
+                        .await
+                        .map_err(internal_err_no_prefix)?;
+                    rows.extend(globals);
+                }
+            }
             let trimmed: Vec<serde_json::Value> = rows
                 .into_iter()
                 .map(|r| {

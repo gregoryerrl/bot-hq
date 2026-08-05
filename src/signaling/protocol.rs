@@ -531,7 +531,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_index_search",
-            description: "Search the Context Library (CL) index for relevant files BEFORE reading any CL file. The index returns lightweight {file_path, description, tags, updated_at} rows — read descriptions to decide which files are worth opening. This saves context vs eagerly reading everything. The `_globals` project holds cross-project system files (general-rules.md, etc.); for project-scoped work pass your session's working project name. Optional `query` does a case-insensitive substring match across file_path/description/tags.",
+            description: "Search the Context Library (CL) index for relevant files BEFORE reading any CL file. The index returns lightweight {file_path, description, tags, updated_at} rows — read descriptions to decide which files are worth opening. This saves context vs eagerly reading everything. The `_globals` project holds cross-project system files (eod.md, tasks.md, general-rules.md, …) and its rows are ALWAYS included alongside a project-scoped search (check the `project` field on each row); for project-scoped work pass your session's working project name. Optional `query` does a case-insensitive substring match across file_path/description/tags.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -549,7 +549,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "cl_retrieve",
-            description: "Pull the most relevant Context Library CONTENT for a query as ranked atom BODIES inline, under a token budget — instead of the cl_index_search -> eyeball descriptions -> Read the whole file loop. Each CL file is split into heading-delimited atoms; this returns the best BM25 matches (conventions/decisions win ties, newest first) formatted as `## file_path > heading_path` blocks. Use it when you need the actual CL content on a topic, not just which files exist.",
+            description: "Pull the most relevant Context Library CONTENT for a query as ranked atom BODIES inline, under a token budget — instead of the cl_index_search -> eyeball descriptions -> Read the whole file loop. Each CL file is split into heading-delimited atoms; this returns the best BM25 matches (conventions/decisions win ties, newest first) formatted as `## file_path > heading_path` blocks. Cross-project `_globals` files (eod.md, tasks.md, …) are ALWAYS searched alongside the project you pass — their blocks are prefixed `[_globals]` — so never conclude a global file doesn't exist from a project-scoped miss. Use it when you need the actual CL content on a topic, not just which files exist.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -645,7 +645,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "properties": {
                     "project": {
                         "type": "string",
-                        "description": "Project name. Use the session's project for project-scoped folders, '_globals' for system-wide directories under the bot-hq root, or omit to search across all projects."
+                        "description": "Project name. Use the session's project for project-scoped folders ('_globals' rows are always included alongside it), '_globals' alone for system-wide directories under the bot-hq root, or omit to search across all projects."
                     },
                     "query": {
                         "type": "string",

@@ -27,13 +27,15 @@ fn atom_age_days(mtime: Option<&str>) -> Option<i64> {
 /// in [`AGE_STALE_FALLBACK_DAYS`], carrying the age so the ⚠ wording says
 /// "old and unverifiable", not "drift detected". Never touches atoms the
 /// code-hash path owns (callers pick one branch per project).
-fn apply_age_stale_fallback(atoms: &mut [crate::storage::RetrievedAtom]) {
-    for atom in atoms {
-        if let Some(days) = atom_age_days(atom.mtime.as_deref()) {
-            if days >= AGE_STALE_FALLBACK_DAYS {
-                atom.stale = true;
-                atom.stale_age_days = Some(days);
-            }
+/// Repo-less age fallback, per-atom (issues.md #23). Per-atom since the
+/// `_globals` union: one result set can mix repo-backed atoms (hash-checked)
+/// with cross-scope `_globals` atoms (age-checked), so staleness is decided
+/// atom by atom in `cl_retrieve`'s loop.
+fn age_stale_one(atom: &mut crate::storage::RetrievedAtom) {
+    if let Some(days) = atom_age_days(atom.mtime.as_deref()) {
+        if days >= AGE_STALE_FALLBACK_DAYS {
+            atom.stale = true;
+            atom.stale_age_days = Some(days);
         }
     }
 }
@@ -98,33 +100,38 @@ impl SignalingBridge {
         query: &str,
         paths: Option<&[String]>,
         budget_tokens: i64,
+        include_globals: bool,
     ) -> Result<Vec<crate::storage::RetrievedAtom>> {
         let Some(storage) = self.storage.lock().await.clone() else {
             return Ok(Vec::new());
         };
-        let mut atoms = storage.cl_retrieve(project, query, paths, budget_tokens).await?;
+        let mut atoms = storage
+            .cl_retrieve(project, query, paths, budget_tokens, include_globals)
+            .await?;
         // Flag atoms whose cited code drifted since indexing. Repo coupling lives
         // in the bridge (storage stays pure): recompute each atom's code_hash from
-        // the current repo and compare to the stored baseline.
+        // the current repo and compare to the stored baseline. Staleness is
+        // per-atom: a `_globals`-union row inside a project query takes the
+        // repo-less AGE fallback (issues.md #23) keyed off the ATOM's project,
+        // never the queried project's repo.
         let repo_root = storage
             .get_project(project)
             .await
             .ok()
             .flatten()
-            .and_then(|p| p.working_repo_path);
-        if let Some(repo_root) = repo_root {
-            let repo_root = PathBuf::from(repo_root);
-            for atom in &mut atoms {
+            .and_then(|p| p.working_repo_path)
+            .map(PathBuf::from);
+        for atom in &mut atoms {
+            if atom.project_id != project {
+                age_stale_one(atom);
+            } else if let Some(root) = &repo_root {
                 if let Some(stored) = atom.code_hash.as_deref() {
-                    let current = cl_refs::compute_code_hash(&atom.body, &repo_root);
+                    let current = cl_refs::compute_code_hash(&atom.body, root);
                     atom.stale = current.as_deref() != Some(stored);
                 }
+            } else {
+                age_stale_one(atom);
             }
-        } else {
-            // Repo-less project / `_globals` (issues.md #23): there is no code
-            // to verify against, so exactly the projects that CAN'T be
-            // hash-checked previously got no staleness signal at all.
-            apply_age_stale_fallback(&mut atoms);
         }
         Ok(atoms)
     }
@@ -447,7 +454,7 @@ mod tests {
         assert_eq!(after.0, 1, "existing unchanged file should be atomized");
 
         let retrieved = storage
-            .cl_retrieve("_globals", "queryable", None, 1000)
+            .cl_retrieve("_globals", "queryable", None, 1000, false)
             .await
             .unwrap();
         assert_eq!(retrieved.len(), 1);
@@ -487,17 +494,17 @@ mod tests {
         bridge.cl_rescan("proj").await.unwrap();
 
         // Fresh index: the cited code is unchanged → not stale.
-        let hits = bridge.cl_retrieve("proj", "helper", None, 1000).await.unwrap();
+        let hits = bridge.cl_retrieve("proj", "helper", None, 1000, false).await.unwrap();
         assert!(!hits.is_empty(), "atom should be retrievable");
         assert!(hits.iter().all(|h| !h.stale), "fresh atom is not stale");
 
         // The cited code changes (no re-rescan) → the citing atom is flagged stale...
         std::fs::write(repo_s.join("src/foo.rs"), "fn foo() { changed() }").unwrap();
-        let foo_hits = bridge.cl_retrieve("proj", "helper", None, 1000).await.unwrap();
+        let foo_hits = bridge.cl_retrieve("proj", "helper", None, 1000, false).await.unwrap();
         assert!(foo_hits.iter().any(|h| h.stale), "atom citing changed code is stale");
 
         // ...but an atom that cites no code is never flagged.
-        let bare_hits = bridge.cl_retrieve("proj", "prose", None, 1000).await.unwrap();
+        let bare_hits = bridge.cl_retrieve("proj", "prose", None, 1000, false).await.unwrap();
         assert!(
             !bare_hits.is_empty() && bare_hits.iter().all(|h| !h.stale),
             "no-ref atom is never stale"
@@ -555,8 +562,9 @@ mod tests {
     /// flagged with their age; fresh or mtime-less atoms are left alone.
     #[test]
     fn age_fallback_flags_old_atoms_in_repoless_projects() {
-        use super::{apply_age_stale_fallback, AGE_STALE_FALLBACK_DAYS};
+        use super::{age_stale_one, AGE_STALE_FALLBACK_DAYS};
         let atom = |mtime: Option<String>| crate::storage::RetrievedAtom {
+            project_id: "_globals".into(),
             file_path: "notes.md".into(),
             heading_path: "Notes".into(),
             body: "b".into(),
@@ -575,7 +583,9 @@ mod tests {
             atom(None),
             atom(Some("garbage".into())),
         ];
-        apply_age_stale_fallback(&mut atoms);
+        for a in &mut atoms {
+            age_stale_one(a);
+        }
 
         assert!(atoms[0].stale, "old atom flagged");
         assert_eq!(atoms[0].stale_age_days, Some(AGE_STALE_FALLBACK_DAYS + 15));

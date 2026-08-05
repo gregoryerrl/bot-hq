@@ -161,6 +161,9 @@ async fn require_owned_session(
 /// invoked here so plugin reads don't pollute agent retrieval telemetry).
 #[derive(Debug, Serialize)]
 struct PluginAtomView {
+    /// Owning project — with the `_globals` union a project query can return
+    /// cross-scope atoms; additive field, existing consumers unaffected.
+    project: String,
     file_path: String,
     heading_path: String,
     body: String,
@@ -287,13 +290,16 @@ pub(crate) async fn dispatch(
             let budget = opt_i64(args, "budget_tokens")
                 .unwrap_or(DEFAULT_RETRIEVE_BUDGET)
                 .clamp(1, MAX_RETRIEVE_BUDGET);
+            // Plugins get the same `_globals`-union contract as agents. Note:
+            // storage-direct, so no bridge stale-flagging here (pre-existing).
             let atoms = storage
-                .cl_retrieve(&project, &query, paths.as_deref(), budget)
+                .cl_retrieve(&project, &query, paths.as_deref(), budget, true)
                 .await
                 .map_err(|e| AppError::DbError(e.to_string()))?;
             let out: Vec<PluginAtomView> = atoms
                 .into_iter()
                 .map(|a| PluginAtomView {
+                    project: a.project_id,
                     file_path: a.file_path,
                     heading_path: a.heading_path,
                     body: a.body,

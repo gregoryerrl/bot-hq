@@ -31,6 +31,10 @@ pub struct Atom {
 /// carrying `file_path` so callers can cite the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievedAtom {
+    /// Owning project of this atom. With the `_globals` union a project-scoped
+    /// retrieval can return cross-scope rows; callers that render or
+    /// stale-check must key off THIS, not the project they queried.
+    pub project_id: String,
     pub file_path: String,
     pub heading_path: String,
     pub body: String,
@@ -131,12 +135,23 @@ impl Storage {
         query: &str,
         paths: Option<&[String]>,
         budget_tokens: i64,
+        include_globals: bool,
     ) -> Result<Vec<RetrievedAtom>> {
         let match_expr = to_fts5_match(query);
         if match_expr.is_empty() {
             return Ok(Vec::new());
         }
         let path_filter = paths.filter(|p| !p.is_empty());
+        // `_globals` union (2026-08-05): agent-facing callers pass true so
+        // cross-project files (eod.md, tasks.md) are ALWAYS retrievable from a
+        // project-scoped query — one query, unified BM25, relevance decides.
+        // Duplicate bind when off (or already querying _globals) keeps one SQL
+        // shape. UI callers pass false: the Library tree stays per-project.
+        let second_scope = if include_globals && project_id != crate::storage::Project::GLOBALS {
+            crate::storage::Project::GLOBALS
+        } else {
+            project_id
+        };
 
         // Pin (convention/decision kind) + freshness are tie-breakers AFTER bm25
         // relevance, then file_path/heading_path as a DETERMINISTIC final key so
@@ -149,8 +164,8 @@ impl Storage {
         // can emit multiple sub-atoms sharing one heading_path, so document order
         // keeps the budget trim deterministic.
         let mut sql = String::from(
-            "SELECT file_path, heading_path, body, code_hash, mtime FROM cl_atoms \
-             WHERE project_id = ? AND cl_atoms MATCH ?",
+            "SELECT project_id, file_path, heading_path, body, code_hash, mtime FROM cl_atoms \
+             WHERE project_id IN (?, ?) AND cl_atoms MATCH ?",
         );
         if let Some(paths) = path_filter {
             sql.push_str(" AND file_path IN (");
@@ -168,10 +183,12 @@ impl Storage {
              mtime DESC, file_path, heading_path, rowid LIMIT 128",
         );
 
-        let mut q =
-            sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>)>(&sql)
-                .bind(project_id)
-                .bind(&match_expr);
+        let mut q = sqlx::query_as::<_, (String, String, String, String, Option<String>, Option<String>)>(
+            &sql,
+        )
+        .bind(project_id)
+        .bind(second_scope)
+        .bind(&match_expr);
         if let Some(paths) = path_filter {
             for p in paths {
                 q = q.bind(p);
@@ -183,13 +200,14 @@ impl Storage {
         // oversized atom can't make the whole retrieval return empty.
         let mut out = Vec::new();
         let mut used = 0i64;
-        for (file_path, heading_path, body, code_hash, mtime) in rows {
+        for (project_id, file_path, heading_path, body, code_hash, mtime) in rows {
             let cost = estimate_tokens(&body);
             if !out.is_empty() && used + cost > budget_tokens {
                 break;
             }
             used += cost;
             out.push(RetrievedAtom {
+                project_id,
                 file_path,
                 heading_path,
                 body,
@@ -416,10 +434,33 @@ mod tests {
             .await
             .unwrap();
 
-        let hits = s.cl_retrieve("p", "migration immutable", None, 10_000).await.unwrap();
+        let hits = s.cl_retrieve("p", "migration immutable", None, 10_000, false).await.unwrap();
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.file_path == "notes.md"), "project-scoped");
         assert_eq!(hits[0].heading_path, "Migrations", "best match ranks first");
+    }
+
+    #[tokio::test]
+    async fn cl_retrieve_include_globals_unions_cross_scope() {
+        let s = Storage::memory().await.unwrap();
+        s.replace_atoms_for_file("p", "notes.md", &[atom("H", "eod report keyword")], "t")
+            .await
+            .unwrap();
+        s.replace_atoms_for_file("_globals", "eod.md", &[atom("Write Below", "eod report keyword")], "t")
+            .await
+            .unwrap();
+        // Off: strict project scope (the UI contract).
+        let strict = s.cl_retrieve("p", "eod report", None, 10_000, false).await.unwrap();
+        assert!(!strict.is_empty());
+        assert!(strict.iter().all(|h| h.project_id == "p"), "false = never cross-scope");
+        // On: _globals rows rank in alongside the project's own.
+        let hits = s.cl_retrieve("p", "eod report", None, 10_000, true).await.unwrap();
+        assert!(hits.iter().any(|h| h.project_id == "_globals" && h.file_path == "eod.md"));
+        assert!(hits.iter().any(|h| h.project_id == "p"));
+        // Querying _globals itself: the dup bind stays single-scope.
+        let g = s.cl_retrieve("_globals", "eod report", None, 10_000, true).await.unwrap();
+        assert!(!g.is_empty());
+        assert!(g.iter().all(|h| h.project_id == "_globals"));
     }
 
     #[tokio::test]
@@ -428,11 +469,11 @@ mod tests {
         s.replace_atoms_for_file("p", "n.md", &[atom("H", "alpha beta gamma")], "t").await.unwrap();
         // FTS5 operators / metacharacters must not throw — they're quoted literals.
         for q in ["alpha AND", "beta\"", "*", "gamma NEAR/2", "   ", "a OR b", "-x"] {
-            s.cl_retrieve("p", q, None, 10_000).await.unwrap();
+            s.cl_retrieve("p", q, None, 10_000, false).await.unwrap();
         }
-        assert!(!s.cl_retrieve("p", "alpha", None, 10_000).await.unwrap().is_empty());
+        assert!(!s.cl_retrieve("p", "alpha", None, 10_000, false).await.unwrap().is_empty());
         // No alphanumeric tokens → no MATCH run, empty result.
-        assert!(s.cl_retrieve("p", "***", None, 10_000).await.unwrap().is_empty());
+        assert!(s.cl_retrieve("p", "***", None, 10_000, false).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -443,9 +484,9 @@ mod tests {
             .await
             .unwrap();
         // Budget for ~one atom → exactly one (we always keep at least the top one).
-        assert_eq!(s.cl_retrieve("p", "lorem", None, 30).await.unwrap().len(), 1);
+        assert_eq!(s.cl_retrieve("p", "lorem", None, 30, false).await.unwrap().len(), 1);
         // Generous budget → all three.
-        assert_eq!(s.cl_retrieve("p", "lorem", None, 10_000).await.unwrap().len(), 3);
+        assert_eq!(s.cl_retrieve("p", "lorem", None, 10_000, false).await.unwrap().len(), 3);
     }
 
     #[tokio::test]
@@ -454,7 +495,7 @@ mod tests {
         s.replace_atoms_for_file("p", "a.md", &[atom("H", "shared keyword")], "t").await.unwrap();
         s.replace_atoms_for_file("p", "b.md", &[atom("H", "shared keyword")], "t").await.unwrap();
         let only = vec!["a.md".to_string()];
-        let hits = s.cl_retrieve("p", "keyword", Some(&only), 10_000).await.unwrap();
+        let hits = s.cl_retrieve("p", "keyword", Some(&only), 10_000, false).await.unwrap();
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.file_path == "a.md"));
     }
@@ -467,7 +508,7 @@ mod tests {
         s.replace_atoms_for_file("p", "conventions.md", &[atom("H", "deploy gate keyword")], "t")
             .await
             .unwrap();
-        let hits = s.cl_retrieve("p", "deploy gate keyword", None, 10_000).await.unwrap();
+        let hits = s.cl_retrieve("p", "deploy gate keyword", None, 10_000, false).await.unwrap();
         assert_eq!(hits[0].file_path, "conventions.md", "pinned file wins the bm25 tie");
     }
 
@@ -479,7 +520,7 @@ mod tests {
         // Without it SQLite order is unspecified and a budget trim could vary.
         s.replace_atoms_for_file("p", "zeta.md", &[atom("H", "shared body keyword")], "t").await.unwrap();
         s.replace_atoms_for_file("p", "alpha.md", &[atom("H", "shared body keyword")], "t").await.unwrap();
-        let hits = s.cl_retrieve("p", "shared body keyword", None, 10_000).await.unwrap();
+        let hits = s.cl_retrieve("p", "shared body keyword", None, 10_000, false).await.unwrap();
         let order: Vec<&str> = hits.iter().map(|h| h.file_path.as_str()).collect();
         assert_eq!(order, vec!["alpha.md", "zeta.md"], "full ties order by file_path");
     }
@@ -502,7 +543,7 @@ mod tests {
         // to_fts5_match's quoting: migrate/migration/migrations share a stem.
         for q in ["migrate", "migration", "MIGRATING"] {
             assert!(
-                !s.cl_retrieve("p", q, None, 10_000).await.unwrap().is_empty(),
+                !s.cl_retrieve("p", q, None, 10_000, false).await.unwrap().is_empty(),
                 "porter stemming should match {q:?} -> migrations (quoting keeps the tokenizer)"
             );
         }
