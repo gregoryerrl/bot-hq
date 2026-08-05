@@ -42,6 +42,17 @@ gate, and the duo-shaped UI. Vision wording: project CL `vision.md`
 ("The harness, not the crew"); decision record: CL `decisions.md`
 (2026-08-05).
 
+**Explicitly DEFERRED behind this migration** (user call, 2026-08-05,
+after the Aug-5 session study — CL `issues.md` #26–#31): the
+duo-pump-shaped fixes ride the teardown instead of patching it —
+`#26` held-forward flush audit (`held_late` ×12/day), `#30` duplicate
+spawn warmup, and the peer-wait watchdog classification (the false
+NEEDS DIRECTION on review handoffs, #25-family). **Not deferred:**
+`#27` (tray answers don't preempt a running turn) is user↔agent
+plumbing that survives any composition — it stays an open standalone
+fix, along with `#29` (gate-refusal UX), `#31` (close-out staleness
+sweep), and `#28` (auto-answerable gate classes).
+
 ---
 
 ## In flight
