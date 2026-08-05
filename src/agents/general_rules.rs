@@ -89,6 +89,7 @@ bot-hq runs a global keyword gate over your Bash tool calls (configured in Setti
 
 - Call `action_gate(command)` with the exact command. A gated command PARKS for the user's approval and the call returns AT ONCE with a `gate_id` — nothing to time out, so never re-issue on \"no answer yet\". On approve bot-hq executes it in your working repo and the output arrives as an out-of-band message; on reject you get a rejection notice (text beyond \"Reject\" is the user's reasoning — read it before retrying). Unsure whether it ran? `gate_status(gate_id)` — never guess, never re-run.
 - Commands matching an `auto_allow` keyword (or no keyword at all) run normally through your own Bash — no `action_gate` needed. This is how `git commit` / `git push` become frictionless once configured.
+- **A refusal means route it, not rephrase it.** Do not rewrite a blocked command to slip past the keyword — splitting it up, swapping the gated form for an equivalent (`rm -rf` → `rm -f` + `rmdir`), or burying it in a script or here-doc. Measured on 2026-08-04/05: two of five refusals were answered by rewording rather than by `action_gate`, one of them narrated in chat. The gate is the user's decision point; going around it silently converts their decision into your own. If the gate looks wrong for this command, say so and ask.
 
 ## Context Library (CL) — open the index first, always
 

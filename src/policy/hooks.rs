@@ -774,10 +774,18 @@ fn tool_gate_exit(
             2,
             Some(format!(
                 "BLOCKED by the bot-hq Tool Gate: `{command}`.\n\
-                 This command is gated. Do NOT retry it directly — call the \
-                 `action_gate` MCP tool with command=\"{command}\". bot-hq will \
-                 surface an Approve/Reject prompt to the user and, on approve, run \
-                 the command in your working repo and return its output."
+                 This command needs the USER'S APPROVAL — not a different command. \
+                 Call the `action_gate` MCP tool with command=\"{command}\". bot-hq \
+                 will surface an Approve/Reject prompt to the user and, on approve, \
+                 run the command in your working repo and return its output \
+                 out-of-band.\n\
+                 Do NOT rewrite the command to get around the gated keyword — \
+                 splitting it up, swapping the gated form for an equivalent one \
+                 (e.g. `rm -rf` → `rm -f` + `rmdir`), or moving it into a script or \
+                 a here-doc. The gate IS the user's decision point; routing around \
+                 it silently is the failure this message exists to prevent, and it \
+                 has happened. If the gate is wrong for this command, say so and \
+                 ask — don't dodge it."
             )),
         ),
         // auto_allow or no match → allow the agent's direct Bash call.
@@ -1770,5 +1778,36 @@ mod tests {
         assert_eq!(tool_gate_exit("ls -la", &kws).0, 0);
         // empty config → fail-open allow.
         assert_eq!(tool_gate_exit("gh issue comment 1", &[]).0, 0);
+    }
+
+    #[test]
+    fn gate_refusal_carries_the_command_and_forbids_rewording() {
+        // issues.md #29, corrected by measurement: the Aug 4-5 refusals showed no
+        // same-command retry loop — 3/5 converted to action_gate correctly, but
+        // 2/5 REWORDED to slip past the keyword (one narrated swapping `rm -rf`
+        // for `rm -f` + `rmdir`). Embedding the exact call was already shipped and
+        // did not stop that, so the refusal must name evasion as the failure.
+        use crate::policy::tool_gate::{GateMode, GatedKeyword};
+        let kws = vec![GatedKeyword {
+            keyword: "rm -rf".into(),
+            mode: GateMode::Gate,
+        }];
+        let (code, msg) = tool_gate_exit("rm -rf ./scratch", &kws);
+        assert_eq!(code, 2);
+        let msg = msg.expect("a gated command must carry a refusal message");
+        // The exact command, twice: once as the block subject, once inside the
+        // ready-to-paste action_gate call.
+        assert!(
+            msg.contains("command=\"rm -rf ./scratch\""),
+            "refusal must embed the exact action_gate invocation: {msg}"
+        );
+        assert!(
+            msg.contains("Do NOT rewrite the command"),
+            "refusal must forbid rewording around the keyword: {msg}"
+        );
+        assert!(
+            msg.contains("out-of-band"),
+            "refusal must state where the approved command's output arrives: {msg}"
+        );
     }
 }
