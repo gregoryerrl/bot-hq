@@ -9,6 +9,26 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-05 — vision consolidated in the CL; duo→plugin direction recorded
+
+The project CL's `vision.md` became the single home for vision material:
+the AI-car bullet rewritten (gate semantics clarified: a hands-off run is
+impossible while any gate is closed; full autonomy = first-prompt
+authorization + deliberately opening every gate), the duo/conductor
+paragraph moved out of the CL `notes.md`, and the memory-hierarchy analogy
+(context = cache, session-docs = RAM, CL = disk — from PLAN.md's
+CL-stitching item) given a vision-level writeup. ARCHITECTURE.md's
+app-as-conductor line was de-metaphorized (`ed49a87`).
+
+The user then stated a direction shift: **drop the duo — Rain becomes a
+plugin only; the core narrows to a single-agent AI harness** (PLAN.md
+"Direction — dissolve the duo" + CL `decisions.md`). The canonical docs
+now carry it as planned/unscheduled; code and README still
+implement/describe the live duo, deliberately, until a migration is
+scoped.
+
+---
+
 ## 2026-08-05 — declare_working: background work is a declared state, not a stall
 
 Found live within hours of the watchdog shipping: HANDS ran the five commit

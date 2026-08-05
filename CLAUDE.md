@@ -4,7 +4,10 @@ You are working on **bot-hq**, a Tauri v2 + React + Rust desktop GUI app
 for driving AI-assisted coding sessions through a bilateral-duo agent
 model (Brian = HANDS, Rain = EYES) with policy enforcement. A former
 solo helper agent, Emma, was removed from the core (planned to return as
-the first bot-hq plugin — TBD).
+the first bot-hq plugin — TBD). Planned direction (2026-08-05,
+unscheduled): dissolve the duo — Rain becomes a plugin only and the core
+narrows to a single-agent AI harness; the duo model described here
+remains accurate until that ships.
 
 The original from-scratch rebuild shipped at v0.1.0; subsequent work
 added a UI redesign, an external driver MCP server, and a two-layer

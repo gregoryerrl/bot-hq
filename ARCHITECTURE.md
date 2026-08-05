@@ -33,7 +33,10 @@ allow-list with no shell.
 
 bot-hq is a two-agent duo (Brian + Rain). A former solo helper agent,
 **Emma**, has been removed from the core (code + data purged); she is
-slated to return as the first bot-hq plugin — TBD.
+slated to return as the first bot-hq plugin — TBD. Planned (2026-08-05,
+unscheduled): the duo itself dissolves — **Rain** moves out of the core
+to become a plugin as well, narrowing the core to a single-agent
+harness. Until that ships, this document describes the live duo.
 
 The user directs the work and owns the decisions; the app is the bridge
 between user and agents. Policy enforcement runs at two layers (MCP tool calls + git

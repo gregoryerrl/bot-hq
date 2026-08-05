@@ -28,6 +28,21 @@ drifts every commit.
 
 ---
 
+## Direction — dissolve the duo (stated 2026-08-05, unscheduled)
+
+The core narrows to a **single-agent AI harness/system**: the gates, the
+transparency surfaces (tray / IPAV docs / terminal), and the memory
+hierarchy. **Rain (EYES, adversarial review) becomes a plugin only**,
+following Emma's path — review stays a first-class value (ideally
+cross-model) but optional and pluggable, not a hardwired co-agent. No
+migration work is scoped yet; when it starts, the blast radius includes
+the role prompts, spawn/duo/router plumbing, the EYES-sign-off commit
+gate, and the duo-shaped UI. Vision wording: project CL `vision.md`
+("The harness, not the crew"); decision record: CL `decisions.md`
+(2026-08-05).
+
+---
+
 ## In flight
 
 The current arc is the **native agent loop** (2026-07-26/27): an agent
