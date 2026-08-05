@@ -64,21 +64,24 @@ Read those before starting; this section is the map, not the territory.
 
 **Track 1 — harness fixes (standalone; none touch the duo pump):**
 
-1. **#27 — tray answers preempt a running turn** (small). Mirror
-   `broadcast`'s idle-harmless `AgentHandle.interrupt()` on the
-   tray-resolve delivery path, so a parked answer lands at the next
-   tool boundary instead of after the whole turn. Two same-day races
-   documented (agent built on premises the user had already overturned).
-2. **#29 — gate refusals convert instead of retry-looping** (small).
-   The PreToolUse refusal embeds the exact `action_gate("<command>")`
-   call — or the refusal itself auto-parks the gate row. 19 refusals
-   on Aug 5, same command retried post-refusal.
-3. **#31 — close-out staleness sweep** (medium). Before
-   `close_session`: grep the project CL for terms the session changed
-   or retired (seed the term list from the session's decisions.md
-   appends + renamed concepts); surface hits to HANDS. Live specimen:
-   the framing-rule session left `conventions.md:3` contradicting
-   itself for hours.
+1. ~~**#27 — tray answers preempt a running turn**~~ — SHIPPED 2026-08-06
+   (`d71c4d1`). The OOB tray-resolve arm now fires the same idle-harmless
+   interrupt `broadcast` does, before delivering.
+2. ~~**#29 — gate refusals**~~ — SHIPPED 2026-08-06 (`c0a66b7`), with the
+   issue's premise corrected by measurement: no same-command retry loop
+   exists (the "19 refusals" were 19 `tool_blocklist` rows = 18 approved
+   + 1 denied; real refusals were 5 across Aug 4–5). The measured failure
+   is **reword-evasion** (2/5) plus a `ToolSearch` round-trip on every
+   correct conversion (#14). The exact-call text was already shipped, so
+   the fix forbids rewriting around the gate. **Still open:** the
+   auto-park half — the hook POSTing a `/hooks/tool-gate` route the way
+   `run_pre_push` already POSTs `/hooks/pre-push`, which would kill both
+   costs but create tray cards without agent intent (interacts with #28).
+3. ~~**#31 — close-out staleness sweep**~~ — SHIPPED 2026-08-06
+   (`525d452`). Seed list comes from the old→new body diff `cl_write_file`
+   already reads, not from decisions.md appends or agent self-declaration;
+   sweep runs at `close_session` before/independently of the learnings
+   nudge, advisory and once-only.
 4. **#28 — auto-answerable gate classes** (medium; design first).
    Extend the `push_gate=auto` pattern: per-class auto-approval
    (read-only gated commands first), same-class batch approve in the

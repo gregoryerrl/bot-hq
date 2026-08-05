@@ -9,6 +9,46 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-06 — Track 1 harness fixes: tray preempt, gate-refusal wording, CL close-out sweep
+
+The first three deliverables from the Aug-5 plan (PLAN.md "Next
+deliverables", Track 1), one commit each:
+
+- **`d71c4d1`** — **#27 tray answers preempt a running turn.** An OOB tray
+  answer was injected on stdin with no interrupt, so it waited out the agent's
+  whole current turn. `resolve_choice`'s `AgentReceiverDroppedFellBack` arm now
+  mirrors `broadcast`: interrupt both agents (`tray-answer-preempt`) BEFORE
+  `send_to_both`. The paused branch still stashes without interrupting, and the
+  `Delivered` arm (blocking `request_approval`) is untouched. Branch extracted
+  as the pure `tray_wake_step`, plus a source-order guard test on the
+  interrupt-then-send contract. Note `ask_user_choice` is non-blocking, so
+  *every* tray answer to an agent question takes the OOB arm.
+- **`c0a66b7`** — **#29 gate refusals.** The issue's premise did not survive
+  measurement: the "19 refusals" were 19 `tool_blocklist` rows (18 approved, 1
+  denied) — `action_gate` outcomes, not refusals, which are never logged as
+  violations. Real refusals: 5 across Aug 4–5, none a same-command retry. 3
+  converted correctly (each paying a `ToolSearch` round-trip, issue #14's tax);
+  **2 reworded to evade the keyword**. Since the exact-call text was already
+  shipped and live through all five, the refusal now forbids rewriting around
+  the gate by name, with an ask-instead escape hatch; matching bullet in the
+  agent general rules.
+- **`525d452`** — **#31 close-out staleness sweep.** `cl_write_file` computes
+  the concepts a write retired (old→new token diff, reusing the status-lint's
+  body read; stopword-filtered, occurrence-ranked, capped) and `close_session`
+  sweeps the project's living CL for files still citing them — before and
+  independently of the learnings nudge, since an agent that wrote the CL clears
+  that nudge and is exactly the one who may have stranded a term. `decisions.md`
+  and dated `learnings-*` / `notes-<date>-*` are skipped; whole-token match;
+  ≤ 20 hits; fires once and can never hold a close shut.
+
+Gates: cargo 1046 tests green (982 lib + 64 integration); frontend 199 vitest /
+tsc / build green; release build green. Live-verified already: the new gate
+refusal fired on this session's own commit (a fresh specimen of issue #12 — the
+matcher hits `rm -rf` quoted as prose in a commit-message body). #27 and #31 are
+in-process and need an app relaunch to go live.
+
+---
+
 ## 2026-08-05 — _globals always agent-retrievable + per-file user-only toggle
 
 User report: agents repeatedly couldn't find `_globals` CL files (eod.md) and
