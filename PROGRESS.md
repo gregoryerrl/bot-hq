@@ -48,6 +48,15 @@ centered warning line, never as user prose. Prompt half: a "Never stall
 silently" section in the HANDS general rules, including the nudge contract.
 User-picked variant (2026-08-05): chip + one-time nudge at 90 s.
 
+**Follow-up (`96d8a64`), found by the live smoke:** first smoke came back NO
+FIRE with the trigger condition present — the in-memory `user_broadcasts`
+counter was 0 because the app had restarted and every input since arrived via
+the tray-resolve path, which never bumped it. The counter now seeds at spawn
+from `count_user_messages` (user text rows only; synthetic `author=user`
+phase/notice rows excluded) and bumps on Delivered / fell-back tray resolves
+(`StaleGateNeedsConfirm` excluded — nothing was delivered). A mid-task app
+restart no longer disarms the watchdog, and tray-only engagement arms it.
+
 ## 2026-08-04 — stop waking the reviewer to say "holding" (#8, first half)
 
 `advance_phase` fed its transition notice to BOTH agents' stdin. For EYES that is
