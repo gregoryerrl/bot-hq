@@ -33,6 +33,8 @@ function SessionTileImpl({
   // Idle-unflagged watchdog: the session sat idle past grace with no question
   // or halt parked — it probably needs direction.
   const attention = useHealthStore((s) => s.attentionBySession[session.id]);
+  // declare_working: HANDS declared harness-background work — idle is expected.
+  const working = useHealthStore((s) => s.workingBySession[session.id]);
   // Slot 8 Quickview: first line of the latest text message (null until one exists).
   const quickview = firstLine(session.last_message);
 
@@ -94,6 +96,14 @@ function SessionTileImpl({
                 title="Idle with no question or halt parked — the duo was nudged to declare state"
               >
                 NEEDS DIRECTION
+              </span>
+            )}
+            {!closed && working && (
+              <span
+                className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"
+                title={`Background work declared: ${working}`}
+              >
+                WORKING
               </span>
             )}
             {!session.rain_enabled && (

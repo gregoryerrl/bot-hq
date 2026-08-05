@@ -178,6 +178,18 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "declare_working",
+            description: "Declare harness-background work that outlives your turn (a backgrounded build/test chain, a long external job you'll be re-woken for) so the idle-unflagged watchdog doesn't read the session as stalled — suppresses the NEEDS DIRECTION chip + nudge and shows a neutral WORKING badge with your reason. NOT for user-waits (ask_user_choice / mark_awaiting_user) or peer-waits (stay silent). The declaration EXPIRES — default 600s, clamp 30–1800 via expected_seconds — and an expired declaration fires the watchdog on its next poll, so a dead background task surfaces fast; re-declare on each wake while work continues. Cleared automatically by the user's next message. HANDS-only.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "reason": { "type": "string", "description": "What is running and why (shown on the WORKING badge tooltip + tray)." },
+                    "expected_seconds": { "type": "number", "description": "How long until your next turn, roughly. Clamped to 30–1800; default 600." }
+                },
+                "required": ["reason"]
+            }),
+        },
+        ToolDescriptor {
             name: "advance_phase",
             description: "Move the IPAV phase chip yourself (no user gate). Use this whenever your work crosses a phase boundary during a substantive task — investigation done -> Plan, plan stated -> Apply, mutation done -> Verify. The dashboard chip updates; both agents receive a [PHASE: X] transition notice on stdin. Phase is a self-discipline signal, not a permission gate. Use exact phase names: Investigate, Plan, Apply, Verify.",
             input_schema: serde_json::json!({

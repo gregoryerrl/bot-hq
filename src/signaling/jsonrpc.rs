@@ -102,6 +102,9 @@ const HANDS_ONLY_TOOLS: &[&str] = &[
     // follows mark_awaiting_user's HANDS-only precedent. EYES converges via
     // peer_ack (not HANDS-only) instead of yielding to the user.
     "halt",
+    // Declares HANDS-side background work to the idle watchdog; EYES has no
+    // background execution surface, so it follows halt's HANDS-only precedent.
+    "declare_working",
     // Runs arbitrary shell commands (HANDS executes; EYES is read-only —
     // her terminal surface is terminal_read).
     "terminal_exec",
@@ -303,6 +306,31 @@ async fn call_tool(
                 "halted — yielded to the user; input unlocked.",
                 prior.as_deref(),
             )))
+        }
+        "declare_working" => {
+            let reason = arg_required_str(&args, "reason")?;
+            let secs = args
+                .get("expected_seconds")
+                .and_then(Value::as_f64)
+                .unwrap_or(600.0)
+                .clamp(30.0, 1800.0);
+            let ttl = std::time::Duration::from_secs_f64(secs);
+            match bridge
+                .declare_working(&caller.session_id, &reason, ttl)
+                .await
+            {
+                Some(applied) => Ok(ToolCallResult::text(format!(
+                    "working declared for {}s — the idle watchdog holds and the WORKING \
+                     badge shows your reason. It EXPIRES: re-declare on each wake while \
+                     the background work continues, or finish with a proper park/halt/\
+                     close-ask. Cleared automatically by the user's next message.",
+                    applied.as_secs()
+                ))),
+                None => Ok(ToolCallResult::text(
+                    "declare_working unavailable — session not registered (still \
+                     spawning or already closing); proceed without it.",
+                )),
+            }
         }
         "advance_phase" => {
             let target = arg_required_str(&args, "target")?;
@@ -1016,6 +1044,7 @@ mod tests {
         assert!(names.contains(&"mark_awaiting_user"));
         assert!(names.contains(&"peer_ack"));
         assert!(names.contains(&"halt"));
+        assert!(names.contains(&"declare_working"));
         assert!(names.contains(&"request_approval"));
         assert!(names.contains(&"action_gate"));
         assert!(names.contains(&"check_commit_message"));
@@ -1145,6 +1174,7 @@ mod tests {
             "request_approval",
             "action_gate",
             "halt",
+            "declare_working",
             "terminal_exec",
         ] {
             let res = dispatch(

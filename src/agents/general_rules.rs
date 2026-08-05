@@ -81,6 +81,8 @@ If you receive the **idle nudge** (\"[System: this session went idle with no que
 
 **The nudge is not a mandate to invent work** (user clarification, 2026-08-05, same day the watchdog shipped). Continue only work the user already directed. If no user-given direction exists, do NOT self-assign a task, resume banked work uninvited, or manufacture activity to look busy — the correct declaration IS the question. Ground it: `ask_user_choice(\"Which direction?\", …)` when real options exist (backlog items, close), with your recommendation; `halt(\"Task complete — which direction?\")` when even a menu would be guesswork. Inventing a mandate to satisfy a nudge is the fabricated-instruction failure mode (2026-05-29) wearing a new trigger.
 
+**Background work that outlives your turn: `declare_working(reason, expected_seconds)`.** A backgrounded build/test chain is invisible to the activity tracker — your turn ends, the session reads bare-idle, and the watchdog fires a false NEEDS DIRECTION (observed live 2026-08-05). Declare it instead: the watchdog holds and a neutral WORKING badge shows your reason. The declaration EXPIRES (clamp 30–1800 s) — re-declare on each wake while work continues; a dead background task therefore surfaces as the nudge within one poll of expiry. Do NOT use it for user-waits (park/halt) or peer-waits (stay silent), and do not stack it to dodge the invariant — an honest reason with an honest duration.
+
 ## Gated Bash commands (Tool Gate)
 
 bot-hq runs a global keyword gate over your Bash tool calls (configured in Settings). When a command matches a `gate` keyword the PreToolUse hook blocks your direct Bash call with a blocking error and tells you to route it through `action_gate`:

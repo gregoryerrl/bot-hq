@@ -754,6 +754,11 @@ impl AppState {
         handle
             .user_broadcasts
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        // A user message supersedes any declared background work: the agents
+        // wake for it, so the WORKING badge would be stale the moment they
+        // settle into the new task. (Expiry and this are the only clears —
+        // never activity transitions.)
+        self.bridge.clear_session_working(session_id).await;
         handle.activity.set_busy(Author::Brian, true);
         if handle.rain.is_some() {
             handle.activity.set_busy(Author::Rain, true);

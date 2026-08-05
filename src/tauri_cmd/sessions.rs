@@ -355,6 +355,9 @@ pub struct SessionRuntime {
     /// Seeds the "needs direction" chip on mount; live updates arrive via
     /// `session:attention`.
     pub attention: Option<String>,
+    /// declare_working reason while HANDS has background work declared
+    /// (None = clear). Seeds the WORKING badge; live via `session:working`.
+    pub working: Option<String>,
     /// Peer-forward router liveness (duo only). `None` = solo, or never reported
     /// (assume alive — the event fires only on change). Seeds the UI router dot.
     pub router_alive: Option<bool>,
@@ -376,6 +379,7 @@ pub async fn get_session_runtime(
             brian_health: core.bridge.current_agent_health(id, "brian"),
             rain_health: core.bridge.current_agent_health(id, "rain"),
             attention: core.bridge.current_session_attention(id),
+            working: core.bridge.current_session_working(id),
             router_alive: core.bridge.current_router_health(id),
         });
     }

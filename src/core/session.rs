@@ -713,6 +713,14 @@ async fn spawn_session_handle(
             .await
             .unwrap_or_default(),
     ));
+    // declare_working flag — set by the bridge (MCP tool), cleared by
+    // broadcast/expiry. In-memory: a restart kills the background tasks the
+    // declaration was about, so it must not survive one.
+    let working: Arc<std::sync::Mutex<Option<(std::time::Instant, String)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    bridge
+        .register_session_working(session.id.clone(), Arc::clone(&working))
+        .await;
     tokio::spawn(crate::core::watchdog::run_stall_watchdog(
         session.id.clone(),
         watchdog_agents,
@@ -724,6 +732,7 @@ async fn spawn_session_handle(
             brian_input_tx: brian_handle.input_tx.clone(),
             ipav: Arc::clone(&ipav),
             user_broadcasts: Arc::clone(&user_broadcasts),
+            working: Arc::clone(&working),
         },
     ));
 

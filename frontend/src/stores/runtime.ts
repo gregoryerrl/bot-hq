@@ -12,6 +12,7 @@ export interface SessionRuntime {
   rain_health: string | null;
   router_alive: boolean | null;
   attention: string | null;
+  working: string | null;
 }
 
 /** Seed the event-driven activity + health stores from a one-shot runtime
@@ -27,6 +28,7 @@ export function seedRuntimeStores(
   setHealth: (id: string, agent: string, h: AgentHealth) => void,
   setRouterHealth: (id: string, alive: boolean) => void,
   setAttention?: (id: string, state: string | null) => void,
+  setWorking?: (id: string, reason: string | null) => void,
 ): void {
   for (const r of rows) {
     setActivity(r.session_id, r.activity as SessionActivity, {
@@ -42,5 +44,6 @@ export function seedRuntimeStores(
       setRouterHealth(r.session_id, r.router_alive);
     // Null = clear — pass it through so a stale pre-reload chip resets.
     if (setAttention) setAttention(r.session_id, r.attention ?? null);
+    if (setWorking) setWorking(r.session_id, r.working ?? null);
   }
 }

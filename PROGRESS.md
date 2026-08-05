@@ -9,6 +9,32 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-05 — declare_working: background work is a declared state, not a stall
+
+Found live within hours of the watchdog shipping: HANDS ran the five commit
+gates as a harness-background task, its turn ended, and the watchdog — correct
+by its own rules — nudged a session that was actually mid-build. Harness
+background work is invisible to the activity tracker, so bare-Idle and
+working-invisibly were indistinguishable. The workaround (an honest `halt`)
+mislabeled the state as awaiting-user.
+
+New HANDS-only MCP tool `declare_working(reason, expected_seconds?)`: sets a
+per-session in-memory flag (spawn-registered with the bridge, mirroring
+`awaiting`) that the idle-unflagged watchdog treats like a pending tray row —
+chip + nudge suppressed — and shows a neutral primary-tinted WORKING badge
+(tile + header) with the reason. The TTL is load-bearing (clamp 30–1800 s,
+default 600): an unexpiring flag would recreate the silent stall one level up,
+so expiry is checked every poll (badge can't linger through a busy stretch)
+and, because `idle_since` keeps accruing under suppression, an expired
+declaration fires the nudge within one poll — a dead background task surfaces
+in ~10 s, not 90. Cleared only by expiry, the user's next message, or close —
+never by activity transitions (EYES blocking finding on the v1 plan: a
+declared state persists across turns; the original shape was a one-way clear
+that the first Busy blip would have killed). In-memory on purpose: a restart
+kills the background tasks the declaration was about, so it must not survive
+one. Prompt contract added to the never-stall-silently section: re-declare on
+each wake, honest reason + duration, never for user- or peer-waits.
+
 ## 2026-08-05 — never stall silently: the idle-unflagged watchdog (issue #25)
 
 The user's own words defined the invariant: "work should be continuous after
