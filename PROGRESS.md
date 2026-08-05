@@ -41,11 +41,27 @@ deliverables", Track 1), one commit each:
   and dated `learnings-*` / `notes-<date>-*` are skipped; whole-token match;
   ≤ 20 hits; fires once and can never hold a close shut.
 
-Gates: cargo 1046 tests green (982 lib + 64 integration); frontend 199 vitest /
+- **`19ec620`** — **#29(ii) auto-park** (user-picked after the wording fix
+  landed). The PreToolUse hook now parks the approval for the command it just
+  blocked: on a `Gate` match with a known session it POSTs the new
+  `/hooks/tool-gate` route, and the refusal becomes "already queued as gate_id
+  X — do NOT call `action_gate`". That removes both measured costs (the
+  ToolSearch round-trip on every conversion, and any incentive to reword).
+  The route calls the newly-extracted `park_gated_command`, **not**
+  `action_gate`: the latter re-resolves the keyword list and EXECUTES on
+  `auto_allow`/no-match, so a route wired to it would run a command with no
+  approval whenever its resolve disagreed with the hook's — and would make this
+  the first localhost route that can execute anything (`/hooks/pre-push` only
+  parks). Transport mirrors `run_pre_push` with a 10s timeout (parking returns
+  at once). Every failure path — no session, app down, non-2xx, 2xx without a
+  `gate_id` — degrades to the previous call-`action_gate` wording, and the exit
+  code stays 2.
+
+Gates: cargo 1051 tests green (987 lib + 64 integration); frontend 199 vitest /
 tsc / build green; release build green. Live-verified already: the new gate
 refusal fired on this session's own commit (a fresh specimen of issue #12 — the
-matcher hits `rm -rf` quoted as prose in a commit-message body). #27 and #31 are
-in-process and need an app relaunch to go live.
+matcher hits `rm -rf` quoted as prose in a commit-message body). #27, #31 and
+the auto-park route are in-process and need an app relaunch to go live.
 
 ---
 

@@ -73,10 +73,14 @@ Read those before starting; this section is the map, not the territory.
    + 1 denied; real refusals were 5 across Aug 4–5). The measured failure
    is **reword-evasion** (2/5) plus a `ToolSearch` round-trip on every
    correct conversion (#14). The exact-call text was already shipped, so
-   the fix forbids rewriting around the gate. **Still open:** the
-   auto-park half — the hook POSTing a `/hooks/tool-gate` route the way
-   `run_pre_push` already POSTs `/hooks/pre-push`, which would kill both
-   costs but create tray cards without agent intent (interacts with #28).
+   the fix forbids rewriting around the gate. The **auto-park half also
+   shipped** 2026-08-06 (`19ec620`, user-picked): the hook POSTs the new
+   `/hooks/tool-gate` route and the refusal becomes "already queued as
+   gate_id X". The route calls `park_gated_command`, NOT `action_gate` —
+   the latter re-resolves keywords and executes on `auto_allow`/no-match,
+   so wiring it there could run a command unapproved whenever its resolve
+   disagreed with the hook's. Every failure degrades to the old wording;
+   exit stays 2.
 3. ~~**#31 — close-out staleness sweep**~~ — SHIPPED 2026-08-06
    (`525d452`). Seed list comes from the old→new body diff `cl_write_file`
    already reads, not from decisions.md appends or agent self-declaration;
