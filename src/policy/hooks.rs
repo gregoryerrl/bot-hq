@@ -752,7 +752,28 @@ fn run_tool_gate(data_dir: &Path) -> Result<i32> {
     // the rest of this hook's posture.
     let sid = hook_session_id();
     let keywords = crate::policy::tool_gate::resolve_keywords(data_dir, sid.as_deref());
-    let (code, message) = tool_gate_exit(&command, &keywords);
+    // Auto-park (issues.md #29): when the command is gated AND we know the
+    // session, park the approval here so the refusal IS the approval request —
+    // the agent doesn't have to convert it into an `action_gate` call (which
+    // cost a ToolSearch round-trip on every observed conversion) and has
+    // nothing to gain by rewording around the keyword (which is what 2 of 5
+    // measured refusals did instead of converting). Best-effort: any failure
+    // leaves `parked` None and the refusal falls back to the call-action_gate
+    // wording. The command stays blocked either way.
+    let parked = match (
+        crate::policy::tool_gate::match_keyword("Bash", &command, &keywords),
+        sid.as_deref(),
+    ) {
+        (Some(crate::policy::tool_gate::GateMode::Gate), Some(session_id)) => match hook_runtime() {
+            Ok(rt) => rt.block_on(park_gate(data_dir, session_id, &hook_agent(), &command)),
+            Err(e) => {
+                tracing::warn!(%e, "tool-gate auto-park: could not start the client");
+                None
+            }
+        },
+        _ => None,
+    };
+    let (code, message) = tool_gate_exit(&command, &keywords, parked.as_ref());
     if let Some(m) = message {
         // Exit 2 = claude-code "blocking error": stops the tool call and feeds
         // stderr to the agent. The ONLY block form honored under bypass.
@@ -767,30 +788,138 @@ fn run_tool_gate(data_dir: &Path) -> Result<i32> {
 fn tool_gate_exit(
     command: &str,
     keywords: &[crate::policy::tool_gate::GatedKeyword],
+    parked: Option<&ParkedGate>,
 ) -> (i32, Option<String>) {
     use crate::policy::tool_gate::GateMode;
     match crate::policy::tool_gate::match_keyword("Bash", command, keywords) {
-        Some(GateMode::Gate) => (
-            2,
-            Some(format!(
-                "BLOCKED by the bot-hq Tool Gate: `{command}`.\n\
-                 This command needs the USER'S APPROVAL — not a different command. \
-                 Call the `action_gate` MCP tool with command=\"{command}\". bot-hq \
-                 will surface an Approve/Reject prompt to the user and, on approve, \
-                 run the command in your working repo and return its output \
-                 out-of-band.\n\
-                 Do NOT rewrite the command to get around the gated keyword — \
-                 splitting it up, swapping the gated form for an equivalent one \
-                 (e.g. `rm -rf` → `rm -f` + `rmdir`), or moving it into a script or \
-                 a here-doc. The gate IS the user's decision point; routing around \
-                 it silently is the failure this message exists to prevent, and it \
-                 has happened. If the gate is wrong for this command, say so and \
-                 ask — don't dodge it."
-            )),
-        ),
+        Some(GateMode::Gate) => (2, Some(gate_refusal_text(command, parked))),
         // auto_allow or no match → allow the agent's direct Bash call.
         _ => (0, None),
     }
+}
+
+/// The refusal an agent reads. Two shapes, one shared spine.
+///
+/// When the hook managed to auto-park, the approval is ALREADY queued, so the
+/// text's job is to stop the agent doing anything at all — no `action_gate`
+/// call (that would be a second, redundant park), no retry, no reword. When
+/// parking failed (app not running, no session, a non-2xx), it degrades to the
+/// original wording: convert it yourself.
+///
+/// Both shapes carry the command verbatim and the anti-rewording clause, which
+/// exists because 2 of the 5 measured Aug 4–5 refusals were answered by
+/// rephrasing around the keyword rather than by routing the command.
+fn gate_refusal_text(command: &str, parked: Option<&ParkedGate>) -> String {
+    let no_dodging = "Do NOT rewrite the command to get around the gated keyword — \
+         splitting it up, swapping the gated form for an equivalent one (e.g. \
+         `rm -rf` → `rm -f` + `rmdir`), or moving it into a script or a \
+         here-doc. The gate IS the user's decision point; routing around it \
+         silently is the failure this message exists to prevent, and it has \
+         happened. If the gate is wrong for this command, say so and ask — \
+         don't dodge it.";
+    match parked {
+        Some(gate) => {
+            let lead = if gate.existing {
+                "an identical command was ALREADY awaiting the user's approval"
+            } else {
+                "bot-hq has PARKED it for the user's approval"
+            };
+            format!(
+                "BLOCKED by the bot-hq Tool Gate: `{command}`.\n\
+                 You do not need to do anything to queue it — {lead} \
+                 (gate_id: {}).\n\
+                 Do NOT call `action_gate` for this command; it is already \
+                 queued. On approve, bot-hq runs it in your working repo and the \
+                 output arrives as an out-of-band message; on reject you get a \
+                 rejection notice. If you need the current state before \
+                 continuing, call gate_status(\"{}\") — never re-issue the \
+                 command or assume it ran.\n\
+                 {no_dodging}",
+                gate.gate_id, gate.gate_id
+            )
+        }
+        None => format!(
+            "BLOCKED by the bot-hq Tool Gate: `{command}`.\n\
+             This command needs the USER'S APPROVAL — not a different command. \
+             Call the `action_gate` MCP tool with command=\"{command}\". bot-hq \
+             will surface an Approve/Reject prompt to the user and, on approve, \
+             run the command in your working repo and return its output \
+             out-of-band.\n\
+             {no_dodging}"
+        ),
+    }
+}
+
+/// A gate the PreToolUse hook parked on the agent's behalf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParkedGate {
+    gate_id: String,
+    /// The command was already pending approval — the app deduped rather than
+    /// stacking a second card.
+    existing: bool,
+}
+
+/// POST `/hooks/tool-gate` on the running app to park the blocked command.
+/// `None` on every failure (app not running, connect/timeout, non-2xx,
+/// unparseable body) — the caller then falls back to the call-`action_gate`
+/// wording, so a miss costs convenience and never safety.
+///
+/// Short timeout, unlike `decide_push`'s 1800s: parking returns immediately
+/// (the user's pick arrives out-of-band later), so a wedged app must not stall
+/// every gated Bash call the agent makes.
+async fn park_gate(
+    data_dir: &Path,
+    session_id: &str,
+    agent: &str,
+    command: &str,
+) -> Option<ParkedGate> {
+    let addr = crate::paths::read_signaling_addr(data_dir)?;
+    let body = serde_json::json!({
+        "session_id": session_id,
+        "agent": agent,
+        "command": command,
+    })
+    .to_string();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp = match client
+        .post(format!("http://{addr}/hooks/tool-gate"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(%e, "tool-gate auto-park request failed");
+            return None;
+        }
+    };
+    let status = resp.status();
+    let txt = resp.text().await.ok()?;
+    classify_park_response(status, &txt)
+}
+
+/// Map a `(status, body)` from `/hooks/tool-gate` onto a parked gate. Pure, so
+/// the mapping is testable without HTTP (the `classify_push_response` pattern).
+/// `Some` ONLY for a 2xx carrying a non-empty `gate_id` — anything else means
+/// we cannot promise the agent a gate exists, and promising one that doesn't
+/// would strand the command with nobody asked.
+fn classify_park_response(status: reqwest::StatusCode, body: &str) -> Option<ParkedGate> {
+    if !status.is_success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let gate_id = v.get("gate_id")?.as_str()?.trim().to_string();
+    if gate_id.is_empty() {
+        return None;
+    }
+    Some(ParkedGate {
+        gate_id,
+        existing: v.get("existing").and_then(|e| e.as_bool()).unwrap_or(false),
+    })
 }
 
 /// Extract the Bash command from a claude-code PreToolUse payload. None for
@@ -1766,18 +1895,18 @@ mod tests {
                 mode: GateMode::AutoAllow,
             },
         ];
-        let (code, msg) = tool_gate_exit("gh issue comment 41 --body x", &kws);
+        let (code, msg) = tool_gate_exit("gh issue comment 41 --body x", &kws, None);
         assert_eq!(code, 2);
         assert!(
             msg.unwrap().contains("action_gate"),
             "gate message must route the agent to action_gate"
         );
         // auto_allow keyword → allow, no message.
-        assert_eq!(tool_gate_exit("git commit -m wip", &kws), (0, None));
+        assert_eq!(tool_gate_exit("git commit -m wip", &kws, None), (0, None));
         // unmatched command → allow.
-        assert_eq!(tool_gate_exit("ls -la", &kws).0, 0);
+        assert_eq!(tool_gate_exit("ls -la", &kws, None).0, 0);
         // empty config → fail-open allow.
-        assert_eq!(tool_gate_exit("gh issue comment 1", &[]).0, 0);
+        assert_eq!(tool_gate_exit("gh issue comment 1", &[], None).0, 0);
     }
 
     #[test]
@@ -1792,7 +1921,7 @@ mod tests {
             keyword: "rm -rf".into(),
             mode: GateMode::Gate,
         }];
-        let (code, msg) = tool_gate_exit("rm -rf ./scratch", &kws);
+        let (code, msg) = tool_gate_exit("rm -rf ./scratch", &kws, None);
         assert_eq!(code, 2);
         let msg = msg.expect("a gated command must carry a refusal message");
         // The exact command, twice: once as the block subject, once inside the
@@ -1808,6 +1937,82 @@ mod tests {
         assert!(
             msg.contains("out-of-band"),
             "refusal must state where the approved command's output arrives: {msg}"
+        );
+    }
+
+    // --- issues.md #29(ii): the refusal parks the gate itself ---------------
+
+    #[test]
+    fn parked_refusal_stops_the_agent_instead_of_routing_it() {
+        let gate = ParkedGate {
+            gate_id: "cid-7".into(),
+            existing: false,
+        };
+        let msg = gate_refusal_text("gh pr create --title x", Some(&gate));
+        assert!(msg.contains("gate_id: cid-7"), "got: {msg}");
+        assert!(msg.contains("gate_status(\"cid-7\")"), "got: {msg}");
+        assert!(
+            msg.contains("Do NOT call `action_gate`"),
+            "a parked command must not be parked a second time: {msg}"
+        );
+        // The dedupe case says so, so a retry doesn't read as a fresh ask.
+        let existing = ParkedGate {
+            gate_id: "cid-7".into(),
+            existing: true,
+        };
+        assert!(
+            gate_refusal_text("gh pr create --title x", Some(&existing))
+                .contains("ALREADY awaiting"),
+            "an already-pending command must be named as such"
+        );
+        // Both shapes keep the command and the anti-rewording clause.
+        for parked in [Some(&gate), None] {
+            let m = gate_refusal_text("gh pr create --title x", parked);
+            assert!(m.contains("gh pr create --title x"), "got: {m}");
+            assert!(m.contains("Do NOT rewrite the command"), "got: {m}");
+        }
+        // Unparked still routes the agent to action_gate itself.
+        assert!(gate_refusal_text("gh pr create --title x", None)
+            .contains("Call the `action_gate` MCP tool"));
+    }
+
+    #[test]
+    fn classify_park_response_promises_a_gate_only_on_a_real_one() {
+        use reqwest::StatusCode;
+        assert_eq!(
+            classify_park_response(StatusCode::OK, r#"{"gate_id":"abc","existing":true}"#),
+            Some(ParkedGate {
+                gate_id: "abc".into(),
+                existing: true
+            })
+        );
+        // `existing` defaults to false when absent.
+        assert_eq!(
+            classify_park_response(StatusCode::OK, r#"{"gate_id":"abc"}"#),
+            Some(ParkedGate {
+                gate_id: "abc".into(),
+                existing: false
+            })
+        );
+        // Anything that doesn't prove a gate exists → None, so the refusal
+        // falls back to telling the agent to call action_gate. Promising a
+        // gate that isn't there would strand the command with nobody asked.
+        assert_eq!(classify_park_response(StatusCode::OK, r#"{"ok":true}"#), None);
+        assert_eq!(classify_park_response(StatusCode::OK, r#"{"gate_id":"  "}"#), None);
+        assert_eq!(classify_park_response(StatusCode::OK, "not json"), None);
+        assert_eq!(
+            classify_park_response(StatusCode::INTERNAL_SERVER_ERROR, r#"{"gate_id":"abc"}"#),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn park_gate_returns_none_when_the_app_is_not_running() {
+        // No signaling-addr file → no network call, no gate promised.
+        let data = tempdir().unwrap();
+        assert_eq!(
+            park_gate(data.path(), "s1", "brian", "rm -rf /tmp/x").await,
+            None
         );
     }
 }

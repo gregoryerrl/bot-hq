@@ -40,51 +40,72 @@ impl SignalingBridge {
             // / no-match are handled defensively so a direct call still works.)
             None | Some(GateMode::AutoAllow) => self.execute_gated(&session_id, &command).await,
             Some(GateMode::Gate) => {
-                // Duplicate suppression: an identical command already awaiting
-                // approval gets the existing gate back instead of stacking a
-                // second confusable prompt. PENDING rows only — a re-fire after
-                // a reject is an intentional retry and parks fresh.
-                if let Some(storage) = self.storage.lock().await.clone() {
-                    if let Ok(Some(existing)) = storage
-                        .pending_gate_for_command(&session_id, &command)
-                        .await
-                    {
-                        return Ok(parked_gate_text(&existing, &command, true));
-                    }
-                }
-                // Park and return IMMEDIATELY (same contract as
-                // ask_user_choice). The old design held this RPC open and the
-                // MCP client timed out at ~60s while the human was still
-                // deciding — the agent saw "The operation timed out" and could
-                // not tell queued from failed (six such ghosts in the archive
-                // study). Execution now always happens at resolve time via the
-                // tray's exactly-once flip; the output arrives out-of-band.
-                let parked = self
-                    .ask_user_choice_inner(
-                        session_id.clone(),
-                        agent,
-                        format!("Run gated command in this session's repo?\n\n`{command}`"),
-                        vec!["Approve".to_string(), "Reject".to_string()],
-                        Some(ApprovalContext {
-                            kind: ViolationKind::ToolBlocklist,
-                            action: command.clone(),
-                            detail: Some("tool-gate".to_string()),
-                        }),
-                        None,
-                        false,
-                    )
+                let (gate_id, existing) = self
+                    .park_gated_command(&session_id, &agent, &command)
                     .await?;
-                let gate_id = serde_json::from_str::<serde_json::Value>(&parked)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("choice_id")
-                            .and_then(|c| c.as_str())
-                            .map(str::to_string)
-                    })
-                    .unwrap_or_default();
-                Ok(parked_gate_text(&gate_id, &command, false))
+                Ok(parked_gate_text(&gate_id, &command, existing))
             }
         }
+    }
+
+    /// Park a gated command for the user's approval and return
+    /// `(gate_id, already_pending)`.
+    ///
+    /// **Parks only — never matches keywords and never executes.** That is the
+    /// difference from [`Self::action_gate`], and it is why the PreToolUse
+    /// hook's `/hooks/tool-gate` route calls THIS: `action_gate` runs the
+    /// command outright on an `auto_allow`/no-match resolve, so a route wired to
+    /// it would execute without approval whenever its resolve disagreed with the
+    /// hook's (e.g. the session's keyword list edited between the two) — an
+    /// unapproved execution triggered by a call that was just blocked.
+    ///
+    /// Execution happens later, at resolve time, through the tray's
+    /// exactly-once flip (`resolve_choice` → `execute_gated`), so parking alone
+    /// is the whole job here.
+    pub(crate) async fn park_gated_command(
+        &self,
+        session_id: &str,
+        agent: &str,
+        command: &str,
+    ) -> Result<(String, bool)> {
+        // Duplicate suppression: an identical command already awaiting
+        // approval gets the existing gate back instead of stacking a
+        // second confusable prompt. PENDING rows only — a re-fire after
+        // a reject is an intentional retry and parks fresh.
+        if let Some(storage) = self.storage.lock().await.clone() {
+            if let Ok(Some(existing)) = storage.pending_gate_for_command(session_id, command).await {
+                return Ok((existing, true));
+            }
+        }
+        // Park and return IMMEDIATELY (same contract as ask_user_choice). The
+        // old design held the RPC open and the MCP client timed out at ~60s
+        // while the human was still deciding — the agent saw "The operation
+        // timed out" and could not tell queued from failed (six such ghosts in
+        // the archive study).
+        let parked = self
+            .ask_user_choice_inner(
+                session_id.to_string(),
+                agent.to_string(),
+                format!("Run gated command in this session's repo?\n\n`{command}`"),
+                vec!["Approve".to_string(), "Reject".to_string()],
+                Some(ApprovalContext {
+                    kind: ViolationKind::ToolBlocklist,
+                    action: command.to_string(),
+                    detail: Some("tool-gate".to_string()),
+                }),
+                None,
+                false,
+            )
+            .await?;
+        let gate_id = serde_json::from_str::<serde_json::Value>(&parked)
+            .ok()
+            .and_then(|v| {
+                v.get("choice_id")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        Ok((gate_id, false))
     }
 
     /// The `gate_status` MCP tool: current state of a parked gate by id.
@@ -681,6 +702,48 @@ mod tests {
             other => panic!("expected AgentReceiverDroppedFellBack, got {other:?}"),
         }
         assert!(marker.exists(), "confirmed stale command must execute");
+    }
+
+    #[tokio::test]
+    async fn park_gated_command_parks_dedupes_and_never_executes() {
+        // #29(ii): the hook's route calls THIS, not action_gate. Two properties
+        // matter. (1) It parks + dedupes like the agent-facing path. (2) It
+        // does NOT resolve keywords, so it cannot reach action_gate's
+        // auto_allow/no-match EXECUTE branch — a route wired to that would run
+        // a command with no approval whenever its resolve disagreed with the
+        // hook's. Proven here by parking a command that is NOT gated at all:
+        // action_gate would run it; this must merely park it.
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let marker = repo.path().join("ran.txt");
+        let bridge = bridge_with(data.path(), &[gk("echo", GateMode::Gate)], "s1", repo.path()).await;
+        let cmd = format!("touch {}", marker.display()); // matches no keyword
+
+        let (gate_id, existing) = bridge
+            .park_gated_command("s1", "brian", &cmd)
+            .await
+            .unwrap();
+        assert!(!gate_id.is_empty());
+        assert!(!existing, "first park is not a dedupe hit");
+        assert!(
+            !marker.exists(),
+            "park_gated_command must never execute — that is the whole point of \
+             not routing the hook through action_gate"
+        );
+        assert!(bridge.gate_status(&gate_id).await.unwrap().starts_with("pending"));
+
+        // Identical command while pending → same gate, flagged existing, so a
+        // retried Bash call can't stack a second card.
+        let (dup_id, dup_existing) = bridge
+            .park_gated_command("s1", "brian", &cmd)
+            .await
+            .unwrap();
+        assert_eq!(dup_id, gate_id);
+        assert!(dup_existing);
+
+        // Approval still executes at resolve time, through the normal path.
+        bridge.resolve_choice(&gate_id, "Approve".into()).await.unwrap();
+        assert!(marker.exists(), "approve runs the parked command");
     }
 
     #[tokio::test]

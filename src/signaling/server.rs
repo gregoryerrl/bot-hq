@@ -142,6 +142,13 @@ async fn handle_request(
         return Ok(handle_pre_push(req.into_body(), bridge).await);
     }
 
+    // Same deal for the PreToolUse Tool Gate hook: it parks the approval for the
+    // command it just blocked, so the agent doesn't have to convert the refusal
+    // into an `action_gate` call by hand (issues.md #29).
+    if path == "/hooks/tool-gate" {
+        return Ok(handle_tool_gate(req.into_body(), bridge).await);
+    }
+
     let caller = match parse_path(&path) {
         Some(c) => c,
         None => {
@@ -230,6 +237,69 @@ async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Respon
     };
 
     text_response(StatusCode::OK, &json!({ "approved": approved }).to_string())
+}
+
+/// Handle `POST /hooks/tool-gate` from the PreToolUse Tool Gate hook. Body:
+/// `{ "session_id": "...", "agent": "brian"?, "command": "..." }`. Parks the
+/// blocked command for the user's approval and replies at once with
+/// `{ "gate_id": "...", "existing": <bool> }` — `existing` when an identical
+/// command was already pending, which is how a retry can't stack a second card.
+///
+/// Deliberately calls [`SignalingBridge::park_gated_command`], NOT
+/// `action_gate`: `action_gate` re-resolves the keyword list and EXECUTES the
+/// command on an `auto_allow`/no-match result. Wiring this route to it would
+/// run a command with no approval whenever its resolve disagreed with the
+/// hook's — and would make this the first localhost route that can execute
+/// anything (`/hooks/pre-push` only parks an approval). The hook already
+/// matched; this route's only job is to park.
+///
+/// The hook treats any non-2xx / malformed reply as "not parked" and falls back
+/// to telling the agent to call `action_gate` itself, so an error here costs
+/// convenience, never safety — the command stays blocked either way.
+async fn handle_tool_gate(body: Incoming, bridge: Arc<SignalingBridge>) -> Response<Full<Bytes>> {
+    let bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => return text_response(StatusCode::BAD_REQUEST, &format!("body read failed: {e}")),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return text_response(StatusCode::BAD_REQUEST, &format!("bad json: {e}")),
+    };
+    let session_id = v
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty());
+    let Some(session_id) = session_id else {
+        return text_response(StatusCode::BAD_REQUEST, "missing session_id");
+    };
+    let command = v
+        .get("command")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.trim().is_empty());
+    let Some(command) = command else {
+        return text_response(StatusCode::BAD_REQUEST, "missing command");
+    };
+    // Only HANDS runs gated Bash; default to brian when the hook couldn't read
+    // BOT_HQ_AGENT (affects only the tray label).
+    let agent = v
+        .get("agent")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("brian");
+
+    match bridge.park_gated_command(session_id, agent, command).await {
+        Ok((gate_id, existing)) => text_response(
+            StatusCode::OK,
+            &json!({ "gate_id": gate_id, "existing": existing }).to_string(),
+        ),
+        Err(e) => {
+            warn!(%session_id, error = %e, "tool-gate auto-park failed");
+            text_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("park failed: {e}"),
+            )
+        }
+    }
 }
 
 fn parse_path(path: &str) -> Option<CallerIdentity> {
@@ -427,6 +497,61 @@ mod tests {
         bridge.resolve_choice(&cid, "Reject".into()).await.unwrap();
         let resp = call.await.unwrap();
         assert_eq!(resp["approved"], json!(false), "reject → approved:false");
+    }
+
+    #[tokio::test]
+    async fn tool_gate_route_parks_then_dedupes() {
+        // #29(ii): the PreToolUse hook POSTs the command it just blocked and
+        // gets a gate_id back AT ONCE — no waiting on the user, unlike
+        // /hooks/pre-push. A repeat of the same command returns the same gate
+        // flagged existing, so a retried Bash call can't stack a second card.
+        use crate::policy::ViolationsLog;
+        let data = tempfile::tempdir().unwrap();
+        let bridge =
+            SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        // The tray row is FK'd to `sessions`; without the session the insert is
+        // swallowed and dedupe has nothing to find.
+        storage.create_session("s1", "gate", None).await.unwrap();
+        bridge.set_storage(storage).await;
+        let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+        let url = format!("http://{}/hooks/tool-gate", server.local_addr);
+        let client = reqwest::Client::new();
+        let post = |body: String| {
+            let (client, url) = (client.clone(), url.clone());
+            async move {
+                let resp = client
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .send()
+                    .await
+                    .unwrap();
+                let status = resp.status();
+                (status, resp.text().await.unwrap())
+            }
+        };
+
+        let body = json!({ "session_id": "s1", "agent": "brian", "command": "gh pr create -t x" })
+            .to_string();
+        let (status, txt) = post(body.clone()).await;
+        assert_eq!(status, StatusCode::OK);
+        let first: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        let gate_id = first["gate_id"].as_str().unwrap().to_string();
+        assert!(!gate_id.is_empty(), "route must return a gate id");
+        assert_eq!(first["existing"], json!(false));
+
+        let (_, txt) = post(body).await;
+        let dup: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        assert_eq!(dup["gate_id"].as_str().unwrap(), gate_id, "dedupe");
+        assert_eq!(dup["existing"], json!(true));
+
+        // Missing command → 400 (the hook then falls back to its old wording).
+        let (status, _) = post(json!({ "session_id": "s1" }).to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Missing session → 400 as well.
+        let (status, _) = post(json!({ "command": "gh pr create -t x" }).to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
