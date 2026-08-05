@@ -101,6 +101,7 @@ impl Storage {
         path_column: &str,
         project_id: Option<&str>,
         query: Option<&str>,
+        agent_only: bool,
     ) -> Result<Vec<T>>
     where
         T: for<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> + Send + Unpin,
@@ -114,11 +115,26 @@ impl Storage {
             matches!(table, "cl_index" | "cl_folders"),
             "cl_search_table: non-constant table name {table:?} — identifiers must not be dynamic"
         );
+        // `agent_only` filters user-hidden files; only cl_index carries the flag.
+        debug_assert!(
+            !agent_only || table == "cl_index",
+            "agent_only visibility filter is a cl_index concept"
+        );
+        // Splice shapes for the visibility filter (const strings, no input):
+        // after a `WHERE x = ?` clause vs prefixing a bare OR-group.
+        let vis_and = if agent_only { " AND agent_visible = 1" } else { "" };
+        let vis_pre = if agent_only { "agent_visible = 1 AND " } else { "" };
+        let vis_where = if agent_only { " WHERE agent_visible = 1" } else { "" };
         let like = query.map(|q| format!("%{}%", q.to_lowercase()));
-        let select = format!("SELECT {} FROM {table}", cl_columns(path_column));
+        let columns = if table == "cl_index" {
+            cl_index_columns()
+        } else {
+            cl_columns(path_column)
+        };
+        let select = format!("SELECT {columns} FROM {table}");
         let rows: Vec<T> = match (project_id, like) {
             (Some(pid), Some(q)) => sqlx::query_as::<_, T>(&format!(
-                "{select} WHERE project_id = ? AND ( \
+                "{select} WHERE project_id = ?{vis_and} AND ( \
                     LOWER({path_column}) LIKE ? \
                     OR LOWER(description) LIKE ? \
                     OR LOWER(IFNULL(tags, '')) LIKE ?) \
@@ -131,15 +147,15 @@ impl Storage {
             .fetch_all(&self.pool)
             .await?,
             (Some(pid), None) => sqlx::query_as::<_, T>(&format!(
-                "{select} WHERE project_id = ? ORDER BY updated_at DESC"
+                "{select} WHERE project_id = ?{vis_and} ORDER BY updated_at DESC"
             ))
             .bind(pid)
             .fetch_all(&self.pool)
             .await?,
             (None, Some(q)) => sqlx::query_as::<_, T>(&format!(
-                "{select} WHERE LOWER({path_column}) LIKE ? \
+                "{select} WHERE {vis_pre}(LOWER({path_column}) LIKE ? \
                     OR LOWER(description) LIKE ? \
-                    OR LOWER(IFNULL(tags, '')) LIKE ? \
+                    OR LOWER(IFNULL(tags, '')) LIKE ?) \
                  ORDER BY updated_at DESC"
             ))
             .bind(&q)
@@ -148,7 +164,7 @@ impl Storage {
             .fetch_all(&self.pool)
             .await?,
             (None, None) => sqlx::query_as::<_, T>(&format!(
-                "{select} ORDER BY updated_at DESC"
+                "{select}{vis_where} ORDER BY updated_at DESC"
             ))
             .fetch_all(&self.pool)
             .await?,
@@ -157,10 +173,17 @@ impl Storage {
     }
 }
 
-/// Column projection for `cl_index` / `cl_folders` reads. The path column differs
-/// per table (`file_path` vs `folder_path`); everything else is shared, so
-/// `get_cl_index` / `get_folder` and `cl_search_table` build from this and can't
-/// drift. `path_column` is a caller-controlled const, never user input.
+/// Column projection for `cl_folders` reads (and the shared base of
+/// `cl_index_columns`). The path column differs per table (`file_path` vs
+/// `folder_path`), so `get_folder` and `cl_search_table` build from this and
+/// can't drift. `path_column` is a caller-controlled const, never user input.
 fn cl_columns(path_column: &str) -> String {
     format!("id, project_id, {path_column}, description, tags, created_at, updated_at")
+}
+
+/// Column projection for `cl_index` reads — the shared list plus
+/// `agent_visible`, which only cl_index carries (selecting it from cl_folders
+/// would be a SQL error, hence the per-table split in `cl_search_table`).
+fn cl_index_columns() -> String {
+    format!("{}, agent_visible", cl_columns("file_path"))
 }

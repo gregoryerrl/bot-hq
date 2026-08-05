@@ -87,8 +87,39 @@ impl Storage {
         project_id: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<ClIndexEntry>> {
-        self.cl_search_table("cl_index", "file_path", project_id, query)
+        self.cl_search_table("cl_index", "file_path", project_id, query, false)
             .await
+    }
+
+    /// Agent-facing variant of [`Self::cl_index_search`]: excludes rows the
+    /// user marked `agent_visible = 0` (personal notes / diary). The UI and
+    /// rescan/orphan sync MUST keep using the unfiltered variant — hiding a
+    /// file from agents must not orphan it from the index.
+    pub async fn cl_index_search_agent(
+        &self,
+        project_id: Option<&str>,
+        query: Option<&str>,
+    ) -> Result<Vec<ClIndexEntry>> {
+        self.cl_search_table("cl_index", "file_path", project_id, query, true)
+            .await
+    }
+
+    /// Flip a file's agent visibility. Returns false when no such row exists.
+    pub async fn set_cl_agent_visibility(
+        &self,
+        project_id: &str,
+        file_path: &str,
+        visible: bool,
+    ) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE cl_index SET agent_visible = ? WHERE project_id = ? AND file_path = ?",
+        )
+        .bind(visible as i64)
+        .bind(project_id)
+        .bind(file_path)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     /// Lookup by (project, path) — used for sync/touch and audit linking.
@@ -99,7 +130,7 @@ impl Storage {
     ) -> Result<Option<ClIndexEntry>> {
         let row = sqlx::query_as::<_, ClIndexEntry>(&format!(
             "SELECT {} FROM cl_index WHERE project_id = ? AND file_path = ?",
-            cl_columns("file_path")
+            cl_index_columns()
         ))
         .bind(project_id)
         .bind(file_path)
@@ -220,7 +251,7 @@ impl Storage {
         project: Option<&str>,
         query: Option<&str>,
     ) -> Result<Vec<ClFolder>> {
-        self.cl_search_table("cl_folders", "folder_path", project, query)
+        self.cl_search_table("cl_folders", "folder_path", project, query, false)
             .await
     }
 }
@@ -244,6 +275,45 @@ mod tests {
         // Scoped by session: s2 has its own row, an unknown session has none.
         assert_eq!(s.cl_reads_for_session("s2").await.unwrap().len(), 1);
         assert!(s.cl_reads_for_session("nope").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_visibility_filters_agent_search_and_survives_upsert() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("p", "p", None, None, None).await.unwrap();
+        s.upsert_cl_index("p", "notes.md", "d", None).await.unwrap();
+        s.upsert_cl_index("p", "diary.md", "d", None).await.unwrap();
+
+        // Default: visible everywhere.
+        assert_eq!(s.cl_index_search_agent(Some("p"), None).await.unwrap().len(), 2);
+
+        // Hidden: gone from the agent variant, still in the unfiltered one.
+        assert!(s.set_cl_agent_visibility("p", "diary.md", false).await.unwrap());
+        let agent = s.cl_index_search_agent(Some("p"), None).await.unwrap();
+        assert_eq!(agent.len(), 1);
+        assert_eq!(agent[0].file_path, "notes.md");
+        let all = s.cl_index_search(Some("p"), None).await.unwrap();
+        assert_eq!(all.len(), 2, "UI/rescan surface keeps hidden rows");
+        assert!(all.iter().any(|r| r.file_path == "diary.md" && !r.agent_visible));
+
+        // Query-filtered agent search excludes it too (LIKE branch).
+        assert!(s
+            .cl_index_search_agent(Some("p"), Some("diary"))
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A rescan-style upsert must NOT resurrect visibility.
+        s.upsert_cl_index("p", "diary.md", "new description", None).await.unwrap();
+        assert!(s
+            .cl_index_search_agent(Some("p"), None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.file_path != "diary.md"));
+
+        // Unknown row: setter reports false.
+        assert!(!s.set_cl_agent_visibility("p", "nope.md", true).await.unwrap());
     }
 
     #[tokio::test]

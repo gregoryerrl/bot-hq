@@ -42,6 +42,19 @@ impl SignalingBridge {
                 content.len()
             );
         }
+        // User-hidden files (agent_visible = 0) refuse AGENT writes: an agent
+        // that can't see a diary in search must not be able to overwrite it by
+        // guessing its path. The Library UI edits bypass this (different path).
+        if let Some(storage) = self.storage.lock().await.clone() {
+            if let Ok(Some(row)) = storage.get_cl_index(&project, &file_path).await {
+                if !row.agent_visible {
+                    anyhow::bail!(
+                        "'{file_path}' is marked user-only (hidden from agents) — \
+                         ask the user to edit it or unhide it in the Library tab"
+                    );
+                }
+            }
+        }
         let project_root = self
             .cl_project_root(&project)
             .await
@@ -521,6 +534,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("1 MiB"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn cl_write_file_refuses_user_hidden_files() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        storage.upsert_project("bot-hq", "bot-hq", None, None, None).await.unwrap();
+        std::fs::create_dir_all(tmp.path().join("library/projects/bot-hq")).unwrap();
+        std::fs::write(tmp.path().join("library/projects/bot-hq/diary.md"), "mine").unwrap();
+        storage.upsert_cl_index("bot-hq", "diary.md", "d", None).await.unwrap();
+        storage.set_cl_agent_visibility("bot-hq", "diary.md", false).await.unwrap();
+
+        let err = bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "diary.md".to_string(),
+                "overwrite attempt".to_string(),
+                false,
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("user-only"), "got: {err}");
+        // File untouched.
+        let body = std::fs::read_to_string(tmp.path().join("library/projects/bot-hq/diary.md")).unwrap();
+        assert_eq!(body, "mine");
     }
 
     #[tokio::test]

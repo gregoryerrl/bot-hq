@@ -331,7 +331,8 @@ async fn spawn_session_handle(
     // knows what project context EXISTS to pull. Bodies stay pull-only. Best-
     // effort; None for `_globals` / repo-less sessions.
     let cl_index: Option<Vec<ClIndexEntry>> = match project.as_deref() {
-        Some(p) => storage.cl_index_search(Some(p), None).await.ok(),
+        // Agent-facing variant: user-hidden files stay out of the primer too.
+        Some(p) => storage.cl_index_search_agent(Some(p), None).await.ok(),
         None => None,
     };
 
@@ -1426,6 +1427,7 @@ mod tests {
             tags: None,
             created_at: String::new(),
             updated_at: String::new(),
+            agent_visible: true,
         }
     }
 

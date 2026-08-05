@@ -28,6 +28,31 @@ pub async fn cl_set_description(
     Ok(())
 }
 
+/// Flip a CL file's agent visibility (user-only ↔ agent-visible). DB-only —
+/// no disk change, so the fs watcher can't announce it; emit `cl:changed`
+/// ourselves for UI freshness. Errors when the row doesn't exist (the toggle
+/// only renders on indexed files).
+#[tauri::command]
+#[specta::specta]
+pub async fn cl_set_agent_visibility(
+    app: tauri::AppHandle,
+    storage: tauri::State<'_, Arc<Storage>>,
+    project: String,
+    file_path: String,
+    visible: bool,
+) -> Result<(), AppError> {
+    let flipped = storage
+        .set_cl_agent_visibility(&project, &file_path, visible)
+        .await?;
+    if !flipped {
+        return Err(AppError::NotFound(format!(
+            "no CL index row for {project}/{file_path}"
+        )));
+    }
+    emit_cl_changed(&app, Some(&project));
+    Ok(())
+}
+
 /// Project as exposed to the frontend. Drives the project-filter dropdown
 /// in ContextLibrary and (eventually) the New-Session repo picker.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
@@ -72,6 +97,7 @@ pub struct ClIndexEntryView {
     pub tags: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub agent_visible: bool,
 }
 
 impl From<ClIndexEntry> for ClIndexEntryView {
@@ -84,6 +110,7 @@ impl From<ClIndexEntry> for ClIndexEntryView {
             tags: e.tags,
             created_at: e.created_at,
             updated_at: e.updated_at,
+            agent_visible: e.agent_visible,
         }
     }
 }

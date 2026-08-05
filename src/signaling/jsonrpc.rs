@@ -751,16 +751,17 @@ async fn call_tool(
             let project = args.get("project").and_then(Value::as_str);
             let query = args.get("query").and_then(Value::as_str);
             let mut rows = bridge
-                .cl_index_search(project, query)
+                .cl_index_search_agent(project, query)
                 .await
                 .map_err(internal_err_no_prefix)?;
             // Project-scoped searches also list `_globals` rows (the `project`
             // field distinguishes them) — same always-reachable contract as
-            // cl_retrieve. `None` already spans every project.
+            // cl_retrieve. `None` already spans every project. The _agent
+            // variant keeps user-hidden files out of both scopes.
             if let Some(p) = project {
                 if p != crate::storage::Project::GLOBALS {
                     let globals = bridge
-                        .cl_index_search(Some(crate::storage::Project::GLOBALS), query)
+                        .cl_index_search_agent(Some(crate::storage::Project::GLOBALS), query)
                         .await
                         .map_err(internal_err_no_prefix)?;
                     rows.extend(globals);

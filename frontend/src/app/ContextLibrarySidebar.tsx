@@ -1,4 +1,5 @@
-import { memo, useMemo, type ReactNode } from "react";
+import { memo, useMemo, type MouseEvent, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/cn";
 import type {
   ClIndexEntryView,
@@ -11,6 +12,8 @@ import {
   CollapseAllIcon,
   collapseKey,
   type CtxTarget,
+  EyeIcon,
+  EyeOffIcon,
   FileIcon,
   FolderIcon,
   type OpenTab,
@@ -608,6 +611,21 @@ function FileRowImpl({
   onOpenFile: (project: string, filePath: string) => void;
   onContextMenu: (target: CtxTarget, x: number, y: number) => void;
 }) {
+  // Agent-visibility toggle. DB flag only: hides the file from agent CL
+  // search/retrieval and blocks agent cl_write_file — it does NOT stop a raw
+  // path read (that's the read-scope gate, a separate concern). The row
+  // refreshes via the cl:changed emit from cl_set_agent_visibility.
+  const toggleVisibility = (e: MouseEvent) => {
+    e.stopPropagation();
+    invoke("cl_set_agent_visibility", {
+      project: file.project_id,
+      filePath: file.file_path,
+      visible: !file.agent_visible,
+    }).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn("cl_set_agent_visibility failed", err);
+    });
+  };
   return (
     <button
       type="button"
@@ -623,14 +641,34 @@ function FileRowImpl({
       title={file.file_path}
       style={{ paddingLeft: `${depth * INDENT_PX + 8}px` }}
       className={cn(
-        "flex w-full items-center gap-1 truncate border-l-2 py-1 pr-2 text-left font-code-sm text-code-sm transition-colors",
+        "group flex w-full items-center gap-1 truncate border-l-2 py-1 pr-2 text-left font-code-sm text-code-sm transition-colors",
         isActive
           ? "border-primary bg-primary/15 text-on-surface"
           : "border-transparent text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
       )}
     >
       <FileIcon className="shrink-0 text-on-surface-variant/60" />
-      <span className="truncate">{baseName(file.file_path)}</span>
+      <span className={cn("truncate", !file.agent_visible && "opacity-50")}>
+        {baseName(file.file_path)}
+      </span>
+      <span
+        role="button"
+        tabIndex={-1}
+        onClick={toggleVisibility}
+        title={
+          file.agent_visible
+            ? "Visible to agents — click to make user-only"
+            : "User-only: hidden from agent CL search/retrieval (raw path reads aren't blocked) — click to unhide"
+        }
+        className={cn(
+          "ml-auto shrink-0 rounded p-0.5 transition-opacity hover:text-on-surface",
+          file.agent_visible
+            ? "opacity-0 text-on-surface-variant/60 group-hover:opacity-100"
+            : "opacity-100 text-warning",
+        )}
+      >
+        {file.agent_visible ? <EyeIcon /> : <EyeOffIcon />}
+      </span>
     </button>
   );
 }

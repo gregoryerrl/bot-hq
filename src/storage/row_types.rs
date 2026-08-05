@@ -518,6 +518,9 @@ pub struct ClIndexEntry {
     pub tags: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// false = user-only (hidden from agent-facing search/retrieval and
+    /// refused by agent cl_write_file); the Library UI always sees the file.
+    pub agent_visible: bool,
 }
 
 /// One audit row recorded each time an agent reads a CL file.

@@ -78,7 +78,8 @@ impl SignalingBridge {
         }
     }
 
-    /// Read-side discovery for agents. Wraps storage.cl_index_search.
+    /// Read-side discovery, unfiltered — the Library UI and rescan sync (which
+    /// must see user-hidden rows). Wraps storage.cl_index_search.
     pub async fn cl_index_search(
         &self,
         project: Option<&str>,
@@ -89,6 +90,20 @@ impl SignalingBridge {
             return Ok(Vec::new());
         };
         storage.cl_index_search(project, query).await
+    }
+
+    /// Agent/plugin-facing discovery: excludes rows the user marked
+    /// `agent_visible = 0`. Wraps storage.cl_index_search_agent.
+    pub async fn cl_index_search_agent(
+        &self,
+        project: Option<&str>,
+        query: Option<&str>,
+    ) -> Result<Vec<ClIndexEntry>> {
+        let storage_guard = self.storage.lock().await;
+        let Some(storage) = storage_guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        storage.cl_index_search_agent(project, query).await
     }
 
     /// Read-side ranked retrieval for agents: returns the CL atom bodies best

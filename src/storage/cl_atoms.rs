@@ -163,9 +163,16 @@ impl Storage {
         // the Rust-side token-budget trim. rowid is the ultimate key: a section
         // can emit multiple sub-atoms sharing one heading_path, so document order
         // keeps the budget trim deterministic.
+        // Retrieval is an agent/plugin surface, so user-hidden files
+        // (cl_index.agent_visible = 0) are excluded unconditionally. The probe
+        // rides cl_index's UNIQUE(project_id, file_path) index (0004).
         let mut sql = String::from(
             "SELECT project_id, file_path, heading_path, body, code_hash, mtime FROM cl_atoms \
-             WHERE project_id IN (?, ?) AND cl_atoms MATCH ?",
+             WHERE project_id IN (?, ?) AND cl_atoms MATCH ? \
+             AND NOT EXISTS (SELECT 1 FROM cl_index i \
+                 WHERE i.project_id = cl_atoms.project_id \
+                 AND i.file_path = cl_atoms.file_path \
+                 AND i.agent_visible = 0)",
         );
         if let Some(paths) = path_filter {
             sql.push_str(" AND file_path IN (");
@@ -438,6 +445,31 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.file_path == "notes.md"), "project-scoped");
         assert_eq!(hits[0].heading_path, "Migrations", "best match ranks first");
+    }
+
+    #[tokio::test]
+    async fn cl_retrieve_excludes_user_hidden_files() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("p", "p", None, None, None).await.unwrap();
+        s.replace_atoms_for_file("p", "notes.md", &[atom("H", "secret keyword")], "t")
+            .await
+            .unwrap();
+        s.replace_atoms_for_file("p", "diary.md", &[atom("H", "secret keyword")], "t")
+            .await
+            .unwrap();
+        s.upsert_cl_index("p", "notes.md", "d", None).await.unwrap();
+        s.upsert_cl_index("p", "diary.md", "d", None).await.unwrap();
+        s.set_cl_agent_visibility("p", "diary.md", false).await.unwrap();
+
+        let hits = s.cl_retrieve("p", "secret keyword", None, 10_000, false).await.unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter().all(|h| h.file_path != "diary.md"),
+            "user-hidden file must never surface in retrieval"
+        );
+        // A file with atoms but no index row (no visibility verdict) stays
+        // retrievable — NOT EXISTS is a deny-list, not an allow-list.
+        assert!(hits.iter().any(|h| h.file_path == "notes.md"));
     }
 
     #[tokio::test]

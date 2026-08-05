@@ -250,8 +250,9 @@ pub(crate) async fn dispatch(
         "cl_index_search" => {
             let project = opt_str(args, "project");
             let query = opt_str(args, "query");
+            // Agent-aligned surface: user-hidden files stay hidden here too.
             let rows = bridge
-                .cl_index_search(project.as_deref(), query.as_deref())
+                .cl_index_search_agent(project.as_deref(), query.as_deref())
                 .await?;
             let out: Vec<PluginClIndexEntryView> = rows
                 .into_iter()
