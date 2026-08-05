@@ -1629,6 +1629,12 @@ export type SessionRuntime = { session_id: string; activity: string;
  */
 brian_busy: boolean; rain_busy: boolean; brian_health: string | null; rain_health: string | null; 
 /**
+ * Idle-unflagged attention state ("idle_unflagged" or None = clear).
+ * Seeds the "needs direction" chip on mount; live updates arrive via
+ * `session:attention`.
+ */
+attention: string | null; 
+/**
  * Peer-forward router liveness (duo only). `None` = solo, or never reported
  * (assume alive — the event fires only on change). Seeds the UI router dot.
  */
