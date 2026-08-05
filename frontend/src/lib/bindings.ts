@@ -422,6 +422,20 @@ async clSetDescription(project: string, filePath: string, description: string, t
 }
 },
 /**
+ * Flip a CL file's agent visibility (user-only ↔ agent-visible). DB-only —
+ * no disk change, so the fs watcher can't announce it; emit `cl:changed`
+ * ourselves for UI freshness. Errors when the row doesn't exist (the toggle
+ * only renders on indexed files).
+ */
+async clSetAgentVisibility(project: string, filePath: string, visible: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cl_set_agent_visibility", { project, filePath, visible }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Upsert a folder's description + tags (`cl_folders`). Used by the Context
  * Library folder-view editor. Routes through the bridge helper so the project
  * row is ensured to exist first (same path as the agent-facing
@@ -1175,7 +1189,7 @@ truncated: boolean;
  */
 binary: boolean }
 export type ClFolderView = { id: number; project_id: string; folder_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
-export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string }
+export type ClIndexEntryView = { id: number; project_id: string; file_path: string; description: string; tags: string | null; created_at: string; updated_at: string; agent_visible: boolean }
 export type ClRescanReportView = { added: string[]; touched: string[]; orphaned: string[] }
 /**
  * The full resolved view of the user's Claude Code config.
