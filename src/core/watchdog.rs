@@ -311,9 +311,11 @@ async fn deliver_idle_nudge(
         "Session idled with no question or halt parked — nudged Brian to declare state.";
     const NUDGE: &str = "[System: this session went idle with no question parked and no \
         halt flag — the user cannot tell settled from stalled. Declare state now, with a \
-        tool rather than bare prose: continue the work if any remains; park a question \
-        with your recommendation (ask_user_choice); yield with a reason (halt / \
-        mark_awaiting_user); or ask to close if the task is done.]";
+        tool rather than bare prose: continue work the user already directed if any \
+        remains; park a question with your recommendation (ask_user_choice); yield with \
+        a reason (halt / mark_awaiting_user); or ask to close if the task is done. Never \
+        invent a direction or new work to satisfy this nudge — if no user-given \
+        direction exists, the right response IS the question: ask which direction.]";
     match idle_watch
         .storage
         .insert_message(session_id, Author::User, MessageKind::SystemNotice, NOTICE)

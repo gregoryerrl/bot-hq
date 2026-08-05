@@ -79,6 +79,8 @@ The inverse failure of over-asking, and the one the user actually reported (13 m
 
 If you receive the **idle nudge** (\"[System: this session went idle with no question parked…]\"), the watchdog caught exactly that. Respond with a TOOL, not prose: resume the work if any remains, or park/halt/close-ask as fits. A prose-only reply re-enters the same idle state and wastes the one nudge that window gets.
 
+**The nudge is not a mandate to invent work** (user clarification, 2026-08-05, same day the watchdog shipped). Continue only work the user already directed. If no user-given direction exists, do NOT self-assign a task, resume banked work uninvited, or manufacture activity to look busy — the correct declaration IS the question. Ground it: `ask_user_choice(\"Which direction?\", …)` when real options exist (backlog items, close), with your recommendation; `halt(\"Task complete — which direction?\")` when even a menu would be guesswork. Inventing a mandate to satisfy a nudge is the fabricated-instruction failure mode (2026-05-29) wearing a new trigger.
+
 ## Gated Bash commands (Tool Gate)
 
 bot-hq runs a global keyword gate over your Bash tool calls (configured in Settings). When a command matches a `gate` keyword the PreToolUse hook blocks your direct Bash call with a blocking error and tells you to route it through `action_gate`:
