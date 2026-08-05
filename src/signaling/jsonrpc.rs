@@ -446,6 +446,14 @@ async fn call_tool(
                 .get("archive")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // #31 close-out staleness sweep, checked BEFORE (and independently
+            // of) the delta nudge: an agent that DID write the CL gets no delta
+            // nudge, and that is exactly the agent whose rewrite may have left
+            // other files citing a retired concept. Fires at most once and never
+            // blocks — the next close_session proceeds either way.
+            if let Some(report) = bridge.staleness_sweep(&caller.session_id).await {
+                return Ok(ToolCallResult::text(report));
+            }
             // A3b (adherence): soft-gate the FIRST close with no CL learnings
             // delta this session — nudge to persist the delta, then close on
             // the retry. The UI force-close path (tauri_cmd) is separate + ungated.
@@ -1189,6 +1197,78 @@ mod tests {
             SignalingEvent::SessionCloseRequest { .. } => {}
             other => panic!("expected SessionCloseRequest on retry, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn close_session_surfaces_the_staleness_sweep_before_the_delta_nudge() {
+        // #31: an agent that wrote the CL clears the delta nudge — and is exactly
+        // the one whose rewrite can strand a retired concept elsewhere. The sweep
+        // therefore runs first and independently; it fires once, then the close
+        // proceeds (advisory, never a hold).
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("library/projects/bot-hq");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("conventions.md"), "The duo maintains this.\n").unwrap();
+        std::fs::write(proj.join("vision.md"), "The duo is the core of it.\n").unwrap();
+        let bridge = SignalingBridge::with_policy(
+            crate::policy::ViolationsLog::new(tmp.path()),
+            tmp.path().to_path_buf(),
+        );
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage
+            .upsert_project("bot-hq", "bot-hq", None, None, None)
+            .await
+            .unwrap();
+        storage.create_session("s1", "sweep", None).await.unwrap();
+        bridge.set_storage(storage).await;
+        let mut sub = bridge.subscribe();
+        let caller = caller();
+
+        bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "vision.md".to_string(),
+                "The harness is the core of it, restated at a similar length.".to_string(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let first = dispatch(
+            req("tools/call", json!({"name": "close_session", "arguments": {}}), 1),
+            &caller,
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let text = serde_json::to_value(&first).unwrap()["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("staleness sweep"), "got: {text}");
+        assert!(text.contains("conventions.md:1"), "got: {text}");
+        assert!(
+            sub.try_recv().is_err(),
+            "the sweep must not request the close"
+        );
+
+        let second = dispatch(
+            req("tools/call", json!({"name": "close_session", "arguments": {}}), 2),
+            &caller,
+            &bridge,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The CL write already lifted the delta gate, so the retry closes.
+        assert!(serde_json::to_value(&second).unwrap()["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("close requested"));
     }
 
     #[tokio::test]

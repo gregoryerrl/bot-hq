@@ -68,7 +68,8 @@ impl SignalingBridge {
         let fp = file_path.clone();
         let proj = project.clone();
         let commit_summary = format!("cl: {project}/{file_path} ({agent})");
-        let replaced = tokio::task::spawn_blocking(move || -> Result<(bool, Option<String>)> {
+        let replaced =
+            tokio::task::spawn_blocking(move || -> Result<(bool, Option<String>, Vec<String>)> {
             let root_real = project_root.canonicalize().with_context(|| {
                 format!("canonicalizing CL project root {}", project_root.display())
             })?;
@@ -100,24 +101,29 @@ impl SignalingBridge {
                 }
                 content
             };
-            // Advisory status-flip lint (issues.md #19) — computed against the
-            // pre-write body, never blocks the write. Fail-open on read errors.
-            let lint = if replaced {
-                std::fs::read_to_string(&target)
-                    .ok()
-                    .and_then(|old| status_flip_warning(&old, &final_content))
-            } else {
-                None
+            // Both advisories read the pre-write body once; neither ever blocks
+            // the write, and both fail open on a read error.
+            let old_body = replaced.then(|| std::fs::read_to_string(&target).ok()).flatten();
+            // Advisory status-flip lint (issues.md #19).
+            let lint = old_body
+                .as_deref()
+                .and_then(|old| status_flip_warning(old, &final_content));
+            // Retired concepts, for the close-out staleness sweep (issues.md
+            // #31). An append can only add, so it retires nothing.
+            let retired = match (&old_body, append) {
+                (Some(old), false) => retired_terms(old, &final_content),
+                _ => Vec::new(),
             };
             atomic_write(&target, &final_content)?;
             if let Some(lib) = library_root {
                 git_version_library(&lib, &commit_summary);
             }
-            Ok((replaced, lint))
+            Ok((replaced, lint, retired))
         })
         .await
         .context("cl_write_file task panicked")??;
-        let (replaced, lint) = replaced;
+        let (replaced, lint, retired) = replaced;
+        self.record_retired_terms(&session_id, &project, retired).await;
         if let Err(err) = self.cl_rescan(&project).await {
             tracing::warn!(
                 %err,
@@ -251,6 +257,124 @@ fn status_flip_warning(old_body: &str, new_body: &str) -> Option<String> {
          the flip if it was inferred.",
         flags.join(", ")
     ))
+}
+
+/// Words too common to be a retired *concept*. The "absent from the whole new
+/// body" filter already does most of the work; this stops an ordinary sentence
+/// rewrite from seeding the close-out sweep with prose noise.
+const SWEEP_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was",
+    "one", "our", "out", "day", "get", "has", "him", "his", "how", "its", "new", "now", "old",
+    "see", "two", "way", "who", "did", "put", "say", "she", "too", "use", "that", "with", "have",
+    "this", "will", "your", "from", "they", "know", "want", "been", "good", "much", "some",
+    "time", "very", "when", "come", "here", "just", "like", "long", "make", "many", "over",
+    "such", "take", "than", "them", "well", "were", "what", "only", "then", "into", "also",
+    "back", "even", "most", "still", "there", "would", "about", "which", "their", "could",
+    "other", "after", "first", "these", "where", "before", "because", "should", "instead",
+    "already", "always", "never", "every", "however", "though", "while", "since", "without",
+    "within", "between", "another", "through", "against", "across", "under", "above", "below",
+    "again", "once", "each", "both", "same", "more", "less", "must", "being", "does", "made",
+    "need", "needs", "keep", "kept", "left", "right", "thing", "things",
+];
+
+/// Concepts this write RETIRED: tokens present in `old` that no longer appear
+/// anywhere in `new`. Seeds the close-out staleness sweep (issues.md #31) —
+/// a session that renames or drops a concept in one CL file should be told
+/// which OTHER files still cite the old one, mechanically, instead of relying
+/// on an agent remembering to grep. Ranked by how load-bearing the term looked
+/// in the old body (occurrence count, then length) and capped, so a wholesale
+/// rewrite yields the handful of real concepts rather than its whole vocabulary.
+///
+/// Deliberately token-level and case-insensitive: the live specimen was the
+/// word "duo" surviving in `conventions.md:3` for hours after the harness
+/// framing rule retired it (2026-08-05).
+pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
+    const MIN_LEN: usize = 3;
+    const MAX_TERMS: usize = 12;
+    fn tokens(body: &str) -> impl Iterator<Item = String> + '_ {
+        body.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .map(|t| t.trim_matches(['-', '_']).to_lowercase())
+            .filter(|t| t.len() >= MIN_LEN && t.chars().any(|c| c.is_alphabetic()))
+    }
+    let surviving: std::collections::HashSet<String> = tokens(new).collect();
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for tok in tokens(old) {
+        if surviving.contains(&tok) || SWEEP_STOPWORDS.contains(&tok.as_str()) {
+            continue;
+        }
+        *counts.entry(tok).or_default() += 1;
+    }
+    let mut terms: Vec<(String, usize)> = counts.into_iter().collect();
+    // Most-used first (a concept the old body leaned on), longest as tiebreak
+    // (more distinctive to grep), then alphabetical so the output is stable.
+    terms.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then(b.0.len().cmp(&a.0.len()))
+            .then(a.0.cmp(&b.0))
+    });
+    terms.truncate(MAX_TERMS);
+    terms.into_iter().map(|(t, _)| t).collect()
+}
+
+/// Cap on the close-out sweep's reported hits — the point is to surface the
+/// contradiction, not to paste the library back at the agent.
+pub(super) const SWEEP_MAX_HITS: usize = 20;
+
+/// Files the sweep never flags, because keeping an old term is their JOB:
+/// `decisions.md` is append-only history (rewriting it is forbidden), and the
+/// dated `learnings-*` / `notes-<date>-*` files are session records of what was
+/// true when written. Flagging them would make every sweep noisy and train the
+/// reader to skip it.
+fn sweep_skips(file_name: &str) -> bool {
+    file_name == "decisions.md"
+        || file_name.starts_with("learnings-")
+        || file_name.starts_with("notes-20")
+}
+
+/// Grep one project's CL root for surviving uses of `terms`. Returns
+/// `"<file>:<line> — <term>"` strings, at most one per (file, term) so a term
+/// repeated through a file reports once. Case-insensitive, whole-token match:
+/// substring matching would flag "duo" inside "duologue".
+pub(super) fn sweep_project(root: &Path, project: &str, terms: &[String]) -> Vec<String> {
+    fn md_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+        if depth > 4 || out.len() > 500 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                md_files(&path, out, depth + 1);
+            } else if path.extension().is_some_and(|e| e == "md") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    md_files(root, &mut files, 0);
+    files.sort();
+    let mut hits = Vec::new();
+    for path in files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        if sweep_skips(name) {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let rel = path.strip_prefix(root).unwrap_or(&path).display().to_string();
+        for term in terms {
+            if let Some((lineno, _)) = body.lines().enumerate().find(|(_, line)| {
+                line.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+                    .any(|tok| tok.trim_matches(['-', '_']).eq_ignore_ascii_case(term))
+            }) {
+                hits.push(format!("  {project}/{rel}:{} — \"{term}\"", lineno + 1));
+            }
+        }
+    }
+    hits
 }
 
 /// Refuse a replace that looks like accidental data loss: writing an empty
@@ -848,6 +972,102 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&old.stdout), "the approved draft");
+    }
+
+    // --- issues.md #31: close-out staleness sweep -------------------------
+
+    #[test]
+    fn retired_terms_keeps_dropped_concepts_and_drops_noise() {
+        let old = "The duo (Brian + Rain) maintains bot-hq. The duo is the core. \
+                   However, the trio was retired.";
+        let new = "The harness maintains bot-hq. The harness is the core.";
+        let terms = retired_terms(old, new);
+        // "duo" survives the length floor (3) — the live specimen was exactly
+        // this word — and outranks the single-use "trio" on occurrence count.
+        assert_eq!(terms.first().map(String::as_str), Some("duo"));
+        assert!(terms.contains(&"trio".to_string()), "got: {terms:?}");
+        // Still present in the new body → not retired.
+        assert!(!terms.contains(&"maintains".to_string()), "got: {terms:?}");
+        assert!(!terms.contains(&"core".to_string()), "got: {terms:?}");
+        // Prose noise is filtered: stopwords and sub-3-char tokens.
+        assert!(!terms.contains(&"however".to_string()), "got: {terms:?}");
+        assert!(!terms.contains(&"was".to_string()), "got: {terms:?}");
+        // An append can only add — a pure superset retires nothing.
+        assert!(retired_terms("alpha beta", "alpha beta gamma").is_empty());
+    }
+
+    #[test]
+    fn sweep_skips_history_files_only() {
+        // Append-only + dated records legitimately keep old vocabulary.
+        assert!(sweep_skips("decisions.md"));
+        assert!(sweep_skips("learnings-2026-08-05-thing.md"));
+        assert!(sweep_skips("notes-2026-07-02-cl-measurement.md"));
+        // Living docs are exactly what the sweep is for.
+        assert!(!sweep_skips("conventions.md"));
+        assert!(!sweep_skips("notes.md"));
+        assert!(!sweep_skips("vision.md"));
+    }
+
+    #[tokio::test]
+    async fn close_out_sweep_reports_files_still_citing_a_retired_term() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let proj = tmp.path().join("library/projects/bot-hq");
+        // conventions.md keeps the old word; decisions.md keeps it too but is
+        // history, so only conventions.md may be reported.
+        std::fs::write(proj.join("conventions.md"), "line one\nThe duo maintains this.\n").unwrap();
+        std::fs::write(proj.join("decisions.md"), "2026-08-05: retired the duo framing.\n").unwrap();
+        std::fs::write(proj.join("vision.md"), "The duo (Brian + Rain) is the core.\n").unwrap();
+
+        // The session rewrites vision.md, retiring "duo".
+        bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "vision.md".to_string(),
+                "The harness is the core. The harness is the core, restated at length \
+                 so the shrink guard stays out of this test's way."
+                    .to_string(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+
+        let report = bridge.staleness_sweep("s1").await.expect("sweep must report a hit");
+        assert!(report.contains("conventions.md:2"), "got:\n{report}");
+        assert!(report.contains("\"duo\""), "got:\n{report}");
+        assert!(
+            !report.contains("decisions.md"),
+            "append-only history must not be flagged:\n{report}"
+        );
+        // Advisory: it fires at most once, so it can never hold a close shut.
+        assert!(
+            bridge.staleness_sweep("s1").await.is_none(),
+            "the sweep must not repeat"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_out_sweep_is_silent_when_nothing_survives() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let proj = tmp.path().join("library/projects/bot-hq");
+        std::fs::write(proj.join("notes.md"), "nothing related here at all.\n").unwrap();
+        std::fs::write(proj.join("vision.md"), "The duo is the core.\n").unwrap();
+        bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "brian".to_string(),
+                "bot-hq".to_string(),
+                "vision.md".to_string(),
+                "The harness is the core, written out at a comparable length.".to_string(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        // "duo" was retired but no other file uses it → no report, no noise.
+        assert!(bridge.staleness_sweep("s1").await.is_none());
     }
 
 }

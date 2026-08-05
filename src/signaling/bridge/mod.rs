@@ -251,6 +251,13 @@ struct CloseGateState {
     cl_written: bool,
     /// We've already nudged once on `close_session` — let the next close go.
     close_nudged: bool,
+    /// #31: `(project, term)` concepts this session's CL writes RETIRED —
+    /// present in a file's old body, gone from its new one. Seeds the
+    /// close-out staleness sweep.
+    retired: Vec<(String, String)>,
+    /// We've already surfaced the staleness sweep once — like `close_nudged`,
+    /// this makes the sweep advisory: it can never hold a close shut.
+    sweep_nudged: bool,
 }
 
 /// Shared signaling state.
@@ -606,6 +613,86 @@ impl SignalingBridge {
             .entry(session_id.to_string())
             .or_default()
             .cl_written = true;
+    }
+
+    /// #31: remember the concepts a CL write retired, so `staleness_sweep` can
+    /// check the rest of the project's library for files still citing them.
+    /// Bounded per session — a long session of rewrites can't grow unboundedly.
+    pub async fn record_retired_terms(&self, session_id: &str, project: &str, terms: Vec<String>) {
+        const MAX_RETIRED_PER_SESSION: usize = 60;
+        if terms.is_empty() {
+            return;
+        }
+        let mut gate = self.session_close_gate.lock().await;
+        let state = gate.entry(session_id.to_string()).or_default();
+        for term in terms {
+            if state.retired.len() >= MAX_RETIRED_PER_SESSION {
+                break;
+            }
+            let entry = (project.to_string(), term);
+            if !state.retired.contains(&entry) {
+                state.retired.push(entry);
+            }
+        }
+    }
+
+    /// #31 close-out staleness sweep: which OTHER CL files still cite a concept
+    /// this session retired? Returns a capped, human-readable report the
+    /// `close_session` handler surfaces ONCE, or `None` when there's nothing to
+    /// say (no retired terms, no surviving hits, or already surfaced).
+    ///
+    /// Advisory by construction — it never blocks the close, it never edits, and
+    /// it fires at most once per session. The gap it closes is mechanical, not
+    /// disciplinary: the 2026-08-05 framing-rule session landed its decision in
+    /// `decisions.md` and left `conventions.md:3` contradicting it for hours,
+    /// with the "grep the old terms" rule live the whole time.
+    pub async fn staleness_sweep(&self, session_id: &str) -> Option<String> {
+        let retired = {
+            let mut gate = self.session_close_gate.lock().await;
+            let state = gate.entry(session_id.to_string()).or_default();
+            if state.sweep_nudged || state.retired.is_empty() {
+                return None;
+            }
+            state.sweep_nudged = true;
+            state.retired.clone()
+        };
+        // Group by project so each library root is walked once.
+        let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
+        for (project, term) in retired {
+            by_project.entry(project).or_default().push(term);
+        }
+        let mut hits: Vec<String> = Vec::new();
+        for (project, terms) in by_project {
+            let Some(root) = self.cl_project_root(&project).await else {
+                continue;
+            };
+            let found = tokio::task::spawn_blocking(move || {
+                cl_write::sweep_project(&root, &project, &terms)
+            })
+            .await
+            .unwrap_or_default();
+            hits.extend(found);
+        }
+        if hits.is_empty() {
+            return None;
+        }
+        let total = hits.len();
+        hits.truncate(cl_write::SWEEP_MAX_HITS);
+        let more = total.saturating_sub(hits.len());
+        let tail = if more > 0 {
+            format!("\n…and {more} more.")
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "Close-out staleness sweep — this session's CL writes retired terms that \
+             OTHER library files still use:\n{}{tail}\n\nEach hit is either (a) a file \
+             that should have been updated with the change, or (b) a legitimate \
+             historical mention. Fix the (a)s with cl_write_file, then call \
+             close_session again — this check does not repeat and will not hold the \
+             close.",
+            hits.join("\n")
+        ))
     }
 
     /// A3b: should the agent's `close_session` be soft-gated with a
