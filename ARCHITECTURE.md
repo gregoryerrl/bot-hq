@@ -35,8 +35,8 @@ bot-hq is a two-agent duo (Brian + Rain). A former solo helper agent,
 **Emma**, has been removed from the core (code + data purged); she is
 slated to return as the first bot-hq plugin — TBD.
 
-The user is the orchestrator; the app is the conductor between user and
-agents. Policy enforcement runs at two layers (MCP tool calls + git
+The user directs the work and owns the decisions; the app is the bridge
+between user and agents. Policy enforcement runs at two layers (MCP tool calls + git
 hooks). Two MCP servers run in-process: one for agent ↔ UI signaling,
 one for external driver clients.
 
