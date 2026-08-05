@@ -941,6 +941,25 @@ impl AppState {
             .bridge
             .resolve_choice_confirmable(choice_id, picked, confirm_stale)
             .await?;
+        // A resolved tray answer is user engagement — the same contract as a
+        // typed message for the idle-unflagged watchdog: it marks the session
+        // as having a task and re-arms the once-per-window nudge. The d61d277
+        // live smoke found tray-only input left the watchdog disarmed (only
+        // `broadcast` bumped the counter). StaleGateNeedsConfirm is excluded:
+        // nothing was flipped or delivered.
+        if matches!(
+            outcome,
+            ResolveOutcome::Delivered | ResolveOutcome::AgentReceiverDroppedFellBack { .. }
+        ) {
+            if let Ok(Some(entry)) = self.storage.get_tray_entry(choice_id).await {
+                let sessions = self.sessions.lock().await;
+                if let Some(handle) = sessions.get(&entry.session_id) {
+                    handle
+                        .user_broadcasts
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                }
+            }
+        }
         // Only the timed-out fallback needs us to wake the duo subprocess. The
         // OOB message is already in storage (bridge wrote it). To actually wake
         // the duo so they read + act on it, also: (1) clear the awaiting-user

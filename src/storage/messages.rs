@@ -53,6 +53,24 @@ impl Storage {
         Ok(exists != 0)
     }
 
+    /// Count of user-authored TEXT rows for a session. Seeds the in-memory
+    /// `SessionHandle.user_broadcasts` counter at spawn, so an app restart
+    /// mid-task doesn't disarm the idle-unflagged watchdog until the next
+    /// typed message (found by the d61d277 live smoke). Text-only on purpose:
+    /// `phase_change` / `system_notice` rows are persisted as synthetic
+    /// `author=user` and are host artifacts, not user engagement.
+    pub async fn count_user_messages(&self, session_id: &str) -> Result<u64> {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM messages \
+             WHERE session_id = ? AND author = 'user' AND kind = 'text'",
+        )
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("counting user messages for {session_id}"))?;
+        Ok(n as u64)
+    }
+
     /// All messages for the session, oldest first.
     /// If `since_id` is provided, returns only messages with id > since_id.
     pub async fn messages_for_session(
@@ -82,5 +100,44 @@ impl Storage {
             }
         };
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::{Author, MessageKind, Storage};
+
+    #[tokio::test]
+    async fn count_user_messages_counts_text_only_and_per_session() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-1", "S", None).await.unwrap();
+        s.create_session("s-2", "Other", None).await.unwrap();
+
+        // Two real user prompts (incl. an OOB answer, stored the same way)…
+        s.insert_message("s-1", Author::User, MessageKind::Text, "task")
+            .await
+            .unwrap();
+        s.insert_message("s-1", Author::User, MessageKind::Text, "oob answer")
+            .await
+            .unwrap();
+        // …plus synthetic author=user host rows that must NOT count…
+        s.insert_message("s-1", Author::User, MessageKind::PhaseChange, "Plan")
+            .await
+            .unwrap();
+        s.insert_message("s-1", Author::User, MessageKind::SystemNotice, "nudged")
+            .await
+            .unwrap();
+        // …plus agent text and another session's user text (both excluded).
+        s.insert_message("s-1", Author::Brian, MessageKind::Text, "ack")
+            .await
+            .unwrap();
+        s.insert_message("s-2", Author::User, MessageKind::Text, "elsewhere")
+            .await
+            .unwrap();
+
+        assert_eq!(s.count_user_messages("s-1").await.unwrap(), 2);
+        assert_eq!(s.count_user_messages("s-2").await.unwrap(), 1);
+        assert_eq!(s.count_user_messages("s-none").await.unwrap(), 0);
     }
 }

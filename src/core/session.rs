@@ -702,7 +702,17 @@ async fn spawn_session_handle(
     // liveness refs, so it self-terminates once the pumps drop their Arcs.
     // Also carries the idle-unflagged watch (chip + HANDS nudge when the
     // session sits bare-Idle past grace with no tray flag).
-    let user_broadcasts = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    //
+    // Seed the counter from storage rather than starting at 0: an app restart
+    // mid-task would otherwise disarm the watchdog until the user's next TYPED
+    // message (the d61d277 live smoke hit exactly this). Race-free — the read
+    // completes before the watchdog task exists.
+    let user_broadcasts = Arc::new(std::sync::atomic::AtomicU64::new(
+        storage
+            .count_user_messages(&session.id)
+            .await
+            .unwrap_or_default(),
+    ));
     tokio::spawn(crate::core::watchdog::run_stall_watchdog(
         session.id.clone(),
         watchdog_agents,
