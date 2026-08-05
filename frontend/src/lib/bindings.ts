@@ -1635,6 +1635,11 @@ brian_busy: boolean; rain_busy: boolean; brian_health: string | null; rain_healt
  */
 attention: string | null; 
 /**
+ * declare_working reason while HANDS has background work declared
+ * (None = clear). Seeds the WORKING badge; live via `session:working`.
+ */
+working: string | null; 
+/**
  * Peer-forward router liveness (duo only). `None` = solo, or never reported
  * (assume alive — the event fires only on change). Seeds the UI router dot.
  */
