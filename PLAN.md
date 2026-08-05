@@ -28,11 +28,12 @@ drifts every commit.
 
 ---
 
-## Direction — dissolve the duo (stated 2026-08-05, unscheduled)
+## Direction — the agent harness is the focus (stated 2026-08-05, unscheduled)
 
-The core narrows to a **single-agent AI harness/system**: the gates, the
-transparency surfaces (tray / IPAV docs / terminal), and the memory
-hierarchy. **Rain (EYES, adversarial review) becomes a plugin only**,
+bot-hq is an **agent harness/system** — the gates, the transparency
+surfaces (tray / IPAV docs / terminal), and the memory hierarchy — and
+that, not any particular agent lineup, is the core's identity.
+**Rain (EYES, adversarial review) becomes a plugin only**,
 following Emma's path — review stays a first-class value (ideally
 cross-model) but optional and pluggable, not a hardwired co-agent. No
 migration work is scoped yet; when it starts, the blast radius includes

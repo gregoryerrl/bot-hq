@@ -20,9 +20,10 @@ paragraph moved out of the CL `notes.md`, and the memory-hierarchy analogy
 CL-stitching item) given a vision-level writeup. ARCHITECTURE.md's
 app-as-conductor line was de-metaphorized (`ed49a87`).
 
-The user then stated a direction shift: **drop the duo — Rain becomes a
-plugin only; the core narrows to a single-agent AI harness** (PLAN.md
-"Direction — dissolve the duo" + CL `decisions.md`). The canonical docs
+The user then stated a direction shift: **Rain becomes a plugin only;
+the core's identity is the agent harness/system itself, never an agent
+count** (PLAN.md "Direction — the agent harness is the focus" + CL
+`decisions.md`). The canonical docs
 now carry it as planned/unscheduled; code and README still
 implement/describe the live duo, deliberately, until a migration is
 scoped.

@@ -5,9 +5,11 @@ for driving AI-assisted coding sessions through a bilateral-duo agent
 model (Brian = HANDS, Rain = EYES) with policy enforcement. A former
 solo helper agent, Emma, was removed from the core (planned to return as
 the first bot-hq plugin — TBD). Planned direction (2026-08-05,
-unscheduled): dissolve the duo — Rain becomes a plugin only and the core
-narrows to a single-agent AI harness; the duo model described here
-remains accurate until that ships.
+unscheduled): Rain becomes a plugin only and the core narrows to the
+agent harness itself; the duo model described here remains accurate
+until that ships. House framing: describe bot-hq as an **agent
+harness/system** — never by agent count (no "single-agent"/"duo"-
+centric identity language).
 
 The original from-scratch rebuild shipped at v0.1.0; subsequent work
 added a UI redesign, an external driver MCP server, and a two-layer
