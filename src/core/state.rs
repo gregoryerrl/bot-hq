@@ -85,6 +85,19 @@ enum DeliverStep {
     GiveUpBestEffort,
 }
 
+/// What to do with an out-of-band tray answer once the bridge has persisted it.
+/// Pure (see [`AppState::tray_wake_step`]) so the paused-vs-preempt branch is
+/// unit-tested without a live session.
+#[derive(Debug, PartialEq, Eq)]
+enum TrayWakeStep {
+    /// The duo is paused: stash the wire for the next `broadcast` (Send /
+    /// Resume) instead of delivering. No interrupt — nothing is being
+    /// delivered, and a tray answer must not release a deliberate pause.
+    StashForResume,
+    /// Live duo: interrupt the in-flight turn, THEN deliver the answer.
+    PreemptAndDeliver,
+}
+
 /// Max respawn attempts in `broadcast`'s auto-heal loop before delivering
 /// best-effort. Bounds a pathological respawn→stale→respawn cycle.
 const BROADCAST_MAX_RESPAWNS: u32 = 3;
@@ -935,6 +948,16 @@ impl AppState {
         }
     }
 
+    /// Decide what an out-of-band tray answer does to a live session. Pure for
+    /// testing; `holds_wakes` is the pause latch (`activity.holds_wakes()`).
+    fn tray_wake_step(holds_wakes: bool) -> TrayWakeStep {
+        if holds_wakes {
+            TrayWakeStep::StashForResume
+        } else {
+            TrayWakeStep::PreemptAndDeliver
+        }
+    }
+
     pub async fn resolve_choice(
         &self,
         choice_id: &str,
@@ -983,24 +1006,44 @@ impl AppState {
                 // paused duo (the user may be triaging their tray while this
                 // session stays parked). Stash the wire; the next `broadcast`
                 // (Send / Resume) delivers it behind the user's message.
-                if handle.activity.holds_wakes() {
-                    self.pending_paused_wakes
-                        .lock()
-                        .await
-                        .entry(session_id.clone())
-                        .or_default()
-                        .push(wire);
-                } else {
-                    handle
-                        .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
-                        .await;
-                    // Answering a tray card ends the halt just as a typed message
-                    // does, so release what the router held behind it — AFTER the
-                    // answer itself, so the peer's held chatter lands behind it.
-                    // Not in the paused arm above: there the wire is deliberately
-                    // stashed for the next broadcast, and flushing would defeat
-                    // the pause latch.
-                    flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
+                match Self::tray_wake_step(handle.activity.holds_wakes()) {
+                    TrayWakeStep::StashForResume => {
+                        self.pending_paused_wakes
+                            .lock()
+                            .await
+                            .entry(session_id.clone())
+                            .or_default()
+                            .push(wire);
+                    }
+                    TrayWakeStep::PreemptAndDeliver => {
+                        // Human preemption, same spine as `broadcast` (issues.md
+                        // #27): an answered tray card is the user speaking, so it
+                        // must take effect at the next tool boundary instead of
+                        // waiting out the agent's whole current turn — two
+                        // same-day races in s-b69a5c01 had an agent building on
+                        // premises the parked answer had already overturned.
+                        // BEFORE the send, mirroring `broadcast`: the pump's
+                        // biased control channel writes the interrupt ahead of
+                        // stdin, so each agent aborts and then reads the answer.
+                        // Verified idle-harmless there (control_response{success},
+                        // process survives, next message still processed) — so no
+                        // gate on the flaky `busy` signal, and no SIGKILL
+                        // escalation (the answer IS the next work).
+                        handle.brian.interrupt("tray-answer-preempt");
+                        if let Some(rain) = handle.rain.as_ref() {
+                            rain.interrupt("tray-answer-preempt");
+                        }
+                        handle
+                            .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
+                            .await;
+                        // Answering a tray card ends the halt just as a typed
+                        // message does, so release what the router held behind
+                        // it — AFTER the answer itself, so the peer's held
+                        // chatter lands behind it. Not in the stash arm above:
+                        // there the wire is deliberately held for the next
+                        // broadcast, and flushing would defeat the pause latch.
+                        flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
+                    }
                 }
             }
             // else: session closed in the gap between resolve and wake — the OOB
@@ -1239,6 +1282,46 @@ mod tests {
         assert_eq!(
             AppState::broadcast_deliver_step(true, BROADCAST_MAX_RESPAWNS + 5),
             DeliverStep::GiveUpBestEffort
+        );
+    }
+
+    // --- issues.md #27: an OOB tray answer preempts the running turn ---
+
+    #[test]
+    fn tray_answer_preempts_a_live_duo_but_not_a_paused_one() {
+        // Live: the answer is the user speaking, so it aborts the in-flight turn
+        // instead of waiting it out (the s-b69a5c01 races — an agent finishing a
+        // deliverable while its superseding answer sat unread on stdin).
+        assert_eq!(
+            AppState::tray_wake_step(false),
+            TrayWakeStep::PreemptAndDeliver
+        );
+        // Paused: nothing is delivered (the wire is stashed for the next
+        // broadcast), so there is nothing to preempt — and interrupting here
+        // would half-release a pause the user deliberately set.
+        assert_eq!(
+            AppState::tray_wake_step(true),
+            TrayWakeStep::StashForResume
+        );
+    }
+
+    #[test]
+    fn tray_preempt_fires_before_the_answer_is_sent() {
+        // Ordering contract, mirroring `broadcast`: the pump's biased control
+        // channel writes the interrupt ahead of stdin, so the agent aborts and
+        // THEN reads the answer. Sending first would let the whole turn run out
+        // before the abort landed — the bug this fixes. Guarded as source order
+        // because the delivery arm needs a live subprocess to exercise.
+        let src = include_str!("state.rs");
+        let arm = src
+            .split("TrayWakeStep::PreemptAndDeliver => {")
+            .nth(1)
+            .expect("the preempt arm must exist");
+        let interrupt = arm.find("brian.interrupt(\"tray-answer-preempt\")");
+        let send = arm.find("send_to_both");
+        assert!(
+            interrupt.is_some() && send.is_some() && interrupt < send,
+            "the tray-answer interrupt must fire BEFORE send_to_both"
         );
     }
 }
