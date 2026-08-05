@@ -55,6 +55,68 @@ sweep), and `#28` (auto-answerable gate classes).
 
 ---
 
+## Next deliverables (planned 2026-08-05, after the Aug-5 session study)
+
+Two tracks, ordered within each by recommended sequence. Full evidence
+for every item: CL `issues.md` #26–#31 + the archived s-b69a5c01
+session docs (investigate/apply/verify) + CL `session-study-method.md`.
+Read those before starting; this section is the map, not the territory.
+
+**Track 1 — harness fixes (standalone; none touch the duo pump):**
+
+1. **#27 — tray answers preempt a running turn** (small). Mirror
+   `broadcast`'s idle-harmless `AgentHandle.interrupt()` on the
+   tray-resolve delivery path, so a parked answer lands at the next
+   tool boundary instead of after the whole turn. Two same-day races
+   documented (agent built on premises the user had already overturned).
+2. **#29 — gate refusals convert instead of retry-looping** (small).
+   The PreToolUse refusal embeds the exact `action_gate("<command>")`
+   call — or the refusal itself auto-parks the gate row. 19 refusals
+   on Aug 5, same command retried post-refusal.
+3. **#31 — close-out staleness sweep** (medium). Before
+   `close_session`: grep the project CL for terms the session changed
+   or retired (seed the term list from the session's decisions.md
+   appends + renamed concepts); surface hits to HANDS. Live specimen:
+   the framing-rule session left `conventions.md:3` contradicting
+   itself for hours.
+4. **#28 — auto-answerable gate classes** (medium; design first).
+   Extend the `push_gate=auto` pattern: per-class auto-approval
+   (read-only gated commands first), same-class batch approve in the
+   tray. Target: engaged-session checkpoint churn (27 asks @ 7.7 min
+   avg in one session).
+
+**Track 2 — CL mechanisms (closing the vision gaps in `vision.md`'s
+"reading notes" + "memory hierarchy" bullets):**
+
+5. **Populate `retrieval_events.used_atoms`** (small-medium). The
+   column is reserved and empty. Define "used" simply first: files
+   Read/Edited by the same agent within the turns after retrieval.
+   Unblocks every utility question below.
+6. **Growth telemetry** (small). Per-project atoms/files/tokens over
+   time + serve-rate joins (queries prototyped in
+   `session-study-method.md`); render in the Context Manager tab
+   beside the existing measurement card.
+7. **Gardening surfacing** (medium). Mechanical prune candidates:
+   never-served files, age+never-served, superseded drafts
+   (`ideas.md`-class), dated learnings whose keepers were folded.
+   Surface as a Library-tab list; the user prunes — no auto-delete.
+8. **The cap — research item, explicitly open** (from vision.md: "we
+   have to find that cap"). Candidate metrics to evaluate once 5–7
+   exist: serve-precision decay, conflicting-atom rate (same topic,
+   contradicting bodies), tokens-per-used-atom. No mechanism until the
+   metric proves out.
+9. **Retention-leak closers** (folds into the existing "Tighten CL ↔
+   agent stitching" item below — same memory-controller arc): the
+   write-then-prune close safety net; a periodic archived-session
+   mining pass (method: CL `session-study-method.md`); three-store
+   rule (CL canonical, auto-memory mirrors it, repo docs get pointers).
+
+**Deferred behind the Rain-plugin migration** (recorded above): #26
+held-forward flush, #30 duplicate spawn warmup, peer-wait watchdog
+classification.
+
+---
+
 ## In flight
 
 The current arc is the **native agent loop** (2026-07-26/27): an agent
