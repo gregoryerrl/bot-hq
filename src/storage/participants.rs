@@ -313,6 +313,136 @@ impl Storage {
     }
 }
 
+/// One row of the session channel, as a participant reads it.
+///
+/// `envelope` carries what used to be invisible string mutation — the phase
+/// banner, sender role, blocking-findings notice, ack tags. Today those are
+/// concatenated into the wire and never persisted, so the user cannot see what
+/// an agent actually received; here they are a rendered field beside the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelMessage {
+    pub id: i64,
+    pub session_id: String,
+    pub participant_id: Option<i64>,
+    pub origin: String,
+    pub kind: String,
+    pub content: String,
+    pub envelope: Option<String>,
+    pub created_at: String,
+}
+
+const CHANNEL_COLUMNS: &str =
+    "id, session_id, participant_id, origin, kind, content, envelope, created_at";
+
+fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
+    use sqlx::Row;
+    ChannelMessage {
+        id: r.get("id"),
+        session_id: r.get("session_id"),
+        participant_id: r.get("participant_id"),
+        origin: r.get("origin"),
+        kind: r.get("kind"),
+        content: r.get("content"),
+        envelope: r.get("envelope"),
+        created_at: r.get("created_at"),
+    }
+}
+
+impl Storage {
+    /// Post to the session channel — the write half of "the channel is the
+    /// transport". Every wire into a participant goes through here, including
+    /// host-authored injections (`origin = "system"`), which today are written
+    /// straight to stdin and never recorded at all.
+    ///
+    /// Writes the legacy `author` column too, so readers that have not migrated
+    /// yet keep working (migration revision 3). `system` rows are stored as
+    /// `author = 'user'` because that is exactly how today's system notices are
+    /// already persisted — legacy readers must not encounter a new author value.
+    pub async fn post_to_channel(
+        &self,
+        session_id: &str,
+        origin: &str,
+        participant_slug: Option<&str>,
+        kind: &str,
+        content: &str,
+        envelope: Option<&str>,
+    ) -> Result<i64> {
+        let participant_id = match (origin, participant_slug) {
+            ("participant", Some(slug)) => {
+                self.participant_by_slug(session_id, slug).await?.map(|p| p.id)
+            }
+            _ => None,
+        };
+        let legacy_author = match origin {
+            "participant" => participant_slug.unwrap_or("user"),
+            // 'system' and 'user' both land as 'user' for legacy readers.
+            _ => "user",
+        };
+        let id = sqlx::query(
+            "INSERT INTO messages \
+             (session_id, participant_id, origin, kind, content, envelope, author, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+        )
+        .bind(session_id)
+        .bind(participant_id)
+        .bind(origin)
+        .bind(kind)
+        .bind(content)
+        .bind(envelope)
+        .bind(legacy_author)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("posting to channel for {session_id}"))?
+        .last_insert_rowid();
+        Ok(id)
+    }
+
+    /// Everything in the channel after `after_id`, oldest first — the read half.
+    /// A participant waking on its turn reads exactly this, from its cursor, so
+    /// context completeness is structural rather than a forwarding discipline.
+    pub async fn channel_after(
+        &self,
+        session_id: &str,
+        after_id: i64,
+    ) -> Result<Vec<ChannelMessage>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {CHANNEL_COLUMNS} FROM messages \
+             WHERE session_id = ? AND id > ? ORDER BY id ASC"
+        ))
+        .bind(session_id)
+        .bind(after_id)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("reading channel for {session_id}"))?;
+        Ok(rows.iter().map(channel_from_row).collect())
+    }
+
+    /// What this participant has not read yet. The query that makes "what did
+    /// participant X actually receive?" answerable — a cursor range, not
+    /// archaeology across a side table of drop records.
+    pub async fn unread_for_participant(
+        &self,
+        participant_id: i64,
+    ) -> Result<Vec<ChannelMessage>> {
+        let Some(p) = self.participant_by_id(participant_id).await? else {
+            return Ok(Vec::new());
+        };
+        let cursor = self.cursor_for(participant_id).await?;
+        self.channel_after(&p.session_id, cursor).await
+    }
+
+    pub async fn participant_by_id(&self, id: i64) -> Result<Option<Participant>> {
+        let row = sqlx::query(&format!(
+            "SELECT {PARTICIPANT_COLUMNS} FROM session_participants WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .context("loading participant by id")?;
+        Ok(row.as_ref().map(participant_from_row))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +604,78 @@ mod tests {
         let msgs = s.messages_for_session("s1", None).await.unwrap();
         assert_eq!(msgs.len(), 2, "both rows readable through the legacy path");
         assert_eq!(msgs[0].author, Author::Brian.as_str());
+    }
+
+    #[tokio::test]
+    async fn the_channel_records_what_a_participant_receives() {
+        // The redesign's central inversion. Today a peer forward is built,
+        // pushed to stdin, and never persisted — so "what did Rain actually
+        // read?" is unanswerable. Here it is a cursor range.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        let eyes = s.role_by_slug("eyes").await.unwrap().unwrap();
+        let b = s
+            .insert_participant("s1", "brian", "Brian", Some(hands.id), None,
+                                &hands.capabilities, "active", 0)
+            .await
+            .unwrap();
+        let r = s
+            .insert_participant("s1", "rain", "Rain", Some(eyes.id), None,
+                                &eyes.capabilities, "active", 1)
+            .await
+            .unwrap();
+
+        let m1 = s.post_to_channel("s1", "user", None, "text", "do the thing", None)
+            .await.unwrap();
+        let m2 = s.post_to_channel("s1", "participant", Some("brian"), "text", "done",
+                                   Some(r#"{"phase":"Apply"}"#)).await.unwrap();
+
+        // Rain has read nothing yet, so both are unread — including the message
+        // she was not "forwarded". Context completeness is structural.
+        let unread = s.unread_for_participant(r).await.unwrap();
+        assert_eq!(unread.len(), 2);
+        assert_eq!(unread[0].id, m1);
+        assert_eq!(unread[0].origin, "user");
+        assert_eq!(unread[1].id, m2);
+        assert_eq!(unread[1].participant_id, Some(b), "attributed to its author");
+        assert_eq!(
+            unread[1].envelope.as_deref(),
+            Some(r#"{"phase":"Apply"}"#),
+            "the envelope is a visible field, not string mutation"
+        );
+
+        // After reading, the cursor advances and the backlog empties.
+        s.advance_cursor(r, m2).await.unwrap();
+        assert!(s.unread_for_participant(r).await.unwrap().is_empty());
+
+        // Brian, who never read, still has both — cursors are per participant.
+        assert_eq!(s.unread_for_participant(b).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn host_injections_become_visible_rows() {
+        // The six invisible wires (apply-entry nudge, reconcile directive, idle
+        // nudge, phase notices, peer prefix, spawn prompt) post as `system`.
+        // Legacy readers must not meet a new author value, so a system row is
+        // stored as author='user' — which is exactly how today's system notices
+        // are already persisted.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let id = s
+            .post_to_channel("s1", "system", None, "system_notice",
+                             "[System: your previous turn was force-interrupted]", None)
+            .await
+            .unwrap();
+        let rows = s.channel_after("s1", 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].origin, "system");
+        assert!(rows[0].participant_id.is_none());
+        // And the legacy read path still sees it, unchanged.
+        let legacy = s.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].author, "user", "legacy readers meet no new author value");
     }
 
     #[tokio::test]
