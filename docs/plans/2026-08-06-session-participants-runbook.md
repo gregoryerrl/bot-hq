@@ -99,6 +99,45 @@ migration is a no-op, not a half-rebuild.
 **Still outstanding before cutover:** the app-boot check against a copied data
 dir. SQL guards cannot catch a sqlx compile-time query mismatch.
 
+## Revision 2 dry-run — 2026-08-06 (roles + turn state added)
+
+The draft grew a `roles` table (roles became first-class and user-owned) and the
+turn-model columns (`turn_position`, `participation_mode`, `done_vote`, per-
+session round state). Re-run against a fresh copy of the live DB,
+`sqlite3 -bail`, **true exit 0**:
+
+| check | result |
+|---|---|
+| `roles` seeded | **2** (`hands`, `eyes`) |
+| `session_participants` | **764** = 382 × 2 |
+| participants with a resolved `role_id` | **764** — none orphaned |
+| sessions with a position-0 participant | **382** = every session has a defined cycle start |
+| `rain` rows disabled | **12** — matches the solo sessions |
+| `participant_cursors` | **764** |
+| unmapped messages | **0** |
+| `PRAGMA integrity_check` / `foreign_key_check` | `ok` / empty |
+
+### Guard-firing tests for the NEW guards
+
+Two deliberately-broken variants of the migration were generated and run against
+fresh copies:
+
+| broken variant | result | original `messages` table |
+|---|---|---|
+| rain seeded at `turn_position = 0` (two cycle starts per session) | **GUARD 5 fired** — `CHECK constraint failed: failure IS NULL`, true exit **1** | **intact, old schema** |
+| role seeding removed (participants would resolve no role) | aborted at seeding — `NOT NULL constraint failed: session_participants.capabilities`, true exit **1** | **intact, old schema** |
+
+**Honest note on guard 4.** The second test aborted at the seeding INSERT rather
+than reaching guard 4, because the `capabilities` NOT NULL constraint fires
+first when the role subselect returns NULL. So guard 4 ("participant with no
+role") is belt-and-braces rather than the primary catch for that failure — the
+failure mode IS caught, just one layer earlier. Recorded rather than glossed:
+the guard has not been proven to fire on its own path.
+
+Both aborts left the original table untouched, confirming the ordering property
+still holds after the revision: **every guard runs before `DROP TABLE
+messages`,** so a failed migration is a no-op rather than a half-rebuild.
+
 ## Go / no-go
 
 Proceed only if every row above passes. Any mismatch → stop, fix the draft, dry
