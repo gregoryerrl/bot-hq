@@ -177,6 +177,17 @@ impl SessionHandle {
     }
 }
 
+/// This session's roster row for `slug`, if the roster read succeeded and the
+/// slug is in it. The single lookup shared by [`session_agents`] and the two
+/// `DuoConfig` sites, so a pump's `participant_id` can never disagree with its
+/// `SessionAgent`'s. B7 replaces slug matching with role derivation.
+fn roster_row<'a>(
+    roster: &'a [crate::storage::Participant],
+    slug: &str,
+) -> Option<&'a crate::storage::Participant> {
+    roster.iter().find(|p| p.slug == slug)
+}
+
 /// Pair each spawned agent with its roster row and order by `turn_position`.
 ///
 /// A slug missing from the roster still yields a `SessionAgent` (id `None`,
@@ -190,7 +201,7 @@ fn session_agents(
     let mut agents: Vec<SessionAgent> = spawned
         .into_iter()
         .map(|(slug, handle)| {
-            let row = roster.iter().find(|p| p.slug == slug);
+            let row = roster_row(roster, &slug);
             SessionAgent {
                 participant_id: row.map(|p| p.id),
                 turn_position: row.map(|p| p.turn_position).unwrap_or(i64::MAX),
@@ -765,6 +776,7 @@ async fn spawn_session_handle(
         activity: Some(Arc::clone(&activity)),
         in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
         liveness: Some(Arc::clone(&brian_liveness)),
+        participant_id: roster_row(&roster, "brian").map(|p| p.id),
         // A3a: Brian's own stdin, so the pump can self-nudge him if he mutates
         // before the Apply phase.
         self_input_tx: Some(brian_handle.input_tx.clone()),
@@ -787,6 +799,7 @@ async fn spawn_session_handle(
             activity: Some(Arc::clone(&activity)),
             in_atomic_tool: Some(Arc::clone(&in_atomic_tool)),
             liveness: Some(Arc::clone(&rain_liveness)),
+            participant_id: roster_row(&roster, "rain").map(|p| p.id),
             ..DuoConfig::new(session_id_clone, Author::Rain)
         };
         tokio::spawn(async move {
@@ -1394,6 +1407,34 @@ mod tests {
             vec!["brian", "rain"],
             "the sort is stable, so an unknown roster degrades to spawn order"
         );
+    }
+
+    #[test]
+    fn a_pumps_participant_id_matches_its_agents() {
+        // `DuoConfig.participant_id` and `SessionAgent.participant_id` are set
+        // at two different points in the spawn, so they go through ONE lookup —
+        // a pump reporting a different participant than its own handle would be
+        // a silent mis-attribution in B5's channel.
+        let roster = vec![
+            stub_participant(4, "brian", 0),
+            stub_participant(7, "rain", 1),
+        ];
+        let agents = session_agents(
+            &roster,
+            vec![
+                ("brian".to_string(), stub_handle("brian")),
+                ("rain".to_string(), stub_handle("rain")),
+            ],
+        );
+        for agent in &agents {
+            assert_eq!(
+                roster_row(&roster, &agent.slug).map(|p| p.id),
+                agent.participant_id,
+                "pump and handle must resolve the same participant for {}",
+                agent.slug
+            );
+        }
+        assert_eq!(roster_row(&roster, "ghost").map(|p| p.id), None);
     }
 
     #[test]

@@ -44,6 +44,16 @@ pub struct DuoConfig {
     /// `MessagePersisted` into the `BatchEmitter` dirty-set / watermark keys (O5).
     pub session_id: Arc<str>,
     pub author: Author,
+    /// `session_participants.id` for this pump's agent — B4b.3.
+    ///
+    /// Added BESIDE `author`, not replacing it: `author` is read on the hottest
+    /// path (`set_busy(cfg.author, false)` fires at every turn end) and the
+    /// router still needs it until B5. Carrying both means B5 flips the hot path
+    /// in one diff instead of mapping `Author` → id on every call.
+    ///
+    /// `None` on the test/hardcoded paths and whenever the roster read failed —
+    /// same degradation as [`SessionAgent::participant_id`].
+    pub participant_id: Option<i64>,
     /// Sender to the central peer-forward router (`core::router`). The pump emits
     /// a `RouterCommand::Forward` here on each completed turn that buffered prose;
     /// the router is the single decision point (forward / suppress / break the
@@ -82,6 +92,7 @@ impl DuoConfig {
         Self {
             session_id: session_id.into(),
             author,
+            participant_id: None,
             router_tx: None,
             bridge: None,
             self_input_tx: None,
@@ -628,6 +639,7 @@ mod tests {
         DuoConfig {
             session_id: "s1".into(),
             author,
+            participant_id: None,
             router_tx: None,
             bridge: None,
             self_input_tx: None,
