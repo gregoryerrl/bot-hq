@@ -22,9 +22,11 @@ impl Storage {
         // The participant is resolved INLINE by subquery rather than with a
         // prior SELECT: this runs on every text/tool_use/tool_result chunk, and
         // an extra round trip per chunk is a cost worth not paying. It resolves
-        // to NULL when the session has no matching participant — a session
-        // created before its roster exists — which is correct rather than an
-        // error, since `author` still carries the attribution.
+        // to NULL when the session has no matching participant, which is
+        // correct rather than an error — `author` still carries the
+        // attribution. `ensure_session_roster` seeds the roster pre-spawn and
+        // repairs anything written before it, so a NULL here means a row from
+        // the window between 0044 and that fix, not a steady state.
         let res = sqlx::query(
             "INSERT INTO messages \
              (session_id, author, kind, content, created_at, participant_id, origin) \

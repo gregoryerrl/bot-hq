@@ -7,11 +7,11 @@
 //! instead of a side effect, and deliveries record what a policy withheld —
 //! policies gate delivery, never persistence.
 //!
-//! **Schema note:** these tables ship in migration 0044, which is deliberately
-//! NOT armed yet (see `docs/plans/2026-08-06-session-participants-runbook.md`).
-//! `sqlx::migrate!` embeds `migrations/` at compile time, so the tests below
-//! apply the reviewed draft to an in-memory DB instead — exercising the exact
-//! schema the migration produces without arming anything.
+//! **Schema note:** these tables ship in migration 0044, applied 2026-08-06
+//! (see `docs/plans/2026-08-06-session-participants-runbook.md`). Its backfill
+//! was a one-shot over the sessions that existed at apply time, so
+//! [`Storage::ensure_session_roster`] is what keeps every session created since
+//! from starting life with an empty roster.
 
 use super::*;
 
@@ -174,6 +174,96 @@ impl Storage {
         .await
         .context("loading participant")?;
         Ok(row.as_ref().map(participant_from_row))
+    }
+
+    /// Seed the default roster for a session that has none, returning how many
+    /// participants were inserted (0 on the common path).
+    ///
+    /// 0044 backfilled `session_participants` from the paired `brian_*`/`rain_*`
+    /// columns as a **one-shot over the rows that existed when it applied**.
+    /// Nothing then created participants for a NEW session, so every message it
+    /// wrote resolved `participant_id` to NULL forever — the dual-write in
+    /// `insert_message` looks up the roster by slug. Called pre-spawn from
+    /// `ensure_session_started`, which every creation path funnels through, so
+    /// this both seeds new sessions and heals any left rosterless by that
+    /// window.
+    ///
+    /// The two INSERTs mirror 0044's backfill statement-for-statement, scoped
+    /// to one session: a seeded roster is then structurally identical to a
+    /// backfilled one, which is what stops the two populations drifting.
+    /// `OR IGNORE` rides `UNIQUE (session_id, slug)` for idempotence, so a
+    /// healthy respawn pays two no-op inserts and nothing else.
+    pub async fn ensure_session_roster(&self, session_id: &str) -> Result<u64> {
+        let hands = sqlx::query(
+            "INSERT OR IGNORE INTO session_participants \
+             (session_id, slug, display_name, role_id, model_id, effort, ultracode, \
+              claude_session_id, capabilities, participation_mode, turn_position, joined_at) \
+             SELECT s.id, 'brian', 'Brian', \
+                    (SELECT id FROM roles WHERE slug = 'hands'), \
+                    COALESCE(s.brian_model_id, s.brian_model_at_spawn), \
+                    s.brian_effort, s.brian_ultracode, s.brian_claude_session_id, \
+                    (SELECT capabilities FROM roles WHERE slug = 'hands'), \
+                    (SELECT participation_mode FROM roles WHERE slug = 'hands'), \
+                    0, s.created_at \
+             FROM sessions s WHERE s.id = ?",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("seeding HANDS participant for {session_id}"))?
+        .rows_affected();
+        // turn_position 1: the reviewer always sees the executor's work before
+        // responding. A solo session keeps the row and disables it, exactly as
+        // 0044 did for the 12 solo sessions it backfilled.
+        let eyes = sqlx::query(
+            "INSERT OR IGNORE INTO session_participants \
+             (session_id, slug, display_name, role_id, model_id, effort, ultracode, \
+              claude_session_id, capabilities, participation_mode, turn_position, \
+              enabled, joined_at) \
+             SELECT s.id, 'rain', 'Rain', \
+                    (SELECT id FROM roles WHERE slug = 'eyes'), \
+                    COALESCE(s.rain_model_id, s.rain_model_at_spawn), \
+                    s.rain_effort, s.rain_ultracode, s.rain_claude_session_id, \
+                    (SELECT capabilities FROM roles WHERE slug = 'eyes'), \
+                    (SELECT participation_mode FROM roles WHERE slug = 'eyes'), \
+                    1, s.rain_enabled, s.created_at \
+             FROM sessions s WHERE s.id = ?",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("seeding EYES participant for {session_id}"))?
+        .rows_affected();
+
+        let inserted = hands + eyes;
+        if inserted == 0 {
+            return Ok(0);
+        }
+        // Every participant reads the channel, so every participant has a
+        // cursor from birth — same invariant `insert_participant` holds.
+        sqlx::query(
+            "INSERT OR IGNORE INTO participant_cursors (participant_id) \
+             SELECT id FROM session_participants WHERE session_id = ?",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .context("seeding cursors for the seeded roster")?;
+        // Repair what the rosterless window wrote. Only reachable when this
+        // call actually inserted, so a healthy spawn never runs it. Scoped to
+        // `origin = 'participant'`: user/system rows have no participant by
+        // design, and pre-0044 rows were already mapped by the migration.
+        sqlx::query(
+            "UPDATE messages SET participant_id = ( \
+                 SELECT p.id FROM session_participants p \
+                 WHERE p.session_id = messages.session_id AND p.slug = messages.author) \
+             WHERE session_id = ? AND participant_id IS NULL AND origin = 'participant'",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("repairing unmapped messages in {session_id}"))?;
+        Ok(inserted)
     }
 
     // ---- turn cycle -----------------------------------------------------
@@ -715,6 +805,95 @@ mod tests {
         let legacy = s.messages_for_session("s1", None).await.unwrap();
         assert_eq!(legacy.len(), 1);
         assert_eq!(legacy[0].author, "user", "legacy readers meet no new author value");
+    }
+
+    #[tokio::test]
+    async fn a_new_session_gets_the_default_roster() {
+        // 0044 backfilled only what existed when it applied. Without this,
+        // every session created afterwards runs with an empty roster.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.set_session_spawn_config("s1", true, Some("opus"), Some("sonnet")).await.unwrap();
+
+        assert_eq!(s.ensure_session_roster("s1").await.unwrap(), 2);
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert_eq!(roster.len(), 2);
+        assert_eq!(roster[0].slug, "brian");
+        assert_eq!(roster[0].turn_position, 0, "HANDS acts first");
+        assert_eq!(roster[0].model_id.as_deref(), Some("opus"), "model snapshotted off the row");
+        assert!(roster[0].capabilities.contains("edit_files"));
+        assert!(roster[0].enabled);
+        assert_eq!(roster[1].slug, "rain");
+        assert_eq!(roster[1].turn_position, 1);
+        assert_eq!(roster[1].model_id.as_deref(), Some("sonnet"));
+        assert!(!roster[1].capabilities.contains("edit_files"), "EYES stays read-only");
+        // A participant without a cursor is invisibly undeliverable.
+        for p in &roster {
+            assert_eq!(s.cursor_for(p.id).await.unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn seeding_a_roster_twice_is_a_no_op() {
+        // It runs pre-spawn on EVERY respawn, so non-idempotence would mean a
+        // duplicate roster per restart.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        assert_eq!(s.ensure_session_roster("s1").await.unwrap(), 2);
+        assert_eq!(s.ensure_session_roster("s1").await.unwrap(), 0, "second call inserts nothing");
+        assert_eq!(s.participants_for_session("s1").await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_solo_session_keeps_rain_disabled() {
+        // Same shape 0044 gave the 12 solo sessions it backfilled: the row
+        // exists (so promoting later is an UPDATE, not an invite) but is off.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.set_session_spawn_config("s1", false, None, None).await.unwrap();
+        assert_eq!(s.ensure_session_roster("s1").await.unwrap(), 2);
+        let roster = s.participants_for_session("s1").await.unwrap();
+        assert!(roster[0].enabled, "HANDS runs");
+        assert!(!roster[1].enabled, "EYES present but disabled");
+        assert!(s.next_active_participant("s1", None).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn seeding_repairs_messages_written_before_the_roster() {
+        // The live defect: a post-0044 session logged 60 messages with
+        // participant_id NULL before anything created its roster. Seeding must
+        // map them, or that history is permanently unattributed in the channel.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.insert_message("s1", Author::Brian, MessageKind::Text, "work").await.unwrap();
+        s.insert_message("s1", Author::Rain, MessageKind::Text, "review").await.unwrap();
+        s.insert_message("s1", Author::User, MessageKind::Text, "reply").await.unwrap();
+        let before = s.channel_after("s1", 0).await.unwrap();
+        assert!(before.iter().all(|m| m.participant_id.is_none()), "precondition: unmapped");
+
+        s.ensure_session_roster("s1").await.unwrap();
+
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let after = s.channel_after("s1", 0).await.unwrap();
+        assert_eq!(after[0].participant_id, Some(roster[0].id), "brian's row mapped");
+        assert_eq!(after[1].participant_id, Some(roster[1].id), "rain's row mapped");
+        assert_eq!(after[2].participant_id, None, "a user row has no participant");
+        assert_eq!(after[2].origin, "user");
+    }
+
+    #[tokio::test]
+    async fn insert_message_resolves_the_participant_once_the_roster_exists() {
+        // Closes the loop with B4a's dual-write: seeded roster → the inline
+        // subquery resolves, so nothing new accumulates unmapped.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        s.insert_message("s1", Author::Brian, MessageKind::Text, "work").await.unwrap();
+        let roster = s.participants_for_session("s1").await.unwrap();
+        let rows = s.channel_after("s1", 0).await.unwrap();
+        assert_eq!(rows[0].participant_id, Some(roster[0].id));
+        assert_eq!(rows[0].origin, "participant");
     }
 
     #[tokio::test]

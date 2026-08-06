@@ -58,6 +58,13 @@ four architectural forks decided by the user:
   turn helpers, `post_to_channel`/`unread_for_participant`.
 - **B4a — dual-write**: `insert_message` now fills `participant_id`/`origin`
   alongside `author`, so the channel is correct with no backfill needed.
+- **B4a.1 — `ensure_session_roster`**: 0044's backfill was a one-shot over the
+  sessions that existed when it applied, and nothing created participants for a
+  *new* one — so the first post-migration session ran with an empty roster and
+  its every message resolved `participant_id` to NULL (60 rows and climbing when
+  caught). Seeded pre-spawn from `ensure_session_started`, the one choke point
+  every creation path funnels through; idempotent, and it repairs what the
+  rosterless window wrote. B4b's rekey needs a roster to key by.
 - **B1 — `migrations/0044_session_participants.sql`, applied and verified live.**
 
 **Verification standard used throughout:** a guard or oracle that passes on
@@ -69,7 +76,9 @@ time it was applied.
 on every row, **0 unmapped**, 2 roles / 768 participants / 768 cursors across
 384 sessions, integrity + FK clean. B4a's dual-write confirmed in production —
 of 538 post-restart rows, all 503 participant rows attributed, and **0
-attribution mismatches across all 202k rows**.
+attribution mismatches across all 202k rows**. That verification covered only
+sessions the migration had backfilled; the first session created *after* it
+exposed the roster gap B4a.1 closes.
 
 **Three findings worth carrying** (full set in the CL's `notes.md`):
 `RAISE(ABORT,…)` is trigger-only and `sqlite3` walks past the parse error with
@@ -81,7 +90,7 @@ Remaining: B4b (structural rekey), B5 (channel + sequencer, deletes
 `router.rs`), B6/B7/B8. Plan:
 `docs/plans/2026-08-06-session-focused-redesign-implementation.md`.
 
-Gates at close: cargo 1081 green, frontend 199 vitest / tsc / build, release
+Gates at close: cargo 1086 green, frontend 199 vitest / tsc / build, release
 build green.
 
 ---

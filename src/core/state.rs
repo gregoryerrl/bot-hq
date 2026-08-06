@@ -266,6 +266,17 @@ impl AppState {
                 }
             }
         }
+        // Seed the roster before spawning. 0044's backfill was a one-shot over
+        // the sessions that existed when it applied, so anything created since
+        // starts with an empty roster and every message it writes resolves
+        // `participant_id` to NULL. This is the one choke point every creation
+        // path funnels through, and it's idempotent — two no-op inserts on a
+        // healthy respawn. A failure must NOT block the spawn: `author` still
+        // carries attribution, so a missing roster degrades the channel rather
+        // than the session.
+        if let Err(e) = self.storage.ensure_session_roster(session_id).await {
+            tracing::warn!(session_id, error = ?e, "seeding session roster failed");
+        }
         let handle = spawn_existing_session(
             session_id,
             &self.paths,
