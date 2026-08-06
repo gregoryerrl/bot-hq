@@ -523,6 +523,20 @@ pub fn render_wire(envelope: Option<&Envelope>, body: &str) -> String {
 }
 
 /// One row of the session channel, as a participant reads it.
+///
+/// The fields are public because reading them is the point — `core` reads
+/// `.content`, `.envelope`, `.origin` and `.id` — but the struct cannot be
+/// BUILT outside this module, and that is load-bearing rather than tidiness.
+/// [`PersistedMessage::from_row`] turns one of these into a receipt, so a
+/// `ChannelMessage` anyone could assemble would be a receipt anyone could
+/// assemble, and the receipt's whole claim is that a row exists behind it.
+///
+/// `_from_table` is what enforces it. Privacy on the module is not enough:
+/// `mod participants` is private to `storage`, which means every descendant of
+/// `storage` — about ten files — can name this type and write a literal. One
+/// private zero-sized field makes that literal `E0451` everywhere except here.
+/// `#[non_exhaustive]` would NOT do it: that only restricts other crates, and
+/// the forge that matters is in-crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelMessage {
     pub id: i64,
@@ -533,6 +547,9 @@ pub struct ChannelMessage {
     pub content: String,
     pub envelope: Option<Envelope>,
     pub created_at: String,
+    /// See the type doc: zero-sized, private, and the only reason "this value
+    /// came out of `messages`" is enforced rather than merely true today.
+    _from_table: (),
 }
 
 const CHANNEL_COLUMNS: &str =
@@ -560,6 +577,9 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
             }
         }),
         created_at: r.get("created_at"),
+        // The one place this may be written: the value is coming off a
+        // `SELECT`, which is exactly what the field asserts.
+        _from_table: (),
     }
 }
 
@@ -589,12 +609,16 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 ///
 /// The value cannot be forged from outside. There are exactly TWO construction
 /// sites — immediately downstream of that INSERT, and
-/// [`PersistedMessage::from_row`] for a row read back out — and both are
-/// unreachable beyond this file: the fields are private to this module, and
-/// `from_row`'s argument type is unnameable outside it. That makes this file,
-/// `mod tests` included, the trusted boundary. Keeping it to those two is a
-/// maintainer's job, not something the compiler checks: a helper added here
-/// later could mint a receipt with no row behind it. The claim now
+/// [`PersistedMessage::from_row`] for a row read back out — and neither is
+/// reachable beyond this file. The receipt's own fields are private, which
+/// blocks a literal; and `from_row`'s argument carries a private field of its
+/// own, which blocks assembling the row to feed it. The second gate is not a
+/// formality: module privacy alone would have left every file under
+/// `src/storage/` able to forge, which is how an earlier version of this
+/// paragraph was wrong. That makes this file, `mod tests` included, the trusted
+/// boundary. Keeping it to those two is a maintainer's job, not something the
+/// compiler checks: a helper added here later could mint a receipt with no row
+/// behind it. The claim now
 /// covers every write to `messages`, not just this method: B5 Task 1b made
 /// [`Storage::insert_message`] — the second live insert path, and the one the
 /// duo pump uses on every chunk — a thin wrapper over `post_to_channel`, so
@@ -607,8 +631,8 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 ///
 /// Two things enforce that, neither of them a convention. The private fields
 /// reject a struct literal (`E0451`, below), and `from_row` — the other way in —
-/// takes a type that cannot be named outside this module, so it cannot be fed a
-/// row that never existed. Forging from outside is rejected:
+/// takes a `ChannelMessage`, which carries a private field of its own, so it
+/// cannot be fed a row that never came out of the table. Forging is rejected:
 ///
 /// ```compile_fail
 /// use bot_hq::storage::PersistedMessage;
@@ -692,15 +716,26 @@ impl PersistedMessage {
     /// just went in — the type's claim is "this text is on record", and a
     /// `SELECT` establishes that at least as well as an `INSERT`.
     ///
-    /// Be exact about what stops this being a forge-anything hatch, because it
-    /// is NOT that the argument is hard to build: [`ChannelMessage`] is a plain
-    /// struct with public fields, so a literal is trivial. It is that the type
-    /// is unnameable outside `storage::participants` — the module is private and
-    /// `storage` re-exports the type list without it — so the only code that can
-    /// build one is this file, which is the trusted boundary the type doc
-    /// already names. `pub(crate)` on top of that keeps the method itself inside
-    /// the crate, matching `ParticipantInput::send_unrouted`. Callers in `core`
-    /// can pass a row they were HANDED without ever being able to invent one.
+    /// Be exact about what stops this being a forge-anything hatch. It is NOT
+    /// module privacy: `mod participants` is private to `storage`, not to this
+    /// file, so every descendant of `storage` — about ten files — can name
+    /// [`ChannelMessage`]. An earlier draft of this comment claimed otherwise
+    /// and a reviewer disproved it by compiling a fake row in
+    /// `storage::messages` and getting a receipt out of it.
+    ///
+    /// What stops it is the private `_from_table` field on `ChannelMessage`: a
+    /// struct literal outside `participants.rs` is `E0451`, so the only rows
+    /// that exist came off a `SELECT`. `pub(crate)` on this method keeps it in
+    /// the crate besides, matching `ParticipantInput::send_unrouted`. Callers in
+    /// `core` can pass a row they were HANDED and cannot invent one.
+    ///
+    /// That gates PROVENANCE, not immutability, and the difference is worth
+    /// keeping straight. `ChannelMessage`'s other fields stay public because
+    /// `core` reads them, so code holding a row it owns can still edit `.content`
+    /// before calling this. What is ruled out is a row that was never in the
+    /// table — the case where no INSERT ever happened. Editing one you were
+    /// handed is a visibly different act, in-crate, and not what the receipt is
+    /// defending against.
     ///
     /// It exists because without it there is no way to deliver history. The turn
     /// sequencer hands each participant its backlog from
@@ -724,6 +759,10 @@ impl PersistedMessage {
     // was no way to make a receipt from one WHILE building it would have meant
     // reaching for `send_unrouted` or widening `deliver` under deadline. The
     // round-trip test below is what keeps it honest in the meantime.
+    //
+    // The attribute comes OFF with the first real caller. If Task 5 lands
+    // without needing it, this method is not load-bearing and should go rather
+    // than sit here suppressing its own warning forever.
     #[allow(dead_code)]
     pub(crate) fn from_row(row: &ChannelMessage) -> Self {
         Self {

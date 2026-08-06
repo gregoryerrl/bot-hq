@@ -132,11 +132,16 @@ pub async fn broadcast_user_message(
 /// 1. the phase tag — `with_phase_and_findings_envelope` above, from the phase
 ///    `route_forward` reads at forward time;
 /// 2. the findings banner — same envelope, from `deps.open_blocking`;
-/// 3. the `peer_ack` override tag (`router.rs`, in `route_forward` just before
+/// 3. the peer provenance tag — the `prefix` match immediately below;
+/// 4. the `peer_ack` override tag (`router.rs`, in `route_forward` just before
 ///    the call to this function), prepended when a turn that called `peer_ack`
 ///    carried substantive text anyway. The only one of the four that changes
-///    what the message MEANS rather than framing it;
-/// 4. the peer provenance tag — the `prefix` match immediately below.
+///    what the message MEANS rather than framing it.
+///
+/// Note that 3 wraps 4 even though `route_forward` applies 4 first: the override
+/// tag is already inside `text` by the time `format!("{prefix}{text}")` below
+/// puts the provenance tag in front of it. Assembly order is the reverse of read
+/// order, which is why the list is numbered by what the peer sees.
 ///
 /// Recording them means threading a receipt through `RouterCommand` and moving
 /// all four decisions with it, which is the turn sequencer's work.

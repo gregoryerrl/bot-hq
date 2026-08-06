@@ -1490,7 +1490,7 @@ mod tests {
         // `{line}` being dropped, would leave the equality above green while the
         // peer reads something else.
         assert!(
-            body.contains(Author::Brian.as_str()),
+            body.contains("brian"),
             "the notice must name the stalled agent: {body}"
         );
         assert!(
