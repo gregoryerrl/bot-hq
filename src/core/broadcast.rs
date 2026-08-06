@@ -46,9 +46,10 @@ pub async fn broadcast_user_message(
     // post-cancel reconciliation directive. NOT persisted: storage keeps the
     // raw user text, so chat history stays clean (like the findings banner).
     system_prefix: Option<&str>,
-    brian_input: &mpsc::Sender<OutgoingUserMessage>,
-    // None for a solo session (Rain disabled) — Brian still receives the message.
-    rain_input: Option<&mpsc::Sender<OutgoingUserMessage>>,
+    // Every live participant, as `(slug, stdin)`. B4b: was a `brian_input` +
+    // `Option<rain_input>` pair. The slug rides along so the per-agent delivery
+    // warning below can still name WHICH agent missed the message.
+    recipients: &[(&str, &mpsc::Sender<OutgoingUserMessage>)],
 ) -> Result<i64> {
     let id = storage
         .insert_message(session_id, Author::User, MessageKind::Text, text)
@@ -65,18 +66,15 @@ pub async fn broadcast_user_message(
     };
     let wire = with_phase_and_findings_envelope(phase, open_blocking, &wire_body);
     let msg = OutgoingUserMessage::text(wire);
-    // Fan out to both agents. The message is persisted (above) regardless, but
+    // Fan out to every agent. The message is persisted (above) regardless, but
     // a send error means that agent's input pump has exited (stdin gone) and
     // the agent won't SEE this message. Previously swallowed with `let _`,
     // which is precisely how the #4 user→HANDS desync stayed invisible: a
     // failed send to Brian while Rain's succeeded looked like nothing wrong.
     // Log per agent so the asymmetry is diagnosable.
-    if let Err(e) = brian_input.send(msg.clone()).await {
-        warn!(agent = "brian", error = %e, "user broadcast not delivered (input pump closed)");
-    }
-    if let Some(rain_input) = rain_input {
-        if let Err(e) = rain_input.send(msg).await {
-            warn!(agent = "rain", error = %e, "user broadcast not delivered (input pump closed)");
+    for (slug, input) in recipients {
+        if let Err(e) = input.send(msg.clone()).await {
+            warn!(agent = %slug, error = %e, "user broadcast not delivered (input pump closed)");
         }
     }
     Ok(id)
@@ -119,7 +117,14 @@ mod tests {
         s.create_session("s1", "test", None).await.unwrap();
         let (btx, mut brx) = mpsc::channel(8);
         let (rtx, mut rrx) = mpsc::channel(8);
-        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, None, &btx, Some(&rtx))
+        broadcast_user_message(
+            &s,
+            "s1",
+            "hello",
+            IpavPhase::Apply,
+            None,
+            &[("brian", &btx), ("rain", &rtx)],
+        )
             .await
             .unwrap();
         let bm = brx.recv().await.unwrap();
@@ -151,8 +156,7 @@ mod tests {
             "msg-into-a",
             IpavPhase::Investigate,
             None,
-            &btx,
-            Some(&rtx),
+            &[("brian", &btx), ("rain", &rtx)],
         )
         .await
         .unwrap();
@@ -175,7 +179,7 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         s.create_session("solo", "test", None).await.unwrap();
         let (btx, mut brx) = mpsc::channel(8);
-        broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, None, &btx, None)
+        broadcast_user_message(&s, "solo", "hi", IpavPhase::Apply, None, &[("brian", &btx)])
             .await
             .unwrap();
         let bm = brx.recv().await.unwrap();
@@ -229,7 +233,7 @@ mod tests {
         .await
         .unwrap();
         let (btx, mut brx) = mpsc::channel(8);
-        broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, None, &btx, None)
+        broadcast_user_message(&s, "s1", "go", IpavPhase::Verify, None, &[("brian", &btx)])
             .await
             .unwrap();
         let bm = brx.recv().await.unwrap();
@@ -260,8 +264,7 @@ mod tests {
             "do the thing",
             IpavPhase::Apply,
             Some("[System: previous turn interrupted — verify workspace.]"),
-            &btx,
-            None,
+            &[("brian", &btx)],
         )
         .await
         .unwrap();

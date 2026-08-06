@@ -47,6 +47,23 @@ impl OpenSessionRequest {
     }
 }
 
+/// One live participant: its process handle plus its roster identity.
+///
+/// B4b: replaces `SessionHandle`'s `brian` + `rain: Option` pair. Ordered by
+/// `turn_position` inside the handle, which is the order B5's fixed ring will
+/// advance through.
+pub struct SessionAgent {
+    /// `session_participants.id`. `None` only when the roster read failed — a
+    /// spawned agent is never dropped because its row could not be loaded, so
+    /// every consumer must tolerate the gap. Carried for B5, unused in B4b.
+    pub participant_id: Option<i64>,
+    /// Roster slug — `brian` / `rain` today. Also the `ActivityTracker` key and
+    /// the legacy `Author` string (0044 mapped them 1:1).
+    pub slug: String,
+    pub turn_position: i64,
+    pub handle: AgentHandle,
+}
+
 /// A live session — the handles owned by `AppState`.
 pub struct SessionHandle {
     pub id: String,
@@ -61,9 +78,13 @@ pub struct SessionHandle {
     /// failed. Not persisted: subprocess restart = fresh capture or fallback.
     pub session_start_sha: Option<String>,
     pub ipav: Arc<Mutex<IpavState>>,
-    pub brian: AgentHandle,
-    /// None when this session runs solo-Brian (Rain disabled at create).
-    pub rain: Option<AgentHandle>,
+    /// Live agents in `turn_position` order. A solo session holds one.
+    ///
+    /// B4b: was `brian: AgentHandle` + `rain: Option<AgentHandle>`. A `Vec`
+    /// rather than the design's `HashMap<ParticipantId, _>` because the ring
+    /// needs deterministic order and a map has none — it would need a parallel
+    /// ordering anyway. N ≤ 5 makes linear lookup free.
+    pub participants: Vec<SessionAgent>,
     /// Shared "duo is awaiting user input" flag. Set by the bridge when any
     /// user-blocking MCP tool fires; checked by `router::route_forward`
     /// before it forwards Brian↔Rain chunks; cleared by
@@ -105,16 +126,40 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    /// Fan a wire message to both agents' stdin. Send errors are ignored: a
+    /// Fan a wire message to every agent's stdin. Send errors are ignored: a
     /// closed input channel means the subprocess is already gone, which this
     /// caller can't remediate.
-    pub async fn send_to_both(&self, msg: crate::agents::OutgoingUserMessage) {
-        let _ = self.brian.input_tx.send(msg.clone()).await;
-        self.activity.set_busy(crate::storage::Author::Brian, true);
-        if let Some(rain) = &self.rain {
-            let _ = rain.input_tx.send(msg).await;
-            self.activity.set_busy(crate::storage::Author::Rain, true);
+    pub async fn send_to_all(&self, msg: crate::agents::OutgoingUserMessage) {
+        for agent in &self.participants {
+            let _ = agent.handle.input_tx.send(msg.clone()).await;
+            self.activity.set_busy_slug(&agent.slug, true);
         }
+    }
+
+    /// Agents in turn order.
+    pub fn agents(&self) -> impl Iterator<Item = &SessionAgent> {
+        self.participants.iter()
+    }
+
+    pub fn agents_mut(&mut self) -> impl Iterator<Item = &mut SessionAgent> {
+        self.participants.iter_mut()
+    }
+
+    pub fn by_slug(&self, slug: &str) -> Option<&SessionAgent> {
+        self.participants.iter().find(|a| a.slug == slug)
+    }
+
+    /// The executor. Slug-keyed until B7 derives the role from capabilities —
+    /// the HANDS-only paths (phase nudges, the atomic-tool gate) need a
+    /// specific agent, not "the first one".
+    pub fn hands(&self) -> Option<&SessionAgent> {
+        self.by_slug("brian")
+    }
+
+    /// How many agents this session runs. `> 1` replaces the old
+    /// `rain.is_some()` duo check.
+    pub fn agent_count(&self) -> usize {
+        self.participants.len()
     }
 
     /// True once either agent's retry supervisor has terminated — a permanent
@@ -126,9 +171,36 @@ impl SessionHandle {
     /// backoff (the supervisor still holds the receiver then), so a recovering
     /// agent is never wrongly evicted.
     pub fn is_stale(&self) -> bool {
-        self.brian.input_tx.is_closed()
-            || self.rain.as_ref().is_some_and(|r| r.input_tx.is_closed())
+        self.participants
+            .iter()
+            .any(|a| a.handle.input_tx.is_closed())
     }
+}
+
+/// Pair each spawned agent with its roster row and order by `turn_position`.
+///
+/// A slug missing from the roster still yields a `SessionAgent` (id `None`,
+/// position `i64::MAX`): a spawned subprocess must never be dropped because a
+/// roster read failed, and the sort is stable, so an all-unknown roster
+/// degrades to spawn order.
+fn session_agents(
+    roster: &[crate::storage::Participant],
+    spawned: Vec<(String, AgentHandle)>,
+) -> Vec<SessionAgent> {
+    let mut agents: Vec<SessionAgent> = spawned
+        .into_iter()
+        .map(|(slug, handle)| {
+            let row = roster.iter().find(|p| p.slug == slug);
+            SessionAgent {
+                participant_id: row.map(|p| p.id),
+                turn_position: row.map(|p| p.turn_position).unwrap_or(i64::MAX),
+                slug,
+                handle,
+            }
+        })
+        .collect();
+    agents.sort_by_key(|a| a.turn_position);
+    agents
 }
 
 pub async fn open_session(
@@ -461,9 +533,32 @@ async fn spawn_session_handle(
 
     let mcp_temp = TempDir::new().context("creating mcp-config temp dir")?;
 
+    // Seed the roster before anything is spawned. THIS is the choke point both
+    // creation paths share — `open_session` (external driver) and
+    // `spawn_existing_session` (everything else) — whereas
+    // `ensure_session_started`, where B4a.1 first put this, is only on the
+    // second. Idempotent, so the common path is two no-op inserts. A failure
+    // must not block the spawn: `author` still carries attribution and the
+    // agents still run.
+    if let Err(e) = storage.ensure_session_roster(&session.id).await {
+        warn!(session_id = %session.id, ?e, "seeding session roster failed");
+    }
+    let roster = match storage.participants_for_session(&session.id).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(session_id = %session.id, ?e, "reading session roster failed");
+            Vec::new()
+        }
+    };
+
     // Resolve each agent's spawn config from its chosen saved model (create
     // dialog), falling back to the per-agent config. Rain is skipped entirely
     // when the session runs solo-Brian.
+    //
+    // Still read off `sessions.brian_*` / `rain_*` rather than the roster:
+    // `Participant` carries no `effort` / `ultracode` / `claude_session_id`
+    // (they are in the 0044 INSERT but not in `PARTICIPANT_COLUMNS`), and
+    // `build_command` needs all three. B7 owns that migration.
     let rain_enabled = session.rain_enabled != 0;
     let brian_cfg =
         resolve_spawn_config(&storage, "brian", session.brian_model_id.as_deref()).await;
@@ -765,8 +860,12 @@ async fn spawn_session_handle(
         working_repo_path,
         session_start_sha,
         ipav,
-        brian: brian_handle,
-        rain: rain_handle,
+        participants: session_agents(
+            &roster,
+            std::iter::once(("brian".to_string(), brian_handle))
+                .chain(rain_handle.map(|r| ("rain".to_string(), r)))
+                .collect(),
+        ),
         awaiting,
         user_silent_forwards,
         user_broadcasts,
@@ -1224,6 +1323,93 @@ mod tests {
     #[test]
     fn eyes_takes_the_native_loop_when_its_model_opts_in() {
         assert_eq!(resolve_agent_kind("rain", true), AgentKind::Native);
+    }
+
+    /// A throwaway handle — `AgentHandle` is a pure channel struct, so the
+    /// receivers are dropped and only the identity/order matters here.
+    fn stub_handle(name: &str) -> AgentHandle {
+        let (_etx, erx) = tokio::sync::mpsc::channel(1);
+        let (itx, _irx) = tokio::sync::mpsc::channel(1);
+        let (ctx, _crx) = tokio::sync::mpsc::channel(1);
+        let (ktx, _krx) = tokio::sync::oneshot::channel();
+        AgentHandle::from_parts(name.to_string(), erx, itx, ctx, ktx)
+    }
+
+    fn stub_participant(id: i64, slug: &str, turn_position: i64) -> crate::storage::Participant {
+        crate::storage::Participant {
+            id,
+            session_id: "s1".into(),
+            slug: slug.into(),
+            display_name: slug.into(),
+            role_id: None,
+            model_id: None,
+            runtime: "claude_code".into(),
+            capabilities: "[]".into(),
+            participation_mode: "active".into(),
+            turn_position,
+            done_vote: false,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn session_agents_follow_the_rosters_turn_order_not_spawn_order() {
+        // Spawn order is brian-then-rain and always will be (Rain's config is
+        // resolved second), so ordering by the roster has to actually re-sort —
+        // otherwise B5's ring would silently run in spawn order and the reviewer
+        // could take the turn before the executor.
+        let roster = vec![
+            stub_participant(7, "rain", 0),
+            stub_participant(4, "brian", 1),
+        ];
+        let agents = session_agents(
+            &roster,
+            vec![
+                ("brian".to_string(), stub_handle("brian")),
+                ("rain".to_string(), stub_handle("rain")),
+            ],
+        );
+        assert_eq!(agents[0].slug, "rain", "turn_position 0 goes first");
+        assert_eq!(agents[0].participant_id, Some(7));
+        assert_eq!(agents[1].slug, "brian");
+        assert_eq!(agents[1].participant_id, Some(4));
+    }
+
+    #[test]
+    fn a_spawned_agent_missing_from_the_roster_is_still_kept() {
+        // A roster read can fail (logged, not fatal). Dropping a spawned agent
+        // here would orphan a live subprocess — strictly worse than running it
+        // with no participant id, which only costs B5 its attribution.
+        let agents = session_agents(
+            &[],
+            vec![
+                ("brian".to_string(), stub_handle("brian")),
+                ("rain".to_string(), stub_handle("rain")),
+            ],
+        );
+        assert_eq!(agents.len(), 2, "no agent is lost to a missing roster");
+        assert!(agents.iter().all(|a| a.participant_id.is_none()));
+        assert_eq!(
+            agents.iter().map(|a| a.slug.as_str()).collect::<Vec<_>>(),
+            vec!["brian", "rain"],
+            "the sort is stable, so an unknown roster degrades to spawn order"
+        );
+    }
+
+    #[test]
+    fn a_partially_known_roster_keeps_the_known_agent_first() {
+        // Mixed case: one slug resolves, one does not. The unknown sorts last
+        // (i64::MAX) rather than colliding with position 0.
+        let agents = session_agents(
+            &[stub_participant(9, "rain", 1)],
+            vec![
+                ("ghost".to_string(), stub_handle("ghost")),
+                ("rain".to_string(), stub_handle("rain")),
+            ],
+        );
+        assert_eq!(agents[0].slug, "rain");
+        assert_eq!(agents[1].slug, "ghost");
+        assert_eq!(agents[1].turn_position, i64::MAX);
     }
 
     #[test]

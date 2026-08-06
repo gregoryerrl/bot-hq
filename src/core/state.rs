@@ -4,7 +4,7 @@ use crate::agents::OutgoingUserMessage;
 use crate::core::broadcast::{broadcast_user_message, with_phase_envelope};
 use crate::core::ipav::IpavPhase;
 use crate::core::session::{
-    open_session, spawn_existing_session, OpenSessionRequest, SessionHandle,
+    open_session, spawn_existing_session, OpenSessionRequest, SessionAgent, SessionHandle,
 };
 use crate::paths::Paths;
 use crate::signaling::{ExternalServer, SignalingBridge, SignalingEvent, SignalingServer};
@@ -258,25 +258,16 @@ impl AppState {
                 // Evict the stale (crashed) handle before re-spawning. Killing
                 // already-dead agents is a no-op.
                 if let Some(mut stale) = sessions.remove(session_id) {
-                    stale.brian.kill();
-                    if let Some(rain) = stale.rain.as_mut() {
-                        rain.kill();
+                    for agent in stale.agents_mut() {
+                        agent.handle.kill();
                     }
                     tracing::info!(session_id, "evicted stale session handle; re-spawning");
                 }
             }
         }
-        // Seed the roster before spawning. 0044's backfill was a one-shot over
-        // the sessions that existed when it applied, so anything created since
-        // starts with an empty roster and every message it writes resolves
-        // `participant_id` to NULL. This is the one choke point every creation
-        // path funnels through, and it's idempotent — two no-op inserts on a
-        // healthy respawn. A failure must NOT block the spawn: `author` still
-        // carries attribution, so a missing roster degrades the channel rather
-        // than the session.
-        if let Err(e) = self.storage.ensure_session_roster(session_id).await {
-            tracing::warn!(session_id, error = ?e, "seeding session roster failed");
-        }
+        // The roster seed moved into `spawn_session_handle` (B4b.2) — it is the
+        // choke point BOTH creation paths share, and this one is not: the
+        // external driver's `open_session` never reaches here.
         let handle = spawn_existing_session(
             session_id,
             &self.paths,
@@ -303,9 +294,8 @@ impl AppState {
         {
             let mut sessions = self.sessions.lock().await;
             if let Some(mut handle) = sessions.remove(session_id) {
-                handle.brian.kill();
-                if let Some(rain) = handle.rain.as_mut() {
-                    rain.kill();
+                for agent in handle.agents_mut() {
+                    agent.handle.kill();
                 }
                 tracing::info!(session_id, "restarting session to apply config change");
             }
@@ -417,13 +407,22 @@ impl AppState {
             // interrupt indistinguishable from one the agent received and ignored
             // — two different bugs with the same symptom, and no way to tell them
             // apart after the fact.
-            let rain_queued = handle.rain.as_ref().map(|rain| rain.interrupt("cancel"));
-            let brian_queued = handle.brian.interrupt("cancel");
+            // Non-HANDS agents first, HANDS last — the ordering is the point,
+            // so iterate by role rather than by turn position (which puts HANDS
+            // at 0). `None` = this session has no peer.
+            let mut rain_queued: Option<bool> = None;
+            for agent in handle.agents().filter(|a| a.slug != "brian") {
+                let queued = agent.handle.interrupt("cancel");
+                if !queued {
+                    tracing::warn!(session_id, slug = %agent.slug, "cancel: peer interrupt was NOT queued");
+                }
+                rain_queued = Some(rain_queued.unwrap_or(true) && queued);
+            }
+            let brian_queued = handle
+                .hands()
+                .is_some_and(|h| h.handle.interrupt("cancel"));
             if !brian_queued {
                 tracing::warn!(session_id, "cancel: HANDS interrupt was NOT queued");
-            }
-            if rain_queued == Some(false) {
-                tracing::warn!(session_id, "cancel: EYES interrupt was NOT queued");
             }
             (
                 Arc::clone(&handle.activity),
@@ -513,12 +512,20 @@ impl AppState {
         let killed = {
             let mut sessions = self.sessions.lock().await;
             if let Some(handle) = sessions.get_mut(session_id) {
-                // EYES (Rain) is review-only → side-effect-safe; cancel it first.
-                // HANDS (Brian) may be mid-tool, so kill it last.
-                if let Some(rain) = handle.rain.as_mut() {
-                    rain.kill();
+                // Non-HANDS agents are review-only → side-effect-safe; kill them
+                // first. HANDS may be mid-tool, so it goes last. Ordering, not
+                // turn position — same rule as `interrupt_then_escalate`.
+                let mut hands: Option<&mut SessionAgent> = None;
+                for agent in handle.agents_mut() {
+                    if agent.slug == "brian" {
+                        hands = Some(agent);
+                    } else {
+                        agent.handle.kill();
+                    }
                 }
-                handle.brian.kill();
+                if let Some(h) = hands {
+                    h.handle.kill();
+                }
                 true
             } else {
                 false
@@ -550,9 +557,8 @@ impl AppState {
     pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
         if let Some(mut handle) = sessions.remove(id) {
-            handle.brian.kill();
-            if let Some(rain) = handle.rain.as_mut() {
-                rain.kill();
+            for agent in handle.agents_mut() {
+                agent.handle.kill();
             }
         }
         // Stop live-watching this session's working repo.
@@ -755,18 +761,21 @@ impl AppState {
         // channel writes this ahead of the message on stdin, so each agent aborts
         // then reads the new message. No SIGKILL escalation (unlike cancel) — the
         // message IS the next work, and the process stays warm (no --resume).
-        handle.brian.interrupt("user-preempt");
-        if let Some(rain) = handle.rain.as_ref() {
-            rain.interrupt("user-preempt");
+        for agent in handle.agents() {
+            agent.handle.interrupt("user-preempt");
         }
+        let recipients: Vec<(&str, &tokio::sync::mpsc::Sender<crate::agents::OutgoingUserMessage>)> =
+            handle
+                .agents()
+                .map(|a| (a.slug.as_str(), &a.handle.input_tx))
+                .collect();
         let id = broadcast_user_message(
             &self.storage,
             session_id,
             text,
             phase,
             reconcile,
-            &handle.brian.input_tx,
-            handle.rain.as_ref().map(|r| &r.input_tx),
+            &recipients,
         )
         .await?;
         // The user's message was dispatched to both agents → they're now busy
@@ -783,9 +792,8 @@ impl AppState {
         // settle into the new task. (Expiry and this are the only clears —
         // never activity transitions.)
         self.bridge.clear_session_working(session_id).await;
-        handle.activity.set_busy(Author::Brian, true);
-        if handle.rain.is_some() {
-            handle.activity.set_busy(Author::Rain, true);
+        for agent in handle.agents() {
+            handle.activity.set_busy_slug(&agent.slug, true);
         }
         self.bridge
             .notify_message_persisted(Arc::from(session_id), id);
@@ -802,7 +810,7 @@ impl AppState {
             .unwrap_or_default();
         for wire in held_wakes {
             handle
-                .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
+                .send_to_all(crate::agents::OutgoingUserMessage::text(wire))
                 .await;
         }
         flush_held(handle.router.as_ref().map(|r| &r.tx), session_id);
@@ -857,24 +865,28 @@ impl AppState {
         // reads the new phase on the next message that actually has something in
         // it. Provider-limit peer notices still wake her deliberately — that is a
         // different path and stays.
-        let _ = handle
-            .brian
-            .input_tx
-            .send(OutgoingUserMessage::text(notice))
-            .await;
+        if let Some(hands) = handle.hands() {
+            let _ = hands
+                .handle
+                .input_tx
+                .send(OutgoingUserMessage::text(notice))
+                .await;
+        }
 
         // A2 (adherence): the peer-ack the prompts don't mechanically enforce.
         // On the Plan→Apply boundary in a duo session, remind Brian (HANDS) to
         // confirm Rain's plan review before mutating. Brian-only; no-op solo;
         // gated by the adherence_nudges setting.
-        if Self::should_peer_ack_nudge(prev_phase, target, handle.rain.is_some())
+        if Self::should_peer_ack_nudge(prev_phase, target, handle.agent_count() > 1)
             && self.storage.adherence_nudges_enabled().await
         {
-            let _ = handle
-                .brian
-                .input_tx
-                .send(OutgoingUserMessage::text(Self::APPLY_ENTRY_NUDGE.to_string()))
-                .await;
+            if let Some(hands) = handle.hands() {
+                let _ = hands
+                    .handle
+                    .input_tx
+                    .send(OutgoingUserMessage::text(Self::APPLY_ENTRY_NUDGE.to_string()))
+                    .await;
+            }
         }
         // A phase advance clears `awaiting` (above), so it must also release what
         // the router held during that halt — otherwise the held forward waits for
@@ -1040,12 +1052,11 @@ impl AppState {
                         // process survives, next message still processed) — so no
                         // gate on the flaky `busy` signal, and no SIGKILL
                         // escalation (the answer IS the next work).
-                        handle.brian.interrupt("tray-answer-preempt");
-                        if let Some(rain) = handle.rain.as_ref() {
-                            rain.interrupt("tray-answer-preempt");
+                        for agent in handle.agents() {
+                            agent.handle.interrupt("tray-answer-preempt");
                         }
                         handle
-                            .send_to_both(crate::agents::OutgoingUserMessage::text(wire))
+                            .send_to_all(crate::agents::OutgoingUserMessage::text(wire))
                             .await;
                         // Answering a tray card ends the halt just as a typed
                         // message does, so release what the router held behind
@@ -1328,11 +1339,11 @@ mod tests {
             .split("TrayWakeStep::PreemptAndDeliver => {")
             .nth(1)
             .expect("the preempt arm must exist");
-        let interrupt = arm.find("brian.interrupt(\"tray-answer-preempt\")");
-        let send = arm.find("send_to_both");
+        let interrupt = arm.find("interrupt(\"tray-answer-preempt\")");
+        let send = arm.find("send_to_all");
         assert!(
             interrupt.is_some() && send.is_some() && interrupt < send,
-            "the tray-answer interrupt must fire BEFORE send_to_both"
+            "the tray-answer interrupt must fire BEFORE send_to_all"
         );
     }
 }
