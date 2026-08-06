@@ -9,6 +9,83 @@ planned next see [`PLAN.md`](PLAN.md).
 
 ---
 
+## 2026-08-06 — rc3 begins: the session-focused redesign (design, B0–B4a, migration 0044 verified live)
+
+**This arc is `1.0.0-rc3`.** rc2 was the harness as built — agent-focused, with
+Brian and Rain compiled into the core. rc3 is the redesign that makes the
+session the unit and agents its configurable participants. Version bumped in
+`Cargo.toml`, `tauri.conf.json` and `frontend/package.json`; the arc is
+partially shipped (B0–B4a + the schema), not complete.
+
+The architecture pivot. User's diagnosis: bot-hq's *doing* is correct but the
+*design of the doing* is the problem — agent-focus makes agent plugins hard, and
+"the chat stream is not really a chat stream" because peer forwards travel a
+hidden pipe that can hold, suppress or rewrite text with no record. Measured
+blast radius: **1333 agent-name occurrences in Rust, 312 in the frontend**, six
+invisible injection points, and a 21-subsystem inventory showing that everything
+carrying meaning *between* agents is invisible while everything carrying meaning
+*to the user* is visible.
+
+**Design** (`docs/plans/2026-08-06-session-focused-redesign-design.md`) — all
+four architectural forks decided by the user:
+- **Participants, not agents.** A session owns N participants; a participant is
+  a model plus an invite-time snapshot of a user-owned **Role**. The Agents tab
+  becomes a Roles tab; HANDS/EYES become the user's own configurations. This
+  deletes the planned Rain-plugin migration outright.
+- **Turn cycle** (user's own model, beat all three options offered): a fixed
+  ring over active participants, **O(1) wakes per turn** vs broadcast's O(N),
+  with each participant waking to everything after its cursor. Deletes the
+  volley-breakers, wake rules, addressing, and `router.rs`'s routing.
+- **Consensus halt**, derived from vision.md's AI-car: the cycle runs until
+  every active participant votes done; a parked question halts immediately.
+  A round budget was rejected as contradicting "the first prompt sets the
+  destination, not the arrival".
+- **Serialisation accepted** as the one deliberate client-visible change —
+  today's duo runs concurrently, which is *why* the reviewer ran a phase behind
+  all session. "The staleness was the bug, not the speed."
+
+**Shipped, 24 commits:**
+- **B0 — the parity oracle.** `src/signaling/parity.rs` pins today's tool
+  authorization + commit-gate contract; `docs/plans/2026-08-06-router-behaviour-inventory.md`
+  gives a verdict to each of the 20 behaviours `router.rs`'s 822 test lines
+  encode (11 preserved, 8 dissolved, 2 dropped with reasons). Two behaviours are
+  invisible in the code and present only in the tests.
+- **B2 — capability model** (`src/agents/capability.rs`): grants only,
+  dependencies validated, session policy as ceiling. Plus a cross-check proving
+  the model reaches the same verdict as the live dispatch layer for all 38 tools.
+- **B3a/B3b — participants storage + channel primitives**
+  (`src/storage/participants.rs`): roles, participants, cursors, deliveries,
+  turn helpers, `post_to_channel`/`unread_for_participant`.
+- **B4a — dual-write**: `insert_message` now fills `participant_id`/`origin`
+  alongside `author`, so the channel is correct with no backfill needed.
+- **B1 — `migrations/0044_session_participants.sql`, applied and verified live.**
+
+**Verification standard used throughout:** a guard or oracle that passes on
+first run proves nothing. Every one was proven by injecting a regression and
+confirming exactly the right test failed. That caught a wrong assertion each
+time it was applied.
+
+**Live migration result:** `applied=1`, 201,999 messages with `author` preserved
+on every row, **0 unmapped**, 2 roles / 768 participants / 768 cursors across
+384 sessions, integrity + FK clean. B4a's dual-write confirmed in production —
+of 538 post-restart rows, all 503 participant rows attributed, and **0
+attribution mismatches across all 202k rows**.
+
+**Three findings worth carrying** (full set in the CL's `notes.md`):
+`RAISE(ABORT,…)` is trigger-only and `sqlite3` walks past the parse error with
+exit 0, so guards silently no-op; a table rebuild transiently needs ≈2× the DB
+size (found via a real disk-full); and keeping `author` as a transitional column
+is what decoupled an irreversible migration from a 153-site refactor.
+
+Remaining: B4b (structural rekey), B5 (channel + sequencer, deletes
+`router.rs`), B6/B7/B8. Plan:
+`docs/plans/2026-08-06-session-focused-redesign-implementation.md`.
+
+Gates at close: cargo 1081 green, frontend 199 vitest / tsc / build, release
+build green.
+
+---
+
 ## 2026-08-06 — Track 1 harness fixes: tray preempt, gate-refusal wording, CL close-out sweep
 
 The first three deliverables from the Aug-5 plan (PLAN.md "Next

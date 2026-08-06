@@ -100,6 +100,34 @@ Check the log for the failure reason before retrying:
 
 ---
 
+## 7. FOLLOW-UP (after verification): reclaim ~400 MB with VACUUM
+
+The rebuild leaves the dropped table's pages on the freelist — SQLite does not
+return them to the filesystem on its own. Measured immediately after 0044
+applied:
+
+```
+page_count=221382  freelist=102511  page_size=4096   →  400.4 MB reclaimable
+```
+
+The database file grew from 452 MB to **864.8 MB**, i.e. **46% of it is empty
+space**. `VACUUM` rewrites the file compactly and gives that back.
+
+**Requires the app STOPPED** — `VACUUM` needs an exclusive lock and will fail or
+block against a live connection. It also needs free disk roughly equal to the
+final size while it runs.
+
+```bash
+# with bot-hq quit:
+sqlite3 ~/.bot-hq/.local/bot-hq.db "VACUUM;"
+sqlite3 ~/.bot-hq/.local/bot-hq.db "PRAGMA integrity_check;"   # expect: ok
+ls -la ~/.bot-hq/.local/bot-hq.db
+```
+
+Not urgent, but worth doing before the next table rebuild — that one will need
+≈2× the *file* size, and a bloated file makes the requirement 2× larger than it
+needs to be.
+
 ## What this session survives
 
 - **Session row, all 1,474 messages, and the IPAV docs** — preserved by the

@@ -1,4 +1,9 @@
-# bot-hq redesign — session-focused architecture
+# bot-hq rc3 — session-focused architecture
+
+**This redesign is release `1.0.0-rc3`.** rc2 was the harness as built:
+agent-focused, with Brian and Rain compiled into the core. rc3 makes the session
+the unit and agents its configurable participants.
+
 
 **Status: DESIGN COMPLETE — no open architectural questions.** Every section was
 validated with the user one at a time. Nothing here is implemented, and the B1
