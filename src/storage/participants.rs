@@ -421,8 +421,18 @@ impl Storage {
 /// body rather than parse them back out, and *delivered == recorded ==
 /// displayed* holds because rendering is deterministic from `(body, envelope)`.
 ///
-/// Fields are private: the renderer below is the only thing that needs to read
-/// them, and keeping them so leaves the JSON shape free to change.
+/// Fields are private, but be precise about what that buys — it is NOT the
+/// unforgeability [`PersistedMessage`] has. Every field has a `pub` builder and
+/// `Deserialize` is derived on top of that, so an arbitrary `Envelope` is
+/// constructible from anywhere, and `core` does build them outright. Privacy
+/// buys the smaller thing: [`render_wire`] is the only code that interprets
+/// these fields, so the on-disk JSON shape stays free to change.
+///
+/// Nor is an `Envelope` a permission. Attached to a row it is recorded and
+/// re-renderable; handed straight to [`render_wire`] it is plain string
+/// building, which is what `core::broadcast::peer_forward_message` still does.
+/// The permission is the receipt below, and only [`Storage::post_to_channel`]
+/// mints one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     /// IPAV phase NAME (`Investigate` / `Plan` / `Apply` / `Verify`), not the
@@ -555,10 +565,11 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// claim to be showing what the agent read true rather than aspirational.
 ///
 /// One string wire survives Task 2: the peer forward in
-/// `core::broadcast::peer_forward_message`, which carries an agent's OWN
-/// already-persisted output to its peer. Making that one receipt-gated means
-/// threading the author's receipt through `RouterCommand`, which is the turn
-/// sequencer's job, not this one.
+/// `core::broadcast::peer_forward_message`. The TEXT it carries is on record —
+/// an agent's own output, persisted chunk by chunk, or for the host-authored
+/// provider-limit notice its own `system` row, posted beside the forward. What
+/// is not is the decoration the router wraps it in at forward time. See that
+/// function for why gating it is the turn sequencer's job, not this one's.
 ///
 /// The value cannot be forged from outside. There is
 /// exactly ONE construction site, immediately downstream of that INSERT, and

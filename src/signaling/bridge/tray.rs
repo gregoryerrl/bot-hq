@@ -636,7 +636,8 @@ impl SignalingBridge {
         // cannot work: a receipt is immutable, so core would either wire the
         // undecorated body (dropping `[PHASE: X]` from what the agent reads) or
         // write a second row for one answer. So the lookup moves to the bridge
-        // instead, which the per-session Weak registry already had a pattern for.
+        // instead, following `session_activity` — the one other per-session map
+        // here that holds a `Weak` back into a live session's state.
         //
         // It also costs core nothing it was relying on: core read the phase
         // microseconds later under the sessions lock, so the only observable
@@ -1041,9 +1042,11 @@ mod tests {
         assert_eq!(receipt.body(), body, "the receipt is for THIS answer");
         assert_eq!(receipt.wire(), format!("[PHASE: Plan]\n{body}"));
 
-        // Unregistering (session closed) is the honest degradation: no phase is
-        // known, so the row records — and the agent would read — an untagged
-        // body rather than a phase the session may have left.
+        // Dropping the session's IPAV state (its handle is gone, but nothing
+        // called `unregister_session`) leaves a dead `Weak`. That is the honest
+        // degradation: no phase is known, so the row records — and the agent
+        // would read — an untagged body rather than a phase the session may
+        // have left. The unregister path is covered separately, in `mod.rs`.
         drop(ipav);
         storage
             .insert_tray_entry(

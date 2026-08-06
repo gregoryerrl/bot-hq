@@ -12,7 +12,8 @@ use tracing::warn;
 /// `open_blocking > 0`, so the banner rides every turn (it can't scroll away)
 /// until the findings are dispositioned — the salience half of the
 /// EYES-sign-off gate (post-mortem §5.2). `open_blocking == 0` renders the
-/// plain phase envelope, so there's zero overhead in the common case.
+/// plain phase envelope, so an absent banner costs nothing: `render_wire` skips
+/// its `format!` entirely.
 ///
 /// Builds an [`Envelope`] and hands it to [`render_wire`] rather than
 /// formatting the tag itself. There must be exactly one place that decides how
@@ -20,6 +21,13 @@ use tracing::warn;
 /// through `render_wire`, so a second spelling here would mean the peer forward
 /// and the user broadcast disagreed about what an agent's stdin looks like, and
 /// only one of them would show up in the chat.
+///
+/// That consolidation is not literally free, and this used to claim it was. The
+/// `Envelope` owns its phase name, so every call heap-allocates a ≤11-byte
+/// `String` that the old single `format!` did not — on the peer-forward path,
+/// once per delivered forward. Kept anyway: a forward already allocates the
+/// whole wire, and buying a second spelling of the phase tag back would cost
+/// far more than it saves.
 ///
 /// The sole production caller is [`peer_forward_message`] — the one wire that
 /// still carries a string with no row of its own. Everything else supplies its
@@ -101,13 +109,28 @@ pub async fn broadcast_user_message(
 /// The message is rendered as if from the user but tagged so the agent knows
 /// who said it.
 ///
-/// **The one wire B5 Task 2 did not gate on a receipt.** The text IS persisted —
-/// the author's pump wrote it as that agent's own row before the router ever
-/// saw it — but the router is handed the string, not the receipt, so gating
-/// here means threading a `PersistedMessage` through `RouterCommand` and
-/// re-homing the peer tag into the envelope. That is the turn sequencer's work.
-/// Until then this is the only caller of `ParticipantInput::send_unrouted`, and
-/// the peer tag below is still invisible string mutation.
+/// **The one wire B5 Task 2 did not gate on a receipt**, and the only caller of
+/// `ParticipantInput::send_unrouted`. The peer tag below is still invisible
+/// string mutation.
+///
+/// Three `RouterCommand::Forward` producers reach here. An agent's turn buffer
+/// (`core::duo`, at flush) and its on-exit prose are accumulations of
+/// `AgentEvent::Text` chunks the pump persists as they arrive. The
+/// provider-limit peer notice is host-authored, and posts its own `system` row
+/// in the pump before handing the same string to the router.
+///
+/// That last one is a row BESIDE the forward rather than through it, on purpose.
+/// What reaches the peer is decided here and in `route_forward`, out of the
+/// peer's identity, the phase and the open-findings count read at forward time,
+/// and only after a ladder that can hold the forward (hard cap) or drop it
+/// (convergence). Delivering the receipt straight to the peer's stdin would skip
+/// that ladder and wake it in cases where today it is not woken — a behaviour
+/// change, not a serialisation one.
+///
+/// So the text is on record either way and the DECORATION is not: the peer tag
+/// below, the phase and the banner exist only on this wire. Recording those means
+/// threading a receipt through `RouterCommand` and moving the assembly with it,
+/// which is the turn sequencer's work.
 pub async fn peer_forward_message(
     peer_author: Author,
     text: &str,

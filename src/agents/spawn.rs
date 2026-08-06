@@ -297,14 +297,24 @@ impl ParticipantInput {
             .is_ok()
     }
 
-    /// The one remaining string wire: `core::broadcast::peer_forward_message`,
-    /// which carries an agent's OWN already-persisted output to its peer.
+    /// The one remaining string wire: `core::broadcast::peer_forward_message`.
     ///
-    /// It is not receipt-gated because the receipt it would need belongs to the
-    /// AUTHOR's row, which the pump mints and the router never sees — threading
-    /// it through `RouterCommand` is the turn sequencer's work. Deliberately
-    /// named to be greppable: `send_unrouted` is the audit list of text that
-    /// reaches a participant without a row of its own.
+    /// Greppable on purpose, but note what the grep gives you — CALL SITES, not
+    /// messages. Three `RouterCommand::Forward` producers reach this one call
+    /// site, and none of them is text with nothing on record any more:
+    ///
+    /// * an agent's turn buffer and its on-exit prose are built from
+    ///   `AgentEvent::Text` chunks the pump persists as they arrive;
+    /// * the provider-limit peer notice (`core::duo`) is host-authored, and
+    ///   posts its own `system` row before handing the same string to the
+    ///   router — forwarding only if that row was written.
+    ///
+    /// What is still ungated is the WIRE, not the text. No row reproduces what
+    /// the peer actually reads: the peer tag, phase and open-findings count are
+    /// assembled inside the router at forward time, after a ladder that may hold
+    /// or drop the forward first. Recording that means threading a receipt
+    /// through `RouterCommand` and moving the assembly with it, which is the
+    /// turn sequencer's work.
     pub(crate) async fn send_unrouted(&self, wire: String) -> bool {
         self.tx.send(OutgoingUserMessage::text(wire)).await.is_ok()
     }

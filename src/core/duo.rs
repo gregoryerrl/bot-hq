@@ -426,21 +426,66 @@ pub async fn pump_agent(
                         last_limit_notice = Some(std::time::Instant::now());
                         warn!(agent = ?cfg.author, %line, "provider limit detected; pausing session on the user");
                         if let Some(router_tx) = &cfg.router_tx {
-                            let _ = router_tx
-                                .send(RouterCommand::Forward {
-                                    // A host-authored notice, not an agent ack.
-                                    peer_ack: false,
-                                    peer_ack_final: false,
-                                    from: cfg.author,
-                                    body: format!(
-                                        "⚠ [bot-hq] {} hit a provider limit and is paused: \
-                                         \"{line}\". Do not expect replies from them, and do \
-                                         not take over their work — the session waits on the \
-                                         user to resume.",
-                                        cfg.author.as_str()
-                                    ),
-                                })
-                                .await;
+                            let notice = format!(
+                                "⚠ [bot-hq] {} hit a provider limit and is paused: \
+                                 \"{line}\". Do not expect replies from them, and do \
+                                 not take over their work — the session waits on the \
+                                 user to resume.",
+                                cfg.author.as_str()
+                            );
+                            // Host-authored, so the row posts as `system` with a
+                            // NULL participant like the other host injections —
+                            // even though the Forward below carries
+                            // `from: cfg.author`, so the wire is tagged as a peer
+                            // message from that agent. The row records who WROTE
+                            // it; the tag is the router's and is unchanged.
+                            //
+                            // The row goes BESIDE the Forward, not in place of it.
+                            // The peer's copy has to keep going through
+                            // `route_forward`: that ladder can hold this forward
+                            // (hard cap) or drop it (convergence), so delivering
+                            // the receipt straight to the peer's stdin would wake
+                            // it in cases where today it is not woken. Row for the
+                            // text, string on the wire — the shape the turn buffer
+                            // below already has, and the reason `send_unrouted`
+                            // still takes a `String`.
+                            //
+                            // No envelope: the phase tag and findings banner the
+                            // peer reads are read at FORWARD time, which a hold
+                            // can put long after this post, so an envelope written
+                            // here would be a guess at a decision the router has
+                            // not made yet.
+                            match storage
+                                .post_to_channel(
+                                    cfg.session_id.clone(),
+                                    "system",
+                                    None,
+                                    MessageKind::SystemNotice.as_str(),
+                                    notice.as_str(),
+                                    None,
+                                )
+                                .await
+                            {
+                                Ok(m) => {
+                                    cfg.notify_persisted(m.message_id());
+                                    let _ = router_tx
+                                        .send(RouterCommand::Forward {
+                                            // A host-authored notice, not an agent ack.
+                                            peer_ack: false,
+                                            peer_ack_final: false,
+                                            from: cfg.author,
+                                            body: notice,
+                                        })
+                                        .await;
+                                }
+                                // No row, no wire — the trade every host injection
+                                // in this batch makes. The health mark and the
+                                // tray halt below are deliberately NOT gated on
+                                // it: those tell the USER the session is parked,
+                                // which stays true whether or not the peer's copy
+                                // got written.
+                                Err(e) => warn!(?e, "persisting the provider-limit peer notice"),
+                            }
                         }
                         if let Some(bridge) = &cfg.bridge {
                             bridge.notify_agent_health(
@@ -1376,4 +1421,106 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_provider_limit_notice_is_a_row_and_the_forward_is_unchanged() {
+        // B5 Task 2's remaining gap: this was the one `RouterCommand::Forward`
+        // producer whose text existed nowhere but the wire — an inline `format!`
+        // straight onto a peer's stdin. It now posts a row of its own.
+        //
+        // The row goes BESIDE the forward, never instead of it, so the assertion
+        // that matters is the pairing: a row exists AND the router still receives
+        // the same command it always did.
+        let (storage, state) = setup().await;
+        let (cfg, mut route_rx) = cfg_with_route(Author::Brian);
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx
+            .send(AgentEvent::Text("Error: 402 Insufficient Balance".into()))
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: None,
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        let notice = storage
+            .channel_after("s1", 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.content.contains("hit a provider limit"))
+            .expect("the notice must have a row of its own");
+        // Host-authored, so it is nobody's turn output — NOT attributed to the
+        // agent it is about, whatever the wire's peer tag says.
+        assert_eq!(notice.origin, "system");
+        assert_eq!(notice.participant_id, None);
+        // No envelope. The phase and banner the peer reads are read at FORWARD
+        // time, which a hold can put long after this row was written, so writing
+        // one here would record a wire the peer may never get.
+        assert_eq!(notice.envelope, None);
+
+        // The forward is byte-for-byte the row's body, still `from` the agent and
+        // still un-acked — so `route_forward`'s ladder sees exactly what it saw
+        // before, and the peer reads the same bytes it always did.
+        let mut forwards = Vec::new();
+        while let Some(f) = next_forward(&mut route_rx) {
+            forwards.push(f);
+        }
+        let (from, body, peer_ack, peer_ack_final) = forwards
+            .iter()
+            .find(|(_, b, _, _)| b.contains("hit a provider limit"))
+            .expect("the peer still gets the notice through the router, not by receipt");
+        assert_eq!(*from, Author::Brian);
+        assert_eq!(body, &notice.content, "the row records the forwarded bytes");
+        assert!(!*peer_ack && !*peer_ack_final);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_provider_limit_with_no_peer_writes_no_notice_row() {
+        // The post sits INSIDE the `router_tx` guard, so a solo session still
+        // records nothing here. Parity: there is no peer to notify, the notice
+        // text is addressed to one ("do not take over their work"), and this
+        // batch is a plumbing change — surfacing it to a solo user would be a
+        // product decision, not a serialisation one. The halt still fires.
+        let (storage, state) = setup().await;
+        let cfg = fast_cfg(Author::Brian); // no router_tx
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx
+            .send(AgentEvent::Text("Error: 402 Insufficient Balance".into()))
+            .await
+            .unwrap();
+        ev_tx
+            .send(AgentEvent::TurnComplete {
+                stop_reason: None,
+                subtype: None,
+                is_error: false,
+                api_error_status: None,
+                context: None,
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+
+        assert!(
+            !storage
+                .channel_after("s1", 0)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.content.contains("hit a provider limit")),
+            "no peer, no peer notice — and so no row for one"
+        );
+    }
 }

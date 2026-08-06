@@ -1226,4 +1226,42 @@ mod tests {
         assert_eq!(bridge.current_agent_health("s1", "brian"), None);
         assert_eq!(bridge.current_agent_health("s2", "rain"), None);
     }
+
+    #[tokio::test]
+    async fn closing_a_session_unregisters_its_phase() {
+        // `session_phase` joins the maps `unregister_session` drains. Missing
+        // from that list it would leak one entry per open→close cycle, and the
+        // `Weak` does not save it: the key outlives the value.
+        //
+        // The Arc is held ALIVE across the unregister on purpose. If the test
+        // dropped it, `current_session_phase` would return None either way and
+        // pass whether or not the entry was ever removed — which is exactly the
+        // hole the `drop(ipav)` case in `tray.rs` leaves open.
+        let bridge = SignalingBridge::new();
+        let ipav = Arc::new(Mutex::new(crate::core::ipav::IpavState::default()));
+        ipav.lock().await.advance(crate::core::ipav::IpavPhase::Verify);
+        bridge
+            .register_session_phase("s1".into(), Arc::downgrade(&ipav))
+            .await;
+        bridge
+            .register_session_phase("s2".into(), Arc::downgrade(&ipav))
+            .await;
+        assert_eq!(
+            bridge.current_session_phase("s1").await,
+            Some(crate::core::ipav::IpavPhase::Verify)
+        );
+
+        bridge.unregister_session("s1").await;
+        assert!(
+            bridge.session_phase.lock().await.get("s1").is_none(),
+            "the map entry itself must go, not just the value behind the Weak"
+        );
+        assert_eq!(bridge.current_session_phase("s1").await, None);
+        // Scoped to the session that closed.
+        assert_eq!(
+            bridge.current_session_phase("s2").await,
+            Some(crate::core::ipav::IpavPhase::Verify)
+        );
+        assert!(Arc::strong_count(&ipav) > 0, "the live Arc is untouched");
+    }
 }
