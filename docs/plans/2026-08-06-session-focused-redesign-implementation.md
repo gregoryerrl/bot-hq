@@ -61,10 +61,28 @@ Call `check_open_findings` before every commit.
 what makes that claim checkable. It is pure test-writing against the CURRENT
 code, so it can land immediately and cannot break anything.
 
-### Task B0.1: Pin the capability boundary as it exists today
+### Task B0.1: Pin the capability boundary as it exists today ✅ DONE (`1f9d26c`)
 
-**Files:**
-- Create: `tests/parity_capability_boundary.rs`
+**Correction to this plan, found while executing it:** the file cannot live in
+`tests/`. `signaling::jsonrpc` is a **private** module (`mod jsonrpc;`), so an
+integration test cannot reach `dispatch` or `CallerIdentity`. It landed as an
+in-crate `#[cfg(test)] mod parity;` inside `signaling`, which compiles to
+nothing in release. Apply the same check to B0.2 before writing it.
+
+**Also worth copying into B0.2:** the tests pin *behaviour* (per-tool
+accept/reject per agent), not the constant lists — asserting the constants would
+not catch a tool being silently added to or removed from a gate. And a fourth
+test pins the tools that are UNGATED today, because over-gating is as much a
+parity break as under-gating and ships far more quietly.
+
+**Verification standard set here — apply it to every later oracle:** a test that
+passes on first run proves nothing. `halt` was removed from `HANDS_ONLY_TOOLS`
+to confirm exactly one test fails (`halt must reject EYES`) while the rest stay
+green, then `jsonrpc.rs` was restored. An oracle must be shown to discriminate.
+
+**Files (as built):**
+- Create: `src/signaling/parity.rs`
+- Modify: `src/signaling/mod.rs` (add `#[cfg(test)] mod parity;`)
 
 **Step 1: Write the failing test**
 
