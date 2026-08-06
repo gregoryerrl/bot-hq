@@ -65,6 +65,27 @@ four architectural forks decided by the user:
   caught). Seeded pre-spawn from `ensure_session_started`, the one choke point
   every creation path funnels through; idempotent, and it repairs what the
   rosterless window wrote. B4b's rekey needs a roster to key by.
+- **B4b — the structural rekey**, in three gate-green slices.
+  - `ActivityTracker`'s `brian_busy`/`rain_busy` become maps keyed by
+    participant slug (not id: `set_busy(cfg.author, …)` runs at every turn end
+    and `Author` lives until B5, so an id key would buy a lookup for nothing).
+    Its public API is unchanged, so all 22 call sites compiled untouched.
+    `derive` collapses to `any_busy` — which is exactly why per-participant
+    edges are tracked separately: the collapsed state cannot express a hand-off.
+  - `SessionHandle`'s `brian` + `rain: Option` become `participants:
+    Vec<SessionAgent>` ordered by `turn_position`. A Vec, not the design's
+    HashMap: the ring needs deterministic order. The 24 field sites collapse
+    into `agents()` / `hands()` / `agent_count()`. Kill and interrupt order is
+    now explicit — it used to come from field order, and sorting HANDS to
+    position 0 would have inverted it (HANDS may be mid-tool, so it stops last).
+  - `DuoConfig` gains `participant_id` beside `author`; both it and
+    `SessionAgent` resolve through one `roster_row` lookup, so a pump cannot
+    report a different participant than its own handle.
+
+  **Parity checkpoint:** B0's oracle green and byte-identical across all of
+  B4b, `activity_events` still one row per transition, and the **frontend diff
+  is empty** — `SessionRuntime`'s two booleans are derived from the map, not
+  migrated, because B8 owns the UI.
 - **B1 — `migrations/0044_session_participants.sql`, applied and verified live.**
 
 **Verification standard used throughout:** a guard or oracle that passes on
@@ -86,11 +107,18 @@ exit 0, so guards silently no-op; a table rebuild transiently needs ≈2× the D
 size (found via a real disk-full); and keeping `author` as a transitional column
 is what decoupled an irreversible migration from a 153-site refactor.
 
-Remaining: B4b (structural rekey), B5 (channel + sequencer, deletes
-`router.rs`), B6/B7/B8. Plan:
-`docs/plans/2026-08-06-session-focused-redesign-implementation.md`.
+**A test-shape finding worth carrying into B5:** removing the per-participant
+edge check didn't fail the guard, it **hung it** — a bare `rx.recv().await`
+waits forever for an emit the regression deleted. The activity tests' 16 recv
+sites now go through a 2s timeout helper, and the same injection then failed in
+2.4s. B5's consensus-halt tests have the identical "wait for something that
+should arrive" shape.
 
-Gates at close: cargo 1086 green, frontend 199 vitest / tsc / build, release
+Remaining: B5 (channel + sequencer, deletes `router.rs`), B6/B7/B8. Plan:
+`docs/plans/2026-08-06-session-focused-redesign-implementation.md` — which asks
+for a fresh `superpowers:writing-plans` pass per batch now that B4 has landed.
+
+Gates at close: cargo 1092 green, frontend 199 vitest / tsc / build, release
 build green.
 
 ---
