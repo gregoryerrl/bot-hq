@@ -339,7 +339,17 @@ first code to actually drive it, and it exposed five problems.
    **B is never scheduled**. Consensus requires *every* active participant to
    vote, so `all_active_voted_done` then never returns true. Two participants
    sharing a position does not degrade the cycle; it makes termination
-   impossible. Needs a unique index or a `(turn_position, id)` tiebreak.
+   impossible.
+
+   **This is a schema gap, not just a query gap** — so a `(turn_position, id)`
+   tiebreak in `next_active_participant` is not sufficient on its own. It would
+   restore scheduling, but the database would still be able to *represent* the
+   broken roster, and the next query written against `turn_position` inherits
+   the same trap. 0044 is immutable, so a constraint means a **new migration** —
+   additive (`CREATE UNIQUE INDEX` over enabled+active rows), no table rebuild,
+   none of the 2×-disk risk that made 0044 heavy. Today's rosters are 0 and 1
+   per session, so existing data satisfies it. Decide: index, tiebreak, or both.
+   No task in this plan was scoped to touch `migrations/`; this one now is.
 2. **`unread_for_participant` returns the participant's own rows** — it is
    `channel_after(session, cursor)` with no author filter. Verified: a row
    posted by `brian` comes back to `brian` as unread. Decide the filter at the
