@@ -11,6 +11,7 @@ mod broadcast;
 pub mod duo;
 pub mod ipav;
 pub mod router;
+pub mod sequencer;
 pub mod session;
 pub mod state;
 pub mod terminal;
