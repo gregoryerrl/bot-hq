@@ -245,6 +245,21 @@ renders `envelope` + `body` and writes to the (now private) `input_tx`; convert
 
 ## Task 3: The `system` participant — the six invisible wires become rows
 
+> **SUBSUMED by Task 2 — verified by sweep, not assumed.** Two things
+> collapsed it. First, the `system` **participant row** was dropped as a design
+> decision: migration 0044 already models system as an *origin* with
+> `participant_id = NULL`, and inventing a roster entry that never takes a turn
+> and never votes would have contradicted the schema to match this heading.
+> Second, making `input_tx` private in Task 2 broke every string-to-stdin site
+> at once, so converting them was forced rather than optional.
+>
+> Closing sweep: `send_unrouted` has exactly **one** call site
+> (`broadcast.rs:166`), there is **zero** raw `input_tx.send` outside
+> `ParticipantInput`, and the host injections post `origin='system'` rows. The
+> two remaining escape hatches are the known residuals — `send_unrouted` on the
+> peer-forward path (the sequencer inherits it) and the module-private `relay`
+> in the supervisor.
+
 **Files:**
 - Modify: `migrations/` — **NO.** Reuse the existing roles table; add a
   `system` row via `ensure_session_roster`, never by editing an applied
@@ -306,15 +321,58 @@ async fn the_sequencer_exits_when_its_control_channel_closes() {
 
 ---
 
+## Task 4b: Fix the storage helpers before the sequencer uses them
+
+**Inserted after Task 4, which found these as their first consumer — two
+verified by probe, not by reading. Prerequisite for Task 5.**
+
+**This supersedes the claim below** that `next_active_participant` is "already
+built and tested". It is tested for the cases B3a imagined; the sequencer is the
+first code to actually drive it, and it exposed five problems.
+
+1. **Consensus can become unreachable — the serious one.** `turn_position` is
+   `INTEGER NOT NULL DEFAULT 0` behind a **non-unique** index
+   (`0044:113`), and 0044's GUARD 5 enforces one-per-session-at-0 only at
+   *migration* time; `insert_participant` accepts any position unchecked.
+   `next_active_participant` advances on `p.turn_position > pos` — strictly
+   greater — so with actives at A(0), B(0), C(1) the ring runs `a, c, a, c` and
+   **B is never scheduled**. Consensus requires *every* active participant to
+   vote, so `all_active_voted_done` then never returns true. Two participants
+   sharing a position does not degrade the cycle; it makes termination
+   impossible. Needs a unique index or a `(turn_position, id)` tiebreak.
+2. **`unread_for_participant` returns the participant's own rows** — it is
+   `channel_after(session, cursor)` with no author filter. Verified: a row
+   posted by `brian` comes back to `brian` as unread. Decide the filter at the
+   storage layer so all four consuming tasks agree.
+3. **Empty active roster has two shapes.** `next_active_participant` → `None`,
+   `all_active_voted_done` → `false`. Neither means "done", so the sequencer
+   must branch explicitly or spin.
+4. **`record_delivery` + `advance_cursor` share no transaction.** A crash
+   between them advances the cursor with no delivery rows — which undercuts the
+   module's own claim to answer "what did participant X receive?".
+5. **`channel_after` has no LIMIT.** A participant that has never read gets the
+   entire session history in one `Vec`, then onto one wire.
+
+---
+
 ## Task 5: Wake the next active participant (O(1) per turn)
 
-Uses `next_active_participant(session_id, current_position)` — already built and
-tested in B3a, including the observer-skipping and all-observers-is-None cases.
+Uses `next_active_participant(session_id, current_position)` — **after Task 4b
+has fixed it.** Do not start this before 4b lands: the ring and the consensus
+tally both sit on helpers 4b repairs, and building on them first means meeting
+the deadlock as a hanging test rather than as a schema constraint.
 
 **Test:** `a_completed_turn_wakes_exactly_one_participant` — assert one deliver,
-to the participant at the next position, with every row after its cursor.
+to the participant at the next position, with every **unread** row (not "every
+row after its cursor": that phrasing describes defect 2 above).
 
 **Test:** `an_observer_is_skipped_not_given_a_no_op_turn`.
+
+**Also decide here, do not defer again:** whether `TurnComplete` carries a
+participant id. Task 4 left it payload-free with the hazard named — Pause →
+agent finishes → Resume + `UserMessage` resets the ring to position 0 → the
+stale `TurnComplete` advances from the wrong position. Zero send sites exist
+today, so adding the field is still mechanical.
 
 Commit: `feat: advance the turn ring on turn completion`
 
