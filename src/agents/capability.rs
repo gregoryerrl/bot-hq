@@ -1,0 +1,384 @@
+//! Capabilities — what a participant may do, as DATA rather than as an
+//! agent-name comparison.
+//!
+//! Batch B2 of the session-focused redesign. Today authorization is
+//! `caller.agent != "brian"` against three hardcoded lists
+//! (`signaling/jsonrpc.rs`); here it becomes a set carried by the participant,
+//! snapshotted from its role at invite time.
+//!
+//! Three rules from the design, encoded here rather than in prose:
+//! 1. **Grants only.** There are no "prohibitions" — a deny-list is derived
+//!    from what is absent, so the two can never contradict.
+//! 2. **Dependencies are structural.** `GatedBash` without `RunBash` is
+//!    incoherent; `validate()` refuses it rather than letting the UI ship a
+//!    role that cannot work.
+//! 3. **Session policy is the ceiling.** `effective = role ∩ session_policy`;
+//!    a role may be more restricted than the session permits, never less.
+
+use std::collections::BTreeSet;
+
+/// One grant. `BTreeSet`-ordered so a serialized set is stable across writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Capability {
+    // ---- channel ----
+    /// Read the session channel. An observer has this and nothing else.
+    ReadChannel,
+    /// Post to the session channel.
+    PostChannel,
+    // ---- user-facing ----
+    AskUser,
+    ParkApproval,
+    SupersedeQuestion,
+    Halt,
+    DeclareWorking,
+    CloseSession,
+    // ---- review ----
+    FileFinding,
+    ApproveFinding,
+    DispositionFinding,
+    OverrideReviewerBlock,
+    // ---- execution ----
+    EditFiles,
+    RunBash,
+    /// Route a gated command for approval. Meaningless without `RunBash`:
+    /// you cannot gate a command you are not allowed to run.
+    GatedBash,
+    RunTerminal,
+    // ---- knowledge ----
+    WriteContextLibrary,
+}
+
+impl Capability {
+    pub fn slug(self) -> &'static str {
+        use Capability::*;
+        match self {
+            ReadChannel => "read_channel",
+            PostChannel => "post_channel",
+            AskUser => "ask_user",
+            ParkApproval => "park_approval",
+            SupersedeQuestion => "supersede_question",
+            Halt => "halt",
+            DeclareWorking => "declare_working",
+            CloseSession => "close_session",
+            FileFinding => "file_finding",
+            ApproveFinding => "approve_finding",
+            DispositionFinding => "disposition_finding",
+            OverrideReviewerBlock => "override_reviewer_block",
+            EditFiles => "edit_files",
+            RunBash => "run_bash",
+            GatedBash => "gated_bash",
+            RunTerminal => "run_terminal",
+            WriteContextLibrary => "write_context_library",
+        }
+    }
+
+    pub fn parse(slug: &str) -> Option<Self> {
+        use Capability::*;
+        Some(match slug {
+            "read_channel" => ReadChannel,
+            "post_channel" => PostChannel,
+            "ask_user" => AskUser,
+            "park_approval" => ParkApproval,
+            "supersede_question" => SupersedeQuestion,
+            "halt" => Halt,
+            "declare_working" => DeclareWorking,
+            "close_session" => CloseSession,
+            "file_finding" => FileFinding,
+            "approve_finding" => ApproveFinding,
+            "disposition_finding" => DispositionFinding,
+            "override_reviewer_block" => OverrideReviewerBlock,
+            "edit_files" => EditFiles,
+            "run_bash" => RunBash,
+            "gated_bash" => GatedBash,
+            "run_terminal" => RunTerminal,
+            "write_context_library" => WriteContextLibrary,
+            _ => return None,
+        })
+    }
+
+    /// Capabilities this one is incoherent without.
+    pub fn requires(self) -> &'static [Capability] {
+        use Capability::*;
+        match self {
+            // Gating presupposes running.
+            GatedBash => &[RunBash],
+            // Closing a session you cannot see.
+            CloseSession => &[ReadChannel],
+            // Every user-facing verb needs a voice in the channel.
+            AskUser | ParkApproval | SupersedeQuestion | Halt => &[PostChannel],
+            _ => &[],
+        }
+    }
+}
+
+/// Which capability a tool call requires. `None` = ungated (both roles today).
+///
+/// This is the single mapping that replaces `HANDS_ONLY_TOOLS`,
+/// `EYES_ONLY_TOOLS` and `CL_MUTATE_TOOLS`. The parity oracle
+/// (`signaling::parity`) is what proves the replacement is faithful.
+pub fn required_for(tool: &str) -> Option<Capability> {
+    use Capability::*;
+    Some(match tool {
+        "ask_user_choice" => AskUser,
+        "mark_awaiting_user" | "halt" => Halt,
+        "request_approval" => ParkApproval,
+        "action_gate" => GatedBash,
+        "supersede_question" => SupersedeQuestion,
+        "disposition_finding" => DispositionFinding,
+        "override_reviewer_block" => OverrideReviewerBlock,
+        "declare_working" => DeclareWorking,
+        "terminal_exec" => RunTerminal,
+        "eyes_flag" => FileFinding,
+        "approve_finding" => ApproveFinding,
+        "cl_write_file" | "cl_register_folder_description" => WriteContextLibrary,
+        "close_session" => CloseSession,
+        _ => return None,
+    })
+}
+
+/// A participant's grants.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapabilitySet(BTreeSet<Capability>);
+
+impl CapabilitySet {
+    pub fn from_slugs(slugs: &[&str]) -> Self {
+        Self(slugs.iter().filter_map(|s| Capability::parse(s)).collect())
+    }
+
+    pub fn to_slugs(&self) -> Vec<&'static str> {
+        self.0.iter().map(|c| c.slug()).collect()
+    }
+
+    pub fn contains(&self, cap: Capability) -> bool {
+        self.0.contains(&cap)
+    }
+
+    /// May a participant with this set call `tool`? An ungated tool is allowed
+    /// to everyone — over-gating is as much a parity break as under-gating.
+    pub fn allows_tool(&self, tool: &str) -> bool {
+        match required_for(tool) {
+            Some(cap) => self.contains(cap),
+            None => true,
+        }
+    }
+
+    /// Structural coherence. Returns every unmet dependency rather than the
+    /// first, so the Roles tab can show them all at once.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errs = Vec::new();
+        for cap in &self.0 {
+            for dep in cap.requires() {
+                if !self.contains(*dep) {
+                    errs.push(format!(
+                        "`{}` requires `{}`",
+                        cap.slug(),
+                        dep.slug()
+                    ));
+                }
+            }
+        }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs)
+        }
+    }
+
+    /// Configurations that are legal but probably not what the user meant.
+    /// ADVISORY — never blocks. The Roles tab renders these.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.contains(Capability::FileFinding) && self.contains(Capability::DispositionFinding) {
+            out.push(
+                "self-review: this role can file a blocking finding and clear its own — \
+                 the commit gate has no teeth for it"
+                    .to_string(),
+            );
+        }
+        if !self.contains(Capability::PostChannel) && self.contains(Capability::ReadChannel) {
+            out.push("observer: reads the session but can never respond".to_string());
+        }
+        let executes = self.contains(Capability::EditFiles) || self.contains(Capability::RunBash);
+        if executes && !self.contains(Capability::AskUser) {
+            out.push(
+                "silent worker: this role can act but can never surface a question to the user"
+                    .to_string(),
+            );
+        }
+        out
+    }
+
+    /// Session policy is the ceiling: a role may be MORE restricted than the
+    /// session allows, never less.
+    pub fn intersect(&self, ceiling: &CapabilitySet) -> Self {
+        Self(self.0.intersection(&ceiling.0).copied().collect())
+    }
+
+    /// The user's HANDS role as seeded by migration 0044. Must grant exactly
+    /// today's HANDS-only tools plus execution — parity, not preference.
+    pub fn preset_hands() -> Self {
+        use Capability::*;
+        Self(BTreeSet::from([
+            ReadChannel,
+            PostChannel,
+            AskUser,
+            ParkApproval,
+            SupersedeQuestion,
+            Halt,
+            DeclareWorking,
+            CloseSession,
+            DispositionFinding,
+            OverrideReviewerBlock,
+            EditFiles,
+            RunBash,
+            GatedBash,
+            RunTerminal,
+            WriteContextLibrary,
+        ]))
+    }
+
+    /// The user's EYES role: reviews, reads, runs read-only shell. No edit, no
+    /// user-facing verbs — today's deny-list expressed as absence.
+    pub fn preset_eyes() -> Self {
+        use Capability::*;
+        Self(BTreeSet::from([
+            ReadChannel,
+            PostChannel,
+            FileFinding,
+            ApproveFinding,
+            RunBash,
+        ]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Today's three gate lists, copied from `signaling/jsonrpc.rs`. The point
+    /// of this test is that the capability model reproduces them EXACTLY — the
+    /// same contract the parity oracle asserts at the dispatch layer.
+    const HANDS_ONLY: &[&str] = &[
+        "ask_user_choice", "mark_awaiting_user", "request_approval", "action_gate",
+        "supersede_question", "disposition_finding", "override_reviewer_block",
+        "halt", "declare_working", "terminal_exec",
+    ];
+    const EYES_ONLY: &[&str] = &["eyes_flag", "approve_finding"];
+    const CL_MUTATE: &[&str] = &["cl_write_file", "cl_register_folder_description"];
+
+    #[test]
+    fn hands_preset_reproduces_todays_hands_only_boundary() {
+        let hands = CapabilitySet::preset_hands();
+        for tool in HANDS_ONLY {
+            assert!(hands.allows_tool(tool), "HANDS must still allow {tool}");
+        }
+        for tool in CL_MUTATE {
+            assert!(hands.allows_tool(tool), "HANDS must still allow {tool}");
+        }
+        for tool in EYES_ONLY {
+            assert!(!hands.allows_tool(tool), "HANDS must not gain {tool}");
+        }
+    }
+
+    #[test]
+    fn eyes_preset_reproduces_todays_eyes_boundary() {
+        let eyes = CapabilitySet::preset_eyes();
+        for tool in EYES_ONLY {
+            assert!(eyes.allows_tool(tool), "EYES must still allow {tool}");
+        }
+        for tool in HANDS_ONLY {
+            assert!(!eyes.allows_tool(tool), "EYES must not gain {tool}");
+        }
+        for tool in CL_MUTATE {
+            assert!(!eyes.allows_tool(tool), "EYES must not gain {tool}");
+        }
+    }
+
+    #[test]
+    fn ungated_tools_are_allowed_to_everyone() {
+        // Over-gating is a parity break too, and a quieter one.
+        let empty = CapabilitySet::default();
+        for tool in ["session_doc_write", "cl_retrieve", "check_open_findings", "peer_ack"] {
+            assert!(empty.allows_tool(tool), "{tool} is ungated today");
+        }
+    }
+
+    #[test]
+    fn both_presets_are_structurally_valid() {
+        assert!(CapabilitySet::preset_hands().validate().is_ok());
+        assert!(CapabilitySet::preset_eyes().validate().is_ok());
+    }
+
+    #[test]
+    fn dependencies_are_enforced() {
+        // Gating a command you cannot run.
+        let e = CapabilitySet::from_slugs(&["gated_bash"]).validate().unwrap_err();
+        assert!(e.iter().any(|m| m.contains("`gated_bash` requires `run_bash`")), "{e:?}");
+        // Closing a session you cannot see.
+        let e = CapabilitySet::from_slugs(&["close_session"]).validate().unwrap_err();
+        assert!(e.iter().any(|m| m.contains("requires `read_channel`")), "{e:?}");
+        // Every unmet dependency is reported, not just the first.
+        let e = CapabilitySet::from_slugs(&["gated_bash", "close_session"])
+            .validate()
+            .unwrap_err();
+        assert_eq!(e.len(), 2, "both dependencies must be reported: {e:?}");
+    }
+
+    #[test]
+    fn session_policy_is_the_ceiling() {
+        let role = CapabilitySet::from_slugs(&["run_bash", "gated_bash", "edit_files"]);
+        let ceiling = CapabilitySet::from_slugs(&["run_bash", "gated_bash"]);
+        let effective = role.intersect(&ceiling);
+        assert!(!effective.contains(Capability::EditFiles), "the ceiling must win");
+        assert!(effective.contains(Capability::RunBash));
+        // Intersection is commutative — a role cannot gain from the ceiling.
+        assert_eq!(effective, ceiling.intersect(&role));
+    }
+
+    #[test]
+    fn warnings_flag_self_review_and_silent_workers() {
+        let self_review = CapabilitySet::from_slugs(&["file_finding", "disposition_finding"]);
+        assert!(
+            self_review.warnings().iter().any(|w| w.contains("self-review")),
+            "a role that files and clears its own findings must be flagged"
+        );
+        // HANDS holds DispositionFinding but NOT FileFinding → not self-review.
+        assert!(
+            !CapabilitySet::preset_hands().warnings().iter().any(|w| w.contains("self-review")),
+            "the HANDS preset must not trip the self-review warning"
+        );
+        let silent = CapabilitySet::from_slugs(&["read_channel", "post_channel", "run_bash"]);
+        assert!(silent.warnings().iter().any(|w| w.contains("silent worker")));
+    }
+
+    #[test]
+    fn close_session_is_the_one_intended_boundary_change() {
+        // Today `close_session` is UNGATED — EYES can close a session, which is
+        // the live gap found in CL issues #5 ("Rain once called close_session
+        // while Brian was one ToolSearch away from writing CL learnings —
+        // nothing was persisted"). The design fixes it as a capability.
+        //
+        // This is therefore a DELIBERATE difference from today's behaviour, and
+        // the only one in B2. Asserting it here means it can never be mistaken
+        // for a parity regression during B6 — and if someone later decides EYES
+        // should keep the ability, this test is where that conversation starts.
+        assert_eq!(required_for("close_session"), Some(Capability::CloseSession));
+        assert!(CapabilitySet::preset_hands().allows_tool("close_session"));
+        assert!(
+            !CapabilitySet::preset_eyes().allows_tool("close_session"),
+            "closing the session is the one capability EYES loses relative to today"
+        );
+        // Note it is deliberately absent from the parity oracle's UNGATED list
+        // (`signaling::parity`), so the two artifacts do not contradict.
+    }
+
+    #[test]
+    fn slugs_round_trip() {
+        // The set is persisted as JSON slugs; a parse/render asymmetry would
+        // silently drop a grant on read.
+        for set in [CapabilitySet::preset_hands(), CapabilitySet::preset_eyes()] {
+            let slugs = set.to_slugs();
+            assert_eq!(CapabilitySet::from_slugs(&slugs), set);
+        }
+    }
+}
