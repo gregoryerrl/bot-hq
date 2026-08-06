@@ -24,6 +24,11 @@ mod bridge;
 pub mod external_jsonrpc;
 pub mod external_server;
 mod jsonrpc;
+/// Parity oracle for the session-focused redesign — pins today's tool
+/// authorization so the capability rewrite can be proven not to change it.
+/// Test-only: compiles to nothing in a release build.
+#[cfg(test)]
+mod parity;
 pub mod protocol;
 mod response;
 mod server;
