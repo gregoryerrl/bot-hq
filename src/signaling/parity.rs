@@ -162,6 +162,142 @@ async fn ungated_tools_admit_both_roles() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// B0.2 — the commit-gate contract
+//
+// The review contract in four assertions: what blocks, what does not, what
+// clears it, and what happens when the reviewer is gone. B6 rewrites the gate's
+// query from "Rain's findings" to "any participant holding FileFinding", and B4
+// replaces the `rain_enabled` duo check with a roster lookup. These must survive
+// both unchanged.
+// ---------------------------------------------------------------------------
+
+use crate::storage::{FindingSeverity, FindingStatus, Storage};
+
+async fn bridge_with_session(sid: &str) -> std::sync::Arc<SignalingBridge> {
+    let bridge = SignalingBridge::new();
+    let storage = Storage::memory().await.unwrap();
+    bridge.set_storage(storage.clone()).await;
+    storage.create_session(sid, "parity", None).await.unwrap();
+    bridge
+}
+
+#[tokio::test]
+async fn a_blocking_finding_gates_the_commit_and_advisory_does_not() {
+    let bridge = bridge_with_session("s1").await;
+    assert_eq!(bridge.check_open_findings("s1").await.unwrap(), "ok");
+
+    // Advisory: filed, visible, but NEVER gates. This is the distinction the
+    // whole N-way generalisation rests on (design Q3) — if advisory ever starts
+    // gating, "derived review authority" silently becomes "anyone can block".
+    bridge
+        .eyes_flag(
+            "s1".into(),
+            "rain".into(),
+            FindingSeverity::Advisory,
+            "style nit".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        bridge.check_open_findings("s1").await.unwrap(),
+        "ok",
+        "an advisory finding must not gate the commit"
+    );
+
+    // Blocking: gates, and names the finding so HANDS can act on it.
+    let uid = bridge
+        .eyes_flag(
+            "s1".into(),
+            "rain".into(),
+            FindingSeverity::Blocking,
+            "real bug".into(),
+            Some("src/x.rs:1".into()),
+        )
+        .await
+        .unwrap();
+    let verdict = bridge.check_open_findings("s1").await.unwrap();
+    assert!(verdict.starts_with("blocked:"), "got: {verdict}");
+    assert!(verdict.contains(&uid), "the gate must name the finding: {verdict}");
+    assert!(
+        verdict.contains("disposition_finding"),
+        "the gate must tell HANDS how to resolve it: {verdict}"
+    );
+}
+
+#[tokio::test]
+async fn both_dispositions_clear_the_gate() {
+    // `fixed` and `rebutted` both clear. A rebuttal deliberately does NOT need
+    // the reviewer's agreement — that is what stops the gate deadlocking — so
+    // if a future quorum rule made rebuttal require assent, it would be a
+    // behaviour change, not a refinement.
+    for status in [FindingStatus::Fixed, FindingStatus::Rebutted] {
+        let bridge = bridge_with_session("s1").await;
+        let uid = bridge
+            .eyes_flag(
+                "s1".into(),
+                "rain".into(),
+                FindingSeverity::Blocking,
+                format!("finding {status:?}"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(bridge.check_open_findings("s1").await.unwrap().starts_with("blocked:"));
+
+        bridge
+            .disposition_finding(uid, status, "because".into(), "brian".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            bridge.check_open_findings("s1").await.unwrap(),
+            "ok",
+            "{status:?} must clear the gate"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
+    // Fail-closed backstop: a reviewer that is gone cannot have reviewed, so the
+    // commit is blocked — but ONLY in a duo, only when the reviewer is really
+    // down (health says stalled/dead AND no recent RPC), and HANDS can override.
+    //
+    // B6 restates this as "every participant holding FileFinding is
+    // dead/stalled/absent". Pinned through the OBSERVABLE gate rather than the
+    // private decision fn, so the assertion survives the rewrite regardless of
+    // how the predicate is factored.
+    let bridge = bridge_with_session("s1").await;
+
+    // Healthy reviewer (no health transition reported yet) → no block.
+    assert_eq!(bridge.check_open_findings("s1").await.unwrap(), "ok");
+
+    // Reviewer reported dead, no RPC activity → fail closed.
+    bridge.notify_agent_health("s1".into(), "rain", "dead");
+    let blocked = bridge.check_open_findings("s1").await.unwrap();
+    assert!(blocked.starts_with("blocked: reviewer down"), "got: {blocked}");
+    assert!(
+        blocked.contains("REVIEWER IS GONE, not"),
+        "must distinguish reviewer-gone from unreviewed: {blocked}"
+    );
+
+    // HANDS overrides → gate opens, and says so rather than silently passing.
+    bridge.override_reviewer_block("s1", "confirmed safe to ship unreviewed");
+    let overridden = bridge.check_open_findings("s1").await.unwrap();
+    assert!(
+        overridden.starts_with("ok (reviewer-down overridden"),
+        "an override must be visible in the verdict, not silent: {overridden}"
+    );
+
+    // Recovery: a reviewer back to running clears the block without an override.
+    let bridge2 = bridge_with_session("s2").await;
+    bridge2.notify_agent_health("s2".into(), "rain", "dead");
+    assert!(bridge2.check_open_findings("s2").await.unwrap().starts_with("blocked:"));
+    bridge2.notify_agent_health("s2".into(), "rain", "running");
+    assert_eq!(bridge2.check_open_findings("s2").await.unwrap(), "ok");
+}
+
 #[tokio::test]
 async fn the_three_gate_lists_are_disjoint() {
     // A tool in two lists would make its authorization order-dependent — the
