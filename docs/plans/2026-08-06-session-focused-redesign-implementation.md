@@ -299,15 +299,33 @@ unreviewable commit.
 
 ## Batch B3 — Storage layer
 
-Queries for roles, participants, cursors, deliveries; `messages` reads/writes
-switched from `author` to `participant_id`/`origin`. **This is what unblocks
-arming B1** (step 4 above).
+### B3a — new tables ✅ DONE (`edf59aa`)
 
-Per-task TDD: write the query test against an in-memory `Storage::memory()` DB
-with the new schema applied, verify fail, implement, verify pass, commit.
+`src/storage/participants.rs`: roles, participants, cursors, deliveries, plus
+the turn helpers (`next_active_participant`, `set_done_vote`,
+`clear_done_votes`, `all_active_voted_done`). 7 tests.
 
-**Parity checkpoint:** at the end of B3, re-run B0's oracle. It must still be
-green against the OLD code paths, because nothing has been rewired yet.
+**Test-harness discovery worth keeping:** `sqlx::migrate!` embeds `migrations/`
+at **compile time**, so these tables do not exist in a stock `Storage::memory()`
+until 0044 is armed — and arming it before the runbook's backup + boot check is
+exactly what the runbook forbids. The tests therefore apply the reviewed draft
+to the in-memory pool via `sqlx::raw_sql`. Side benefit: **the draft is now
+proven to apply through sqlx, not just the `sqlite3` CLI** — which is the path
+the real migration takes, and something the CLI dry-run could not establish.
+Delete the `storage_with_0044()` helper once 0044 is applied.
+
+### B3b — the `messages` sweep ⛔ NOT DONE, and it is the real blocker
+
+`messages` reads/writes still select `author`. Switching them to
+`participant_id`/`origin` changes `insert_message(author: Author)`'s signature,
+which cascades into **`Author`'s 147 call sites** — that is B4's Author
+demotion, not a query sweep. So:
+
+**Revised sequencing:** B3b and B4 are one unit of work and must land together.
+Arming 0044 comes after them, not after B3.
+
+**Parity checkpoint (still required):** after B3b/B4, re-run B0's oracle — it
+must be green, and `activity_events` must still record a row per transition.
 
 ---
 
