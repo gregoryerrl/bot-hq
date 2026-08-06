@@ -356,7 +356,7 @@ async fn deliver_idle_nudge(
         direction exists, the right response IS the question: ask which direction.]";
     match idle_watch
         .storage
-        .insert_message(session_id, Author::User, MessageKind::SystemNotice, NOTICE)
+        .insert_message_id(session_id, Author::User, MessageKind::SystemNotice, NOTICE)
         .await
     {
         Ok(id) => bridge.notify_message_persisted(Arc::from(session_id), id),

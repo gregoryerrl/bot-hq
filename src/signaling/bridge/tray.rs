@@ -630,7 +630,7 @@ impl SignalingBridge {
             let storage_guard = self.storage.lock().await;
             match storage_guard.as_ref() {
                 Some(storage) => match storage
-                    .insert_message(&session_id, Author::User, MessageKind::Text, &body)
+                    .insert_message_id(&session_id, Author::User, MessageKind::Text, &body)
                     .await
                 {
                     Ok(id) => Some(id),
@@ -869,7 +869,7 @@ impl SignalingBridge {
                 let author =
                     crate::storage::Author::parse(&agent).unwrap_or(crate::storage::Author::User);
                 match storage
-                    .insert_message(
+                    .insert_message_id(
                         &session_id,
                         author,
                         crate::storage::MessageKind::Text,

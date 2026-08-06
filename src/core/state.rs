@@ -846,7 +846,7 @@ impl AppState {
         // Synthetic phase-change message in storage.
         let id = self
             .storage
-            .insert_message(session_id, Author::User, MessageKind::PhaseChange, &notice)
+            .insert_message_id(session_id, Author::User, MessageKind::PhaseChange, &notice)
             .await?;
         self.bridge
             .notify_message_persisted(Arc::from(session_id), id);

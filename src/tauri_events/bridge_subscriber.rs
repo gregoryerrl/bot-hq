@@ -233,7 +233,8 @@ mod tests {
         let id = storage
             .insert_message("s1", Author::Brian, MessageKind::Text, "hi")
             .await
-            .unwrap();
+            .unwrap()
+            .message_id();
         let captured_msgs: Arc<Mutex<Vec<Vec<crate::tauri_events::types::AgentMessage>>>> =
             Arc::new(Mutex::new(Vec::new()));
         let cap = captured_msgs.clone();

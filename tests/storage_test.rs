@@ -95,11 +95,13 @@ async fn message_round_trip() {
     let id1 = s
         .insert_message("sess1", Author::User, MessageKind::Text, "hello")
         .await
-        .unwrap();
+        .unwrap()
+        .message_id();
     let id2 = s
         .insert_message("sess1", Author::Brian, MessageKind::Text, "world")
         .await
-        .unwrap();
+        .unwrap()
+        .message_id();
     assert!(id2 > id1);
     let msgs = s.messages_for_session("sess1", None).await.unwrap();
     assert_eq!(msgs.len(), 2);
@@ -116,7 +118,8 @@ async fn messages_since_id_filter() {
     let id1 = s
         .insert_message("sess1", Author::User, MessageKind::Text, "a")
         .await
-        .unwrap();
+        .unwrap()
+        .message_id();
     s.insert_message("sess1", Author::Brian, MessageKind::Text, "b")
         .await
         .unwrap();

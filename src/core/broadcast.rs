@@ -51,8 +51,13 @@ pub async fn broadcast_user_message(
     // warning below can still name WHICH agent missed the message.
     recipients: &[(&str, &mpsc::Sender<OutgoingUserMessage>)],
 ) -> Result<i64> {
+    // The id-only variant: this function returns an id to its own callers, and
+    // the wire it fans out below is deliberately NOT the persisted row — it is
+    // the text plus a prefix and an envelope, while storage keeps the raw user
+    // text (see `system_prefix`). So a receipt would have nothing to authorize
+    // here.
     let id = storage
-        .insert_message(session_id, Author::User, MessageKind::Text, text)
+        .insert_message_id(session_id, Author::User, MessageKind::Text, text)
         .await?;
     // Ride the open-blocking-findings banner on every user turn (fail-safe 0 on
     // any query error — the banner is salience, not a gate).

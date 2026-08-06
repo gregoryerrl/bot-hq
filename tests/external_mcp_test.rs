@@ -760,7 +760,8 @@ async fn wait_for_change_wakes_up_on_persisted_event() {
             .storage
             .insert_message("s-wait3", Author::User, MessageKind::Text, "arrived late")
             .await
-            .unwrap();
+            .unwrap()
+            .message_id();
         core_clone
             .bridge
             .notify_message_persisted("s-wait3".into(), id);

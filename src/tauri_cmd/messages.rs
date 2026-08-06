@@ -68,7 +68,8 @@ mod tests {
         let id1 = storage
             .insert_message("s1", Author::Brian, MessageKind::Text, "first")
             .await
-            .unwrap();
+            .unwrap()
+            .message_id();
         storage
             .insert_message("s1", Author::Brian, MessageKind::Text, "second")
             .await

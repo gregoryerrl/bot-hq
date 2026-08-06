@@ -456,12 +456,12 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// the fields are private to this module — which makes this file, `mod tests`
 /// included, the trusted boundary. Keeping it to one construction site is a
 /// maintainer's job, not something the compiler checks: a helper added here
-/// later could mint a receipt with no row behind it. Note also the scope of the
-/// claim — it covers `post_to_channel`, not every write to `messages`.
-/// [`Storage::insert_message`] is a second live insert path into the same
-/// table: it returns a bare `i64`, mints no receipt, and is what the duo pump
-/// uses on every chunk. Whether the two paths converge is a B5 Task 2 decision,
-/// deliberately not settled here.
+/// later could mint a receipt with no row behind it. The claim now covers every
+/// write to `messages`, not just this method: B5 Task 1b made
+/// [`Storage::insert_message`] — the second live insert path, and the one the
+/// duo pump uses on every chunk — a thin wrapper over `post_to_channel`, so
+/// there is one INSERT and every row that reaches the table has a receipt
+/// behind it.
 ///
 /// `Clone` is deliberate. Fan-out hands one row to N agents by reference, so a
 /// clone is never what reaches the wire; consuming by move would instead push
@@ -577,29 +577,50 @@ impl Storage {
         // an envelope — and envelopes are small JSON metadata, so the hot-path
         // argument that motivates the generic on `content` does not apply.
         let content: String = content.into();
-        let participant_id = match (origin, participant_slug) {
-            ("participant", Some(slug)) => {
-                self.participant_by_slug(&session_id, slug).await?.map(|p| p.id)
-            }
-            _ => None,
-        };
         let legacy_author = match origin {
             "participant" => participant_slug.unwrap_or("user"),
             // 'system' and 'user' both land as 'user' for legacy readers.
             _ => "user",
         };
+        // The participant is resolved INLINE by subquery rather than by a prior
+        // awaited SELECT. `insert_message` delegates here and fires on every
+        // text/tool_use/tool_result chunk, so a separate round trip per post is
+        // a cost worth not paying — and one that would be near-impossible to
+        // attribute once the send path starts routing through this method.
+        //
+        // The `CASE` is the origin guard the old two-step form carried in its
+        // `match`: only a participant origin resolves, so a user/system row
+        // stays NULL even if handed a live slug, and SQLite skips the subquery
+        // entirely for those. A slug with no roster row resolves to NULL rather
+        // than erroring, which is correct — `author` still carries the
+        // attribution, and an unattributed row beats a lost one.
         let id = sqlx::query(
             "INSERT INTO messages \
              (session_id, participant_id, origin, kind, content, envelope, author, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+             VALUES (?1, \
+                     CASE WHEN ?2 = 'participant' THEN \
+                          (SELECT id FROM session_participants \
+                           WHERE session_id = ?1 AND slug = ?3) END, \
+                     ?2, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(&*session_id)
-        .bind(participant_id)
         .bind(origin)
+        .bind(participant_slug)
         .bind(kind)
         .bind(content.as_str())
         .bind(envelope.as_deref())
         .bind(legacy_author)
+        // `now_utc()` (RFC3339-Z), NOT SQLite's `datetime('now')`, which this
+        // method used until `insert_message` began delegating here. That is the
+        // project baseline every other write already keeps — see `storage::time`
+        // — and the difference is not cosmetic. `datetime('now')` emits a
+        // zone-less `2026-08-06 11:22:33`, which sorts BEFORE the same instant
+        // in RFC3339 (space < 'T'), so `has_message_from_author_since` — a
+        // string compare against an RFC3339-Z bound — would have gone
+        // permanently false and silently disarmed the findings re-raise
+        // turn-evidence guard. The frontend would also have read every new row
+        // as local time: the staleness hallucination `now_utc` exists to stop.
+        .bind(now_utc())
         .execute(&self.pool)
         .await
         .with_context(|| format!("posting to channel for {session_id}"))?
@@ -798,7 +819,8 @@ mod tests {
         let id = s
             .insert_message("s1", Author::Brian, MessageKind::Text, "hello")
             .await
-            .unwrap();
+            .unwrap()
+            .message_id();
         assert!(id > 0, "legacy insert_message must still work post-0044");
         s.insert_message("s1", Author::User, MessageKind::Text, "hi back")
             .await
@@ -863,6 +885,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_to_channel_resolves_the_participant_by_slug() {
+        // Pins the RESOLUTION RULE itself, so moving it out of a separate
+        // awaited `participant_by_slug` SELECT and into the INSERT's own
+        // subquery is provably behaviour-preserving: this passes on both sides
+        // of that change. A test that only passed afterwards would be pinning
+        // the refactor rather than the behaviour.
+        //
+        // Four cases, because each is a way the resolution can be wrong:
+        // a known slug resolves; an unknown one degrades to NULL and STILL
+        // writes the row (an agent's output vanishing is far worse than one
+        // that is unattributed); resolution is scoped to the session, not
+        // global; and a non-participant origin never resolves at all.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.create_session("s2", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        s.ensure_session_roster("s2").await.unwrap();
+        let brian1 = s.participant_by_slug("s1", "brian").await.unwrap().unwrap().id;
+        let brian2 = s.participant_by_slug("s2", "brian").await.unwrap().unwrap().id;
+        assert_ne!(brian1, brian2, "precondition: two rosters, two 'brian' rows");
+
+        let known = s
+            .post_to_channel("s1", "participant", Some("brian"), "text", "mine", None)
+            .await
+            .unwrap();
+        let unknown = s
+            .post_to_channel("s1", "participant", Some("nobody"), "text", "orphan", None)
+            .await
+            .unwrap();
+        let system = s
+            .post_to_channel("s1", "system", Some("brian"), "system_notice", "notice", None)
+            .await
+            .unwrap();
+        let elsewhere = s
+            .post_to_channel("s2", "participant", Some("brian"), "text", "hers", None)
+            .await
+            .unwrap();
+
+        let rows = s.channel_after("s1", 0).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].id, known.message_id());
+        assert_eq!(rows[0].participant_id, Some(brian1), "a known slug resolves");
+        assert_eq!(rows[1].id, unknown.message_id());
+        assert_eq!(rows[1].participant_id, None, "an unknown slug resolves to NULL");
+        assert_eq!(rows[1].content, "orphan", "and the row is written regardless");
+        assert_eq!(rows[2].id, system.message_id());
+        assert_eq!(
+            rows[2].participant_id, None,
+            "only a participant origin resolves, even handed a live slug"
+        );
+
+        let other = s.channel_after("s2", 0).await.unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].id, elsewhere.message_id());
+        assert_eq!(
+            other[0].participant_id,
+            Some(brian2),
+            "resolution is scoped to the posting session, not the slug globally"
+        );
+    }
+
+    #[tokio::test]
     async fn the_legacy_write_path_now_populates_the_new_columns() {
         // B4a dual-write: `insert_message` keeps its signature and its `author`
         // column, and ALSO fills participant_id/origin. That means the channel
@@ -900,7 +984,8 @@ mod tests {
         let id = s
             .insert_message("s1", Author::Rain, MessageKind::Text, "no roster yet")
             .await
-            .unwrap();
+            .unwrap()
+            .message_id();
         assert!(id > 0, "logging must never depend on the roster existing");
         let rows = s.channel_after("s1", 0).await.unwrap();
         assert_eq!(rows[0].participant_id, None);

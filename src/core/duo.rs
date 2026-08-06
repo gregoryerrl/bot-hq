@@ -248,7 +248,7 @@ pub async fn pump_agent(
                     .insert_message(&cfg.session_id, cfg.author, MessageKind::Text, &text)
                     .await
                 {
-                    Ok(id) => cfg.notify_persisted(id),
+                    Ok(m) => cfg.notify_persisted(m.message_id()),
                     Err(e) => warn!(?e, "persisting text"),
                 }
                 if limit_line.is_none() {
@@ -323,7 +323,7 @@ pub async fn pump_agent(
                     )
                     .await
                 {
-                    Ok(id) => cfg.notify_persisted(id),
+                    Ok(m) => cfg.notify_persisted(m.message_id()),
                     Err(e) => warn!(?e, "persisting tool_use"),
                 }
             }
@@ -359,7 +359,7 @@ pub async fn pump_agent(
                     )
                     .await
                 {
-                    Ok(id) => cfg.notify_persisted(id),
+                    Ok(m) => cfg.notify_persisted(m.message_id()),
                     Err(e) => warn!(?e, "persisting tool_result"),
                 }
             }
@@ -577,7 +577,7 @@ pub async fn pump_agent(
                     .insert_message(&cfg.session_id, cfg.author, MessageKind::Text, &msg)
                     .await
                 {
-                    Ok(id) => cfg.notify_persisted(id),
+                    Ok(m) => cfg.notify_persisted(m.message_id()),
                     Err(e) => warn!(?e, "persisting agent error"),
                 }
             }
