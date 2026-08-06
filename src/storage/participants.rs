@@ -645,6 +645,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_legacy_write_path_now_populates_the_new_columns() {
+        // B4a dual-write: `insert_message` keeps its signature and its `author`
+        // column, and ALSO fills participant_id/origin. That means the channel
+        // is correct from the moment 0044 applies — no backfill pass later, and
+        // no flag day where attribution is half-migrated.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let hands = s.role_by_slug("hands").await.unwrap().unwrap();
+        let b = s
+            .insert_participant("s1", "brian", "Brian", Some(hands.id), None,
+                                &hands.capabilities, "active", 0)
+            .await
+            .unwrap();
+
+        s.insert_message("s1", Author::Brian, MessageKind::Text, "work").await.unwrap();
+        s.insert_message("s1", Author::User, MessageKind::Text, "reply").await.unwrap();
+
+        let rows = s.channel_after("s1", 0).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].participant_id, Some(b), "resolved to the roster entry");
+        assert_eq!(rows[0].origin, "participant");
+        assert_eq!(rows[1].participant_id, None, "a user message has no participant");
+        assert_eq!(rows[1].origin, "user");
+    }
+
+    #[tokio::test]
+    async fn a_message_from_an_agent_with_no_roster_entry_still_writes() {
+        // A session whose roster does not exist yet (created before its
+        // participants are inserted) must not fail to log. The subquery
+        // resolves to NULL and `author` still carries the attribution —
+        // degraded, not broken. Getting this wrong would mean an agent's output
+        // vanishing rather than being mis-attributed, which is far worse.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let id = s
+            .insert_message("s1", Author::Rain, MessageKind::Text, "no roster yet")
+            .await
+            .unwrap();
+        assert!(id > 0, "logging must never depend on the roster existing");
+        let rows = s.channel_after("s1", 0).await.unwrap();
+        assert_eq!(rows[0].participant_id, None);
+        assert_eq!(rows[0].origin, "participant");
+        // The legacy path still attributes it correctly.
+        let legacy = s.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(legacy[0].author, "rain");
+    }
+
+    #[tokio::test]
     async fn host_injections_become_visible_rows() {
         // The six invisible wires (apply-entry nudge, reconcile directive, idle
         // nudge, phase notices, peer prefix, spawn prompt) post as `system`.

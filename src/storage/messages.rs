@@ -14,9 +14,24 @@ impl Storage {
         kind: MessageKind,
         content: &str,
     ) -> Result<i64> {
+        // Writes the legacy `author` AND the session-focused `participant_id` /
+        // `origin` (migration 0044). Dual-write on purpose: `author` keeps every
+        // unmigrated reader working, while the new columns are correct from the
+        // moment 0044 applies — so the channel needs no backfill later.
+        //
+        // The participant is resolved INLINE by subquery rather than with a
+        // prior SELECT: this runs on every text/tool_use/tool_result chunk, and
+        // an extra round trip per chunk is a cost worth not paying. It resolves
+        // to NULL when the session has no matching participant — a session
+        // created before its roster exists — which is correct rather than an
+        // error, since `author` still carries the attribution.
         let res = sqlx::query(
-            "INSERT INTO messages (session_id, author, kind, content, created_at) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO messages \
+             (session_id, author, kind, content, created_at, participant_id, origin) \
+             VALUES (?1, ?2, ?3, ?4, ?5, \
+                     (SELECT id FROM session_participants \
+                      WHERE session_id = ?1 AND slug = ?2), \
+                     CASE WHEN ?2 = 'user' THEN 'user' ELSE 'participant' END)",
         )
         .bind(session_id)
         .bind(author.as_str())
