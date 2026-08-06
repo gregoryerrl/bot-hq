@@ -82,6 +82,53 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
     }
 }
 
+/// The ring step, as a pure function of the rotation.
+///
+/// Split out of [`Storage::next_active_participant`] so the scheduling rule can
+/// be exercised over rosters the database will not produce — which is the only
+/// way to test what the ring does with a roster the schema once permitted.
+///
+/// `ring` is the active participants in `(turn_position, id)` order and nothing
+/// else; observers and disabled rows are filtered out by the caller, because a
+/// wake that cannot produce output is pure waste.
+///
+/// **The step is by POSITION IN THE RING, not by `turn_position` value.** The
+/// old rule — the first member whose `turn_position` is strictly greater —
+/// starves every member after the first at any shared position, and
+/// `turn_position` carried no uniqueness until migration 0045. 0045's index
+/// covers exactly the rows this ring holds, so that roster is now unreachable
+/// through the database; stepping by index means the ring does not have to
+/// depend on that. The two are the same condition written in two languages —
+/// SQL's `WHERE enabled = 1 AND participation_mode = 'active'` and the caller's
+/// filter — and nothing keeps them in agreement if one is later widened.
+fn next_in_ring<'a>(
+    ring: &[&'a Participant],
+    current: Option<&Participant>,
+) -> Option<&'a Participant> {
+    if ring.is_empty() {
+        return None;
+    }
+    // A user message resets the cycle to the first active participant.
+    let Some(current) = current else {
+        return Some(ring[0]);
+    };
+    match ring.iter().position(|p| p.id == current.id) {
+        Some(i) => Some(ring[(i + 1) % ring.len()]),
+        // `current` is not in the rotation: it was disabled or demoted to
+        // observer while it held the turn, so there is no place to step one
+        // along FROM. Fall back to the first member sorting after where it sat,
+        // in the ring's own `(turn_position, id)` order, and wrap when there is
+        // none. Skipping straight to `ring[0]` instead would replay the first
+        // participant's turn every time someone left mid-cycle.
+        None => Some(
+            ring.iter()
+                .find(|p| (p.turn_position, p.id) > (current.turn_position, current.id))
+                .copied()
+                .unwrap_or(ring[0]),
+        ),
+    }
+}
+
 impl Storage {
     // ---- roles ----------------------------------------------------------
 
@@ -272,31 +319,27 @@ impl Storage {
 
     /// The participant after `current` in the ring, skipping anyone not in the
     /// rotation. Observers are SKIPPED rather than given a no-op turn: a wake
-    /// that cannot produce output is pure waste. `None` when nobody is active.
+    /// that cannot produce output is pure waste. `None` when nobody is active,
+    /// which is exactly when [`Storage::all_active_voted_done`] is `true` —
+    /// see there for what the pair means.
+    ///
+    /// `current` is the participant that just held the turn, not its position:
+    /// the ring steps by place IN the rotation, so it needs to know WHICH row
+    /// held the turn rather than only where that row sat. `None` resets the
+    /// cycle to the front, which is what a user message does.
     pub async fn next_active_participant(
         &self,
         session_id: &str,
-        current_position: Option<i64>,
+        current: Option<&Participant>,
     ) -> Result<Option<Participant>> {
         let roster = self.participants_for_session(session_id).await?;
-        let active: Vec<&Participant> = roster
+        // `participants_for_session` orders by `(turn_position, id)`, so this
+        // filter preserves ring order — which is what [`next_in_ring`] assumes.
+        let ring: Vec<&Participant> = roster
             .iter()
             .filter(|p| p.enabled && p.participation_mode == "active")
             .collect();
-        if active.is_empty() {
-            return Ok(None);
-        }
-        let next = match current_position {
-            // Wrap to the first active participant past `current`.
-            Some(pos) => active
-                .iter()
-                .find(|p| p.turn_position > pos)
-                .copied()
-                .unwrap_or(active[0]),
-            // A user message resets the cycle to the first active participant.
-            None => active[0],
-        };
-        Ok(Some(next.clone()))
+        Ok(next_in_ring(&ring, current).cloned())
     }
 
     pub async fn set_done_vote(&self, participant_id: i64, done: bool) -> Result<()> {
@@ -321,16 +364,25 @@ impl Storage {
     }
 
     /// Consensus halt: every ACTIVE participant has declared done.
+    ///
+    /// **An empty rotation is done.** Vacuously — there is no participant left
+    /// who has not voted — and the pair with
+    /// [`Storage::next_active_participant`] is why it is written that way
+    /// rather than as `false`. That returns `None` when nobody is active, which
+    /// is "no turn to hand out", not "done"; this returned `false`, which is
+    /// "not done". Neither answer stopped a loop, and neither gave it anything
+    /// to do, so a sequencer reading the two spun. Read together they now say:
+    /// nobody can produce output, so the cycle has arrived — halt and wait for
+    /// a wake (a user message, a participant enabled) rather than cycle.
+    ///
+    /// The two states that reach it are an all-observer session and a session
+    /// with no roster yet, since `ensure_session_roster` only runs pre-spawn.
     pub async fn all_active_voted_done(&self, session_id: &str) -> Result<bool> {
         let roster = self.participants_for_session(session_id).await?;
-        let mut any = false;
-        for p in roster.iter().filter(|p| p.enabled && p.participation_mode == "active") {
-            any = true;
-            if !p.done_vote {
-                return Ok(false);
-            }
-        }
-        Ok(any)
+        Ok(roster
+            .iter()
+            .filter(|p| p.enabled && p.participation_mode == "active")
+            .all(|p| p.done_vote))
     }
 
     // ---- channel cursors + deliveries -----------------------------------
@@ -346,43 +398,79 @@ impl Storage {
         Ok(row.map(|r| r.0).unwrap_or(0))
     }
 
-    /// Cursors only ever move FORWARD. A rewind would re-deliver messages an
-    /// agent has already acted on — the staleness class this redesign removes.
-    pub async fn advance_cursor(&self, participant_id: i64, message_id: i64) -> Result<()> {
+    /// Record what a participant was handed and move its cursor past the batch,
+    /// in ONE transaction.
+    ///
+    /// **The pairing is the point.** These were two public methods, and a
+    /// delivery needs both: a `participant_deliveries` row per message so
+    /// "what did participant X receive?" has an answer, and a cursor move so
+    /// the same rows are not offered again. Called separately they are two
+    /// commits, and a crash between them leaves a cursor past rows with no
+    /// record behind them — the module's own claim, quietly false, and
+    /// unrecoverable because the cursor never rewinds. One `BEGIN`/`COMMIT`
+    /// around both is what closes that window, and taking the whole batch is
+    /// what stops a caller re-opening it by hand.
+    ///
+    /// `withheld_reason = None` means delivered. **A withheld message still
+    /// gets a row and still advances the cursor**: policies gate delivery,
+    /// never persistence, and leaving the cursor behind would re-offer the row
+    /// on every subsequent turn instead of recording once that it was withheld.
+    /// [`Storage::withheld_for_participant`] is where that record is read back.
+    ///
+    /// The cursor lands on the HIGHEST message id in the batch, derived here
+    /// rather than passed, so the cursor and the records cannot disagree about
+    /// how far the batch reached. It still only ever moves forward: a late
+    /// delivery for an already-passed row is recorded without rewinding.
+    /// An empty batch is a no-op.
+    pub async fn commit_delivery(
+        &self,
+        participant_id: i64,
+        deliveries: &[(i64, Option<&str>)],
+    ) -> Result<()> {
+        if deliveries.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("opening the delivery transaction")?;
+        for (message_id, withheld_reason) in deliveries {
+            // `OR IGNORE` on `UNIQUE (participant_id, message_id)`: re-recording
+            // a delivery is idempotent, not an error, so a retried turn does not
+            // fail the whole batch.
+            sqlx::query(
+                "INSERT OR IGNORE INTO participant_deliveries \
+                 (participant_id, message_id, delivered_at, withheld_reason) \
+                 VALUES (?, ?, CASE WHEN ?3 IS NULL THEN datetime('now') ELSE NULL END, ?3)",
+            )
+            .bind(participant_id)
+            .bind(message_id)
+            .bind(*withheld_reason)
+            .execute(&mut *tx)
+            .await
+            .context("recording delivery")?;
+        }
+        let high = deliveries
+            .iter()
+            .map(|(message_id, _)| *message_id)
+            .max()
+            .expect("a non-empty batch has a highest id");
+        // Cursors only ever move FORWARD. A rewind would re-deliver messages an
+        // agent has already acted on — the staleness class this redesign
+        // removes — so the MAX() is in the statement, not in the caller.
         sqlx::query(
             "UPDATE participant_cursors \
              SET last_read_message_id = MAX(last_read_message_id, ?), \
                  updated_at = datetime('now') \
              WHERE participant_id = ?",
         )
-        .bind(message_id)
+        .bind(high)
         .bind(participant_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("advancing cursor")?;
-        Ok(())
-    }
-
-    /// Record an delivery outcome. `withheld_reason = None` means delivered.
-    /// A withheld message still has a row — policies gate delivery, never
-    /// persistence.
-    pub async fn record_delivery(
-        &self,
-        participant_id: i64,
-        message_id: i64,
-        withheld_reason: Option<&str>,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT OR IGNORE INTO participant_deliveries \
-             (participant_id, message_id, delivered_at, withheld_reason) \
-             VALUES (?, ?, CASE WHEN ?3 IS NULL THEN datetime('now') ELSE NULL END, ?3)",
-        )
-        .bind(participant_id)
-        .bind(message_id)
-        .bind(withheld_reason)
-        .execute(&self.pool)
-        .await
-        .context("recording delivery")?;
+        tx.commit().await.context("committing the delivery")?;
         Ok(())
     }
 
@@ -551,6 +639,38 @@ pub struct ChannelMessage {
     /// came out of `messages`" is enforced rather than merely true today.
     _from_table: (),
 }
+
+/// One bounded read of the channel.
+///
+/// The bound is the point, and so is [`ChannelPage::more`]. A read that just
+/// truncated would make "the participant is caught up" and "the participant hit
+/// the cap" the same value, and the second silently drops the rest of the
+/// session — which is worse than the unbounded read it replaced, because it
+/// looks fine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelPage {
+    /// Oldest first, at most the `limit` the read was given.
+    pub rows: Vec<ChannelMessage>,
+    /// `true` when the limit cut the read short: rows exist after
+    /// `rows.last()`. `false` means this is the whole remainder — that's all.
+    pub more: bool,
+}
+
+/// How many channel rows a participant is handed in one turn.
+///
+/// A cap on ROWS, not on bytes, and the difference matters: the largest single
+/// row in the live database is ~2 MB, so one row can outweigh this whole batch.
+/// What it bounds is the unbounded case — a participant that has never read.
+/// The live channel averages 538 rows per session and reaches 3,585, at ~1.9 KB
+/// per row, so an uncapped backlog read was up to ~6.7 MB in one `Vec` and then
+/// onto one agent's stdin. 266 of 382 sessions hold more than this many rows, so
+/// [`ChannelPage::more`] is a normal outcome and not an edge case.
+///
+/// Not a context-window computation. `storage` does not know which model is
+/// reading, and a row budget cannot stand in for a token budget; this is a
+/// transport bound, and whatever trims a turn's context to a model belongs
+/// where the model is known.
+pub const UNREAD_BATCH_LIMIT: i64 = 200;
 
 const CHANNEL_COLUMNS: &str =
     "id, session_id, participant_id, origin, kind, content, envelope, created_at";
@@ -739,7 +859,7 @@ impl PersistedMessage {
     ///
     /// It exists because without it there is no way to deliver history. The turn
     /// sequencer hands each participant its backlog from
-    /// [`Storage::unread_for_participant`], which returns `Vec<ChannelMessage>`,
+    /// [`Storage::unread_for_participant`], which returns [`ChannelMessage`]s,
     /// and every row written before a restart is only ever available that way.
     /// With `deliver` taking a receipt and receipts minted only by the INSERT,
     /// the sequencer's only exits would have been `send_unrouted` — dissolving
@@ -897,38 +1017,108 @@ impl Storage {
         })
     }
 
-    /// Everything in the channel after `after_id`, oldest first — the read half.
-    /// A participant waking on its turn reads exactly this, from its cursor, so
-    /// context completeness is structural rather than a forwarding discipline.
+    /// The channel after `after_id`, oldest first — the read half, and the
+    /// whole channel rather than any one participant's view of it.
+    ///
+    /// At most `limit` rows; [`ChannelPage::more`] says whether that cut the
+    /// read short. The bound is a parameter rather than a constant because the
+    /// two readers want different numbers: a turn's backlog is capped by
+    /// [`UNREAD_BATCH_LIMIT`], while a whole-channel read is capped by whatever
+    /// the reader can hold. What a participant WAKING on its turn reads is
+    /// [`Storage::unread_for_participant`], not this — that one starts at the
+    /// participant's cursor and leaves out its own rows.
     pub async fn channel_after(
         &self,
         session_id: &str,
         after_id: i64,
-    ) -> Result<Vec<ChannelMessage>> {
-        let rows = sqlx::query(&format!(
+        limit: i64,
+    ) -> Result<ChannelPage> {
+        self.channel_page(session_id, after_id, None, limit).await
+    }
+
+    /// The one channel read. `exclude_participant` drops rows that participant
+    /// AUTHORED, which is the difference between a whole-channel read and a
+    /// backlog — see [`Storage::unread_for_participant`].
+    async fn channel_page(
+        &self,
+        session_id: &str,
+        after_id: i64,
+        exclude_participant: Option<i64>,
+        limit: i64,
+    ) -> Result<ChannelPage> {
+        // `?3 IS NULL OR …` rather than two query strings: one statement, one
+        // plan, and the whole-channel read cannot drift from the backlog read.
+        //
+        // `participant_id IS NULL OR participant_id <> ?3` is the exclusion, and
+        // the NULL half is load-bearing. `origin = 'user'` and `origin =
+        // 'system'` rows carry no participant by design (0044), and SQL's
+        // three-valued logic makes `NULL <> 5` NULL — never true — so without it
+        // every user message and every host injection would vanish from every
+        // backlog. An `origin = 'participant'` row that resolved to nobody is
+        // kept for the same reason: it cannot be attributed to this participant,
+        // so it cannot be its own.
+        //
+        // Reads `limit + 1` and keeps `limit`. Asking for one more row is how
+        // "there is more" is learned from the same query rather than from a
+        // second `count(*)` that could disagree with it under a concurrent
+        // write.
+        //
+        // `saturating_add`, not `+`, because `i64::MAX` is a legal argument and
+        // `i64::MAX + 1` is an overflow: a panic in debug, and in release a wrap
+        // to a negative, which SQLite treats as NO LIMIT (verified:
+        // `SELECT … LIMIT -1` returns every row) — silently restoring the
+        // unbounded read this exists to remove. `.max(0)` for the other end: a
+        // negative `limit` would otherwise reach SQLite unchanged and mean the
+        // same thing. Clamped, it means what it says — zero rows, and `more`
+        // true if any exist.
+        let probe = limit.max(0).saturating_add(1);
+        let mut rows: Vec<ChannelMessage> = sqlx::query(&format!(
             "SELECT {CHANNEL_COLUMNS} FROM messages \
-             WHERE session_id = ? AND id > ? ORDER BY id ASC"
+             WHERE session_id = ?1 AND id > ?2 \
+               AND (?3 IS NULL OR participant_id IS NULL OR participant_id <> ?3) \
+             ORDER BY id ASC LIMIT ?4"
         ))
         .bind(session_id)
         .bind(after_id)
+        .bind(exclude_participant)
+        .bind(probe)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("reading channel for {session_id}"))?;
-        Ok(rows.iter().map(channel_from_row).collect())
+        .with_context(|| format!("reading channel for {session_id}"))?
+        .iter()
+        .map(channel_from_row)
+        .collect();
+        let more = rows.len() as i64 > limit.max(0);
+        rows.truncate(limit.max(0) as usize);
+        Ok(ChannelPage { rows, more })
     }
 
     /// What this participant has not read yet. The query that makes "what did
     /// participant X actually receive?" answerable — a cursor range, not
     /// archaeology across a side table of drop records.
-    pub async fn unread_for_participant(
-        &self,
-        participant_id: i64,
-    ) -> Result<Vec<ChannelMessage>> {
+    ///
+    /// **Excludes the participant's own rows.** It read them back before, which
+    /// meant a participant handed its backlog met its own last turn as fresh
+    /// input. Everything else past the cursor is delivered, including rows it
+    /// was never "forwarded": the peer's turns, the user's messages and the
+    /// host's `system` injections. Context completeness is structural.
+    ///
+    /// **Bounded at [`UNREAD_BATCH_LIMIT`] rows.** A participant that has never
+    /// read used to get the entire session history in one `Vec` and then onto
+    /// one wire; [`ChannelPage::more`] is how the caller learns to come back
+    /// for the rest after committing this batch.
+    pub async fn unread_for_participant(&self, participant_id: i64) -> Result<ChannelPage> {
         let Some(p) = self.participant_by_id(participant_id).await? else {
-            return Ok(Vec::new());
+            return Ok(ChannelPage::default());
         };
         let cursor = self.cursor_for(participant_id).await?;
-        self.channel_after(&p.session_id, cursor).await
+        self.channel_page(
+            &p.session_id,
+            cursor,
+            Some(participant_id),
+            UNREAD_BATCH_LIMIT,
+        )
+        .await
     }
 
     pub async fn participant_by_id(&self, id: i64) -> Result<Option<Participant>> {
@@ -946,6 +1136,16 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole channel, for the tests whose channels are far smaller than any
+    /// bound. The `more` assertion is what keeps that true: a test that grows
+    /// past the read limit must fail loudly rather than quietly assert against
+    /// the first page.
+    async fn all_rows(s: &Storage, session_id: &str) -> Vec<ChannelMessage> {
+        let page = s.channel_after(session_id, 0, 100).await.unwrap();
+        assert!(!page.more, "this test's channel outgrew its read limit");
+        page.rows
+    }
 
     /// 0044 is armed, so the stock in-memory backend has these tables — the
     /// transitional `storage_with_0044()` scaffold that applied the draft by
@@ -1061,19 +1261,91 @@ mod tests {
         assert!(!roster[0].done_vote);
     }
 
-    #[tokio::test]
-    async fn cursors_only_move_forward() {
-        let s = storage_with_0044().await;
-        s.create_session("s1", "t", None).await.unwrap();
-        let pid = s
-            .insert_participant("s1", "a", "A", None, None, "[]", "active", 0)
-            .await
-            .unwrap();
-        s.advance_cursor(pid, 10).await.unwrap();
-        assert_eq!(s.cursor_for(pid).await.unwrap(), 10);
-        // A rewind would re-deliver messages already acted on — refuse it.
-        s.advance_cursor(pid, 4).await.unwrap();
-        assert_eq!(s.cursor_for(pid).await.unwrap(), 10, "cursor must not rewind");
+    // `cursors_only_move_forward` lived here. Its invariant did not move — it
+    // is pinned by `a_committed_delivery_never_rewinds_a_cursor`, through
+    // `commit_delivery`, which is now the only way the cursor moves.
+
+    /// A roster row with nothing behind it but its ring-relevant fields.
+    /// [`next_in_ring`] reads `id`, `turn_position` and `slug`, so the rest is
+    /// filler — and the point of the pure function is that these rosters need
+    /// not be constructible in the database.
+    fn ring_member(id: i64, slug: &str, turn_position: i64) -> Participant {
+        Participant {
+            id,
+            session_id: "s1".into(),
+            slug: slug.into(),
+            display_name: slug.into(),
+            role_id: None,
+            model_id: None,
+            runtime: "claude_code".into(),
+            capabilities: "[]".into(),
+            participation_mode: "active".into(),
+            turn_position,
+            done_vote: false,
+            enabled: true,
+        }
+    }
+
+    /// Walk the ring `steps` times from a cold start, returning the slugs in
+    /// the order they were handed the turn.
+    fn walk(ring: &[&Participant], steps: usize) -> Vec<String> {
+        let mut current: Option<&Participant> = None;
+        let mut seen = Vec::new();
+        for _ in 0..steps {
+            let next = next_in_ring(ring, current).expect("a non-empty ring hands out a turn");
+            seen.push(next.slug.clone());
+            current = Some(next);
+        }
+        seen
+    }
+
+    #[test]
+    fn every_active_participant_gets_a_turn_even_at_a_shared_position() {
+        // The starvation defect. 0044 indexes `turn_position` NON-uniquely and
+        // DEFAULTs it to 0, so A(0), B(0), C(1) is a roster the schema permits.
+        // Advancing on `turn_position > current` then runs a, c, a, c: B is
+        // never scheduled, and because it is still enabled and active,
+        // consensus keeps waiting on a vote it can never be given the turn to
+        // cast. Migration 0045 makes this roster unrepresentable; the ring must
+        // not depend on that to schedule everyone.
+        let a = ring_member(1, "a", 0);
+        let b = ring_member(2, "b", 0);
+        let c = ring_member(3, "c", 1);
+        assert_eq!(
+            walk(&[&a, &b, &c], 6),
+            ["a", "b", "c", "a", "b", "c"],
+            "a shared position must cost an ordering, not a participant"
+        );
+    }
+
+    #[test]
+    fn a_participant_that_left_the_rotation_mid_turn_still_advances() {
+        // The sequencer hands the turn to X and X is disabled (or demoted to
+        // observer) before it completes. `current` is then not IN the ring, so
+        // there is no "one place along" to step — the ring has to fall back to
+        // the first member that sorts after it, and wrap when there is none.
+        let a = ring_member(1, "a", 0);
+        let gone = ring_member(2, "gone", 1);
+        let c = ring_member(3, "c", 2);
+        let ring = [&a, &c];
+        assert_eq!(
+            next_in_ring(&ring, Some(&gone)).unwrap().slug,
+            "c",
+            "advance past where the departed participant sat"
+        );
+        let last = ring_member(9, "last", 7);
+        assert_eq!(
+            next_in_ring(&ring, Some(&last)).unwrap().slug,
+            "a",
+            "and wrap when nothing sorts after it"
+        );
+    }
+
+    #[test]
+    fn an_empty_ring_hands_out_no_turn() {
+        let a = ring_member(1, "a", 0);
+        assert!(next_in_ring(&[], None).is_none());
+        assert!(next_in_ring(&[], Some(&a)).is_none());
     }
 
     #[tokio::test]
@@ -1088,11 +1360,84 @@ mod tests {
         let first = s.next_active_participant("s1", None).await.unwrap().unwrap();
         assert_eq!(first.slug, "a");
         // The observer is SKIPPED, not given a no-op turn.
-        let second = s.next_active_participant("s1", Some(0)).await.unwrap().unwrap();
+        let second = s.next_active_participant("s1", Some(&first)).await.unwrap().unwrap();
         assert_eq!(second.slug, "c", "observer must not take a turn");
         // The ring wraps.
-        let third = s.next_active_participant("s1", Some(2)).await.unwrap().unwrap();
+        let third = s.next_active_participant("s1", Some(&second)).await.unwrap().unwrap();
         assert_eq!(third.slug, "a");
+    }
+
+    #[tokio::test]
+    async fn two_active_participants_cannot_share_a_turn_slot() {
+        // The schema half of the starvation defect. The roster
+        // `every_active_participant_gets_a_turn_even_at_a_shared_position`
+        // walks is one 0044 represented happily — non-unique index, DEFAULT 0,
+        // and `insert_participant` taking the position unchecked. Migration
+        // 0045 is what stops the database holding it.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.insert_participant("s1", "a", "A", None, None, "[]", "active", 0).await.unwrap();
+
+        let err = s
+            .insert_participant("s1", "b", "B", None, None, "[]", "active", 0)
+            .await
+            .expect_err("two actives sharing a slot must be rejected");
+        assert!(
+            format!("{err:#}").contains("UNIQUE constraint failed"),
+            "expected a uniqueness failure, got: {err:#}"
+        );
+
+        // What it does NOT prevent, and must not: an observer at the same
+        // position, because an observer never takes a turn and its position is
+        // retained purely against a later promotion.
+        s.insert_participant("s1", "obs", "Obs", None, None, "[]", "observer", 0)
+            .await
+            .unwrap();
+        // …nor slot 0 of a different session. The slot is per session.
+        s.create_session("s2", "t", None).await.unwrap();
+        s.insert_participant("s2", "a", "A", None, None, "[]", "active", 0).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_slot_is_occupied_only_while_someone_is_in_the_rotation() {
+        // Why the index is PARTIAL rather than over every row. A disabled
+        // participant keeps its `turn_position`, so a full unique index would
+        // reserve the slot for a row that takes no turns — and re-inviting at
+        // that position would collide with nobody.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let a = s
+            .insert_participant("s1", "a", "A", None, None, "[]", "active", 0)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE session_participants SET enabled = 0 WHERE id = ?")
+            .bind(a)
+            .execute(s.pool())
+            .await
+            .unwrap();
+
+        let b = s
+            .insert_participant("s1", "b", "B", None, None, "[]", "active", 0)
+            .await
+            .expect("a vacated slot is free to re-invite into");
+
+        // And the constraint follows the rotation rather than the INSERT:
+        // re-enabling A now moves a row INTO the set, which is the moment the
+        // collision starts mattering, so that is where it fails.
+        let err = sqlx::query("UPDATE session_participants SET enabled = 1 WHERE id = ?")
+            .bind(a)
+            .execute(s.pool())
+            .await
+            .expect_err("re-enabling onto an occupied slot must be rejected");
+        assert!(
+            err.to_string().contains("UNIQUE constraint failed"),
+            "expected a uniqueness failure, got: {err}"
+        );
+        assert_eq!(
+            s.next_active_participant("s1", None).await.unwrap().unwrap().id,
+            b,
+            "and the rotation is still B's alone"
+        );
     }
 
     #[tokio::test]
@@ -1126,10 +1471,101 @@ mod tests {
             .insert_participant("s1", "a", "A", None, None, "[]", "active", 0)
             .await
             .unwrap();
-        s.record_delivery(pid, 1, None).await.unwrap();
-        s.record_delivery(pid, 2, Some("spin")).await.unwrap();
+        s.commit_delivery(pid, &[(1, None), (2, Some("spin"))]).await.unwrap();
         let withheld = s.withheld_for_participant(pid).await.unwrap();
         assert_eq!(withheld, vec![(2, "spin".to_string())]);
+    }
+
+    /// Every delivery row for a participant, as `(message_id, withheld_reason)`
+    /// — including the delivered ones, which `withheld_for_participant`
+    /// deliberately does not return.
+    async fn delivery_rows(s: &Storage, participant_id: i64) -> Vec<(i64, Option<String>)> {
+        sqlx::query_as(
+            "SELECT message_id, withheld_reason FROM participant_deliveries \
+             WHERE participant_id = ? ORDER BY message_id",
+        )
+        .bind(participant_id)
+        .fetch_all(s.pool())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_batch_of_deliveries_and_its_cursor_land_in_one_commit() {
+        // `record_delivery` and `advance_cursor` were two public methods with
+        // no transaction between them, so a caller pairing them by hand — the
+        // only way to deliver anything — left a window where a crash advanced
+        // the cursor with no delivery rows behind it. The module's claim to
+        // answer "what did participant X receive?" is exactly what that window
+        // costs. There is now one call and one COMMIT.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let brian = s.participant_by_slug("s1", "brian").await.unwrap().unwrap().id;
+        let rain = s.participant_by_slug("s1", "rain").await.unwrap().unwrap().id;
+
+        let m1 = s.post_to_channel("s1", "user", None, "text", "one", None).await.unwrap();
+        let m2 = s
+            .post_to_channel("s1", "participant", Some("brian"), "text", "two", None)
+            .await
+            .unwrap();
+        let m3 = s.post_to_channel("s1", "user", None, "text", "three", None).await.unwrap();
+
+        let backlog = s.unread_for_participant(rain).await.unwrap().rows;
+        assert_eq!(backlog.len(), 3, "precondition: three rows past the cursor");
+        s.commit_delivery(
+            rain,
+            &[
+                (m1.message_id(), None),
+                (m2.message_id(), Some("spin")),
+                (m3.message_id(), None),
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Every row in the batch has a record, withheld or not…
+        assert_eq!(
+            delivery_rows(&s, rain).await,
+            vec![
+                (m1.message_id(), None),
+                (m2.message_id(), Some("spin".to_string())),
+                (m3.message_id(), None),
+            ]
+        );
+        // …and the cursor sat past the whole batch in the same commit.
+        assert_eq!(s.cursor_for(rain).await.unwrap(), m3.message_id());
+        assert!(
+            s.unread_for_participant(rain).await.unwrap().rows.is_empty(),
+            "a withheld row is recorded, not re-offered forever"
+        );
+        // Scoped to one participant: Brian's cursor and records are untouched.
+        assert_eq!(s.cursor_for(brian).await.unwrap(), 0);
+        assert!(delivery_rows(&s, brian).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_committed_delivery_never_rewinds_a_cursor() {
+        // Cursors only move FORWARD — a rewind re-delivers messages an agent has
+        // already acted on. Carried over from `advance_cursor`, which this
+        // replaces as the only way the cursor moves.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let pid = s
+            .insert_participant("s1", "a", "A", None, None, "[]", "active", 0)
+            .await
+            .unwrap();
+        s.commit_delivery(pid, &[(10, None)]).await.unwrap();
+        assert_eq!(s.cursor_for(pid).await.unwrap(), 10);
+        s.commit_delivery(pid, &[(4, None)]).await.unwrap();
+        assert_eq!(s.cursor_for(pid).await.unwrap(), 10, "cursor must not rewind");
+        // The late row is still RECORDED as delivered, though — the cursor is
+        // where reading got to, not the list of what was handed over.
+        assert_eq!(delivery_rows(&s, pid).await, vec![(4, None), (10, None)]);
+        // An empty batch is a no-op rather than a cursor reset.
+        s.commit_delivery(pid, &[]).await.unwrap();
+        assert_eq!(s.cursor_for(pid).await.unwrap(), 10);
+        assert_eq!(delivery_rows(&s, pid).await.len(), 2);
     }
 
     #[tokio::test]
@@ -1195,7 +1631,7 @@ mod tests {
 
         // Rain has read nothing yet, so both are unread — including the message
         // she was not "forwarded". Context completeness is structural.
-        let unread = s.unread_for_participant(r).await.unwrap();
+        let unread = s.unread_for_participant(r).await.unwrap().rows;
         assert_eq!(unread.len(), 2);
         assert_eq!(unread[0].id, m1.message_id());
         assert_eq!(unread[0].origin, "user");
@@ -1207,12 +1643,173 @@ mod tests {
             "the envelope is a visible field, not string mutation"
         );
 
-        // After reading, the cursor advances and the backlog empties.
-        s.advance_cursor(r, m2.message_id()).await.unwrap();
-        assert!(s.unread_for_participant(r).await.unwrap().is_empty());
+        // After reading, the cursor advances and the backlog empties — and the
+        // record of what she was handed goes down in the same commit.
+        s.commit_delivery(r, &[(m1.message_id(), None), (m2.message_id(), None)])
+            .await
+            .unwrap();
+        assert!(s.unread_for_participant(r).await.unwrap().rows.is_empty());
 
-        // Brian, who never read, still has both — cursors are per participant.
-        assert_eq!(s.unread_for_participant(b).await.unwrap().len(), 2);
+        // Brian, who never read, still has the user's message — cursors are per
+        // participant. He does NOT have his own row back: he wrote it, which is
+        // as read as a message gets.
+        let brians = s.unread_for_participant(b).await.unwrap().rows;
+        assert_eq!(brians.len(), 1);
+        assert_eq!(brians[0].id, m1.message_id());
+    }
+
+    #[tokio::test]
+    async fn a_channel_read_is_bounded_and_says_when_it_stopped_short() {
+        // `channel_after` had no LIMIT, so a participant that had never read
+        // got the whole session history in one `Vec` and then onto one wire.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let mut ids = Vec::new();
+        for n in 0..5 {
+            ids.push(
+                s.post_to_channel("s1", "user", None, "text", format!("m{n}"), None)
+                    .await
+                    .unwrap()
+                    .message_id(),
+            );
+        }
+
+        let page = s.channel_after("s1", 0, 2).await.unwrap();
+        assert_eq!(page.rows.iter().map(|m| m.id).collect::<Vec<_>>(), ids[..2]);
+        assert!(page.more, "two of five — the caller must be told to come back");
+
+        // And resuming from the last row returned reaches the end, where `more`
+        // goes false. Truncating without that flag would make "caught up" and
+        // "cut short" the same answer.
+        let rest = s.channel_after("s1", ids[1], 100).await.unwrap();
+        assert_eq!(rest.rows.iter().map(|m| m.id).collect::<Vec<_>>(), ids[2..]);
+        assert!(!rest.more, "that's all");
+
+        // An exact fit is not "more": the probe row is what distinguishes them.
+        let exact = s.channel_after("s1", 0, 5).await.unwrap();
+        assert_eq!(exact.rows.len(), 5);
+        assert!(!exact.more);
+
+        // The two ends of the range, because both are ways a bad number would
+        // quietly restore the unbounded read. SQLite reads a NEGATIVE limit as
+        // no limit at all, so it is clamped to zero rather than passed through…
+        let none = s.channel_after("s1", 0, 0).await.unwrap();
+        assert!(none.rows.is_empty());
+        assert!(none.more, "zero rows read is not zero rows waiting");
+        assert_eq!(s.channel_after("s1", 0, -5).await.unwrap(), none);
+        // …and the largest legal limit must not overflow the `limit + 1` probe.
+        let everything = s.channel_after("s1", 0, i64::MAX).await.unwrap();
+        assert_eq!(everything.rows.len(), 5);
+        assert!(!everything.more);
+    }
+
+    #[tokio::test]
+    async fn a_backlog_is_capped_at_the_batch_limit() {
+        // The unbounded case the cap exists for: a participant that has never
+        // read a session with more history than one turn should carry.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let rain = s.participant_by_slug("s1", "rain").await.unwrap().unwrap().id;
+        for n in 0..UNREAD_BATCH_LIMIT + 1 {
+            s.post_to_channel("s1", "user", None, "text", format!("m{n}"), None)
+                .await
+                .unwrap();
+        }
+
+        let first = s.unread_for_participant(rain).await.unwrap();
+        assert_eq!(first.rows.len() as i64, UNREAD_BATCH_LIMIT);
+        assert!(first.more, "one row over the cap is one row still owed");
+
+        // Committing the batch is what makes the next call return the rest.
+        let batch: Vec<(i64, Option<&str>)> =
+            first.rows.iter().map(|m| (m.id, None)).collect();
+        s.commit_delivery(rain, &batch).await.unwrap();
+        let second = s.unread_for_participant(rain).await.unwrap();
+        assert_eq!(second.rows.len(), 1);
+        assert!(!second.more);
+    }
+
+    #[tokio::test]
+    async fn a_participant_does_not_read_its_own_rows_back() {
+        // `unread_for_participant` was `channel_after` from the cursor with no
+        // author filter at all, so a participant handed its backlog read its
+        // OWN last turn back as fresh input — while the doc said "what this
+        // participant has not read yet". A participant has, by definition,
+        // read what it wrote.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1").await.unwrap();
+        let brian = s.participant_by_slug("s1", "brian").await.unwrap().unwrap().id;
+        let rain = s.participant_by_slug("s1", "rain").await.unwrap().unwrap().id;
+
+        let by_brian = s
+            .post_to_channel("s1", "participant", Some("brian"), "text", "my turn", None)
+            .await
+            .unwrap();
+        let by_rain = s
+            .post_to_channel("s1", "participant", Some("rain"), "text", "review", None)
+            .await
+            .unwrap();
+        let by_user = s
+            .post_to_channel("s1", "user", None, "text", "carry on", None)
+            .await
+            .unwrap();
+        let by_host = s
+            .post_to_channel("s1", "system", None, "system_notice", "[System: note]", None)
+            .await
+            .unwrap();
+        // An `origin = 'participant'` row that resolved to nobody — an agent
+        // that posted before its roster existed. Unattributable, so it cannot
+        // be anyone's own, and dropping it would lose it from every backlog.
+        let orphan = s
+            .post_to_channel("s1", "participant", Some("nobody"), "text", "orphan", None)
+            .await
+            .unwrap();
+
+        let unread: Vec<i64> = s
+            .unread_for_participant(brian)
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert!(
+            !unread.contains(&by_brian.message_id()),
+            "a participant must not be handed its own turn as fresh input"
+        );
+        assert_eq!(
+            unread,
+            vec![
+                by_rain.message_id(),
+                by_user.message_id(),
+                by_host.message_id(),
+                orphan.message_id(),
+            ],
+            "the peer's turn, the user's message, the host's notice and an \
+             unattributed row are all still delivered"
+        );
+
+        // Rain's backlog is the mirror image — the filter is per participant,
+        // not a blanket "drop participant rows".
+        let rain_unread: Vec<i64> = s
+            .unread_for_participant(rain)
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            rain_unread,
+            vec![
+                by_brian.message_id(),
+                by_user.message_id(),
+                by_host.message_id(),
+                orphan.message_id(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1268,7 +1865,7 @@ mod tests {
             .await
             .unwrap();
 
-        let rows = s.channel_after("s1", 0).await.unwrap();
+        let rows = all_rows(&s, "s1").await;
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].id, known.message_id());
         assert_eq!(rows[0].participant_id, Some(brian1), "a known slug resolves");
@@ -1288,7 +1885,7 @@ mod tests {
         );
         assert_eq!(rows[3].content, "anonymous", "and that row is written too");
 
-        let other = s.channel_after("s2", 0).await.unwrap();
+        let other = all_rows(&s, "s2").await;
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].id, elsewhere.message_id());
         assert_eq!(
@@ -1316,7 +1913,7 @@ mod tests {
         s.insert_message("s1", Author::Brian, MessageKind::Text, "work").await.unwrap();
         s.insert_message("s1", Author::User, MessageKind::Text, "reply").await.unwrap();
 
-        let rows = s.channel_after("s1", 0).await.unwrap();
+        let rows = all_rows(&s, "s1").await;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].participant_id, Some(b), "resolved to the roster entry");
         assert_eq!(rows[0].origin, "participant");
@@ -1339,7 +1936,7 @@ mod tests {
             .unwrap()
             .message_id();
         assert!(id > 0, "logging must never depend on the roster existing");
-        let rows = s.channel_after("s1", 0).await.unwrap();
+        let rows = all_rows(&s, "s1").await;
         assert_eq!(rows[0].participant_id, None);
         assert_eq!(rows[0].origin, "participant");
         // The legacy path still attributes it correctly.
@@ -1361,7 +1958,7 @@ mod tests {
                              "[System: your previous turn was force-interrupted]", None)
             .await
             .unwrap();
-        let rows = s.channel_after("s1", 0).await.unwrap();
+        let rows = all_rows(&s, "s1").await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, pm.message_id());
         assert_eq!(rows[0].origin, "system");
@@ -1434,13 +2031,13 @@ mod tests {
         s.insert_message("s1", Author::Brian, MessageKind::Text, "work").await.unwrap();
         s.insert_message("s1", Author::Rain, MessageKind::Text, "review").await.unwrap();
         s.insert_message("s1", Author::User, MessageKind::Text, "reply").await.unwrap();
-        let before = s.channel_after("s1", 0).await.unwrap();
+        let before = all_rows(&s, "s1").await;
         assert!(before.iter().all(|m| m.participant_id.is_none()), "precondition: unmapped");
 
         s.ensure_session_roster("s1").await.unwrap();
 
         let roster = s.participants_for_session("s1").await.unwrap();
-        let after = s.channel_after("s1", 0).await.unwrap();
+        let after = all_rows(&s, "s1").await;
         assert_eq!(after[0].participant_id, Some(roster[0].id), "brian's row mapped");
         assert_eq!(after[1].participant_id, Some(roster[1].id), "rain's row mapped");
         assert_eq!(after[2].participant_id, None, "a user row has no participant");
@@ -1456,7 +2053,7 @@ mod tests {
         s.ensure_session_roster("s1").await.unwrap();
         s.insert_message("s1", Author::Brian, MessageKind::Text, "work").await.unwrap();
         let roster = s.participants_for_session("s1").await.unwrap();
-        let rows = s.channel_after("s1", 0).await.unwrap();
+        let rows = all_rows(&s, "s1").await;
         assert_eq!(rows[0].participant_id, Some(roster[0].id));
         assert_eq!(rows[0].origin, "participant");
     }
@@ -1481,7 +2078,7 @@ mod tests {
             .unwrap();
         assert!(pm.message_id() > 0, "a PersistedMessage is proof of a row");
 
-        let rows = s.channel_after("s1", 0).await.unwrap();
+        let rows = all_rows(&s, "s1").await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, pm.message_id());
         // Against the ROW, not the argument: Task 2's cross-session guard rests
@@ -1526,7 +2123,7 @@ mod tests {
             .await
             .unwrap();
 
-        let row = &s.channel_after("s1", 0).await.unwrap()[0];
+        let row = &all_rows(&s, "s1").await[0];
         let replayed = PersistedMessage::from_row(row);
 
         // Same row, so the same bytes on stdin — the receipt read back is worth
@@ -1547,12 +2144,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_session_with_no_active_participants_has_no_next_turn() {
-        // An all-observer session must not wedge the sequencer on an unwrap.
+    async fn a_session_with_no_active_participants_is_already_done() {
+        // An all-observer session must not wedge the sequencer on an unwrap —
+        // and must not wedge it on a SPIN either, which is what the two answers
+        // used to add up to. `next_active_participant` said `None` (no turn to
+        // hand out) and `all_active_voted_done` said `false` (not done), so a
+        // loop reading the pair had nothing to do and no reason to stop.
+        //
+        // The pair is now coherent, and the shape is: an empty rotation is
+        // DONE. Vacuously — every active participant has voted done when there
+        // are none — and usefully, because nobody left can produce output, so
+        // waiting is waiting on nothing. The sequencer halts and waits for a
+        // wake (a user message, a participant being enabled) rather than
+        // cycling.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.insert_participant("s1", "o", "O", None, None, "[]", "observer", 0).await.unwrap();
         assert!(s.next_active_participant("s1", None).await.unwrap().is_none());
-        assert!(!s.all_active_voted_done("s1").await.unwrap(), "no actives = no consensus");
+        assert!(
+            s.all_active_voted_done("s1").await.unwrap(),
+            "no actives = nothing left to wait for"
+        );
+
+        // A session with no roster at all is the same answer for the same
+        // reason — and it is reachable, since `ensure_session_roster` only runs
+        // pre-spawn.
+        s.create_session("s2", "t", None).await.unwrap();
+        assert!(s.next_active_participant("s2", None).await.unwrap().is_none());
+        assert!(s.all_active_voted_done("s2").await.unwrap());
+
+        // The two answers stay coupled once somebody IS active: a turn to hand
+        // out means not done.
+        s.insert_participant("s1", "a", "A", None, None, "[]", "active", 1).await.unwrap();
+        assert!(s.next_active_participant("s1", None).await.unwrap().is_some());
+        assert!(!s.all_active_voted_done("s1").await.unwrap());
     }
 }

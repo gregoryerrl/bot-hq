@@ -40,7 +40,9 @@ pub use cl_atoms::{Atom, RetrievedAtom};
 pub(crate) use cl_atoms::estimate_tokens;
 pub use models::{RAIN_DISABLED_DEFAULT_KEY, WORKTREE_DEFAULT_KEY};
 pub use cancel_events::CancelEventRecord;
-pub use participants::{render_wire, Envelope, Participant, PersistedMessage, Role};
+pub use participants::{
+    render_wire, ChannelPage, Envelope, Participant, PersistedMessage, Role, UNREAD_BATCH_LIMIT,
+};
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use row_types::{
     AgentConfig, AgentFeedback, Author, CancelEvent, ClFolder, ForwardEvent, ClIndexEntry, ClRead,

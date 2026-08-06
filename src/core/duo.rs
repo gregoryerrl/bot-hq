@@ -1453,9 +1453,10 @@ mod tests {
         task.await.unwrap();
 
         let notice = storage
-            .channel_after("s1", 0)
+            .channel_after("s1", 0, 100)
             .await
             .unwrap()
+            .rows
             .into_iter()
             .find(|m| m.content.contains("hit a provider limit"))
             .expect("the notice must have a row of its own");
@@ -1540,9 +1541,10 @@ mod tests {
 
         assert!(
             !storage
-                .channel_after("s1", 0)
+                .channel_after("s1", 0, 100)
                 .await
                 .unwrap()
+                .rows
                 .iter()
                 .any(|m| m.content.contains("hit a provider limit")),
             "no peer, no peer notice — and so no row for one"

@@ -547,7 +547,7 @@ mod tests {
             ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), Arc::clone(&bridge));
         deliver_idle_nudge("s1", &idle_watch, &activity, &bridge).await;
 
-        let rows = storage.channel_after("s1", 0).await.unwrap();
+        let rows = storage.channel_after("s1", 0, 100).await.unwrap().rows;
         assert_eq!(rows.len(), 2, "NOTICE and NUDGE are separate messages");
         assert_eq!(rows[0].origin, "user", "the notice reads as a chat message");
         assert!(rows[0].content.starts_with("Session idled"));

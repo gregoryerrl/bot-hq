@@ -211,7 +211,7 @@ mod tests {
         // stored row reproduces both agents' stdin byte for byte. Before B5
         // Task 2 the row said only "hello" and the `[PHASE: Apply]` the agents
         // read existed nowhere the user could see it.
-        let row = &s.channel_after("s1", 0).await.unwrap()[0];
+        let row = &s.channel_after("s1", 0, 100).await.unwrap().rows[0];
         assert_eq!(
             render_wire(row.envelope.as_ref(), &row.content),
             bm.message.content

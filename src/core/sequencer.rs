@@ -3,34 +3,36 @@
 //!
 //! The shape it is being built toward: exactly one participant holds the turn.
 //! When that turn ends the sequencer picks the next active participant
-//! ([`Storage::next_active_participant`]), hands it every unread row
-//! ([`Storage::unread_for_participant`]), and waits. The cycle ends by
+//! ([`Storage::next_active_participant`]), hands it its unread rows a batch at
+//! a time ([`Storage::unread_for_participant`]), and waits. The cycle ends by
 //! consensus — every active participant has voted done
 //! ([`Storage::all_active_voted_done`]) — or immediately, when a participant
 //! parks a question for the user.
 //!
-//! ## Those three helpers are seams, not working code
+//! ## What those helpers now guarantee, and what they still leave to this loop
 //!
-//! Read the paragraph above as the target. All three have defects that the next
-//! task fixes before it builds on them, and each was reproduced against
-//! `Storage::memory()` rather than inferred from reading:
+//! The skeleton was the first consumer of the `storage::participants` helpers
+//! and found five defects in them. All five are fixed; what follows is the
+//! contract the loop may now rely on, not a list of hazards to work around:
 //!
-//! - `unread_for_participant` is `channel_after` with no author filter, so it
-//!   returns the participant's OWN rows. A participant handed its backlog reads
-//!   its own last turn back as fresh input. "Every unread row" above is the
-//!   design's wording and the goal; it is not what the helper does today.
-//! - `next_active_participant` advances on `turn_position > pos` — strictly
-//!   greater — while 0044 constrains only `UNIQUE (session_id, slug)`. Nothing
-//!   stops two active participants sharing a position, and the column DEFAULTs
-//!   to 0. With actives at positions 0, 0 and 1 the observed ring is
-//!   `a, c, a, c, a, c`: the second participant at 0 is never scheduled. It is
-//!   still `enabled` and `active`, so consensus keeps requiring a vote it can
-//!   never be given the turn to cast. **"The cycle ends by consensus" is
-//!   unreachable in a roster the schema permits.**
-//! - With no active participants at all, `next_active_participant` yields `None`
-//!   and `all_active_voted_done` yields `false`. Neither answer is "done", so a
-//!   loop that treats the two as a pair spins; the empty roster needs its own
-//!   branch rather than falling through either path.
+//! - `unread_for_participant` excludes the participant's OWN rows, so a
+//!   backlog is input rather than an echo. It is BOUNDED at
+//!   [`UNREAD_BATCH_LIMIT`](crate::storage::UNREAD_BATCH_LIMIT) rows and
+//!   returns a [`ChannelPage`](crate::storage::ChannelPage); `more` means the
+//!   participant is owed another batch after this one is committed, and a loop
+//!   that ignores it silently truncates a long session's history.
+//! - `next_active_participant` takes the participant that HELD the turn, not
+//!   its position, and steps by place in the rotation. Migration 0045 makes two
+//!   active participants sharing a `turn_position` unrepresentable besides, so
+//!   the ring reaches everyone and consensus is reachable.
+//! - `next_active_participant` returning `None` and `all_active_voted_done`
+//!   returning `true` are now the same condition — an empty rotation is DONE,
+//!   vacuously and usefully, because nobody left can produce output. Ask
+//!   consensus first and halt on it; there is no third state to branch on.
+//! - `commit_delivery` records the batch and moves the cursor in one
+//!   transaction. It replaces the unpaired `record_delivery` / `advance_cursor`
+//!   pair, so there is no longer a way to advance a cursor past rows with no
+//!   record of what was handed over.
 //!
 //! **What is in this file is the skeleton: the loop and its lifecycle, and
 //! nothing else.** No ring advance, no consensus, no delivery — each of those
@@ -94,7 +96,7 @@
 //! drop a forward (convergence) or hold one (the hard cap) AFTER its row is
 //! written, so the chat can show a row that no peer ever read. The sequencer
 //! replaces that ladder, so it either inherits that state — deliberately, with
-//! [`Storage::record_delivery`] and a withheld reason making it auditable — or
+//! [`Storage::commit_delivery`] and a withheld reason making it auditable — or
 //! ends it, by handing every row past the cursor to whoever holds the turn and
 //! letting the participant judge.
 //!

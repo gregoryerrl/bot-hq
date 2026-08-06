@@ -1558,7 +1558,7 @@ mod tests {
         );
         // And the row carries every byte of it: body + envelope, nothing added
         // between the INSERT and the write to stdin.
-        let row = &storage.channel_after("s1", 0).await.unwrap()[0];
+        let row = &storage.channel_after("s1", 0, 100).await.unwrap().rows[0];
         assert_eq!(row.id, receipt.message_id());
         assert_eq!(
             wire,

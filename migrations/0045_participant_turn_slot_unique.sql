@@ -1,0 +1,92 @@
+-- ============================================================================
+-- 0045 — one participant per rotation slot.
+--
+-- 0044 gave `turn_position` a NON-unique index (idx_participants_turn) and a
+-- DEFAULT of 0, and enforced "exactly one participant per session at position
+-- 0" only as a migration-time guard (0044 GUARD 5). Nothing constrains a row
+-- written after that guard ran, and `insert_participant` takes the position
+-- from its caller unchecked, so A(0), B(0), C(1) — three active participants,
+-- two of them sharing a slot — is a roster the schema represents happily.
+--
+-- The turn ring then advanced on `turn_position > current`, which schedules
+-- a, c, a, c and never B. B is still enabled and active, so the consensus halt
+-- ("every active participant has voted done") waits forever on a vote B can
+-- never be given the turn to cast. The ring no longer works that way — it steps
+-- by position IN the rotation, so a shared slot costs an ordering rather than a
+-- participant — but a query fix alone leaves the database able to REPRESENT the
+-- broken roster, and the next query written against `turn_position` inherits
+-- the trap. This is the half that makes it unrepresentable.
+--
+-- ADDITIVE. One `CREATE UNIQUE INDEX`; no table rebuild, so none of 0044's
+-- 2×-disk precondition and no risk to `messages`.
+--
+-- PRECONDITION, verified against the live database (~/.bot-hq/.local/bot-hq.db)
+-- on 2026-08-07 before this file was written:
+--   * 770 participants across 385 sessions;
+--   * 0 duplicate (session_id, turn_position) groups over ALL rows;
+--   * 0 duplicate groups over the subset this index covers;
+--   * positions are only ever 0 and 1; the 12 disabled rows are all at 1;
+--   * every session has exactly one enabled+active participant at position 0.
+-- The index therefore builds without a repair pass, and it applied cleanly to a
+-- copy of that database (770 rows, integrity_check ok).
+--
+-- NO GUARD TABLE, unlike 0044, and that is a decision rather than an omission.
+-- 0044 needed guards because it DROPped and rebuilt a 200k-row table, so a
+-- failure part-way through had a half-applied state to protect against. This is
+-- one DDL statement that is its own guard: against a roster that already
+-- violates the invariant it fails with
+--   UNIQUE constraint failed: session_participants.session_id,
+--   session_participants.turn_position
+-- and creates nothing (both verified, against a copy of the live database with
+-- one colliding participant inserted: that exact message, non-zero exit, and
+-- the index absent afterwards).
+-- A 0044-style guard was written first and then removed, because it did not buy
+-- what it looked like it bought — a `CHECK (failure IS NULL)` violation reports
+-- "CHECK constraint failed: failure IS NULL" and cannot carry the offending
+-- session ids into the message, so it is no more diagnostic than the line
+-- above, only longer. `RAISE(ABORT, …)` takes a literal and is trigger-only, so
+-- there is no portable way to get the data into a SQLite error at all.
+-- ============================================================================
+
+-- ---------------------------------------------------------------------------
+-- The constraint. PARTIAL, over exactly the rows the turn ring reads.
+--
+-- WHY PARTIAL RATHER THAN OVER EVERY ROW: `turn_position` is only meaningful
+-- for a participant that is IN the rotation. 0044's own comment on the column
+-- says an observer's or a disabled participant's position is "retained but
+-- unused if promoted later" — so those rows hold a slot they do not occupy. A
+-- full unique index would make that retention exclusive: disable a participant
+-- and its slot stays reserved forever, so inviting a replacement at the same
+-- position fails on a row that is not in the rotation at all. Scoping the index
+-- to the rotation means a slot is free exactly when nobody is using it.
+--
+-- WHAT IT PREVENTS: two participants that are both enabled and both `active`
+-- sharing a `turn_position` within one session — by INSERT, and equally by an
+-- UPDATE that moves a row INTO that set. Enabling a disabled participant, or
+-- promoting an observer, onto an occupied slot fails at the UPDATE, which is
+-- the moment the collision starts mattering. SQLite enforces it against every
+-- writer, so it does not depend on going through `insert_participant`.
+--
+-- WHAT IT DOES NOT PREVENT, deliberately:
+--   * observers, `on_demand` participants and disabled rows sharing a position
+--     with each other or with an active one — none of them take turns;
+--   * gaps in the SEQUENCE of positions: 0, 7, 900 is a legal three-participant
+--     ring, and so is a single participant at 42. This constrains uniqueness,
+--     not contiguity, and not that a ring starts at 0 — 0044 GUARD 5's "exactly
+--     one at position 0" is still only a one-shot check from migration time;
+--   * a session with no active participant at all (see `all_active_voted_done`
+--     for what that state means);
+--   * a silent skip rather than an error where a caller writes
+--     `INSERT OR IGNORE` — `ensure_session_roster` does, for idempotence on
+--     `UNIQUE (session_id, slug)`, and now rides this constraint too. It only
+--     ever inserts positions 0 and 1, so nothing changes today; a future seeder
+--     that inserted onto an occupied slot would get a no-op and a short roster
+--     rather than a failure.
+--
+-- The index is not what makes the ring correct, and is not relied on to be:
+-- `next_in_ring` schedules every member of a shared slot on its own. The two
+-- are the same invariant enforced from both sides.
+-- ---------------------------------------------------------------------------
+CREATE UNIQUE INDEX idx_participants_turn_slot
+    ON session_participants (session_id, turn_position)
+    WHERE enabled = 1 AND participation_mode = 'active';
