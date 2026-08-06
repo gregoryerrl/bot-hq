@@ -150,31 +150,44 @@ git add tests/parity_capability_boundary.rs
 git commit -F /tmp/msg   # "test: pin today's tool-authorization boundary"
 ```
 
-### Task B0.2: Pin the commit gate's behaviour
+### Task B0.2: Pin the commit gate's behaviour ✅ DONE (`e55870f`)
 
-**Files:** Create `tests/parity_commit_gate.rs`
+Landed in `src/signaling/parity.rs` (same in-crate correction as B0.1), as three
+tests: a blocking finding gates and the verdict names both the finding and how
+to resolve it; an advisory finding never gates; both dispositions clear it,
+`rebutted` included. The reviewer-down backstop is pinned **through
+`check_open_findings`** rather than the private `reviewer_block_decision`, so it
+survives however B6 refactors the predicate — healthy passes, dead blocks with
+reviewer-gone wording, override opens it *visibly*, recovery clears it.
 
-Pin, using the existing `bridge/findings.rs` test helpers: an unresolved
-BLOCKING finding blocks; an ADVISORY finding does not; a `fixed`/`rebutted`
-disposition clears; `override_reviewer_block` works only when the reviewer is
-down. These four assertions are the whole review contract and must survive the
-capability rewrite unchanged.
+Regression-proven: dropping the `severity = 'blocking'` filter fails exactly the
+advisory assertion and nothing else.
 
-### Task B0.3: Inventory the router's encoded behaviour
+**Note for B6:** `check_open_findings` decides "is this a duo" by reading
+`sessions.rain_enabled`. That read must become a roster lookup, and it is one of
+the `sessions.{brian,rain}_*` reads the cutover grep audit must catch.
 
-**Files:** Create `docs/plans/2026-08-06-router-behaviour-inventory.md`
+### Task B0.3: Inventory the router's encoded behaviour ✅ DONE (`e55870f`)
 
-`core/router.rs` is 1454 lines — **632 code, 822 tests**. Those 822 lines are
-the specification of behaviour B5 will delete. For each test, record: name, the
-behaviour it pins, and the verdict — **preserved** (becomes a channel policy),
-**dissolved** (cannot occur in a ring), or **consciously dropped** (with a
-reason).
+**Files:** `docs/plans/2026-08-06-router-behaviour-inventory.md`
 
-This is a document task, not a code task. It is the difference between deleting
-a subsystem and losing one.
+All 20 behaviours have a verdict: **11 preserved** (each needs a green test in
+the new model *before* the old one is deleted), **8 dissolved** (a fixed ring
+cannot express the failure they guard), **2 dropped** with stated reasons.
 
-**Definition of done for B0:** all parity tests green; the router inventory
-complete with a verdict on every test. No production code touched.
+Two findings worth carrying into B5:
+- **#9 and #13 would plausibly have been lost in a rewrite** — an
+  acked-but-substantive turn forwarding anyway (which exists because four real
+  reviews were destroyed), and a convergence reset surviving a suppressed
+  forward. Neither is visible in the code, only in the tests.
+- **#6 is dropped deliberately and it is the redesign's whole point:** the
+  delivery path asserting it never touches storage IS the invisibility the user
+  reported. Its replacement asserts the opposite; the perf concern that
+  motivated it is carried forward as a **benchmark in B5, not an assumption**.
+
+**Definition of done for B0:** ✅ met — 8 parity tests green and
+regression-proven, inventory complete with a verdict on every behaviour, no
+production behaviour touched.
 
 ---
 
