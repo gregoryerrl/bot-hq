@@ -205,16 +205,42 @@ CREATE TABLE messages_new (
     -- 'participant' | 'user' | 'system'. `system` is how host-authored
     -- injections (apply-entry nudge, reconcile directive, idle nudge, phase
     -- notices) become visible rows instead of invisible stdin writes.
-    origin         TEXT    NOT NULL,
+    --
+    -- NULLABLE during the transition, deliberately. It would otherwise be
+    -- NOT NULL with no default, and every legacy `insert_message` — which
+    -- knows nothing about `origin` — would fail on insert, so the app would
+    -- not boot at all. Backfilled for existing rows below; new rows written by
+    -- pre-B3b code leave it NULL, and readers fall back to `author`. The
+    -- follow-up migration that drops `author` makes this NOT NULL.
+    origin         TEXT,
     kind           TEXT    NOT NULL,
     content        TEXT    NOT NULL,
     -- JSON metadata that used to be invisible string mutation: phase envelope,
     -- blocking-findings banner, sender-role prefix, peer_ack-override tag.
     envelope       TEXT,
-    created_at     TEXT    NOT NULL DEFAULT (datetime('now'))
+    created_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+
+    -- ---- LEGACY, TRANSITIONAL (revision 3) -----------------------------
+    -- The old author string, retained and still populated. The CHECK
+    -- constraint is gone — which was the only reason this table needed
+    -- rebuilding — but the column stays so that EVERY existing query keeps
+    -- working the moment this migration applies.
+    --
+    -- Why: dropping it here would mean the app cannot boot until all 153
+    -- `Author::` references and 31 `insert_message` call sites move in one
+    -- unreviewable commit. Keeping it makes the SCHEMA change big-bang (one
+    -- migration, as chosen) while letting the CODE migrate in reviewable,
+    -- gate-green slices. Same pattern already used for
+    -- `sessions.{brian,rain}_*`.
+    --
+    -- Dropped by a follow-up migration once the cutover grep audit proves
+    -- nothing reads it. Until then it is written alongside participant_id,
+    -- and `participant_id` is the source of truth for anything new.
+    author         TEXT
 );
 
-INSERT INTO messages_new (id, session_id, participant_id, origin, kind, content, created_at)
+INSERT INTO messages_new
+    (id, session_id, participant_id, origin, kind, content, created_at, author)
 SELECT
     m.id,
     m.session_id,
@@ -222,7 +248,8 @@ SELECT
     CASE WHEN m.author = 'user' THEN 'user' ELSE 'participant' END,
     m.kind,
     m.content,
-    m.created_at
+    m.created_at,
+    m.author
 FROM messages m
 LEFT JOIN session_participants p
        ON p.session_id = m.session_id AND p.slug = m.author;
@@ -278,6 +305,15 @@ INSERT INTO _migration_guard_0044 (failure)
 SELECT 'participant seeding: participant with no role'
 WHERE EXISTS (SELECT 1 FROM session_participants WHERE role_id IS NULL);
 
+-- GUARD 6 (revision 3): the legacy `author` column survived the copy intact.
+-- If it did not, every existing query keeps compiling and silently reads NULL —
+-- the quietest possible failure, and the one this transitional column exists to
+-- prevent.
+INSERT INTO _migration_guard_0044 (failure)
+SELECT 'messages rebuild: author column not preserved'
+WHERE (SELECT count(*) FROM messages_new WHERE author IS NOT NULL)
+   <> (SELECT count(*) FROM messages WHERE author IS NOT NULL);
+
 -- GUARD 5 (revision 2): exactly one participant per session at turn_position 0,
 -- or the turn cycle has no defined start.
 INSERT INTO _migration_guard_0044 (failure)
@@ -293,12 +329,16 @@ DROP TABLE _migration_guard_0044;
 DROP TABLE messages;
 ALTER TABLE messages_new RENAME TO messages;
 
--- Recreate the three indexes the old table had; the author-keyed one becomes
--- participant-keyed.
+-- Recreate the three indexes the old table had, and add the participant-keyed
+-- one. The author-keyed index is retained for as long as the column is —
+-- dropping it while queries still use `author` would silently make the message
+-- pane's per-agent reads a table scan on ~200k rows.
 CREATE INDEX idx_messages_session_time
     ON messages (session_id, created_at);
 CREATE INDEX idx_messages_session_id
     ON messages (session_id, id);
+CREATE INDEX idx_messages_session_author_time
+    ON messages (session_id, author, created_at);
 CREATE INDEX idx_messages_session_participant_time
     ON messages (session_id, participant_id, created_at);
 

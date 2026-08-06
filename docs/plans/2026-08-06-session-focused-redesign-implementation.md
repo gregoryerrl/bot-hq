@@ -314,15 +314,31 @@ proven to apply through sqlx, not just the `sqlite3` CLI** — which is the path
 the real migration takes, and something the CLI dry-run could not establish.
 Delete the `storage_with_0044()` helper once 0044 is applied.
 
-### B3b — the `messages` sweep ⛔ NOT DONE, and it is the real blocker
+### B3b — the `messages` sweep — RESEQUENCED AGAIN (migration revision 3)
 
-`messages` reads/writes still select `author`. Switching them to
-`participant_id`/`origin` changes `insert_message(author: Author)`'s signature,
-which cascades into **`Author`'s 147 call sites** — that is B4's Author
-demotion, not a query sweep. So:
+The previous note said B3b+B4 must land together as one 153-site commit before
+0044 could be armed. **That is no longer true, and the fix was to change the
+migration rather than to attempt the commit.**
 
-**Revised sequencing:** B3b and B4 are one unit of work and must land together.
-Arming 0044 comes after them, not after B3.
+Migration revision 3 keeps `author` as a populated legacy column. The CHECK
+constraint — the only reason the table needed rebuilding — is still gone, but
+every existing query keeps working the moment the migration applies. So:
+
+- **0044 can be armed independently of the code migration.** Schema stays
+  big-bang (one migration); code migrates in reviewable slices.
+- B3b becomes **additive**: `insert_message` starts writing `participant_id` and
+  `origin` *alongside* `author`; readers gain participant-aware variants. No
+  call-site cascade, each slice gate-green.
+- B4's `Author` demotion becomes an ordinary refactor rather than a
+  prerequisite, and a follow-up migration drops `author` once the grep audit
+  proves nothing reads it.
+
+**Defect this caught before it shipped:** `origin` was `NOT NULL` with no
+default, so every legacy `insert_message` would have failed and the app would
+not have booted. Found by
+`storage::participants::tests::every_legacy_message_query_still_works_after_0044`
+— by writing the test, not by reading the SQL. That test is now the app-boot
+check in miniature.
 
 **Parity checkpoint (still required):** after B3b/B4, re-run B0's oracle — it
 must be green, and `activity_events` must still record a row per transition.

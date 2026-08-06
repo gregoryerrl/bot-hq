@@ -442,6 +442,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_legacy_message_query_still_works_after_0044() {
+        // **This is the app-boot check, in miniature.** The runbook's one
+        // outstanding unknown was whether the app can boot against the new
+        // schema; SQL guards cannot answer that, because the failure mode is a
+        // query that no longer matches the table.
+        //
+        // It caught a real defect: `origin` was NOT NULL with no default, so
+        // every legacy `insert_message` — which knows nothing about `origin` —
+        // would have failed on insert and the app would not have started. The
+        // column is transitional-nullable because of this test.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+
+        // The write path, untouched by B3a.
+        let id = s
+            .insert_message("s1", Author::Brian, MessageKind::Text, "hello")
+            .await
+            .unwrap();
+        assert!(id > 0, "legacy insert_message must still work post-0044");
+        s.insert_message("s1", Author::User, MessageKind::Text, "hi back")
+            .await
+            .unwrap();
+
+        // The read paths that key on `author`.
+        assert_eq!(
+            s.count_user_messages("s1").await.unwrap(),
+            1,
+            "count_user_messages keys on author = 'user'"
+        );
+        let msgs = s.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(msgs.len(), 2, "both rows readable through the legacy path");
+        assert_eq!(msgs[0].author, Author::Brian.as_str());
+    }
+
+    #[tokio::test]
     async fn a_session_with_no_active_participants_has_no_next_turn() {
         // An all-observer session must not wedge the sequencer on an unwrap.
         let s = storage_with_0044().await;

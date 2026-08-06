@@ -138,6 +138,49 @@ Both aborts left the original table untouched, confirming the ordering property
 still holds after the revision: **every guard runs before `DROP TABLE
 messages`,** so a failed migration is a no-op rather than a half-rebuild.
 
+## Revision 3 — the transitional `author` column (2026-08-06)
+
+**This revision removes the migration's dependency on the code migration.**
+
+Revision 2 dropped `author`, which meant the app could not boot until all 153
+`Author::` references and 31 `insert_message` call sites moved in one
+unreviewable commit. Revision 3 keeps `author` as a populated legacy column —
+the CHECK constraint (the only reason the table needed rebuilding) is still
+gone, but every existing query keeps working the moment the migration applies.
+
+Consequences:
+- **Arming 0044 no longer waits on B3b/B4.** The schema change stays big-bang
+  (one migration); the code migrates in reviewable slices afterwards.
+- A follow-up migration drops `author` and makes `origin` NOT NULL once the
+  cutover grep audit proves nothing reads it.
+- `idx_messages_session_author_time` is retained for as long as the column is —
+  dropping it while queries still use `author` would silently turn the message
+  pane's per-agent reads into a table scan over ~200k rows.
+
+**A defect this revision caught, which would have stopped the app booting:**
+`origin` was `NOT NULL` with no default. Every legacy `insert_message` — which
+knows nothing about `origin` — would have failed on insert. It is now
+transitional-nullable, backfilled for existing rows, and made NOT NULL by the
+follow-up migration. Found by writing
+`every_legacy_message_query_still_works_after_0044`, not by reading the SQL.
+
+**Revision 3 dry-run** (fresh copy of the live DB, `-bail`, exit 0):
+
+| check | result |
+|---|---|
+| messages | **200,726** |
+| `author` preserved | **200,726** — all rows |
+| `origin` backfilled | **200,726** — all rows |
+| unmapped participant rows | **0** |
+| `PRAGMA integrity_check` | `ok` |
+| guard-firing (injected `emma` row) | **aborts**, original table intact |
+
+**The app-boot unknown is now partly closed:** `every_legacy_message_query_still_works_after_0044`
+exercises `insert_message`, `count_user_messages` and `messages_for_session`
+against the real post-migration schema. A full app boot against a copied data
+dir is still worth doing, but the query-shape failure mode it was meant to catch
+is now covered by a test.
+
 ## Go / no-go
 
 Proceed only if every row above passes. Any mismatch → stop, fix the draft, dry
