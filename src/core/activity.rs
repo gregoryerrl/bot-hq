@@ -7,6 +7,7 @@
 
 use crate::signaling::SignalingBridge;
 use crate::storage::Author;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -43,27 +44,26 @@ impl SessionActivity {
         }
     }
 
-    /// Pure derivation from the five inputs. Priority (highest first):
-    /// `cancelling` > `paused` > `awaiting` > `busy` (either agent) > `idle`.
+    /// Pure derivation from the four inputs. Priority (highest first):
+    /// `cancelling` > `paused` > `awaiting` > `busy` (ANY participant) > `idle`.
     /// `cancelling` wins so a kill-in-flight is never masked by residual busy;
     /// `paused` wins over `awaiting`/`busy` so a Stop lands in Paused the moment
     /// the interrupt settles (a straggler busy agent is about to be interrupted —
     /// the commanded state is Paused); `awaiting` wins over `busy` so a parked
     /// question re-opens input even though a turn is technically still in flight.
-    pub fn derive(
-        brian_busy: bool,
-        rain_busy: bool,
-        awaiting: bool,
-        cancelling: bool,
-        paused: bool,
-    ) -> Self {
+    ///
+    /// B4b: took `brian_busy, rain_busy` before the participant rekey. The
+    /// collapse to `any_busy` is what makes this N-participant-shaped — and it
+    /// is also why per-participant edges must be tracked separately (see
+    /// `Inner::per_agent_changed`), since this state cannot express a hand-off.
+    pub fn derive(any_busy: bool, awaiting: bool, cancelling: bool, paused: bool) -> Self {
         if cancelling {
             SessionActivity::Cancelling
         } else if paused {
             SessionActivity::Paused
         } else if awaiting {
             SessionActivity::AwaitingUser
-        } else if brian_busy || rain_busy {
+        } else if any_busy {
             SessionActivity::Busy
         } else {
             SessionActivity::Idle
@@ -76,18 +76,56 @@ impl SessionActivity {
 /// spurious intermediate (e.g. a momentary `Idle` between `Busy{brian}` and
 /// `Busy{rain}` during a peer hand-off).
 struct Inner {
-    brian_busy: bool,
-    rain_busy: bool,
+    /// Per-participant busy, keyed by participant **slug**. B4b: was
+    /// `brian_busy` / `rain_busy`.
+    ///
+    /// Slug, not `participant_id`, on purpose: `set_busy` is still `Author`-keyed
+    /// (the router needs `Author` until B5 deletes it) and runs at every turn
+    /// end, so an id key would force an `Author`→id lookup on the hot path for
+    /// no gain. The slug IS the legacy author string by construction — 0044
+    /// mapped `slug` 1:1 onto `author` and `ensure_session_roster` preserves
+    /// that — so it is the one key both worlds already agree on. B5 switches the
+    /// key to the id in one diff.
+    ///
+    /// An absent slug reads as `false`; nothing pre-registers a roster here.
+    busy: HashMap<String, bool>,
     cancelling: bool,
     /// Last derived state we emitted — so we only fire on an actual change.
     last: SessionActivity,
-    /// Last per-agent flags we emitted. Tracked separately from `last` because
-    /// the derived `state` collapses both agents to a single `Busy`: a broadcast
-    /// (Brian-busy → Rain-busy) or a peer hand-off (Rain-busy → Brian-idle)
-    /// leaves `state == Busy` throughout, so without this the per-agent
-    /// transition would be suppressed and the UI would mislabel who's working.
-    last_brian_busy: bool,
-    last_rain_busy: bool,
+    /// Last per-participant flags we emitted. Tracked separately from `last`
+    /// because the derived `state` collapses every participant into a single
+    /// `Busy`: a broadcast (Brian-busy → Rain-busy) or a peer hand-off
+    /// (Rain-busy → Brian-idle) leaves `state == Busy` throughout, so without
+    /// this the per-participant transition would be suppressed and the UI would
+    /// mislabel who's working.
+    last_busy: HashMap<String, bool>,
+}
+
+impl Inner {
+    fn busy_of(&self, slug: &str) -> bool {
+        self.busy.get(slug).copied().unwrap_or(false)
+    }
+
+    fn any_busy(&self) -> bool {
+        self.busy.values().any(|b| *b)
+    }
+
+    /// Did any participant's busy flag change since the last emit?
+    ///
+    /// Compared by EFFECTIVE value (absent == `false`) in both directions, not
+    /// by map equality: `set_busy(x, false)` on a participant that was never
+    /// registered inserts a `false` where `last_busy` holds no key at all, and
+    /// structural inequality there would emit a spurious transition that the
+    /// two-bool version never emitted.
+    fn per_agent_changed(&self) -> bool {
+        self.busy
+            .iter()
+            .any(|(slug, busy)| self.last_busy.get(slug).copied().unwrap_or(false) != *busy)
+            || self
+                .last_busy
+                .iter()
+                .any(|(slug, was)| self.busy.get(slug).copied().unwrap_or(false) != *was)
+    }
 }
 
 /// Per-session activity tracker. Hold via `Arc`; all mutators take `&self`.
@@ -123,12 +161,10 @@ impl ActivityTracker {
     ) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(Inner {
-                brian_busy: false,
-                rain_busy: false,
+                busy: HashMap::new(),
                 cancelling: false,
                 last: SessionActivity::Idle,
-                last_brian_busy: false,
-                last_rain_busy: false,
+                last_busy: HashMap::new(),
             }),
             awaiting,
             paused: AtomicBool::new(false),
@@ -144,14 +180,15 @@ impl ActivityTracker {
         if matches!(author, Author::User) {
             return;
         }
+        self.set_busy_slug(author.as_str(), busy);
+    }
+
+    /// Participant-keyed [`set_busy`] — the form B5 keeps once `Author` is gone.
+    /// `Author::User` never reaches here (its early-return is in `set_busy`), so
+    /// `"user"` cannot enter the map.
+    pub fn set_busy_slug(&self, slug: &str, busy: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        match author {
-            Author::Brian => g.brian_busy = busy,
-            Author::Rain => g.rain_busy = busy,
-            // Guarded by the early-return above; degrade to a no-op rather than
-            // panic if a future caller path ever reaches here.
-            Author::User => return,
-        }
+        g.busy.insert(slug.to_string(), busy);
         self.recompute_locked(&mut g);
     }
 
@@ -217,8 +254,7 @@ impl ActivityTracker {
     pub fn current(&self) -> SessionActivity {
         let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         SessionActivity::derive(
-            g.brian_busy,
-            g.rain_busy,
+            g.any_busy(),
             self.awaiting.load(Ordering::Acquire),
             g.cancelling,
             self.paused.load(Ordering::Acquire),
@@ -228,25 +264,31 @@ impl ActivityTracker {
     /// Whether a specific agent is mid-turn — the Batch 7 stall watchdog reads
     /// this to tell a stall (busy + silent) from expected silence (idle).
     pub fn is_busy(&self, author: Author) -> bool {
-        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        match author {
-            Author::Brian => g.brian_busy,
-            Author::Rain => g.rain_busy,
-            Author::User => false,
+        if matches!(author, Author::User) {
+            return false;
         }
+        self.is_busy_slug(author.as_str())
+    }
+
+    /// Participant-keyed [`is_busy`]. An unknown slug reads idle, which is the
+    /// honest answer for a participant that has never taken a turn.
+    pub fn is_busy_slug(&self, slug: &str) -> bool {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.busy_of(slug)
     }
 
     /// Poll (50ms) until NEITHER agent is busy, or `deadline` elapses; returns
     /// whether they went idle in time. The cancel interrupt-escalation uses this:
-    /// after a `control_request` interrupt, the turn's `result` event clears both
-    /// `busy` flags (and auto-clears Cancelling→Idle). If that doesn't land within
-    /// the window — interrupt dropped, or a wedged agent — the caller escalates to
-    /// a SIGKILL. A solo session never has Rain busy, so this just waits on Brian.
+    /// after a `control_request` interrupt, the turn's `result` event clears the
+    /// agent's `busy` flag (and auto-clears Cancelling→Idle). If that doesn't land
+    /// within the window — interrupt dropped, or a wedged agent — the caller
+    /// escalates to a SIGKILL. A participant that never took a turn is absent from
+    /// the map and reads idle, so a solo session just waits on HANDS.
     pub async fn await_both_idle(&self, deadline: tokio::time::Instant) -> bool {
         loop {
             {
                 let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-                if !g.brian_busy && !g.rain_busy {
+                if !g.any_busy() {
                     return true;
                 }
             }
@@ -264,36 +306,38 @@ impl ActivityTracker {
         // of sticking. Done BEFORE derive so the emitted state reflects it.
         // (Set true by `set_cancelling` on Stop; the agents' pumps then clear
         // their `busy` as they die.)
-        if !g.brian_busy && !g.rain_busy {
+        if !g.any_busy() {
             // Record that the agents reached idle. Read after the escalation
             // window by `escalation_outcome`, which must not skip the SIGKILL
             // for an agent that never got here.
             self.idled_since_cancel.store(true, Ordering::Release);
         }
-        if g.cancelling && !g.brian_busy && !g.rain_busy {
+        if g.cancelling && !g.any_busy() {
             g.cancelling = false;
         }
         let next = SessionActivity::derive(
-            g.brian_busy,
-            g.rain_busy,
+            g.any_busy(),
             self.awaiting.load(Ordering::Acquire),
             g.cancelling,
             self.paused.load(Ordering::Acquire),
         );
-        // Fire on a change to the derived state OR to either per-agent flag —
+        // Fire on a change to the derived state OR to any per-participant flag —
         // the latter so a within-`Busy` transition (broadcast both-busy, peer
         // hand-off) still reaches the UI to relabel who's working.
-        let agents_changed =
-            g.brian_busy != g.last_brian_busy || g.rain_busy != g.last_rain_busy;
-        if next != g.last || agents_changed {
+        if next != g.last || g.per_agent_changed() {
             g.last = next;
-            g.last_brian_busy = g.brian_busy;
-            g.last_rain_busy = g.rain_busy;
+            g.last_busy.clone_from(&g.busy);
+            // The wire payload still carries exactly two booleans, derived from
+            // the map. The frontend contract (`SessionRuntime.brian_busy` /
+            // `.rain_busy`) is frozen until B8 rewrites the session view — a
+            // roster-shaped payload here would be a UI change smuggled into a
+            // runtime batch.
+            let (brian_busy, rain_busy) = (g.busy_of("brian"), g.busy_of("rain"));
             self.bridge.notify_session_activity(
                 self.session_id.clone(),
                 next.as_str(),
-                g.brian_busy,
-                g.rain_busy,
+                brian_busy,
+                rain_busy,
             );
         }
     }
@@ -316,40 +360,25 @@ mod tests {
     #[test]
     fn derive_priority() {
         use SessionActivity::*;
+        // (any_busy, awaiting, cancelling, paused) — B4b collapsed the two
+        // per-agent bools into one "any participant busy".
         // idle: nothing set.
-        assert_eq!(SessionActivity::derive(false, false, false, false, false), Idle);
-        // busy: either agent.
-        assert_eq!(SessionActivity::derive(true, false, false, false, false), Busy);
-        assert_eq!(SessionActivity::derive(false, true, false, false, false), Busy);
-        assert_eq!(SessionActivity::derive(true, true, false, false, false), Busy);
+        assert_eq!(SessionActivity::derive(false, false, false, false), Idle);
+        // busy: any participant.
+        assert_eq!(SessionActivity::derive(true, false, false, false), Busy);
         // awaiting beats busy (parked question re-opens input mid-turn).
-        assert_eq!(
-            SessionActivity::derive(true, true, true, false, false),
-            AwaitingUser
-        );
-        assert_eq!(
-            SessionActivity::derive(false, false, true, false, false),
-            AwaitingUser
-        );
+        assert_eq!(SessionActivity::derive(true, true, false, false), AwaitingUser);
+        assert_eq!(SessionActivity::derive(false, true, false, false), AwaitingUser);
         // paused beats awaiting + busy (Stop is the commanded state, even for a
         // straggler busy agent about to be interrupted / a parked question).
-        assert_eq!(SessionActivity::derive(false, false, false, false, true), Paused);
-        assert_eq!(SessionActivity::derive(true, true, false, false, true), Paused);
-        assert_eq!(SessionActivity::derive(true, true, true, false, true), Paused);
+        assert_eq!(SessionActivity::derive(false, false, false, true), Paused);
+        assert_eq!(SessionActivity::derive(true, false, false, true), Paused);
+        assert_eq!(SessionActivity::derive(true, true, false, true), Paused);
         // cancelling beats everything, including paused (Stop sets both; the
         // UI shows "Stopping…" until the interrupt settles, then Paused).
-        assert_eq!(
-            SessionActivity::derive(true, true, true, true, false),
-            Cancelling
-        );
-        assert_eq!(
-            SessionActivity::derive(false, false, false, true, false),
-            Cancelling
-        );
-        assert_eq!(
-            SessionActivity::derive(true, true, true, true, true),
-            Cancelling
-        );
+        assert_eq!(SessionActivity::derive(true, true, true, false), Cancelling);
+        assert_eq!(SessionActivity::derive(false, false, true, false), Cancelling);
+        assert_eq!(SessionActivity::derive(true, true, true, true), Cancelling);
     }
 
     fn activity_state(ev: &SignalingEvent) -> Option<&str> {
@@ -357,6 +386,20 @@ mod tests {
             SignalingEvent::SessionActivity { state, .. } => Some(state),
             _ => None,
         }
+    }
+
+    /// `rx.recv()` with a deadline. A missing emit IS the regression these tests
+    /// exist to catch, and a bare `recv().await` turns it into a hung test
+    /// rather than a failing one — the B4b injection run (per-participant edge
+    /// check removed) wedged instead of reporting, which is the worst shape a
+    /// guard can have. 2s is far above the in-process broadcast latency.
+    async fn next_event(
+        rx: &mut tokio::sync::broadcast::Receiver<SignalingEvent>,
+    ) -> SignalingEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("expected a SessionActivity emit within 2s; none arrived")
+            .unwrap()
     }
 
     fn activity_tuple(ev: &SignalingEvent) -> Option<(&str, bool, bool)> {
@@ -381,7 +424,7 @@ mod tests {
         // idle -> busy(brian)
         t.set_busy(Author::Brian, true);
         assert_eq!(
-            activity_tuple(&rx.recv().await.unwrap()),
+            activity_tuple(&next_event(&mut rx).await),
             Some(("busy", true, false))
         );
 
@@ -394,7 +437,7 @@ mod tests {
         // BOTH agents working, not just Brian.
         t.set_busy(Author::Rain, true);
         assert_eq!(
-            activity_tuple(&rx.recv().await.unwrap()),
+            activity_tuple(&next_event(&mut rx).await),
             Some(("busy", true, true))
         );
 
@@ -402,19 +445,19 @@ mod tests {
         // peer hand-off) → re-emit with the new flags so the label follows.
         t.set_busy(Author::Brian, false);
         assert_eq!(
-            activity_tuple(&rx.recv().await.unwrap()),
+            activity_tuple(&next_event(&mut rx).await),
             Some(("busy", false, true))
         );
 
         // both idle -> idle.
         t.set_busy(Author::Rain, false);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("idle"));
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("idle"));
 
         // awaiting flips externally -> awaiting_user (after refresh).
         awaiting.store(true, Ordering::Release);
         t.refresh();
         assert_eq!(
-            activity_state(&rx.recv().await.unwrap()),
+            activity_state(&next_event(&mut rx).await),
             Some("awaiting_user")
         );
         awaiting.store(false, Ordering::Release);
@@ -423,11 +466,77 @@ mod tests {
         // settling). An agent goes busy, Stop sets cancelling (overrides busy),
         // then the agent dies (idle) → cancelling AUTO-CLEARS → Idle.
         t.set_busy(Author::Brian, true);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("busy"));
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("busy"));
         t.set_cancelling(true);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("cancelling"));
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("cancelling"));
         t.set_busy(Author::Brian, false);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("idle"));
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("idle"));
+    }
+
+    #[tokio::test]
+    async fn a_three_participant_handoff_still_emits_per_participant() {
+        // B4b: the tracker is no longer two-agent-shaped. `derive` collapses
+        // every participant into one `Busy`, so a hand-off produces NO state
+        // change — the per-participant edge is the only thing that tells the UI
+        // who is working. With a third participant the two-bool version fails
+        // twice over: it cannot represent `scout` at all, so a session where
+        // only `scout` is mid-turn would read `idle` and unlock the input under
+        // a running agent.
+        let bridge = SignalingBridge::new();
+        let mut rx = bridge.subscribe();
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge.clone());
+
+        t.set_busy_slug("brian", true);
+        assert_eq!(
+            activity_tuple(&next_event(&mut rx).await),
+            Some(("busy", true, false))
+        );
+
+        // A third participant joins the turn. Derived state stays `busy` and the
+        // wire tuple is UNCHANGED (it carries only brian/rain until B8), but the
+        // transition is real and must still emit.
+        t.set_busy_slug("scout", true);
+        assert_eq!(
+            activity_tuple(&next_event(&mut rx).await),
+            Some(("busy", true, false)),
+            "a third participant's transition emits even though the wire can't name it"
+        );
+
+        // The hand-off: brian idles, scout keeps working. Both wire booleans are
+        // now false — and the session is STILL busy. This is the assertion the
+        // two-bool tracker could not make.
+        t.set_busy_slug("brian", false);
+        assert_eq!(
+            activity_tuple(&next_event(&mut rx).await),
+            Some(("busy", false, false)),
+            "an unnamed participant still holds the session busy"
+        );
+        assert_eq!(t.current(), SessionActivity::Busy);
+        assert!(t.is_busy_slug("scout"));
+        assert!(!t.is_busy(Author::Brian));
+
+        // Redundant set on the third participant: nothing changed → no emit.
+        t.set_busy_slug("scout", true);
+        assert!(rx.try_recv().is_err(), "no emit when nothing changed");
+
+        // Last participant idles → idle.
+        t.set_busy_slug("scout", false);
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("idle"));
+    }
+
+    #[tokio::test]
+    async fn clearing_an_unregistered_participant_emits_nothing() {
+        // `set_busy(x, false)` on a participant that never took a turn inserts a
+        // `false` where the last-emitted map holds no key at all. Comparing the
+        // maps structurally would emit a spurious transition here; comparing by
+        // effective value (absent == false) does not. The two-bool tracker was
+        // silent, and so must this be.
+        let bridge = SignalingBridge::new();
+        let mut rx = bridge.subscribe();
+        let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge.clone());
+        t.set_busy_slug("rain", false);
+        assert!(rx.try_recv().is_err(), "clearing an idle participant is not a transition");
+        assert_eq!(t.current(), SessionActivity::Idle);
     }
 
     #[tokio::test]
@@ -498,16 +607,16 @@ mod tests {
         let mut rx = bridge.subscribe();
         let t = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge.clone());
         t.set_busy(Author::Brian, true);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("busy"));
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("busy"));
         t.set_cancelling(true);
         t.set_paused(true);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("cancelling"));
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("cancelling"));
         t.set_busy(Author::Brian, false);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("paused"));
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("paused"));
         assert!(t.is_paused());
         // Resume releases the latch → Idle.
         t.set_paused(false);
-        assert_eq!(activity_state(&rx.recv().await.unwrap()), Some("idle"));
+        assert_eq!(activity_state(&next_event(&mut rx).await), Some("idle"));
         assert!(!t.is_paused());
     }
 
