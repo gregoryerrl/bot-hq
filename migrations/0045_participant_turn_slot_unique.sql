@@ -24,7 +24,9 @@
 -- on 2026-08-07 before this file was written:
 --   * 770 participants across 385 sessions;
 --   * 0 duplicate (session_id, turn_position) groups over ALL rows;
---   * 0 duplicate groups over the subset this index covers;
+--   * 0 duplicate groups over the subset this index covers (re-checked against
+--     the corrected `enabled <> 0` predicate, which selects the same rows as
+--     `enabled = 1` does here: `enabled` only ever holds 0 or 1 today);
 --   * positions are only ever 0 and 1; the 12 disabled rows are all at 1;
 --   * every session has exactly one enabled+active participant at position 0.
 -- The index therefore builds without a repair pass, and it applied cleanly to a
@@ -60,6 +62,18 @@
 -- position fails on a row that is not in the rotation at all. Scoping the index
 -- to the rotation means a slot is free exactly when nobody is using it.
 --
+-- WHY `enabled <> 0` AND NOT `enabled = 1`: the predicate has to select the
+-- same rows the Rust ring does, and the ring's filter is `Participant.enabled`,
+-- which `participant_from_row` decodes as `r.get::<i64,_>("enabled") != 0`.
+-- `enabled` is `INTEGER NOT NULL DEFAULT 1` with no CHECK, so 2 is a storable
+-- value; the column is a truthiness flag, not a two-valued one. Written as
+-- `enabled = 1` this index skipped every such row while the ring still
+-- scheduled it — verified against a copy of the live database, where a row with
+-- `enabled = 2` inserted onto an occupied slot was ACCEPTED, reproducing the
+-- exact starvation roster this file exists to make unrepresentable. `<> 0` is
+-- the same test the decode performs, so the two provably agree rather than
+-- happening to agree on the values in the table today (which are only 0 and 1).
+--
 -- WHAT IT PREVENTS: two participants that are both enabled and both `active`
 -- sharing a `turn_position` within one session — by INSERT, and equally by an
 -- UPDATE that moves a row INTO that set. Enabling a disabled participant, or
@@ -86,7 +100,21 @@
 -- The index is not what makes the ring correct, and is not relied on to be:
 -- `next_in_ring` schedules every member of a shared slot on its own. The two
 -- are the same invariant enforced from both sides.
+--
+-- 0044's `idx_participants_turn (session_id, turn_position)` is RETAINED, and
+-- this does not supersede it. That one serves `participants_for_session`, which
+-- reads the WHOLE roster — `WHERE session_id = ? ORDER BY turn_position, id`,
+-- with no filter on `enabled` or `participation_mode`. A partial index is only
+-- usable where the query's WHERE clause implies the index's, which that query's
+-- does not, so this index cannot take over the job.
+--
+-- Measured rather than assumed, against a copy of the live database: with both
+-- present the roster read is `SEARCH … USING COVERING INDEX
+-- idx_participants_turn`; with `idx_participants_turn` dropped the planner
+-- falls back to `idx_participants_session` plus `USE TEMP B-TREE FOR ORDER BY`
+-- — and notably NOT to this partial index. So dropping it costs the covering
+-- read and a per-query sort, not a table scan.
 -- ---------------------------------------------------------------------------
 CREATE UNIQUE INDEX idx_participants_turn_slot
     ON session_participants (session_id, turn_position)
-    WHERE enabled = 1 AND participation_mode = 'active';
+    WHERE enabled <> 0 AND participation_mode = 'active';

@@ -95,12 +95,21 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
 /// **The step is by POSITION IN THE RING, not by `turn_position` value.** The
 /// old rule — the first member whose `turn_position` is strictly greater —
 /// starves every member after the first at any shared position, and
-/// `turn_position` carried no uniqueness until migration 0045. 0045's index
-/// covers exactly the rows this ring holds, so that roster is now unreachable
-/// through the database; stepping by index means the ring does not have to
-/// depend on that. The two are the same condition written in two languages —
-/// SQL's `WHERE enabled = 1 AND participation_mode = 'active'` and the caller's
-/// filter — and nothing keeps them in agreement if one is later widened.
+/// `turn_position` carried no uniqueness until migration 0045.
+///
+/// 0045's index and this caller's filter are meant to select the same rows, and
+/// keeping them in agreement is a maintenance obligation, not something either
+/// side enforces on the other. They already disagreed once: the index was
+/// written `WHERE enabled = 1` while [`participant_from_row`] decodes `enabled`
+/// as `!= 0`, so a row storing 2 — which `INTEGER NOT NULL DEFAULT 1` with no
+/// CHECK permits — was outside the index and inside the ring, and a copy of the
+/// live database accepted exactly that duplicate. The predicate is `<> 0` now,
+/// which is the same test the decode performs. Widening the ring to include
+/// `on_demand` later is the same trap, one line away.
+///
+/// Stepping by ring index is what makes that a correctness question about the
+/// SCHEMA rather than about scheduling: whatever set the caller's filter
+/// selects, every member of it gets a turn.
 fn next_in_ring<'a>(
     ring: &[&'a Participant],
     current: Option<&Participant>,
@@ -319,9 +328,17 @@ impl Storage {
 
     /// The participant after `current` in the ring, skipping anyone not in the
     /// rotation. Observers are SKIPPED rather than given a no-op turn: a wake
-    /// that cannot produce output is pure waste. `None` when nobody is active,
-    /// which is exactly when [`Storage::all_active_voted_done`] is `true` —
-    /// see there for what the pair means.
+    /// that cannot produce output is pure waste.
+    ///
+    /// `None` means nobody is active, and that IMPLIES
+    /// [`Storage::all_active_voted_done`] is `true` — one way only. The converse
+    /// is false and must not be assumed: a rotation where every active
+    /// participant has voted done is also `true` there while this still returns
+    /// `Some`, because the ring is unchanged by how anyone voted. So
+    /// `next_active_participant(..).is_none()` is NOT a consensus test; it never
+    /// fires while any active participant exists. Ask
+    /// [`Storage::all_active_voted_done`] for consensus and use this only to
+    /// find whose turn is next.
     ///
     /// `current` is the participant that just held the turn, not its position:
     /// the ring steps by place IN the rotation, so it needs to know WHICH row
@@ -371,12 +388,21 @@ impl Storage {
     /// rather than as `false`. That returns `None` when nobody is active, which
     /// is "no turn to hand out", not "done"; this returned `false`, which is
     /// "not done". Neither answer stopped a loop, and neither gave it anything
-    /// to do, so a sequencer reading the two spun. Read together they now say:
-    /// nobody can produce output, so the cycle has arrived — halt and wait for
-    /// a wake (a user message, a participant enabled) rather than cycle.
+    /// to do, so a sequencer reading the two spun.
     ///
-    /// The two states that reach it are an all-observer session and a session
-    /// with no roster yet, since `ensure_session_roster` only runs pre-spawn.
+    /// **This is the halt test, and it is the only one.** An empty rotation
+    /// makes both answers agree, but the two are NOT the same condition: with
+    /// every active participant voted done this is `true` while
+    /// `next_active_participant` still returns `Some` — the ring does not care
+    /// how anyone voted. The implication runs one way (no actives ⟹ done) and
+    /// the operational rule follows from THIS side: ask consensus, halt on it,
+    /// and take a turn only if it says no. Reading `is_none()` as "done" instead
+    /// would never halt a session that has participants in it.
+    ///
+    /// The states that reach the empty-rotation case: an all-observer or
+    /// all-`on_demand` roster, a roster whose every active participant has been
+    /// disabled (what disabling the last agent produces), and a session with no
+    /// roster yet, since `ensure_session_roster` only runs pre-spawn.
     pub async fn all_active_voted_done(&self, session_id: &str) -> Result<bool> {
         let roster = self.participants_for_session(session_id).await?;
         Ok(roster
@@ -422,6 +448,14 @@ impl Storage {
     /// how far the batch reached. It still only ever moves forward: a late
     /// delivery for an already-passed row is recorded without rewinding.
     /// An empty batch is a no-op.
+    ///
+    /// **Errors when the participant has no cursor row.** That is not
+    /// defensiveness for its own sake: the cursor half is an UPDATE matched on
+    /// `participant_id`, and an UPDATE matching nothing is not an error in
+    /// SQLite, so the missing-cursor case would otherwise record deliveries,
+    /// leave the cursor at 0, re-offer the same batch every turn, and report
+    /// success throughout. The transaction alone does not cover it — there is
+    /// nothing to roll back until something fails.
     pub async fn commit_delivery(
         &self,
         participant_id: i64,
@@ -459,7 +493,7 @@ impl Storage {
         // Cursors only ever move FORWARD. A rewind would re-deliver messages an
         // agent has already acted on — the staleness class this redesign
         // removes — so the MAX() is in the statement, not in the caller.
-        sqlx::query(
+        let moved = sqlx::query(
             "UPDATE participant_cursors \
              SET last_read_message_id = MAX(last_read_message_id, ?), \
                  updated_at = datetime('now') \
@@ -469,7 +503,21 @@ impl Storage {
         .bind(participant_id)
         .execute(&mut *tx)
         .await
-        .context("advancing cursor")?;
+        .context("advancing cursor")?
+        .rows_affected();
+        // An UPDATE that matches nothing is not an error in SQLite, so without
+        // this check a participant with no cursor row would have its deliveries
+        // recorded, its cursor stay at 0, and the same batch re-offered every
+        // turn — with this method reporting success each time. Failing here
+        // rolls the batch back with it, which is the honest outcome: a delivery
+        // whose cursor cannot move has not happened.
+        if moved != 1 {
+            anyhow::bail!(
+                "participant {participant_id} has no cursor row, so a delivery \
+                 of {} message(s) could not be recorded",
+                deliveries.len()
+            );
+        }
         tx.commit().await.context("committing the delivery")?;
         Ok(())
     }
@@ -1071,8 +1119,9 @@ impl Storage {
         // negative `limit` would otherwise reach SQLite unchanged and mean the
         // same thing. Clamped, it means what it says — zero rows, and `more`
         // true if any exist.
-        let probe = limit.max(0).saturating_add(1);
-        let mut rows: Vec<ChannelMessage> = sqlx::query(&format!(
+        let keep = limit.max(0);
+        let probe = keep.saturating_add(1);
+        let mut raw = sqlx::query(&format!(
             "SELECT {CHANNEL_COLUMNS} FROM messages \
              WHERE session_id = ?1 AND id > ?2 \
                AND (?3 IS NULL OR participant_id IS NULL OR participant_id <> ?3) \
@@ -1084,13 +1133,18 @@ impl Storage {
         .bind(probe)
         .fetch_all(&self.pool)
         .await
-        .with_context(|| format!("reading channel for {session_id}"))?
-        .iter()
-        .map(channel_from_row)
-        .collect();
-        let more = rows.len() as i64 > limit.max(0);
-        rows.truncate(limit.max(0) as usize);
-        Ok(ChannelPage { rows, more })
+        .with_context(|| format!("reading channel for {session_id}"))?;
+        // Truncate the ROWS before decoding them, not the decoded page after.
+        // `channel_from_row` clones the body out of the row and the largest
+        // single message in the live database is ~2 MB, so decoding the probe
+        // row and dropping it is a whole-body copy for a value that exists only
+        // to be counted.
+        let more = raw.len() as i64 > keep;
+        raw.truncate(keep as usize);
+        Ok(ChannelPage {
+            rows: raw.iter().map(channel_from_row).collect(),
+            more,
+        })
     }
 
     /// What this participant has not read yet. The query that makes "what did
@@ -1399,6 +1453,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_slot_constraint_covers_every_row_the_ring_schedules() {
+        // 0045's predicate and the ring's filter have to select the SAME rows,
+        // and they did not at first. `enabled` is `INTEGER NOT NULL DEFAULT 1`
+        // with no CHECK — a truthiness flag, not a two-valued one — while
+        // `participant_from_row` decodes it as `!= 0`. Written `WHERE enabled =
+        // 1`, the index skipped a row storing 2 that the ring still scheduled,
+        // which is the starvation roster back through a hole in the predicate.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let a = s
+            .insert_participant("s1", "a", "A", None, None, "[]", "active", 0)
+            .await
+            .unwrap();
+
+        // First: such a row IS in the rotation, so the index must cover it.
+        // Parked at a free slot so this half tests scheduling, not uniqueness.
+        sqlx::query(
+            "INSERT INTO session_participants \
+             (session_id, slug, display_name, capabilities, participation_mode, \
+              turn_position, enabled) \
+             VALUES ('s1', 'truthy', 'Truthy', '[]', 'active', 5, 2)",
+        )
+        .execute(s.pool())
+        .await
+        .unwrap();
+        let truthy = s.participant_by_slug("s1", "truthy").await.unwrap().unwrap();
+        assert!(truthy.enabled, "`enabled = 2` decodes as enabled");
+        let first = s.next_active_participant("s1", None).await.unwrap().unwrap();
+        assert_eq!(first.id, a);
+        assert_eq!(
+            s.next_active_participant("s1", Some(&first)).await.unwrap().unwrap().id,
+            truthy.id,
+            "the ring schedules it, so the slot constraint has to apply to it"
+        );
+
+        // Second: and it therefore collides like any other rotation member.
+        let err = sqlx::query(
+            "INSERT INTO session_participants \
+             (session_id, slug, display_name, capabilities, participation_mode, \
+              turn_position, enabled) \
+             VALUES ('s1', 'b', 'B', '[]', 'active', 5, 2)",
+        )
+        .execute(s.pool())
+        .await
+        .expect_err("a row the ring schedules must not share a slot");
+        assert!(
+            err.to_string().contains("UNIQUE constraint failed"),
+            "expected a uniqueness failure, got: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_slot_is_occupied_only_while_someone_is_in_the_rotation() {
         // Why the index is PARTIAL rather than over every row. A disabled
         // participant keeps its `turn_position`, so a full unique index would
@@ -1542,6 +1648,43 @@ mod tests {
         // Scoped to one participant: Brian's cursor and records are untouched.
         assert_eq!(s.cursor_for(brian).await.unwrap(), 0);
         assert!(delivery_rows(&s, brian).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_delivery_with_no_cursor_to_move_is_an_error() {
+        // The cursor half is `UPDATE … WHERE participant_id = ?`, and in SQLite
+        // an UPDATE that matches nothing is not an error — zero rows changed,
+        // `Ok(())` back. A participant whose cursor row is missing would get its
+        // deliveries recorded, its cursor left at 0, and the same batch
+        // re-offered every turn forever, while every call reported success. The
+        // transaction does not help: there is nothing to roll back.
+        //
+        // Not reachable today — `insert_participant` and `ensure_session_roster`
+        // both seed a cursor. But `ensure_session_roster` returns early when it
+        // inserts nothing, BEFORE its cursor-seeding statement, so nothing in
+        // the system would ever heal a participant that lost one.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let pid = s
+            .insert_participant("s1", "a", "A", None, None, "[]", "active", 0)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM participant_cursors WHERE participant_id = ?")
+            .bind(pid)
+            .execute(s.pool())
+            .await
+            .unwrap();
+
+        let err = s
+            .commit_delivery(pid, &[(1, None)])
+            .await
+            .expect_err("a delivery whose cursor cannot move must not report success");
+        assert!(
+            format!("{err:#}").contains("no cursor"),
+            "the error must name the missing cursor, got: {err:#}"
+        );
+        // And the whole batch rolled back: no half-recorded delivery either.
+        assert!(delivery_rows(&s, pid).await.is_empty());
     }
 
     #[tokio::test]
@@ -2156,10 +2299,15 @@ mod tests {
         // are none — and usefully, because nobody left can produce output, so
         // waiting is waiting on nothing. The sequencer halts and waits for a
         // wake (a user message, a participant being enabled) rather than
-        // cycling.
+        // cycling. Reached by an all-observer or all-`on_demand` roster, by
+        // every active participant being disabled, and by a session with no
+        // roster yet — all four covered below or by the roster tests.
         let s = storage_with_0044().await;
         s.create_session("s1", "t", None).await.unwrap();
         s.insert_participant("s1", "o", "O", None, None, "[]", "observer", 0).await.unwrap();
+        // `on_demand` too — skipped in the rotation, woken only when addressed,
+        // so a roster of nothing but these is also an empty rotation.
+        s.insert_participant("s1", "d", "D", None, None, "[]", "on_demand", 1).await.unwrap();
         assert!(s.next_active_participant("s1", None).await.unwrap().is_none());
         assert!(
             s.all_active_voted_done("s1").await.unwrap(),
@@ -2173,10 +2321,38 @@ mod tests {
         assert!(s.next_active_participant("s2", None).await.unwrap().is_none());
         assert!(s.all_active_voted_done("s2").await.unwrap());
 
-        // The two answers stay coupled once somebody IS active: a turn to hand
-        // out means not done.
-        s.insert_participant("s1", "a", "A", None, None, "[]", "active", 1).await.unwrap();
+        // Disabling the last active participant is the same state, and it is the
+        // one a user can reach from the UI rather than by building an
+        // all-observer roster.
+        let a = s
+            .insert_participant("s1", "a", "A", None, None, "[]", "active", 1)
+            .await
+            .unwrap();
         assert!(s.next_active_participant("s1", None).await.unwrap().is_some());
         assert!(!s.all_active_voted_done("s1").await.unwrap());
+        sqlx::query("UPDATE session_participants SET enabled = 0 WHERE id = ?")
+            .bind(a)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        assert!(s.next_active_participant("s1", None).await.unwrap().is_none());
+        assert!(s.all_active_voted_done("s1").await.unwrap());
+
+        // But the implication runs ONE WAY, and this is the trap the sequencer
+        // must not fall into. Re-enable A and vote it done: consensus is `true`
+        // while there is still a turn to hand out, so `is_none()` is NOT a halt
+        // test — it would never fire in a session that has participants in it.
+        sqlx::query("UPDATE session_participants SET enabled = 1 WHERE id = ?")
+            .bind(a)
+            .execute(s.pool())
+            .await
+            .unwrap();
+        s.set_done_vote(a, true).await.unwrap();
+        assert!(s.all_active_voted_done("s1").await.unwrap(), "consensus reached");
+        assert!(
+            s.next_active_participant("s1", None).await.unwrap().is_some(),
+            "the ring is unchanged by how anyone voted — done is not the same \
+             condition as having no next turn"
+        );
     }
 }

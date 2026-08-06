@@ -25,9 +25,13 @@
 //!   its position, and steps by place in the rotation. Migration 0045 makes two
 //!   active participants sharing a `turn_position` unrepresentable besides, so
 //!   the ring reaches everyone and consensus is reachable.
-//! - `next_active_participant` returning `None` and `all_active_voted_done`
-//!   returning `true` are now the same condition — an empty rotation is DONE,
-//!   vacuously and usefully, because nobody left can produce output. Ask
+//! - An empty rotation is DONE — `all_active_voted_done` is vacuously `true`
+//!   there, so `next_active_participant` returning `None` no longer needs its
+//!   own branch. The implication runs ONE WAY: no actives ⟹ done. The converse
+//!   is false, and assuming it is the trap here — with every active participant
+//!   voted done, `all_active_voted_done` is `true` while
+//!   `next_active_participant` still returns `Some`, so `is_none()` as a halt
+//!   test would never fire in a session that has participants in it. Ask
 //!   consensus first and halt on it; there is no third state to branch on.
 //! - `commit_delivery` records the batch and moves the cursor in one
 //!   transaction. It replaces the unpaired `record_delivery` / `advance_cursor`
