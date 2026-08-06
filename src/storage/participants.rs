@@ -451,13 +451,17 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// becomes a compile error. Until Task 2 lands, that is the plan, not yet a
 /// property of the system.
 ///
-/// What IS true today: the value cannot be forged. There is exactly ONE
-/// construction site, immediately downstream of that INSERT, and the fields are
-/// private to this module. Note the scope of that claim — it covers
-/// `post_to_channel`, not every write to `messages`. [`Storage::insert_message`]
-/// is a second live insert path into the same table: it returns a bare `i64`,
-/// mints no receipt, and is what the duo pump uses on every chunk. Whether the
-/// two paths converge is a B5 Task 2 decision, deliberately not settled here.
+/// What IS true today: the value cannot be forged from outside. There is
+/// exactly ONE construction site, immediately downstream of that INSERT, and
+/// the fields are private to this module — which makes this file, `mod tests`
+/// included, the trusted boundary. Keeping it to one construction site is a
+/// maintainer's job, not something the compiler checks: a helper added here
+/// later could mint a receipt with no row behind it. Note also the scope of the
+/// claim — it covers `post_to_channel`, not every write to `messages`.
+/// [`Storage::insert_message`] is a second live insert path into the same
+/// table: it returns a bare `i64`, mints no receipt, and is what the duo pump
+/// uses on every chunk. Whether the two paths converge is a B5 Task 2 decision,
+/// deliberately not settled here.
 ///
 /// `Clone` is deliberate. Fan-out hands one row to N agents by reference, so a
 /// clone is never what reaches the wire; consuming by move would instead push
@@ -532,9 +536,11 @@ impl Storage {
     /// host-authored injections (`origin = "system"`), which today are written
     /// straight to stdin and never recorded at all.
     ///
-    /// Returns a [`PersistedMessage`] rather than a bare id: the receipt IS the
-    /// permission to wire the text, so the send path can demand one and no
-    /// caller can hand it a string that never became a row.
+    /// Returns a [`PersistedMessage`] rather than a bare id. The receipt is
+    /// meant to become the permission to wire the text: once B5 Task 2 changes
+    /// the send path, it will be able to demand one, after which no caller can
+    /// hand it a string that never became a row. Nothing demands one yet — see
+    /// the type's own docs for what is and is not true today.
     ///
     /// Writes the legacy `author` column too, so readers that have not migrated
     /// yet keep working (migration revision 3). `system` rows are stored as
@@ -542,13 +548,21 @@ impl Storage {
     /// already persisted — legacy readers must not encounter a new author value.
     pub async fn post_to_channel(
         &self,
-        session_id: &str,
+        session_id: impl Into<Arc<str>>,
         origin: &str,
         participant_slug: Option<&str>,
         kind: &str,
         content: impl Into<String>,
         envelope: Option<String>,
     ) -> Result<PersistedMessage> {
+        // `impl Into<Arc<str>>` so a caller already holding one — Task 3's do,
+        // from `DuoConfig::session_id` — passes a refcount bump instead of
+        // deref-ing to `&str` and re-allocating. To be clear about the size of
+        // the win: a ~36-byte copy next to a SQLite INSERT is noise. This is
+        // consistency with the ownership argument above, not a perf claim, and
+        // it is one line now versus a signature change once six call sites
+        // exist.
+        let session_id: Arc<str> = session_id.into();
         // Both taken by value and MOVED into the receipt at the bottom. This
         // fires per Text / ToolUse / ToolResult chunk and a tool result can
         // carry a whole file, so copying the body into the receipt would be a
@@ -565,7 +579,7 @@ impl Storage {
         let content: String = content.into();
         let participant_id = match (origin, participant_slug) {
             ("participant", Some(slug)) => {
-                self.participant_by_slug(session_id, slug).await?.map(|p| p.id)
+                self.participant_by_slug(&session_id, slug).await?.map(|p| p.id)
             }
             _ => None,
         };
@@ -579,7 +593,7 @@ impl Storage {
              (session_id, participant_id, origin, kind, content, envelope, author, created_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
         )
-        .bind(session_id)
+        .bind(&*session_id)
         .bind(participant_id)
         .bind(origin)
         .bind(kind)
@@ -591,11 +605,11 @@ impl Storage {
         .with_context(|| format!("posting to channel for {session_id}"))?
         .last_insert_rowid();
         // The one and only place a `PersistedMessage` is minted, and it sits
-        // downstream of the INSERT — the row is what the value proves. Body and
-        // envelope MOVE in here; only the (short) session id is copied.
+        // downstream of the INSERT — the row is what the value proves. Every
+        // field MOVES in; nothing is copied.
         Ok(PersistedMessage {
             message_id: id,
-            session_id: Arc::from(session_id),
+            session_id,
             body: content,
             envelope,
         })
@@ -1029,13 +1043,17 @@ mod tests {
             .await
             .unwrap();
         assert!(pm.message_id() > 0, "a PersistedMessage is proof of a row");
-        // The scope is part of the receipt: without it, Task 2's
-        // `session_a.send_to_all(receipt_from_session_b)` would compile.
-        assert_eq!(pm.session_id(), "s1", "a receipt is scoped to its channel");
 
         let rows = s.channel_after("s1", 0).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, pm.message_id());
+        // Against the ROW, not the argument: Task 2's cross-session guard rests
+        // on the receipt naming the channel the row actually landed in.
+        assert_eq!(
+            pm.session_id(),
+            rows[0].session_id,
+            "a receipt is scoped to the channel it was persisted into"
+        );
         assert_eq!(pm.body(), rows[0].content, "receipt body IS the persisted body");
         assert_eq!(
             pm.envelope(),
