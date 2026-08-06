@@ -110,8 +110,7 @@ pub async fn broadcast_user_message(
 /// who said it.
 ///
 /// **The one wire B5 Task 2 did not gate on a receipt**, and the only caller of
-/// `ParticipantInput::send_unrouted`. The peer tag below is still invisible
-/// string mutation.
+/// `ParticipantInput::send_unrouted`.
 ///
 /// Three `RouterCommand::Forward` producers reach here. An agent's turn buffer
 /// (`core::duo`, at flush) and its on-exit prose are accumulations of
@@ -127,10 +126,20 @@ pub async fn broadcast_user_message(
 /// that ladder and wake it in cases where today it is not woken — a behaviour
 /// change, not a serialisation one.
 ///
-/// So the text is on record either way and the DECORATION is not: the peer tag
-/// below, the phase and the banner exist only on this wire. Recording those means
-/// threading a receipt through `RouterCommand` and moving the assembly with it,
-/// which is the turn sequencer's work.
+/// So the TEXT is on record and the DECORATION is not. Four pieces of it, none
+/// recorded anywhere, in the order the peer reads them:
+///
+/// 1. the phase tag — `with_phase_and_findings_envelope` above, from the phase
+///    `route_forward` reads at forward time;
+/// 2. the findings banner — same envelope, from `deps.open_blocking`;
+/// 3. the `peer_ack` override tag (`router.rs`, in `route_forward` just before
+///    the call to this function), prepended when a turn that called `peer_ack`
+///    carried substantive text anyway. The only one of the four that changes
+///    what the message MEANS rather than framing it;
+/// 4. the peer provenance tag — the `prefix` match immediately below.
+///
+/// Recording them means threading a receipt through `RouterCommand` and moving
+/// all four decisions with it, which is the turn sequencer's work.
 pub async fn peer_forward_message(
     peer_author: Author,
     text: &str,

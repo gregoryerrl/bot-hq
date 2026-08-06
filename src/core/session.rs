@@ -145,7 +145,30 @@ impl SessionHandle {
     ///
     /// One row, N deliveries — the receipt is borrowed, so fan-out never means
     /// re-posting the same text once per recipient.
+    ///
+    /// **Enforces the receipt's session scope.** The scope has been a field on
+    /// `PersistedMessage` since Task 2, but until now nothing compared it to
+    /// anything, so `session_a.send_to_all(receipt_from_session_b)` compiled and
+    /// ran — wiring another session's text into these agents while the row sat
+    /// in the wrong channel. This is the only place that holds both ids, so this
+    /// is where the comparison belongs; `deliver` sees one participant and has
+    /// nothing to check against.
+    ///
+    /// Drops rather than panics. A mismatch is a routing bug in the caller, and
+    /// the containment that matters is that the wrong agents do not read it —
+    /// killing the session on top of that helps nobody. It cannot pass silently:
+    /// the row is already written, so the text is still in its own channel and
+    /// the warning names both sides.
     pub async fn send_to_all(&self, msg: &PersistedMessage) {
+        if msg.session_id() != self.id {
+            warn!(
+                session = %self.id,
+                receipt_session = %msg.session_id(),
+                message_id = msg.message_id(),
+                "refusing to deliver a receipt from another session"
+            );
+            return;
+        }
         for agent in &self.participants {
             agent.deliver(msg).await;
             self.activity.set_busy_slug(&agent.slug, true);
@@ -1391,6 +1414,90 @@ mod tests {
         let (ctx, _crx) = tokio::sync::mpsc::channel(1);
         let (ktx, _krx) = tokio::sync::oneshot::channel();
         AgentHandle::from_parts(name.to_string(), erx, itx, ctx, ktx)
+    }
+
+    /// A `SessionHandle` with one agent whose stdin the caller can read.
+    async fn stub_session(
+        id: &str,
+        bridge: &Arc<crate::signaling::SignalingBridge>,
+    ) -> (SessionHandle, tokio::sync::mpsc::Receiver<crate::agents::OutgoingUserMessage>) {
+        let (itx, irx) = tokio::sync::mpsc::channel(4);
+        let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = SessionHandle {
+            id: id.to_string(),
+            title: "t".into(),
+            working_repo_path: None,
+            session_start_sha: None,
+            ipav: Arc::new(Mutex::new(IpavState::default())),
+            participants: vec![SessionAgent {
+                participant_id: None,
+                slug: "brian".into(),
+                turn_position: 0,
+                handle: {
+                    let (_etx, erx) = tokio::sync::mpsc::channel(1);
+                    let (ctx, _crx) = tokio::sync::mpsc::channel(1);
+                    let (ktx, _krx) = tokio::sync::oneshot::channel();
+                    AgentHandle::from_parts("brian".to_string(), erx, itx, ctx, ktx)
+                },
+            }],
+            awaiting: Arc::clone(&awaiting),
+            user_silent_forwards: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            user_broadcasts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            activity: crate::core::ActivityTracker::new(id, awaiting, Arc::clone(bridge)),
+            in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancel_superseded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            router: None,
+            _mcp_temp: TempDir::new().unwrap(),
+        };
+        (handle, irx)
+    }
+
+    #[tokio::test]
+    async fn a_receipt_from_another_session_is_refused() {
+        // The receipt has carried a session id since Task 2, but for one batch
+        // nothing compared it — so this call compiled AND delivered, wiring
+        // session B's text into session A's agents while the row sat in B's
+        // channel. `send_to_all` is the earliest point that knows both ids.
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s-a", "a", None).await.unwrap();
+        storage.create_session("s-b", "b", None).await.unwrap();
+        let bridge = crate::signaling::SignalingBridge::new();
+        let (a, mut a_rx) = stub_session("s-a", &bridge).await;
+
+        let from_b = storage
+            .post_to_channel(
+                "s-b",
+                "user",
+                None,
+                crate::storage::MessageKind::Text.as_str(),
+                "meant for the other session",
+                None,
+            )
+            .await
+            .unwrap();
+        a.send_to_all(&from_b).await;
+        assert!(
+            a_rx.try_recv().is_err(),
+            "session A's agent must not read session B's row"
+        );
+
+        // The guard is a scope check, not a blanket refusal: A's own row lands.
+        let from_a = storage
+            .post_to_channel(
+                "s-a",
+                "user",
+                None,
+                crate::storage::MessageKind::Text.as_str(),
+                "meant for this session",
+                None,
+            )
+            .await
+            .unwrap();
+        a.send_to_all(&from_a).await;
+        assert_eq!(
+            a_rx.try_recv().unwrap().message.content,
+            "meant for this session"
+        );
     }
 
     #[tokio::test]

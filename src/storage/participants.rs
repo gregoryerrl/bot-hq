@@ -417,9 +417,18 @@ impl Storage {
 /// finished string, and that would be one fewer moving part — but then the
 /// wire would be decided at post time by whoever happened to insert the row,
 /// and the same phase tag would be spelled a different way per call site. A
-/// struct means the fields are queryable, the UI can render them beside the
-/// body rather than parse them back out, and *delivered == recorded ==
-/// displayed* holds because rendering is deterministic from `(body, envelope)`.
+/// struct means the fields are queryable, and *delivered == recorded* holds
+/// because rendering is deterministic from `(body, envelope)`: given the row you
+/// can rebuild the exact bytes, whenever you ask.
+///
+/// "Whenever" is the part that earns the struct. [`PersistedMessage::from_row`]
+/// re-renders a row the sequencer reads back, under the envelope it should go
+/// out with — a pre-rendered column would replay the phase tag the row was
+/// POSTED under and there would be no way to tell the two apart.
+///
+/// Not yet *displayed*, though. The chat pane reads [`Message`], which carries
+/// no envelope, so the UI still shows the body alone; rendering the decoration
+/// beside it is what the queryable fields make possible, not what happens today.
 ///
 /// Fields are private, but be precise about what that buys — it is NOT the
 /// unforgeability [`PersistedMessage`] has. Every field has a `pub` builder and
@@ -561,8 +570,15 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// the delivery path take a `&PersistedMessage`, so the host paths that used to
 /// push a bare string at an agent now have to post the row first and hand over
 /// the receipt. What an agent reads is [`PersistedMessage::wire`] — body plus
-/// rendered envelope — and nothing else, which is what makes the chat pane's
-/// claim to be showing what the agent read true rather than aspirational.
+/// rendered envelope — and nothing else, so the wire is RECONSTRUCTIBLE from the
+/// row: `render_wire(row.envelope, row.content)` reproduces it byte for byte.
+///
+/// That is recorded == delivered, and it is as far as the claim goes today. The
+/// chat pane does not yet show it: `messages_for_session` returns a [`Message`],
+/// which has no `envelope` field, so nothing in the Tauri command, the event
+/// payload or `bindings.ts` carries the decoration. Displaying what the agent
+/// read is a UI that reads the column — tracked separately — not something this
+/// type already delivers.
 ///
 /// One string wire survives Task 2: the peer forward in
 /// `core::broadcast::peer_forward_message`. The TEXT it carries is on record —
@@ -571,13 +587,15 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// is not is the decoration the router wraps it in at forward time. See that
 /// function for why gating it is the turn sequencer's job, not this one's.
 ///
-/// The value cannot be forged from outside. There is
-/// exactly ONE construction site, immediately downstream of that INSERT, and
-/// the fields are private to this module — which makes this file, `mod tests`
-/// included, the trusted boundary. Keeping it to one construction site is a
+/// The value cannot be forged from outside. There are exactly TWO construction
+/// sites — immediately downstream of that INSERT, and
+/// [`PersistedMessage::from_row`] for a row read back out — and both are
+/// unreachable beyond this file: the fields are private to this module, and
+/// `from_row`'s argument type is unnameable outside it. That makes this file,
+/// `mod tests` included, the trusted boundary. Keeping it to those two is a
 /// maintainer's job, not something the compiler checks: a helper added here
-/// later could mint a receipt with no row behind it. The claim now covers every
-/// write to `messages`, not just this method: B5 Task 1b made
+/// later could mint a receipt with no row behind it. The claim now
+/// covers every write to `messages`, not just this method: B5 Task 1b made
 /// [`Storage::insert_message`] — the second live insert path, and the one the
 /// duo pump uses on every chunk — a thin wrapper over `post_to_channel`, so
 /// there is one INSERT and every row that reaches the table has a receipt
@@ -587,8 +605,10 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// clone is never what reaches the wire; consuming by move would instead push
 /// callers into re-posting the same text once per recipient.
 ///
-/// The private fields are the enforcement, not a convention — forging one from
-/// outside this module is rejected (`E0451`):
+/// Two things enforce that, neither of them a convention. The private fields
+/// reject a struct literal (`E0451`, below), and `from_row` — the other way in —
+/// takes a type that cannot be named outside this module, so it cannot be fed a
+/// row that never existed. Forging from outside is rejected:
 ///
 /// ```compile_fail
 /// use bot_hq::storage::PersistedMessage;
@@ -619,10 +639,16 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 pub struct PersistedMessage {
     message_id: i64,
     /// The channel this receipt is valid for. A receipt without a scope is
-    /// forgeable ACROSS sessions: after Task 2,
-    /// `session_a_handle.send_to_all(receipt_from_session_b)` would compile and
-    /// wire another session's text into these agents, with the row sitting in
-    /// the wrong channel — the exact class of bug this type exists to rule out.
+    /// forgeable ACROSS sessions:
+    /// `session_a_handle.send_to_all(receipt_from_session_b)` would wire another
+    /// session's text into these agents, with the row sitting in the wrong
+    /// channel — the exact class of bug this type exists to rule out.
+    ///
+    /// Carrying the id is only half of it, and for one batch it was the only
+    /// half: nothing compared it, so the call above still compiled and ran.
+    /// `SessionHandle::send_to_all` now rejects a mismatch, which is the earliest
+    /// point that knows both ids. The field buys detection; that check is what
+    /// makes it prevention.
     ///
     /// `Arc<str>` rather than `String` to match `DuoConfig::session_id` and the
     /// `MessagePersisted` / `BatchEmitter` threading this will flow into.
@@ -657,6 +683,55 @@ impl PersistedMessage {
     /// arguments cannot drift from the row they came from.
     pub fn wire(&self) -> String {
         render_wire(self.envelope.as_ref(), &self.body)
+    }
+
+    /// A receipt for a row READ BACK from `messages`.
+    ///
+    /// The second construction site, and deliberate rather than a leak. A row
+    /// that came out of the table is proof of a row exactly as much as one that
+    /// just went in — the type's claim is "this text is on record", and a
+    /// `SELECT` establishes that at least as well as an `INSERT`.
+    ///
+    /// Be exact about what stops this being a forge-anything hatch, because it
+    /// is NOT that the argument is hard to build: [`ChannelMessage`] is a plain
+    /// struct with public fields, so a literal is trivial. It is that the type
+    /// is unnameable outside `storage::participants` — the module is private and
+    /// `storage` re-exports the type list without it — so the only code that can
+    /// build one is this file, which is the trusted boundary the type doc
+    /// already names. `pub(crate)` on top of that keeps the method itself inside
+    /// the crate, matching `ParticipantInput::send_unrouted`. Callers in `core`
+    /// can pass a row they were HANDED without ever being able to invent one.
+    ///
+    /// It exists because without it there is no way to deliver history. The turn
+    /// sequencer hands each participant its backlog from
+    /// [`Storage::unread_for_participant`], which returns `Vec<ChannelMessage>`,
+    /// and every row written before a restart is only ever available that way.
+    /// With `deliver` taking a receipt and receipts minted only by the INSERT,
+    /// the sequencer's only exits would have been `send_unrouted` — dissolving
+    /// the gate this batch built — or widening `deliver` back to strings.
+    ///
+    /// This is also what cashes the struct-over-string choice above. The
+    /// sequencer reads a `ChannelMessage`, and [`render_wire`] rebuilds the wire
+    /// from `(body, envelope)`; had the column held a pre-rendered prefix, a
+    /// replayed row would carry the phase tag it was posted under with no way to
+    /// tell that from the one it should be read under.
+    ///
+    /// Costs a clone of the body: the caller owns the row and may still need it,
+    /// and this is the read path, not the per-chunk write path the module doc
+    /// guards against copying on.
+    // Dead until the turn sequencer lands — that is the point of adding it now.
+    // Task 5 hands each participant its backlog as rows, and discovering there
+    // was no way to make a receipt from one WHILE building it would have meant
+    // reaching for `send_unrouted` or widening `deliver` under deadline. The
+    // round-trip test below is what keeps it honest in the meantime.
+    #[allow(dead_code)]
+    pub(crate) fn from_row(row: &ChannelMessage) -> Self {
+        Self {
+            message_id: row.id,
+            session_id: Arc::from(row.session_id.as_str()),
+            body: row.content.clone(),
+            envelope: row.envelope.clone(),
+        }
     }
 }
 
@@ -1389,6 +1464,47 @@ mod tests {
             pm.wire(),
             render_wire(rows[0].envelope.as_ref(), &rows[0].content)
         );
+    }
+
+    #[tokio::test]
+    async fn a_receipt_for_a_row_read_back_renders_the_same_wire() {
+        // The sequencer's path: rows come out of `channel_after` /
+        // `unread_for_participant` as `ChannelMessage`, long after the
+        // `PersistedMessage` the INSERT minted has been dropped — after a
+        // restart there never was one in this process. `from_row` is what lets
+        // those be delivered without reopening `deliver` to strings.
+        let s = storage_with_0044().await;
+        s.create_session("s1", "t", None).await.unwrap();
+        let posted = s
+            .post_to_channel(
+                "s1",
+                "system",
+                None,
+                MessageKind::SystemNotice.as_str(),
+                "declare state",
+                Some(Envelope::phase("Verify").with_open_blocking(3)),
+            )
+            .await
+            .unwrap();
+
+        let row = &s.channel_after("s1", 0).await.unwrap()[0];
+        let replayed = PersistedMessage::from_row(row);
+
+        // Same row, so the same bytes on stdin — the receipt read back is worth
+        // exactly what the one from the INSERT was worth.
+        assert_eq!(replayed.message_id(), posted.message_id());
+        assert_eq!(replayed.body(), posted.body());
+        assert_eq!(replayed.envelope(), posted.envelope());
+        assert_eq!(replayed.wire(), posted.wire());
+        assert_eq!(
+            replayed.wire(),
+            "[PHASE: Verify]\n⚠ 3 unresolved EYES blocking finding(s) — run \
+             check_open_findings and disposition each (fix/rebut) before you \
+             commit.\ndeclare state"
+        );
+        // The scope survives the round trip, or `send_to_all`'s check would wave
+        // every replayed row through.
+        assert_eq!(replayed.session_id(), "s1");
     }
 
     #[tokio::test]

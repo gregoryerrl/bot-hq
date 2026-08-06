@@ -1468,9 +1468,8 @@ mod tests {
         // one here would record a wire the peer may never get.
         assert_eq!(notice.envelope, None);
 
-        // The forward is byte-for-byte the row's body, still `from` the agent and
-        // still un-acked — so `route_forward`'s ladder sees exactly what it saw
-        // before, and the peer reads the same bytes it always did.
+        // The forward still goes through the router — `from` the agent and
+        // un-acked, so `route_forward`'s ladder sees the command it always saw.
         let mut forwards = Vec::new();
         while let Some(f) = next_forward(&mut route_rx) {
             forwards.push(f);
@@ -1480,8 +1479,24 @@ mod tests {
             .find(|(_, b, _, _)| b.contains("hit a provider limit"))
             .expect("the peer still gets the notice through the router, not by receipt");
         assert_eq!(*from, Author::Brian);
-        assert_eq!(body, &notice.content, "the row records the forwarded bytes");
         assert!(!*peer_ack && !*peer_ack_final);
+        // Row and forward must not diverge. Note what this does NOT prove: both
+        // sides come from one `format!`, so they would drift together and this
+        // would still pass.
+        assert_eq!(body, &notice.content, "the row records the forwarded bytes");
+        // So pin the interpolation itself, which is the part that can change
+        // under both at once. The peer is told WHO stalled and WHAT the provider
+        // said; `as_str()` quietly becoming a display name, or the quoted
+        // `{line}` being dropped, would leave the equality above green while the
+        // peer reads something else.
+        assert!(
+            body.contains(Author::Brian.as_str()),
+            "the notice must name the stalled agent: {body}"
+        );
+        assert!(
+            body.contains("Error: 402 Insufficient Balance"),
+            "the notice must quote the provider's line verbatim: {body}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1490,9 +1505,19 @@ mod tests {
         // records nothing here. Parity: there is no peer to notify, the notice
         // text is addressed to one ("do not take over their work"), and this
         // batch is a plumbing change — surfacing it to a solo user would be a
-        // product decision, not a serialisation one. The halt still fires.
+        // product decision, not a serialisation one.
+        //
+        // The bridge IS wired, so this also pins that skipping the notice does
+        // not skip the halt: a solo user must still be told the session is
+        // parked, which is the whole reason the peer notice is not what carries
+        // that news.
         let (storage, state) = setup().await;
-        let cfg = fast_cfg(Author::Brian); // no router_tx
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let cfg = DuoConfig {
+            bridge: Some(Arc::clone(&bridge)),
+            ..fast_cfg(Author::Brian) // no router_tx
+        };
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
@@ -1521,6 +1546,13 @@ mod tests {
                 .iter()
                 .any(|m| m.content.contains("hit a provider limit")),
             "no peer, no peer notice — and so no row for one"
+        );
+        // …but the user is still told, on the path that is theirs.
+        let tray = storage.tray_entries_for_session("s1").await.unwrap();
+        assert!(
+            tray.iter()
+                .any(|q| q.status == "pending" && q.prompt.contains("Provider limit")),
+            "the halt fires with or without a peer: {tray:?}"
         );
     }
 }
