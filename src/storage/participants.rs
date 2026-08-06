@@ -14,6 +14,7 @@
 //! from starting life with an empty roster.
 
 use super::*;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,12 +405,105 @@ impl Storage {
     }
 }
 
-/// One row of the session channel, as a participant reads it.
+/// The decoration a message carries on its way to a participant: the IPAV
+/// phase tag, the blocking-findings banner, a host-authored system prefix.
 ///
-/// `envelope` carries what used to be invisible string mutation — the phase
-/// banner, sender role, blocking-findings notice, ack tags. Today those are
-/// concatenated into the wire and never persisted, so the user cannot see what
-/// an agent actually received; here they are a rendered field beside the body.
+/// These are exactly the strings that used to be concatenated onto the wire
+/// AFTER the row was written, which is why "what did the agent actually read?"
+/// had no answer. Stored as JSON in `messages.envelope` (migration 0044) and
+/// turned back into bytes by [`render_wire`] at delivery.
+///
+/// **Metadata, not a pre-rendered prefix.** The column could have held the
+/// finished string, and that would be one fewer moving part — but then the
+/// wire would be decided at post time by whoever happened to insert the row,
+/// and the same phase tag would be spelled a different way per call site. A
+/// struct means the fields are queryable, the UI can render them beside the
+/// body rather than parse them back out, and *delivered == recorded ==
+/// displayed* holds because rendering is deterministic from `(body, envelope)`.
+///
+/// Fields are private: the renderer below is the only thing that needs to read
+/// them, and keeping them so leaves the JSON shape free to change.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Envelope {
+    /// IPAV phase NAME (`Investigate` / `Plan` / `Apply` / `Verify`), not the
+    /// `IpavPhase` enum — `storage` has no dependency on `core` and adding one
+    /// for a four-word string would invert the layering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+    /// Unresolved EYES blocking findings; `0` renders nothing.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    open_blocking: usize,
+    /// A host note that rides in front of the body — e.g. the post-cancel
+    /// reconciliation directive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    system_prefix: Option<String>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+impl Envelope {
+    pub fn phase(phase: impl Into<String>) -> Self {
+        Self {
+            phase: Some(phase.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_open_blocking(mut self, open_blocking: usize) -> Self {
+        self.open_blocking = open_blocking;
+        self
+    }
+
+    pub fn with_system_prefix(mut self, system_prefix: impl Into<String>) -> Self {
+        self.system_prefix = Some(system_prefix.into());
+        self
+    }
+}
+
+/// Render `(envelope, body)` into the bytes a participant reads.
+///
+/// The whole point of the receipt is that this is the ONLY thing standing
+/// between a row and an agent's stdin, so it is a free function of its two
+/// arguments: no clock, no database, no session state. Given the same row it
+/// produces the same wire forever, which is what lets the chat pane claim it is
+/// showing what the agent read.
+///
+/// Order is load-bearing and reproduces what the pre-B5 call sites built by
+/// hand: phase tag, then findings banner, then system prefix, then the body.
+/// The prefix sits closest to the body because those sites concatenated it onto
+/// the body FIRST and wrapped the pair in the phase envelope afterwards.
+pub fn render_wire(envelope: Option<&Envelope>, body: &str) -> String {
+    let Some(envelope) = envelope else {
+        return body.to_string();
+    };
+    // Body plus headroom for the decoration, whose largest component is the
+    // ~130-char findings banner. A miss costs one realloc, never correctness.
+    let mut wire = String::with_capacity(body.len() + 192);
+    if let Some(phase) = &envelope.phase {
+        wire.push_str("[PHASE: ");
+        wire.push_str(phase);
+        wire.push_str("]\n");
+    }
+    if envelope.open_blocking > 0 {
+        // The banner rides every turn until the findings are dispositioned —
+        // salience, not a gate (post-mortem §5.2).
+        wire.push_str(&format!(
+            "⚠ {} unresolved EYES blocking finding(s) — run check_open_findings and \
+             disposition each (fix/rebut) before you commit.\n",
+            envelope.open_blocking
+        ));
+    }
+    if let Some(prefix) = &envelope.system_prefix {
+        wire.push_str(prefix);
+        wire.push('\n');
+    }
+    wire.push_str(body);
+    wire
+}
+
+/// One row of the session channel, as a participant reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelMessage {
     pub id: i64,
@@ -418,7 +512,7 @@ pub struct ChannelMessage {
     pub origin: String,
     pub kind: String,
     pub content: String,
-    pub envelope: Option<String>,
+    pub envelope: Option<Envelope>,
     pub created_at: String,
 }
 
@@ -427,6 +521,7 @@ const CHANNEL_COLUMNS: &str =
 
 fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
     use sqlx::Row;
+    let envelope: Option<String> = r.get("envelope");
     ChannelMessage {
         id: r.get("id"),
         session_id: r.get("session_id"),
@@ -434,7 +529,17 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
         origin: r.get("origin"),
         kind: r.get("kind"),
         content: r.get("content"),
-        envelope: r.get("envelope"),
+        // A row whose envelope will not parse is still a row: dropping the
+        // whole message because its decoration is malformed would lose the
+        // body, which is the part that matters. Logged rather than silent —
+        // an unparseable envelope means a reader and a writer disagree.
+        envelope: envelope.and_then(|json| match serde_json::from_str(&json) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                tracing::warn!(error = %e, envelope = %json, "unparseable message envelope");
+                None
+            }
+        }),
         created_at: r.get("created_at"),
     }
 }
@@ -442,16 +547,20 @@ fn channel_from_row(r: &sqlx::sqlite::SqliteRow) -> ChannelMessage {
 /// A receipt for one channel row, minted by — and only by — the INSERT in
 /// [`Storage::post_to_channel`].
 ///
-/// **This is the enabling half, not a closed gate.** Nothing consumes a
-/// `PersistedMessage` yet, and all six of the paths that write a string
-/// straight to an agent's stdin with no persisted row are still open, so what
-/// those agents read remains invisible to the user. The type exists now so that
-/// B5 Task 2 can change the send path to take one instead of a `&str`; at that
-/// point "wire something that was never recorded" stops being a discipline and
-/// becomes a compile error. Until Task 2 lands, that is the plan, not yet a
-/// property of the system.
+/// **This is the permission to write to a participant's stdin.** B5 Task 2 made
+/// the delivery path take a `&PersistedMessage`, so the host paths that used to
+/// push a bare string at an agent now have to post the row first and hand over
+/// the receipt. What an agent reads is [`PersistedMessage::wire`] — body plus
+/// rendered envelope — and nothing else, which is what makes the chat pane's
+/// claim to be showing what the agent read true rather than aspirational.
 ///
-/// What IS true today: the value cannot be forged from outside. There is
+/// One string wire survives Task 2: the peer forward in
+/// `core::broadcast::peer_forward_message`, which carries an agent's OWN
+/// already-persisted output to its peer. Making that one receipt-gated means
+/// threading the author's receipt through `RouterCommand`, which is the turn
+/// sequencer's job, not this one.
+///
+/// The value cannot be forged from outside. There is
 /// exactly ONE construction site, immediately downstream of that INSERT, and
 /// the fields are private to this module — which makes this file, `mod tests`
 /// included, the trusted boundary. Keeping it to one construction site is a
@@ -508,7 +617,7 @@ pub struct PersistedMessage {
     /// `MessagePersisted` / `BatchEmitter` threading this will flow into.
     session_id: Arc<str>,
     body: String,
-    envelope: Option<String>,
+    envelope: Option<Envelope>,
 }
 
 impl PersistedMessage {
@@ -525,22 +634,36 @@ impl PersistedMessage {
         &self.body
     }
 
-    pub fn envelope(&self) -> Option<&str> {
-        self.envelope.as_deref()
+    pub fn envelope(&self) -> Option<&Envelope> {
+        self.envelope.as_ref()
+    }
+
+    /// The bytes this row puts on a participant's stdin.
+    ///
+    /// Kept as a method on the receipt rather than left to each delivery site
+    /// so there is one answer to "what did the agent read": every caller of
+    /// [`render_wire`] on the delivery path goes through here, and the
+    /// arguments cannot drift from the row they came from.
+    pub fn wire(&self) -> String {
+        render_wire(self.envelope.as_ref(), &self.body)
     }
 }
 
 impl Storage {
     /// Post to the session channel — the write half of "the channel is the
     /// transport". Every wire into a participant goes through here, including
-    /// host-authored injections (`origin = "system"`), which today are written
-    /// straight to stdin and never recorded at all.
+    /// the host-authored injections (`origin = "system"`) that used to be
+    /// written straight to stdin and never recorded at all.
     ///
-    /// Returns a [`PersistedMessage`] rather than a bare id. The receipt is
-    /// meant to become the permission to wire the text: once B5 Task 2 changes
-    /// the send path, it will be able to demand one, after which no caller can
-    /// hand it a string that never became a row. Nothing demands one yet — see
-    /// the type's own docs for what is and is not true today.
+    /// Returns a [`PersistedMessage`] rather than a bare id. The receipt is the
+    /// permission to wire the text: the delivery path takes one, so no caller
+    /// can hand it a string that never became a row.
+    ///
+    /// `envelope` is the decoration the wire will carry, and it is taken HERE
+    /// rather than applied at the send because the row has to record what the
+    /// agent will read. Two call sites had to be reordered to supply it (the
+    /// user broadcast's findings count, the tray fallback's phase); that
+    /// reordering is the price of the invariant, not an accident of it.
     ///
     /// Writes the legacy `author` column too, so readers that have not migrated
     /// yet keep working (migration revision 3). `system` rows are stored as
@@ -553,7 +676,7 @@ impl Storage {
         participant_slug: Option<&str>,
         kind: &str,
         content: impl Into<String>,
-        envelope: Option<String>,
+        envelope: Option<Envelope>,
     ) -> Result<PersistedMessage> {
         // `impl Into<Arc<str>>` so a caller already holding one — Task 3's do,
         // from `DuoConfig::session_id` — passes a refcount bump instead of
@@ -571,12 +694,21 @@ impl Storage {
         // and delivery is by reference, so nothing ever clones the body.
         //
         // `content` is `impl Into<String>` so `&str` callers stay ergonomic and
-        // `String` callers pay nothing. `envelope` is a plain `Option<String>`
-        // on purpose: `Option<impl Into<String>>` cannot infer a bare `None`
-        // (E0283), which would force a turbofish at every call site that omits
-        // an envelope — and envelopes are small JSON metadata, so the hot-path
-        // argument that motivates the generic on `content` does not apply.
+        // `String` callers pay nothing. `envelope` is a concrete
+        // `Option<Envelope>`, not a generic: a bare `None` could not be
+        // inferred through `Option<impl Into<_>>` (E0283), which would force a
+        // turbofish at every envelope-less call site.
         let content: String = content.into();
+        // Serialised once, here, so the JSON in the column is always what the
+        // receipt renders from. `Envelope` is strings and a usize, so this
+        // cannot fail in practice; it is still propagated rather than unwrapped,
+        // because losing the decoration silently would mean the row records a
+        // wire the agent never got.
+        let envelope_json = envelope
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("serialising message envelope")?;
         let legacy_author = match origin {
             "participant" => participant_slug.unwrap_or("user"),
             // 'system' and 'user' both land as 'user' for legacy readers.
@@ -612,7 +744,7 @@ impl Storage {
         .bind(participant_slug)
         .bind(kind)
         .bind(content.as_str())
-        .bind(envelope.as_deref())
+        .bind(envelope_json.as_deref())
         .bind(legacy_author)
         // `now_utc()` (RFC3339-Z), NOT SQLite's `datetime('now')`, which this
         // method used until `insert_message` began delegating here. That is the
@@ -696,6 +828,76 @@ mod tests {
     /// "storage that has 0044", which is the property they depend on.
     async fn storage_with_0044() -> Storage {
         Storage::memory().await.unwrap()
+    }
+
+    // ---- the wire renderer ----------------------------------------------
+
+    #[test]
+    fn no_envelope_renders_the_body_unchanged() {
+        // The phase-change notice relies on this: `transition_notice()` already
+        // carries its own `[PHASE: X]`, so an envelope would double-tag it.
+        assert_eq!(render_wire(None, "advance to Apply"), "advance to Apply");
+        assert_eq!(render_wire(Some(&Envelope::default()), "bare"), "bare");
+    }
+
+    #[test]
+    fn the_phase_tag_leads_and_the_body_trails() {
+        assert_eq!(
+            render_wire(Some(&Envelope::phase("Apply")), "go"),
+            "[PHASE: Apply]\ngo"
+        );
+    }
+
+    #[test]
+    fn the_findings_banner_sits_between_the_phase_tag_and_the_body() {
+        // Zero open findings is the common case and must cost nothing — the
+        // banner is salience, and an empty one would train agents to skim it.
+        assert_eq!(
+            render_wire(Some(&Envelope::phase("Verify").with_open_blocking(0)), "go"),
+            render_wire(Some(&Envelope::phase("Verify")), "go")
+        );
+        let wire = render_wire(Some(&Envelope::phase("Verify").with_open_blocking(3)), "go");
+        assert_eq!(
+            wire,
+            "[PHASE: Verify]\n⚠ 3 unresolved EYES blocking finding(s) — run \
+             check_open_findings and disposition each (fix/rebut) before you \
+             commit.\ngo"
+        );
+    }
+
+    #[test]
+    fn the_system_prefix_sits_closest_to_the_body() {
+        // The only site with a prefix is the user broadcast (the post-cancel
+        // reconcile directive), and it built `{prefix}\n{body}` FIRST, then
+        // wrapped that whole thing in the phase envelope. Hence innermost.
+        let envelope = Envelope::phase("Apply")
+            .with_open_blocking(1)
+            .with_system_prefix("[System: previous turn interrupted]");
+        let wire = render_wire(Some(&envelope), "do the thing");
+        assert!(wire.starts_with("[PHASE: Apply]\n⚠ 1 unresolved"));
+        assert!(wire.ends_with("[System: previous turn interrupted]\ndo the thing"));
+    }
+
+    #[test]
+    fn an_envelope_survives_a_round_trip_through_the_column() {
+        // The column holds JSON, so the renderer's input on the read side is
+        // whatever `serde` gives back. A field that serialises but does not
+        // deserialise would render a SHORTER wire than the one delivered, and
+        // the chat pane would quietly disagree with what the agent read.
+        let envelope = Envelope::phase("Plan")
+            .with_open_blocking(2)
+            .with_system_prefix("[System: note]");
+        let json = serde_json::to_string(&envelope).unwrap();
+        let back: Envelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, envelope);
+        assert_eq!(render_wire(Some(&back), "b"), render_wire(Some(&envelope), "b"));
+        // Absent fields are omitted rather than written as nulls/zeroes: the
+        // common case is phase-only and it rides on ~200k existing rows'
+        // worth of table, so the column value stays minimal.
+        assert_eq!(
+            serde_json::to_string(&Envelope::phase("Plan")).unwrap(),
+            r#"{"phase":"Plan"}"#
+        );
     }
 
     #[tokio::test]
@@ -864,7 +1066,7 @@ mod tests {
         let m1 = s.post_to_channel("s1", "user", None, "text", "do the thing", None)
             .await.unwrap();
         let m2 = s.post_to_channel("s1", "participant", Some("brian"), "text", "done",
-                                   Some(r#"{"phase":"Apply"}"#.to_string())).await.unwrap();
+                                   Some(Envelope::phase("Apply"))).await.unwrap();
 
         // Rain has read nothing yet, so both are unread — including the message
         // she was not "forwarded". Context completeness is structural.
@@ -875,8 +1077,8 @@ mod tests {
         assert_eq!(unread[1].id, m2.message_id());
         assert_eq!(unread[1].participant_id, Some(b), "attributed to its author");
         assert_eq!(
-            unread[1].envelope.as_deref(),
-            Some(r#"{"phase":"Apply"}"#),
+            unread[1].envelope.as_ref(),
+            Some(&Envelope::phase("Apply")),
             "the envelope is a visible field, not string mutation"
         );
 
@@ -1149,7 +1351,7 @@ mod tests {
         s.ensure_session_roster("s1").await.unwrap();
         let pm = s
             .post_to_channel("s1", "participant", Some("brian"), "text", "work",
-                             Some(r#"{"phase":"Apply"}"#.to_string()))
+                             Some(Envelope::phase("Apply")))
             .await
             .unwrap();
         assert!(pm.message_id() > 0, "a PersistedMessage is proof of a row");
@@ -1167,8 +1369,14 @@ mod tests {
         assert_eq!(pm.body(), rows[0].content, "receipt body IS the persisted body");
         assert_eq!(
             pm.envelope(),
-            rows[0].envelope.as_deref(),
+            rows[0].envelope.as_ref(),
             "receipt envelope IS the persisted envelope"
+        );
+        // And therefore the wire too — the receipt renders the same bytes the
+        // stored row does, which is the whole of what a delivery may write.
+        assert_eq!(
+            pm.wire(),
+            render_wire(rows[0].envelope.as_ref(), &rows[0].content)
         );
     }
 
