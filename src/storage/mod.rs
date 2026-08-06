@@ -26,6 +26,7 @@ mod forward_events;
 mod findings;
 mod messages;
 mod models;
+mod participants;
 mod plugin_kv;
 mod plugins;
 mod projects;
