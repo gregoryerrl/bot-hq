@@ -298,6 +298,56 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
     assert_eq!(bridge2.check_open_findings("s2").await.unwrap(), "ok");
 }
 
+// ---------------------------------------------------------------------------
+// CROSS-CHECK — the capability model vs the live dispatch layer
+//
+// B0.1 pins what `dispatch` does. B2's tests pin what `CapabilitySet` decides.
+// Neither proves the two AGREE, and that agreement is the entire premise of B6:
+// swapping name-equality for capability lookup is only safe if, for every tool
+// in the registry, both reach the same verdict for both roles.
+//
+// This runs the real `tools/list` registry — so a tool added later is covered
+// automatically instead of being forgotten.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn the_capability_model_reproduces_the_dispatch_layer_exactly() {
+    use crate::agents::capability::CapabilitySet;
+
+    let presets = [
+        ("brian", CapabilitySet::preset_hands()),
+        ("rain", CapabilitySet::preset_eyes()),
+    ];
+    // The single deliberate difference, asserted in
+    // `agents::capability::tests::close_session_is_the_one_intended_boundary_change`:
+    // `close_session` is ungated today (CL issues #5) and becomes a capability.
+    const INTENDED_DIVERGENCE: &[&str] = &["close_session"];
+
+    let mut checked = 0usize;
+    for descriptor in super::protocol::tool_descriptors() {
+        let tool = descriptor.name;
+        if INTENDED_DIVERGENCE.contains(&tool) {
+            continue;
+        }
+        for (agent, caps) in &presets {
+            let dispatch_admits = !role_rejected(tool, agent).await;
+            let model_admits = caps.allows_tool(tool);
+            assert_eq!(
+                model_admits, dispatch_admits,
+                "DIVERGENCE on {tool} for {agent}: capability model says \
+                 {model_admits}, dispatch says {dispatch_admits}. B6 would \
+                 change behaviour here."
+            );
+        }
+        checked += 1;
+    }
+    assert!(
+        checked >= 30,
+        "expected the full tool registry, only checked {checked} — did \
+         tool_descriptors() shrink?"
+    );
+}
+
 #[tokio::test]
 async fn the_three_gate_lists_are_disjoint() {
     // A tool in two lists would make its authorization order-dependent — the
