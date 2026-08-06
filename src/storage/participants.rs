@@ -447,21 +447,12 @@ impl Storage {
 mod tests {
     use super::*;
 
-    /// Apply migration 0044's reviewed draft to a fresh in-memory DB.
-    ///
-    /// `sqlx::migrate!` embeds `migrations/` at COMPILE time, so these tables
-    /// do not exist in a stock `Storage::memory()` until the migration is
-    /// armed — and arming it before the runbook's backup + app-boot check is
-    /// exactly what the runbook forbids. Applying the draft here tests the
-    /// queries against the schema the migration actually produces, with
-    /// nothing armed. Delete this helper once 0044 is applied.
+    /// 0044 is armed, so the stock in-memory backend has these tables — the
+    /// transitional `storage_with_0044()` scaffold that applied the draft by
+    /// hand is gone. Kept as a named alias so the tests still read as
+    /// "storage that has 0044", which is the property they depend on.
     async fn storage_with_0044() -> Storage {
-        let s = Storage::memory().await.unwrap();
-        let draft = include_str!(
-            "../../docs/plans/2026-08-06-session-participants-migration-DRAFT.sql"
-        );
-        sqlx::raw_sql(draft).execute(&s.pool).await.unwrap();
-        s
+        Storage::memory().await.unwrap()
     }
 
     #[tokio::test]

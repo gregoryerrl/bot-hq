@@ -13,6 +13,46 @@ the file there **is** arming the destructive step — there is no separate "run
 it" action. So the draft lives in `docs/plans/` until explicitly approved, then
 moves to `migrations/0044_session_participants.sql` (0043 is the current head).
 
+## STATUS: ARMED 2026-08-06
+
+`migrations/0044_session_participants.sql` is in place. **It applies to the live
+database on the next app start**, not before — the running instance holds the
+old schema until it restarts.
+
+What was done before arming:
+- **Online backup taken and verified:** `~/.bot-hq/.local/bot-hq.db.pre0044`,
+  `PRAGMA integrity_check = ok`, 201,034 messages / 384 sessions, matching live
+  exactly. Taken with `sqlite3 .backup`, which is consistent on a live DB.
+- **Final dry-run against the exact current live state:** exit 0, 201,034 rows
+  with `author` preserved on every one, max id 201,164 intact, 0 unmapped, 768
+  participants across 384 sessions, 768 cursors, integrity + FK clean.
+- **Test suite re-run with 0044 embedded:** all 10 participant tests now pass
+  against the migration applied by sqlx's own migrator on a fresh DB, not the
+  hand-applied draft. The `storage_with_0044()` scaffold is gone.
+- Gates green: cargo 1079, vitest 199, tsc + both builds.
+
+**What is NOT yet verified:** the live application of 0044 to the real database.
+That happens on your next app restart. If it fails, the migration is not
+recorded as applied (sqlite DDL is transactional), the app will report the
+error, and the restore path below is intact.
+
+### ⚠ Precondition discovered while arming: FREE DISK SPACE
+
+The rebuild copies `messages` before dropping the original, so **the migration
+transiently needs roughly 2× the database size** — about 450 MB here. This was
+found the hard way: a dry-run copy failed with `No space left on device` because
+the volume was at 100% (accumulated dry-run copies had themselves consumed
+8.8 GB). Check free space before restarting the app:
+
+```
+df -h /System/Volumes/Data
+ls -la ~/.bot-hq/.local/*.db*
+```
+
+Note the pre-existing `bot-hq.db.bak-20260728-194915` (350 MB) and the new
+`bot-hq.db.pre0044` (452 MB) both sit on the same volume. Keep `pre0044` until
+the live migration is verified; the July backup is prunable.
+
 ## Pre-flight
 
 1. **Stop bot-hq.** A live app holds the single-instance lock and will apply

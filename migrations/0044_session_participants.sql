@@ -1,31 +1,35 @@
 -- ============================================================================
--- DRAFT — NOT A MIGRATION YET. DO NOT MOVE INTO migrations/ UNTIL APPROVED.
+-- 0044 — session participants: the session-focused architecture's schema.
 --
--- Target filename once approved: migrations/0044_session_participants.sql
+-- Introduces user-owned `roles`, `session_participants` (with the invite-time
+-- capability snapshot and turn state), `participant_cursors`,
+-- `participant_deliveries`, and rebuilds `messages` to drop the
+-- agent-name CHECK constraint.
 --
--- WHY THIS FILE LIVES HERE AND NOT IN migrations/:
---   sqlx applies every file in migrations/ automatically at app start, so
---   creating it there IS arming the destructive step. And the immutable-artifact
---   pre-commit gate + sqlx's runtime checksums mean an applied migration can
---   never be revised. This must be reviewed, dry-run against a COPY, and
---   explicitly approved before it becomes migration 0044.
+-- Design:  docs/plans/2026-08-06-session-focused-redesign-design.md
+-- Runbook: docs/plans/2026-08-06-session-participants-runbook.md
 --
--- SCOPE: the session-focused architecture, batch B1. Introduces user-owned
---   roles, session participants (with turn state), channel cursors + delivery
---   records, and rebuilds `messages`. Design:
---   docs/plans/2026-08-06-session-focused-redesign-design.md
+-- APPROVED AND ARMED 2026-08-06 after: four dry runs against copies of the live
+-- database (the last against its exact current state — 201,034 messages, author
+-- preserved on every row, 0 unmapped, integrity + FK clean); guard-firing tests
+-- on three deliberately broken variants, each leaving the original table
+-- intact; and a boot check
+-- (`storage::participants::tests::every_legacy_message_query_still_works_after_0044`)
+-- proving the legacy query paths survive.
 --
--- REVISION 2 (2026-08-06): adds the `roles` table (roles became first-class and
---   user-owned) and the turn-model columns (turn_position, participation_mode,
---   done_vote, per-session round state). Both land here rather than in a
---   follow-up migration because the user chose big-bang for the schema.
+-- WHAT MAKES THIS SAFE TO APPLY TO A LIVE DATABASE:
+--   * `author` is RETAINED and still populated, so every query that has not
+--     migrated yet keeps working the moment this applies. The CHECK constraint —
+--     the only reason the table needed rebuilding — is what goes.
+--   * `origin` is nullable for the same reason: it would otherwise be NOT NULL
+--     with no default and every legacy `insert_message` would fail on insert.
+--   * Six guards run BEFORE `DROP TABLE messages`, so a failed migration is a
+--     no-op rather than a half-rebuild.
+--   * A follow-up migration drops `author` and makes `origin` NOT NULL once the
+--     cutover grep audit proves nothing reads the legacy column.
 --
--- MEASURED INPUTS (bot-hq.db, 2026-08-06):
---   messages : ~199.6k rows — brian 132,037 · rain 62,548 · user 5,022
---              ZERO 'emma' rows (the legacy CHECK value is dead weight)
---   sessions : 382 total — 12 with rain_enabled = 0 (solo)
---   (counts drift while the app runs; the in-migration guards assert equality
---   at run time rather than trusting these.)
+-- PRECONDITION: free disk ≈ 2× the database size. This rebuilds the largest
+-- table, so the copy and the original coexist until the DROP.
 -- ============================================================================
 
 PRAGMA foreign_keys = OFF;   -- required for the table rebuild; restored at end
