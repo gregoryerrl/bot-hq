@@ -1,9 +1,22 @@
 # bot-hq redesign — session-focused architecture
 
-**Status: DESIGN IN PROGRESS.** Sections are validated one at a time with the
-user; open decisions are marked. Nothing here is implemented, and the B1
+**Status: DESIGN COMPLETE — no open architectural questions.** Every section was
+validated with the user one at a time. Nothing here is implemented, and the B1
 migration draft (`2026-08-06-session-participants-migration-DRAFT.sql`) is
 deliberately not armed.
+
+**Decisions and who made them** — the four forks were the user's, not the
+agent's:
+
+| # | question | answer |
+|---|---|---|
+| Q1 | what governs waking | **turn-based cycle** (user's own model; beat all three options offered) |
+| Q2 | round termination | **consensus halt**, derived from vision.md's AI-car |
+| Q3 | review authority | **derived + existing blocking/advisory severity** |
+| Q4 | parity vs serialisation | **accept serialisation** — "the staleness was the bug, not the speed" |
+
+Next step is an implementation plan, not code: the B1 draft needs its `roles`
+table before it can be armed.
 
 Origin: the user's observation that bot-hq's *doing* is correct but the *design
 of the doing* is problematic — agent-focus makes agent plugins hard, and hidden
@@ -14,6 +27,53 @@ Supporting evidence lives in this session's IPAV docs: blast radius (1333 Rust +
 invisible injection points.
 
 ---
+
+## Constraint 0 — behavioural parity (user, 2026-08-06)
+
+> *"This shouldn't change what works today client-side. We're redesigning how
+> the flow works, not the flow itself. We're migrating HANDS and EYES into
+> roles, so nothing should change client-side."*
+
+This is an **acceptance criterion**, not an aspiration. A session created with
+the seeded defaults must behave as today's duo does:
+
+- HANDS capability set maps 1:1 onto today's `HANDS_ONLY_TOOLS` + write access;
+  EYES onto `EYES_ONLY_TOOLS` + read-only.
+- The commit gate behaves identically: a reviewer files → executor dispositions →
+  commits blocked until resolved.
+- `eyes_flag` / `disposition_finding` / `approve_finding` survive as the same
+  tools, gated by capability instead of name equality.
+- IPAV, the tray, push/Tool gates, CL, terminal, worktrees: unchanged.
+- The composed prompt delivers the same contract the agents read today.
+- The Roles tab exists but requires no interaction — HANDS and EYES are seeded.
+
+**Verification:** the full gate suite green, plus a live smoke comparing a
+default session against today's behaviour — not just "it compiles".
+
+### ⚠ The one place parity and the turn model genuinely conflict
+
+**Today's duo is CONCURRENT.** `broadcast_user_message` delivers the user's
+message to *both* agents' input channels and marks both busy
+(`state.rs:762-765`, `session.rs:111-118`). Evidence, not inference: this
+session's `activity_events` carries repeated `busy | 1 | 1` rows.
+
+**A turn cycle is serial by definition.** The user's message wakes participant 1;
+participant 2 acts when its turn comes. Two client-visible consequences:
+
+1. wall-clock for a "both respond" round becomes sequential, not parallel;
+2. the reviewer can no longer comment on the user's message *before* the
+   executor works.
+
+**RESOLVED — serialisation accepted** (user, Q4): *"the staleness was the bug,
+not the speed."* Concurrency was never a chosen feature; it is an artifact of
+the duo pump, and it is the direct cause of the staleness investigated earlier
+the same session (EYES believing the session was still in Investigate after four
+commits had landed). Serialising costs wall-clock per round and removes an
+entire class of wrong-premise work.
+
+So parity is scoped precisely: **capabilities, gates, tools, prompts and
+surfaces are unchanged; concurrency is deliberately dropped.** That exception is
+recorded here so it is never mistaken for a regression during implementation.
 
 ## Pillars
 
@@ -202,7 +262,7 @@ the author".
 
 ---
 
-## Section 3 — Channel transport ⏳ AWAITING VALIDATION
+## Section 3 — Channel transport ✅ VALIDATED
 
 - One session channel. Participants read it via `participant_cursors`; delivery
   is a cursor advance, making it an auditable fact.
@@ -240,7 +300,7 @@ complaint.
 
 ---
 
-## Section 4 — Migration ⏳ DRAFTED, NOT YET VALIDATED
+## Section 4 — Migration ✅ VALIDATED
 
 Big-bang schema (user-picked), code in batches. See the B1 draft + runbook.
 
