@@ -166,6 +166,51 @@ git commit -m "feat: add the PersistedMessage newtype"
 
 ---
 
+## Task 1b: Converge `insert_message` onto `post_to_channel`
+
+**Added after Task 1's quality review. This is a PREREQUISITE for Task 2, not a
+follow-up.**
+
+**The problem the review surfaced:** there are two live insert paths into
+`messages`. `post_to_channel` mints a receipt; `Storage::insert_message`
+(`src/storage/messages.rs`) returns a bare `i64` and mints nothing — and it is
+the path `duo.rs` uses on **every chunk**.
+
+Today that split is coherent: `insert_message` records an agent's *output*, and
+delivery is a separate act, so output rows need no receipt. **After B5 those
+collapse** — Brian's output row *is* the row Rain reads through her cursor.
+There is one row, and if delivery is receipt-gated then that row must be
+receipt-bearing. Leaving the split forces Task 2 into one of two bad shapes:
+
+- a **second write** — two rows for one logical message, corrupting the very
+  channel this redesign exists to make trustworthy; or
+- a **re-read** of the row to synthesise a receipt — which re-opens
+  forgery-by-reconstruction *and* costs a SELECT per chunk.
+
+**Order matters, and step 1 must come first:**
+
+1. **Move `post_to_channel`'s participant resolution to the inline subquery**
+   that `insert_message` already uses. `post_to_channel` currently does a
+   separate awaited `participant_by_slug` SELECT before its INSERT;
+   `storage/messages.rs:22` explains why the other path refuses that — *"this
+   runs on every text/tool_use/tool_result chunk, and an extra round trip per
+   chunk is a cost worth not paying."* Do this **before** Task 2 flips the send
+   path, or per-chunk traffic silently gains a round trip and Task 13b's perf
+   criterion fails at the point where it is hardest to attribute.
+2. Make `insert_message` a thin wrapper: map `Author` → `(origin,
+   participant_slug)`, pass `envelope: None`, delegate, return a
+   `PersistedMessage`. Keep an `-> i64` shim for the call sites that genuinely
+   only want the id (`notify_message_persisted` in `state.rs`, `watchdog.rs`,
+   `tray.rs`).
+3. Delete the open-question note left at `participants.rs:457-460`.
+
+**Why not leave them split:** that is defensible only if something *enforces*
+the "logged but not delivered" distinction. Nothing would. Two writers to one
+table with divergent attribution logic is how the invisible-wire problem was
+created in the first place.
+
+---
+
 ## Task 2: The private input sender
 
 **Files:**
